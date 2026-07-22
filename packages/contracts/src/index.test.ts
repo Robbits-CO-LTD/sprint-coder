@@ -276,6 +276,50 @@ describe('public contracts', () => {
     ).toMatchObject({ type: 'approval.resolved', approval: { decision: 'deny' } });
   });
 
+  it('validates durable command lifecycle and bounded sequenced output events', () => {
+    const command = {
+      id: 'command-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-1',
+      specDigest: 'a'.repeat(64),
+      executable: '/usr/bin/printf',
+      argv: ['ok'],
+      cwd: '/workspace',
+      state: 'running',
+      pid: 123,
+      exitCode: null,
+      signal: null,
+      outputBytes: 0,
+      truncated: false,
+      createdAt: '2026-07-23T00:00:00.000Z',
+      startedAt: '2026-07-23T00:00:01.000Z',
+      finishedAt: null,
+    };
+    expect(
+      turnEventSchema.parse({
+        type: 'command.started',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        seq: 7,
+        command,
+      }),
+    ).toMatchObject({ type: 'command.started', command: { state: 'running' } });
+    expect(
+      turnEventSchema.parse({
+        type: 'command.output',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        seq: 8,
+        commandId: 'command-1',
+        outputSeq: 1,
+        stream: 'stderr',
+        text: 'safe output',
+        byteLength: 11,
+      }),
+    ).toMatchObject({ type: 'command.output', outputSeq: 1 });
+  });
+
   it('represents waiting approval in reconnect snapshots without widening Runtime stages', () => {
     const snapshot = {
       lastSeq: 5,

@@ -1,13 +1,17 @@
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   ToolRegistry,
   createToolDefinition,
   createToolId,
+  executionSpecDigest,
   type Capability,
   type ToolExecutionContext,
 } from '@vibe/domain';
-import { ApprovalCoordinator } from './approval-coordinator';
+import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import { ToolBroker, type ToolAuthorizationRequest } from './tool-broker';
 
 const NOW = '2026-07-22T12:00:00.000Z';
@@ -272,6 +276,60 @@ function resolveCommand(approval: StoredApproval, decision: Decision) {
 }
 
 describe('ApprovalCoordinator', () => {
+  it('binds command approval facts to the sealed ExecutionSpec digest and Workspace cwd', async () => {
+    const registry = new ToolRegistry();
+    const definition = createToolDefinition({
+      toolId: createToolId({
+        provider: 'builtin',
+        namespace: 'command',
+        name: 'run',
+        version: '1',
+      }),
+      providerName: 'run_command',
+      kind: 'shell',
+      schemaVersion: 1,
+      inputSchema: { type: 'object' },
+      outputSchema: { type: 'object' },
+      sideEffect: 'process',
+      risk: 'high',
+      requiredCapabilities: ['shell.execute'],
+      executionTarget: 'command-runner',
+      implementationKind: 'command-runner',
+      priority: 1,
+      workspaceBinding: { kind: 'any' },
+      providerCompatibility: ['mock'],
+    });
+    registry.register(definition);
+    const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-1' })
+      .entries[0]!;
+    const workspacePath = await mkdtemp(join(tmpdir(), 'vibe-approval-command-'));
+    try {
+      const { prepareExecutionSpec } = await import('./command-runner');
+      const spec = await prepareExecutionSpec({
+        workspacePath,
+        executable: process.execPath,
+        argv: ['--version'],
+        cwd: '.',
+      });
+      const facts = approvalFactsForTool(
+        { context: toolContext, callId: 'command-call', entry, input: spec },
+        'shell.execute',
+      );
+
+      expect(facts.specDigest).toBe(executionSpecDigest(spec));
+      expect(facts.resourceSet).toMatchObject({
+        kind: 'external-exact',
+        target: `command:${executionSpecDigest(spec)}`,
+      });
+      expect(facts.resource).toMatchObject({
+        kind: 'external',
+        target: `command:${executionSpecDigest(spec)}`,
+      });
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
   it('commits a pending request before publishing it, then releases allow-once exactly once', async () => {
     const harness = createHarness();
     const { broker, executions } = createBroker(
@@ -404,6 +462,26 @@ describe('ApprovalCoordinator', () => {
       expect(harness.persistence.approvals.get(approval.id)?.state).toBe('canceled');
     },
   );
+
+  it('releases every pending waiter during application shutdown', async () => {
+    const harness = createHarness();
+    const authorization = harness.coordinator.authorizeTool({
+      context: toolContext,
+      callId: 'shutdown-call',
+      entry: createBroker(() =>
+        Promise.resolve({ decision: 'deny', reason: 'unused' }),
+      ).broker.startTurn(toolContext, 'mock').entries[0]!,
+      input: { origin: 'https://example.test' },
+    });
+    await waitForPublished(harness);
+
+    harness.coordinator.dispose();
+
+    await expect(authorization).resolves.toEqual({
+      decision: 'deny',
+      reason: 'application_shutdown',
+    });
+  });
 
   it('fails closed when policyEpoch changes before decision and never executes', async () => {
     const harness = createHarness();

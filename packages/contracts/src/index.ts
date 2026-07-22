@@ -185,7 +185,7 @@ export const approvalSummarySchema = z
     reason: z.string().min(1).max(500),
     target: z.string().min(1).max(500),
     impact: z.string().min(1).max(500),
-    execution: z.string().min(1).max(2_000),
+    execution: z.string().min(1).max(100_000),
     risk: toolRiskSchema,
     capability: toolCapabilitySchema,
     challenge: z.string().min(8).max(256),
@@ -220,6 +220,39 @@ export const approvalResolveInputSchema = z
   })
   .strict();
 export type ApprovalResolveInput = z.infer<typeof approvalResolveInputSchema>;
+
+export const commandStateSchema = z.enum([
+  'prepared',
+  'starting',
+  'running',
+  'exited',
+  'canceled',
+  'failed',
+  'interrupted',
+]);
+export type CommandState = z.infer<typeof commandStateSchema>;
+export const commandSummarySchema = z
+  .object({
+    id: idSchema,
+    taskId: idSchema,
+    turnId: idSchema,
+    callId: idSchema,
+    specDigest: digestSchema,
+    executable: z.string().min(1).max(32_768),
+    argv: z.array(z.string().max(1_000_000)).max(4_096),
+    cwd: z.string().min(1).max(32_768),
+    state: commandStateSchema,
+    pid: z.number().int().positive().nullable(),
+    exitCode: z.number().int().nullable(),
+    signal: z.string().max(64).nullable(),
+    outputBytes: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+    createdAt: timestampSchema,
+    startedAt: timestampSchema.nullable(),
+    finishedAt: timestampSchema.nullable(),
+  })
+  .strict();
+export type CommandSummary = z.infer<typeof commandSummarySchema>;
 
 const turnEventBase = { taskId: idSchema, turnId: idSchema, seq: z.number().int().positive() };
 export const turnEventSchema = z.discriminatedUnion('type', [
@@ -262,6 +295,31 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       })
       .strict(),
   ),
+  z
+    .object({
+      type: z.literal('command.started'),
+      ...turnEventBase,
+      command: commandSummarySchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('command.output'),
+      ...turnEventBase,
+      commandId: idSchema,
+      outputSeq: z.number().int().positive(),
+      stream: z.enum(['stdout', 'stderr']),
+      text: z.string().max(65_536),
+      byteLength: z.number().int().nonnegative().max(65_536),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('command.completed'),
+      ...turnEventBase,
+      command: commandSummarySchema,
+    })
+    .strict(),
   z
     .object({
       type: z.literal('turn.completed'),

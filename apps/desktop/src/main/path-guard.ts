@@ -86,7 +86,10 @@ export async function canonicalizeResourcePath(input: {
       ? await resolveExisting(existingPath, 'PATH_NOT_FOUND')
       : resolvedPath;
   assertContained(workspacePath, canonicalTarget);
-  const parentPath = await resolveExisting(dirname(canonicalTarget), 'PATH_NOT_FOUND');
+  const parentPath =
+    canonicalTarget === workspacePath
+      ? workspacePath
+      : await resolveExisting(dirname(canonicalTarget), 'PATH_NOT_FOUND');
   assertContained(workspacePath, parentPath);
   const parentIdentity = toIdentity(await stat(parentPath));
   const chain = await snapshotLexicalChain(workspacePath, lexicalTarget);

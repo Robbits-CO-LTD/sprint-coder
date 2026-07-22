@@ -4,8 +4,18 @@ import {
   createToolId,
   type ToolCatalogSnapshot,
   type ToolExecutionContext,
+  type ExecutionSpec,
 } from '@vibe/domain';
+import { randomUUID } from 'node:crypto';
 import { ToolBroker, type ToolAuthorizer } from './tool-broker';
+import {
+  CommandRunner,
+  prepareExecutionSpec,
+  type CommandOutputChunk,
+  type CommandResult,
+} from './command-runner';
+import type { PersistenceClient } from './persistence';
+import type { TurnEvent } from '@vibe/contracts';
 
 export const MOCK_ECHO_TOOL = createToolDefinition({
   toolId: createToolId({ provider: 'builtin', namespace: 'mock', name: 'echo', version: '1' }),
@@ -39,6 +49,7 @@ export const COMMAND_RUNNER_TOOL = createToolDefinition({
     properties: {
       executable: { type: 'string' },
       argv: { type: 'array', items: { type: 'string' } },
+      cwd: { type: 'string' },
     },
     required: ['executable', 'argv'],
     additionalProperties: false,
@@ -79,7 +90,23 @@ export const APPROVAL_PROBE_TOOL = createToolDefinition({
 export function createDefaultToolBroker(
   getCurrentPolicyEpoch: (taskId: string) => number,
   authorizer?: ToolAuthorizer,
+  command?: {
+    persistence: Pick<
+      PersistenceClient,
+      | 'getWorkspace'
+      | 'prepareCommand'
+      | 'beginCommand'
+      | 'startCommand'
+      | 'appendCommandOutput'
+      | 'appendCommandOutputBatch'
+      | 'completeCommand'
+      | 'getCommand'
+    >;
+    publish(event: TurnEvent): void;
+  },
 ): ToolBroker {
+  const commandRunner = new CommandRunner();
+  const commandIds = new WeakMap<object, string>();
   const registry = new ToolRegistry();
   registry.register(MOCK_ECHO_TOOL);
   registry.register(COMMAND_RUNNER_TOOL);
@@ -117,11 +144,119 @@ export function createDefaultToolBroker(
   broker.registerImplementation({
     toolId: COMMAND_RUNNER_TOOL.toolId,
     implementationKind: 'command-runner',
-    execute: () => {
-      throw new Error('CommandRunner execution boundary is not available until Slice 4.4');
+    dispose: () => commandRunner.dispose(),
+    prepare: async (input, context, control) => {
+      if (command === undefined)
+        throw new Error('CommandRunner execution boundary is not configured');
+      const workspacePath = command.persistence.getWorkspace(context.taskId);
+      if (workspacePath === null) throw new Error('CommandRunner requires a selected Workspace');
+      const request = input as { executable: string; argv: string[]; cwd?: string };
+      const spec = await prepareExecutionSpec({
+        workspacePath,
+        executable: request.executable,
+        argv: request.argv,
+        ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+      });
+      const persisted = command.persistence.prepareCommand({
+        id: randomUUID(),
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: control.callId,
+        spec,
+        createdAt: new Date().toISOString(),
+      });
+      commandIds.set(spec, persisted.id);
+      return spec;
+    },
+    authorizationDenied: (input) => {
+      if (command === undefined) return;
+      const commandId = commandIds.get(input as object);
+      if (commandId === undefined) return;
+      const current = command.persistence.getCommand(commandId);
+      if (current.state !== 'prepared') return;
+      const persisted = command.persistence.completeCommand({
+        commandId,
+        state: 'canceled',
+        exitCode: null,
+        signal: null,
+        outputBytes: 0,
+        truncated: false,
+        finishedAt: new Date().toISOString(),
+      });
+      command.publish(persisted.event);
+    },
+    execute: async (input, _context, control) => {
+      if (command === undefined)
+        throw new Error('CommandRunner execution boundary is not configured');
+      const spec = input as ExecutionSpec;
+      const commandId = commandIds.get(spec);
+      if (commandId === undefined) throw new Error('Command ExecutionSpec has no durable identity');
+      try {
+        const result = await commandRunner.run(spec, {
+          ...(control.signal === undefined ? {} : { signal: control.signal }),
+          beforeSpawn: () => {
+            command.persistence.beginCommand(commandId);
+          },
+          onStarted: ({ pid, startedAt, processStartIdentity }) => {
+            const persisted = command.persistence.startCommand({
+              commandId,
+              pid,
+              processStartTime: processStartIdentity,
+              startedAt: new Date(startedAt).toISOString(),
+            });
+            command.publish(persisted.event);
+          },
+          onBatch: (chunks: readonly CommandOutputChunk[]) => {
+            const events = command.persistence.appendCommandOutputBatch({
+              commandId,
+              chunks,
+              createdAt: new Date().toISOString(),
+            });
+            for (const event of events) command.publish(event);
+          },
+        });
+        const persisted = completePersistedCommand(command.persistence, commandId, result);
+        command.publish(persisted.event);
+        return result;
+      } catch (error) {
+        const current = command.persistence.getCommand(commandId);
+        if (
+          current.state === 'prepared' ||
+          current.state === 'starting' ||
+          current.state === 'running'
+        ) {
+          const persisted = command.persistence.completeCommand({
+            commandId,
+            state: 'failed',
+            exitCode: null,
+            signal: null,
+            outputBytes: current.outputBytes,
+            truncated: current.state === 'running',
+            finishedAt: new Date().toISOString(),
+          });
+          command.publish(persisted.event);
+        }
+        throw error;
+      }
     },
   });
   return broker;
+}
+
+function completePersistedCommand(
+  persistence: Pick<PersistenceClient, 'completeCommand'>,
+  commandId: string,
+  result: CommandResult,
+) {
+  return persistence.completeCommand({
+    commandId,
+    state: result.canceled ? 'canceled' : 'exited',
+    exitCode: result.exitCode,
+    signal: result.signal,
+    outputBytes: result.outputBytes,
+    truncated: result.truncated,
+    finishedAt: new Date().toISOString(),
+  });
 }
 
 export function startMockTurnCatalog(

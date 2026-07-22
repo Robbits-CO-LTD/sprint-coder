@@ -9,6 +9,8 @@ const isDevelopment = !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
 let persistence: SqlitePersistenceClient | null = null;
 let router: IpcRouter | null = null;
+let shutdownCommitted = false;
+let shutdownInFlight = false;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -68,9 +70,25 @@ if (!hasLock) {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
-app.on('before-quit', () => {
-  router?.dispose();
-  persistence?.close();
+app.on('before-quit', (event) => {
+  if (shutdownCommitted) return;
+  event.preventDefault();
+  if (shutdownInFlight) return;
+  shutdownInFlight = true;
+  void (async () => {
+    try {
+      await router?.dispose();
+    } catch (error) {
+      console.error('CommandRunner shutdown did not fully drain', error);
+    } finally {
+      try {
+        persistence?.close();
+      } finally {
+        shutdownCommitted = true;
+        app.quit();
+      }
+    }
+  })();
 });
 
 function createWindow(): BrowserWindow {

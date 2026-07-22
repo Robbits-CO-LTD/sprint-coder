@@ -59,5 +59,18 @@ test.describe('approval flow', () => {
     await page.waitForTimeout(1_000);
     await expect(card).toHaveCount(0);
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed');
+
+    await page.getByTestId('sidebar-new-task-button').click();
+    await textarea.fill('承認テストをしてください');
+    await textarea.press('Enter');
+    await expect(card).toBeVisible();
+    const runningApp = app;
+    await Promise.race([
+      runningApp.close(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('app shutdown stalled on pending approval')), 8_000),
+      ),
+    ]);
+    app = null;
   });
 });

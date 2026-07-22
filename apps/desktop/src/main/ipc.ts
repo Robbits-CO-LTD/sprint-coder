@@ -69,6 +69,8 @@ import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinato
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
 import type { Capability } from '@vibe/domain';
+import type { ExecutionSpec } from '@vibe/domain';
+import { executionSpecPathGuard } from './command-runner';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -442,8 +444,23 @@ export class IpcRouter {
       IPC_CHANNELS.turnsStopAndSend,
       turnStopAndSendInputSchema,
       z.undefined(),
-      (input, event, envelope) => {
-        let canceledTurnId: string | null = null;
+      async (input, event, envelope) => {
+        const principal = principalFor(event);
+        const hash = requestHash(envelope.payload);
+        const cached = this.persistence.getOperationResult<void>(
+          principal,
+          input.taskId,
+          IPC_CHANNELS.turnsStopAndSend,
+          envelope.operationId,
+          hash,
+        );
+        if (cached.found) return cached.value;
+        const activeTurnId = this.persistence.getActiveTurnId(input.taskId);
+        if (activeTurnId !== null) {
+          this.approvalCoordinator.turnEnded(input.taskId, activeTurnId, 'canceled');
+          await this.cancelRuntime(input.taskId, activeTurnId);
+        }
+        const canceledTurnId: string | null = activeTurnId;
         let canceledEvent: TurnEvent | null = null;
         let started: StartedTurn | undefined;
         const result = this.runMutation(
@@ -452,17 +469,12 @@ export class IpcRouter {
           input.taskId,
           IPC_CHANNELS.turnsStopAndSend,
           () => {
-            canceledTurnId = this.persistence.getActiveTurnId(input.taskId);
             if (canceledTurnId !== null)
               canceledEvent = this.persistence.cancelTurn(input.taskId, canceledTurnId);
             started = this.persistence.startTurn(input.taskId, input.text);
           },
         );
         if (result.executed) {
-          if (canceledTurnId !== null) {
-            this.approvalCoordinator.turnEnded(input.taskId, canceledTurnId, 'canceled');
-            this.cancelRuntime(input.taskId, canceledTurnId);
-          }
           if (canceledEvent !== null) this.publish(canceledEvent);
           if (started !== undefined) this.dispatchStarted(started);
         }
@@ -473,7 +485,9 @@ export class IpcRouter {
       IPC_CHANNELS.turnsCancel,
       turnCancelInputSchema,
       z.undefined(),
-      (input, event, envelope) => {
+      async (input, event, envelope) => {
+        this.approvalCoordinator.turnEnded(input.taskId, input.turnId, 'canceled');
+        await this.cancelRuntime(input.taskId, input.turnId);
         let canceledEvent: TurnEvent | null = null;
         let next: QueueTransition = null;
         const result = this.runMutation(
@@ -487,8 +501,6 @@ export class IpcRouter {
           },
         );
         if (result.executed) {
-          this.approvalCoordinator.turnEnded(input.taskId, input.turnId, 'canceled');
-          this.cancelRuntime(input.taskId, input.turnId);
           if (canceledEvent !== null) this.publish(canceledEvent);
           this.dispatchQueueTransition(next);
         }
@@ -538,9 +550,11 @@ export class IpcRouter {
     await this.permissionBroker.drainPolicyEpochOutbox();
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
+    this.approvalCoordinator.dispose();
+    await this.mockRuntime.dispose();
     this.codexRuntime.dispose();
   }
 
@@ -626,8 +640,9 @@ export class IpcRouter {
   }
 
   private evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
-    if (request.entry.implementationKind === 'command-runner') return 'deny' as const;
     const facts = approvalFactsForTool(request, capability);
+    const commandRunner = request.entry.implementationKind === 'command-runner';
+    const sandboxProfile = commandRunner ? ('full' as const) : ('read-only' as const);
     const expiresAt = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
     const ceilingEntry = {
       capability,
@@ -635,9 +650,9 @@ export class IpcRouter {
       operations: [facts.operation],
       expiresAt,
       providerEgress: ['none' as const],
-      sandboxProfiles: ['read-only' as const],
+      sandboxProfiles: [sandboxProfile],
     };
-    const evaluation = this.permissionBroker.evaluate({
+    const evaluationInput: Parameters<PermissionBroker['evaluate']>[0] = {
       taskId: request.context.taskId,
       request: {
         taskId: request.context.taskId,
@@ -646,7 +661,7 @@ export class IpcRouter {
         resource: facts.resource,
         operation: facts.operation,
         providerEgress: 'none',
-        sandboxProfile: 'read-only',
+        sandboxProfile,
         executionSpecDigest: facts.specDigest,
         reviewerInputDigest: createHash('sha256')
           .update(JSON.stringify(request.input))
@@ -658,10 +673,17 @@ export class IpcRouter {
         projectDeny: [],
         parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
         modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
-        sandbox: { feasible: true, profile: 'read-only' },
+        sandbox: { feasible: true, profile: sandboxProfile },
       },
       now: new Date().toISOString(),
-    });
+    };
+    const evaluation =
+      request.entry.implementationKind === 'command-runner'
+        ? this.permissionBroker.evaluateExecutionSpec({
+            ...evaluationInput,
+            pathGuard: executionSpecPathGuard(request.input as ExecutionSpec),
+          })
+        : this.permissionBroker.evaluate(evaluationInput);
     return evaluation.decision === 'allow' || evaluation.decision === 'allow_once'
       ? ('allow' as const)
       : evaluation.decision;
@@ -706,11 +728,11 @@ export class IpcRouter {
     return prepared;
   }
 
-  private cancelRuntime(taskId: string, turnId: string): void {
+  private async cancelRuntime(taskId: string, turnId: string): Promise<void> {
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
     if (kind === 'codex') this.codexRuntime.cancel(taskId, turnId);
-    else this.mockRuntime.cancel(turnId);
+    else await this.mockRuntime.cancel(turnId);
   }
 
   private handleCodexEvent(

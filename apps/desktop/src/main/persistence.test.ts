@@ -4,9 +4,16 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ToolRegistry, createSessionGrant, createToolDefinition, createToolId } from '@vibe/domain';
+import {
+  ToolRegistry,
+  createExecutionSpec,
+  createSessionGrant,
+  createToolDefinition,
+  createToolId,
+} from '@vibe/domain';
 import { randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
+import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { ToolBroker } from './tool-broker';
 import {
   OperationConflictError,
@@ -72,7 +79,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v13', () => {
+  describe('SqlitePersistenceClient v14', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -553,6 +560,22 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('persists the complete security-critical execution display without truncation', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const execution = JSON.stringify({ executable: '/usr/bin/tool', argv: ['x'.repeat(8_000)] });
+
+      persistence.requestApproval(
+        approvalRequest(task.id, turn.turnId, {
+          display: { target: '/usr/bin/tool', impact: 'process', execution },
+        }),
+      );
+
+      expect(persistence.getApproval(task.id, 'approval-1').execution).toBe(execution);
+      persistence.close();
+    });
+
     it('resolves allow-once, task grant, and deny without failing the Turn', () => {
       const decisions = ['allow_once', 'allow_task', 'deny'] as const;
       for (const [index, decision] of decisions.entries()) {
@@ -985,6 +1008,231 @@ if (runsWithElectronAbi)
       db.close();
     });
 
+    it('persists command lifecycle and replays sanitized mixed-stream output in global order', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const started = startExecutingTurn(persistence, task.id);
+      const spec = createExecutionSpec({
+        absoluteExecutable: process.execPath,
+        argv: ['--version'],
+        cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'a'.repeat(64) },
+        envDelta: {},
+        stdinMode: 'closed',
+        shell: 'none',
+      });
+      const prepared = persistence.prepareCommand({
+        id: 'command-1',
+        taskId: task.id,
+        turnId: started.turnId,
+        callId: 'call-1',
+        spec,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      expect(prepared.state).toBe('prepared');
+      expect(persistence.beginCommand(prepared.id).state).toBe('starting');
+      expect(
+        persistence.startCommand({
+          commandId: prepared.id,
+          pid: 123,
+          processStartTime: 'lease-start-1',
+          startedAt: '2026-07-23T00:00:01.000Z',
+        }).event.type,
+      ).toBe('command.started');
+      const observed = [
+        { seq: 1, stream: 'stdout' as const, text: 'one\n' },
+        { seq: 2, stream: 'stderr' as const, text: 'two\n' },
+        { seq: 3, stream: 'stdout' as const, text: 'three\n' },
+      ];
+      for (const chunk of observed)
+        persistence.appendCommandOutput({
+          commandId: prepared.id,
+          ...chunk,
+          byteLength: Buffer.byteLength(chunk.text),
+          createdAt: '2026-07-23T00:00:02.000Z',
+        });
+      const completed = persistence.completeCommand({
+        commandId: prepared.id,
+        state: 'exited',
+        exitCode: 0,
+        signal: null,
+        outputBytes: observed.reduce((sum, chunk) => sum + Buffer.byteLength(chunk.text), 0),
+        truncated: false,
+        finishedAt: '2026-07-23T00:00:03.000Z',
+      });
+      expect(completed.event.type).toBe('command.completed');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listCommandOutput(prepared.id)).toEqual(
+        observed.map((chunk) => ({ ...chunk, byteLength: Buffer.byteLength(chunk.text) })),
+      );
+      expect(
+        reopened
+          .listEventsAfter(task.id, 0)
+          .filter(({ type }) => type.startsWith('command.'))
+          .map(({ type }) => type),
+      ).toEqual([
+        'command.started',
+        'command.output',
+        'command.output',
+        'command.output',
+        'command.completed',
+      ]);
+      reopened.close();
+    });
+
+    it('marks a running command interrupted on restart and never reconnects by PID', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const started = startExecutingTurn(persistence, task.id);
+      const spec = createExecutionSpec({
+        absoluteExecutable: process.execPath,
+        argv: ['--version'],
+        cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'b'.repeat(64) },
+        envDelta: {},
+        stdinMode: 'closed',
+        shell: 'none',
+      });
+      persistence.prepareCommand({
+        id: 'command-interrupted',
+        taskId: task.id,
+        turnId: started.turnId,
+        callId: 'call-interrupted',
+        spec,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      persistence.beginCommand('command-interrupted');
+      persistence.startCommand({
+        commandId: 'command-interrupted',
+        pid: 999_999,
+        processStartTime: 'old-process',
+        startedAt: '2026-07-23T00:00:01.000Z',
+      });
+      persistence.prepareCommand({
+        id: 'command-never-dispatched',
+        taskId: task.id,
+        turnId: started.turnId,
+        callId: 'call-never-dispatched',
+        spec,
+        createdAt: '2026-07-23T00:00:02.000Z',
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getCommand('command-interrupted').state).toBe('interrupted');
+      expect(reopened.getCommand('command-never-dispatched').state).toBe('interrupted');
+      expect(
+        reopened.listEventsAfter(task.id, 0).filter((event) => event.type === 'command.completed'),
+      ).toHaveLength(2);
+      reopened.close();
+    });
+
+    it('seals the exact command before authorization and commits output before publishing it', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const workspacePath = join(path, '..');
+      persistence.setWorkspace(task.id, workspacePath);
+      const started = startExecutingTurn(persistence, task.id);
+      const published: string[] = [];
+      let authorizedInput: unknown;
+      const broker = createDefaultToolBroker(
+        () => persistence.getPermissionPolicy(task.id).policyEpoch,
+        (request) => {
+          authorizedInput = request.input;
+          return { decision: 'allow', reason: 'integration_test' };
+        },
+        {
+          persistence,
+          publish: (event) => {
+            if (event.type === 'command.output') {
+              const replay = persistence.listCommandOutput(event.commandId);
+              expect(replay.at(-1)?.seq).toBe(event.outputSeq);
+            }
+            published.push(event.type);
+          },
+        },
+      );
+      startMockTurnCatalog(broker, {
+        taskId: task.id,
+        turnId: started.turnId,
+        workspaceId: 'workspace-1',
+        policyEpoch: 0,
+      });
+      const executable =
+        process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : '/usr/bin/printf';
+      const argv = process.platform === 'win32' ? ['where'] : ['command-ok\\n'];
+      const result = (await broker.dispatch({
+        taskId: task.id,
+        turnId: started.turnId,
+        callId: 'command-call-1',
+        providerName: 'run_command',
+        input: { executable, argv, cwd: '.' },
+      })) as { exitCode: number; outputBytes: number };
+
+      expect(result.exitCode).toBe(0);
+      expect(authorizedInput).toMatchObject({
+        absoluteExecutable: executable,
+        argv,
+        cwdIdentity: { canonicalPath: expect.any(String), identityDigest: expect.any(String) },
+        shell: 'none',
+      });
+      expect(published[0]).toBe('command.started');
+      expect(published.at(-1)).toBe('command.completed');
+      const commandEvent = persistence
+        .listEventsAfter(task.id, 0)
+        .find((event) => event.type === 'command.completed');
+      expect(commandEvent).toMatchObject({
+        type: 'command.completed',
+        command: { state: 'exited' },
+      });
+      persistence.close();
+    });
+
+    it('terminalizes a prepared command when authorization is denied without failing the Turn', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      persistence.setWorkspace(task.id, join(path, '..'));
+      const started = startExecutingTurn(persistence, task.id);
+      const broker = createDefaultToolBroker(
+        () => 0,
+        () => ({ decision: 'deny', reason: 'integration_deny' }),
+        { persistence, publish: () => undefined },
+      );
+      startMockTurnCatalog(broker, {
+        taskId: task.id,
+        turnId: started.turnId,
+        workspaceId: 'workspace-1',
+        policyEpoch: 0,
+      });
+
+      await expect(
+        broker.dispatch({
+          taskId: task.id,
+          turnId: started.turnId,
+          callId: 'command-denied',
+          providerName: 'run_command',
+          input: {
+            executable:
+              process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : '/usr/bin/printf',
+            argv: ['denied'],
+            cwd: '.',
+          },
+        }),
+      ).rejects.toMatchObject({ name: 'ToolAuthorizationDeniedError' });
+      const completed = persistence
+        .listEventsAfter(task.id, 0)
+        .find(
+          (event) =>
+            event.type === 'command.completed' && event.command.callId === 'command-denied',
+        );
+      expect(completed).toMatchObject({
+        type: 'command.completed',
+        command: { state: 'canceled', pid: null },
+      });
+      expect(persistence.getActiveTurnId(task.id)).toBe(started.turnId);
+      persistence.close();
+    });
+
     it('migrates a v1 database with duplicate active turns without crashing', () => {
       const directory = mkdtempSync(join(tmpdir(), 'vibe-migration-'));
       cleanup.push(directory);
@@ -1013,6 +1261,7 @@ if (runsWithElectronAbi)
         { version: 11 },
         { version: 12 },
         { version: 13 },
+        { version: 14 },
       ]);
       expect(
         migrated
@@ -1091,7 +1340,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v13 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v14 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

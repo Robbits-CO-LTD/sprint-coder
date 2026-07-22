@@ -14,6 +14,7 @@ export type ToolDispatchRequest = {
   callId: string;
   providerName: string;
   input: unknown;
+  signal?: AbortSignal;
 };
 
 export type ToolAuthorizationRequest = Readonly<{
@@ -102,6 +103,13 @@ export class ToolBroker {
     this.turns.delete(turnKey(taskId, turnId));
   }
 
+  async dispose(): Promise<void> {
+    await Promise.all(
+      [...this.implementations.values()].map(async (implementation) => implementation.dispose?.()),
+    );
+    this.turns.clear();
+  }
+
   async dispatch(request: ToolDispatchRequest): Promise<unknown> {
     if (request.callId.length === 0 || request.callId.length > 128)
       throw new Error('Invalid tool call id');
@@ -126,30 +134,67 @@ export class ToolBroker {
     if (implementation === undefined) throw new Error('Pinned ToolImplementation is unavailable');
     if (implementation.implementationKind !== entry.implementationKind)
       throw new Error('Pinned ToolImplementation kind mismatch');
-    const pinnedInput = cloneAndFreeze(request.input);
-    if (!toolValueMatchesSchema(entry.inputSchema, pinnedInput))
+    const runtimeInput = cloneAndFreeze(request.input);
+    if (!toolValueMatchesSchema(entry.inputSchema, runtimeInput))
       throw new Error('Tool input does not match the pinned schema');
-    const authorization = await this.authorize({
-      context: bound.context,
-      callId: request.callId,
-      entry,
-      input: pinnedInput,
-    });
-    if (authorization.decision !== 'allow') throw new ToolAuthorizationDeniedError(authorization);
-    if (this.turns.get(turnKey(request.taskId, request.turnId)) !== bound)
+    const pinnedInput =
+      implementation.prepare === undefined
+        ? runtimeInput
+        : await implementation.prepare(runtimeInput, bound.context, { callId: request.callId });
+    if (!isDeeplyFrozen(pinnedInput))
+      throw new Error('Tool implementation returned a mutable prepared input');
+    let authorization: ToolAuthorizationDecision;
+    try {
+      authorization = await this.authorize({
+        context: bound.context,
+        callId: request.callId,
+        entry,
+        input: pinnedInput,
+      });
+    } catch (error) {
+      await implementation.authorizationDenied?.(pinnedInput, bound.context);
+      throw error;
+    }
+    if (authorization.decision !== 'allow') {
+      await implementation.authorizationDenied?.(pinnedInput, bound.context);
+      throw new ToolAuthorizationDeniedError(authorization);
+    }
+    if (this.turns.get(turnKey(request.taskId, request.turnId)) !== bound) {
+      await implementation.authorizationDenied?.(pinnedInput, bound.context);
       throw new Error('Tool dispatch rejected because the Turn ended during authorization');
-    if (this.getCurrentPolicyEpoch(request.taskId) !== bound.context.policyEpoch)
+    }
+    if (this.getCurrentPolicyEpoch(request.taskId) !== bound.context.policyEpoch) {
+      await implementation.authorizationDenied?.(pinnedInput, bound.context);
       throw new Error('Tool dispatch rejected because the policy epoch changed');
-    if (authorization.beforeExecute?.() === false)
+    }
+    let executionValid: boolean | undefined;
+    try {
+      executionValid = authorization.beforeExecute?.();
+    } catch (error) {
+      await implementation.authorizationDenied?.(pinnedInput, bound.context);
+      throw error;
+    }
+    if (executionValid === false) {
+      await implementation.authorizationDenied?.(pinnedInput, bound.context);
       throw new ToolAuthorizationDeniedError({
         decision: 'deny',
         reason: 'execution_revalidation_failed',
       });
-    const output = await implementation.execute(pinnedInput, bound.context);
+    }
+    const output = await implementation.execute(pinnedInput, bound.context, {
+      callId: request.callId,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    });
     if (!toolValueMatchesSchema(definition.outputSchema, output))
       throw new Error('Tool output does not match the pinned schema');
     return output;
   }
+}
+
+function isDeeplyFrozen(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return true;
+  if (!Object.isFrozen(value)) return false;
+  return Object.values(value).every(isDeeplyFrozen);
 }
 
 function cloneAndFreeze<T>(value: T): T {

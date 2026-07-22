@@ -24,6 +24,12 @@ export function ApprovalCard({
         <span className={`approval-card__risk risk-${approval.risk}`}>{approval.risk}</span>
       </div>
       <p>{approval.reason}</p>
+      {approval.capability === 'shell.execute' ? (
+        <p className="approval-card__warning" role="note">
+          OS
+          sandboxなしで、あなたと同じ権限で実行されます。Workspace外のファイルやネットワークにもアクセスできます。
+        </p>
+      ) : null}
       <dl className="approval-card__facts">
         <div>
           <dt>対象</dt>

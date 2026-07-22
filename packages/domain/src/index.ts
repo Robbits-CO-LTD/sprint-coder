@@ -112,3 +112,4 @@ export function transitionIntelligenceStep(
 export * from './permission';
 export * from './approval';
 export * from './tool-registry';
+export * from './execution-spec';

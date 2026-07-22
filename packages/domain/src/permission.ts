@@ -611,8 +611,12 @@ function requestFactsValid(request: PermissionRequest): boolean {
               ? request.resource.kind === 'provider'
               : request.capability === 'external.open'
                 ? request.resource.kind === 'external'
-                : request.resource.kind === 'workspace-path' ||
-                  request.resource.kind === 'external-path';
+                : request.capability === 'shell.execute'
+                  ? request.resource.kind === 'external' ||
+                    request.resource.kind === 'workspace-path' ||
+                    request.resource.kind === 'external-path'
+                  : request.resource.kind === 'workspace-path' ||
+                    request.resource.kind === 'external-path';
   return resourceMatchesCapability;
 }
 

@@ -93,10 +93,26 @@ export type ToolExecutionContext = Readonly<{
   policyEpoch: number;
 }>;
 
+export type ToolExecutionControl = Readonly<{
+  callId: string;
+  signal?: AbortSignal;
+}>;
+
 export type ToolImplementation = Readonly<{
   toolId: ToolId;
   implementationKind: ToolImplementationKind;
-  execute: (input: unknown, context: ToolExecutionContext) => Promise<unknown> | unknown;
+  prepare?: (
+    input: unknown,
+    context: ToolExecutionContext,
+    control: Readonly<{ callId: string }>,
+  ) => Promise<unknown> | unknown;
+  authorizationDenied?: (input: unknown, context: ToolExecutionContext) => Promise<void> | void;
+  execute: (
+    input: unknown,
+    context: ToolExecutionContext,
+    control: ToolExecutionControl,
+  ) => Promise<unknown> | unknown;
+  dispose?: () => void | Promise<void>;
 }>;
 
 /** Reserved extension point. MCP sources are intentionally not connected before Public Beta. */

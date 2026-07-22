@@ -5,6 +5,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   chatMessageSchema,
   approvalSummarySchema,
+  commandSummarySchema,
   taskSummarySchema,
   turnEventSchema,
   turnSnapshotSchema,
@@ -12,6 +13,8 @@ import {
   type ApprovalDecision,
   type ApprovalState,
   type ApprovalSummary,
+  type CommandState,
+  type CommandSummary,
   type ContextUsage,
   type QueuedInput,
   type RuntimeKind,
@@ -41,6 +44,8 @@ import {
   type SandboxProfile,
   type StepSnapshot,
   type TurnState,
+  type ExecutionSpec,
+  executionSpecDigest,
 } from '@vibe/domain';
 import {
   ContextLedger,
@@ -152,6 +157,24 @@ type ApprovalRow = {
   requested_at: string;
   resolved_at: string | null;
   decision_operation_id: string | null;
+};
+type CommandRow = {
+  id: string;
+  task_id: string;
+  turn_id: string;
+  call_id: string;
+  spec_json: string;
+  spec_digest: string;
+  state: CommandState;
+  pid: number | null;
+  process_start_time: string | null;
+  exit_code: number | null;
+  signal: string | null;
+  output_bytes: number;
+  truncated: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 };
 type EventWithoutSeq = TurnEvent extends infer Event
   ? Event extends TurnEvent
@@ -509,6 +532,44 @@ const migrations = [
         ON approvals(turn_id, runtime_call_id, capability);
     `,
   },
+  {
+    version: 14,
+    checksum: 'commands-v14-runs-sequenced-output',
+    sql: `
+      CREATE TABLE command_runs (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        call_id TEXT NOT NULL,
+        spec_json TEXT NOT NULL,
+        spec_digest TEXT NOT NULL CHECK (length(spec_digest) = 64),
+        state TEXT NOT NULL CHECK (state IN (
+          'prepared', 'starting', 'running', 'exited', 'canceled', 'failed', 'interrupted'
+        )),
+        pid INTEGER,
+        process_start_time TEXT,
+        exit_code INTEGER,
+        signal TEXT,
+        output_bytes INTEGER NOT NULL DEFAULT 0 CHECK (output_bytes >= 0),
+        truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        UNIQUE(turn_id, call_id)
+      );
+      CREATE INDEX command_runs_task_created_idx ON command_runs(task_id, created_at, id);
+      CREATE TABLE command_output_chunks (
+        command_id TEXT NOT NULL REFERENCES command_runs(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL CHECK (seq > 0),
+        stream TEXT NOT NULL CHECK (stream IN ('stdout', 'stderr')),
+        text TEXT NOT NULL,
+        byte_length INTEGER NOT NULL CHECK (byte_length >= 0 AND byte_length <= 65536),
+        content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(command_id, seq)
+      );
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -569,6 +630,13 @@ export type ApprovalPersistenceResult = {
   event: TurnEvent;
   oneTimePermitToken?: string;
 };
+
+export type CommandOutputRecord = Readonly<{
+  seq: number;
+  stream: 'stdout' | 'stderr';
+  text: string;
+  byteLength: number;
+}>;
 
 export type PermissionPolicyRecord = {
   preset: AccessPreset;
@@ -643,6 +711,50 @@ export interface PersistenceClient {
     policyEpoch: number,
     invalidatedAt: string,
   ): ApprovalPersistenceResult[];
+  prepareCommand(input: {
+    id: string;
+    taskId: string;
+    turnId: string;
+    callId: string;
+    spec: ExecutionSpec;
+    createdAt: string;
+  }): CommandSummary;
+  startCommand(input: {
+    commandId: string;
+    pid: number;
+    processStartTime: string;
+    startedAt: string;
+  }): { command: CommandSummary; event: TurnEvent };
+  beginCommand(commandId: string): CommandSummary;
+  appendCommandOutput(input: {
+    commandId: string;
+    seq: number;
+    stream: 'stdout' | 'stderr';
+    text: string;
+    byteLength: number;
+    createdAt: string;
+  }): TurnEvent;
+  appendCommandOutputBatch(input: {
+    commandId: string;
+    chunks: readonly {
+      seq: number;
+      stream: 'stdout' | 'stderr';
+      text: string;
+      byteLength: number;
+    }[];
+    createdAt: string;
+  }): TurnEvent[];
+  completeCommand(input: {
+    commandId: string;
+    state: Extract<CommandState, 'exited' | 'canceled' | 'failed'>;
+    exitCode: number | null;
+    signal: string | null;
+    outputBytes: number;
+    truncated: boolean;
+    finishedAt: string;
+  }): { command: CommandSummary; event: TurnEvent };
+  getCommand(commandId: string): CommandSummary;
+  listCommandOutput(commandId: string, afterSeq?: number, limit?: number): CommandOutputRecord[];
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
   queueInput(
@@ -707,6 +819,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     this.runMigrations(databasePath);
+    this.interruptActiveCommands();
     this.contextLedger = new ContextLedger(this);
   }
 
@@ -1147,7 +1260,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           JSON.stringify({
             target: sanitizeApprovalText(input.display.target, 500),
             impact: sanitizeApprovalText(input.display.impact, 500),
-            execution: sanitizeApprovalText(input.display.execution, 2_000),
+            execution: sanitizeApprovalText(input.display.execution, 100_000),
           }),
           sha256(input.challenge),
           new Date(input.expiresAt).toISOString(),
@@ -1465,6 +1578,256 @@ export class SqlitePersistenceClient implements PersistenceClient {
         evaluation.reviewerAudit === undefined ? null : JSON.stringify(evaluation.reviewerAudit),
         new Date().toISOString(),
       );
+  }
+
+  prepareCommand(input: {
+    id: string;
+    taskId: string;
+    turnId: string;
+    callId: string;
+    spec: ExecutionSpec;
+    createdAt: string;
+  }): CommandSummary {
+    const specDigest = executionSpecDigest(input.spec);
+    const createdAt = new Date(input.createdAt).toISOString();
+    return this.db.transaction(() => {
+      const existing = this.db
+        .prepare('SELECT * FROM command_runs WHERE turn_id = ? AND call_id = ?')
+        .get(input.turnId, input.callId) as CommandRow | undefined;
+      if (existing !== undefined) {
+        if (existing.spec_digest !== specDigest) throw new Error('Command callId spec conflict');
+        return toCommandSummary(existing);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO command_runs(
+            id, task_id, turn_id, call_id, spec_json, spec_digest, state,
+            pid, process_start_time, exit_code, signal, output_bytes, truncated,
+            created_at, started_at, finished_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, NULL, NULL, 0, 0, ?, NULL, NULL)`,
+        )
+        .run(
+          input.id,
+          input.taskId,
+          input.turnId,
+          input.callId,
+          JSON.stringify(input.spec),
+          specDigest,
+          createdAt,
+        );
+      return this.getCommand(input.id);
+    })();
+  }
+
+  beginCommand(commandId: string): CommandSummary {
+    return this.db.transaction(() => {
+      const updated = this.db
+        .prepare("UPDATE command_runs SET state = 'starting' WHERE id = ? AND state = 'prepared'")
+        .run(commandId);
+      if (updated.changes !== 1) throw new Error('Command is not prepared');
+      return this.getCommand(commandId);
+    })();
+  }
+
+  startCommand(input: {
+    commandId: string;
+    pid: number;
+    processStartTime: string;
+    startedAt: string;
+  }): { command: CommandSummary; event: TurnEvent } {
+    return this.db.transaction(() => {
+      const startedAt = new Date(input.startedAt).toISOString();
+      const updated = this.db
+        .prepare(
+          `UPDATE command_runs SET state = 'running', pid = ?, process_start_time = ?, started_at = ?
+           WHERE id = ? AND state = 'starting'`,
+        )
+        .run(input.pid, input.processStartTime, startedAt, input.commandId);
+      if (updated.changes !== 1) throw new Error('Command is not starting');
+      const command = this.getCommand(input.commandId);
+      const event = this.appendEvent({
+        type: 'command.started',
+        taskId: command.taskId,
+        turnId: command.turnId,
+        command,
+      });
+      return { command, event };
+    })();
+  }
+
+  appendCommandOutput(input: {
+    commandId: string;
+    seq: number;
+    stream: 'stdout' | 'stderr';
+    text: string;
+    byteLength: number;
+    createdAt: string;
+  }): TurnEvent {
+    return this.appendCommandOutputBatch({
+      commandId: input.commandId,
+      chunks: [input],
+      createdAt: input.createdAt,
+    })[0]!;
+  }
+
+  appendCommandOutputBatch(input: {
+    commandId: string;
+    chunks: readonly {
+      seq: number;
+      stream: 'stdout' | 'stderr';
+      text: string;
+      byteLength: number;
+    }[];
+    createdAt: string;
+  }): TurnEvent[] {
+    return this.db.transaction(() => {
+      if (input.chunks.length === 0) return [];
+      const row = this.commandRow(input.commandId);
+      if (row.state !== 'running') throw new Error('Command is not running');
+      let expected = (
+        this.db
+          .prepare(
+            'SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM command_output_chunks WHERE command_id = ?',
+          )
+          .get(input.commandId) as { seq: number }
+      ).seq;
+      const createdAt = new Date(input.createdAt).toISOString();
+      const insert = this.db.prepare(
+        `INSERT INTO command_output_chunks(
+          command_id, seq, stream, text, byte_length, content_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const events: TurnEvent[] = [];
+      let totalBytes = 0;
+      for (const chunk of input.chunks) {
+        if (Buffer.byteLength(chunk.text) !== chunk.byteLength || chunk.byteLength > 65_536)
+          throw new Error('Command output byte length mismatch');
+        if (chunk.seq !== expected++) throw new Error('Command output sequence mismatch');
+        insert.run(
+          input.commandId,
+          chunk.seq,
+          chunk.stream,
+          chunk.text,
+          chunk.byteLength,
+          sha256(chunk.text),
+          createdAt,
+        );
+        totalBytes += chunk.byteLength;
+        events.push(
+          this.appendEvent({
+            type: 'command.output',
+            taskId: row.task_id,
+            turnId: row.turn_id,
+            commandId: row.id,
+            outputSeq: chunk.seq,
+            stream: chunk.stream,
+            text: chunk.text,
+            byteLength: chunk.byteLength,
+          }),
+        );
+      }
+      this.db
+        .prepare('UPDATE command_runs SET output_bytes = output_bytes + ? WHERE id = ?')
+        .run(totalBytes, input.commandId);
+      return events;
+    })();
+  }
+
+  completeCommand(input: {
+    commandId: string;
+    state: Extract<CommandState, 'exited' | 'canceled' | 'failed'>;
+    exitCode: number | null;
+    signal: string | null;
+    outputBytes: number;
+    truncated: boolean;
+    finishedAt: string;
+  }): { command: CommandSummary; event: TurnEvent } {
+    return this.db.transaction(() => {
+      const finishedAt = new Date(input.finishedAt).toISOString();
+      const updated = this.db
+        .prepare(
+          `UPDATE command_runs SET state = ?, exit_code = ?, signal = ?, output_bytes = ?,
+            truncated = ?, finished_at = ? WHERE id = ? AND state IN ('prepared', 'starting', 'running')`,
+        )
+        .run(
+          input.state,
+          input.exitCode,
+          input.signal,
+          input.outputBytes,
+          input.truncated ? 1 : 0,
+          finishedAt,
+          input.commandId,
+        );
+      if (updated.changes !== 1) throw new Error('Command is not active');
+      const command = this.getCommand(input.commandId);
+      const event = this.appendEvent({
+        type: 'command.completed',
+        taskId: command.taskId,
+        turnId: command.turnId,
+        command,
+      });
+      return { command, event };
+    })();
+  }
+
+  getCommand(commandId: string): CommandSummary {
+    return toCommandSummary(this.commandRow(commandId));
+  }
+
+  listCommandOutput(commandId: string, afterSeq = 0, limit = 200): CommandOutputRecord[] {
+    this.commandRow(commandId);
+    if (!Number.isInteger(afterSeq) || afterSeq < 0) throw new Error('Invalid output cursor');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500)
+      throw new Error('Invalid output limit');
+    return (
+      this.db
+        .prepare(
+          `SELECT seq, stream, text, byte_length FROM command_output_chunks
+           WHERE command_id = ? AND seq > ? ORDER BY seq LIMIT ?`,
+        )
+        .all(commandId, afterSeq, limit) as {
+        seq: number;
+        stream: 'stdout' | 'stderr';
+        text: string;
+        byte_length: number;
+      }[]
+    ).map((row) => ({
+      seq: row.seq,
+      stream: row.stream,
+      text: row.text,
+      byteLength: row.byte_length,
+    }));
+  }
+
+  private commandRow(commandId: string): CommandRow {
+    const row = this.db.prepare('SELECT * FROM command_runs WHERE id = ?').get(commandId) as
+      CommandRow | undefined;
+    if (row === undefined) throw new NotFoundError('Command not found');
+    return row;
+  }
+
+  private interruptActiveCommands(): void {
+    this.db.transaction(() => {
+      const rows = this.db
+        .prepare("SELECT id FROM command_runs WHERE state IN ('prepared', 'starting', 'running')")
+        .all() as { id: string }[];
+      const finishedAt = new Date().toISOString();
+      for (const row of rows) {
+        this.db
+          .prepare(
+            `UPDATE command_runs SET state = 'interrupted', finished_at = ?
+             WHERE id = ? AND state IN ('prepared', 'starting', 'running')`,
+          )
+          .run(finishedAt, row.id);
+        const command = this.getCommand(row.id);
+        this.appendEvent({
+          type: 'command.completed',
+          taskId: command.taskId,
+          turnId: command.turnId,
+          command,
+        });
+      }
+    })();
   }
 
   listMessages(taskId: string): ChatMessage[] {
@@ -2264,6 +2627,31 @@ export function toApprovalSummary(approval: PersistedApproval): ApprovalSummary 
   });
 }
 
+function toCommandSummary(row: CommandRow): CommandSummary {
+  const spec = JSON.parse(row.spec_json) as ExecutionSpec;
+  if (executionSpecDigest(spec) !== row.spec_digest)
+    throw new Error('Command spec digest mismatch');
+  return commandSummarySchema.parse({
+    id: row.id,
+    taskId: row.task_id,
+    turnId: row.turn_id,
+    callId: row.call_id,
+    specDigest: row.spec_digest,
+    executable: spec.absoluteExecutable,
+    argv: [...spec.argv],
+    cwd: spec.cwdIdentity.canonicalPath,
+    state: row.state,
+    pid: row.pid,
+    exitCode: row.exit_code,
+    signal: row.signal,
+    outputBytes: row.output_bytes,
+    truncated: row.truncated === 1,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+  });
+}
+
 function validateApprovalRequest(input: ApprovalRequestInput): void {
   for (const value of [
     input.id,
@@ -2308,7 +2696,7 @@ function parseApprovalDisplay(value: string): {
   return {
     target: sanitizeApprovalText(parsed.target, 500),
     impact: sanitizeApprovalText(parsed.impact, 500),
-    execution: sanitizeApprovalText(parsed.execution, 2_000),
+    execution: sanitizeApprovalText(parsed.execution, 100_000),
   };
 }
 
@@ -2349,7 +2737,7 @@ function approvalRequestDigest(input: ApprovalRequestInput): string {
       display: {
         target: sanitizeApprovalText(input.display.target, 500),
         impact: sanitizeApprovalText(input.display.impact, 500),
-        execution: sanitizeApprovalText(input.display.execution, 2_000),
+        execution: sanitizeApprovalText(input.display.execution, 100_000),
       },
     }),
   );

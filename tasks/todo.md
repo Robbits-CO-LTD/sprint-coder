@@ -56,7 +56,13 @@ Wave 2(完了 2026-07-22):
   - Chatへ対象・影響・実行内容・riskと「今回のみ許可 / Task中許可 / 拒否」を表示。Rendererは検証済みDTOとdecisionだけを送信しauthority factsを保持しない
   - 拒否はerror tool-resultとしてIntelligence Loopへ戻し、Runを失敗させず代替回答を継続（FR-APR-06）。CommandRunnerはSlice 4.4まで実行不可を維持
   - 検証: typecheck/test(329件)/lint/format/E2E 6本 green。Computer UseでGPT-5.6-Terra表示、承認カード、拒否後の完了回答を実機確認
-- [ ] Slice 4.4 CommandRunner
+- [x] Slice 4.4 CommandRunner
+  - immutable `ExecutionSpec`（absolute executable + argv、shellなし、stdin閉鎖、制御environment、Workspace cwd identity）を承認前に固定。実行ファイルはcanonical path/device/inode/metadata/content digestを実行直前に再検証
+  - SQLite migration v14へ`prepared→starting→running→exited/canceled/failed/interrupted`とglobal seq付きstdout/stderr chunkを追加。spawn前の`starting` commit、再起動時terminal event、拒否時terminal化、commit-before-publishを実装
+  - stdout/stderrは100ms/64KiB batch、async sink backpressure、16MiB cap、UTF-8境界、ANSI/control sanitize、保存前credential redaction、process `close`/pipe drain後のterminal commitを実装
+  - cancelはUnix process group / Windows `taskkill /T`で協調停止→grace後強制停止。親が先に終了する孫残留fixture、sink failure、アプリ終了時drainを含めて回収
+  - CommandRunnerをToolBroker/Approval/Intelligence Loopへ接続。承認対象はexact spec digest、OS sandboxなしのfull user authorityとして表示し、Workspace外・networkアクセス警告を追加
+  - 検証: typecheck/test(354件)/lint/format/E2E 7本 green。model選択・再起動復元E2Eも同時通過
 
 ---
 

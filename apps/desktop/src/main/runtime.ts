@@ -15,7 +15,14 @@ type Publish = (event: TurnEvent) => void;
 type Serialize = <T>(taskId: string, action: () => T) => Promise<T>;
 type Terminal = (taskId: string, turnId: string, state: 'completed' | 'failed') => void;
 type PrepareContext = (taskId: string, turnId: string) => PreparedContext | void;
-type ActiveTurn = { canceled: boolean; steering: string[]; context: PreparedContext | undefined };
+type ActiveTurn = {
+  canceled: boolean;
+  steering: string[];
+  context: PreparedContext | undefined;
+  abortController: AbortController;
+  settled: Promise<void>;
+  resolveSettled: () => void;
+};
 type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' | 'completeTurn'> &
   Partial<
     Pick<
@@ -25,6 +32,13 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
       | 'createIntelligenceStep'
       | 'transitionIntelligenceStep'
       | 'listIntelligenceSteps'
+      | 'prepareCommand'
+      | 'beginCommand'
+      | 'startCommand'
+      | 'appendCommandOutput'
+      | 'appendCommandOutputBatch'
+      | 'completeCommand'
+      | 'getCommand'
     >
   >;
 
@@ -46,15 +60,36 @@ export class MockRuntimeAdapter {
     this.toolBroker = createDefaultToolBroker(
       (taskId) => this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0,
       authorizer,
+      {
+        persistence: this.persistence as Pick<
+          PersistenceClient,
+          | 'getWorkspace'
+          | 'prepareCommand'
+          | 'beginCommand'
+          | 'startCommand'
+          | 'appendCommandOutput'
+          | 'appendCommandOutputBatch'
+          | 'completeCommand'
+          | 'getCommand'
+        >,
+        publish: this.publish,
+      },
     );
   }
 
   start(taskId: string, turnId: string, input: string): void {
     const context = this.prepareContext?.(taskId, turnId);
+    let resolveSettled = (): void => undefined;
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
     const control: ActiveTurn = {
       canceled: false,
       steering: [],
       context: context === undefined ? undefined : context,
+      abortController: new AbortController(),
+      settled,
+      resolveSettled,
     };
     this.active.set(turnId, control);
     void this.run(taskId, turnId, input, control);
@@ -65,9 +100,22 @@ export class MockRuntimeAdapter {
     if (control !== undefined) control.steering.push(text);
   }
 
-  cancel(turnId: string): void {
+  async cancel(turnId: string): Promise<void> {
     const control = this.active.get(turnId);
-    if (control !== undefined) control.canceled = true;
+    if (control !== undefined) {
+      control.canceled = true;
+      control.abortController.abort();
+      await control.settled;
+    }
+  }
+
+  async dispose(): Promise<void> {
+    const settlements = [...this.active.values()].map((control) => control.settled);
+    for (const control of this.active.values()) {
+      control.canceled = true;
+      control.abortController.abort();
+    }
+    await Promise.all([this.toolBroker.dispose(), ...settlements]);
   }
 
   private async run(
@@ -111,6 +159,7 @@ export class MockRuntimeAdapter {
               callId: call.callId,
               providerName: call.toolName,
               input: call.arguments,
+              signal: control.abortController.signal,
             });
           } catch (error) {
             if (error instanceof ToolAuthorizationDeniedError)
@@ -121,8 +170,7 @@ export class MockRuntimeAdapter {
               };
             throw error;
           }
-          if (typeof result !== 'string') throw new Error('Mock tool returned a non-string result');
-          return result;
+          return typeof result === 'string' ? result : JSON.stringify(result);
         },
         ...(recorder === undefined ? {} : { recorder }),
       });
@@ -157,6 +205,7 @@ export class MockRuntimeAdapter {
     } finally {
       this.toolBroker.finishTurn(taskId, turnId);
       this.active.delete(turnId);
+      control.resolveSettled();
     }
   }
 

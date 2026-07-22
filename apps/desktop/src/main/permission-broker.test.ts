@@ -309,6 +309,24 @@ describe('Main PermissionBroker', () => {
       }),
     ).toThrow('Shell requests must use evaluateShell');
 
+    const structured = broker.evaluateExecutionSpec({
+      taskId: 'task-1',
+      request: shellRequest,
+      now: NOW,
+      pathGuard,
+      basePolicy: {
+        managedDeny: [],
+        projectDeny: [],
+        parentCeiling: shellCeiling,
+        modeCeiling: shellCeiling,
+        sandbox: { feasible: true, profile: 'read-only' },
+        allowRules: [
+          { capability: 'shell.execute', resourceSet: { kind: 'all' }, operations: ['execute'] },
+        ],
+      },
+    });
+    expect(structured.decision).toBe('allow');
+
     const result = broker.evaluateShell({
       taskId: 'task-1',
       command: '/bin/echo one && /usr/bin/printf two',
@@ -330,6 +348,6 @@ describe('Main PermissionBroker', () => {
       decision: 'deny',
       reason: 'shell_execution_boundary_unavailable',
     });
-    expect(audits).toHaveLength(2);
+    expect(audits).toHaveLength(3);
   });
 });

@@ -5,7 +5,9 @@ import type {
   PermissionOperation,
   PermissionResource,
   ResourceSet,
+  ExecutionSpec,
 } from '@vibe/domain';
+import { executionSpecDigest, validateExecutionSpec } from '@vibe/domain';
 import type { ToolAuthorizationDecision, ToolAuthorizationRequest } from './tool-broker';
 import type { ApprovalRequestInput, ApprovalResolutionInput } from './persistence';
 
@@ -190,7 +192,7 @@ export class ApprovalCoordinator {
       resource,
       operation,
       providerEgress: 'none',
-      sandboxProfile: 'read-only',
+      sandboxProfile: request.entry.implementationKind === 'command-runner' ? 'full' : 'read-only',
       risk: request.entry.risk,
       reasonUntrusted: `Tool ${request.entry.providerName} requests ${capability}`,
       display: {
@@ -343,6 +345,11 @@ export class ApprovalCoordinator {
     }
   }
 
+  dispose(): void {
+    for (const id of [...this.waiters.keys()])
+      this.release(id, { decision: 'deny', reason: 'application_shutdown' });
+  }
+
   private release(id: string, decision: ToolAuthorizationDecision): void {
     const waiter = this.waiters.get(id);
     if (waiter === undefined) return;
@@ -376,16 +383,31 @@ export function approvalFactsForTool(
   resource: PermissionResource;
   operation: PermissionOperation;
 } {
-  const resourceSet = resourceFor(request);
+  const commandSpec =
+    request.entry.implementationKind === 'command-runner' && validateExecutionSpec(request.input)
+      ? (request.input as ExecutionSpec)
+      : undefined;
+  const commandResource =
+    commandSpec === undefined
+      ? undefined
+      : { kind: 'external' as const, target: `command:${executionSpecDigest(commandSpec)}` };
+  const resourceSet: ResourceSet =
+    commandResource === undefined
+      ? resourceFor(request)
+      : { kind: 'external-exact', target: commandResource.target };
   const resource: PermissionResource =
-    resourceSet.kind === 'network-origin'
+    commandResource ??
+    (resourceSet.kind === 'network-origin'
       ? { kind: 'network', origin: resourceSet.origin }
       : resourceSet.kind === 'external-exact'
         ? { kind: 'external', target: resourceSet.target }
-        : { kind: 'external', target: displayTarget(request.input) };
+        : { kind: 'external', target: displayTarget(request.input) });
   return {
     subjectId: `tool:${request.entry.toolId}`,
-    specDigest: digest({ toolId: request.entry.toolId, input: request.input }),
+    specDigest:
+      request.entry.implementationKind === 'command-runner' && validateExecutionSpec(request.input)
+        ? executionSpecDigest(request.input as ExecutionSpec)
+        : digest({ toolId: request.entry.toolId, input: request.input }),
     resourceSet,
     resource,
     operation: operationFor(capability),
@@ -395,7 +417,7 @@ export function approvalFactsForTool(
 function displayTarget(input: unknown): string {
   if (typeof input === 'object' && input !== null) {
     const record = input as Record<string, unknown>;
-    for (const key of ['origin', 'target', 'path', 'executable'])
+    for (const key of ['origin', 'target', 'path', 'absoluteExecutable', 'executable'])
       if (typeof record[key] === 'string') return record[key];
   }
   return 'requested resource';

@@ -65,6 +65,26 @@ export type ApprovalSummary = {
 
 export type QueuedInput = { ordinal: number; text: string };
 
+export type CommandSummary = {
+  id: string;
+  taskId: string;
+  turnId: string;
+  callId: string;
+  specDigest: string;
+  executable: string;
+  argv: string[];
+  cwd: string;
+  state: 'prepared' | 'starting' | 'running' | 'exited' | 'canceled' | 'failed' | 'interrupted';
+  pid: number | null;
+  exitCode: number | null;
+  signal: string | null;
+  outputBytes: number;
+  truncated: boolean;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
 /** Context-window usage breakdown (FR-CTX). Backend may not have wired this yet — renderer
  * must treat both `TurnSnapshot.contextUsage` and the `context.usage` event as optional/absent
  * and degrade to a "context —" display until real data arrives (see store/appStore.ts). */
@@ -109,6 +129,31 @@ export type TurnEvent =
       approvalId: string;
       decision: ApprovalDecision;
       approval: ApprovalSummary;
+    }
+  | {
+      type: 'command.started';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      command: CommandSummary;
+    }
+  | {
+      type: 'command.output';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      commandId: string;
+      outputSeq: number;
+      stream: 'stdout' | 'stderr';
+      text: string;
+      byteLength: number;
+    }
+  | {
+      type: 'command.completed';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      command: CommandSummary;
     }
   | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
   | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage };

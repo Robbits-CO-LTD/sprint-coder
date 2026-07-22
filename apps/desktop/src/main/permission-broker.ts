@@ -119,6 +119,18 @@ export class PermissionBroker {
     return this.evaluateSingle(input);
   }
 
+  evaluateExecutionSpec(input: {
+    taskId: string;
+    request: PermissionRequest;
+    basePolicy: PermissionPolicyBase;
+    now: string;
+    pathGuard?: PathGuard;
+  }): PermissionEvaluation {
+    if (input.request.capability !== 'shell.execute')
+      throw new Error('ExecutionSpec evaluation requires shell.execute');
+    return this.evaluateSingle(input);
+  }
+
   evaluateShell(input: {
     taskId: string;
     command: string;

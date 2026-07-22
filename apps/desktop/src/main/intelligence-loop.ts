@@ -179,6 +179,23 @@ export function createDeterministicMockSampler(
           },
         ],
       };
+    if (input.includes('コマンドテスト')) {
+      const fixture = commandFixture();
+      return {
+        kind: 'tool-calls',
+        calls: [
+          {
+            callId: `command-${digestCanonical(input).slice(0, 16)}`,
+            toolName: 'run_command',
+            arguments: {
+              executable: fixture.executable,
+              argv: fixture.argv,
+              cwd: '.',
+            },
+          },
+        ],
+      };
+    }
     return {
       kind: 'tool-calls',
       calls: [
@@ -190,6 +207,12 @@ export function createDeterministicMockSampler(
       ],
     };
   };
+}
+
+function commandFixture(): { executable: string; argv: string[] } {
+  return process.platform === 'win32'
+    ? { executable: 'C:\\Windows\\System32\\where.exe', argv: ['where'] }
+    : { executable: '/usr/bin/printf', argv: ['command ok\\n'] };
 }
 
 export const deterministicMockToolExecutor: ToolExecutor = (call) => {

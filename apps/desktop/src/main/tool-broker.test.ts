@@ -274,6 +274,7 @@ describe('Main ToolBroker', () => {
       release = resolve;
     });
     let executed = false;
+    let terminalized = false;
     const broker = new ToolBroker(
       registry,
       () => currentEpoch,
@@ -285,6 +286,9 @@ describe('Main ToolBroker', () => {
     broker.registerImplementation({
       toolId: echo.toolId,
       implementationKind: 'built-in',
+      authorizationDenied: () => {
+        terminalized = true;
+      },
       execute: () => {
         executed = true;
         return { text: 'unsafe' };
@@ -303,6 +307,7 @@ describe('Main ToolBroker', () => {
 
     await expect(dispatch).rejects.toThrow('policy epoch changed');
     expect(executed).toBe(false);
+    expect(terminalized).toBe(true);
   });
 
   it('pins and freezes tool input before asynchronous authorization', async () => {
@@ -353,6 +358,7 @@ describe('Main ToolBroker', () => {
       release = resolve;
     });
     let executed = false;
+    let terminalized = false;
     const broker = new ToolBroker(
       registry,
       () => 3,
@@ -364,6 +370,9 @@ describe('Main ToolBroker', () => {
     broker.registerImplementation({
       toolId: echo.toolId,
       implementationKind: 'built-in',
+      authorizationDenied: () => {
+        terminalized = true;
+      },
       execute: () => {
         executed = true;
         return { text: 'unsafe' };
@@ -382,6 +391,7 @@ describe('Main ToolBroker', () => {
 
     await expect(dispatch).rejects.toThrow('Turn ended during authorization');
     expect(executed).toBe(false);
+    expect(terminalized).toBe(true);
   });
 
   it('claims each callId once and rejects replay, concurrent duplicates, and finished Turns', async () => {
@@ -465,6 +475,47 @@ describe('Main ToolBroker', () => {
         input: { executable: '/bin/echo', argv: [] },
       }),
     ).rejects.toThrow('authorization deny');
+    expect(executed).toBe(false);
+  });
+
+  it('terminalizes prepared input when execution revalidation throws', async () => {
+    const { registry, command } = createRegistry();
+    let terminalized = false;
+    let executed = false;
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      () => ({
+        decision: 'allow',
+        reason: 'test_allow',
+        beforeExecute: () => {
+          throw new Error('identity probe failed');
+        },
+      }),
+    );
+    broker.registerImplementation({
+      toolId: command.toolId,
+      implementationKind: 'command-runner',
+      authorizationDenied: () => {
+        terminalized = true;
+      },
+      execute: () => {
+        executed = true;
+        return {};
+      },
+    });
+    broker.startTurn(context, 'mock');
+
+    await expect(
+      broker.dispatch({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        callId: 'call-revalidation-throws',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: [] },
+      }),
+    ).rejects.toThrow('identity probe failed');
+    expect(terminalized).toBe(true);
     expect(executed).toBe(false);
   });
 
