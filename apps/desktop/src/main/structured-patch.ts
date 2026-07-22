@@ -1,10 +1,19 @@
 import { createHash } from 'node:crypto';
 import { canonicalizeResourcePath } from './path-guard';
 import type {
+  FileRevisionToken,
   FileRevisionRegistry,
   FileRevisionOwner,
   FileRevisionReference,
 } from './file-revision';
+
+export type PreparedFileRevision = Readonly<{
+  identityDigest: string;
+  contentHash: string;
+  size: number;
+  mode: number;
+  nlink: 1;
+}>;
 
 const MAX_POST_IMAGE_BYTES = 1024 * 1024;
 
@@ -31,6 +40,7 @@ export type PreparedPatchOperation = Readonly<{
   destination: string | null;
   canonicalDestination: string | null;
   revisionTokenId: string | null;
+  preRevision: PreparedFileRevision | null;
   preImage: string | null;
   postImage: string | null;
   preHash: string | null;
@@ -97,6 +107,7 @@ export async function prepareStructuredPatch(input: {
           destination: null,
           canonicalDestination: null,
           revisionTokenId: null,
+          preRevision: null,
           preImage: null,
           postImage: operation.content,
           preHash: null,
@@ -130,6 +141,7 @@ export async function prepareStructuredPatch(input: {
           destination: null,
           canonicalDestination: null,
           revisionTokenId: operation.revision.tokenId,
+          preRevision: preparedFileRevision(revision.token),
           preImage: revision.content,
           postImage,
           preHash: revision.token.contentHash,
@@ -148,6 +160,7 @@ export async function prepareStructuredPatch(input: {
           destination: null,
           canonicalDestination: null,
           revisionTokenId: operation.revision.tokenId,
+          preRevision: preparedFileRevision(revision.token),
           preImage: revision.content,
           postImage: null,
           preHash: revision.token.contentHash,
@@ -173,6 +186,7 @@ export async function prepareStructuredPatch(input: {
         destination: operation.destination,
         canonicalDestination: destinationGuard.resolvedPath,
         revisionTokenId: operation.revision.tokenId,
+        preRevision: preparedFileRevision(revision.token),
         preImage: revision.content,
         postImage: revision.content,
         preHash: revision.token.contentHash,
@@ -250,5 +264,21 @@ function hash(value: string): string {
 }
 
 function freezeOperation(operation: PreparedPatchOperation): PreparedPatchOperation {
-  return Object.freeze(operation);
+  return Object.freeze({
+    ...operation,
+    preRevision:
+      operation.preRevision === null ? null : Object.freeze({ ...operation.preRevision }),
+  });
+}
+
+function preparedFileRevision(token: FileRevisionToken): PreparedFileRevision {
+  if (token.identity.kind !== 'file' || token.identity.nlink !== 1)
+    throw new PatchValidationError('HARDLINK_WRITE_DENIED', 'Expected one regular file identity');
+  return Object.freeze({
+    identityDigest: token.identityDigest,
+    contentHash: token.contentHash,
+    size: token.size,
+    mode: token.identity.mode,
+    nlink: 1 as const,
+  });
 }

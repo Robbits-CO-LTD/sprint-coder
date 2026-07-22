@@ -1,4 +1,4 @@
-import { constants, type Stats } from 'node:fs';
+import { constants, type BigIntStats } from 'node:fs';
 import { lstat, open, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -60,7 +60,7 @@ export async function canonicalizeResourcePath(input: {
 }): Promise<CanonicalPathIdentity> {
   validateInput(input.targetPath);
   const workspacePath = await resolveExisting(input.workspacePath, 'PATH_NOT_FOUND');
-  const workspaceStats = await stat(workspacePath);
+  const workspaceStats = await stat(workspacePath, { bigint: true });
   if (!workspaceStats.isDirectory())
     throw new PathGuardError('INVALID_PATH', 'Workspace must be a directory');
 
@@ -80,7 +80,8 @@ export async function canonicalizeResourcePath(input: {
   const resolvedPath = join(canonicalAncestor, ...missingParts);
   assertContained(workspacePath, resolvedPath);
 
-  const targetIdentity = missingParts.length === 0 ? toIdentity(await lstat(existingPath)) : null;
+  const targetIdentity =
+    missingParts.length === 0 ? toIdentity(await lstat(existingPath, { bigint: true })) : null;
   const canonicalTarget =
     missingParts.length === 0
       ? await resolveExisting(existingPath, 'PATH_NOT_FOUND')
@@ -91,7 +92,7 @@ export async function canonicalizeResourcePath(input: {
       ? workspacePath
       : await resolveExisting(dirname(canonicalTarget), 'PATH_NOT_FOUND');
   assertContained(workspacePath, parentPath);
-  const parentIdentity = toIdentity(await stat(parentPath));
+  const parentIdentity = toIdentity(await stat(parentPath, { bigint: true }));
   const chain = await snapshotLexicalChain(workspacePath, lexicalTarget);
 
   return {
@@ -187,7 +188,7 @@ export async function openGuardedExistingFile(
   let handle: FileHandle | undefined;
   try {
     handle = await open(guard.resolvedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const openedIdentity = toIdentity(await handle.stat());
+    const openedIdentity = toIdentity(await handle.stat({ bigint: true }));
     if (openedIdentity.kind !== 'file' || !sameIdentity(openedIdentity, guard.targetIdentity))
       throw new PathGuardError('IDENTITY_CHANGED', 'Opened file is not the approved inode');
     return handle;
@@ -221,7 +222,7 @@ export async function workspaceMutationBinding(inputPath: string): Promise<
   }>
 > {
   const canonicalPath = await realpath(inputPath);
-  const identity = toIdentity(await lstat(canonicalPath));
+  const identity = toIdentity(await lstat(canonicalPath, { bigint: true }));
   if (identity.kind !== 'directory')
     throw new PathGuardError('INVALID_PATH', 'Workspace must be a directory');
   const rootIdentityDigest = createHash('sha256')
@@ -370,7 +371,7 @@ async function snapshotLexicalChain(
   for (const part of pathParts) {
     current = join(current, part);
     try {
-      const stats = await lstat(current);
+      const stats = await lstat(current, { bigint: true });
       chain.push({
         lexicalPath: current,
         identity: toIdentity(stats),
@@ -402,16 +403,16 @@ function assertContained(workspacePath: string, candidatePath: string): void {
     throw new PathGuardError('PATH_ESCAPE', 'Path escapes the canonical workspace');
 }
 
-function toIdentity(stats: Stats): FileIdentity {
+function toIdentity(stats: BigIntStats): FileIdentity {
   return {
-    dev: String(stats.dev),
-    ino: String(stats.ino),
-    mode: stats.mode,
-    size: stats.size,
-    mtimeMs: stats.mtimeMs,
-    ctimeMs: stats.ctimeMs,
-    birthtimeMs: stats.birthtimeMs,
-    nlink: stats.nlink,
+    dev: stats.dev.toString(),
+    ino: stats.ino.toString(),
+    mode: exactStatNumber(stats.mode, 'mode'),
+    size: exactStatNumber(stats.size, 'size'),
+    mtimeMs: exactStatNumber(stats.mtimeMs, 'mtimeMs'),
+    ctimeMs: exactStatNumber(stats.ctimeMs, 'ctimeMs'),
+    birthtimeMs: exactStatNumber(stats.birthtimeMs, 'birthtimeMs'),
+    nlink: exactStatNumber(stats.nlink, 'nlink'),
     kind: stats.isSymbolicLink()
       ? 'symlink'
       : stats.isDirectory()
@@ -420,6 +421,13 @@ function toIdentity(stats: Stats): FileIdentity {
           ? 'file'
           : 'other',
   };
+}
+
+function exactStatNumber(value: bigint, name: string): number {
+  const result = Number(value);
+  if (!Number.isSafeInteger(result))
+    throw new PathGuardError('IDENTITY_CHANGED', `${name} exceeds the exact numeric range`);
+  return result;
 }
 
 function sameOptionalIdentity(left: FileIdentity | null, right: FileIdentity | null): boolean {

@@ -27,6 +27,7 @@ import {
   EditSagaCrashError,
   EditSagaExecutor,
   PersistenceEditSagaStore,
+  journaledPatchDigest,
   stageEditSagaRequest,
   type EditArtifactRepository,
   type EditEffectBoundary,
@@ -45,7 +46,13 @@ import {
   MutationLeaseStaleError,
   MutationQuarantinedError,
   mutationWorkspaceKey,
+  type MutationLeaseToken,
 } from './mutation-lease';
+import {
+  createNativeMutationIntentSeed,
+  type NativeMutationIntentSeed,
+  type NativeMutationRevision,
+} from './native-mutation-intent';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.VIBE_ELECTRON_DB_TEST === '1';
@@ -54,11 +61,36 @@ afterEach(() => {
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-function createPersistence(): { persistence: SqlitePersistenceClient; path: string } {
+function createPersistence(
+  options: {
+    verifyNativeSession?: typeof verifyTestNativeSession;
+    invalidateNativeWorkspace?: (workspaceKey: string, minimumFence: string) => void;
+  } = {},
+): { persistence: SqlitePersistenceClient; path: string } {
   const directory = mkdtempSync(join(tmpdir(), 'vibe-persistence-'));
   cleanup.push(directory);
   const path = join(directory, 'test.sqlite3');
-  return { persistence: new SqlitePersistenceClient(path), path };
+  return {
+    persistence: new SqlitePersistenceClient(
+      path,
+      options.verifyNativeSession ?? verifyTestNativeSession,
+      options.invalidateNativeWorkspace,
+    ),
+    path,
+  };
+}
+
+function verifyTestNativeSession(binding: {
+  id: string;
+  workspaceKey: string;
+  fence: string;
+}): void {
+  if (
+    !['6'.repeat(32), 'b'.repeat(32)].includes(binding.id) ||
+    !/^[a-f0-9]{64}$/.test(binding.workspaceKey) ||
+    !/^[1-9][0-9]*$/.test(binding.fence)
+  )
+    throw new MutationLeaseStaleError();
 }
 
 function bindMutationWorkspace(
@@ -132,7 +164,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v22', () => {
+  describe('SqlitePersistenceClient v23', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -815,6 +847,583 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('durably stages a lease-bound Native mutation intent before the Saga effect', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const rootIdentityDigest = '8'.repeat(64);
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace',
+        rootIdentityDigest,
+      );
+      const turn = persistence.startTurn(task.id, 'journal native mutation');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'native-intent-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'native-intent-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const token = persistence.acquireMutationLease({
+        workspaceKey,
+        rootIdentityDigest,
+        holderInstanceId: 'native-intent-instance',
+        taskId: task.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        purpose: 'forward',
+        policyEpoch: saga.policyEpoch,
+        intentDigest: saga.planDigest,
+        now: '2026-07-23T00:00:01.000Z',
+        expiresAt: '2026-07-23T00:01:01.000Z',
+      });
+      const seed = persistedNativeIntentSeed(saga, token);
+      const untrustedPersistence = new SqlitePersistenceClient(path);
+      expect(() =>
+        untrustedPersistence.prepareNativeMutationIntent(seed, token, '2026-07-23T00:00:01.000Z'),
+      ).toThrow(MutationLeaseStaleError);
+      untrustedPersistence.close();
+      const { version: _version, seedDigest: _seedDigest, ...seedInput } = seed;
+      expect(() =>
+        persistence.prepareNativeMutationIntent(
+          createNativeMutationIntentSeed({
+            ...seedInput,
+            sourceSegments: ['src', 'other.ts'],
+          }),
+          token,
+          '2026-07-23T00:00:01.000Z',
+        ),
+      ).toThrow(MutationLeaseStaleError);
+      expect(() =>
+        persistence.prepareNativeMutationIntent(
+          createNativeMutationIntentSeed({
+            ...seedInput,
+            artifact: { ...seed.artifact!, contentHash: '0'.repeat(64) },
+          }),
+          token,
+          '2026-07-23T00:00:01.000Z',
+        ),
+      ).toThrow(MutationLeaseStaleError);
+      let intent = persistence.prepareNativeMutationIntent(seed, token, '2026-07-23T00:00:01.000Z');
+      expect(
+        persistence.prepareNativeMutationIntent(seed, token, '2026-07-23T00:00:01.000Z'),
+      ).toEqual(intent);
+      const concurrent = new SqlitePersistenceClient(path, verifyTestNativeSession);
+      expect(
+        concurrent.prepareNativeMutationIntent(seed, token, '2026-07-23T00:00:01.000Z'),
+      ).toEqual(intent);
+      expect(() =>
+        concurrent.prepareNativeMutationIntent(
+          createNativeMutationIntentSeed({
+            ...seedInput,
+            expectedSource: {
+              ...seed.expectedSource,
+              identityDigest: 'f'.repeat(64),
+            } as NativeMutationRevision,
+          }),
+          token,
+          '2026-07-23T00:00:01.000Z',
+        ),
+      ).toThrow(MutationLeaseStaleError);
+      expect(intent).toMatchObject({
+        state: 'planned',
+        leaseFence: String(token.fence),
+        temp: { role: 'post_temp' },
+      });
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection
+          .prepare('SELECT state, snapshot_json FROM native_mutation_intents WHERE id = ?')
+          .get(intent.id),
+      ).toMatchObject({ state: 'planned', snapshot_json: expect.not.stringContaining('before') });
+      inspection.close();
+
+      intent = persistence.updateNativeMutationIntent(
+        intent.id,
+        intent.revision,
+        token,
+        '2026-07-23T00:00:01.100Z',
+        seed.nativeSessionId,
+        { state: 'aux_pending' },
+      );
+      expect(
+        concurrent.updateNativeMutationIntent(
+          intent.id,
+          0,
+          token,
+          '2026-07-23T00:00:01.100Z',
+          seed.nativeSessionId,
+          { state: 'aux_pending' },
+        ),
+      ).toEqual(intent);
+      expect(() =>
+        concurrent.updateNativeMutationIntent(
+          intent.id,
+          0,
+          token,
+          '2026-07-23T00:00:01.100Z',
+          seed.nativeSessionId,
+          { state: 'effect_pending' },
+        ),
+      ).toThrow(OperationConflictError);
+      const renewed = persistence.renewMutationLease(
+        token,
+        '2026-07-23T00:00:01.500Z',
+        '2026-07-23T00:01:01.500Z',
+      );
+      const staged: NativeMutationRevision = {
+        state: 'present',
+        identityDigest: '9'.repeat(64),
+        contentHash: intent.temp!.expectedContentHash,
+        size: intent.temp!.expectedSize,
+        mode: 0o100600,
+        nlink: 1,
+      };
+      expect(() =>
+        persistence.updateNativeMutationIntent(
+          intent.id,
+          intent.revision,
+          token,
+          '2026-07-23T00:00:01.600Z',
+          seed.nativeSessionId,
+          { state: 'aux_observed', auxObservation: staged },
+        ),
+      ).toThrow(MutationLeaseStaleError);
+      intent = persistence.updateNativeMutationIntent(
+        intent.id,
+        intent.revision,
+        renewed,
+        '2026-07-23T00:00:01.600Z',
+        seed.nativeSessionId,
+        { state: 'aux_observed', auxObservation: staged },
+      );
+      intent = persistence.updateNativeMutationIntent(
+        intent.id,
+        intent.revision,
+        renewed,
+        '2026-07-23T00:00:01.700Z',
+        seed.nativeSessionId,
+        { state: 'effect_pending' },
+      );
+      expect(persistence.getEditSaga(saga.id)).toMatchObject({
+        state: 'applying',
+        steps: [expect.objectContaining({ state: 'effect_pending' })],
+      });
+      expect(persistence.listRecoverableNativeMutationIntents()).toEqual([intent]);
+
+      intent = persistence.updateNativeMutationIntent(
+        intent.id,
+        intent.revision,
+        renewed,
+        '2026-07-23T00:00:01.800Z',
+        seed.nativeSessionId,
+        {
+          state: 'effect_observed',
+          effectObservation: {
+            source: staged,
+            destination: { state: 'absent' },
+            auxiliary: seed.expectedSource,
+          },
+        },
+      );
+      expect(persistence.getEditSaga(saga.id)).toMatchObject({
+        state: 'applying',
+        steps: [expect.objectContaining({ state: 'effect_observed' })],
+      });
+      const originalStep = saga.steps[0]!;
+      let compensation = persistence.prepareNativeMutationIntent(
+        createNativeMutationIntentSeed({
+          ...seedInput,
+          id: 'native-intent-compensation-1',
+          direction: 'compensation',
+          artifact: {
+            artifactId: originalStep.operation.preArtifact!.artifactId,
+            contentHash: originalStep.operation.preArtifact!.contentHash,
+            size: originalStep.operation.preArtifact!.size,
+            expectedMode: originalStep.operation.preRevision!.mode,
+          },
+          expectedSource: staged,
+          createdAt: '2026-07-23T00:00:02.000Z',
+        }),
+        renewed,
+        '2026-07-23T00:00:02.000Z',
+      );
+      compensation = persistence.updateNativeMutationIntent(
+        compensation.id,
+        compensation.revision,
+        renewed,
+        '2026-07-23T00:00:02.100Z',
+        compensation.nativeSessionId,
+        { state: 'aux_pending' },
+      );
+      compensation = persistence.updateNativeMutationIntent(
+        compensation.id,
+        compensation.revision,
+        renewed,
+        '2026-07-23T00:00:02.200Z',
+        compensation.nativeSessionId,
+        {
+          state: 'aux_observed',
+          auxObservation: {
+            ...staged,
+            identityDigest: 'a'.repeat(64),
+            contentHash: compensation.temp!.expectedContentHash,
+            size: compensation.temp!.expectedSize,
+          },
+        },
+      );
+      compensation = persistence.updateNativeMutationIntent(
+        compensation.id,
+        compensation.revision,
+        renewed,
+        '2026-07-23T00:00:02.300Z',
+        compensation.nativeSessionId,
+        { state: 'effect_pending' },
+      );
+      expect(persistence.getEditSaga(saga.id)).toMatchObject({
+        state: 'compensating',
+        steps: [expect.objectContaining({ state: 'compensation_pending' })],
+      });
+      expect(persistence.listRecoverableNativeMutationIntents()).toEqual([intent, compensation]);
+      concurrent.close();
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path, verifyTestNativeSession);
+      expect(reopened.getNativeMutationIntent(intent.id)).toEqual(intent);
+      expect(reopened.getNativeMutationIntent(compensation.id)).toEqual(compensation);
+      expect(
+        reopened.initializeMutationRecovery('replacement-instance', '2026-07-23T00:00:02.000Z'),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            taskId: task.id,
+            workspaceKey,
+          }),
+        ]),
+      );
+      const recoveryLease = reopened.acquireMutationLease({
+        workspaceKey,
+        rootIdentityDigest,
+        holderInstanceId: 'replacement-instance',
+        taskId: task.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        purpose: 'recovery',
+        policyEpoch: saga.policyEpoch,
+        intentDigest: saga.planDigest,
+        now: '2026-07-23T00:00:02.100Z',
+        expiresAt: '2026-07-23T00:01:02.100Z',
+      });
+      const recoverySessionId = 'b'.repeat(32);
+      expect(
+        reopened.bindNativeMutationIntentRecovery(
+          intent.id,
+          intent.revision,
+          recoveryLease,
+          recoverySessionId,
+          '2026-07-23T00:00:02.200Z',
+        ),
+      ).toMatchObject({ attempt: 1, leaseFence: String(recoveryLease.fence) });
+      reopened.bindNativeMutationIntentRecovery(
+        compensation.id,
+        compensation.revision,
+        recoveryLease,
+        recoverySessionId,
+        '2026-07-23T00:00:02.200Z',
+      );
+      intent = reopened.updateNativeMutationIntent(
+        intent.id,
+        intent.revision,
+        recoveryLease,
+        '2026-07-23T00:00:02.300Z',
+        recoverySessionId,
+        { state: 'cleanup_pending' },
+      );
+      intent = reopened.updateNativeMutationIntent(
+        intent.id,
+        intent.revision,
+        recoveryLease,
+        '2026-07-23T00:00:02.400Z',
+        recoverySessionId,
+        { state: 'completed', cleanupObservation: { state: 'absent' } },
+      );
+      compensation = reopened.updateNativeMutationIntent(
+        compensation.id,
+        compensation.revision,
+        recoveryLease,
+        '2026-07-23T00:00:02.500Z',
+        recoverySessionId,
+        {
+          state: 'effect_observed',
+          effectObservation: {
+            source: compensation.auxObservation!,
+            destination: { state: 'absent' },
+            auxiliary: compensation.expectedSource,
+          },
+        },
+      );
+      compensation = reopened.updateNativeMutationIntent(
+        compensation.id,
+        compensation.revision,
+        recoveryLease,
+        '2026-07-23T00:00:02.600Z',
+        recoverySessionId,
+        { state: 'cleanup_pending' },
+      );
+      reopened.updateNativeMutationIntent(
+        compensation.id,
+        compensation.revision,
+        recoveryLease,
+        '2026-07-23T00:00:02.700Z',
+        recoverySessionId,
+        { state: 'completed', cleanupObservation: { state: 'absent' } },
+      );
+      const compensatingSaga = reopened.getEditSaga(saga.id);
+      reopened.updateEditSagaUnderLease(
+        saga.id,
+        compensatingSaga.revision,
+        recoveryLease,
+        (current) => ({
+          ...withoutEditRevision(current),
+          state: 'restored',
+          updatedAt: '2026-07-23T00:00:02.800Z',
+        }),
+      );
+      expect(reopened.listRecoverableNativeMutationIntents()).toEqual([]);
+      reopened.releaseMutationLease(recoveryLease, '2026-07-23T00:00:02.900Z');
+      reopened.clearMutationQuarantine(
+        workspaceKey,
+        recoveryLease.fence,
+        '2026-07-23T00:00:03.000Z',
+      );
+      reopened.close();
+
+      const scalarTamper = new Database(path);
+      scalarTamper
+        .prepare("UPDATE native_mutation_intents SET state = 'aux_pending' WHERE id = ?")
+        .run(intent.id);
+      scalarTamper.close();
+      const scalarTampered = new SqlitePersistenceClient(path);
+      expect(() => scalarTampered.getNativeMutationIntent(intent.id)).toThrow('sealed snapshot');
+      expect(() =>
+        scalarTampered.initializeMutationRecovery('tamper-instance', '2026-07-23T00:00:03.100Z'),
+      ).toThrow('sealed snapshot');
+      scalarTampered.close();
+
+      const sealedTamper = new Database(path);
+      const validShapeSnapshot = JSON.parse(
+        sealedTamper
+          .prepare('SELECT snapshot_json FROM native_mutation_intents WHERE id = ?')
+          .pluck()
+          .get(intent.id) as string,
+      ) as Record<string, unknown>;
+      const effect = validShapeSnapshot['effectObservation'] as Record<string, unknown>;
+      effect['source'] = {
+        ...(effect['source'] as Record<string, unknown>),
+        identityDigest: 'c'.repeat(64),
+      };
+      sealedTamper
+        .prepare('UPDATE native_mutation_intents SET state = ?, snapshot_json = ? WHERE id = ?')
+        .run(intent.state, JSON.stringify(validShapeSnapshot), intent.id);
+      sealedTamper.close();
+      const sealRejected = new SqlitePersistenceClient(path);
+      expect(() => sealRejected.getNativeMutationIntent(intent.id)).toThrow(
+        'Invalid persisted Native mutation intent',
+      );
+      sealRejected.close();
+
+      const jsonTamper = new Database(path);
+      const rawSnapshot = JSON.parse(
+        jsonTamper
+          .prepare('SELECT snapshot_json FROM native_mutation_intents WHERE id = ?')
+          .pluck()
+          .get(intent.id) as string,
+      ) as Record<string, unknown>;
+      rawSnapshot['expectedSource'] = {
+        ...(rawSnapshot['expectedSource'] as Record<string, unknown>),
+        rawContent: 'must-not-be-persisted',
+      };
+      jsonTamper
+        .prepare('UPDATE native_mutation_intents SET state = ?, snapshot_json = ? WHERE id = ?')
+        .run(intent.state, JSON.stringify(rawSnapshot), intent.id);
+      jsonTamper.close();
+      const jsonTampered = new SqlitePersistenceClient(path);
+      expect(() => jsonTampered.getNativeMutationIntent(intent.id)).toThrow('unknown or missing');
+      expect(() =>
+        jsonTampered.initializeMutationRecovery('tamper-instance', '2026-07-23T00:00:03.200Z'),
+      ).toThrow('unknown or missing');
+      jsonTampered.close();
+    });
+
+    it('refuses to create a first intent after the Saga already reached effect-pending', async () => {
+      const fixture = await nativeIntentFixture('missing-intent');
+      const current = fixture.persistence.getEditSaga(fixture.saga.id);
+      fixture.persistence.updateEditSagaUnderLease(
+        current.id,
+        current.revision,
+        fixture.token,
+        (snapshot) => ({
+          ...withoutEditRevision(snapshot),
+          state: 'applying',
+          steps: snapshot.steps.map((step) => ({ ...step, state: 'effect_pending' as const })),
+          updatedAt: '2026-07-23T00:00:01.100Z',
+        }),
+      );
+      expect(() =>
+        fixture.persistence.prepareNativeMutationIntent(
+          persistedNativeIntentSeed(fixture.saga, fixture.token),
+          fixture.token,
+          '2026-07-23T00:00:01.200Z',
+        ),
+      ).toThrow(MutationLeaseStaleError);
+      const inspection = new Database(fixture.path, { readonly: true });
+      expect(inspection.prepare('SELECT COUNT(*) FROM native_mutation_intents').pluck().get()).toBe(
+        0,
+      );
+      inspection.close();
+      fixture.persistence.close();
+    });
+
+    it('persists quarantine and disables native authority when expiry invalidation fails', async () => {
+      let nativeSessionLive = true;
+      const invalidations: Array<{ workspaceKey: string; minimumFence: string }> = [];
+      const fixture = await nativeIntentFixture(
+        'expired-intent',
+        '2026-07-23T00:00:02.000Z',
+        'before',
+        'after',
+        {
+          verifyNativeSession(binding) {
+            verifyTestNativeSession(binding);
+            if (!nativeSessionLive) throw new MutationLeaseStaleError();
+          },
+          invalidateNativeWorkspace(workspaceKey, minimumFence) {
+            invalidations.push({ workspaceKey, minimumFence });
+            nativeSessionLive = false;
+            throw new Error('simulated native invalidation failure');
+          },
+        },
+      );
+      const seed = persistedNativeIntentSeed(fixture.saga, fixture.token);
+      let intent = fixture.persistence.prepareNativeMutationIntent(
+        seed,
+        fixture.token,
+        '2026-07-23T00:00:01.100Z',
+      );
+      intent = fixture.persistence.updateNativeMutationIntent(
+        intent.id,
+        intent.revision,
+        fixture.token,
+        '2026-07-23T00:00:01.200Z',
+        seed.nativeSessionId,
+        { state: 'aux_pending' },
+      );
+      const staged: NativeMutationRevision = {
+        state: 'present',
+        identityDigest: 'e'.repeat(64),
+        contentHash: intent.temp!.expectedContentHash,
+        size: intent.temp!.expectedSize,
+        mode: intent.temp!.expectedMode,
+        nlink: 1,
+      };
+      intent = fixture.persistence.updateNativeMutationIntent(
+        intent.id,
+        intent.revision,
+        fixture.token,
+        '2026-07-23T00:00:01.300Z',
+        seed.nativeSessionId,
+        { state: 'aux_observed', auxObservation: staged },
+      );
+      intent = fixture.persistence.updateNativeMutationIntent(
+        intent.id,
+        intent.revision,
+        fixture.token,
+        '2026-07-23T00:00:01.400Z',
+        seed.nativeSessionId,
+        { state: 'effect_pending' },
+      );
+      expect(() =>
+        fixture.persistence.updateNativeMutationIntent(
+          intent.id,
+          intent.revision,
+          fixture.token,
+          '2026-07-23T00:00:02.000Z',
+          seed.nativeSessionId,
+          {
+            state: 'effect_observed',
+            effectObservation: {
+              source: staged,
+              destination: { state: 'absent' },
+              auxiliary: seed.expectedSource,
+            },
+          },
+        ),
+      ).toThrow(MutationQuarantinedError);
+      expect(invalidations).toEqual([
+        {
+          workspaceKey: fixture.token.workspaceKey,
+          minimumFence: String(fixture.token.fence + 1),
+        },
+      ]);
+      expect(fixture.persistence.isNativeMutationAuthorityAvailable()).toBe(false);
+      expect(() =>
+        fixture.persistence.updateNativeMutationIntent(
+          intent.id,
+          intent.revision,
+          fixture.token,
+          '2026-07-23T00:00:02.001Z',
+          seed.nativeSessionId,
+          {
+            state: 'effect_observed',
+            effectObservation: {
+              source: staged,
+              destination: { state: 'absent' },
+              auxiliary: seed.expectedSource,
+            },
+          },
+        ),
+      ).toThrow(MutationLeaseStaleError);
+      expect(() => fixture.persistence.startTurn(fixture.taskId, 'blocked')).toThrow(
+        MutationQuarantinedError,
+      );
+      fixture.persistence.close();
+      const reopened = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+      expect(() => reopened.startTurn(fixture.taskId, 'still blocked after reopen')).toThrow(
+        MutationQuarantinedError,
+      );
+      reopened.close();
+    });
+
+    it('never stores preimage or postimage bytes in SQLite intent records or sidecars', async () => {
+      const preimage = `PRE-${randomUUID()}-${randomUUID()}`;
+      const postimage = `POST-${randomUUID()}-${randomUUID()}`;
+      const fixture = await nativeIntentFixture(
+        'opaque-intent',
+        '2026-07-23T00:01:01.000Z',
+        preimage,
+        postimage,
+      );
+      fixture.persistence.prepareNativeMutationIntent(
+        persistedNativeIntentSeed(fixture.saga, fixture.token),
+        fixture.token,
+        '2026-07-23T00:00:01.100Z',
+      );
+      fixture.persistence.close();
+      for (const file of [fixture.path, `${fixture.path}-wal`, `${fixture.path}-shm`]) {
+        if (!existsSync(file)) continue;
+        const bytes = readFileSync(file);
+        expect(bytes.includes(Buffer.from(preimage))).toBe(false);
+        expect(bytes.includes(Buffer.from(postimage))).toBe(false);
+      }
+    });
+
     it('quarantines expiry and blocks every Task sharing the workspace until recovery', async () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();
@@ -961,6 +1570,386 @@ if (runsWithElectronAbi)
       ]);
       expect(() => reopened.startTurn(task.id, 'still blocked')).toThrow(MutationQuarantinedError);
       reopened.close();
+    });
+
+    it('advances multi-step Native intents forward and compensates them in strict reverse order', async () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const rootIdentityDigest = '4'.repeat(64);
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace',
+        rootIdentityDigest,
+      );
+      const turn = persistence.startTurn(task.id, 'multi-step native journal');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'multi-native-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'multi-native-operation',
+            plan: persistedTwoStepEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const token = persistence.acquireMutationLease({
+        workspaceKey,
+        rootIdentityDigest,
+        holderInstanceId: 'multi-native-instance',
+        taskId: task.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        purpose: 'forward',
+        policyEpoch: saga.policyEpoch,
+        intentDigest: saga.planDigest,
+        now: '2026-07-23T00:00:01.000Z',
+        expiresAt: '2026-07-23T00:01:01.000Z',
+      });
+
+      const forwardOne = observeNativeUpdateIntent(
+        persistence,
+        persistedNativeUpdateSeed(saga, token, 1, 'forward', 'multi-forward-1'),
+        token,
+        'a',
+      );
+      const forwardTwo = observeNativeUpdateIntent(
+        persistence,
+        persistedNativeUpdateSeed(
+          persistence.getEditSaga(saga.id),
+          token,
+          2,
+          'forward',
+          'multi-forward-2',
+        ),
+        token,
+        'b',
+      );
+      expect(persistence.getEditSaga(saga.id).steps.map(({ state }) => state)).toEqual([
+        'effect_observed',
+        'effect_observed',
+      ]);
+
+      expect(() =>
+        persistence.prepareNativeMutationIntent(
+          persistedNativeUpdateSeed(
+            persistence.getEditSaga(saga.id),
+            token,
+            1,
+            'compensation',
+            'out-of-order-compensation-1',
+            forwardOne.staged,
+          ),
+          token,
+          '2026-07-23T00:00:02.000Z',
+        ),
+      ).toThrow(MutationLeaseStaleError);
+      observeNativeUpdateIntent(
+        persistence,
+        persistedNativeUpdateSeed(
+          persistence.getEditSaga(saga.id),
+          token,
+          2,
+          'compensation',
+          'multi-compensation-2',
+          forwardTwo.staged,
+        ),
+        token,
+        'c',
+      );
+      observeNativeUpdateIntent(
+        persistence,
+        persistedNativeUpdateSeed(
+          persistence.getEditSaga(saga.id),
+          token,
+          1,
+          'compensation',
+          'multi-compensation-1',
+          forwardOne.staged,
+        ),
+        token,
+        'd',
+      );
+      expect(persistence.getEditSaga(saga.id)).toMatchObject({
+        state: 'compensating',
+        steps: [{ state: 'restored' }, { state: 'restored' }],
+      });
+      persistence.close();
+    });
+
+    it.each(['add', 'delete', 'rename'] as const)(
+      'pairs a %s intent effect with the matching SQLite Saga step',
+      async (kind) => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const rootIdentityDigest = editHash(`root:${kind}`);
+        const workspaceKey = bindMutationWorkspace(
+          persistence,
+          task.id,
+          '/workspace',
+          rootIdentityDigest,
+        );
+        const turn = persistence.startTurn(task.id, `${kind} native journal`);
+        const saga = persistence.prepareEditSaga(
+          await stageEditSagaRequest(
+            {
+              id: `${kind}-native-saga`,
+              taskId: task.id,
+              turnId: turn.turnId,
+              operationId: `${kind}-native-operation`,
+              plan: persistedEditPlanForKind(kind),
+              createdAt: '2026-07-23T00:00:00.000Z',
+            },
+            new PersistenceTestArtifacts(),
+          ),
+        );
+        const token = persistence.acquireMutationLease({
+          workspaceKey,
+          rootIdentityDigest,
+          holderInstanceId: `${kind}-native-instance`,
+          taskId: task.id,
+          turnId: turn.turnId,
+          sagaId: saga.id,
+          purpose: 'forward',
+          policyEpoch: saga.policyEpoch,
+          intentDigest: saga.planDigest,
+          now: '2026-07-23T00:00:01.000Z',
+          expiresAt: '2026-07-23T00:01:01.000Z',
+        });
+        const step = saga.steps[0]!;
+        const expectedSource =
+          kind === 'add'
+            ? ({ state: 'absent' } as const)
+            : ({ state: 'present' as const, ...step.operation.preRevision! } as const);
+        const seed = createNativeMutationIntentSeed({
+          id: `${kind}-native-intent`,
+          sagaId: saga.id,
+          ordinal: 1,
+          direction: 'forward',
+          kind,
+          operationDigest: editHash(JSON.stringify(step.operation)),
+          workspaceKey,
+          rootIdentityDigest,
+          policyEpoch: saga.policyEpoch,
+          leaseFence: String(token.fence),
+          nativeSessionId: '6'.repeat(32),
+          sourceSegments: ['src', `${kind}.ts`],
+          destinationSegments: kind === 'rename' ? ['src', 'renamed.ts'] : null,
+          expectedSource,
+          expectedDestination: { state: 'absent' },
+          artifact:
+            kind === 'add'
+              ? {
+                  artifactId: step.operation.postArtifact!.artifactId,
+                  contentHash: step.operation.postArtifact!.contentHash,
+                  size: step.operation.postArtifact!.size,
+                  expectedMode: 0o100600,
+                }
+              : null,
+          createdAt: '2026-07-23T00:00:02.000Z',
+        });
+        let intent = persistence.prepareNativeMutationIntent(seed, token, seed.createdAt);
+        let staged: NativeMutationRevision | null = null;
+        if (intent.temp !== null) {
+          intent = persistence.updateNativeMutationIntent(
+            intent.id,
+            intent.revision,
+            token,
+            seed.createdAt,
+            seed.nativeSessionId,
+            { state: 'aux_pending' },
+          );
+          staged = {
+            state: 'present',
+            identityDigest: 'f'.repeat(64),
+            contentHash: intent.temp!.expectedContentHash,
+            size: intent.temp!.expectedSize,
+            mode: intent.temp!.expectedMode,
+            nlink: 1,
+          };
+          intent = persistence.updateNativeMutationIntent(
+            intent.id,
+            intent.revision,
+            token,
+            seed.createdAt,
+            seed.nativeSessionId,
+            { state: 'aux_observed', auxObservation: staged },
+          );
+        }
+        intent = persistence.updateNativeMutationIntent(
+          intent.id,
+          intent.revision,
+          token,
+          seed.createdAt,
+          seed.nativeSessionId,
+          { state: 'effect_pending' },
+        );
+        expect(persistence.getEditSaga(saga.id).steps[0]!.state).toBe('effect_pending');
+        const effectObservation =
+          kind === 'add'
+            ? {
+                source: staged!,
+                destination: { state: 'absent' as const },
+                auxiliary: { state: 'absent' as const },
+              }
+            : kind === 'delete'
+              ? {
+                  source: { state: 'absent' as const },
+                  destination: { state: 'absent' as const },
+                  auxiliary: expectedSource,
+                }
+              : {
+                  source: { state: 'absent' as const },
+                  destination: expectedSource,
+                  auxiliary: { state: 'absent' as const },
+                };
+        persistence.updateNativeMutationIntent(
+          intent.id,
+          intent.revision,
+          token,
+          seed.createdAt,
+          seed.nativeSessionId,
+          { state: 'effect_observed', effectObservation },
+        );
+        expect(persistence.getEditSaga(saga.id).steps[0]!.state).toBe('effect_observed');
+
+        const compensationKind =
+          kind === 'add' ? ('delete' as const) : kind === 'delete' ? ('add' as const) : kind;
+        const compensationExpectedSource =
+          compensationKind === 'add'
+            ? ({ state: 'absent' } as const)
+            : kind === 'add'
+              ? staged!
+              : expectedSource;
+        const compensationSeed = createNativeMutationIntentSeed({
+          id: `${kind}-native-compensation`,
+          sagaId: saga.id,
+          ordinal: 1,
+          direction: 'compensation',
+          kind: compensationKind,
+          operationDigest: editHash(JSON.stringify(step.operation)),
+          workspaceKey,
+          rootIdentityDigest,
+          policyEpoch: saga.policyEpoch,
+          leaseFence: String(token.fence),
+          nativeSessionId: '6'.repeat(32),
+          sourceSegments: kind === 'rename' ? ['src', 'renamed.ts'] : ['src', `${kind}.ts`],
+          destinationSegments: kind === 'rename' ? ['src', 'rename.ts'] : null,
+          expectedSource: compensationExpectedSource,
+          expectedDestination: { state: 'absent' },
+          artifact:
+            compensationKind === 'add'
+              ? {
+                  artifactId: step.operation.preArtifact!.artifactId,
+                  contentHash: step.operation.preArtifact!.contentHash,
+                  size: step.operation.preArtifact!.size,
+                  expectedMode: step.operation.preRevision!.mode,
+                }
+              : null,
+          createdAt: '2026-07-23T00:00:03.000Z',
+        });
+        let compensation = persistence.prepareNativeMutationIntent(
+          compensationSeed,
+          token,
+          compensationSeed.createdAt,
+        );
+        let restored: NativeMutationRevision | null = null;
+        if (compensation.temp !== null) {
+          const temp = compensation.temp;
+          compensation = persistence.updateNativeMutationIntent(
+            compensation.id,
+            compensation.revision,
+            token,
+            compensationSeed.createdAt,
+            compensationSeed.nativeSessionId,
+            { state: 'aux_pending' },
+          );
+          restored = {
+            state: 'present',
+            identityDigest: 'e'.repeat(64),
+            contentHash: temp.expectedContentHash,
+            size: temp.expectedSize,
+            mode: temp.expectedMode,
+            nlink: 1,
+          };
+          compensation = persistence.updateNativeMutationIntent(
+            compensation.id,
+            compensation.revision,
+            token,
+            compensationSeed.createdAt,
+            compensationSeed.nativeSessionId,
+            { state: 'aux_observed', auxObservation: restored },
+          );
+        }
+        compensation = persistence.updateNativeMutationIntent(
+          compensation.id,
+          compensation.revision,
+          token,
+          compensationSeed.createdAt,
+          compensationSeed.nativeSessionId,
+          { state: 'effect_pending' },
+        );
+        expect(persistence.getEditSaga(saga.id).steps[0]!.state).toBe('compensation_pending');
+        const compensationObservation =
+          compensationKind === 'add'
+            ? {
+                source: restored!,
+                destination: { state: 'absent' as const },
+                auxiliary: { state: 'absent' as const },
+              }
+            : compensationKind === 'delete'
+              ? {
+                  source: { state: 'absent' as const },
+                  destination: { state: 'absent' as const },
+                  auxiliary: compensationExpectedSource,
+                }
+              : {
+                  source: { state: 'absent' as const },
+                  destination: compensationExpectedSource,
+                  auxiliary: { state: 'absent' as const },
+                };
+        persistence.updateNativeMutationIntent(
+          compensation.id,
+          compensation.revision,
+          token,
+          compensationSeed.createdAt,
+          compensationSeed.nativeSessionId,
+          { state: 'effect_observed', effectObservation: compensationObservation },
+        );
+        expect(persistence.getEditSaga(saga.id).steps[0]!.state).toBe('restored');
+        persistence.close();
+      },
+    );
+
+    it('rechecks the exact lease inside the immediate intent transaction', async () => {
+      const fixture = await nativeIntentFixture('native-prepare-race');
+      const concurrent = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+      const seed = persistedNativeIntentSeed(fixture.saga, fixture.token);
+      const originalAssert = fixture.persistence.assertMutationLease.bind(fixture.persistence);
+      let interleaved = false;
+      fixture.persistence.assertMutationLease = (token, now) => {
+        originalAssert(token, now);
+        if (interleaved) return;
+        interleaved = true;
+        concurrent.renewMutationLease(
+          token,
+          '2026-07-23T00:00:01.050Z',
+          '2026-07-23T00:01:01.050Z',
+        );
+      };
+      expect(() =>
+        fixture.persistence.prepareNativeMutationIntent(
+          seed,
+          fixture.token,
+          '2026-07-23T00:00:01.000Z',
+        ),
+      ).toThrow(MutationLeaseStaleError);
+      expect(fixture.persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+      concurrent.close();
+      fixture.persistence.close();
     });
 
     it('fences a held lease when policy changes before release', async () => {
@@ -1448,6 +2437,82 @@ if (runsWithElectronAbi)
         }),
       );
       expect(() => reopened.startTurn(task.id, 'blocked legacy')).toThrow(MutationQuarantinedError);
+      reopened.close();
+    });
+
+    it('backfills v22 Saga operations with fail-closed native identity receipts', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const rootIdentityDigest = '7'.repeat(64);
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/v22-saga',
+        rootIdentityDigest,
+      );
+      const turn = persistence.startTurn(task.id, 'v22 saga');
+      persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'v22-native-binding-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'v22-native-binding-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      persistence.close();
+
+      const raw = new Database(path);
+      const row = raw
+        .prepare('SELECT snapshot_json FROM edit_sagas WHERE id = ?')
+        .get('v22-native-binding-saga') as { snapshot_json: string };
+      const snapshot = JSON.parse(row.snapshot_json) as Record<string, unknown>;
+      const steps = snapshot['steps'] as Array<{ operation: Record<string, unknown> }>;
+      delete steps[0]!.operation['preRevision'];
+      snapshot['journalDigest'] = journaledPatchDigest({
+        version: 2,
+        policyEpoch: snapshot['policyEpoch'] as number,
+        workspaceKey: snapshot['workspaceKey'] as string,
+        rootIdentityDigest: snapshot['rootIdentityDigest'] as string,
+        operations: steps.map(({ operation }) => operation as never),
+      });
+      raw
+        .prepare('UPDATE edit_sagas SET snapshot_json = ? WHERE id = ?')
+        .run(JSON.stringify(snapshot), 'v22-native-binding-saga');
+      raw.exec(`
+        DROP TABLE native_mutation_recovery_bindings;
+        DROP TABLE native_mutation_intents;
+        ALTER TABLE edit_sagas DROP COLUMN native_binding_version;
+        DELETE FROM schema_migrations WHERE version = 23;
+      `);
+      raw.close();
+
+      const reopened = new SqlitePersistenceClient(path, verifyTestNativeSession);
+      expect(reopened.getEditSaga('v22-native-binding-saga')).toMatchObject({
+        steps: [
+          {
+            operation: {
+              preRevision: {
+                identityDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+                contentHash: editHash('before'),
+                size: Buffer.byteLength('before'),
+                mode: 0o100000,
+                nlink: 1,
+              },
+            },
+          },
+        ],
+      });
+      expect(
+        reopened.initializeMutationRecovery('v22-recovery-instance', '2026-07-23T00:00:01.000Z'),
+      ).toContainEqual(expect.objectContaining({ taskId: task.id, workspaceKey }));
+      expect(() => reopened.startTurn(task.id, 'blocked v22 saga')).toThrow(
+        MutationQuarantinedError,
+      );
       reopened.close();
     });
 
@@ -2873,6 +3938,7 @@ if (runsWithElectronAbi)
         { version: 20 },
         { version: 21 },
         { version: 22 },
+        { version: 23 },
       ]);
       expect(
         migrated
@@ -2951,7 +4017,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v22 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v23 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),
@@ -2983,6 +4049,13 @@ function persistedEditPlan(preImage = 'before', postImage = 'after'): PreparedSt
         destination: null,
         canonicalDestination: null,
         revisionTokenId: 'token-1',
+        preRevision: Object.freeze({
+          identityDigest: '8'.repeat(64),
+          contentHash: editHash(preImage),
+          size: Buffer.byteLength(preImage),
+          mode: 0o100600,
+          nlink: 1 as const,
+        }),
         preImage,
         postImage,
         preHash: editHash(preImage),
@@ -2993,8 +4066,249 @@ function persistedEditPlan(preImage = 'before', postImage = 'after'): PreparedSt
   return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
 }
 
+function persistedTwoStepEditPlan(): PreparedStructuredPatch {
+  const operation = (leaf: string, token: string, before: string, after: string) =>
+    Object.freeze({
+      kind: 'update' as const,
+      path: `src/${leaf}`,
+      canonicalPath: `/workspace/src/${leaf}`,
+      destination: null,
+      canonicalDestination: null,
+      revisionTokenId: token,
+      preRevision: Object.freeze({
+        identityDigest: editHash(`identity:${leaf}`),
+        contentHash: editHash(before),
+        size: Buffer.byteLength(before),
+        mode: 0o100600,
+        nlink: 1 as const,
+      }),
+      preImage: before,
+      postImage: after,
+      preHash: editHash(before),
+      postHash: editHash(after),
+    });
+  const facts = {
+    version: 1 as const,
+    policyEpoch: 0,
+    operations: Object.freeze([
+      operation('a.ts', 'token-a', 'before-a', 'after-a'),
+      operation('b.ts', 'token-b', 'before-b', 'after-b'),
+    ]),
+  };
+  return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+}
+
+function persistedEditPlanForKind(kind: 'add' | 'delete' | 'rename'): PreparedStructuredPatch {
+  const content = kind === 'add' ? 'added' : 'before';
+  const preRevision =
+    kind === 'add'
+      ? null
+      : Object.freeze({
+          identityDigest: editHash(`identity:${kind}`),
+          contentHash: editHash(content),
+          size: Buffer.byteLength(content),
+          mode: 0o100640,
+          nlink: 1 as const,
+        });
+  const operation = Object.freeze({
+    kind,
+    path: `src/${kind}.ts`,
+    canonicalPath: `/workspace/src/${kind}.ts`,
+    destination: kind === 'rename' ? 'src/renamed.ts' : null,
+    canonicalDestination: kind === 'rename' ? '/workspace/src/renamed.ts' : null,
+    revisionTokenId: kind === 'add' ? null : `token-${kind}`,
+    preRevision,
+    preImage: kind === 'add' ? null : content,
+    postImage: kind === 'delete' ? null : content,
+    preHash: kind === 'add' ? null : editHash(content),
+    postHash: kind === 'delete' ? null : editHash(content),
+  });
+  const facts = {
+    version: 1 as const,
+    policyEpoch: 0,
+    operations: Object.freeze([operation]),
+  };
+  return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+}
+
 function editHash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function persistedNativeIntentSeed(
+  saga: ReturnType<SqlitePersistenceClient['getEditSaga']>,
+  token: MutationLeaseToken,
+): NativeMutationIntentSeed {
+  const step = saga.steps[0]!;
+  return createNativeMutationIntentSeed({
+    id: 'native-intent-1',
+    sagaId: saga.id,
+    ordinal: step.ordinal,
+    direction: 'forward',
+    kind: step.operation.kind,
+    operationDigest: editHash(JSON.stringify(step.operation)),
+    workspaceKey: token.workspaceKey,
+    rootIdentityDigest: token.rootIdentityDigest,
+    policyEpoch: token.policyEpoch,
+    leaseFence: String(token.fence),
+    nativeSessionId: '6'.repeat(32),
+    sourceSegments: ['src', 'a.ts'],
+    destinationSegments: null,
+    expectedSource: {
+      state: 'present',
+      ...step.operation.preRevision!,
+    },
+    expectedDestination: { state: 'absent' },
+    artifact: {
+      artifactId: step.operation.postArtifact!.artifactId,
+      contentHash: step.operation.postArtifact!.contentHash,
+      size: step.operation.postArtifact!.size,
+      expectedMode: step.operation.preRevision!.mode,
+    },
+    createdAt: '2026-07-23T00:00:01.000Z',
+  });
+}
+
+function persistedNativeUpdateSeed(
+  saga: ReturnType<SqlitePersistenceClient['getEditSaga']>,
+  token: MutationLeaseToken,
+  ordinal: number,
+  direction: 'forward' | 'compensation',
+  id: string,
+  expectedSource?: NativeMutationRevision,
+): NativeMutationIntentSeed {
+  const step = saga.steps[ordinal - 1]!;
+  const reference =
+    direction === 'forward' ? step.operation.postArtifact : step.operation.preArtifact;
+  if (reference === null || step.operation.preRevision === null)
+    throw new Error('test update operation is missing its artifact binding');
+  return createNativeMutationIntentSeed({
+    id,
+    sagaId: saga.id,
+    ordinal,
+    direction,
+    kind: 'update',
+    operationDigest: editHash(JSON.stringify(step.operation)),
+    workspaceKey: token.workspaceKey,
+    rootIdentityDigest: token.rootIdentityDigest,
+    policyEpoch: token.policyEpoch,
+    leaseFence: String(token.fence),
+    nativeSessionId: '6'.repeat(32),
+    sourceSegments: ['src', ordinal === 1 ? 'a.ts' : 'b.ts'],
+    destinationSegments: null,
+    expectedSource: expectedSource ?? { state: 'present', ...step.operation.preRevision },
+    expectedDestination: { state: 'absent' },
+    artifact: {
+      artifactId: reference.artifactId,
+      contentHash: reference.contentHash,
+      size: reference.size,
+      expectedMode: step.operation.preRevision.mode,
+    },
+    createdAt: '2026-07-23T00:00:02.000Z',
+  });
+}
+
+function observeNativeUpdateIntent(
+  persistence: SqlitePersistenceClient,
+  seed: NativeMutationIntentSeed,
+  token: MutationLeaseToken,
+  identityDigit: string,
+) {
+  let intent = persistence.prepareNativeMutationIntent(seed, token, seed.createdAt);
+  intent = persistence.updateNativeMutationIntent(
+    intent.id,
+    intent.revision,
+    token,
+    seed.createdAt,
+    seed.nativeSessionId,
+    { state: 'aux_pending' },
+  );
+  const staged: NativeMutationRevision = {
+    state: 'present',
+    identityDigest: identityDigit.repeat(64),
+    contentHash: intent.temp!.expectedContentHash,
+    size: intent.temp!.expectedSize,
+    mode: intent.temp!.expectedMode,
+    nlink: 1,
+  };
+  intent = persistence.updateNativeMutationIntent(
+    intent.id,
+    intent.revision,
+    token,
+    seed.createdAt,
+    seed.nativeSessionId,
+    { state: 'aux_observed', auxObservation: staged },
+  );
+  intent = persistence.updateNativeMutationIntent(
+    intent.id,
+    intent.revision,
+    token,
+    seed.createdAt,
+    seed.nativeSessionId,
+    { state: 'effect_pending' },
+  );
+  intent = persistence.updateNativeMutationIntent(
+    intent.id,
+    intent.revision,
+    token,
+    seed.createdAt,
+    seed.nativeSessionId,
+    {
+      state: 'effect_observed',
+      effectObservation: {
+        source: staged,
+        destination: { state: 'absent' },
+        auxiliary: seed.expectedSource,
+      },
+    },
+  );
+  return { intent, staged };
+}
+
+async function nativeIntentFixture(
+  id: string,
+  expiresAt = '2026-07-23T00:01:01.000Z',
+  preimage = 'before',
+  postimage = 'after',
+  options: Parameters<typeof createPersistence>[0] = {},
+) {
+  const { persistence, path } = createPersistence(options);
+  const task = persistence.createTask();
+  const rootIdentityDigest = '8'.repeat(64);
+  const workspaceKey = bindMutationWorkspace(
+    persistence,
+    task.id,
+    '/workspace',
+    rootIdentityDigest,
+  );
+  const turn = persistence.startTurn(task.id, id);
+  const saga = persistence.prepareEditSaga(
+    await stageEditSagaRequest(
+      {
+        id: `${id}-saga`,
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: `${id}-operation`,
+        plan: persistedEditPlan(preimage, postimage),
+        createdAt: '2026-07-23T00:00:00.000Z',
+      },
+      new PersistenceTestArtifacts(),
+    ),
+  );
+  const token = persistence.acquireMutationLease({
+    workspaceKey,
+    rootIdentityDigest,
+    holderInstanceId: `${id}-instance`,
+    taskId: task.id,
+    turnId: turn.turnId,
+    sagaId: saga.id,
+    purpose: 'forward',
+    policyEpoch: saga.policyEpoch,
+    intentDigest: saga.planDigest,
+    now: '2026-07-23T00:00:01.000Z',
+    expiresAt,
+  });
+  return { persistence, path, taskId: task.id, saga, token };
 }
 
 function persistedObservation(value: string, identityDigest: string): OperationObservation {

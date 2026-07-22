@@ -68,6 +68,7 @@ export type JournaledPatchOperation = Readonly<{
   destination: string | null;
   canonicalDestination: string | null;
   revisionTokenId: string | null;
+  preRevision: PreparedPatchOperation['preRevision'];
   preArtifact: EditArtifactRef | null;
   postArtifact: EditArtifactRef | null;
   preHash: string | null;
@@ -359,6 +360,7 @@ export async function stageEditSagaRequest(
         destination: operation.destination,
         canonicalDestination: operation.canonicalDestination,
         revisionTokenId: operation.revisionTokenId,
+        preRevision: operation.preRevision,
         preArtifact,
         postArtifact,
         preHash: operation.preHash,
@@ -1016,6 +1018,10 @@ function freezeSnapshot(snapshot: EditSagaSnapshot): EditSagaSnapshot {
         ...step,
         operation: Object.freeze({
           ...step.operation,
+          preRevision:
+            step.operation.preRevision === null
+              ? null
+              : Object.freeze({ ...step.operation.preRevision }),
           preArtifact: freezeArtifactReference(step.operation.preArtifact),
           postArtifact: freezeArtifactReference(step.operation.postArtifact),
         }),
@@ -1166,11 +1172,28 @@ function samePreparedOperation(
     left.destination === right.destination &&
     left.canonicalDestination === right.canonicalDestination &&
     left.revisionTokenId === right.revisionTokenId &&
+    JSON.stringify(left.preRevision) === JSON.stringify(right.preRevision) &&
     sameArtifactReference(left.preArtifact, right.preArtifact) &&
     sameArtifactReference(left.postArtifact, right.postArtifact) &&
     left.preHash === right.preHash &&
     left.postHash === right.postHash
   );
+}
+
+function validatePreparedFileRevision(value: JournaledPatchOperation['preRevision']): void {
+  if (value === null) return;
+  if (!isRecord(value)) throw new Error('Invalid persisted Edit file revision');
+  assertExactKeys(value, ['identityDigest', 'contentHash', 'size', 'mode', 'nlink']);
+  if (
+    !isDigest(value.identityDigest) ||
+    !isDigest(value.contentHash) ||
+    !Number.isSafeInteger(value.size) ||
+    value.size < 0 ||
+    !Number.isSafeInteger(value.mode) ||
+    (value.mode & 0o170000) !== 0o100000 ||
+    value.nlink !== 1
+  )
+    throw new Error('Invalid persisted Edit file revision');
 }
 
 function sameArtifactReference(
@@ -1254,18 +1277,23 @@ function validatePersistedStep(value: EditSagaStep | undefined, ordinal: number)
     'destination',
     'canonicalDestination',
     'revisionTokenId',
+    'preRevision',
     'preArtifact',
     'postArtifact',
     'preHash',
     'postHash',
   ]);
   if (operation.preArtifact !== null) validateEditArtifactReference(operation.preArtifact);
+  validatePreparedFileRevision(operation.preRevision);
   if (operation.postArtifact !== null) validateEditArtifactReference(operation.postArtifact);
   if (
     (operation.preArtifact !== null &&
       (operation.preArtifact.owner.ordinal !== ordinal ||
         operation.preArtifact.owner.role !== 'preimage' ||
-        operation.preArtifact.contentHash !== operation.preHash)) ||
+        operation.preArtifact.contentHash !== operation.preHash ||
+        operation.preRevision === null ||
+        operation.preRevision.contentHash !== operation.preHash ||
+        operation.preRevision.size !== operation.preArtifact.size)) ||
     (operation.postArtifact !== null &&
       (operation.postArtifact.owner.ordinal !== ordinal ||
         operation.postArtifact.owner.role !== 'postimage' ||
@@ -1275,6 +1303,7 @@ function validatePersistedStep(value: EditSagaStep | undefined, ordinal: number)
   const validShape =
     operation.kind === 'add'
       ? operation.revisionTokenId === null &&
+        operation.preRevision === null &&
         operation.preArtifact === null &&
         operation.preHash === null &&
         operation.postArtifact !== null &&
@@ -1283,6 +1312,7 @@ function validatePersistedStep(value: EditSagaStep | undefined, ordinal: number)
         operation.canonicalDestination === null
       : operation.kind === 'update'
         ? operation.revisionTokenId !== null &&
+          operation.preRevision !== null &&
           operation.preArtifact !== null &&
           operation.preHash !== null &&
           operation.postArtifact !== null &&
@@ -1291,6 +1321,7 @@ function validatePersistedStep(value: EditSagaStep | undefined, ordinal: number)
           operation.canonicalDestination === null
         : operation.kind === 'delete'
           ? operation.revisionTokenId !== null &&
+            operation.preRevision !== null &&
             operation.preArtifact !== null &&
             operation.preHash !== null &&
             operation.postArtifact === null &&
@@ -1298,6 +1329,7 @@ function validatePersistedStep(value: EditSagaStep | undefined, ordinal: number)
             operation.destination === null &&
             operation.canonicalDestination === null
           : operation.revisionTokenId !== null &&
+            operation.preRevision !== null &&
             operation.preArtifact !== null &&
             operation.preHash !== null &&
             operation.postArtifact !== null &&

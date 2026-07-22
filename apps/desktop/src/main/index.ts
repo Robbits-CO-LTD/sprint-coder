@@ -4,11 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
+import { loadNativeSafeFs, type NativeSafeFs } from './native-safe-fs';
 import { SqlitePersistenceClient } from './persistence';
 
 const isDevelopment = !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
 let persistence: SqlitePersistenceClient | null = null;
+let nativeSafeFs: NativeSafeFs | null = null;
 let router: IpcRouter | null = null;
 let shutdownCommitted = false;
 let shutdownInFlight = false;
@@ -44,8 +46,14 @@ if (!hasLock) {
     .whenReady()
     .then(async () => {
       if (!isDevelopment) registerProductionProtocol();
+      nativeSafeFs = loadNativeSafeFs({
+        lockDirectoryPath: join(app.getPath('userData'), 'native-safe-fs-locks'),
+      });
       persistence = new SqlitePersistenceClient(
         join(app.getPath('userData'), 'vibe-editor3.sqlite3'),
+        (binding) => nativeSafeFs!.assertSession(binding),
+        (workspaceKey, minimumFence) =>
+          nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
       );
       persistence.initializeMutationRecovery(randomUUID(), new Date().toISOString());
       mainWindow = createWindow();

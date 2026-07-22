@@ -58,8 +58,17 @@ describe('structured patch preparation', () => {
         kind: 'update',
         preImage: 'alpha beta gamma\n',
         postImage: 'alpha BETA gamma\n',
+        preRevision: expect.objectContaining({
+          identityDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          nlink: 1,
+        }),
       }),
-      expect.objectContaining({ kind: 'add', preImage: null, postImage: 'new file\n' }),
+      expect.objectContaining({
+        kind: 'add',
+        preImage: null,
+        preRevision: null,
+        postImage: 'new file\n',
+      }),
     ]);
     expect(plan.digest).toMatch(/^[a-f0-9]{64}$/);
     expect(Object.isFrozen(plan)).toBe(true);

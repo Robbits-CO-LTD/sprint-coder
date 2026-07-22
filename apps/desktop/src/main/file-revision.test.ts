@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   FileRevisionRegistry,
+  fileRevisionIdentityDigest,
   readRevisionBoundFile,
   revalidateFileRevisionToken,
 } from './file-revision';
@@ -28,6 +29,23 @@ async function fixture() {
 }
 
 describe('FileRevisionToken', () => {
+  it('keeps 64-bit device and inode identities as exact decimal strings', () => {
+    const identity = {
+      dev: '9007199254740993',
+      ino: '18446744073709551615',
+      mode: 0o100600,
+      size: 1,
+      mtimeMs: 1,
+      ctimeMs: 1,
+      birthtimeMs: 1,
+      nlink: 1,
+      kind: 'file' as const,
+    };
+    expect(fileRevisionIdentityDigest(identity)).not.toBe(
+      fileRevisionIdentityDigest({ ...identity, dev: '9007199254740992' }),
+    );
+  });
+
   it('reads a regular UTF-8 file through an exact handle and seals its revision facts', async () => {
     const { workspace } = await fixture();
     const result = await readRevisionBoundFile({
@@ -44,6 +62,7 @@ describe('FileRevisionToken', () => {
       identity: { kind: 'file', nlink: 1 },
     });
     expect(result.token.contentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.token.identityDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(Object.isFrozen(result.token)).toBe(true);
     await expect(
       revalidateFileRevisionToken({

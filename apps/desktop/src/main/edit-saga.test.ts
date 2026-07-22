@@ -30,6 +30,7 @@ function plan(): PreparedStructuredPatch {
       destination: null,
       canonicalDestination: null,
       revisionTokenId: 'token-a',
+      preRevision: sealedRevision('A0', 'a'),
       preImage: 'A0',
       postImage: 'A1',
       preHash: hash('A0'),
@@ -42,6 +43,7 @@ function plan(): PreparedStructuredPatch {
       destination: null,
       canonicalDestination: null,
       revisionTokenId: 'token-b',
+      preRevision: sealedRevision('B0', 'b'),
       preImage: 'B0',
       postImage: 'B1',
       preHash: hash('B0'),
@@ -568,6 +570,7 @@ function singleOperationPlan(kind: 'add' | 'delete' | 'rename'): PreparedStructu
     destination: kind === 'rename' ? 'moved.txt' : null,
     canonicalDestination: kind === 'rename' ? '/workspace/moved.txt' : null,
     revisionTokenId: kind === 'add' ? null : `token-${kind}`,
+    preRevision: kind === 'add' ? null : sealedRevision(content, kind === 'delete' ? 'd' : 'e'),
     preImage: kind === 'add' ? null : content,
     postImage: kind === 'delete' ? null : content,
     preHash: kind === 'add' ? null : hash(content),
@@ -579,4 +582,14 @@ function singleOperationPlan(kind: 'add' | 'delete' | 'rename'): PreparedStructu
 
 function hash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function sealedRevision(value: string, identity: string) {
+  return Object.freeze({
+    identityDigest: identity.repeat(64),
+    contentHash: hash(value),
+    size: Buffer.byteLength(value),
+    mode: 0o100600,
+    nlink: 1 as const,
+  });
 }

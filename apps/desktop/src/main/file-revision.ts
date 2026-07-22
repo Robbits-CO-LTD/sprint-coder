@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { Stats } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import {
   createPathGuard,
@@ -36,6 +36,7 @@ export type FileRevisionToken = Readonly<{
   version: 1;
   id: string;
   identity: Readonly<FileIdentity>;
+  identityDigest: string;
   contentHash: string;
   mtimeHint: number;
   size: number;
@@ -138,11 +139,11 @@ export async function readRevisionBoundFile(input: {
   let handle: FileHandle | undefined;
   try {
     handle = await openGuardedExistingFile(guard, 'read');
-    const before = await handle.stat();
+    const before = await handle.stat({ bigint: true });
     assertRegularAndBounded(before, maxBytes);
     const bytes = await handle.readFile();
-    const after = await handle.stat();
-    if (!sameStableReadIdentity(before, after) || bytes.byteLength !== after.size)
+    const after = await handle.stat({ bigint: true });
+    if (!sameStableReadIdentity(before, after) || BigInt(bytes.byteLength) !== after.size)
       throw new FileRevisionError('READ_RACE', 'File changed while it was being read');
     const content = decodeText(bytes);
     const identity = Object.freeze(toIdentity(after));
@@ -150,8 +151,9 @@ export async function readRevisionBoundFile(input: {
       version: 1 as const,
       id: randomUUID(),
       identity,
+      identityDigest: fileRevisionIdentityDigest(identity),
       contentHash: createHash('sha256').update(bytes).digest('hex'),
-      mtimeHint: after.mtimeMs,
+      mtimeHint: exactStatNumber(after.mtimeMs, 'mtimeMs'),
       size: bytes.byteLength,
       policyEpoch,
       workspaceBinding: digest(guard.workspacePath),
@@ -163,6 +165,21 @@ export async function readRevisionBoundFile(input: {
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+export function fileRevisionIdentityDigest(identity: Readonly<FileIdentity>): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        'native-file-identity-v1',
+        identity.dev,
+        identity.ino,
+        identity.mode,
+        identity.nlink,
+        identity.kind,
+      ]),
+    )
+    .digest('hex');
 }
 
 export async function revalidateFileRevisionToken(input: {
@@ -206,9 +223,9 @@ export async function revalidateFileRevisionToken(input: {
   return input.token;
 }
 
-function assertRegularAndBounded(stats: Stats, maxBytes: number): void {
+function assertRegularAndBounded(stats: BigIntStats, maxBytes: number): void {
   if (!stats.isFile()) throw new FileRevisionError('NON_TEXT_FILE', 'Target is not a regular file');
-  if (stats.size > maxBytes)
+  if (stats.size > BigInt(maxBytes))
     throw new FileRevisionError('FILE_TOO_LARGE', 'File exceeds the configured read limit');
 }
 
@@ -224,7 +241,7 @@ function decodeText(bytes: Buffer): string {
   return content;
 }
 
-function sameStableReadIdentity(left: Stats, right: Stats): boolean {
+function sameStableReadIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return (
     left.dev === right.dev &&
     left.ino === right.ino &&
@@ -246,16 +263,16 @@ function sameFileIdentity(left: Readonly<FileIdentity>, right: Readonly<FileIden
   );
 }
 
-function toIdentity(stats: Stats): FileIdentity {
+function toIdentity(stats: BigIntStats): FileIdentity {
   return {
-    dev: String(stats.dev),
-    ino: String(stats.ino),
-    mode: stats.mode,
-    size: stats.size,
-    mtimeMs: stats.mtimeMs,
-    ctimeMs: stats.ctimeMs,
-    birthtimeMs: stats.birthtimeMs,
-    nlink: stats.nlink,
+    dev: stats.dev.toString(),
+    ino: stats.ino.toString(),
+    mode: exactStatNumber(stats.mode, 'mode'),
+    size: exactStatNumber(stats.size, 'size'),
+    mtimeMs: exactStatNumber(stats.mtimeMs, 'mtimeMs'),
+    ctimeMs: exactStatNumber(stats.ctimeMs, 'ctimeMs'),
+    birthtimeMs: exactStatNumber(stats.birthtimeMs, 'birthtimeMs'),
+    nlink: exactStatNumber(stats.nlink, 'nlink'),
     kind: stats.isFile()
       ? 'file'
       : stats.isDirectory()
@@ -264,6 +281,13 @@ function toIdentity(stats: Stats): FileIdentity {
           ? 'symlink'
           : 'other',
   };
+}
+
+function exactStatNumber(value: bigint, name: string): number {
+  const result = Number(value);
+  if (!Number.isSafeInteger(result))
+    throw new FileRevisionError('INVALID_REQUEST', `${name} exceeds the exact numeric range`);
+  return result;
 }
 
 function targetBinding(guard: PathGuard): string {

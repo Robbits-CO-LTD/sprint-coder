@@ -57,6 +57,7 @@ export type NativeSafeFsOpenInput = Readonly<{
 export interface NativeSafeFs {
   probe(): Promise<NativeSafeFsProbe>;
   openSession(input: NativeSafeFsOpenInput): Promise<NativeSafeFsSession>;
+  assertSession(binding: Readonly<{ id: string; workspaceKey: string; fence: string }>): void;
   invalidateWorkspace(workspaceKey: string, minimumFence: string): void;
   closeSession(session: NativeSafeFsSession): Promise<void>;
 }
@@ -78,7 +79,7 @@ export function loadNativeSafeFs(
   const addonPath = resolve(options.addonPath ?? nativeSafeFsAddonPath());
   const lockDirectoryPath =
     options.lockDirectoryPath === undefined ? null : resolve(options.lockDirectoryPath);
-  const issuedSessions = new WeakSet<object>();
+  const issuedSessions = new Map<string, NativeSafeFsSession>();
   let addon: RawAddon | null = null;
   let capabilityProbe: NativeSafeFsProbe | null = null;
   let unavailableReason: string | null = null;
@@ -121,11 +122,21 @@ export function loadNativeSafeFs(
             'NATIVE_FAILURE',
             'NativeSafeFs returned a mismatched session',
           );
-        issuedSessions.add(session);
+        issuedSessions.set(session.id, session);
         return session;
       } catch (error) {
         throw mapNativeError(error);
       }
+    },
+
+    assertSession(binding: Readonly<{ id: string; workspaceKey: string; fence: string }>): void {
+      const session = issuedSessions.get(binding.id);
+      if (
+        session === undefined ||
+        session.workspaceKey !== binding.workspaceKey ||
+        session.fence !== binding.fence
+      )
+        throw new NativeSafeFsError('STALE_SESSION', 'NativeSafeFs session is stale');
     },
 
     invalidateWorkspace(workspaceKey: string, minimumFence: string): void {
@@ -135,6 +146,8 @@ export function loadNativeSafeFs(
         throw new NativeSafeFsError('INVALID_INPUT', 'Invalid NativeSafeFs fence invalidation');
       try {
         addon.invalidateWorkspace(workspaceKey, minimumFence);
+        for (const [id, session] of issuedSessions)
+          if (session.workspaceKey === workspaceKey) issuedSessions.delete(id);
       } catch (error) {
         throw mapNativeError(error);
       }
@@ -143,9 +156,9 @@ export function loadNativeSafeFs(
     async closeSession(session: NativeSafeFsSession): Promise<void> {
       if (addon === null)
         throw new NativeSafeFsError('ADDON_UNAVAILABLE', 'NativeSafeFs addon is unavailable');
-      if (!issuedSessions.has(session))
+      if (issuedSessions.get(session.id) !== session)
         throw new NativeSafeFsError('STALE_SESSION', 'NativeSafeFs session is stale');
-      issuedSessions.delete(session);
+      issuedSessions.delete(session.id);
       try {
         await addon.closeSession(session.id);
       } catch (error) {

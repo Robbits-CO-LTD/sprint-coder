@@ -167,6 +167,18 @@ describe('NativeSafeFs authority boundary', () => {
       await boundary.closeSession(second);
     });
 
+    it('invalidates the JavaScript session authority synchronously with the native fence', async () => {
+      const input = await fixture();
+      const boundary = fixtureBoundary(input);
+      const session = await boundary.openSession({ ...input, fence: '10' });
+      boundary.assertSession(session);
+      boundary.invalidateWorkspace(input.workspaceKey, '11');
+      expect(() => boundary.assertSession(session)).toThrow(
+        expect.objectContaining({ code: 'STALE_SESSION' }),
+      );
+      await expect(boundary.closeSession(session)).rejects.toMatchObject({ code: 'STALE_SESSION' });
+    });
+
     it('queues root acquisition off the JavaScript call stack', async () => {
       const input = await fixture();
       const boundary = fixtureBoundary(input);
@@ -226,7 +238,14 @@ describe('NativeSafeFs authority boundary', () => {
       const input = await fixture();
       const boundary = fixtureBoundary(input);
       const session = await boundary.openSession({ ...input, fence: '1' });
+      expect(() => boundary.assertSession(session)).not.toThrow();
+      expect(() => boundary.assertSession({ ...session, fence: '2' })).toThrow(
+        expect.objectContaining({ code: 'STALE_SESSION' }),
+      );
       await boundary.closeSession(session);
+      expect(() => boundary.assertSession(session)).toThrow(
+        expect.objectContaining({ code: 'STALE_SESSION' }),
+      );
       await expect(boundary.closeSession(session)).rejects.toMatchObject({
         code: 'STALE_SESSION',
       } satisfies Partial<NativeSafeFsError>);
@@ -256,6 +275,9 @@ describe('NativeSafeFs authority boundary', () => {
       const boundary = fixtureBoundary(input, addonPath);
       const session = await boundary.openSession({ ...input, fence: '40' });
       boundary.invalidateWorkspace(input.workspaceKey, '5');
+      expect(() => boundary.assertSession(session)).toThrow(
+        expect.objectContaining({ code: 'STALE_SESSION' }),
+      );
       await expect(boundary.closeSession(session)).rejects.toMatchObject({ code: 'STALE_SESSION' });
       await expect(childOpenOutcome(addonPath, { ...input, fence: '40' })).resolves.toBe(
         'STALE_FENCE',

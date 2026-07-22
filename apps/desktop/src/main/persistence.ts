@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   chatMessageSchema,
@@ -88,7 +88,19 @@ import {
   type EditSagaLeaseGuard,
   type EditSagaCreateRequest,
   type EditSagaSnapshot,
+  type JournaledPatchOperation,
+  type OperationObservation,
 } from './edit-saga';
+import {
+  createNativeMutationIntentSnapshot,
+  deriveNativeMutationEffectKind,
+  parseNativeMutationIntentSeed,
+  parseNativeMutationIntentSnapshot,
+  transitionNativeMutationIntent,
+  type NativeMutationIntentSeed,
+  type NativeMutationIntentSnapshot,
+  type NativeMutationIntentTransition,
+} from './native-mutation-intent';
 
 export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
   private readonly issued = new Map<string, MutationLeaseToken>();
@@ -327,12 +339,55 @@ type EditSagaRow = {
   workspace_key: string | null;
   root_identity_digest: string | null;
   binding_version: number;
+  native_binding_version: number;
   state: EditSagaSnapshot['state'];
   revision: number;
   artifact_cleanup_pending: number;
   snapshot_json: string;
   created_at: string;
   updated_at: string;
+};
+type NativeMutationIntentRow = {
+  id: string;
+  saga_id: string;
+  ordinal: number;
+  direction: NativeMutationIntentSnapshot['direction'];
+  operation_digest: string;
+  workspace_key: string;
+  root_identity_digest: string;
+  policy_epoch: number;
+  lease_fence: string;
+  native_session_id: string;
+  seed_digest: string;
+  intent_digest: string;
+  record_digest: string;
+  auxiliary_key: string | null;
+  state: NativeMutationIntentSnapshot['state'];
+  revision: number;
+  snapshot_json: string;
+  created_at: string;
+  updated_at: string;
+};
+export type NativeMutationRecoveryBinding = Readonly<{
+  version: 1;
+  intentId: string;
+  attempt: number;
+  intentDigest: string;
+  leaseId: string;
+  leaseFence: string;
+  nativeSessionId: string;
+  bindingDigest: string;
+  createdAt: string;
+}>;
+type NativeMutationRecoveryBindingRow = {
+  intent_id: string;
+  attempt: number;
+  intent_digest: string;
+  lease_id: string;
+  lease_fence: string;
+  native_session_id: string;
+  binding_digest: string;
+  created_at: string;
 };
 type WorkspaceMutationRow = {
   workspace_key: string;
@@ -938,6 +993,56 @@ const migrations = [
         CHECK (binding_version IN (0, 1));
     `,
   },
+  {
+    version: 23,
+    checksum: 'native-mutation-intent-v23-record-seal',
+    sql: `
+      ALTER TABLE edit_sagas ADD COLUMN native_binding_version INTEGER NOT NULL DEFAULT 0
+        CHECK (native_binding_version IN (0, 1));
+      CREATE TABLE native_mutation_intents (
+        id TEXT PRIMARY KEY,
+        saga_id TEXT NOT NULL REFERENCES edit_sagas(id) ON DELETE RESTRICT,
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND 100),
+        direction TEXT NOT NULL CHECK (direction IN ('forward', 'compensation')),
+        operation_digest TEXT NOT NULL CHECK (length(operation_digest) = 64),
+        workspace_key TEXT NOT NULL CHECK (length(workspace_key) = 64),
+        root_identity_digest TEXT NOT NULL CHECK (length(root_identity_digest) = 64),
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        lease_fence TEXT NOT NULL,
+        native_session_id TEXT NOT NULL CHECK (length(native_session_id) = 32),
+        seed_digest TEXT NOT NULL CHECK (length(seed_digest) = 64),
+        intent_digest TEXT NOT NULL CHECK (length(intent_digest) = 64),
+        record_digest TEXT NOT NULL CHECK (length(record_digest) = 64),
+        auxiliary_key TEXT CHECK (auxiliary_key IS NULL OR length(auxiliary_key) = 64),
+        state TEXT NOT NULL CHECK (state IN (
+          'planned', 'aux_pending', 'aux_observed', 'effect_pending', 'effect_observed',
+          'cleanup_pending', 'completed', 'recovery_required'
+        )),
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(saga_id, ordinal, direction),
+        UNIQUE(workspace_key, auxiliary_key)
+      );
+      CREATE INDEX native_mutation_intents_recovery_idx
+        ON native_mutation_intents(state, updated_at, id);
+      CREATE INDEX native_mutation_intents_saga_idx
+        ON native_mutation_intents(saga_id, ordinal, direction);
+      CREATE TABLE native_mutation_recovery_bindings (
+        intent_id TEXT NOT NULL REFERENCES native_mutation_intents(id) ON DELETE RESTRICT,
+        attempt INTEGER NOT NULL CHECK (attempt >= 1),
+        intent_digest TEXT NOT NULL CHECK (length(intent_digest) = 64),
+        lease_id TEXT NOT NULL,
+        lease_fence TEXT NOT NULL,
+        native_session_id TEXT NOT NULL CHECK (length(native_session_id) = 32),
+        binding_digest TEXT NOT NULL CHECK (length(binding_digest) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(intent_id, attempt),
+        UNIQUE(intent_id, lease_id, native_session_id)
+      );
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -1094,6 +1199,7 @@ export interface PersistenceClient {
   quarantineStartupMutations(holderInstanceId: string, now: string): readonly MutationQuarantine[];
   initializeMutationRecovery(holderInstanceId: string, now: string): readonly MutationQuarantine[];
   clearMutationQuarantine(workspaceKey: string, expectedFence: number, now: string): void;
+  isNativeMutationAuthorityAvailable(): boolean;
   getRuntime(): RuntimeKind;
   setRuntime(kind: RuntimeKind): void;
   getModel(): string;
@@ -1275,6 +1381,28 @@ export interface PersistenceClient {
     mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
   ): EditSagaSnapshot;
   listRecoverableEditSagas(): readonly EditSagaSnapshot[];
+  prepareNativeMutationIntent(
+    seed: NativeMutationIntentSeed,
+    lease: MutationLeaseToken,
+    now: string,
+  ): NativeMutationIntentSnapshot;
+  getNativeMutationIntent(id: string): NativeMutationIntentSnapshot;
+  bindNativeMutationIntentRecovery(
+    id: string,
+    expectedRevision: number,
+    lease: MutationLeaseToken,
+    nativeSessionId: string,
+    now: string,
+  ): NativeMutationRecoveryBinding;
+  updateNativeMutationIntent(
+    id: string,
+    expectedRevision: number,
+    lease: MutationLeaseToken,
+    now: string,
+    nativeSessionId: string,
+    transition: NativeMutationIntentTransition,
+  ): NativeMutationIntentSnapshot;
+  listRecoverableNativeMutationIntents(): readonly NativeMutationIntentSnapshot[];
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
   queueInput(
@@ -1331,8 +1459,22 @@ export interface PersistenceClient {
 export class SqlitePersistenceClient implements PersistenceClient {
   private readonly db: Database.Database;
   private readonly contextLedger: ContextLedger;
+  private nativeMutationAuthorityDisabled = false;
 
-  constructor(databasePath: string) {
+  constructor(
+    databasePath: string,
+    private readonly verifyNativeSession: (binding: {
+      id: string;
+      workspaceKey: string;
+      fence: string;
+    }) => void = () => {
+      throw new MutationLeaseStaleError();
+    },
+    private readonly invalidateNativeWorkspace: (
+      workspaceKey: string,
+      minimumFence: string,
+    ) => void = () => undefined,
+  ) {
     mkdirSync(dirname(databasePath), { recursive: true });
     this.db = new Database(databasePath);
     this.db.pragma('journal_mode = WAL');
@@ -1341,6 +1483,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.runMigrations(databasePath);
     this.backfillLegacyMutationScopes();
     this.backfillLegacyEditSagaBindings();
+    this.backfillLegacyNativeEditSagaRevisions();
     this.interruptActiveCommands();
     this.contextLedger = new ContextLedger(this);
   }
@@ -1422,6 +1565,59 @@ export class SqlitePersistenceClient implements PersistenceClient {
           ),
         });
         raw['journalDigest'] = journalDigest;
+        update.run(JSON.stringify(raw), row.id);
+      }
+    })();
+  }
+
+  private backfillLegacyNativeEditSagaRevisions(): void {
+    const rows = this.db
+      .prepare(`SELECT id, snapshot_json FROM edit_sagas WHERE native_binding_version = 0`)
+      .all() as { id: string; snapshot_json: string }[];
+    const update = this.db.prepare(
+      `UPDATE edit_sagas SET snapshot_json = ?, native_binding_version = 1
+       WHERE id = ? AND native_binding_version = 0`,
+    );
+    this.db.transaction(() => {
+      for (const row of rows) {
+        const raw = JSON.parse(row.snapshot_json) as Record<string, unknown>;
+        const steps = raw['steps'];
+        if (!Array.isArray(steps)) throw new Error('Invalid legacy Edit Saga steps');
+        for (const [index, value] of steps.entries()) {
+          if (typeof value !== 'object' || value === null)
+            throw new Error('Invalid legacy Edit Saga step');
+          const step = value as Record<string, unknown>;
+          const operationValue = step['operation'];
+          if (typeof operationValue !== 'object' || operationValue === null)
+            throw new Error('Invalid legacy Edit Saga operation');
+          const operation = operationValue as Record<string, unknown>;
+          if ('preRevision' in operation) continue;
+          if (operation['kind'] === 'add') {
+            operation['preRevision'] = null;
+            continue;
+          }
+          const artifactValue = operation['preArtifact'];
+          if (typeof artifactValue !== 'object' || artifactValue === null)
+            throw new Error('Invalid legacy Edit Saga pre-artifact');
+          const artifact = artifactValue as Record<string, unknown>;
+          operation['preRevision'] = {
+            identityDigest: digestJson(['legacy-untracked-native-identity-v1', row.id, index + 1]),
+            contentHash: artifact['contentHash'],
+            size: artifact['size'],
+            mode: 0o100000,
+            nlink: 1,
+          };
+        }
+        raw['journalDigest'] = journaledPatchDigest({
+          version: 2,
+          policyEpoch: raw['policyEpoch'] as number,
+          workspaceKey: raw['workspaceKey'] as string | null,
+          rootIdentityDigest: raw['rootIdentityDigest'] as string | null,
+          operations: steps.map(
+            (step) =>
+              (step as { operation: EditSagaSnapshot['steps'][number]['operation'] }).operation,
+          ),
+        });
         update.run(JSON.stringify(raw), row.id);
       }
     })();
@@ -3188,6 +3384,34 @@ export class SqlitePersistenceClient implements PersistenceClient {
           now,
         );
       }
+      (
+        this.db
+          .prepare('SELECT * FROM native_mutation_recovery_bindings')
+          .all() as NativeMutationRecoveryBindingRow[]
+      ).map(toNativeMutationRecoveryBinding);
+      const unresolvedIntents = (
+        this.db.prepare('SELECT * FROM native_mutation_intents').all() as NativeMutationIntentRow[]
+      )
+        .map(toNativeMutationIntent)
+        .filter((intent) => intent.state !== 'completed');
+      for (const item of unresolvedIntents) {
+        this.ensureMutationRow(item.workspaceKey, item.rootIdentityDigest, now);
+        const row = this.getMutationRow(item.workspaceKey);
+        if (row.state !== 'quarantined')
+          this.quarantineWorkspaceInTransaction(
+            row,
+            'unresolved_native_mutation_intent',
+            now,
+            item.sagaId,
+          );
+        this.quarantineSagaOwnerInTransaction(
+          item.workspaceKey,
+          item.sagaId,
+          'unresolved_native_mutation_intent',
+          this.getMutationRow(item.workspaceKey).fence,
+          now,
+        );
+      }
       const legacy = this.db
         .prepare(
           `SELECT e.id AS saga_id, t.mutation_scope_key AS workspace_key,
@@ -3238,6 +3462,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .get(workspaceKey, workspaceKey);
       if (unresolved !== undefined) throw new MutationQuarantinedError();
+      const intents = (
+        this.db
+          .prepare('SELECT * FROM native_mutation_intents WHERE workspace_key = ?')
+          .all(workspaceKey) as NativeMutationIntentRow[]
+      ).map(toNativeMutationIntent);
+      if (intents.some((intent) => intent.state !== 'completed'))
+        throw new MutationQuarantinedError();
+      (
+        this.db
+          .prepare(
+            `SELECT b.* FROM native_mutation_recovery_bindings b
+             JOIN native_mutation_intents i ON i.id = b.intent_id
+             WHERE i.workspace_key = ?`,
+          )
+          .all(workspaceKey) as NativeMutationRecoveryBindingRow[]
+      ).map(toNativeMutationRecoveryBinding);
       this.db
         .prepare(
           `UPDATE task_mutation_quarantines SET cleared_at = ?, revision = revision + 1
@@ -3245,6 +3485,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(now, workspaceKey);
     })();
+  }
+
+  isNativeMutationAuthorityAvailable(): boolean {
+    return !this.nativeMutationAuthorityDisabled;
   }
 
   private ensureMutationRow(workspaceKey: string, rootIdentityDigest: string, now: string): void {
@@ -3298,6 +3542,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
            revision = task_mutation_quarantines.revision + 1`,
       )
       .run(row.workspace_key, reason, sourceSagaId, fence, now, row.workspace_key);
+    try {
+      this.invalidateNativeWorkspace(row.workspace_key, String(fence));
+    } catch {
+      // Preserve the durable quarantine and disable later native mutations because the
+      // external session's revocation is now unknown.
+      this.nativeMutationAuthorityDisabled = true;
+    }
   }
 
   private quarantineHeldMutationForTask(taskId: string, reason: string, now: string): void {
@@ -3398,8 +3649,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
           `INSERT INTO edit_sagas(
             id, task_id, turn_id, operation_id, plan_digest, policy_epoch,
             workspace_key, root_identity_digest,
-            binding_version, state, revision, artifact_cleanup_pending, snapshot_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+            binding_version, native_binding_version, state, revision,
+            artifact_cleanup_pending, snapshot_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           snapshot.id,
@@ -3501,6 +3753,418 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .all() as EditSagaRow[]
     ).map(toEditSaga);
+  }
+
+  prepareNativeMutationIntent(
+    seed: NativeMutationIntentSeed,
+    lease: MutationLeaseToken,
+    now: string,
+  ): NativeMutationIntentSnapshot {
+    validateMutationToken(lease);
+    validateMutationTimestamp(now, 'Native mutation intent preparation time');
+    const parsedSeed = parseNativeMutationIntentSeed(seed);
+    this.assertNativeMutationSession({
+      id: parsedSeed.nativeSessionId,
+      workspaceKey: parsedSeed.workspaceKey,
+      fence: parsedSeed.leaseFence,
+    });
+    this.assertMutationLease(lease, now);
+    return this.db
+      .transaction(() => {
+        this.assertNativeMutationLeaseSubject(parsedSeed, lease);
+        this.assertNativeMutationLeaseCurrentInTransaction(lease, now);
+        validateNativeSessionId(parsedSeed.nativeSessionId);
+        if (parsedSeed.leaseFence !== String(lease.fence)) throw new MutationLeaseStaleError();
+        const saga = this.getEditSaga(parsedSeed.sagaId);
+        const step = saga.steps[parsedSeed.ordinal - 1];
+        const task = this.getTaskRow(saga.taskId);
+        const expected =
+          step === undefined || task.workspace_path === null
+            ? null
+            : expectedNativeMutationBinding(
+                step.operation,
+                parsedSeed.direction,
+                task.workspace_path,
+                step.postObservation,
+              );
+        if (
+          step === undefined ||
+          expected === null ||
+          expected.kind !== parsedSeed.kind ||
+          JSON.stringify(expected.artifact) !== JSON.stringify(parsedSeed.artifact) ||
+          JSON.stringify(expected.sourceSegments) !== JSON.stringify(parsedSeed.sourceSegments) ||
+          JSON.stringify(expected.destinationSegments) !==
+            JSON.stringify(parsedSeed.destinationSegments) ||
+          !nativeExpectationMatchesBinding(parsedSeed.expectedSource, expected.expectedSource) ||
+          parsedSeed.expectedDestination.state !== 'absent' ||
+          nativeMutationOperationDigest(step.operation) !== parsedSeed.operationDigest ||
+          saga.workspaceKey !== parsedSeed.workspaceKey ||
+          saga.rootIdentityDigest !== parsedSeed.rootIdentityDigest
+        )
+          throw new MutationLeaseStaleError();
+        const existing = this.db
+          .prepare(
+            `SELECT * FROM native_mutation_intents
+           WHERE saga_id = ? AND ordinal = ? AND direction = ?`,
+          )
+          .get(parsedSeed.sagaId, parsedSeed.ordinal, parsedSeed.direction) as
+          NativeMutationIntentRow | undefined;
+        if (existing !== undefined) {
+          const snapshot = toNativeMutationIntent(existing);
+          if (snapshot.seedDigest !== parsedSeed.seedDigest)
+            throw new OperationConflictError('Native mutation intent key was reused');
+          return snapshot;
+        }
+        const readyForNewIntent = nativeMutationStepIsNext(
+          saga,
+          parsedSeed.ordinal,
+          parsedSeed.direction,
+        );
+        if (!readyForNewIntent) throw new MutationLeaseStaleError();
+        const snapshot = createNativeMutationIntentSnapshot(parsedSeed);
+        this.db
+          .prepare(
+            `INSERT INTO native_mutation_intents(
+            id, saga_id, ordinal, direction, operation_digest, workspace_key,
+            root_identity_digest, policy_epoch, lease_fence, native_session_id,
+            seed_digest, intent_digest, record_digest, auxiliary_key, state, revision,
+            snapshot_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            snapshot.id,
+            snapshot.sagaId,
+            snapshot.ordinal,
+            snapshot.direction,
+            snapshot.operationDigest,
+            snapshot.workspaceKey,
+            snapshot.rootIdentityDigest,
+            snapshot.policyEpoch,
+            snapshot.leaseFence,
+            snapshot.nativeSessionId,
+            snapshot.seedDigest,
+            snapshot.intentDigest,
+            snapshot.recordDigest,
+            nativeMutationAuxiliaryKey(snapshot),
+            snapshot.state,
+            snapshot.revision,
+            JSON.stringify(snapshot),
+            snapshot.createdAt,
+            snapshot.updatedAt,
+          );
+        return snapshot;
+      })
+      .immediate();
+  }
+
+  getNativeMutationIntent(id: string): NativeMutationIntentSnapshot {
+    const row = this.db.prepare('SELECT * FROM native_mutation_intents WHERE id = ?').get(id) as
+      NativeMutationIntentRow | undefined;
+    if (row === undefined) throw new NotFoundError('Native mutation intent not found');
+    return toNativeMutationIntent(row);
+  }
+
+  bindNativeMutationIntentRecovery(
+    id: string,
+    expectedRevision: number,
+    lease: MutationLeaseToken,
+    nativeSessionId: string,
+    now: string,
+  ): NativeMutationRecoveryBinding {
+    validateMutationToken(lease);
+    validateMutationTimestamp(now, 'Native mutation recovery binding time');
+    validateNativeSessionId(nativeSessionId);
+    if (lease.purpose !== 'recovery') throw new MutationLeaseStaleError();
+    this.assertMutationLease(lease, now);
+    this.assertNativeMutationSession({
+      id: nativeSessionId,
+      workspaceKey: lease.workspaceKey,
+      fence: String(lease.fence),
+    });
+    return this.db
+      .transaction(() => {
+        const intent = this.getNativeMutationIntent(id);
+        if (intent.revision !== expectedRevision || intent.state === 'completed')
+          throw new OperationConflictError('Native mutation intent cannot be rebound');
+        this.assertNativeMutationLeaseSubject(intent, lease);
+        this.assertNativeMutationLeaseCurrentInTransaction(lease, now);
+        const existing = this.db
+          .prepare(
+            `SELECT * FROM native_mutation_recovery_bindings
+             WHERE intent_id = ? AND lease_id = ? AND native_session_id = ?`,
+          )
+          .get(id, lease.leaseId, nativeSessionId) as NativeMutationRecoveryBindingRow | undefined;
+        if (existing !== undefined) return toNativeMutationRecoveryBinding(existing);
+        const attempt = this.db
+          .prepare(
+            'SELECT COALESCE(MAX(attempt), 0) + 1 FROM native_mutation_recovery_bindings WHERE intent_id = ?',
+          )
+          .pluck()
+          .get(id) as number;
+        const facts = {
+          version: 1 as const,
+          intentId: id,
+          attempt,
+          intentDigest: intent.intentDigest,
+          leaseId: lease.leaseId,
+          leaseFence: String(lease.fence),
+          nativeSessionId,
+          createdAt: now,
+        };
+        const binding = Object.freeze({
+          ...facts,
+          bindingDigest: digestJson(facts),
+        });
+        this.db
+          .prepare(
+            `INSERT INTO native_mutation_recovery_bindings(
+               intent_id, attempt, intent_digest, lease_id, lease_fence,
+               native_session_id, binding_digest, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            binding.intentId,
+            binding.attempt,
+            binding.intentDigest,
+            binding.leaseId,
+            binding.leaseFence,
+            binding.nativeSessionId,
+            binding.bindingDigest,
+            binding.createdAt,
+          );
+        return binding;
+      })
+      .immediate();
+  }
+
+  updateNativeMutationIntent(
+    id: string,
+    expectedRevision: number,
+    lease: MutationLeaseToken,
+    now: string,
+    nativeSessionId: string,
+    transition: NativeMutationIntentTransition,
+  ): NativeMutationIntentSnapshot {
+    validateMutationToken(lease);
+    validateMutationTimestamp(now, 'Native mutation intent update time');
+    validateNativeSessionId(nativeSessionId);
+    this.assertNativeMutationSession({
+      id: nativeSessionId,
+      workspaceKey: lease.workspaceKey,
+      fence: String(lease.fence),
+    });
+    this.assertMutationLease(lease, now);
+    return this.db
+      .transaction(() => {
+        const current = this.getNativeMutationIntent(id);
+        this.assertNativeMutationLeaseBinding(current, lease, nativeSessionId);
+        if (
+          current.revision === expectedRevision + 1 &&
+          nativeMutationTransitionAlreadyApplied(current, transition)
+        )
+          return current;
+        if (current.revision !== expectedRevision)
+          throw new OperationConflictError('Stale Native mutation intent revision');
+        const next = transitionNativeMutationIntent(current, transition, now);
+        if (next.state === 'effect_pending')
+          this.markEditSagaStepEffectPending(
+            current.sagaId,
+            current.ordinal,
+            current.direction,
+            lease,
+          );
+        if (next.state === 'effect_observed' && next.effectObservation !== null)
+          this.markEditSagaStepEffectObserved(
+            current.sagaId,
+            current.ordinal,
+            current.direction,
+            nativeIntentSagaObservation(current, next.effectObservation),
+            lease,
+          );
+        const changes = this.db
+          .prepare(
+            `UPDATE native_mutation_intents SET state = ?, revision = ?, record_digest = ?,
+             snapshot_json = ?, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+          )
+          .run(
+            next.state,
+            next.revision,
+            next.recordDigest,
+            JSON.stringify(next),
+            next.updatedAt,
+            id,
+            expectedRevision,
+          ).changes;
+        if (changes !== 1)
+          throw new OperationConflictError('Stale Native mutation intent revision');
+        return next;
+      })
+      .immediate();
+  }
+
+  listRecoverableNativeMutationIntents(): readonly NativeMutationIntentSnapshot[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM native_mutation_intents
+           WHERE state != 'completed'
+           ORDER BY created_at, id`,
+        )
+        .all() as NativeMutationIntentRow[]
+    ).map(toNativeMutationIntent);
+  }
+
+  private assertNativeMutationLeaseSubject(
+    intent: Pick<
+      NativeMutationIntentSeed,
+      'sagaId' | 'workspaceKey' | 'rootIdentityDigest' | 'policyEpoch'
+    >,
+    lease: MutationLeaseToken,
+  ): void {
+    if (
+      intent.sagaId !== lease.sagaId ||
+      intent.workspaceKey !== lease.workspaceKey ||
+      intent.rootIdentityDigest !== lease.rootIdentityDigest ||
+      intent.policyEpoch !== lease.policyEpoch ||
+      this.getPermissionPolicy(lease.taskId).policyEpoch !== lease.policyEpoch
+    )
+      throw new MutationLeaseStaleError();
+  }
+
+  private assertNativeMutationSession(binding: {
+    id: string;
+    workspaceKey: string;
+    fence: string;
+  }): void {
+    if (this.nativeMutationAuthorityDisabled) throw new MutationLeaseStaleError();
+    this.verifyNativeSession(binding);
+  }
+
+  private assertNativeMutationLeaseBinding(
+    intent: NativeMutationIntentSnapshot,
+    lease: MutationLeaseToken,
+    nativeSessionId = intent.nativeSessionId,
+  ): void {
+    const row = this.getMutationRow(lease.workspaceKey);
+    if (!mutationTokenMatchesRow(lease, row)) throw new MutationLeaseStaleError();
+    this.assertNativeMutationLeaseSubject(intent, lease);
+    if (intent.leaseFence === String(lease.fence) && intent.nativeSessionId === nativeSessionId)
+      return;
+    const recovery = this.db
+      .prepare(
+        `SELECT * FROM native_mutation_recovery_bindings
+         WHERE intent_id = ? AND lease_id = ? AND lease_fence = ? AND native_session_id = ?
+         ORDER BY attempt DESC LIMIT 1`,
+      )
+      .get(intent.id, lease.leaseId, String(lease.fence), nativeSessionId) as
+      NativeMutationRecoveryBindingRow | undefined;
+    if (
+      recovery === undefined ||
+      toNativeMutationRecoveryBinding(recovery).intentDigest !== intent.intentDigest
+    )
+      throw new MutationLeaseStaleError();
+  }
+
+  private assertNativeMutationLeaseCurrentInTransaction(
+    lease: MutationLeaseToken,
+    now: string,
+  ): void {
+    const row = this.getMutationRow(lease.workspaceKey);
+    const nowMs = Date.parse(now);
+    if (
+      !mutationTokenMatchesRow(lease, row) ||
+      row.expires_at === null ||
+      nowMs < Date.parse(row.last_observed_at) ||
+      nowMs >= Date.parse(row.expires_at) ||
+      this.getPermissionPolicy(lease.taskId).policyEpoch !== lease.policyEpoch
+    )
+      throw new MutationLeaseStaleError();
+  }
+
+  private markEditSagaStepEffectPending(
+    sagaId: string,
+    ordinal: number,
+    direction: NativeMutationIntentSnapshot['direction'],
+    lease: MutationLeaseToken,
+  ): void {
+    const current = this.getEditSaga(sagaId);
+    const step = current.steps[ordinal - 1];
+    const expectedState = direction === 'forward' ? 'pending' : 'effect_observed';
+    if (step === undefined || step.state !== expectedState) throw new MutationLeaseStaleError();
+    const next = transitionEditSagaSnapshot(current, (snapshot) => ({
+      ...withoutEditSagaRevision(snapshot),
+      state: direction === 'forward' ? 'applying' : 'compensating',
+      steps: snapshot.steps.map((candidate) =>
+        candidate.ordinal === ordinal
+          ? {
+              ...candidate,
+              state:
+                direction === 'forward'
+                  ? ('effect_pending' as const)
+                  : ('compensation_pending' as const),
+            }
+          : candidate,
+      ),
+      updatedAt: nextPersistenceTimestamp(snapshot.updatedAt),
+    }));
+    const changes = this.db
+      .prepare(
+        `UPDATE edit_sagas SET state = ?, revision = ?, snapshot_json = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND workspace_key = ? AND root_identity_digest = ?`,
+      )
+      .run(
+        next.state,
+        next.revision,
+        JSON.stringify(next),
+        next.updatedAt,
+        sagaId,
+        current.revision,
+        lease.workspaceKey,
+        lease.rootIdentityDigest,
+      ).changes;
+    if (changes !== 1) throw new MutationLeaseStaleError();
+  }
+
+  private markEditSagaStepEffectObserved(
+    sagaId: string,
+    ordinal: number,
+    direction: NativeMutationIntentSnapshot['direction'],
+    observation: OperationObservation,
+    lease: MutationLeaseToken,
+  ): void {
+    const current = this.getEditSaga(sagaId);
+    const step = current.steps[ordinal - 1];
+    const expectedState = direction === 'forward' ? 'effect_pending' : 'compensation_pending';
+    if (step === undefined || step.state !== expectedState) throw new MutationLeaseStaleError();
+    const next = transitionEditSagaSnapshot(current, (snapshot) => ({
+      ...withoutEditSagaRevision(snapshot),
+      state: direction === 'forward' ? 'applying' : 'compensating',
+      steps: snapshot.steps.map((candidate) =>
+        candidate.ordinal === ordinal
+          ? direction === 'forward'
+            ? { ...candidate, state: 'effect_observed' as const, postObservation: observation }
+            : { ...candidate, state: 'restored' as const, restoredObservation: observation }
+          : candidate,
+      ),
+      updatedAt: nextPersistenceTimestamp(snapshot.updatedAt),
+    }));
+    const changes = this.db
+      .prepare(
+        `UPDATE edit_sagas SET state = ?, revision = ?, snapshot_json = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND workspace_key = ? AND root_identity_digest = ?`,
+      )
+      .run(
+        next.state,
+        next.revision,
+        JSON.stringify(next),
+        next.updatedAt,
+        sagaId,
+        current.revision,
+        lease.workspaceKey,
+        lease.rootIdentityDigest,
+      ).changes;
+    if (changes !== 1) throw new MutationLeaseStaleError();
   }
 
   listMessages(taskId: string): ChatMessage[] {
@@ -5046,6 +5710,7 @@ function toEditSaga(row: EditSagaRow): EditSagaSnapshot {
     snapshot.workspaceKey !== row.workspace_key ||
     snapshot.rootIdentityDigest !== row.root_identity_digest ||
     row.binding_version !== 1 ||
+    row.native_binding_version !== 1 ||
     snapshot.state !== row.state ||
     snapshot.revision !== row.revision ||
     snapshot.artifactCleanupPending !== (row.artifact_cleanup_pending === 1) ||
@@ -5054,6 +5719,268 @@ function toEditSaga(row: EditSagaRow): EditSagaSnapshot {
   )
     throw new Error('Persisted Edit Saga columns do not match its sealed snapshot');
   return snapshot;
+}
+
+function toNativeMutationIntent(row: NativeMutationIntentRow): NativeMutationIntentSnapshot {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.snapshot_json);
+  } catch {
+    throw new Error('Invalid persisted Native mutation intent JSON');
+  }
+  const snapshot = parseNativeMutationIntentSnapshot(parsed);
+  if (
+    snapshot.id !== row.id ||
+    snapshot.sagaId !== row.saga_id ||
+    snapshot.ordinal !== row.ordinal ||
+    snapshot.direction !== row.direction ||
+    snapshot.operationDigest !== row.operation_digest ||
+    snapshot.workspaceKey !== row.workspace_key ||
+    snapshot.rootIdentityDigest !== row.root_identity_digest ||
+    snapshot.policyEpoch !== row.policy_epoch ||
+    snapshot.leaseFence !== row.lease_fence ||
+    snapshot.nativeSessionId !== row.native_session_id ||
+    snapshot.seedDigest !== row.seed_digest ||
+    snapshot.intentDigest !== row.intent_digest ||
+    snapshot.recordDigest !== row.record_digest ||
+    nativeMutationAuxiliaryKey(snapshot) !== row.auxiliary_key ||
+    snapshot.state !== row.state ||
+    snapshot.revision !== row.revision ||
+    snapshot.createdAt !== row.created_at ||
+    snapshot.updatedAt !== row.updated_at
+  )
+    throw new Error('Persisted Native mutation columns do not match its sealed snapshot');
+  return snapshot;
+}
+
+function toNativeMutationRecoveryBinding(
+  row: NativeMutationRecoveryBindingRow,
+): NativeMutationRecoveryBinding {
+  const facts = {
+    version: 1 as const,
+    intentId: row.intent_id,
+    attempt: row.attempt,
+    intentDigest: row.intent_digest,
+    leaseId: row.lease_id,
+    leaseFence: row.lease_fence,
+    nativeSessionId: row.native_session_id,
+    createdAt: row.created_at,
+  };
+  const binding = Object.freeze({ ...facts, bindingDigest: row.binding_digest });
+  if (
+    !Number.isSafeInteger(binding.attempt) ||
+    binding.attempt < 1 ||
+    binding.intentId.length < 1 ||
+    binding.intentId.length > 200 ||
+    binding.leaseId.length < 1 ||
+    binding.leaseId.length > 200 ||
+    !/^[1-9][0-9]{0,19}$/.test(binding.leaseFence) ||
+    !/^[a-f0-9]{64}$/.test(binding.intentDigest) ||
+    !/^[a-f0-9]{64}$/.test(binding.bindingDigest) ||
+    digestJson(facts) !== binding.bindingDigest
+  )
+    throw new Error('Invalid persisted Native mutation recovery binding');
+  validateNativeSessionId(binding.nativeSessionId);
+  validateMutationTimestamp(binding.createdAt, 'Native mutation recovery binding timestamp');
+  return binding;
+}
+
+function nativeMutationOperationDigest(operation: JournaledPatchOperation): string {
+  return createHash('sha256').update(JSON.stringify(operation)).digest('hex');
+}
+
+function nativeMutationAuxiliaryKey(snapshot: NativeMutationIntentSnapshot): string | null {
+  const auxiliary = snapshot.temp ?? snapshot.tombstone;
+  return auxiliary === null
+    ? null
+    : digestJson([snapshot.workspaceKey, auxiliary.parentSegments, auxiliary.leafName]);
+}
+
+function nativeMutationTransitionAlreadyApplied(
+  current: NativeMutationIntentSnapshot,
+  transition: NativeMutationIntentTransition,
+): boolean {
+  if (current.state !== transition.state) return false;
+  if (transition.state === 'aux_observed')
+    return JSON.stringify(current.auxObservation) === JSON.stringify(transition.auxObservation);
+  if (transition.state === 'effect_observed')
+    return (
+      JSON.stringify(current.effectObservation) === JSON.stringify(transition.effectObservation)
+    );
+  if (transition.state === 'completed')
+    return (
+      JSON.stringify(current.cleanupObservation) === JSON.stringify(transition.cleanupObservation)
+    );
+  return true;
+}
+
+function expectedNativeMutationArtifact(
+  operation: JournaledPatchOperation,
+  direction: NativeMutationIntentSnapshot['direction'],
+): NativeMutationIntentSnapshot['artifact'] {
+  const reference =
+    direction === 'forward'
+      ? operation.kind === 'add' || operation.kind === 'update'
+        ? operation.postArtifact
+        : null
+      : operation.kind === 'update' || operation.kind === 'delete'
+        ? operation.preArtifact
+        : null;
+  return reference === null
+    ? null
+    : {
+        artifactId: reference.artifactId,
+        contentHash: reference.contentHash,
+        size: reference.size,
+        expectedMode:
+          operation.kind === 'add' && direction === 'forward'
+            ? 0o100600
+            : (operation.preRevision?.mode ?? failNativeMutationBinding()),
+      };
+}
+
+function expectedNativeMutationBinding(
+  operation: JournaledPatchOperation,
+  direction: NativeMutationIntentSnapshot['direction'],
+  workspacePath: string,
+  postObservation: OperationObservation | null,
+): Readonly<{
+  kind: NativeMutationIntentSnapshot['kind'];
+  artifact: NativeMutationIntentSnapshot['artifact'];
+  sourceSegments: readonly string[];
+  destinationSegments: readonly string[] | null;
+  expectedSource: NativeMutationIntentSnapshot['expectedSource'];
+}> {
+  const kind = deriveNativeMutationEffectKind(operation.kind, direction);
+  const forwardSource = nativeRelativeSegments(workspacePath, operation.canonicalPath);
+  const forwardDestination =
+    operation.canonicalDestination === null
+      ? null
+      : nativeRelativeSegments(workspacePath, operation.canonicalDestination);
+  const sourceSegments =
+    direction === 'compensation' && operation.kind === 'rename'
+      ? (forwardDestination ?? failNativeMutationBinding())
+      : forwardSource;
+  const destinationSegments =
+    kind === 'rename'
+      ? direction === 'compensation'
+        ? forwardSource
+        : (forwardDestination ?? failNativeMutationBinding())
+      : null;
+  const compensationSource =
+    postObservation === null
+      ? null
+      : operation.kind === 'rename'
+        ? postObservation.destination
+        : postObservation.source;
+  const expectedSource =
+    kind === 'add'
+      ? ({ state: 'absent' } as const)
+      : direction === 'forward'
+        ? operation.preRevision === null
+          ? failNativeMutationBinding()
+          : ({ state: 'present' as const, ...operation.preRevision } as const)
+        : compensationSource?.state !== 'present'
+          ? failNativeMutationBinding()
+          : ({
+              state: 'present' as const,
+              identityDigest: compensationSource.revision.identityDigest,
+              contentHash: compensationSource.revision.contentHash,
+              size: compensationSource.revision.size,
+              mode: operation.preRevision?.mode ?? 0o100600,
+              nlink: 1 as const,
+            } as const);
+  return {
+    kind,
+    artifact: expectedNativeMutationArtifact(operation, direction),
+    sourceSegments,
+    destinationSegments,
+    expectedSource,
+  };
+}
+
+function nativeIntentSagaObservation(
+  intent: NativeMutationIntentSnapshot,
+  observation: NonNullable<NativeMutationIntentSnapshot['effectObservation']>,
+): OperationObservation {
+  const endpoint = (
+    value: NativeMutationIntentSnapshot['expectedSource'],
+  ): OperationObservation['source'] =>
+    value.state === 'absent'
+      ? { state: 'absent' }
+      : {
+          state: 'present',
+          revision: {
+            identityDigest: value.identityDigest,
+            contentHash: value.contentHash,
+            size: value.size,
+          },
+        };
+  return intent.direction === 'compensation' && intent.kind === 'rename'
+    ? { source: endpoint(observation.destination), destination: endpoint(observation.source) }
+    : { source: endpoint(observation.source), destination: endpoint(observation.destination) };
+}
+
+function nativeRelativeSegments(workspacePath: string, canonicalPath: string): readonly string[] {
+  const value = relative(workspacePath, canonicalPath);
+  if (value.length === 0 || isAbsolute(value)) return failNativeMutationBinding();
+  const segments = value.split(sep);
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..'))
+    return failNativeMutationBinding();
+  return segments;
+}
+
+function nativeExpectationMatchesBinding(
+  actual: NativeMutationIntentSnapshot['expectedSource'],
+  expected: ReturnType<typeof expectedNativeMutationBinding>['expectedSource'],
+): boolean {
+  return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+function failNativeMutationBinding(): never {
+  throw new MutationLeaseStaleError();
+}
+
+function nativeMutationStepIsNext(
+  saga: EditSagaSnapshot,
+  ordinal: number,
+  direction: NativeMutationIntentSnapshot['direction'],
+): boolean {
+  const index = ordinal - 1;
+  const step = saga.steps[index];
+  if (step === undefined) return false;
+  if (direction === 'forward')
+    return (
+      (saga.state === 'prepared' || saga.state === 'applying') &&
+      step.state === 'pending' &&
+      saga.steps.slice(0, index).every((candidate) => candidate.state === 'effect_observed') &&
+      saga.steps.slice(index + 1).every((candidate) => candidate.state === 'pending')
+    );
+  return (
+    (saga.state === 'applying' || saga.state === 'compensating') &&
+    step.state === 'effect_observed' &&
+    saga.steps
+      .slice(index + 1)
+      .every((candidate) => candidate.state === 'pending' || candidate.state === 'restored') &&
+    !saga.steps.slice(0, index).some((candidate) => candidate.state === 'restored')
+  );
+}
+
+function withoutEditSagaRevision(snapshot: EditSagaSnapshot): Omit<EditSagaSnapshot, 'revision'> {
+  const { revision: _revision, ...rest } = snapshot;
+  return rest;
+}
+
+function nextPersistenceTimestamp(previous: string): string {
+  return new Date(Date.parse(previous) + 1).toISOString();
+}
+
+function digestJson(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function validateNativeSessionId(value: string): void {
+  if (!/^[a-f0-9]{32}$/.test(value)) throw new MutationLeaseStaleError();
 }
 
 function validateMutationLeaseInput(input: {
