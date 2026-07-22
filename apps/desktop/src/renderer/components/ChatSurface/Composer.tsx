@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
-import type { QueuedInput } from '../../types/vibe';
+import type { QueuedInput, RuntimeKind } from '../../types/vibe';
+
+const STEER_UNSUPPORTED_HINT =
+  'Codex runtimeでは実行中の追加指示に対応していません。キュー追加を使ってください';
 
 type SendMode = 'queue' | 'steer' | 'stopAndSend';
 
@@ -36,6 +39,7 @@ export function Composer({ taskId }: { taskId: string }) {
   const queued = useAppStore((s) => s.queuedByTask[taskId]) ?? [];
   const toast = useAppStore((s) => s.toast);
   const dismissToast = useAppStore((s) => s.dismissToast);
+  const runtime = useAppStore((s) => s.runtime);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [sendMode, setSendMode] = useState<SendMode>('queue');
   const [wasTurnActive, setWasTurnActive] = useState(false);
@@ -46,12 +50,19 @@ export function Composer({ taskId }: { taskId: string }) {
   const canSteer = typeof window.vibe?.turns?.steer === 'function';
   const canStopAndSend = typeof window.vibe?.turns?.stopAndSend === 'function';
   const hasAnyActiveModeCapability = canQueue || canSteer || canStopAndSend;
+  // Codex runtime does not support mid-turn steering (STEER_UNSUPPORTED) — the Steer segment
+  // stays visible but disabled so the user understands why, per FR-SET-03.
+  const steerBlockedByRuntime = runtime.kind === 'codex';
 
   // Reset the mode selector back to the default once the turn finishes (render-time adjustment
   // instead of an effect, per react-hooks/set-state-in-effect).
   if (turnActive !== wasTurnActive) {
     setWasTurnActive(turnActive);
     if (!turnActive) setSendMode('queue');
+  }
+  // Likewise, fall back off Steer if the runtime switches to Codex while it's selected.
+  if (sendMode === 'steer' && steerBlockedByRuntime) {
+    setSendMode('queue');
   }
 
   useEffect(() => {
@@ -62,7 +73,11 @@ export function Composer({ taskId }: { taskId: string }) {
   }, [draft]);
 
   const activeModeCapable =
-    sendMode === 'queue' ? canQueue : sendMode === 'steer' ? canSteer : canStopAndSend;
+    sendMode === 'queue'
+      ? canQueue
+      : sendMode === 'steer'
+        ? canSteer && !steerBlockedByRuntime
+        : canStopAndSend;
   const sendDisabled = !draft.trim() || sending || (turnActive && !activeModeCapable);
 
   function handleSend() {
@@ -72,7 +87,7 @@ export function Composer({ taskId }: { taskId: string }) {
       void startTurn(taskId, text);
       return;
     }
-    if (sendMode === 'steer' && canSteer && turn) {
+    if (sendMode === 'steer' && canSteer && !steerBlockedByRuntime && turn) {
       void steerMessage(taskId, text, turn.turnId);
     } else if (sendMode === 'stopAndSend' && canStopAndSend) {
       void stopAndSend(taskId, text);
@@ -97,6 +112,7 @@ export function Composer({ taskId }: { taskId: string }) {
           <textarea
             ref={textareaRef}
             className="composer-input"
+            data-testid="composer-textarea"
             rows={1}
             placeholder={
               turnActive
@@ -110,14 +126,7 @@ export function Composer({ taskId }: { taskId: string }) {
             aria-label="メッセージ入力"
           />
           <div className="composer-row">
-            <button
-              type="button"
-              className="cmp-chip"
-              disabled
-              title="モデル選択は今回のスコープ外です"
-            >
-              GPT-6.2 mini
-            </button>
+            <RuntimeChip />
             <button
               type="button"
               className="cmp-chip"
@@ -141,23 +150,31 @@ export function Composer({ taskId }: { taskId: string }) {
                   .filter((mode) =>
                     mode === 'queue' ? canQueue : mode === 'steer' ? canSteer : canStopAndSend,
                   )
-                  .map((mode) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      className={`send-mode-btn${sendMode === mode ? ' active' : ''}`}
-                      onClick={() => setSendMode(mode)}
-                      title={MODE_HINT[mode]}
-                      aria-pressed={sendMode === mode}
-                    >
-                      {MODE_LABEL[mode]}
-                    </button>
-                  ))}
+                  .map((mode) => {
+                    const blocked = mode === 'steer' && steerBlockedByRuntime;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={`send-mode-btn${sendMode === mode ? ' active' : ''}`}
+                        onClick={() => {
+                          if (!blocked) setSendMode(mode);
+                        }}
+                        disabled={blocked}
+                        aria-disabled={blocked || undefined}
+                        title={blocked ? STEER_UNSUPPORTED_HINT : MODE_HINT[mode]}
+                        aria-pressed={sendMode === mode}
+                      >
+                        {MODE_LABEL[mode]}
+                      </button>
+                    );
+                  })}
               </div>
             )}
             <button
               type="button"
               className="send-btn"
+              data-testid="composer-send-button"
               disabled={sendDisabled}
               onClick={handleSend}
               aria-label={turnActive ? `${MODE_LABEL[sendMode]}で送信` : '送信'}
@@ -177,12 +194,107 @@ export function Composer({ taskId }: { taskId: string }) {
   );
 }
 
+const RUNTIME_LABEL: Record<RuntimeKind, string> = {
+  mock: 'Mock Runtime',
+  codex: 'Codex',
+};
+
+const RUNTIME_DESC: Record<RuntimeKind, string> = {
+  mock: '決定論的ローカル応答',
+  codex: 'ローカルのCodex CLIで実応答',
+};
+
+// Runtime selector chip (FR-SET-03). Falls back to the legacy dummy "GPT-6.2 mini" chip when
+// the backend hasn't wired the `settings` API yet — graceful degrade per the vibe.d.ts contract.
+function RuntimeChip() {
+  const runtimeSupported =
+    typeof window !== 'undefined' && typeof window.vibe?.settings?.getRuntime === 'function';
+  const runtime = useAppStore((s) => s.runtime);
+  const setRuntime = useAppStore((s) => s.setRuntime);
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  if (!runtimeSupported) {
+    return (
+      <button
+        type="button"
+        className="cmp-chip"
+        disabled
+        title="モデル選択は今回のスコープ外です"
+      >
+        GPT-6.2 mini
+      </button>
+    );
+  }
+
+  function choose(kind: RuntimeKind) {
+    if (kind === 'codex' && !runtime.codexAvailable) return;
+    setOpen(false);
+    if (kind !== runtime.kind) void setRuntime(kind);
+  }
+
+  return (
+    <div
+      className="runtime-chip-wrap"
+      ref={wrapRef}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        className="cmp-chip runtime-chip"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        title="Runtimeを選択"
+      >
+        {RUNTIME_LABEL[runtime.kind]}
+      </button>
+      {open && (
+        <div className="runtime-menu" role="menu" aria-label="Runtime選択">
+          {(['mock', 'codex'] as RuntimeKind[]).map((kind) => {
+            const disabled = kind === 'codex' && !runtime.codexAvailable;
+            return (
+              <button
+                key={kind}
+                type="button"
+                role="menuitemradio"
+                aria-checked={runtime.kind === kind}
+                className={`runtime-menu-item${runtime.kind === kind ? ' active' : ''}`}
+                disabled={disabled}
+                title={disabled ? 'Codex CLIが見つかりません' : undefined}
+                onClick={() => choose(kind)}
+              >
+                <span className="runtime-menu-title">{RUNTIME_LABEL[kind]}</span>
+                <span className="runtime-menu-desc">{RUNTIME_DESC[kind]}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function QueuedList({ items }: { items: QueuedInput[] }) {
   if (items.length === 0) return null;
   return (
     <div className="queued-list" aria-label="キュー投入済みの入力">
       {items.map((item) => (
-        <div key={item.ordinal} className="queued-item">
+        <div key={item.ordinal} className="queued-item" data-testid="queued-item">
           <span className="queued-ordinal">#{item.ordinal}</span>
           <span className="queued-text">{item.text}</span>
         </div>

@@ -9,6 +9,7 @@ import {
   turnSnapshotSchema,
   type ChatMessage,
   type QueuedInput,
+  type RuntimeKind,
   type TaskSummary,
   type TurnEvent,
   type TurnSnapshot,
@@ -158,6 +159,19 @@ const migrations = [
         WHERE state IN ('queued', 'understanding', 'planning', 'executing', 'synthesizing', 'canceling');
     `,
   },
+  {
+    version: 3,
+    checksum: 'chat-alpha-v3-settings-runtime',
+    sql: `
+      CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO settings(key, value, updated_at)
+        VALUES ('runtime.kind', 'mock', datetime('now'));
+    `,
+  },
 ];
 
 export type StartedTurn = { turnId: string; text: string; event: TurnEvent };
@@ -174,6 +188,8 @@ export interface PersistenceClient {
   setDraft(taskId: string, draft: string): void;
   getWorkspace(taskId: string): string | null;
   setWorkspace(taskId: string, path: string): void;
+  getRuntime(): RuntimeKind;
+  setRuntime(kind: RuntimeKind): void;
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
   queueInput(
@@ -315,6 +331,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('UPDATE tasks SET workspace_path = ?, updated_at = ? WHERE id = ?')
       .run(path, new Date().toISOString(), taskId);
     if (result.changes !== 1) throw new NotFoundError('Task not found');
+  }
+
+  getRuntime(): RuntimeKind {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = 'runtime.kind'").get() as
+      { value: string } | undefined;
+    return row?.value === 'codex' ? 'codex' : 'mock';
+  }
+
+  setRuntime(kind: RuntimeKind): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.kind', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(kind, new Date().toISOString());
   }
 
   listMessages(taskId: string): ChatMessage[] {

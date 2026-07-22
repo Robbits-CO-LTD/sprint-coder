@@ -19,14 +19,17 @@ export function MessageBubble({ author, content, isStreaming = false }: Props) {
   if (author === 'user') {
     // User content is always rendered as plain text — never passed through Markdown.
     return (
-      <div className="msg msg-user">
+      <div className="msg msg-user" data-testid="user-message">
         <div className="bubble">{content}</div>
       </div>
     );
   }
 
   return (
-    <div className="msg msg-assistant">
+    <div
+      className="msg msg-assistant"
+      data-testid={isStreaming ? 'streaming-assistant-message' : 'assistant-message'}
+    >
       <span className="msg-label">Assistant</span>
       <div className={`bubble${isStreaming ? ' caret' : ''}`}>
         <Markdown content={content} />

@@ -7,6 +7,8 @@ import {
   commandEnvelopeSchema,
   commandResultSchema,
   emptyPayloadSchema,
+  runtimeSetInputSchema,
+  runtimeSettingsSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -119,6 +121,12 @@ const api: VibeApi = {
       invoke(IPC_CHANNELS.workspaceSelect, taskIdPayloadSchema, workspaceSelectionSchema, {
         taskId,
       }),
+  },
+  settings: {
+    getRuntime: () =>
+      invoke(IPC_CHANNELS.settingsGetRuntime, emptyPayloadSchema, runtimeSettingsSchema, {}),
+    setRuntime: (kind) =>
+      invoke(IPC_CHANNELS.settingsSetRuntime, runtimeSetInputSchema, z.undefined(), { kind }),
   },
   turns: {
     start: (input) =>

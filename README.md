@@ -16,3 +16,7 @@ Chatから始まり、必要になった瞬間だけ複数のAI Workerへ広が�
 ## 現在の状態
 
 3者レビュー済みの設計baseline。実装は `tasks/IMPLEMENTATION_PLAN.md` のPhase 0で、5 workstream・12実測項目の成立証拠と関連ADRを確定してから開始する。Phase 0は3–5日の調査timeboxであり、Gate未通過時はfallback、延長、No-Goのいずれかを記録する。
+
+## Codex runtimeの手動確認
+
+実CLIの確認は、隔離したuser dataで `VIBE_USER_DATA_DIR=/tmp/vibe-runtime-smoke VIBE_RUNTIME_SMOKE=codex npm start` を実行し、Settings APIでCodexを選択して短いTurnを開始する。stageが順番に進み、応答がstreamして完了すること、実行中のSteerが`STEER_UNSUPPORTED`になること、CancelでCodexの子processが残らないことを確認する（`VIBE_RUNTIME_SMOKE`は手動試験の意図を示すmarkerであり、runtime選択自体はSettings APIに保存される）。

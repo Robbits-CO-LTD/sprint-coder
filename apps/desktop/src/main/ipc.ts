@@ -17,6 +17,8 @@ import {
   chatMessageSchema,
   commandEnvelopeSchema,
   emptyPayloadSchema,
+  runtimeSetInputSchema,
+  runtimeSettingsSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -39,6 +41,7 @@ import {
   type CommandEnvelope,
   type CommandResult,
   type PublicError,
+  type RuntimeKind,
   type TurnEvent,
 } from '@vibe/contracts';
 import type { PersistenceClient, QueueTransition, StartedTurn } from './persistence';
@@ -50,6 +53,8 @@ import {
   TurnActiveError,
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
+import { RuntimeHostClient } from './runtime-host';
+import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -57,19 +62,27 @@ type PortBinding = { taskId: string; port: MessagePortMain };
 export class IpcRouter {
   private readonly ports = new Set<PortBinding>();
   private readonly mailbox = new TaskMailbox();
-  private readonly runtime: MockRuntimeAdapter;
+  private readonly mockRuntime: MockRuntimeAdapter;
+  private readonly codexRuntime: RuntimeHostClient;
+  private readonly turnRuntimes = new Map<string, RuntimeKind>();
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
   ) {
-    this.runtime = new MockRuntimeAdapter(
+    this.mockRuntime = new MockRuntimeAdapter(
       persistence,
       (event) => this.publish(event),
       240,
       (taskId, action) => this.mailbox.run(taskId, action),
-      (taskId, turnId, state) => this.finishAndAdvance(taskId, turnId, state),
+      (taskId, turnId, state) => {
+        if (this.turnRuntimes.get(turnId) === 'mock') this.finishAndAdvance(taskId, turnId, state);
+      },
+    );
+    this.codexRuntime = new RuntimeHostClient(
+      (taskId, turnId, runtimeEvent) => this.handleCodexEvent(taskId, turnId, runtimeEvent),
+      (taskId, turnId, error) => this.handleCodexFailure(taskId, turnId, error),
     );
   }
 
@@ -78,6 +91,27 @@ export class IpcRouter {
       version: app.getVersion(),
       platform: process.platform,
     }));
+    this.handle(
+      IPC_CHANNELS.settingsGetRuntime,
+      emptyPayloadSchema,
+      runtimeSettingsSchema,
+      async () => ({
+        kind: this.persistence.getRuntime(),
+        codexAvailable: await this.codexRuntime.probe(),
+      }),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetRuntime,
+      runtimeSetInputSchema,
+      z.undefined(),
+      async (input, event, envelope) => {
+        if (input.kind === 'codex' && !(await this.codexRuntime.probe()))
+          throw new RuntimeUnavailableError();
+        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetRuntime, () =>
+          this.persistence.setRuntime(input.kind),
+        ).value;
+      },
+    );
     this.handle(IPC_CHANNELS.tasksList, emptyPayloadSchema, z.array(taskSummarySchema), () =>
       this.persistence.listTasks(),
     );
@@ -245,6 +279,8 @@ export class IpcRouter {
       turnSteerInputSchema,
       z.undefined(),
       (input, event, envelope) => {
+        if (this.turnRuntimes.get(input.expectedTurnId) === 'codex')
+          throw new SteerUnsupportedError();
         const result = this.runMutation(
           event,
           envelope,
@@ -252,7 +288,7 @@ export class IpcRouter {
           IPC_CHANNELS.turnsSteer,
           () => this.persistence.steerTurn(input.taskId, input.text, input.expectedTurnId),
         );
-        if (result.executed) this.runtime.steer(input.expectedTurnId, input.text);
+        if (result.executed) this.mockRuntime.steer(input.expectedTurnId, input.text);
         return result.value;
       },
     );
@@ -277,7 +313,7 @@ export class IpcRouter {
           },
         );
         if (result.executed) {
-          if (canceledTurnId !== null) this.runtime.cancel(canceledTurnId);
+          if (canceledTurnId !== null) this.cancelRuntime(input.taskId, canceledTurnId);
           if (canceledEvent !== null) this.publish(canceledEvent);
           if (started !== undefined) this.dispatchStarted(started);
         }
@@ -302,7 +338,7 @@ export class IpcRouter {
           },
         );
         if (result.executed) {
-          this.runtime.cancel(input.turnId);
+          this.cancelRuntime(input.taskId, input.turnId);
           if (canceledEvent !== null) this.publish(canceledEvent);
           this.dispatchQueueTransition(next);
         }
@@ -351,6 +387,7 @@ export class IpcRouter {
   dispose(): void {
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
+    this.codexRuntime.dispose();
   }
 
   private handle<TInput, TOutput>(
@@ -428,24 +465,75 @@ export class IpcRouter {
   }
 
   private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {
+    this.turnRuntimes.delete(turnId);
     this.publish(this.persistence.completeTurn(taskId, turnId, state));
     this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
   }
 
   private dispatchStarted(started: StartedTurn): void {
     this.publish(started.event);
-    this.runtime.start(started.event.taskId, started.turnId, started.text);
+    this.startSelectedRuntime(started);
   }
 
   private dispatchQueueTransition(transition: QueueTransition): void {
     if (transition === null) return;
     this.publish(transition.started.event);
     this.publish(transition.queueEvent);
-    this.runtime.start(
-      transition.started.event.taskId,
-      transition.started.turnId,
-      transition.started.text,
-    );
+    this.startSelectedRuntime(transition.started);
+  }
+
+  private startSelectedRuntime(started: StartedTurn): void {
+    const taskId = started.event.taskId;
+    const kind = this.persistence.getRuntime();
+    this.turnRuntimes.set(started.turnId, kind);
+    if (kind === 'mock') {
+      this.mockRuntime.start(taskId, started.turnId, started.text);
+    } else {
+      this.codexRuntime.start(
+        taskId,
+        started.turnId,
+        started.text,
+        this.persistence.getWorkspace(taskId),
+      );
+    }
+  }
+
+  private cancelRuntime(taskId: string, turnId: string): void {
+    const kind = this.turnRuntimes.get(turnId);
+    this.turnRuntimes.delete(turnId);
+    if (kind === 'codex') this.codexRuntime.cancel(taskId, turnId);
+    else this.mockRuntime.cancel(turnId);
+  }
+
+  private handleCodexEvent(
+    taskId: string,
+    turnId: string,
+    runtimeEvent: RuntimeCanonicalEvent,
+  ): void {
+    void this.mailbox
+      .run(taskId, () => {
+        if (this.turnRuntimes.get(turnId) !== 'codex') return;
+        if (runtimeEvent.type === 'stage')
+          this.publish(this.persistence.changeStage(taskId, turnId, runtimeEvent.stage));
+        else if (runtimeEvent.type === 'delta')
+          this.publish(
+            this.persistence.appendDelta(
+              taskId,
+              turnId,
+              runtimeEvent.messageId,
+              runtimeEvent.delta,
+            ),
+          );
+        else this.finishAndAdvance(taskId, turnId, 'completed');
+      })
+      .catch(() => this.handleCodexFailure(taskId, turnId, runtimeProtocolError()));
+  }
+
+  private handleCodexFailure(taskId: string, turnId: string, _error: PublicError): void {
+    void this.mailbox.run(taskId, () => {
+      if (this.turnRuntimes.get(turnId) !== 'codex') return;
+      this.finishAndAdvance(taskId, turnId, 'failed');
+    });
   }
 
   private validateSender(event: InvokeEvent): void {
@@ -497,6 +585,8 @@ export class TaskMailbox {
 }
 
 class SecurityError extends Error {}
+class RuntimeUnavailableError extends Error {}
+class SteerUnsupportedError extends Error {}
 
 function principalFor(_event: InvokeEvent): string {
   return 'local-desktop';
@@ -567,6 +657,18 @@ function toPublicError(error: unknown): PublicError {
       userMessage: '対象のTurnはすでに切り替わっています。',
       retryable: false,
     };
+  if (error instanceof SteerUnsupportedError)
+    return {
+      code: 'STEER_UNSUPPORTED',
+      userMessage: 'Codex runtimeは実行中の追加指示に対応していません。',
+      retryable: false,
+    };
+  if (error instanceof RuntimeUnavailableError)
+    return {
+      code: 'RUNTIME_UNAVAILABLE',
+      userMessage: 'Codex CLIが利用できないため、このruntimeを選択できません。',
+      retryable: false,
+    };
   if (error instanceof OperationConflictError)
     return {
       code: 'OPERATION_CONFLICT',
@@ -591,5 +693,13 @@ function toPublicError(error: unknown): PublicError {
     code: 'INTERNAL_ERROR',
     userMessage: '処理を完了できませんでした。もう一度お試しください。',
     retryable: true,
+  };
+}
+
+function runtimeProtocolError(): PublicError {
+  return {
+    code: 'RUNTIME_PROTOCOL_ERROR',
+    userMessage: 'Runtime Hostから無効なイベントを受信しました。',
+    retryable: false,
   };
 }

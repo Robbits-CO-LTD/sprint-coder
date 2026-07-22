@@ -26,7 +26,7 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v2', () => {
+  describe('SqlitePersistenceClient v3', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -144,6 +144,17 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('defaults to mock and persists the selected runtime across restart', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getRuntime()).toBe('mock');
+      persistence.setRuntime('codex');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getRuntime()).toBe('codex');
+      reopened.close();
+    });
+
     it('migrates a v1 database with duplicate active turns without crashing', () => {
       const directory = mkdtempSync(join(tmpdir(), 'vibe-migration-'));
       cleanup.push(directory);
@@ -157,7 +168,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v2 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v3 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

@@ -802,6 +802,55 @@ button {
   border-color: var(--border-subtle);
   color: var(--text-primary);
 }
+.runtime-chip-wrap {
+  position: relative;
+}
+.runtime-chip:hover {
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+}
+.runtime-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 6;
+  min-width: 220px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  animation: msgIn var(--t-quick) var(--ease-ui);
+}
+.runtime-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  gap: 1px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  text-align: left;
+}
+.runtime-menu-item:hover:not(:disabled) {
+  background: rgba(255, 244, 224, 0.06);
+}
+.runtime-menu-item.active {
+  background: rgba(227, 154, 98, 0.16);
+}
+.runtime-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.runtime-menu-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.runtime-menu-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
 .send-btn {
   margin-left: auto;
   width: 32px;

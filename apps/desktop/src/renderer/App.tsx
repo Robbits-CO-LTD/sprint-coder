@@ -49,7 +49,12 @@ export default function App() {
             <h2>Taskを選択してください</h2>
             <p>左のTask履歴から選ぶか、新しいTaskを作成して会話を始めます。</p>
             <div className="chips">
-              <button type="button" className="chip" onClick={() => void createTask()}>
+              <button
+                type="button"
+                className="chip"
+                data-testid="empty-state-create-task-button"
+                onClick={() => void createTask()}
+              >
                 ＋ 新しいTaskを作成
               </button>
             </div>

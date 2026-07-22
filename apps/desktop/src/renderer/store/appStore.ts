@@ -1,5 +1,12 @@
 import { create } from 'zustand';
-import type { ChatMessage, QueuedInput, TaskSummary, TurnEvent, TurnStage } from '../types/vibe';
+import type {
+  ChatMessage,
+  QueuedInput,
+  RuntimeKind,
+  TaskSummary,
+  TurnEvent,
+  TurnStage,
+} from '../types/vibe';
 
 export type TurnStatus =
   'running' | 'canceling' | 'completed' | 'canceled' | 'failed' | 'interrupted';
@@ -14,6 +21,8 @@ export type TurnRuntimeState = {
 };
 
 export type WorkspaceInfo = { path: string; name: string };
+
+export type RuntimeState = { kind: RuntimeKind; codexAvailable: boolean };
 
 export const STAGE_LABEL: Record<TurnStage, string> = {
   understanding: 'ユーザーの依頼を理解中',
@@ -57,12 +66,19 @@ type AppState = {
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
 
+  /** Runtime (Mock/Codex) selection surfaced by the Composer runtime chip (FR-SET-03).
+   * Defaults to Mock/unavailable until `settings.getRuntime` resolves (or forever if the
+   * backend hasn't wired the `settings` API yet — see `loadRuntime`). */
+  runtime: RuntimeState;
+
   /** Latest stage/turn-completion announcement text for the aria-live region (NFR-A11Y-03). */
   stageAnnouncement: string;
   /** Ephemeral toast for non-fatal notices (e.g. STEER_STALE). */
   toast: { id: number; message: string } | null;
 
   init(): Promise<void>;
+  loadRuntime(): Promise<void>;
+  setRuntime(kind: RuntimeKind): Promise<void>;
   selectTask(taskId: string): Promise<void>;
   createTask(): Promise<void>;
   renameTask(taskId: string, title: string): Promise<void>;
@@ -294,6 +310,7 @@ export const useAppStore = create<AppState>((set, get) => {
     draftByTask: {},
     workspaceByTask: {},
     pendingOptimisticIdByTask: {},
+    runtime: { kind: 'mock', codexAvailable: false },
     stageAnnouncement: '',
     toast: null,
 
@@ -303,6 +320,7 @@ export const useAppStore = create<AppState>((set, get) => {
         return;
       }
       set({ vibeAvailable: true, loadingTasks: true, error: null });
+      void get().loadRuntime();
       try {
         const tasks = await window.vibe.tasks.list();
         set({ tasks, loadingTasks: false, initialized: true });
@@ -312,6 +330,35 @@ export const useAppStore = create<AppState>((set, get) => {
         }
       } catch (err) {
         set({ loadingTasks: false, initialized: true, error: describeError(err) });
+      }
+    },
+
+    async loadRuntime() {
+      if (!window.vibe || typeof window.vibe.settings?.getRuntime !== 'function') return;
+      try {
+        const runtime = await window.vibe.settings.getRuntime();
+        set({ runtime });
+      } catch {
+        // Non-fatal: keep the last-known (or default) runtime state.
+      }
+    },
+
+    async setRuntime(kind: RuntimeKind) {
+      if (!window.vibe || typeof window.vibe.settings?.setRuntime !== 'function') return;
+      const previous = get().runtime;
+      if (previous.kind === kind) return;
+      set({ runtime: { ...previous, kind } });
+      try {
+        await window.vibe.settings.setRuntime(kind);
+        await get().loadRuntime();
+      } catch (err) {
+        set({ runtime: previous });
+        const code = errorCode(err);
+        if (code === 'RUNTIME_UNAVAILABLE') {
+          get().showToast('Codex CLIが見つからないため切り替えできません');
+        } else {
+          set({ error: describeError(err) });
+        }
       }
     },
 
@@ -524,10 +571,14 @@ export const useAppStore = create<AppState>((set, get) => {
         const code = errorCode(err);
         set((state) => ({
           draftByTask: { ...state.draftByTask, [taskId]: trimmed },
-          error: code === 'STEER_STALE' ? state.error : describeError(err),
+          error: code === 'STEER_STALE' || code === 'STEER_UNSUPPORTED' ? state.error : describeError(err),
         }));
         if (code === 'STEER_STALE') {
           get().showToast('Turnが切り替わったため送信し直してください');
+        } else if (code === 'STEER_UNSUPPORTED') {
+          get().showToast(
+            'Codex runtimeでは実行中の追加指示に対応していません。キュー追加を使ってください',
+          );
         }
       }
     },

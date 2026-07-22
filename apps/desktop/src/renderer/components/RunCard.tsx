@@ -31,7 +31,11 @@ export function RunCard({ turn, onStop }: { turn: TurnRuntimeState; onStop: () =
   const currentIndex = STAGE_ORDER.indexOf(turn.stage);
 
   return (
-    <div className={`run-card ${cardStateClass}${isActive ? '' : ' compact'}`}>
+    <div
+      className={`run-card ${cardStateClass}${isActive ? '' : ' compact'}`}
+      data-testid="run-card"
+      data-run-status={turn.status}
+    >
       <div className="run-head">
         <span className="run-dot" aria-hidden="true" />
         <span className="run-title">{TITLE_BY_STATUS[turn.status]}</span>
@@ -40,6 +44,7 @@ export function RunCard({ turn, onStop }: { turn: TurnRuntimeState; onStop: () =
           <button
             type="button"
             className="run-stop"
+            data-testid="run-card-stop-button"
             onClick={onStop}
             disabled={turn.status === 'canceling'}
           >

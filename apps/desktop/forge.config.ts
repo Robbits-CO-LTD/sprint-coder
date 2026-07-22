@@ -12,6 +12,7 @@ const config: ForgeConfig = {
       build: [
         { entry: 'src/main/index.ts', config: 'vite.main.config.ts' },
         { entry: 'src/preload/index.ts', config: 'vite.preload.config.ts' },
+        { entry: 'src/runtime-host/index.ts', config: 'vite.runtime-host.config.ts' },
       ],
       renderer: [{ name: 'main_window', config: 'vite.renderer.config.ts' }],
     }),

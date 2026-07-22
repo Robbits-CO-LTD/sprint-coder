@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   commandEnvelopeSchema,
+  publicErrorSchema,
+  runtimeSettingsSchema,
   taskRenameInputSchema,
   turnEventSchema,
   turnSnapshotSchema,
@@ -53,5 +55,19 @@ describe('public contracts', () => {
         queued: [{ ordinal: 1, text: 'next' }],
       }).lastSeq,
     ).toBe(3);
+  });
+
+  it('validates runtime settings and the runtime error codes', () => {
+    expect(runtimeSettingsSchema.parse({ kind: 'codex', codexAvailable: false })).toEqual({
+      kind: 'codex',
+      codexAvailable: false,
+    });
+    expect(
+      publicErrorSchema.parse({
+        code: 'STEER_UNSUPPORTED',
+        userMessage: 'unsupported',
+        retryable: false,
+      }).code,
+    ).toBe('STEER_UNSUPPORTED');
   });
 });

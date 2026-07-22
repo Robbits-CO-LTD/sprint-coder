@@ -55,7 +55,12 @@ export function Sidebar() {
 
   return (
     <nav className="sidebar" aria-label="Task履歴">
-      <button type="button" className="sb-new" onClick={() => void createTask()}>
+      <button
+        type="button"
+        className="sb-new"
+        data-testid="sidebar-new-task-button"
+        onClick={() => void createTask()}
+      >
         ＋ 新しいTask
       </button>
       <div className="sb-search">

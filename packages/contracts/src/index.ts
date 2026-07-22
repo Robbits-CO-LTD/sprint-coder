@@ -98,14 +98,40 @@ export const workspaceSelectionSchema = z
   .nullable();
 export type WorkspaceSelection = z.infer<typeof workspaceSelectionSchema>;
 
+export const publicErrorCodeSchema = z.enum([
+  'NOT_FOUND',
+  'TURN_ACTIVE',
+  'STEER_STALE',
+  'STEER_UNSUPPORTED',
+  'OPERATION_CONFLICT',
+  'OPERATION_IN_PROGRESS',
+  'FORBIDDEN',
+  'INVALID_REQUEST',
+  'RUNTIME_UNAVAILABLE',
+  'RUNTIME_CLI_MISSING',
+  'RUNTIME_FAILED',
+  'RUNTIME_TIMEOUT',
+  'RUNTIME_PROTOCOL_ERROR',
+  'INTERNAL_ERROR',
+]);
+export type PublicErrorCode = z.infer<typeof publicErrorCodeSchema>;
+
 export const publicErrorSchema = z
   .object({
-    code: z.string().min(1).max(80),
+    code: publicErrorCodeSchema,
     userMessage: z.string().min(1).max(500),
     retryable: z.boolean(),
   })
   .strict();
 export type PublicError = z.infer<typeof publicErrorSchema>;
+
+export const runtimeKindSchema = z.enum(['mock', 'codex']);
+export type RuntimeKind = z.infer<typeof runtimeKindSchema>;
+export const runtimeSettingsSchema = z
+  .object({ kind: runtimeKindSchema, codexAvailable: z.boolean() })
+  .strict();
+export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;
+export const runtimeSetInputSchema = z.object({ kind: runtimeKindSchema }).strict();
 
 export const commandEnvelopeSchema = <T extends z.ZodType>(payload: T) =>
   z
@@ -196,6 +222,10 @@ export interface VibeApi {
     get(taskId: string): Promise<WorkspaceSelection>;
     select(taskId: string): Promise<WorkspaceSelection>;
   };
+  settings: {
+    getRuntime(): Promise<{ kind: 'mock' | 'codex'; codexAvailable: boolean }>;
+    setRuntime(kind: 'mock' | 'codex'): Promise<void>;
+  };
   turns: {
     start(input: { taskId: string; text: string }): Promise<{ turnId: string }>;
     queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
@@ -224,6 +254,8 @@ export const IPC_CHANNELS = {
   tasksSetDraft: 'vibe:tasks:set-draft',
   workspaceGet: 'vibe:workspace:get',
   workspaceSelect: 'vibe:workspace:select',
+  settingsGetRuntime: 'vibe:settings:get-runtime',
+  settingsSetRuntime: 'vibe:settings:set-runtime',
   turnsStart: 'vibe:turns:start',
   turnsQueue: 'vibe:turns:queue',
   turnsSteer: 'vibe:turns:steer',

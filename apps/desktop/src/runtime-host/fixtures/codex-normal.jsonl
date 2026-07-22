@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"thread-1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"reasoning-1","type":"reasoning","text":"internal summary"}}
+{"type":"item.started","item":{"id":"command-1","type":"command_execution","command":"pwd"}}
+{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"Canonical answer."}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":4}}
