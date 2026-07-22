@@ -44,6 +44,7 @@ import {
   type RuntimeKind,
   type TurnEvent,
 } from '@vibe/contracts';
+import type { PreparedContext } from './context-ledger';
 import type { PersistenceClient, QueueTransition, StartedTurn } from './persistence';
 import {
   NotFoundError,
@@ -500,9 +501,10 @@ export class IpcRouter {
     }
   }
 
-  private prepareContext(taskId: string, turnId: string): void {
+  private prepareContext(taskId: string, turnId: string): PreparedContext {
     const prepared = this.persistence.prepareContext(taskId, turnId);
     for (const event of prepared.usageEvents) this.publish(event);
+    return prepared;
   }
 
   private cancelRuntime(taskId: string, turnId: string): void {

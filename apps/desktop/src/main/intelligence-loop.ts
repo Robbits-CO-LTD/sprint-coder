@@ -1,0 +1,190 @@
+import type { IntelligenceStepState, ReasoningEffort, StepSnapshot } from '@vibe/domain';
+import {
+  ContextCompiler,
+  digestCanonical,
+  type ToolTranscriptItem,
+  type WorldState,
+} from './context-compiler';
+import type { ContextFragment } from './context-ledger';
+
+export type ToolCatalogEntry = {
+  toolId: string;
+  providerName: string;
+  version: string;
+  kind: 'pure';
+  inputSchemaDigest: string;
+};
+
+export const MOCK_TOOL_CATALOG: readonly ToolCatalogEntry[] = Object.freeze([
+  Object.freeze({
+    toolId: 'builtin:mock.echo@1',
+    providerName: 'mock_echo',
+    version: '1',
+    kind: 'pure' as const,
+    inputSchemaDigest: digestCanonical({ type: 'object', required: ['text'], text: 'string' }),
+  }),
+]);
+
+export const MOCK_TOOL_CATALOG_DIGEST = digestCanonical(MOCK_TOOL_CATALOG);
+
+export type ModelToolCall = {
+  callId: string;
+  toolName: string;
+  arguments: unknown;
+};
+
+export type ModelSample =
+  { kind: 'final'; text: string } | { kind: 'tool-calls'; calls: readonly ModelToolCall[] };
+
+export type ModelSampler = (input: {
+  stepOrdinal: number;
+  compiledContextDigest: string;
+  transcript: readonly ToolTranscriptItem[];
+}) => Promise<ModelSample> | ModelSample;
+
+export type ToolExecutor = (call: ModelToolCall) => Promise<string> | string;
+
+export type IntelligenceStepRecorder = {
+  createIntelligenceStep(input: {
+    taskId: string;
+    turnId: string;
+    model: string;
+    effort: ReasoningEffort;
+    contextDigest: string;
+    toolCatalogDigest: string;
+    policyEpoch: number;
+    workspaceRevision: string;
+    contractRevision: number | null;
+  }): Promise<StepSnapshot> | StepSnapshot;
+  transitionIntelligenceStep(stepId: string, state: IntelligenceStepState): Promise<void> | void;
+};
+
+export type IntelligenceLoopInput = {
+  taskId: string;
+  turnId: string;
+  fragments: readonly ContextFragment[];
+  model: string;
+  effort: ReasoningEffort;
+  policyEpoch: number;
+  workspaceRevision: string;
+  contractRevision: number | null;
+  sample: ModelSampler;
+  executeTool: ToolExecutor;
+  recorder?: IntelligenceStepRecorder;
+  maxSteps?: number;
+};
+
+export type IntelligenceLoopResult = {
+  text: string;
+  stepCount: number;
+  toolCallCount: number;
+  transcript: ToolTranscriptItem[];
+};
+
+export async function runIntelligenceLoop(
+  input: IntelligenceLoopInput,
+): Promise<IntelligenceLoopResult> {
+  const compiler = new ContextCompiler();
+  const transcript: ToolTranscriptItem[] = [];
+  const maxSteps = input.maxSteps ?? 8;
+  let toolCallCount = 0;
+  let previousWorldState: WorldState = {};
+  const worldState: WorldState = {
+    policyEpoch: input.policyEpoch,
+    workspaceRevision: input.workspaceRevision,
+  };
+
+  for (let ordinal = 1; ordinal <= maxSteps; ordinal += 1) {
+    const compiled = compiler.compile({
+      fragments: input.fragments,
+      toolTranscript: transcript,
+      previousWorldState,
+      worldState,
+    });
+    previousWorldState = worldState;
+    const snapshot =
+      input.recorder === undefined
+        ? undefined
+        : await input.recorder.createIntelligenceStep({
+            taskId: input.taskId,
+            turnId: input.turnId,
+            model: input.model,
+            effort: input.effort,
+            contextDigest: compiled.digest,
+            toolCatalogDigest: MOCK_TOOL_CATALOG_DIGEST,
+            policyEpoch: input.policyEpoch,
+            workspaceRevision: input.workspaceRevision,
+            contractRevision: input.contractRevision,
+          });
+    const transition = async (state: IntelligenceStepState): Promise<void> => {
+      if (snapshot !== undefined)
+        await input.recorder?.transitionIntelligenceStep(snapshot.stepId, state);
+    };
+
+    try {
+      await transition('sampling');
+      const sampled = await input.sample({
+        stepOrdinal: ordinal,
+        compiledContextDigest: compiled.digest,
+        transcript,
+      });
+      await transition('sampled');
+      if (sampled.kind === 'final') {
+        await transition('completed');
+        return { text: sampled.text, stepCount: ordinal, toolCallCount, transcript };
+      }
+
+      await transition('dispatching');
+      const results = await Promise.all(
+        sampled.calls.map(async (call) => ({ call, content: await input.executeTool(call) })),
+      );
+      for (const { call, content } of results) {
+        transcript.push({
+          type: 'tool-call',
+          callId: call.callId,
+          toolName: call.toolName,
+          arguments: call.arguments,
+        });
+        transcript.push({ type: 'tool-result', callId: call.callId, content, isError: false });
+      }
+      toolCallCount += sampled.calls.length;
+      await transition('toolsCommitted');
+      await transition('completed');
+    } catch (error) {
+      await transition('failed');
+      throw error;
+    }
+  }
+  throw new Error(`Intelligence loop exceeded ${maxSteps} steps`);
+}
+
+export function createDeterministicMockSampler(
+  input: string,
+  finalText: string,
+  mode: 'answer-only' | 'mock-tool' = 'mock-tool',
+): ModelSampler {
+  return ({ transcript }) => {
+    if (mode === 'answer-only' || transcript.length > 0) return { kind: 'final', text: finalText };
+    return {
+      kind: 'tool-calls',
+      calls: [
+        {
+          callId: `mock-${digestCanonical(input).slice(0, 16)}`,
+          toolName: 'mock_echo',
+          arguments: { text: input },
+        },
+      ],
+    };
+  };
+}
+
+export const deterministicMockToolExecutor: ToolExecutor = (call) => {
+  if (call.toolName !== 'mock_echo') throw new Error(`Unknown mock tool: ${call.toolName}`);
+  if (
+    typeof call.arguments !== 'object' ||
+    call.arguments === null ||
+    typeof (call.arguments as { text?: unknown }).text !== 'string'
+  )
+    throw new Error('mock_echo requires a string text argument');
+  return (call.arguments as { text: string }).text;
+};

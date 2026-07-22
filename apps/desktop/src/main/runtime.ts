@@ -1,13 +1,30 @@
 import { randomUUID } from 'node:crypto';
 import type { TurnEvent, TurnStage } from '@vibe/contracts';
 import type { PersistenceClient } from './persistence';
+import type { PreparedContext } from './context-ledger';
+import { digestCanonical } from './context-compiler';
+import {
+  createDeterministicMockSampler,
+  deterministicMockToolExecutor,
+  runIntelligenceLoop,
+  type IntelligenceStepRecorder,
+} from './intelligence-loop';
 
 type Publish = (event: TurnEvent) => void;
-type Serialize = (taskId: string, action: () => void) => Promise<void>;
+type Serialize = <T>(taskId: string, action: () => T) => Promise<T>;
 type Terminal = (taskId: string, turnId: string, state: 'completed' | 'failed') => void;
-type PrepareContext = (taskId: string, turnId: string) => void;
-type ActiveTurn = { canceled: boolean; steering: string[] };
-type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' | 'completeTurn'>;
+type PrepareContext = (taskId: string, turnId: string) => PreparedContext | void;
+type ActiveTurn = { canceled: boolean; steering: string[]; context: PreparedContext | undefined };
+type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' | 'completeTurn'> &
+  Partial<
+    Pick<
+      PersistenceClient,
+      | 'getWorkspace'
+      | 'createIntelligenceStep'
+      | 'transitionIntelligenceStep'
+      | 'listIntelligenceSteps'
+    >
+  >;
 
 const stages: TurnStage[] = ['understanding', 'planning', 'executing', 'synthesizing'];
 
@@ -24,8 +41,12 @@ export class MockRuntimeAdapter {
   ) {}
 
   start(taskId: string, turnId: string, input: string): void {
-    this.prepareContext?.(taskId, turnId);
-    const control: ActiveTurn = { canceled: false, steering: [] };
+    const context = this.prepareContext?.(taskId, turnId);
+    const control: ActiveTurn = {
+      canceled: false,
+      steering: [],
+      context: context === undefined ? undefined : context,
+    };
     this.active.set(turnId, control);
     void this.run(taskId, turnId, input, control);
   }
@@ -55,8 +76,23 @@ export class MockRuntimeAdapter {
         );
       }
 
+      const workspacePath = this.persistence.getWorkspace?.(taskId) ?? null;
+      const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
+      const loop = await runIntelligenceLoop({
+        taskId,
+        turnId,
+        fragments: control.context?.fragments ?? [],
+        model: 'mock-v1',
+        effort: 'low',
+        policyEpoch: 0,
+        workspaceRevision: `untracked:${digestCanonical({ workspacePath })}`,
+        contractRevision: null,
+        sample: createDeterministicMockSampler(input, buildReply(input)),
+        executeTool: deterministicMockToolExecutor,
+        ...(recorder === undefined ? {} : { recorder }),
+      });
       const messageId = randomUUID();
-      const chunks = chunkReply(buildReply(input));
+      const chunks = chunkReply(loop.text);
       while (chunks.length > 0 || control.steering.length > 0) {
         if (chunks.length === 0) {
           const instruction = control.steering.shift();
@@ -95,6 +131,21 @@ export class MockRuntimeAdapter {
       else this.publish(this.persistence.completeTurn(taskId, turnId, state));
     });
   }
+}
+
+function intelligenceRecorder(
+  persistence: RuntimePersistence,
+  serialize: Serialize,
+  taskId: string,
+): IntelligenceStepRecorder | undefined {
+  const create = persistence.createIntelligenceStep;
+  const transition = persistence.transitionIntelligenceStep;
+  if (create === undefined || transition === undefined) return undefined;
+  return {
+    createIntelligenceStep: (input) => serialize(taskId, () => create.call(persistence, input)),
+    transitionIntelligenceStep: (stepId, state) =>
+      serialize(taskId, () => transition.call(persistence, stepId, state)),
+  };
 }
 
 function buildReply(input: string): string {

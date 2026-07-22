@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { canTransitionTurn, reduceTurn, transitionTurn, turnStates, type TurnState } from './index';
+import {
+  canTransitionTurn,
+  InvalidIntelligenceStepTransitionError,
+  reduceTurn,
+  transitionIntelligenceStep,
+  transitionTurn,
+  turnStates,
+  type TurnState,
+} from './index';
 
 const valid: Record<TurnState, readonly TurnState[]> = {
   queued: ['understanding', 'canceling', 'failed', 'interrupted'],
@@ -29,4 +37,24 @@ describe('Turn state machine', () => {
       });
     }
   }
+});
+
+describe('intelligence step state machine', () => {
+  it('supports a final answer without a tool dispatch', () => {
+    expect(transitionIntelligenceStep('prepared', 'sampling')).toBe('sampling');
+    expect(transitionIntelligenceStep('sampling', 'sampled')).toBe('sampled');
+    expect(transitionIntelligenceStep('sampled', 'completed')).toBe('completed');
+  });
+
+  it('supports a committed tool result before completion', () => {
+    expect(transitionIntelligenceStep('sampled', 'dispatching')).toBe('dispatching');
+    expect(transitionIntelligenceStep('dispatching', 'toolsCommitted')).toBe('toolsCommitted');
+    expect(transitionIntelligenceStep('toolsCommitted', 'completed')).toBe('completed');
+  });
+
+  it('rejects replaying a completed step', () => {
+    expect(() => transitionIntelligenceStep('completed', 'sampling')).toThrow(
+      InvalidIntelligenceStepTransitionError,
+    );
+  });
 });

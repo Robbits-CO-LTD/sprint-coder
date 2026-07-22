@@ -26,7 +26,7 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v4', () => {
+  describe('SqlitePersistenceClient v5', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -202,6 +202,52 @@ if (runsWithElectronAbi)
       db.close();
     });
 
+    it('persists immutable intelligence step snapshots in turn order', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'step snapshot');
+      const first = persistence.createIntelligenceStep({
+        taskId: task.id,
+        turnId: turn.turnId,
+        model: 'mock-v1',
+        effort: 'low',
+        contextDigest: 'a'.repeat(64),
+        toolCatalogDigest: 'b'.repeat(64),
+        policyEpoch: 0,
+        workspaceRevision: 'workspace-v1',
+        contractRevision: null,
+      });
+      persistence.transitionIntelligenceStep(first.stepId, 'sampling');
+      persistence.transitionIntelligenceStep(first.stepId, 'sampled');
+      persistence.transitionIntelligenceStep(first.stepId, 'completed');
+      const second = persistence.createIntelligenceStep({
+        taskId: task.id,
+        turnId: turn.turnId,
+        model: 'mock-v1',
+        effort: 'low',
+        contextDigest: 'c'.repeat(64),
+        toolCatalogDigest: 'b'.repeat(64),
+        policyEpoch: 1,
+        workspaceRevision: 'workspace-v2',
+        contractRevision: 2,
+      });
+
+      expect(persistence.listIntelligenceSteps(turn.turnId)).toEqual([
+        first,
+        { ...second, ordinal: 2 },
+      ]);
+      persistence.close();
+
+      const db = new Database(path, { readonly: true });
+      expect(
+        db.prepare('SELECT ordinal, state FROM intelligence_steps ORDER BY ordinal').all(),
+      ).toEqual([
+        { ordinal: 1, state: 'completed' },
+        { ordinal: 2, state: 'prepared' },
+      ]);
+      db.close();
+    });
+
     it('migrates a v1 database with duplicate active turns without crashing', () => {
       const directory = mkdtempSync(join(tmpdir(), 'vibe-migration-'));
       cleanup.push(directory);
@@ -216,7 +262,7 @@ if (runsWithElectronAbi)
       const migrated = new Database(path, { readonly: true });
       expect(
         migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all(),
-      ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+      ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }]);
       expect(
         migrated
           .prepare('PRAGMA table_info(context_fragments)')
@@ -232,11 +278,32 @@ if (runsWithElectronAbi)
         'superseded_by_compaction_id',
         'message_id',
       ]);
+      expect(
+        migrated
+          .prepare('PRAGMA table_info(intelligence_steps)')
+          .all()
+          .map((column) => (column as { name: string }).name),
+      ).toEqual([
+        'id',
+        'task_id',
+        'turn_id',
+        'ordinal',
+        'state',
+        'model',
+        'effort',
+        'context_digest',
+        'tool_catalog_digest',
+        'policy_epoch',
+        'workspace_revision',
+        'contract_revision',
+        'created_at',
+        'updated_at',
+      ]);
       migrated.close();
     });
   });
 else
-  describe('SqlitePersistenceClient v4 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v5 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

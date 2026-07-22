@@ -19,6 +19,18 @@ Wave 2(完了 2026-07-22):
   2. CI実走 — GitHub remote未設定のため未実行
 - 意図的延期: Slice 3.6 Intelligence Loop baseline(Phase 4のtool loopと不可分のためPhase 4冒頭へ)、MessagePort以外のSlice 1.2完遂項目は完了済み
 
+## Phase 4 実装進捗(2026-07-22)
+
+- [x] Phase 4冒頭 / Slice 3.6 Intelligence Loop baseline
+  - `intelligence_steps` migration v5とimmutable StepSnapshot(model/effort/context・tool digest/policy epoch/workspace・contract revision)を追加
+  - Step lifecycle(`prepared→sampling→sampled→dispatching→toolsCommitted→completed`)をdomain state machineとSQLiteで強制
+  - Context Compiler minimum(workspace rule authority、world-state diff、history authority正規化、tool call/result pairを壊さないtrim)を追加
+  - MockRuntimeを同一Turn内の`model→mock_echo→result→model` 2-Step loopへ接続。production Codex adapterのread-only profileは変更なし
+  - answer-only/mock-tool 2-case corpus runner骨格と比較用digest/metricを追加。coding 30-case gateはSlice 4.7
+  - workspaceの内容revisionはまだ追跡不能なためStepSnapshotへ`untracked:<canonical workspace identity digest>`を明示保存。FileRevisionToken/実revisionはSlice 4.7
+  - 検証: typecheck/test(125件)/lint/format/E2E 4本 green、既存forge dev起動とE2E Electron実起動でsmoke済み
+- [ ] Slice 4.1 PermissionBroker
+
 ---
 
 # Chat Alpha骨格 実装TODO(commander運用)

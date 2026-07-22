@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TurnEvent, TurnStage } from '@vibe/contracts';
+import type { IntelligenceStepState, ReasoningEffort, StepSnapshot } from '@vibe/domain';
 import type { PersistenceClient } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
 
@@ -11,6 +12,8 @@ class FakePersistence implements Pick<
   state: 'queued' | TurnStage | 'completed' | 'canceled' = 'queued';
   content = '';
   seq = 1;
+  readonly steps: StepSnapshot[] = [];
+  readonly stepTransitions = new Map<string, IntelligenceStepState[]>();
 
   changeStage(taskId: string, turnId: string, stage: TurnStage): TurnEvent {
     this.state = stage;
@@ -38,6 +41,33 @@ class FakePersistence implements Pick<
     return this.record({ type: 'turn.completed', taskId, turnId, seq: ++this.seq, state });
   }
 
+  createIntelligenceStep(input: {
+    taskId: string;
+    turnId: string;
+    model: string;
+    effort: ReasoningEffort;
+    contextDigest: string;
+    toolCatalogDigest: string;
+    policyEpoch: number;
+    workspaceRevision: string;
+    contractRevision: number | null;
+  }): StepSnapshot {
+    const stepId = `step-${this.steps.length + 1}`;
+    const snapshot = {
+      stepId,
+      ordinal: this.steps.length + 1,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      ...input,
+    };
+    this.steps.push(snapshot);
+    this.stepTransitions.set(stepId, []);
+    return snapshot;
+  }
+
+  transitionIntelligenceStep(stepId: string, state: IntelligenceStepState): void {
+    this.stepTransitions.get(stepId)?.push(state);
+  }
+
   private record<T extends TurnEvent>(event: T): T {
     this.events.push(event);
     return event;
@@ -55,7 +85,9 @@ describe('MockRuntimeAdapter', () => {
       1,
       undefined,
       undefined,
-      (taskId, turnId) => prepared.push(`${taskId}:${turnId}`),
+      (taskId, turnId) => {
+        prepared.push(`${taskId}:${turnId}`);
+      },
     );
     runtime.start('task', 'turn', '同じ入力');
     await waitFor(() => persistence.state === 'completed');
@@ -70,6 +102,9 @@ describe('MockRuntimeAdapter', () => {
     ).toBeGreaterThanOrEqual(20);
     expect(persistence.content).toContain('同じ入力');
     expect(prepared).toEqual(['task:turn']);
+    expect(persistence.steps).toHaveLength(2);
+    expect(persistence.stepTransitions.get('step-1')).toContain('toolsCommitted');
+    expect(persistence.stepTransitions.get('step-2')).not.toContain('dispatching');
     expect(published.at(-1)).toMatchObject({ type: 'turn.completed', state: 'completed' });
     expect(published.map((event) => event.seq)).toEqual(
       [...published.map((event) => event.seq)].sort((a, b) => a - b),

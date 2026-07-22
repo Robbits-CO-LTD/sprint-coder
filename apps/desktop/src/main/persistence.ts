@@ -16,7 +16,14 @@ import {
   type TurnSnapshot,
   type TurnStage,
 } from '@vibe/contracts';
-import { transitionTurn, type TurnState } from '@vibe/domain';
+import {
+  transitionIntelligenceStep,
+  transitionTurn,
+  type IntelligenceStepState,
+  type ReasoningEffort,
+  type StepSnapshot,
+  type TurnState,
+} from '@vibe/domain';
 import {
   ContextLedger,
   defaultContextUsage,
@@ -54,6 +61,21 @@ type TurnRow = {
 };
 type QueueRow = { ordinal: number; payload_json: string };
 type OperationRow = { request_hash: string; state: string; result_json: string | null };
+type IntelligenceStepRow = {
+  id: string;
+  task_id: string;
+  turn_id: string;
+  ordinal: number;
+  state: IntelligenceStepState;
+  model: string;
+  effort: ReasoningEffort;
+  context_digest: string;
+  tool_catalog_digest: string;
+  policy_epoch: number;
+  workspace_revision: string;
+  contract_revision: number | null;
+  created_at: string;
+};
 type EventWithoutSeq = TurnEvent extends infer Event
   ? Event extends TurnEvent
     ? Omit<Event, 'seq'>
@@ -201,6 +223,32 @@ const migrations = [
         ON context_fragments(message_id) WHERE message_id IS NOT NULL;
     `,
   },
+  {
+    version: 5,
+    checksum: 'intelligence-baseline-v5-step-snapshots',
+    sql: `
+      CREATE TABLE intelligence_steps (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+        state TEXT NOT NULL CHECK (state IN (
+          'prepared', 'sampling', 'sampled', 'dispatching', 'toolsCommitted', 'completed', 'failed'
+        )),
+        model TEXT NOT NULL,
+        effort TEXT NOT NULL CHECK (effort IN ('low', 'medium', 'high')),
+        context_digest TEXT NOT NULL CHECK (length(context_digest) = 64),
+        tool_catalog_digest TEXT NOT NULL CHECK (length(tool_catalog_digest) = 64),
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        workspace_revision TEXT NOT NULL,
+        contract_revision INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(turn_id, ordinal)
+      );
+      CREATE INDEX intelligence_steps_turn_idx ON intelligence_steps(turn_id, ordinal);
+    `,
+  },
 ];
 
 export type StartedTurn = { turnId: string; text: string; event: TurnEvent };
@@ -239,6 +287,19 @@ export interface PersistenceClient {
   cancelTurn(taskId: string, turnId: string): TurnEvent | null;
   snapshot(taskId: string): TurnSnapshot;
   prepareContext(taskId: string, turnId: string): PreparedContext;
+  createIntelligenceStep(input: {
+    taskId: string;
+    turnId: string;
+    model: string;
+    effort: ReasoningEffort;
+    contextDigest: string;
+    toolCatalogDigest: string;
+    policyEpoch: number;
+    workspaceRevision: string;
+    contractRevision: number | null;
+  }): StepSnapshot;
+  transitionIntelligenceStep(stepId: string, state: IntelligenceStepState): void;
+  listIntelligenceSteps(turnId: string): StepSnapshot[];
   listEventsAfter(taskId: string, afterSeq: number): TurnEvent[];
   executeOperation<T>(
     principal: string,
@@ -567,6 +628,80 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   prepareContext(taskId: string, turnId: string): PreparedContext {
     return this.db.transaction(() => this.contextLedger.prepare(taskId, turnId))();
+  }
+
+  createIntelligenceStep(input: {
+    taskId: string;
+    turnId: string;
+    model: string;
+    effort: ReasoningEffort;
+    contextDigest: string;
+    toolCatalogDigest: string;
+    policyEpoch: number;
+    workspaceRevision: string;
+    contractRevision: number | null;
+  }): StepSnapshot {
+    return this.db.transaction(() => {
+      this.getTurn(input.taskId, input.turnId);
+      const ordinal = (
+        this.db
+          .prepare(
+            'SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM intelligence_steps WHERE turn_id = ?',
+          )
+          .get(input.turnId) as { ordinal: number }
+      ).ordinal;
+      const now = new Date().toISOString();
+      const snapshot: StepSnapshot = {
+        stepId: randomUUID(),
+        ordinal,
+        createdAt: now,
+        ...input,
+      };
+      this.db
+        .prepare(
+          `INSERT INTO intelligence_steps(
+            id, task_id, turn_id, ordinal, state, model, effort, context_digest,
+            tool_catalog_digest, policy_epoch, workspace_revision, contract_revision, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'prepared', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          snapshot.stepId,
+          snapshot.taskId,
+          snapshot.turnId,
+          snapshot.ordinal,
+          snapshot.model,
+          snapshot.effort,
+          snapshot.contextDigest,
+          snapshot.toolCatalogDigest,
+          snapshot.policyEpoch,
+          snapshot.workspaceRevision,
+          snapshot.contractRevision,
+          now,
+          now,
+        );
+      return snapshot;
+    })();
+  }
+
+  transitionIntelligenceStep(stepId: string, state: IntelligenceStepState): void {
+    this.db.transaction(() => {
+      const row = this.db
+        .prepare('SELECT state FROM intelligence_steps WHERE id = ?')
+        .get(stepId) as { state: IntelligenceStepState } | undefined;
+      if (row === undefined) throw new NotFoundError('Intelligence step not found');
+      transitionIntelligenceStep(row.state, state);
+      this.db
+        .prepare('UPDATE intelligence_steps SET state = ?, updated_at = ? WHERE id = ?')
+        .run(state, new Date().toISOString(), stepId);
+    })();
+  }
+
+  listIntelligenceSteps(turnId: string): StepSnapshot[] {
+    return (
+      this.db
+        .prepare('SELECT * FROM intelligence_steps WHERE turn_id = ? ORDER BY ordinal')
+        .all(turnId) as IntelligenceStepRow[]
+    ).map(toStepSnapshot);
   }
 
   listEventsAfter(taskId: string, afterSeq: number): TurnEvent[] {
@@ -935,6 +1070,23 @@ function toMessage(row: MessageRow): ChatMessage {
     content: row.content,
     createdAt: row.created_at,
   });
+}
+
+function toStepSnapshot(row: IntelligenceStepRow): StepSnapshot {
+  return {
+    stepId: row.id,
+    taskId: row.task_id,
+    turnId: row.turn_id,
+    ordinal: row.ordinal,
+    model: row.model,
+    effort: row.effort,
+    contextDigest: row.context_digest,
+    toolCatalogDigest: row.tool_catalog_digest,
+    policyEpoch: row.policy_epoch,
+    workspaceRevision: row.workspace_revision,
+    contractRevision: row.contract_revision,
+    createdAt: row.created_at,
+  };
 }
 
 function isTerminal(state: TurnState): boolean {

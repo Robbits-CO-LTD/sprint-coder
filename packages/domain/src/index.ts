@@ -47,3 +47,60 @@ export type TurnReducerEvent = { type: 'state.transitioned'; state: TurnState };
 export function reduceTurn(state: TurnState, event: TurnReducerEvent): TurnState {
   return transitionTurn(state, event.state);
 }
+
+export const intelligenceStepStates = [
+  'prepared',
+  'sampling',
+  'sampled',
+  'dispatching',
+  'toolsCommitted',
+  'completed',
+  'failed',
+] as const;
+
+export type IntelligenceStepState = (typeof intelligenceStepStates)[number];
+
+const intelligenceStepTransitions: Readonly<
+  Record<IntelligenceStepState, readonly IntelligenceStepState[]>
+> = {
+  prepared: ['sampling', 'failed'],
+  sampling: ['sampled', 'failed'],
+  sampled: ['dispatching', 'completed', 'failed'],
+  dispatching: ['toolsCommitted', 'failed'],
+  toolsCommitted: ['completed', 'failed'],
+  completed: [],
+  failed: [],
+};
+
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+
+export type StepSnapshot = {
+  stepId: string;
+  taskId: string;
+  turnId: string;
+  ordinal: number;
+  model: string;
+  effort: ReasoningEffort;
+  contextDigest: string;
+  toolCatalogDigest: string;
+  policyEpoch: number;
+  workspaceRevision: string;
+  contractRevision: number | null;
+  createdAt: string;
+};
+
+export class InvalidIntelligenceStepTransitionError extends Error {
+  constructor(from: IntelligenceStepState, to: IntelligenceStepState) {
+    super(`Invalid intelligence step transition: ${from} -> ${to}`);
+    this.name = 'InvalidIntelligenceStepTransitionError';
+  }
+}
+
+export function transitionIntelligenceStep(
+  from: IntelligenceStepState,
+  to: IntelligenceStepState,
+): IntelligenceStepState {
+  if (!intelligenceStepTransitions[from].includes(to))
+    throw new InvalidIntelligenceStepTransitionError(from, to);
+  return to;
+}
