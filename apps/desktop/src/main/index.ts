@@ -18,7 +18,13 @@ protocol.registerSchemesAsPrivileged([
 ]);
 app.enableSandbox();
 
-if (isDevelopment) app.setPath('userData', resolve(process.cwd(), '.vite-user-data'));
+const userDataOverride = process.env['VIBE_USER_DATA_DIR'];
+if (userDataOverride !== undefined && userDataOverride.length > 0) {
+  // E2E and diagnostics isolate their state (and the single-instance lock) per directory.
+  app.setPath('userData', resolve(userDataOverride));
+} else if (isDevelopment) {
+  app.setPath('userData', resolve(process.cwd(), '.vite-user-data'));
+}
 
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) {
