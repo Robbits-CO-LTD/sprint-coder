@@ -17,6 +17,7 @@ import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { ToolBroker } from './tool-broker';
 import {
   OperationConflictError,
+  SqliteEditSagaLeaseGuard,
   SqlitePersistenceClient,
   SteerStaleError,
   TurnActiveError,
@@ -38,6 +39,13 @@ import {
   type EditArtifactOwner,
   type EditArtifactRef,
 } from './edit-artifact-store';
+import {
+  MutationClockRollbackError,
+  MutationLeaseBusyError,
+  MutationLeaseStaleError,
+  MutationQuarantinedError,
+  mutationWorkspaceKey,
+} from './mutation-lease';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.VIBE_ELECTRON_DB_TEST === '1';
@@ -51,6 +59,17 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
   cleanup.push(directory);
   const path = join(directory, 'test.sqlite3');
   return { persistence: new SqlitePersistenceClient(path), path };
+}
+
+function bindMutationWorkspace(
+  persistence: SqlitePersistenceClient,
+  taskId: string,
+  path: string,
+  rootIdentityDigest: string,
+): string {
+  const workspaceKey = mutationWorkspaceKey(path, rootIdentityDigest);
+  persistence.setWorkspaceBinding(taskId, { path, workspaceKey, rootIdentityDigest });
+  return workspaceKey;
 }
 
 class PersistenceTestArtifacts implements EditArtifactRepository {
@@ -113,7 +132,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v19', () => {
+  describe('SqlitePersistenceClient v22', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -520,6 +539,916 @@ if (runsWithElectronAbi)
         [],
       );
       reopenedPersistence.close();
+    });
+
+    it('fences concurrent workspace mutation leases across SQLite clients', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/shared',
+        'a'.repeat(64),
+      );
+      const turn = persistence.startTurn(task.id, 'lease test');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'lease-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'lease-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const base = {
+        workspaceKey,
+        rootIdentityDigest: 'a'.repeat(64),
+        taskId: task.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        purpose: 'forward' as const,
+        policyEpoch: 0,
+        intentDigest: saga.planDigest,
+        now: '2026-07-23T00:00:01.000Z',
+        expiresAt: '2026-07-23T00:01:01.000Z',
+      };
+      const first = persistence.acquireMutationLease({ ...base, holderInstanceId: 'instance-a' });
+      const secondClient = new SqlitePersistenceClient(path);
+      expect(() =>
+        secondClient.acquireMutationLease({ ...base, holderInstanceId: 'instance-b' }),
+      ).toThrow(MutationLeaseBusyError);
+      persistence.releaseMutationLease(first, '2026-07-23T00:00:02.000Z');
+
+      const second = secondClient.acquireMutationLease({
+        ...base,
+        holderInstanceId: 'instance-b',
+        now: '2026-07-23T00:00:03.000Z',
+        expiresAt: '2026-07-23T00:01:03.000Z',
+      });
+      expect(second.fence).toBeGreaterThan(first.fence);
+      expect(() => persistence.releaseMutationLease(first, '2026-07-23T00:00:04.000Z')).toThrow(
+        MutationLeaseStaleError,
+      );
+      secondClient.releaseMutationLease(second, '2026-07-23T00:00:05.000Z');
+      secondClient.close();
+      persistence.close();
+    });
+
+    it('allows only one concurrent Edit Saga executor to reach the effect boundary', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const rootIdentityDigest = '9'.repeat(64);
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/executor',
+        rootIdentityDigest,
+      );
+      const turn = persistence.startTurn(task.id, 'executor fence');
+      const request = {
+        id: 'executor-fence-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'executor-fence-operation',
+        plan: persistedEditPlan(),
+        mutationBinding: { workspaceKey, rootIdentityDigest },
+        createdAt: '2026-07-23T00:00:00.000Z',
+      } as const;
+      const artifacts = new PersistenceTestArtifacts();
+      persistence.prepareEditSaga(await stageEditSagaRequest(request, artifacts));
+      const secondClient = new SqlitePersistenceClient(path);
+      let effectCount = 0;
+      let releaseEffect!: () => void;
+      let signalStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        signalStarted = resolve;
+      });
+      const effectGate = new Promise<void>((resolve) => {
+        releaseEffect = resolve;
+      });
+      const post = persistedObservation('after', `file:${editHash('after')}`);
+      const boundary: EditEffectBoundary = {
+        async apply(_step, lease) {
+          expect(lease).not.toBeNull();
+          effectCount += 1;
+          signalStarted();
+          await effectGate;
+          return post;
+        },
+        async observe(_step, lease) {
+          expect(lease).not.toBeNull();
+          return { state: 'post', observation: post };
+        },
+        async restore(_step, _expected, lease) {
+          expect(lease).not.toBeNull();
+          return persistedObservation('before', `file:${editHash('before')}`);
+        },
+      };
+      const now = () => new Date('2026-07-23T00:00:01.000Z');
+      const firstExecutor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        boundary,
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'executor-a', now),
+      );
+      const secondExecutor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(secondClient),
+        boundary,
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(secondClient, 'executor-b', now),
+      );
+      const first = firstExecutor.apply(request);
+      await started;
+      await expect(secondExecutor.apply(request)).rejects.toBeInstanceOf(MutationLeaseBusyError);
+      expect(effectCount).toBe(1);
+      releaseEffect();
+      await expect(first).resolves.toMatchObject({ state: 'committed' });
+      expect(effectCount).toBe(1);
+      secondClient.close();
+      persistence.close();
+    });
+
+    it('does not publish an effect result after its lease is fenced', async () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const rootIdentityDigest = '8'.repeat(64);
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/fenced-result',
+        rootIdentityDigest,
+      );
+      const turn = persistence.startTurn(task.id, 'fenced result');
+      const request = {
+        id: 'fenced-result-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'fenced-result-operation',
+        plan: persistedEditPlan(),
+        mutationBinding: { workspaceKey, rootIdentityDigest },
+        createdAt: new Date().toISOString(),
+      } as const;
+      let releaseEffect!: () => void;
+      let signalStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        signalStarted = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        releaseEffect = resolve;
+      });
+      const post = persistedObservation('after', `file:${editHash('after')}`);
+      const boundary: EditEffectBoundary = {
+        async apply() {
+          signalStarted();
+          await gate;
+          return post;
+        },
+        async observe() {
+          return { state: 'post', observation: post };
+        },
+        async restore() {
+          return persistedObservation('before', `file:${editHash('before')}`);
+        },
+      };
+      const artifacts = new PersistenceTestArtifacts();
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        boundary,
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'fenced-result-instance'),
+      );
+      const applying = executor.apply(request);
+      await started;
+      persistence.setAccessPreset(task.id, 'auto');
+      releaseEffect();
+      await expect(applying).rejects.toBeInstanceOf(MutationLeaseStaleError);
+      expect(persistence.getEditSaga(request.id)).toMatchObject({
+        state: 'applying',
+        steps: [expect.objectContaining({ state: 'effect_pending', postObservation: null })],
+      });
+      persistence.close();
+    });
+
+    it('keeps lease bindings isolated for parallel Sagas sharing one persistence store', async () => {
+      const { persistence } = createPersistence();
+      const taskA = persistence.createTask();
+      const taskB = persistence.createTask();
+      const rootA = 'a'.repeat(64);
+      const rootB = 'b'.repeat(64);
+      const workspaceA = bindMutationWorkspace(persistence, taskA.id, '/parallel/a', rootA);
+      const workspaceB = bindMutationWorkspace(persistence, taskB.id, '/parallel/b', rootB);
+      const turnA = persistence.startTurn(taskA.id, 'parallel a');
+      const turnB = persistence.startTurn(taskB.id, 'parallel b');
+      const requestA = {
+        id: 'parallel-saga-a',
+        taskId: taskA.id,
+        turnId: turnA.turnId,
+        operationId: 'parallel-operation-a',
+        plan: persistedEditPlan('before-a', 'after-a'),
+        mutationBinding: { workspaceKey: workspaceA, rootIdentityDigest: rootA },
+        createdAt: new Date().toISOString(),
+      } as const;
+      const requestB = {
+        id: 'parallel-saga-b',
+        taskId: taskB.id,
+        turnId: turnB.turnId,
+        operationId: 'parallel-operation-b',
+        plan: persistedEditPlan('before-b', 'after-b'),
+        mutationBinding: { workspaceKey: workspaceB, rootIdentityDigest: rootB },
+        createdAt: new Date().toISOString(),
+      } as const;
+      const releases = new Map<string, () => void>();
+      const started = new Set<string>();
+      let signalBoth!: () => void;
+      const bothStarted = new Promise<void>((resolve) => {
+        signalBoth = resolve;
+      });
+      const boundary: EditEffectBoundary = {
+        async apply(step) {
+          const id = step.operation.postHash!;
+          started.add(id);
+          if (started.size === 2) signalBoth();
+          await new Promise<void>((resolve) => releases.set(id, resolve));
+          const value = id === editHash('after-a') ? 'after-a' : 'after-b';
+          return persistedObservation(value, `file:${editHash(value)}`);
+        },
+        async observe(step) {
+          const value = step.operation.postHash === editHash('after-a') ? 'after-a' : 'after-b';
+          return {
+            state: 'post',
+            observation: persistedObservation(value, `file:${editHash(value)}`),
+          };
+        },
+        async restore(step) {
+          const value = step.operation.preHash === editHash('before-a') ? 'before-a' : 'before-b';
+          return persistedObservation(value, `file:${editHash(value)}`);
+        },
+      };
+      const store = new PersistenceEditSagaStore(persistence);
+      const artifacts = new PersistenceTestArtifacts();
+      const first = new EditSagaExecutor(
+        store,
+        boundary,
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'parallel-instance-a'),
+      ).apply(requestA);
+      const second = new EditSagaExecutor(
+        store,
+        boundary,
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'parallel-instance-b'),
+      ).apply(requestB);
+      await bothStarted;
+      releases.get(editHash('after-a'))!();
+      await expect(first).resolves.toMatchObject({ state: 'committed' });
+      releases.get(editHash('after-b'))!();
+      await expect(second).resolves.toMatchObject({ state: 'committed' });
+      persistence.close();
+    });
+
+    it('quarantines expiry and blocks every Task sharing the workspace until recovery', async () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const sibling = persistence.createTask();
+      const unrelated = persistence.createTask();
+      const lateBinding = persistence.createTask();
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/shared',
+        'b'.repeat(64),
+      );
+      bindMutationWorkspace(persistence, sibling.id, '/workspace/shared', 'b'.repeat(64));
+      bindMutationWorkspace(persistence, unrelated.id, '/workspace/other', 'c'.repeat(64));
+      const turn = persistence.startTurn(task.id, 'expire lease');
+      const staged = await stageEditSagaRequest(
+        {
+          id: 'expired-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'expired-operation',
+          plan: persistedEditPlan(),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        },
+        new PersistenceTestArtifacts(),
+      );
+      const saga = persistence.prepareEditSaga(staged);
+      const input = {
+        workspaceKey,
+        rootIdentityDigest: 'b'.repeat(64),
+        holderInstanceId: 'instance-a',
+        taskId: task.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        purpose: 'forward' as const,
+        policyEpoch: 0,
+        intentDigest: saga.planDigest,
+        now: '2026-07-23T00:00:01.000Z',
+        expiresAt: '2026-07-23T00:00:02.000Z',
+      };
+      const expired = persistence.acquireMutationLease(input);
+      expect(() =>
+        persistence.acquireMutationLease({
+          ...input,
+          holderInstanceId: 'instance-b',
+          now: '2026-07-23T00:00:03.000Z',
+          expiresAt: '2026-07-23T00:01:03.000Z',
+        }),
+      ).toThrow(MutationQuarantinedError);
+      expect(() =>
+        persistence.renewMutationLease(
+          expired,
+          '2026-07-23T00:00:04.000Z',
+          '2026-07-23T00:01:04.000Z',
+        ),
+      ).toThrow(MutationLeaseStaleError);
+      expect(() => persistence.startTurn(sibling.id, 'must wait')).toThrow(
+        MutationQuarantinedError,
+      );
+      persistence.queueInput(sibling.id, 'queued while recovering', 'queued-recovery-operation');
+      expect(() => persistence.startNextQueued(sibling.id)).toThrow(MutationQuarantinedError);
+      expect(persistence.startTurn(unrelated.id, 'can proceed')).toBeDefined();
+
+      const recovery = persistence.acquireMutationLease({
+        ...input,
+        holderInstanceId: 'recovery-instance',
+        purpose: 'recovery',
+        now: '2026-07-23T00:00:05.000Z',
+        expiresAt: '2026-07-23T00:01:05.000Z',
+      });
+      expect(recovery.fence).toBeGreaterThan(expired.fence);
+      persistence.releaseMutationLease(recovery, '2026-07-23T00:00:06.000Z');
+      expect(() =>
+        persistence.setWorkspaceBinding(lateBinding.id, {
+          path: '/workspace/shared',
+          workspaceKey,
+          rootIdentityDigest: 'b'.repeat(64),
+        }),
+      ).toThrow(MutationQuarantinedError);
+      persistence.updateEditSaga(saga.id, saga.revision, (current) => ({
+        ...withoutEditRevision(current),
+        state: 'restored',
+        updatedAt: '2026-07-23T00:00:07.000Z',
+      }));
+      persistence.clearMutationQuarantine(workspaceKey, recovery.fence, '2026-07-23T00:00:08.000Z');
+      expect(persistence.startNextQueued(sibling.id)).toMatchObject({
+        started: { text: 'queued while recovering' },
+      });
+      persistence.close();
+    });
+
+    it('fails closed on clock rollback and persists startup quarantine', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/clock',
+        'd'.repeat(64),
+      );
+      const turn = persistence.startTurn(task.id, 'clock lease');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'clock-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'clock-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const token = persistence.acquireMutationLease({
+        workspaceKey,
+        rootIdentityDigest: 'd'.repeat(64),
+        holderInstanceId: 'old-instance',
+        taskId: task.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        purpose: 'forward',
+        policyEpoch: 0,
+        intentDigest: saga.planDigest,
+        now: '2026-07-23T00:00:10.000Z',
+        expiresAt: '2026-07-23T00:01:10.000Z',
+      });
+      expect(() =>
+        persistence.renewMutationLease(
+          token,
+          '2026-07-23T00:00:09.000Z',
+          '2026-07-23T00:01:09.000Z',
+        ),
+      ).toThrow(MutationClockRollbackError);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      const quarantines = reopened.initializeMutationRecovery(
+        'new-instance',
+        '2026-07-23T00:00:11.000Z',
+      );
+      expect(quarantines).toEqual([
+        expect.objectContaining({ taskId: task.id, reason: 'clock_rollback' }),
+      ]);
+      expect(() => reopened.startTurn(task.id, 'still blocked')).toThrow(MutationQuarantinedError);
+      reopened.close();
+    });
+
+    it('fences a held lease when policy changes before release', async () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/policy-fence',
+        'e'.repeat(64),
+      );
+      const turn = persistence.startTurn(task.id, 'policy lease');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'policy-fence-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'policy-fence-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const token = persistence.acquireMutationLease({
+        workspaceKey,
+        rootIdentityDigest: 'e'.repeat(64),
+        holderInstanceId: 'policy-instance',
+        taskId: task.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        purpose: 'forward',
+        policyEpoch: 0,
+        intentDigest: saga.planDigest,
+        now: '2026-07-23T00:00:01.000Z',
+        expiresAt: '2026-07-23T00:01:01.000Z',
+      });
+      persistence.setAccessPreset(task.id, 'auto');
+      expect(() => persistence.releaseMutationLease(token, '2026-07-23T00:00:02.000Z')).toThrow(
+        MutationLeaseStaleError,
+      );
+      expect(() => persistence.startTurn(task.id, 'blocked after policy change')).toThrow(
+        MutationQuarantinedError,
+      );
+      persistence.close();
+    });
+
+    it('quarantines a previous-instance holder and interrupts its Turn at startup', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const sibling = persistence.createTask();
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/restart',
+        'f'.repeat(64),
+      );
+      bindMutationWorkspace(persistence, sibling.id, '/workspace/restart', 'f'.repeat(64));
+      const turn = persistence.startTurn(task.id, 'restart lease');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'restart-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'restart-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const oldToken = persistence.acquireMutationLease({
+        workspaceKey,
+        rootIdentityDigest: 'f'.repeat(64),
+        holderInstanceId: 'previous-instance',
+        taskId: task.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        purpose: 'forward',
+        policyEpoch: 0,
+        intentDigest: saga.planDigest,
+        now: '2026-07-23T00:00:01.000Z',
+        expiresAt: '2026-07-23T01:00:01.000Z',
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(
+        reopened.initializeMutationRecovery('current-instance', '2026-07-23T00:00:02.000Z'),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ taskId: task.id, reason: 'unclean_shutdown' }),
+          expect.objectContaining({ taskId: sibling.id, reason: 'unclean_shutdown' }),
+        ]),
+      );
+      expect(reopened.snapshot(task.id).activeTurn).toBeNull();
+      expect(() => reopened.releaseMutationLease(oldToken, '2026-07-23T00:00:03.000Z')).toThrow(
+        MutationLeaseStaleError,
+      );
+      expect(() => reopened.startTurn(sibling.id, 'same workspace blocked')).toThrow(
+        MutationQuarantinedError,
+      );
+      reopened.close();
+    });
+
+    it('recovers multiple unresolved Sagas in one workspace quarantine session', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const rootIdentityDigest = '0'.repeat(64);
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/multi-recovery',
+        rootIdentityDigest,
+      );
+      const turn = persistence.startTurn(task.id, 'multiple recovery');
+      const first = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'multi-recovery-a',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'multi-recovery-operation-a',
+            plan: persistedEditPlan('before-a', 'after-a'),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const second = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'multi-recovery-b',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'multi-recovery-operation-b',
+            plan: persistedEditPlan('before-b', 'after-b'),
+            createdAt: '2026-07-23T00:00:01.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('multi-recovery-instance', '2026-07-23T00:00:02.000Z');
+      const recover = (saga: typeof first, ordinal: number) => {
+        const token = reopened.acquireMutationLease({
+          workspaceKey,
+          rootIdentityDigest,
+          holderInstanceId: `multi-recovery-${ordinal}`,
+          taskId: task.id,
+          turnId: turn.turnId,
+          sagaId: saga.id,
+          purpose: 'recovery',
+          policyEpoch: saga.policyEpoch,
+          intentDigest: saga.planDigest,
+          now: `2026-07-23T00:00:0${ordinal + 2}.000Z`,
+          expiresAt: `2026-07-23T00:01:0${ordinal + 2}.000Z`,
+        });
+        reopened.releaseMutationLease(token, `2026-07-23T00:00:0${ordinal + 3}.000Z`);
+        reopened.updateEditSaga(saga.id, saga.revision, (current) => ({
+          ...withoutEditRevision(current),
+          state: 'restored',
+          updatedAt: `2026-07-23T00:00:1${ordinal}.000Z`,
+        }));
+        return token;
+      };
+      recover(first, 1);
+      const finalToken = recover(second, 3);
+      reopened.clearMutationQuarantine(workspaceKey, finalToken.fence, '2026-07-23T00:00:20.000Z');
+      expect(reopened.startTurn(task.id, 'recovery complete')).toBeDefined();
+      reopened.close();
+    });
+
+    it('rejects rebinding into quarantine and cannot move an existing Saga to another workspace', async () => {
+      const { persistence } = createPersistence();
+      const owner = persistence.createTask();
+      const newcomer = persistence.createTask();
+      const rootA = '1'.repeat(64);
+      const rootB = '2'.repeat(64);
+      const workspaceA = bindMutationWorkspace(persistence, owner.id, '/workspace/a', rootA);
+      const turn = persistence.startTurn(owner.id, 'bound saga');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'binding-saga',
+            taskId: owner.id,
+            turnId: turn.turnId,
+            operationId: 'binding-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const workspaceB = mutationWorkspaceKey('/workspace/b', rootB);
+      persistence.setWorkspaceBinding(owner.id, {
+        path: '/workspace/b',
+        workspaceKey: workspaceB,
+        rootIdentityDigest: rootB,
+      });
+      expect(() =>
+        persistence.acquireMutationLease({
+          workspaceKey: workspaceB,
+          rootIdentityDigest: rootB,
+          holderInstanceId: 'wrong-workspace-instance',
+          taskId: owner.id,
+          turnId: turn.turnId,
+          sagaId: saga.id,
+          purpose: 'forward',
+          policyEpoch: saga.policyEpoch,
+          intentDigest: saga.planDigest,
+          now: '2026-07-23T00:00:01.000Z',
+          expiresAt: '2026-07-23T00:01:01.000Z',
+        }),
+      ).toThrow(MutationLeaseStaleError);
+      persistence.setWorkspaceBinding(owner.id, {
+        path: '/workspace/a',
+        workspaceKey: workspaceA,
+        rootIdentityDigest: rootA,
+      });
+      const token = persistence.acquireMutationLease({
+        workspaceKey: workspaceA,
+        rootIdentityDigest: rootA,
+        holderInstanceId: 'binding-instance',
+        taskId: owner.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        purpose: 'forward',
+        policyEpoch: saga.policyEpoch,
+        intentDigest: saga.planDigest,
+        now: '2026-07-23T00:00:10.000Z',
+        expiresAt: '2026-07-23T00:01:10.000Z',
+      });
+      expect(() => persistence.assertMutationLease(token, '2026-07-23T00:00:09.000Z')).toThrow(
+        MutationClockRollbackError,
+      );
+      expect(() =>
+        persistence.setWorkspaceBinding(newcomer.id, {
+          path: '/workspace/a',
+          workspaceKey: workspaceA,
+          rootIdentityDigest: rootA,
+        }),
+      ).toThrow(MutationQuarantinedError);
+
+      expect(() =>
+        persistence.setWorkspaceBinding(owner.id, {
+          path: '/workspace/b',
+          workspaceKey: workspaceB,
+          rootIdentityDigest: rootB,
+        }),
+      ).toThrow(MutationQuarantinedError);
+      persistence.close();
+    });
+
+    it('uses the immutable Saga workspace for startup quarantine after Task rebinding', async () => {
+      const { persistence, path } = createPersistence();
+      const owner = persistence.createTask();
+      const siblingA = persistence.createTask();
+      const unrelatedB = persistence.createTask();
+      const rootA = '3'.repeat(64);
+      const rootB = '4'.repeat(64);
+      const workspaceA = bindMutationWorkspace(persistence, owner.id, '/workspace/a', rootA);
+      bindMutationWorkspace(persistence, siblingA.id, '/workspace/a', rootA);
+      const workspaceB = bindMutationWorkspace(persistence, unrelatedB.id, '/workspace/b', rootB);
+      const turn = persistence.startTurn(owner.id, 'immutable startup scope');
+      persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'immutable-startup-saga',
+            taskId: owner.id,
+            turnId: turn.turnId,
+            operationId: 'immutable-startup-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      persistence.setWorkspaceBinding(owner.id, {
+        path: '/workspace/b',
+        workspaceKey: workspaceB,
+        rootIdentityDigest: rootB,
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      const quarantines = reopened.initializeMutationRecovery(
+        'immutable-startup-instance',
+        '2026-07-23T00:00:01.000Z',
+      );
+      expect(quarantines).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ taskId: owner.id, workspaceKey: workspaceA }),
+          expect.objectContaining({ taskId: siblingA.id, workspaceKey: workspaceA }),
+        ]),
+      );
+      expect(() => reopened.startTurn(owner.id, 'owner blocked')).toThrow(MutationQuarantinedError);
+      expect(() => reopened.startTurn(siblingA.id, 'sibling blocked')).toThrow(
+        MutationQuarantinedError,
+      );
+      expect(reopened.startTurn(unrelatedB.id, 'unrelated proceeds')).toBeDefined();
+      reopened.close();
+    });
+
+    it('re-arms a cleared moved-owner quarantine row during startup recovery', async () => {
+      const { persistence, path } = createPersistence();
+      const owner = persistence.createTask();
+      const rootA = '5'.repeat(64);
+      const rootB = '7'.repeat(64);
+      const workspaceA = bindMutationWorkspace(persistence, owner.id, '/workspace/a', rootA);
+      const turn = persistence.startTurn(owner.id, 'quarantine history');
+      const firstSaga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'cleared-history-saga',
+            taskId: owner.id,
+            turnId: turn.turnId,
+            operationId: 'cleared-history-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const expired = persistence.acquireMutationLease({
+        workspaceKey: workspaceA,
+        rootIdentityDigest: rootA,
+        holderInstanceId: 'cleared-owner',
+        taskId: owner.id,
+        turnId: turn.turnId,
+        sagaId: firstSaga.id,
+        purpose: 'forward',
+        policyEpoch: firstSaga.policyEpoch,
+        intentDigest: firstSaga.planDigest,
+        now: '2026-07-23T00:00:01.000Z',
+        expiresAt: '2026-07-23T00:00:02.000Z',
+      });
+      expect(() => persistence.assertMutationLease(expired, '2026-07-23T00:00:03.000Z')).toThrow(
+        MutationQuarantinedError,
+      );
+      const recovery = persistence.acquireMutationLease({
+        workspaceKey: workspaceA,
+        rootIdentityDigest: rootA,
+        holderInstanceId: 'cleared-recovery',
+        taskId: owner.id,
+        turnId: turn.turnId,
+        sagaId: firstSaga.id,
+        purpose: 'recovery',
+        policyEpoch: firstSaga.policyEpoch,
+        intentDigest: firstSaga.planDigest,
+        now: '2026-07-23T00:00:04.000Z',
+        expiresAt: '2026-07-23T00:01:04.000Z',
+      });
+      persistence.releaseMutationLease(recovery, '2026-07-23T00:00:05.000Z');
+      persistence.updateEditSaga(firstSaga.id, firstSaga.revision, (current) => ({
+        ...withoutEditRevision(current),
+        state: 'restored',
+        updatedAt: '2026-07-23T00:00:06.000Z',
+      }));
+      persistence.clearMutationQuarantine(workspaceA, recovery.fence, '2026-07-23T00:00:07.000Z');
+
+      persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'rearmed-history-saga',
+            taskId: owner.id,
+            turnId: turn.turnId,
+            operationId: 'rearmed-history-operation',
+            plan: persistedEditPlan('before-2', 'after-2'),
+            createdAt: '2026-07-23T00:00:08.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      const workspaceB = mutationWorkspaceKey('/workspace/b', rootB);
+      persistence.setWorkspaceBinding(owner.id, {
+        path: '/workspace/b',
+        workspaceKey: workspaceB,
+        rootIdentityDigest: rootB,
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(
+        reopened.initializeMutationRecovery('rearmed-startup-instance', '2026-07-23T00:00:09.000Z'),
+      ).toContainEqual(
+        expect.objectContaining({
+          taskId: owner.id,
+          workspaceKey: workspaceA,
+          sourceSagaId: 'rearmed-history-saga',
+        }),
+      );
+      expect(() => reopened.startTurn(owner.id, 'must remain blocked')).toThrow(
+        MutationQuarantinedError,
+      );
+      reopened.close();
+    });
+
+    it('fails closed instead of granting a legacy path-only workspace identity', async () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.setWorkspace(task.id, '/workspace/legacy');
+      const turn = persistence.startTurn(task.id, 'legacy binding');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'legacy-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'legacy-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      expect(() =>
+        persistence.acquireMutationLease({
+          workspaceKey: saga.workspaceKey!,
+          rootIdentityDigest: saga.rootIdentityDigest!,
+          holderInstanceId: 'legacy-instance',
+          taskId: task.id,
+          turnId: turn.turnId,
+          sagaId: saga.id,
+          purpose: 'forward',
+          policyEpoch: saga.policyEpoch,
+          intentDigest: saga.planDigest,
+          now: '2026-07-23T00:00:01.000Z',
+          expiresAt: '2026-07-23T00:01:01.000Z',
+        }),
+      ).toThrow(MutationQuarantinedError);
+      persistence.close();
+    });
+
+    it('migrates an unsealed legacy Saga as unbound and quarantines it for recovery', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const rootIdentityDigest = '6'.repeat(64);
+      const workspaceKey = bindMutationWorkspace(
+        persistence,
+        task.id,
+        '/workspace/legacy-saga',
+        rootIdentityDigest,
+      );
+      const turn = persistence.startTurn(task.id, 'legacy saga');
+      persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'legacy-unsealed-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'legacy-unsealed-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      persistence.close();
+      const raw = new Database(path);
+      raw
+        .prepare(
+          `UPDATE edit_sagas SET binding_version = 0,
+           workspace_key = NULL, root_identity_digest = NULL WHERE id = ?`,
+        )
+        .run('legacy-unsealed-saga');
+      raw.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getEditSaga('legacy-unsealed-saga')).toMatchObject({
+        workspaceKey: null,
+        rootIdentityDigest: null,
+      });
+      expect(
+        reopened.initializeMutationRecovery('legacy-recovery-instance', '2026-07-23T00:00:01.000Z'),
+      ).toContainEqual(
+        expect.objectContaining({
+          taskId: task.id,
+          workspaceKey,
+          reason: 'legacy_unbound_edit_saga',
+        }),
+      );
+      expect(() => reopened.startTurn(task.id, 'blocked legacy')).toThrow(MutationQuarantinedError);
+      reopened.close();
     });
 
     it('persists expanded access policy rules and revokes task-scoped grants by epoch', () => {
@@ -1941,6 +2870,9 @@ if (runsWithElectronAbi)
         { version: 17 },
         { version: 18 },
         { version: 19 },
+        { version: 20 },
+        { version: 21 },
+        { version: 22 },
       ]);
       expect(
         migrated
@@ -2019,7 +2951,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v19 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v22 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),
@@ -2102,6 +3034,11 @@ function fileBoundary(filePath: string, artifacts: EditArtifactStore): EditEffec
       return observeValue(value);
     },
   };
+}
+
+function withoutEditRevision<T extends { revision: number }>(value: T): Omit<T, 'revision'> {
+  const { revision: _revision, ...rest } = value;
+  return rest;
 }
 
 function createLegacyV1Database(path: string): void {

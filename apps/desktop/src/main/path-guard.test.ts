@@ -9,6 +9,7 @@ import {
   openGuardedExistingFile,
   revalidatePathGuard,
   workspacePermissionResourceFromGuard,
+  workspaceMutationBinding,
 } from './path-guard';
 
 const temporaryRoots: string[] = [];
@@ -291,5 +292,26 @@ describe('path guard', () => {
     await expect(openGuardedExistingFile(symlinkGuard, 'read')).rejects.toMatchObject({
       code: 'SPECIAL_FILE',
     } satisfies Partial<PathGuardError>);
+  });
+
+  it('binds canonical workspace aliases to one root identity and mutation scope', async () => {
+    const { root, workspace } = await fixture();
+    const alias = `${workspace}-alias`;
+    await symlink(workspace, alias);
+
+    const direct = await workspaceMutationBinding(workspace);
+    const throughAlias = await workspaceMutationBinding(alias);
+    await writeFile(join(workspace, 'new-file.txt'), 'changes directory metadata');
+    const afterContentChange = await workspaceMutationBinding(workspace);
+    const renamed = join(root, 'renamed-workspace');
+    await rename(workspace, renamed);
+    const afterRename = await workspaceMutationBinding(renamed);
+
+    expect(throughAlias).toEqual(direct);
+    expect(afterContentChange.workspaceKey).toBe(direct.workspaceKey);
+    expect(afterRename.workspaceKey).toBe(direct.workspaceKey);
+    expect(afterRename.rootIdentityDigest).toBe(direct.rootIdentityDigest);
+    expect(direct.workspaceKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(direct.rootIdentityDigest).toMatch(/^[a-f0-9]{64}$/);
   });
 });

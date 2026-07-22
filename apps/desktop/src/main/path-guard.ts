@@ -213,6 +213,26 @@ export function pathGuardIdentityDigest(guard: PathGuard): string {
     .digest('hex');
 }
 
+export async function workspaceMutationBinding(inputPath: string): Promise<
+  Readonly<{
+    canonicalPath: string;
+    rootIdentityDigest: string;
+    workspaceKey: string;
+  }>
+> {
+  const canonicalPath = await realpath(inputPath);
+  const identity = toIdentity(await lstat(canonicalPath));
+  if (identity.kind !== 'directory')
+    throw new PathGuardError('INVALID_PATH', 'Workspace must be a directory');
+  const rootIdentityDigest = createHash('sha256')
+    .update(JSON.stringify(['workspace-root-v2', identity.dev, identity.ino, identity.kind]))
+    .digest('hex');
+  const workspaceKey = createHash('sha256')
+    .update(JSON.stringify(['workspace-mutation-v2', rootIdentityDigest]))
+    .digest('hex');
+  return Object.freeze({ canonicalPath, rootIdentityDigest, workspaceKey });
+}
+
 export function workspacePermissionResourceFromGuard(
   guard: PathGuard,
 ): Extract<PermissionResource, { kind: 'workspace-path' }> {

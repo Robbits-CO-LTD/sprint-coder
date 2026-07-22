@@ -95,6 +95,8 @@ export type EditSagaSnapshot = Readonly<{
   planDigest: string;
   journalDigest: string;
   policyEpoch: number;
+  workspaceKey: string | null;
+  rootIdentityDigest: string | null;
   state: EditSagaState;
   revision: number;
   steps: readonly EditSagaStep[];
@@ -111,6 +113,7 @@ export type EditSagaApplyRequest = Readonly<{
   turnId: string;
   operationId: string;
   plan: PreparedStructuredPatch;
+  mutationBinding?: Readonly<{ workspaceKey: string; rootIdentityDigest: string }>;
   createdAt: string;
 }>;
 
@@ -122,6 +125,8 @@ export type EditSagaCreateRequest = Readonly<{
   planDigest: string;
   journalDigest: string;
   policyEpoch: number;
+  workspaceKey: string | null;
+  rootIdentityDigest: string | null;
   operations: readonly JournaledPatchOperation[];
   createdAt: string;
 }>;
@@ -145,9 +150,19 @@ export interface EditSagaFaultInjector {
 }
 
 export interface EditEffectBoundary {
-  apply(step: EditSagaStep): Promise<OperationObservation>;
-  observe(step: EditSagaStep): Promise<EditEffectObservation>;
-  restore(step: EditSagaStep, expectedPost: OperationObservation): Promise<OperationObservation>;
+  apply(step: EditSagaStep, lease: unknown | null): Promise<OperationObservation>;
+  observe(step: EditSagaStep, lease: unknown | null): Promise<EditEffectObservation>;
+  restore(
+    step: EditSagaStep,
+    expectedPost: OperationObservation,
+    lease: unknown | null,
+  ): Promise<OperationObservation>;
+}
+
+export interface EditSagaLeaseGuard {
+  acquire(saga: EditSagaSnapshot, purpose: 'forward' | 'recovery'): Promise<unknown>;
+  assertCurrent(lease: unknown, saga: EditSagaSnapshot): Promise<void>;
+  release(lease: unknown, saga: EditSagaSnapshot): Promise<void>;
 }
 
 export interface EditSagaStore {
@@ -160,6 +175,7 @@ export interface EditSagaStore {
     mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
   ): EditSagaSnapshot;
   listRecoverable(): readonly EditSagaSnapshot[];
+  bindLease?(sagaId: string, lease: unknown | null): void;
 }
 
 export interface DurableEditSagaPersistence {
@@ -171,10 +187,17 @@ export interface DurableEditSagaPersistence {
     expectedRevision: number,
     mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
   ): EditSagaSnapshot;
+  updateEditSagaUnderLease?(
+    id: string,
+    expectedRevision: number,
+    lease: unknown,
+    mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
+  ): EditSagaSnapshot;
   listRecoverableEditSagas(): readonly EditSagaSnapshot[];
 }
 
 export class PersistenceEditSagaStore implements EditSagaStore {
+  private readonly leases = new Map<string, unknown>();
   constructor(private readonly persistence: DurableEditSagaPersistence) {}
   create(request: EditSagaCreateRequest): EditSagaSnapshot {
     return this.persistence.prepareEditSaga(request);
@@ -190,10 +213,25 @@ export class PersistenceEditSagaStore implements EditSagaStore {
     expectedRevision: number,
     mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
   ): EditSagaSnapshot {
+    const lease = this.leases.get(id);
+    if (lease !== undefined && this.persistence.updateEditSagaUnderLease !== undefined)
+      return this.persistence.updateEditSagaUnderLease(id, expectedRevision, lease, mutate);
+    const current = this.get(id);
+    if (
+      current.workspaceKey !== null &&
+      current.state !== 'committed' &&
+      current.state !== 'restored' &&
+      current.state !== 'recovery_required'
+    )
+      throw new Error('Workspace-bound Edit Saga update requires a mutation lease');
     return this.persistence.updateEditSaga(id, expectedRevision, mutate);
   }
   listRecoverable(): readonly EditSagaSnapshot[] {
     return this.persistence.listRecoverableEditSagas();
+  }
+  bindLease(sagaId: string, lease: unknown | null): void {
+    if (lease === null) this.leases.delete(sagaId);
+    else this.leases.set(sagaId, lease);
   }
 }
 
@@ -269,6 +307,8 @@ export function createEditSagaSnapshot(request: EditSagaCreateRequest): EditSaga
     planDigest: request.planDigest,
     journalDigest: request.journalDigest,
     policyEpoch: request.policyEpoch,
+    workspaceKey: request.workspaceKey,
+    rootIdentityDigest: request.rootIdentityDigest,
     state: 'prepared',
     revision: 0,
     steps: request.operations.map((operation, index) => ({
@@ -327,8 +367,10 @@ export async function stageEditSagaRequest(
     );
   }
   const facts = {
-    version: 1 as const,
+    version: 2 as const,
     policyEpoch: request.plan.policyEpoch,
+    workspaceKey: request.mutationBinding?.workspaceKey ?? null,
+    rootIdentityDigest: request.mutationBinding?.rootIdentityDigest ?? null,
     operations: Object.freeze(operations),
   };
   return Object.freeze({
@@ -339,19 +381,29 @@ export async function stageEditSagaRequest(
     planDigest: request.plan.digest,
     journalDigest: journaledPatchDigest(facts),
     policyEpoch: request.plan.policyEpoch,
+    workspaceKey: facts.workspaceKey,
+    rootIdentityDigest: facts.rootIdentityDigest,
     operations: facts.operations,
     createdAt: request.createdAt,
   });
 }
 
 export function journaledPatchDigest(input: {
-  version?: 1;
+  version?: 2;
   policyEpoch: number;
+  workspaceKey: string | null;
+  rootIdentityDigest: string | null;
   operations: readonly JournaledPatchOperation[];
 }): string {
   return createHash('sha256')
     .update(
-      JSON.stringify({ version: 1, policyEpoch: input.policyEpoch, operations: input.operations }),
+      JSON.stringify({
+        version: 2,
+        policyEpoch: input.policyEpoch,
+        workspaceKey: input.workspaceKey,
+        rootIdentityDigest: input.rootIdentityDigest,
+        operations: input.operations,
+      }),
     )
     .digest('hex');
 }
@@ -377,6 +429,8 @@ export function parseEditSagaSnapshot(value: unknown): EditSagaSnapshot {
     'planDigest',
     'journalDigest',
     'policyEpoch',
+    'workspaceKey',
+    'rootIdentityDigest',
     'state',
     'revision',
     'steps',
@@ -398,6 +452,9 @@ export function parseEditSagaSnapshot(value: unknown): EditSagaSnapshot {
     !isDigest(value['journalDigest']) ||
     !Number.isSafeInteger(value['policyEpoch']) ||
     (value['policyEpoch'] as number) < 0 ||
+    !isOptionalDigest(value['workspaceKey']) ||
+    !isOptionalDigest(value['rootIdentityDigest']) ||
+    (value['workspaceKey'] === null) !== (value['rootIdentityDigest'] === null) ||
     !editSagaStates.includes(state as EditSagaState) ||
     !Number.isSafeInteger(value['revision']) ||
     (value['revision'] as number) < 0 ||
@@ -427,8 +484,10 @@ export function parseEditSagaSnapshot(value: unknown): EditSagaSnapshot {
   if (snapshot.recovery !== null) validateRecovery(snapshot.recovery);
   if (
     journaledPatchDigest({
-      version: 1,
+      version: 2,
       policyEpoch: snapshot.policyEpoch,
+      workspaceKey: snapshot.workspaceKey,
+      rootIdentityDigest: snapshot.rootIdentityDigest,
       operations: snapshot.steps.map((step) => step.operation),
     }) !== snapshot.journalDigest
   )
@@ -443,6 +502,7 @@ export class EditSagaExecutor {
     private readonly boundary: EditEffectBoundary,
     private readonly artifacts: EditArtifactRepository,
     private readonly fault?: EditSagaFaultInjector,
+    private readonly leaseGuard?: EditSagaLeaseGuard,
   ) {}
 
   async apply(request: EditSagaApplyRequest): Promise<EditSagaSnapshot> {
@@ -459,12 +519,14 @@ export class EditSagaExecutor {
     if (isTerminal(saga.state)) return saga;
     if (saga.state !== 'prepared') return this.recover(saga.id);
     await this.fault?.hit({ kind: 'afterJournalPrepared' });
-    try {
-      await this.materializeArtifacts(saga, request.plan);
-    } catch {
-      return this.cleanupArtifacts(this.transitionTerminal(saga, 'restored', []));
-    }
-    return this.runForward(saga.id);
+    return this.runWithLease(saga, 'forward', async (lease) => {
+      try {
+        await this.materializeArtifacts(saga, request.plan);
+      } catch {
+        return this.cleanupArtifacts(this.transitionTerminal(saga, 'restored', []));
+      }
+      return this.runForward(saga.id, lease);
+    });
   }
 
   async recover(id: string): Promise<EditSagaSnapshot> {
@@ -473,8 +535,14 @@ export class EditSagaExecutor {
     if (saga.state === 'prepared') {
       return this.cleanupArtifacts(this.transitionTerminal(saga, 'restored', []));
     }
-    if (saga.state === 'applying') return this.compensate(id, 'interrupted during apply');
-    if (saga.state === 'compensating') return this.compensate(id, 'resume compensation');
+    if (saga.state === 'applying')
+      return this.runWithLease(saga, 'recovery', (lease) =>
+        this.compensate(id, 'interrupted during apply', lease),
+      );
+    if (saga.state === 'compensating')
+      return this.runWithLease(saga, 'recovery', (lease) =>
+        this.compensate(id, 'resume compensation', lease),
+      );
     return saga;
   }
 
@@ -519,7 +587,36 @@ export class EditSagaExecutor {
     await Promise.all(references.map((reference) => this.artifacts.release(reference)));
   }
 
-  private async runForward(id: string): Promise<EditSagaSnapshot> {
+  private async runWithLease(
+    saga: EditSagaSnapshot,
+    purpose: 'forward' | 'recovery',
+    run: (lease: unknown | null) => Promise<EditSagaSnapshot>,
+  ): Promise<EditSagaSnapshot> {
+    if (saga.workspaceKey !== null && this.leaseGuard === undefined)
+      throw new Error('Workspace-bound Edit Saga requires a mutation lease guard');
+    const lease =
+      this.leaseGuard === undefined ? null : await this.leaseGuard.acquire(saga, purpose);
+    this.store.bindLease?.(saga.id, lease);
+    try {
+      const result = await run(lease);
+      if (
+        lease !== null &&
+        this.leaseGuard !== undefined &&
+        (result.state === 'committed' || result.state === 'restored')
+      )
+        await this.leaseGuard.release(lease, result);
+      return result;
+    } finally {
+      this.store.bindLease?.(saga.id, null);
+    }
+  }
+
+  private async assertLease(lease: unknown | null, saga: EditSagaSnapshot): Promise<void> {
+    if (lease !== null && this.leaseGuard !== undefined)
+      await this.leaseGuard.assertCurrent(lease, saga);
+  }
+
+  private async runForward(id: string, lease: unknown | null): Promise<EditSagaSnapshot> {
     let saga = this.store.get(id);
     for (const currentStep of saga.steps) {
       if (currentStep.state !== 'pending') continue;
@@ -534,9 +631,11 @@ export class EditSagaExecutor {
       );
       const step = stepAt(saga, currentStep.ordinal);
       try {
-        const observation = await this.boundary.apply(step);
+        await this.assertLease(lease, saga);
+        const observation = await this.boundary.apply(step, lease);
         validatePostObservation(step, observation);
         await this.fault?.hit({ kind: 'afterEffectBeforeJournal', ordinal: step.ordinal });
+        await this.assertLease(lease, saga);
         saga = this.updateStep(
           saga,
           step.ordinal,
@@ -549,13 +648,14 @@ export class EditSagaExecutor {
         );
       } catch (error) {
         if (error instanceof EditSagaCrashError) throw error;
-        return this.compensate(id, errorMessage(error));
+        return this.compensate(id, errorMessage(error), lease);
       }
     }
     try {
       await this.fault?.hit({ kind: 'beforeFinalize' });
       for (const step of saga.steps) {
-        const observed = await this.boundary.observe(step);
+        await this.assertLease(lease, saga);
+        const observed = await this.boundary.observe(step, lease);
         if (observed.state !== 'post') throw new Error('Final Edit observation is not post-image');
         validatePostObservation(step, observed.observation);
         if (
@@ -567,11 +667,15 @@ export class EditSagaExecutor {
       return this.cleanupArtifacts(this.transitionTerminal(saga, 'committed', buildDiff(saga)));
     } catch (error) {
       if (error instanceof EditSagaCrashError) throw error;
-      return this.compensate(id, errorMessage(error));
+      return this.compensate(id, errorMessage(error), lease);
     }
   }
 
-  private async compensate(id: string, failure: string): Promise<EditSagaSnapshot> {
+  private async compensate(
+    id: string,
+    failure: string,
+    lease: unknown | null,
+  ): Promise<EditSagaSnapshot> {
     let saga = this.store.get(id);
     if (saga.state !== 'compensating')
       saga = this.transition(saga, (current) => ({
@@ -586,7 +690,8 @@ export class EditSagaExecutor {
       if (step.state === 'effect_pending') {
         let observed: EditEffectObservation;
         try {
-          observed = await this.boundary.observe(step);
+          await this.assertLease(lease, saga);
+          observed = await this.boundary.observe(step, lease);
         } catch (error) {
           return this.requireRecovery(
             saga,
@@ -620,7 +725,8 @@ export class EditSagaExecutor {
       if (step.state === 'compensation_pending') {
         let observed: EditEffectObservation;
         try {
-          observed = await this.boundary.observe(step);
+          await this.assertLease(lease, saga);
+          observed = await this.boundary.observe(step, lease);
         } catch (error) {
           return this.requireRecovery(
             saga,
@@ -679,7 +785,8 @@ export class EditSagaExecutor {
       step = stepAt(saga, step.ordinal);
       try {
         await this.fault?.hit({ kind: 'beforeRestore', ordinal: step.ordinal });
-        const restored = await this.boundary.restore(step, expectedPost);
+        await this.assertLease(lease, saga);
+        const restored = await this.boundary.restore(step, expectedPost, lease);
         validateRestoredObservation(step, restored);
         await this.fault?.hit({ kind: 'afterRestoreBeforeJournal', ordinal: step.ordinal });
         saga = this.updateStep(
@@ -696,7 +803,8 @@ export class EditSagaExecutor {
         if (error instanceof EditSagaCrashError) throw error;
         let observed: EditEffectObservation | null = null;
         try {
-          observed = await this.boundary.observe(step);
+          await this.assertLease(lease, saga);
+          observed = await this.boundary.observe(step, lease);
         } catch {
           // A missing or corrupted artifact is itself recovery evidence; never retry blindly.
         }
@@ -948,6 +1056,8 @@ function assertStableIdentity(
     candidate.planDigest !== current.planDigest ||
     candidate.journalDigest !== current.journalDigest ||
     candidate.policyEpoch !== current.policyEpoch ||
+    candidate.workspaceKey !== current.workspaceKey ||
+    candidate.rootIdentityDigest !== current.rootIdentityDigest ||
     candidate.createdAt !== current.createdAt
   )
     throw new Error('Immutable Edit Saga identity changed');
@@ -1342,6 +1452,10 @@ function isString(value: unknown, maxLength: number): value is string {
 
 function isDigest(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+}
+
+function isOptionalDigest(value: unknown): value is string | null {
+  return value === null || isDigest(value);
 }
 
 function isIsoDate(value: unknown): value is string {

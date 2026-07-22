@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, net, protocol, session } from 'electron';
 import { readdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
@@ -46,7 +47,7 @@ if (!hasLock) {
       persistence = new SqlitePersistenceClient(
         join(app.getPath('userData'), 'vibe-editor3.sqlite3'),
       );
-      persistence.interruptActiveTurns();
+      persistence.initializeMutationRecovery(randomUUID(), new Date().toISOString());
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined

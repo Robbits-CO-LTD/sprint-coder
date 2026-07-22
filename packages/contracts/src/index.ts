@@ -460,6 +460,7 @@ export type WorkspaceSelection = z.infer<typeof workspaceSelectionSchema>;
 export const publicErrorCodeSchema = z.enum([
   'NOT_FOUND',
   'TURN_ACTIVE',
+  'TASK_RECOVERY_REQUIRED',
   'STEER_STALE',
   'STEER_UNSUPPORTED',
   'OPERATION_CONFLICT',

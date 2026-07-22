@@ -8,8 +8,8 @@ import {
   type MessagePortMain,
 } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
-import { realpath } from 'node:fs/promises';
 import { basename } from 'node:path';
+import { workspaceMutationBinding } from './path-guard';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
@@ -77,6 +77,7 @@ import { permissionRequestFingerprint, type Capability } from '@vibe/domain';
 import type { ExecutionSpec } from '@vibe/domain';
 import { executionSpecPathGuard } from './command-runner';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
+import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lease';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -410,7 +411,7 @@ export class IpcRouter {
         const selectedPath = selected.filePaths[0];
         if (selectedPath === undefined)
           throw new Error('Directory selection did not include a path');
-        const canonicalPath = await realpath(selectedPath);
+        const binding = await workspaceMutationBinding(selectedPath);
         return this.persistence.executeOperation(
           principal,
           input.taskId,
@@ -418,8 +419,12 @@ export class IpcRouter {
           envelope.operationId,
           hash,
           () => {
-            this.persistence.setWorkspace(input.taskId, canonicalPath);
-            return workspaceValue(canonicalPath);
+            this.persistence.setWorkspaceBinding(input.taskId, {
+              path: binding.canonicalPath,
+              workspaceKey: binding.workspaceKey,
+              rootIdentityDigest: binding.rootIdentityDigest,
+            });
+            return workspaceValue(binding.canonicalPath);
           },
         );
       },
@@ -1058,6 +1063,18 @@ function toPublicError(error: unknown): PublicError {
       code: 'TURN_ACTIVE',
       userMessage: 'このタスクでは別のTurnが実行中です。',
       retryable: false,
+    };
+  if (error instanceof MutationQuarantinedError)
+    return {
+      code: 'TASK_RECOVERY_REQUIRED',
+      userMessage: '安全な編集復旧が完了するまで、このWorkspaceでは新しいTurnを開始できません。',
+      retryable: true,
+    };
+  if (error instanceof MutationLeaseBusyError)
+    return {
+      code: 'OPERATION_IN_PROGRESS',
+      userMessage: 'Workspaceの安全な編集処理が進行中です。',
+      retryable: true,
     };
   if (error instanceof SteerStaleError)
     return {

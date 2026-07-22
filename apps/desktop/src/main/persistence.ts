@@ -69,12 +69,82 @@ import {
 import { redactSecrets } from './secret-redactor';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
 import {
+  legacyMutationWorkspaceKey,
+  MutationClockRollbackError,
+  MutationLeaseBusyError,
+  MutationLeaseStaleError,
+  MutationQuarantinedError,
+  validateMutationDigest,
+  validateMutationTimestamp,
+  type MutationLeasePurpose,
+  type MutationLeaseToken,
+  type MutationQuarantine,
+} from './mutation-lease';
+import {
   createEditSagaSnapshot,
+  journaledPatchDigest,
   parseEditSagaSnapshot,
   transitionEditSagaSnapshot,
+  type EditSagaLeaseGuard,
   type EditSagaCreateRequest,
   type EditSagaSnapshot,
 } from './edit-saga';
+
+export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
+  private readonly issued = new Map<string, MutationLeaseToken>();
+
+  constructor(
+    private readonly persistence: PersistenceClient,
+    private readonly holderInstanceId: string,
+    private readonly now: () => Date = () => new Date(),
+    private readonly ttlMs = 60_000,
+  ) {
+    validateMutationIdentifier(holderInstanceId, 'holder instance id');
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000)
+      throw new Error('Invalid mutation lease TTL');
+  }
+
+  async acquire(
+    saga: EditSagaSnapshot,
+    purpose: MutationLeasePurpose,
+  ): Promise<MutationLeaseToken> {
+    if (saga.workspaceKey === null || saga.rootIdentityDigest === null)
+      throw new MutationQuarantinedError();
+    const now = this.now();
+    const token = this.persistence.acquireMutationLease({
+      workspaceKey: saga.workspaceKey,
+      rootIdentityDigest: saga.rootIdentityDigest,
+      holderInstanceId: this.holderInstanceId,
+      taskId: saga.taskId,
+      turnId: saga.turnId,
+      sagaId: saga.id,
+      purpose,
+      policyEpoch: saga.policyEpoch,
+      intentDigest: saga.planDigest,
+      now: now.toISOString(),
+      expiresAt: new Date(now.getTime() + this.ttlMs).toISOString(),
+    });
+    this.issued.set(saga.id, token);
+    return token;
+  }
+
+  async assertCurrent(lease: unknown, saga: EditSagaSnapshot): Promise<void> {
+    const token = this.requireIssued(lease, saga.id);
+    this.persistence.assertMutationLease(token, this.now().toISOString());
+  }
+
+  async release(lease: unknown, saga: EditSagaSnapshot): Promise<void> {
+    const token = this.requireIssued(lease, saga.id);
+    this.persistence.releaseMutationLease(token, this.now().toISOString());
+    this.issued.delete(saga.id);
+  }
+
+  private requireIssued(lease: unknown, sagaId: string): MutationLeaseToken {
+    const token = this.issued.get(sagaId);
+    if (token === undefined || token !== lease) throw new MutationLeaseStaleError();
+    return token;
+  }
+}
 
 type TaskRow = {
   id: string;
@@ -83,6 +153,8 @@ type TaskRow = {
   archived: number;
   goal: string | null;
   workspace_path: string | null;
+  mutation_scope_key: string | null;
+  mutation_root_identity_digest: string | null;
   draft: string;
   branch_epoch: number;
   context_epoch: number;
@@ -252,12 +324,35 @@ type EditSagaRow = {
   operation_id: string;
   plan_digest: string;
   policy_epoch: number;
+  workspace_key: string | null;
+  root_identity_digest: string | null;
+  binding_version: number;
   state: EditSagaSnapshot['state'];
   revision: number;
   artifact_cleanup_pending: number;
   snapshot_json: string;
   created_at: string;
   updated_at: string;
+};
+type WorkspaceMutationRow = {
+  workspace_key: string;
+  root_identity_digest: string;
+  state: 'idle' | 'held' | 'quarantined';
+  fence: number;
+  revision: number;
+  lease_id: string | null;
+  holder_instance_id: string | null;
+  task_id: string | null;
+  turn_id: string | null;
+  saga_id: string | null;
+  purpose: MutationLeasePurpose | null;
+  policy_epoch: number | null;
+  intent_digest: string | null;
+  acquired_at: string | null;
+  renewed_at: string | null;
+  expires_at: string | null;
+  last_observed_at: string;
+  quarantine_reason: string | null;
 };
 type EventWithoutSeq = TurnEvent extends infer Event
   ? Event extends TurnEvent
@@ -782,6 +877,67 @@ const migrations = [
       CREATE INDEX edit_sagas_recovery_idx ON edit_sagas(state, updated_at, id);
     `,
   },
+  {
+    version: 20,
+    checksum: 'workspace-mutation-lease-v20',
+    sql: `
+      ALTER TABLE tasks ADD COLUMN mutation_scope_key TEXT;
+      ALTER TABLE tasks ADD COLUMN mutation_root_identity_digest TEXT;
+
+      CREATE TABLE workspace_mutation_state (
+        workspace_key TEXT PRIMARY KEY CHECK (length(workspace_key) = 64),
+        root_identity_digest TEXT NOT NULL CHECK (length(root_identity_digest) = 64),
+        state TEXT NOT NULL CHECK (state IN ('idle', 'held', 'quarantined')),
+        fence INTEGER NOT NULL CHECK (fence >= 0),
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        lease_id TEXT,
+        holder_instance_id TEXT,
+        task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+        saga_id TEXT REFERENCES edit_sagas(id) ON DELETE SET NULL,
+        purpose TEXT CHECK (purpose IN ('forward', 'recovery')),
+        policy_epoch INTEGER CHECK (policy_epoch >= 0),
+        intent_digest TEXT CHECK (intent_digest IS NULL OR length(intent_digest) = 64),
+        acquired_at TEXT,
+        renewed_at TEXT,
+        expires_at TEXT,
+        last_observed_at TEXT NOT NULL,
+        quarantine_reason TEXT
+      );
+
+      CREATE TABLE task_mutation_quarantines (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        workspace_key TEXT NOT NULL REFERENCES workspace_mutation_state(workspace_key),
+        reason TEXT NOT NULL,
+        source_saga_id TEXT REFERENCES edit_sagas(id) ON DELETE SET NULL,
+        fence INTEGER NOT NULL CHECK (fence >= 0),
+        created_at TEXT NOT NULL,
+        cleared_at TEXT,
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        PRIMARY KEY(task_id, workspace_key)
+      );
+      CREATE INDEX task_mutation_quarantine_active_idx
+        ON task_mutation_quarantines(task_id, cleared_at, workspace_key);
+    `,
+  },
+  {
+    version: 21,
+    checksum: 'edit-saga-workspace-binding-v21',
+    sql: `
+      ALTER TABLE edit_sagas ADD COLUMN workspace_key TEXT;
+      ALTER TABLE edit_sagas ADD COLUMN root_identity_digest TEXT;
+      CREATE INDEX edit_sagas_workspace_recovery_idx
+        ON edit_sagas(workspace_key, state, updated_at, id);
+    `,
+  },
+  {
+    version: 22,
+    checksum: 'edit-saga-binding-seal-v22',
+    sql: `
+      ALTER TABLE edit_sagas ADD COLUMN binding_version INTEGER NOT NULL DEFAULT 0
+        CHECK (binding_version IN (0, 1));
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -915,6 +1071,29 @@ export interface PersistenceClient {
   setDraft(taskId: string, draft: string): void;
   getWorkspace(taskId: string): string | null;
   setWorkspace(taskId: string, path: string): void;
+  setWorkspaceBinding(
+    taskId: string,
+    binding: { path: string; workspaceKey: string; rootIdentityDigest: string },
+  ): void;
+  acquireMutationLease(input: {
+    workspaceKey: string;
+    rootIdentityDigest: string;
+    holderInstanceId: string;
+    taskId: string;
+    turnId: string;
+    sagaId: string;
+    purpose: MutationLeasePurpose;
+    policyEpoch: number;
+    intentDigest: string;
+    now: string;
+    expiresAt: string;
+  }): MutationLeaseToken;
+  renewMutationLease(token: MutationLeaseToken, now: string, expiresAt: string): MutationLeaseToken;
+  assertMutationLease(token: MutationLeaseToken, now: string): void;
+  releaseMutationLease(token: MutationLeaseToken, now: string): void;
+  quarantineStartupMutations(holderInstanceId: string, now: string): readonly MutationQuarantine[];
+  initializeMutationRecovery(holderInstanceId: string, now: string): readonly MutationQuarantine[];
+  clearMutationQuarantine(workspaceKey: string, expectedFence: number, now: string): void;
   getRuntime(): RuntimeKind;
   setRuntime(kind: RuntimeKind): void;
   getModel(): string;
@@ -1089,6 +1268,12 @@ export interface PersistenceClient {
     expectedRevision: number,
     mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
   ): EditSagaSnapshot;
+  updateEditSagaUnderLease(
+    id: string,
+    expectedRevision: number,
+    lease: unknown,
+    mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
+  ): EditSagaSnapshot;
   listRecoverableEditSagas(): readonly EditSagaSnapshot[];
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
@@ -1154,6 +1339,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     this.runMigrations(databasePath);
+    this.backfillLegacyMutationScopes();
+    this.backfillLegacyEditSagaBindings();
     this.interruptActiveCommands();
     this.contextLedger = new ContextLedger(this);
   }
@@ -1185,6 +1372,59 @@ export class SqlitePersistenceClient implements PersistenceClient {
           .run(migration.version, migration.checksum, new Date().toISOString());
       })();
     }
+  }
+
+  private backfillLegacyMutationScopes(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT id, workspace_path FROM tasks
+         WHERE workspace_path IS NOT NULL AND mutation_scope_key IS NULL`,
+      )
+      .all() as { id: string; workspace_path: string }[];
+    const update = this.db.prepare(
+      `UPDATE tasks SET mutation_scope_key = ?, mutation_root_identity_digest = ? WHERE id = ?`,
+    );
+    this.db.transaction(() => {
+      for (const row of rows) {
+        const legacyKey = legacyMutationWorkspaceKey(row.workspace_path);
+        update.run(legacyKey, legacyKey, row.id);
+      }
+    })();
+  }
+
+  private backfillLegacyEditSagaBindings(): void {
+    const rows = this.db
+      .prepare(`SELECT id, snapshot_json FROM edit_sagas WHERE binding_version = 0`)
+      .all() as {
+      id: string;
+      snapshot_json: string;
+    }[];
+    const update = this.db.prepare(
+      `UPDATE edit_sagas SET workspace_key = NULL, root_identity_digest = NULL,
+       snapshot_json = ?, binding_version = 1
+       WHERE id = ? AND binding_version = 0`,
+    );
+    this.db.transaction(() => {
+      for (const row of rows) {
+        const raw = JSON.parse(row.snapshot_json) as Record<string, unknown>;
+        raw['workspaceKey'] = null;
+        raw['rootIdentityDigest'] = null;
+        const steps = raw['steps'];
+        if (!Array.isArray(steps)) throw new Error('Invalid legacy Edit Saga steps');
+        const journalDigest = journaledPatchDigest({
+          version: 2,
+          policyEpoch: raw['policyEpoch'] as number,
+          workspaceKey: null,
+          rootIdentityDigest: null,
+          operations: steps.map(
+            (step) =>
+              (step as { operation: EditSagaSnapshot['steps'][number]['operation'] }).operation,
+          ),
+        });
+        raw['journalDigest'] = journalDigest;
+        update.run(JSON.stringify(raw), row.id);
+      }
+    })();
   }
 
   listTasks(): TaskSummary[] {
@@ -1266,14 +1506,62 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   setWorkspace(taskId: string, path: string): void {
+    const legacyKey = legacyMutationWorkspaceKey(path);
+    this.setWorkspaceBinding(taskId, {
+      path,
+      workspaceKey: legacyKey,
+      rootIdentityDigest: legacyKey,
+    });
+  }
+
+  setWorkspaceBinding(
+    taskId: string,
+    binding: { path: string; workspaceKey: string; rootIdentityDigest: string },
+  ): void {
+    validateMutationDigest(binding.workspaceKey, 'workspace mutation key');
+    validateMutationDigest(binding.rootIdentityDigest, 'workspace root identity digest');
     this.db.transaction(() => {
+      this.assertTaskNotMutationQuarantined(taskId);
       const current = this.getTaskRow(taskId);
+      if (current.mutation_scope_key !== null) {
+        const active = this.db
+          .prepare(
+            `SELECT 1 FROM workspace_mutation_state
+             WHERE workspace_key = ? AND state = 'held' LIMIT 1`,
+          )
+          .get(current.mutation_scope_key);
+        if (active !== undefined) throw new MutationLeaseBusyError();
+      }
+      const destination = this.db
+        .prepare('SELECT state FROM workspace_mutation_state WHERE workspace_key = ?')
+        .get(binding.workspaceKey) as { state: WorkspaceMutationRow['state'] } | undefined;
+      if (destination?.state === 'held') throw new MutationLeaseBusyError();
+      if (destination?.state === 'quarantined') throw new MutationQuarantinedError();
+      const destinationQuarantine = this.db
+        .prepare(
+          `SELECT 1 FROM task_mutation_quarantines
+           WHERE workspace_key = ? AND cleared_at IS NULL LIMIT 1`,
+        )
+        .get(binding.workspaceKey);
+      if (destinationQuarantine !== undefined) throw new MutationQuarantinedError();
+      const changed =
+        current.workspace_path !== binding.path ||
+        current.mutation_scope_key !== binding.workspaceKey ||
+        current.mutation_root_identity_digest !== binding.rootIdentityDigest;
       const result = this.db
         .prepare(
-          `UPDATE tasks SET workspace_path = ?, context_epoch = context_epoch + ?, updated_at = ?
+          `UPDATE tasks SET workspace_path = ?, mutation_scope_key = ?,
+           mutation_root_identity_digest = ?, context_epoch = context_epoch + ?, updated_at = ?
            WHERE id = ?`,
         )
-        .run(path, current.workspace_path === path ? 0 : 1, new Date().toISOString(), taskId);
+        .run(
+          binding.path,
+          binding.workspaceKey,
+          binding.rootIdentityDigest,
+          changed ? 1 : 0,
+          new Date().toISOString(),
+          taskId,
+        );
       if (result.changes !== 1) throw new NotFoundError('Task not found');
       this.quarantineStaleBackgroundInTransaction(taskId);
     })();
@@ -1629,6 +1917,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
             rule.auditReason ?? null,
             now,
           );
+      this.quarantineHeldMutationForTask(taskId, 'policy_epoch_changed', now);
       this.enqueuePermissionPolicyEpoch(taskId, policyEpoch, now);
       return {
         preset,
@@ -1723,6 +2012,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
             revoked_at = excluded.revoked_at, policy_epoch = excluded.policy_epoch`,
         )
         .run(taskId, capability, canonicalNow, nextEpoch);
+      this.quarantineHeldMutationForTask(taskId, 'policy_epoch_changed', canonicalNow);
       this.enqueuePermissionPolicyEpoch(taskId, nextEpoch, canonicalNow);
       return updated.changes;
     })();
@@ -2627,25 +2917,489 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  acquireMutationLease(input: {
+    workspaceKey: string;
+    rootIdentityDigest: string;
+    holderInstanceId: string;
+    taskId: string;
+    turnId: string;
+    sagaId: string;
+    purpose: MutationLeasePurpose;
+    policyEpoch: number;
+    intentDigest: string;
+    now: string;
+    expiresAt: string;
+  }): MutationLeaseToken {
+    validateMutationLeaseInput(input);
+    const outcome = this.db.transaction(() => {
+      const task = this.getTaskRow(input.taskId);
+      if (
+        task.mutation_scope_key !== input.workspaceKey ||
+        task.mutation_root_identity_digest !== input.rootIdentityDigest
+      )
+        throw new MutationQuarantinedError();
+      this.getTurn(input.taskId, input.turnId);
+      const saga = this.getEditSaga(input.sagaId);
+      if (
+        saga.taskId !== input.taskId ||
+        saga.turnId !== input.turnId ||
+        saga.policyEpoch !== input.policyEpoch ||
+        saga.workspaceKey !== input.workspaceKey ||
+        saga.rootIdentityDigest !== input.rootIdentityDigest ||
+        saga.planDigest !== input.intentDigest ||
+        saga.state === 'committed' ||
+        saga.state === 'restored'
+      )
+        throw new MutationLeaseStaleError();
+      this.ensureMutationRow(input.workspaceKey, input.rootIdentityDigest, input.now);
+      const row = this.getMutationRow(input.workspaceKey);
+      if (input.workspaceKey === input.rootIdentityDigest) {
+        this.quarantineWorkspaceInTransaction(
+          row,
+          'legacy_workspace_identity',
+          input.now,
+          input.sagaId,
+        );
+        return { error: 'quarantined' } as const;
+      }
+      if (this.getPermissionPolicy(input.taskId).policyEpoch !== input.policyEpoch) {
+        this.quarantineWorkspaceInTransaction(row, 'policy_epoch_changed', input.now, input.sagaId);
+        return { error: 'quarantined' } as const;
+      }
+      const clockFailure = Date.parse(input.now) < Date.parse(row.last_observed_at);
+      const rootFailure = row.root_identity_digest !== input.rootIdentityDigest;
+      const expired =
+        row.expires_at !== null && Date.parse(input.now) >= Date.parse(row.expires_at);
+      if (clockFailure || rootFailure || (row.state === 'held' && expired)) {
+        this.quarantineWorkspaceInTransaction(
+          row,
+          clockFailure ? 'clock_rollback' : rootFailure ? 'root_identity_changed' : 'lease_expired',
+          input.now,
+          row.saga_id,
+        );
+        return { error: clockFailure ? 'clock' : 'quarantined' } as const;
+      }
+      if (row.state === 'held') return { error: 'busy' } as const;
+      const activeQuarantine = this.db
+        .prepare(
+          `SELECT 1 FROM task_mutation_quarantines
+           WHERE workspace_key = ? AND cleared_at IS NULL LIMIT 1`,
+        )
+        .get(input.workspaceKey);
+      if (activeQuarantine !== undefined && input.purpose !== 'recovery')
+        return { error: 'quarantined' } as const;
+      if (
+        input.purpose === 'recovery' &&
+        activeQuarantine === undefined &&
+        row.state !== 'quarantined'
+      )
+        return { error: 'quarantined' } as const;
+      if (row.state === 'quarantined' && input.purpose !== 'recovery')
+        return { error: 'quarantined' } as const;
+      if (input.purpose === 'recovery') {
+        const source = this.db
+          .prepare(
+            `SELECT 1 FROM task_mutation_quarantines
+             WHERE task_id = ? AND workspace_key = ? AND cleared_at IS NULL LIMIT 1`,
+          )
+          .get(input.taskId, input.workspaceKey);
+        if (source === undefined) return { error: 'quarantined' } as const;
+      }
+      if (row.fence >= Number.MAX_SAFE_INTEGER) {
+        this.quarantineWorkspaceInTransaction(row, 'fence_exhausted', input.now, input.sagaId);
+        return { error: 'quarantined' } as const;
+      }
+      const leaseId = randomUUID();
+      const fence = row.fence + 1;
+      const revision = row.revision + 1;
+      const result = this.db
+        .prepare(
+          `UPDATE workspace_mutation_state SET state = 'held', fence = ?, revision = ?,
+           lease_id = ?, holder_instance_id = ?, task_id = ?, turn_id = ?, saga_id = ?,
+           purpose = ?, policy_epoch = ?, intent_digest = ?, acquired_at = ?, renewed_at = ?,
+           expires_at = ?, last_observed_at = ?, quarantine_reason = NULL
+           WHERE workspace_key = ? AND revision = ?`,
+        )
+        .run(
+          fence,
+          revision,
+          leaseId,
+          input.holderInstanceId,
+          input.taskId,
+          input.turnId,
+          input.sagaId,
+          input.purpose,
+          input.policyEpoch,
+          input.intentDigest,
+          input.now,
+          input.now,
+          input.expiresAt,
+          input.now,
+          input.workspaceKey,
+          row.revision,
+        );
+      if (result.changes !== 1) return { error: 'busy' } as const;
+      return {
+        token: mutationLeaseToken({
+          ...input,
+          leaseId,
+          fence,
+          revision,
+          acquiredAt: input.now,
+          renewedAt: input.now,
+        }),
+      } as const;
+    })();
+    if ('token' in outcome) return outcome.token;
+    if (outcome.error === 'busy') throw new MutationLeaseBusyError();
+    if (outcome.error === 'clock') throw new MutationClockRollbackError();
+    throw new MutationQuarantinedError();
+  }
+
+  renewMutationLease(
+    token: MutationLeaseToken,
+    now: string,
+    expiresAt: string,
+  ): MutationLeaseToken {
+    validateMutationToken(token);
+    const nowMs = validateMutationTimestamp(now, 'mutation lease renewal time');
+    const expiresMs = validateMutationTimestamp(expiresAt, 'mutation lease expiry');
+    if (expiresMs <= nowMs) throw new Error('Mutation lease expiry must be in the future');
+    const outcome = this.db.transaction(() => {
+      const row = this.getMutationRow(token.workspaceKey);
+      if (!mutationTokenMatchesRow(token, row)) return 'stale' as const;
+      if (nowMs < Date.parse(row.last_observed_at)) {
+        this.quarantineWorkspaceInTransaction(row, 'clock_rollback', now, token.sagaId);
+        return 'clock' as const;
+      }
+      if (this.getPermissionPolicy(token.taskId).policyEpoch !== token.policyEpoch) {
+        this.quarantineWorkspaceInTransaction(row, 'policy_epoch_changed', now, token.sagaId);
+        return 'quarantined' as const;
+      }
+      if (Date.parse(row.expires_at!) <= nowMs) {
+        this.quarantineWorkspaceInTransaction(row, 'lease_expired', now, token.sagaId);
+        return 'quarantined' as const;
+      }
+      const revision = row.revision + 1;
+      const result = this.db
+        .prepare(
+          `UPDATE workspace_mutation_state SET revision = ?, renewed_at = ?, expires_at = ?,
+           last_observed_at = ? WHERE workspace_key = ? AND revision = ? AND state = 'held'`,
+        )
+        .run(revision, now, expiresAt, now, token.workspaceKey, row.revision);
+      if (result.changes !== 1) return 'stale' as const;
+      return mutationLeaseToken({ ...token, revision, renewedAt: now, expiresAt });
+    })();
+    if (outcome === 'clock') throw new MutationClockRollbackError();
+    if (outcome === 'quarantined') throw new MutationQuarantinedError();
+    if (outcome === 'stale') throw new MutationLeaseStaleError();
+    return outcome;
+  }
+
+  assertMutationLease(token: MutationLeaseToken, now: string): void {
+    validateMutationToken(token);
+    const nowMs = validateMutationTimestamp(now, 'mutation lease assertion time');
+    const outcome = this.db.transaction(() => {
+      const row = this.getMutationRow(token.workspaceKey);
+      if (!mutationTokenMatchesRow(token, row)) return 'stale' as const;
+      if (nowMs < Date.parse(row.last_observed_at)) {
+        this.quarantineWorkspaceInTransaction(row, 'clock_rollback', now, token.sagaId);
+        return 'clock' as const;
+      }
+      if (this.getPermissionPolicy(token.taskId).policyEpoch !== token.policyEpoch) {
+        this.quarantineWorkspaceInTransaction(row, 'policy_epoch_changed', now, token.sagaId);
+        return 'quarantined' as const;
+      }
+      if (Date.parse(row.expires_at!) <= nowMs) {
+        this.quarantineWorkspaceInTransaction(row, 'lease_expired', now, token.sagaId);
+        return 'quarantined' as const;
+      }
+      return 'ok' as const;
+    })();
+    if (outcome === 'clock') throw new MutationClockRollbackError();
+    if (outcome === 'quarantined') throw new MutationQuarantinedError();
+    if (outcome === 'stale') throw new MutationLeaseStaleError();
+  }
+
+  releaseMutationLease(token: MutationLeaseToken, now: string): void {
+    validateMutationToken(token);
+    const nowMs = validateMutationTimestamp(now, 'mutation lease release time');
+    const outcome = this.db.transaction(() => {
+      const row = this.getMutationRow(token.workspaceKey);
+      if (!mutationTokenMatchesRow(token, row)) return 'stale' as const;
+      if (nowMs < Date.parse(row.last_observed_at)) {
+        this.quarantineWorkspaceInTransaction(row, 'clock_rollback', now, token.sagaId);
+        return 'clock' as const;
+      }
+      if (this.getPermissionPolicy(token.taskId).policyEpoch !== token.policyEpoch) {
+        this.quarantineWorkspaceInTransaction(row, 'policy_epoch_changed', now, token.sagaId);
+        return 'quarantined' as const;
+      }
+      if (Date.parse(row.expires_at!) <= nowMs) {
+        this.quarantineWorkspaceInTransaction(row, 'lease_expired', now, token.sagaId);
+        return 'quarantined' as const;
+      }
+      const changes = this.db
+        .prepare(
+          `UPDATE workspace_mutation_state SET state = 'idle', revision = revision + 1,
+           lease_id = NULL, holder_instance_id = NULL, task_id = NULL, turn_id = NULL,
+           saga_id = NULL, purpose = NULL, policy_epoch = NULL, intent_digest = NULL,
+           acquired_at = NULL, renewed_at = NULL, expires_at = NULL, last_observed_at = ?,
+           quarantine_reason = NULL WHERE workspace_key = ? AND revision = ? AND state = 'held'`,
+        )
+        .run(now, token.workspaceKey, row.revision).changes;
+      return changes === 1 ? ('released' as const) : ('stale' as const);
+    })();
+    if (outcome === 'clock') throw new MutationClockRollbackError();
+    if (outcome === 'quarantined') throw new MutationQuarantinedError();
+    if (outcome === 'stale') throw new MutationLeaseStaleError();
+  }
+
+  quarantineStartupMutations(holderInstanceId: string, now: string): readonly MutationQuarantine[] {
+    validateMutationIdentifier(holderInstanceId, 'holder instance id');
+    validateMutationTimestamp(now, 'startup quarantine time');
+    return this.db.transaction(() => {
+      const held = this.db
+        .prepare(
+          `SELECT * FROM workspace_mutation_state
+           WHERE state = 'held' AND holder_instance_id IS NOT ?`,
+        )
+        .all(holderInstanceId) as WorkspaceMutationRow[];
+      for (const row of held)
+        this.quarantineWorkspaceInTransaction(row, 'unclean_shutdown', now, row.saga_id);
+      const unresolved = this.db
+        .prepare(
+          `SELECT DISTINCT e.workspace_key, e.root_identity_digest, e.id AS saga_id
+           FROM edit_sagas e
+           WHERE e.state IN ('prepared', 'applying', 'compensating', 'recovery_required')
+             AND e.workspace_key IS NOT NULL AND e.root_identity_digest IS NOT NULL`,
+        )
+        .all() as { workspace_key: string; root_identity_digest: string; saga_id: string }[];
+      for (const item of unresolved) {
+        this.ensureMutationRow(item.workspace_key, item.root_identity_digest, now);
+        const row = this.getMutationRow(item.workspace_key);
+        if (row.state !== 'quarantined')
+          this.quarantineWorkspaceInTransaction(row, 'unresolved_edit_saga', now, item.saga_id);
+        this.quarantineSagaOwnerInTransaction(
+          item.workspace_key,
+          item.saga_id,
+          'unresolved_edit_saga',
+          this.getMutationRow(item.workspace_key).fence,
+          now,
+        );
+      }
+      const legacy = this.db
+        .prepare(
+          `SELECT e.id AS saga_id, t.mutation_scope_key AS workspace_key,
+                  t.mutation_root_identity_digest AS root_identity_digest
+           FROM edit_sagas e JOIN tasks t ON t.id = e.task_id
+           WHERE e.state IN ('prepared', 'applying', 'compensating', 'recovery_required')
+             AND e.workspace_key IS NULL
+             AND t.mutation_scope_key IS NOT NULL
+             AND t.mutation_root_identity_digest IS NOT NULL`,
+        )
+        .all() as { workspace_key: string; root_identity_digest: string; saga_id: string }[];
+      for (const item of legacy) {
+        this.ensureMutationRow(item.workspace_key, item.root_identity_digest, now);
+        const row = this.getMutationRow(item.workspace_key);
+        if (row.state !== 'quarantined')
+          this.quarantineWorkspaceInTransaction(row, 'legacy_unbound_edit_saga', now, item.saga_id);
+        this.quarantineSagaOwnerInTransaction(
+          item.workspace_key,
+          item.saga_id,
+          'legacy_unbound_edit_saga',
+          this.getMutationRow(item.workspace_key).fence,
+          now,
+        );
+      }
+      return this.listMutationQuarantines();
+    })();
+  }
+
+  initializeMutationRecovery(holderInstanceId: string, now: string): readonly MutationQuarantine[] {
+    return this.db.transaction(() => {
+      const quarantines = this.quarantineStartupMutations(holderInstanceId, now);
+      this.interruptActiveTurns();
+      return quarantines;
+    })();
+  }
+
+  clearMutationQuarantine(workspaceKey: string, expectedFence: number, now: string): void {
+    validateMutationDigest(workspaceKey, 'workspace mutation key');
+    validateMutationTimestamp(now, 'quarantine clear time');
+    this.db.transaction(() => {
+      const row = this.getMutationRow(workspaceKey);
+      if (row.state !== 'idle' || row.fence !== expectedFence) throw new MutationQuarantinedError();
+      const unresolved = this.db
+        .prepare(
+          `SELECT 1 FROM edit_sagas e JOIN tasks t ON t.id = e.task_id
+           WHERE (e.workspace_key = ? OR (e.workspace_key IS NULL AND t.mutation_scope_key = ?))
+             AND e.state IN ('prepared', 'applying', 'compensating', 'recovery_required') LIMIT 1`,
+        )
+        .get(workspaceKey, workspaceKey);
+      if (unresolved !== undefined) throw new MutationQuarantinedError();
+      this.db
+        .prepare(
+          `UPDATE task_mutation_quarantines SET cleared_at = ?, revision = revision + 1
+           WHERE workspace_key = ? AND cleared_at IS NULL`,
+        )
+        .run(now, workspaceKey);
+    })();
+  }
+
+  private ensureMutationRow(workspaceKey: string, rootIdentityDigest: string, now: string): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO workspace_mutation_state(
+          workspace_key, root_identity_digest, state, fence, revision, last_observed_at
+        ) VALUES (?, ?, 'idle', 0, 0, ?)`,
+      )
+      .run(workspaceKey, rootIdentityDigest, now);
+  }
+
+  private getMutationRow(workspaceKey: string): WorkspaceMutationRow {
+    const row = this.db
+      .prepare('SELECT * FROM workspace_mutation_state WHERE workspace_key = ?')
+      .get(workspaceKey) as WorkspaceMutationRow | undefined;
+    if (row === undefined) throw new MutationLeaseStaleError();
+    return row;
+  }
+
+  private quarantineWorkspaceInTransaction(
+    row: WorkspaceMutationRow,
+    reason: string,
+    now: string,
+    sourceSagaId: string | null,
+  ): void {
+    if (row.fence >= Number.MAX_SAFE_INTEGER) reason = 'fence_exhausted';
+    const fence = row.fence >= Number.MAX_SAFE_INTEGER ? row.fence : row.fence + 1;
+    const lastObservedAt =
+      Date.parse(now) < Date.parse(row.last_observed_at) ? row.last_observed_at : now;
+    const result = this.db
+      .prepare(
+        `UPDATE workspace_mutation_state SET state = 'quarantined', fence = ?,
+         revision = revision + 1, lease_id = NULL, holder_instance_id = NULL,
+         task_id = NULL, turn_id = NULL, saga_id = NULL, purpose = NULL,
+         policy_epoch = NULL, intent_digest = NULL, acquired_at = NULL, renewed_at = NULL,
+         expires_at = NULL, last_observed_at = ?, quarantine_reason = ?
+         WHERE workspace_key = ? AND revision = ?`,
+      )
+      .run(fence, lastObservedAt, reason, row.workspace_key, row.revision);
+    if (result.changes !== 1) throw new MutationLeaseStaleError();
+    this.db
+      .prepare(
+        `INSERT INTO task_mutation_quarantines(
+           task_id, workspace_key, reason, source_saga_id, fence, created_at, cleared_at, revision
+         )
+         SELECT id, ?, ?, ?, ?, ?, NULL, 0 FROM tasks WHERE mutation_scope_key = ?
+         ON CONFLICT(task_id, workspace_key) DO UPDATE SET
+           reason = excluded.reason, source_saga_id = excluded.source_saga_id,
+           fence = excluded.fence, created_at = excluded.created_at, cleared_at = NULL,
+           revision = task_mutation_quarantines.revision + 1`,
+      )
+      .run(row.workspace_key, reason, sourceSagaId, fence, now, row.workspace_key);
+  }
+
+  private quarantineHeldMutationForTask(taskId: string, reason: string, now: string): void {
+    const row = this.db
+      .prepare("SELECT * FROM workspace_mutation_state WHERE task_id = ? AND state = 'held'")
+      .get(taskId) as WorkspaceMutationRow | undefined;
+    if (row !== undefined) this.quarantineWorkspaceInTransaction(row, reason, now, row.saga_id);
+  }
+
+  private quarantineSagaOwnerInTransaction(
+    workspaceKey: string,
+    sagaId: string,
+    reason: string,
+    fence: number,
+    now: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO task_mutation_quarantines(
+           task_id, workspace_key, reason, source_saga_id, fence, created_at, cleared_at, revision
+         ) SELECT task_id, ?, ?, id, ?, ?, NULL, 0 FROM edit_sagas WHERE id = ?
+         ON CONFLICT(task_id, workspace_key) DO UPDATE SET
+           reason = excluded.reason, source_saga_id = excluded.source_saga_id,
+           fence = excluded.fence, created_at = excluded.created_at, cleared_at = NULL,
+           revision = task_mutation_quarantines.revision + 1
+         WHERE task_mutation_quarantines.cleared_at IS NOT NULL`,
+      )
+      .run(workspaceKey, reason, fence, now, sagaId);
+  }
+
+  private listMutationQuarantines(): readonly MutationQuarantine[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT task_id, workspace_key, reason, source_saga_id, fence, created_at
+           FROM task_mutation_quarantines WHERE cleared_at IS NULL ORDER BY task_id, workspace_key`,
+        )
+        .all() as {
+        task_id: string;
+        workspace_key: string;
+        reason: string;
+        source_saga_id: string | null;
+        fence: number;
+        created_at: string;
+      }[]
+    ).map((row) =>
+      Object.freeze({
+        taskId: row.task_id,
+        workspaceKey: row.workspace_key,
+        reason: row.reason,
+        sourceSagaId: row.source_saga_id,
+        fence: row.fence,
+        createdAt: row.created_at,
+      }),
+    );
+  }
+
   prepareEditSaga(request: EditSagaCreateRequest): EditSagaSnapshot {
     return this.db.transaction(() => {
       this.getTurn(request.taskId, request.turnId);
+      const task = this.getTaskRow(request.taskId);
+      if (this.getPermissionPolicy(request.taskId).policyEpoch !== request.policyEpoch)
+        throw new OperationConflictError('Edit Saga policy epoch changed');
+      if (
+        request.workspaceKey !== null &&
+        (request.workspaceKey !== task.mutation_scope_key ||
+          request.rootIdentityDigest !== task.mutation_root_identity_digest)
+      )
+        throw new OperationConflictError('Edit Saga workspace binding changed');
+      const boundRequest: EditSagaCreateRequest = {
+        ...request,
+        workspaceKey: task.mutation_scope_key,
+        rootIdentityDigest: task.mutation_root_identity_digest,
+        journalDigest: journaledPatchDigest({
+          version: 2,
+          policyEpoch: request.policyEpoch,
+          workspaceKey: task.mutation_scope_key,
+          rootIdentityDigest: task.mutation_root_identity_digest,
+          operations: request.operations,
+        }),
+      };
       const existing = this.db
         .prepare('SELECT * FROM edit_sagas WHERE task_id = ? AND turn_id = ? AND operation_id = ?')
         .get(request.taskId, request.turnId, request.operationId) as EditSagaRow | undefined;
       if (existing !== undefined) {
         const snapshot = toEditSaga(existing);
-        if (snapshot.planDigest !== request.planDigest)
+        if (
+          snapshot.planDigest !== request.planDigest ||
+          snapshot.workspaceKey !== boundRequest.workspaceKey ||
+          snapshot.rootIdentityDigest !== boundRequest.rootIdentityDigest
+        )
           throw new OperationConflictError('Edit operation id was reused with another patch');
         return snapshot;
       }
-      const snapshot = createEditSagaSnapshot(request);
+      const snapshot = createEditSagaSnapshot(boundRequest);
       this.db
         .prepare(
           `INSERT INTO edit_sagas(
             id, task_id, turn_id, operation_id, plan_digest, policy_epoch,
-            state, revision, artifact_cleanup_pending, snapshot_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            workspace_key, root_identity_digest,
+            binding_version, state, revision, artifact_cleanup_pending, snapshot_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           snapshot.id,
@@ -2654,6 +3408,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
           snapshot.operationId,
           snapshot.planDigest,
           snapshot.policyEpoch,
+          snapshot.workspaceKey,
+          snapshot.rootIdentityDigest,
           snapshot.state,
           snapshot.revision,
           snapshot.artifactCleanupPending ? 1 : 0,
@@ -2708,6 +3464,33 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  updateEditSagaUnderLease(
+    id: string,
+    expectedRevision: number,
+    lease: unknown,
+    mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
+  ): EditSagaSnapshot {
+    const token = lease as MutationLeaseToken;
+    validateMutationToken(token);
+    const transaction = this.db.transaction(() => {
+      const row = this.getMutationRow(token.workspaceKey);
+      if (!mutationTokenMatchesRow(token, row) || token.sagaId !== id)
+        throw new MutationLeaseStaleError();
+      if (this.getPermissionPolicy(token.taskId).policyEpoch !== token.policyEpoch)
+        throw new MutationLeaseStaleError();
+      const saga = this.getEditSaga(id);
+      if (
+        saga.workspaceKey !== token.workspaceKey ||
+        saga.rootIdentityDigest !== token.rootIdentityDigest ||
+        saga.policyEpoch !== token.policyEpoch ||
+        saga.planDigest !== token.intentDigest
+      )
+        throw new MutationLeaseStaleError();
+      return this.updateEditSaga(id, expectedRevision, mutate);
+    });
+    return transaction.immediate();
+  }
+
   listRecoverableEditSagas(): readonly EditSagaSnapshot[] {
     return (
       this.db
@@ -2732,6 +3515,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   startTurn(taskId: string, text: string): StartedTurn {
     return this.db.transaction(() => {
       this.assertTask(taskId);
+      this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
       return this.startTurnInTransaction(taskId, text);
     })();
@@ -2778,6 +3562,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   startNextQueued(taskId: string): QueueTransition {
     return this.db.transaction(() => {
       this.assertTask(taskId);
+      this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) return null;
       const row = this.db
         .prepare(
@@ -3650,6 +4435,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.getTaskRow(taskId);
   }
 
+  private assertTaskNotMutationQuarantined(taskId: string): void {
+    const active = this.db
+      .prepare(
+        `SELECT 1 FROM task_mutation_quarantines
+         WHERE task_id = ? AND cleared_at IS NULL LIMIT 1`,
+      )
+      .get(taskId);
+    if (active !== undefined) throw new MutationQuarantinedError();
+  }
+
   private getTurn(taskId: string, turnId: string): TurnRow {
     const row = this.db
       .prepare('SELECT * FROM turns WHERE id = ? AND task_id = ?')
@@ -4248,6 +5043,9 @@ function toEditSaga(row: EditSagaRow): EditSagaSnapshot {
     snapshot.operationId !== row.operation_id ||
     snapshot.planDigest !== row.plan_digest ||
     snapshot.policyEpoch !== row.policy_epoch ||
+    snapshot.workspaceKey !== row.workspace_key ||
+    snapshot.rootIdentityDigest !== row.root_identity_digest ||
+    row.binding_version !== 1 ||
     snapshot.state !== row.state ||
     snapshot.revision !== row.revision ||
     snapshot.artifactCleanupPending !== (row.artifact_cleanup_pending === 1) ||
@@ -4256,4 +5054,76 @@ function toEditSaga(row: EditSagaRow): EditSagaSnapshot {
   )
     throw new Error('Persisted Edit Saga columns do not match its sealed snapshot');
   return snapshot;
+}
+
+function validateMutationLeaseInput(input: {
+  workspaceKey: string;
+  rootIdentityDigest: string;
+  holderInstanceId: string;
+  taskId: string;
+  turnId: string;
+  sagaId: string;
+  purpose: MutationLeasePurpose;
+  policyEpoch: number;
+  intentDigest: string;
+  now: string;
+  expiresAt: string;
+}): void {
+  validateMutationDigest(input.workspaceKey, 'workspace mutation key');
+  validateMutationDigest(input.rootIdentityDigest, 'workspace root identity digest');
+  validateMutationDigest(input.intentDigest, 'mutation intent digest');
+  validateMutationIdentifier(input.holderInstanceId, 'holder instance id');
+  validateMutationIdentifier(input.taskId, 'task id');
+  validateMutationIdentifier(input.turnId, 'turn id');
+  validateMutationIdentifier(input.sagaId, 'saga id');
+  if (!['forward', 'recovery'].includes(input.purpose)) throw new Error('Invalid lease purpose');
+  if (!Number.isSafeInteger(input.policyEpoch) || input.policyEpoch < 0)
+    throw new Error('Invalid mutation policy epoch');
+  const now = validateMutationTimestamp(input.now, 'mutation lease acquisition time');
+  const expiresAt = validateMutationTimestamp(input.expiresAt, 'mutation lease expiry');
+  if (expiresAt <= now) throw new Error('Mutation lease expiry must be in the future');
+}
+
+function validateMutationToken(token: MutationLeaseToken): void {
+  if (token.version !== 1) throw new MutationLeaseStaleError();
+  validateMutationLeaseInput({ ...token, now: token.acquiredAt });
+  validateMutationIdentifier(token.leaseId, 'mutation lease id');
+  if (
+    !Number.isSafeInteger(token.fence) ||
+    token.fence < 1 ||
+    !Number.isSafeInteger(token.revision) ||
+    token.revision < 1
+  )
+    throw new MutationLeaseStaleError();
+  validateMutationTimestamp(token.renewedAt, 'mutation lease renewal time');
+}
+
+function mutationLeaseToken(input: Omit<MutationLeaseToken, 'version'>): MutationLeaseToken {
+  return Object.freeze({ version: 1, ...input });
+}
+
+function mutationTokenMatchesRow(token: MutationLeaseToken, row: WorkspaceMutationRow): boolean {
+  return (
+    row.state === 'held' &&
+    row.workspace_key === token.workspaceKey &&
+    row.root_identity_digest === token.rootIdentityDigest &&
+    row.lease_id === token.leaseId &&
+    row.holder_instance_id === token.holderInstanceId &&
+    row.task_id === token.taskId &&
+    row.turn_id === token.turnId &&
+    row.saga_id === token.sagaId &&
+    row.purpose === token.purpose &&
+    row.policy_epoch === token.policyEpoch &&
+    row.intent_digest === token.intentDigest &&
+    row.fence === token.fence &&
+    row.revision === token.revision &&
+    row.acquired_at === token.acquiredAt &&
+    row.renewed_at === token.renewedAt &&
+    row.expires_at === token.expiresAt
+  );
+}
+
+function validateMutationIdentifier(value: string, name: string): void {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 200)
+    throw new Error(`Invalid ${name}`);
 }
