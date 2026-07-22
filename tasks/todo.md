@@ -4,11 +4,20 @@ Wave 1(並列):
 - [ ] A(Codex): operations ledger / MessagePort+snapshot+afterSeq / input queue(Queue/Steer/Stop&Send) / goal・pin・archive・draft・workspace永続化 / contracts v2
 - [ ] B(Sonnet): Markdown+sanitizer描画 / pin・archive・goal・workspace UI / draft永続化接続 / queue・steer UI / snapshot復元
 - [ ] C(Sonnet): eslint+prettier+CI(GitHub Actions 3OS matrix)
-Wave 2(Wave 1監査後):
-- [ ] D(Codex): Production adapter(Codex CLI、read-only/no-tools、UtilityProcess)
-- [ ] E(Sonnet): Playwright Electron E2E golden paths
-- [ ] F: Context Ledger minimum
-- [ ] Fable: 各wave監査 → ゲート判定 → ADR更新
+Wave 2(完了 2026-07-22):
+- [x] D(Codex): Production adapter(Codex CLI、read-only/no-tools、UtilityProcess)+ ADR
+- [x] E(Sonnet): Playwright E2E 4 specs(devモードfallbackで3回連続green)
+- [x] F(Codex+Sonnet): Context Ledger minimum + context %UI
+- [x] Fable: 全wave監査済み
+
+## Chat Alphaゲート判定(2026-07-22 Fable)
+
+**判定: 実質通過**(環境依存2件を除く)
+- 通過: 永続Chat/復元、streaming/中止/interrupted、input queue、operations ledger、snapshot+afterSeq、Markdown安全描画、Workspace選択、Codex production runtime(実CLI裏取り済み)、Context Ledger、キーボード完結、E2E 4本、114テスト、lint/format/CI定義
+- 環境依存の残件:
+  1. ローカルpackaging不能 — extract-zipがElectron zipのelectron.icnsで決定論的ハング(Node 26/22両方で再現=バージョン非依存のマシン固有問題)。CI(GitHub Actions)では別環境のため要確認
+  2. CI実走 — GitHub remote未設定のため未実行
+- 意図的延期: Slice 3.6 Intelligence Loop baseline(Phase 4のtool loopと不可分のためPhase 4冒頭へ)、MessagePort以外のSlice 1.2完遂項目は完了済み
 
 ---
 
