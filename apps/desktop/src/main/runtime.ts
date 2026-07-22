@@ -15,6 +15,7 @@ type Publish = (event: TurnEvent) => void;
 type Serialize = <T>(taskId: string, action: () => T) => Promise<T>;
 type Terminal = (taskId: string, turnId: string, state: 'completed' | 'failed') => void;
 type PrepareContext = (taskId: string, turnId: string) => PreparedContext | void;
+type ContextAccepted = (taskId: string, turnId: string, fragmentIds: readonly string[]) => void;
 type ActiveTurn = {
   canceled: boolean;
   steering: string[];
@@ -56,6 +57,7 @@ export class MockRuntimeAdapter {
     private readonly terminal?: Terminal,
     private readonly prepareContext?: PrepareContext,
     authorizer?: ToolAuthorizer,
+    private readonly contextAccepted?: ContextAccepted,
   ) {
     this.toolBroker = createDefaultToolBroker(
       (taskId) => this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0,
@@ -79,6 +81,12 @@ export class MockRuntimeAdapter {
 
   start(taskId: string, turnId: string, input: string): void {
     const context = this.prepareContext?.(taskId, turnId);
+    if (context !== undefined)
+      this.contextAccepted?.(
+        taskId,
+        turnId,
+        context.fragments.map((fragment) => fragment.id),
+      );
     let resolveSettled = (): void => undefined;
     const settled = new Promise<void>((resolve) => {
       resolveSettled = resolve;

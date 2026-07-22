@@ -17,6 +17,12 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
     adapter.start(
       data.turnId,
       data.input,
+      data.contextFragments,
+      () =>
+        send(data.taskId, data.turnId, data.operationId, {
+          type: 'started',
+          acceptedContextFragmentIds: data.contextFragments.map((fragment) => fragment.id),
+        }),
       data.workspacePath,
       data.model,
       (event) => send(data.taskId, data.turnId, data.operationId, { type: 'event', event }),
@@ -50,6 +56,10 @@ function send(
         'type' | 'codexAvailable' | 'codexVersion' | 'codexModels'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'event' }>, 'type' | 'event'>
+    | Pick<
+        Extract<RuntimeToMainEnvelope, { type: 'started' }>,
+        'type' | 'acceptedContextFragmentIds'
+      >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'exit' }>, 'type' | 'code' | 'canceled'>
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'error' }>, 'type' | 'error'>,
 ): void {

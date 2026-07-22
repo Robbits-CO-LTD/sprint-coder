@@ -140,6 +140,39 @@ describe('MockRuntimeAdapter', () => {
 
     expect(persistence.content).toContain('追加指示を反映しました: 短くまとめて');
   });
+
+  it('acknowledges the exact prepared context before Mock sampling', async () => {
+    const persistence = new FakePersistence();
+    const accepted: string[][] = [];
+    const runtime = new MockRuntimeAdapter(
+      persistence,
+      (event) => persistence.events.push(event),
+      1,
+      undefined,
+      undefined,
+      () => ({
+        fragments: [
+          {
+            id: 'completion-1',
+            taskId: 'task',
+            source: 'background',
+            trust: 'assistant',
+            tokenEstimate: 2,
+            content: 'done',
+            createdAt: '2026-07-23T00:00:00.000Z',
+            messageId: null,
+          },
+        ],
+        usageEvents: [],
+        compacted: false,
+      }),
+      undefined,
+      (_taskId, _turnId, fragmentIds) => accepted.push([...fragmentIds]),
+    );
+    runtime.start('task', 'turn', 'continue');
+    expect(accepted).toEqual([['completion-1']]);
+    await waitFor(() => persistence.state === 'completed');
+  });
 });
 
 async function waitFor(predicate: () => boolean): Promise<void> {

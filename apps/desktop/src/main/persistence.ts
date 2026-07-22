@@ -48,15 +48,26 @@ import {
   type TurnState,
   type ExecutionSpec,
   executionSpecDigest,
+  backgroundDeliveryId,
+  backgroundEpochMismatch,
+  transitionBackgroundActivity,
+  type BackgroundActivityKind,
+  type BackgroundActivityState,
+  type BackgroundCompletionState,
+  type BackgroundEpochs,
+  type BackgroundWakePolicy,
 } from '@vibe/domain';
 import {
   ContextLedger,
   defaultContextUsage,
+  estimateTokens,
   type ContextFragment,
   type ContextLedgerState,
   type PersistedFragment,
   type PreparedContext,
 } from './context-ledger';
+import { redactSecrets } from './secret-redactor';
+import { sanitizeTerminalOutput } from './ansi-sanitizer';
 
 type TaskRow = {
   id: string;
@@ -66,8 +77,53 @@ type TaskRow = {
   goal: string | null;
   workspace_path: string | null;
   draft: string;
+  branch_epoch: number;
+  context_epoch: number;
   created_at: string;
   updated_at: string;
+};
+type BackgroundActivityRow = {
+  id: string;
+  task_id: string;
+  owner_thread_id: string;
+  owner_turn_id: string;
+  origin_worker_id: string | null;
+  kind: BackgroundActivityKind;
+  state: BackgroundActivityState;
+  wake_policy: BackgroundWakePolicy;
+  required_capabilities_json: string;
+  branch_epoch: number;
+  policy_epoch: number;
+  context_epoch: number;
+  heartbeat_at: string | null;
+  output_cursor: number;
+  volume_quota_bytes: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+type BackgroundCompletionRow = {
+  completion_id: string;
+  delivery_id: string;
+  activity_id: string;
+  task_id: string;
+  owner_thread_id: string;
+  owner_turn_id: string;
+  branch_epoch: number;
+  policy_epoch: number;
+  context_epoch: number;
+  wake_policy: BackgroundWakePolicy;
+  outcome: 'completed' | 'failed';
+  payload: string;
+  payload_digest: string;
+  output_cursor: number;
+  state: BackgroundCompletionState;
+  target_turn_id: string | null;
+  fragment_id: string;
+  quarantine_reason: string | null;
+  created_at: string;
+  attached_at: string | null;
+  runtime_acked_at: string | null;
 };
 type MessageRow = {
   id: string;
@@ -615,6 +671,61 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 17,
+    checksum: 'background-v17-durable-completion-delivery',
+    sql: `
+      ALTER TABLE tasks ADD COLUMN branch_epoch INTEGER NOT NULL DEFAULT 0 CHECK (branch_epoch >= 0);
+      ALTER TABLE tasks ADD COLUMN context_epoch INTEGER NOT NULL DEFAULT 0 CHECK (context_epoch >= 0);
+      CREATE TABLE background_activities (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        owner_thread_id TEXT NOT NULL,
+        owner_turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        origin_worker_id TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('command', 'monitor', 'scheduler')),
+        state TEXT NOT NULL CHECK (state IN ('registered', 'running', 'completed', 'failed', 'canceled')),
+        wake_policy TEXT NOT NULL CHECK (wake_policy IN ('immediate', 'nextSafePoint', 'manual')),
+        required_capabilities_json TEXT NOT NULL,
+        branch_epoch INTEGER NOT NULL CHECK (branch_epoch >= 0),
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        context_epoch INTEGER NOT NULL CHECK (context_epoch >= 0),
+        heartbeat_at TEXT,
+        output_cursor INTEGER NOT NULL DEFAULT 0 CHECK (output_cursor >= 0),
+        volume_quota_bytes INTEGER NOT NULL CHECK (volume_quota_bytes > 0 AND volume_quota_bytes <= 1048576),
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+      );
+      CREATE INDEX background_activities_task_state_idx
+        ON background_activities(task_id, state, created_at, id);
+      CREATE TABLE background_completions (
+        completion_id TEXT PRIMARY KEY,
+        delivery_id TEXT NOT NULL UNIQUE CHECK (length(delivery_id) = 64),
+        activity_id TEXT NOT NULL REFERENCES background_activities(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        owner_thread_id TEXT NOT NULL,
+        owner_turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        branch_epoch INTEGER NOT NULL CHECK (branch_epoch >= 0),
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        context_epoch INTEGER NOT NULL CHECK (context_epoch >= 0),
+        wake_policy TEXT NOT NULL CHECK (wake_policy IN ('immediate', 'nextSafePoint', 'manual')),
+        outcome TEXT NOT NULL CHECK (outcome IN ('completed', 'failed')),
+        payload TEXT NOT NULL,
+        payload_digest TEXT NOT NULL CHECK (length(payload_digest) = 64),
+        output_cursor INTEGER NOT NULL CHECK (output_cursor >= 0),
+        state TEXT NOT NULL CHECK (state IN ('persisted', 'attached', 'runtimeAcked', 'quarantined')),
+        target_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+        fragment_id TEXT NOT NULL UNIQUE,
+        quarantine_reason TEXT,
+        created_at TEXT NOT NULL,
+        attached_at TEXT,
+        runtime_acked_at TEXT
+      );
+      CREATE INDEX background_completions_delivery_idx
+        ON background_completions(task_id, state, wake_policy, created_at, completion_id);
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -692,6 +803,44 @@ export type PermissionPolicyRecord = {
 
 export type StartedTurn = { turnId: string; text: string; event: TurnEvent };
 export type QueueTransition = { started: StartedTurn; queueEvent: TurnEvent } | null;
+export type BackgroundActivityRecord = Readonly<{
+  id: string;
+  taskId: string;
+  ownerThreadId: string;
+  ownerTurnId: string;
+  originWorkerId: string | null;
+  kind: BackgroundActivityKind;
+  state: BackgroundActivityState;
+  wakePolicy: BackgroundWakePolicy;
+  requiredCapabilities: Capability[];
+  epochs: BackgroundEpochs;
+  heartbeatAt: string | null;
+  outputCursor: number;
+  volumeQuotaBytes: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}>;
+export type BackgroundCompletionRecord = Readonly<{
+  completionId: string;
+  deliveryId: string;
+  activityId: string;
+  taskId: string;
+  ownerThreadId: string;
+  ownerTurnId: string;
+  epochs: BackgroundEpochs;
+  wakePolicy: BackgroundWakePolicy;
+  outcome: 'completed' | 'failed';
+  payload: string;
+  outputCursor: number;
+  state: BackgroundCompletionState;
+  targetTurnId: string | null;
+  fragmentId: string;
+  quarantineReason: string | null;
+  createdAt: string;
+  attachedAt: string | null;
+  runtimeAckedAt: string | null;
+}>;
 
 export interface PersistenceClient {
   listTasks(): TaskSummary[];
@@ -836,6 +985,40 @@ export interface PersistenceClient {
     maxBytes: number;
   }): CommandOutputPage;
   listAutoPermissionDecisions(taskId: string): AutoPermissionDecision[];
+  getBackgroundEpochs(taskId: string): BackgroundEpochs;
+  createBackgroundActivity(input: {
+    id: string;
+    taskId: string;
+    ownerThreadId: string;
+    ownerTurnId: string;
+    originWorkerId?: string;
+    kind: BackgroundActivityKind;
+    wakePolicy: BackgroundWakePolicy;
+    requiredCapabilities: Capability[];
+    volumeQuotaBytes: number;
+    createdAt: string;
+  }): BackgroundActivityRecord;
+  transitionBackgroundActivity(
+    activityId: string,
+    state: Extract<BackgroundActivityState, 'running' | 'canceled'>,
+    occurredAt: string,
+  ): BackgroundActivityRecord;
+  completeBackgroundActivity(input: {
+    activityId: string;
+    completionId: string;
+    outcome: 'completed' | 'failed';
+    payload: string;
+    outputCursor: number;
+    completedAt: string;
+  }): BackgroundCompletionRecord;
+  releaseBackgroundCompletion(completionId: string): BackgroundCompletionRecord;
+  listBackgroundCompletions(taskId: string): BackgroundCompletionRecord[];
+  acknowledgeBackgroundFragments(
+    taskId: string,
+    turnId: string,
+    fragmentIds: readonly string[],
+  ): TurnEvent[];
+  quarantineBackgroundForPolicyEpoch(taskId: string, policyEpoch: number, now: string): number;
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
   queueInput(
@@ -968,10 +1151,32 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.updateTask(taskId, 'pinned', pinned ? 1 : 0);
   }
   setArchived(taskId: string, archived: boolean): TaskSummary {
-    return this.updateTask(taskId, 'archived', archived ? 1 : 0);
+    if (!archived) return this.updateTask(taskId, 'archived', 0);
+    return this.db.transaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE tasks SET archived = 1, branch_epoch = branch_epoch + 1,
+             context_epoch = context_epoch + 1, updated_at = ? WHERE id = ?`,
+        )
+        .run(new Date().toISOString(), taskId);
+      if (result.changes !== 1) throw new NotFoundError('Task not found');
+      this.quarantineStaleBackgroundInTransaction(taskId);
+      return toTask(this.getTaskRow(taskId));
+    })();
   }
   setGoal(taskId: string, goal: string): TaskSummary {
-    return this.updateTask(taskId, 'goal', goal);
+    return this.db.transaction(() => {
+      const current = this.getTaskRow(taskId);
+      const result = this.db
+        .prepare(
+          `UPDATE tasks SET goal = ?, context_epoch = context_epoch + ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(goal, current.goal === goal ? 0 : 1, new Date().toISOString(), taskId);
+      if (result.changes !== 1) throw new NotFoundError('Task not found');
+      this.quarantineStaleBackgroundInTransaction(taskId);
+      return toTask(this.getTaskRow(taskId));
+    })();
   }
 
   getDraft(taskId: string): string {
@@ -990,10 +1195,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   setWorkspace(taskId: string, path: string): void {
-    const result = this.db
-      .prepare('UPDATE tasks SET workspace_path = ?, updated_at = ? WHERE id = ?')
-      .run(path, new Date().toISOString(), taskId);
-    if (result.changes !== 1) throw new NotFoundError('Task not found');
+    this.db.transaction(() => {
+      const current = this.getTaskRow(taskId);
+      const result = this.db
+        .prepare(
+          `UPDATE tasks SET workspace_path = ?, context_epoch = context_epoch + ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(path, current.workspace_path === path ? 0 : 1, new Date().toISOString(), taskId);
+      if (result.changes !== 1) throw new NotFoundError('Task not found');
+      this.quarantineStaleBackgroundInTransaction(taskId);
+    })();
   }
 
   getRuntime(): RuntimeKind {
@@ -1025,6 +1237,214 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(model, new Date().toISOString());
+  }
+
+  getBackgroundEpochs(taskId: string): BackgroundEpochs {
+    const task = this.getTaskRow(taskId);
+    return {
+      branchEpoch: task.branch_epoch,
+      policyEpoch: this.getPermissionPolicy(taskId).policyEpoch,
+      contextEpoch: task.context_epoch,
+    };
+  }
+
+  createBackgroundActivity(input: {
+    id: string;
+    taskId: string;
+    ownerThreadId: string;
+    ownerTurnId: string;
+    originWorkerId?: string;
+    kind: BackgroundActivityKind;
+    wakePolicy: BackgroundWakePolicy;
+    requiredCapabilities: Capability[];
+    volumeQuotaBytes: number;
+    createdAt: string;
+  }): BackgroundActivityRecord {
+    return this.db.transaction(() => {
+      if (input.id.length < 1 || input.id.length > 128) throw new Error('Invalid activity id');
+      if (input.ownerThreadId.length < 1 || input.ownerThreadId.length > 128)
+        throw new Error('Invalid owner thread id');
+      this.getTurn(input.taskId, input.ownerTurnId);
+      if (
+        !Number.isInteger(input.volumeQuotaBytes) ||
+        input.volumeQuotaBytes < 1 ||
+        input.volumeQuotaBytes > 1_048_576
+      )
+        throw new Error('Invalid background volume quota');
+      const uniqueCapabilities = [...new Set(input.requiredCapabilities)];
+      if (
+        uniqueCapabilities.length !== input.requiredCapabilities.length ||
+        uniqueCapabilities.some((capability) => !capabilities.includes(capability))
+      )
+        throw new Error('Invalid background capabilities');
+      const epochs = this.getBackgroundEpochs(input.taskId);
+      this.db
+        .prepare(
+          `INSERT INTO background_activities(
+            id, task_id, owner_thread_id, owner_turn_id, origin_worker_id, kind, state,
+            wake_policy, required_capabilities_json, branch_epoch, policy_epoch, context_epoch,
+            volume_quota_bytes, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.id,
+          input.taskId,
+          input.ownerThreadId,
+          input.ownerTurnId,
+          input.originWorkerId ?? null,
+          input.kind,
+          input.wakePolicy,
+          JSON.stringify(uniqueCapabilities),
+          epochs.branchEpoch,
+          epochs.policyEpoch,
+          epochs.contextEpoch,
+          input.volumeQuotaBytes,
+          input.createdAt,
+        );
+      return this.backgroundActivity(input.id);
+    })();
+  }
+
+  transitionBackgroundActivity(
+    activityId: string,
+    state: Extract<BackgroundActivityState, 'running' | 'canceled'>,
+    occurredAt: string,
+  ): BackgroundActivityRecord {
+    return this.db.transaction(() => {
+      const current = this.backgroundActivityRow(activityId);
+      transitionBackgroundActivity(current.state, state);
+      const result = this.db
+        .prepare(
+          `UPDATE background_activities
+           SET state = ?, started_at = CASE WHEN ? = 'running' THEN ? ELSE started_at END,
+             finished_at = CASE WHEN ? = 'canceled' THEN ? ELSE finished_at END
+           WHERE id = ? AND state = ?`,
+        )
+        .run(state, state, occurredAt, state, occurredAt, activityId, current.state);
+      if (result.changes !== 1) throw new Error('Background activity transition conflict');
+      return this.backgroundActivity(activityId);
+    })();
+  }
+
+  completeBackgroundActivity(input: {
+    activityId: string;
+    completionId: string;
+    outcome: 'completed' | 'failed';
+    payload: string;
+    outputCursor: number;
+    completedAt: string;
+  }): BackgroundCompletionRecord {
+    return this.db.transaction(() => {
+      if (Buffer.byteLength(input.payload, 'utf8') > 1_048_576)
+        throw new Error('Background completion input exceeds the ingestion limit');
+      const redactedPayload = redactSecrets(sanitizeTerminalOutput(input.payload));
+      const payloadBytes = Buffer.byteLength(redactedPayload, 'utf8');
+      const payloadDigest = sha256(redactedPayload);
+      const replay = this.backgroundCompletionRow(input.completionId);
+      if (replay !== undefined) {
+        if (
+          replay.activity_id !== input.activityId ||
+          replay.outcome !== input.outcome ||
+          replay.payload_digest !== payloadDigest ||
+          replay.payload !== redactedPayload ||
+          replay.output_cursor !== input.outputCursor
+        )
+          throw new OperationConflictError();
+        return toBackgroundCompletion(replay);
+      }
+      const activity = this.backgroundActivityRow(input.activityId);
+      if (activity.state !== 'running') throw new Error('Background activity is not running');
+      if (payloadBytes < 1 || payloadBytes > Math.min(activity.volume_quota_bytes, 29_000))
+        throw new Error('Background completion exceeds its bounded fragment quota');
+      if (!Number.isInteger(input.outputCursor) || input.outputCursor < activity.output_cursor)
+        throw new Error('Invalid background output cursor');
+      const terminalState = input.outcome === 'completed' ? 'completed' : 'failed';
+      transitionBackgroundActivity(activity.state, terminalState);
+      const deliveryId = backgroundDeliveryId({
+        completionId: input.completionId,
+        activityId: activity.id,
+        ownerThreadId: activity.owner_thread_id,
+      });
+      this.db
+        .prepare(
+          `UPDATE background_activities SET state = ?, output_cursor = ?, finished_at = ?
+           WHERE id = ? AND state = 'running'`,
+        )
+        .run(terminalState, input.outputCursor, input.completedAt, input.activityId);
+      this.db
+        .prepare(
+          `INSERT INTO background_completions(
+            completion_id, delivery_id, activity_id, task_id, owner_thread_id, owner_turn_id,
+            branch_epoch, policy_epoch, context_epoch, wake_policy, outcome, payload,
+            payload_digest, output_cursor, state, fragment_id, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'persisted', ?, ?)`,
+        )
+        .run(
+          input.completionId,
+          deliveryId,
+          activity.id,
+          activity.task_id,
+          activity.owner_thread_id,
+          activity.owner_turn_id,
+          activity.branch_epoch,
+          activity.policy_epoch,
+          activity.context_epoch,
+          activity.wake_policy,
+          input.outcome,
+          redactedPayload,
+          payloadDigest,
+          input.outputCursor,
+          input.completionId,
+          input.completedAt,
+        );
+      return toBackgroundCompletion(this.requireBackgroundCompletionRow(input.completionId));
+    })();
+  }
+
+  releaseBackgroundCompletion(completionId: string): BackgroundCompletionRecord {
+    return this.db.transaction(() => {
+      const row = this.requireBackgroundCompletionRow(completionId);
+      if (row.state === 'persisted' && row.wake_policy === 'manual')
+        this.db
+          .prepare(
+            `UPDATE background_completions SET wake_policy = 'nextSafePoint'
+             WHERE completion_id = ? AND state = 'persisted' AND wake_policy = 'manual'`,
+          )
+          .run(completionId);
+      return toBackgroundCompletion(this.requireBackgroundCompletionRow(completionId));
+    })();
+  }
+
+  listBackgroundCompletions(taskId: string): BackgroundCompletionRecord[] {
+    this.assertTask(taskId);
+    return (
+      this.db
+        .prepare(
+          'SELECT * FROM background_completions WHERE task_id = ? ORDER BY created_at, rowid',
+        )
+        .all(taskId) as BackgroundCompletionRow[]
+    ).map(toBackgroundCompletion);
+  }
+
+  quarantineBackgroundForPolicyEpoch(taskId: string, policyEpoch: number, now: string): number {
+    return this.db.transaction(() => {
+      this.assertTask(taskId);
+      if (!Number.isInteger(policyEpoch) || policyEpoch < 0)
+        throw new Error('Invalid policy epoch');
+      this.db
+        .prepare(
+          `UPDATE background_activities SET state = 'canceled', finished_at = ?
+           WHERE task_id = ? AND policy_epoch <> ? AND state IN ('registered', 'running')`,
+        )
+        .run(now, taskId, policyEpoch);
+      return this.db
+        .prepare(
+          `UPDATE background_completions
+           SET state = 'quarantined', quarantine_reason = 'policy_epoch_changed'
+           WHERE task_id = ? AND policy_epoch <> ? AND state IN ('persisted', 'attached')`,
+        )
+        .run(taskId, policyEpoch).changes;
+    })();
   }
 
   getPermissionPolicy(taskId: string): PermissionPolicyRecord {
@@ -2088,6 +2508,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return row;
   }
 
+  private backgroundActivityRow(activityId: string): BackgroundActivityRow {
+    const row = this.db
+      .prepare('SELECT * FROM background_activities WHERE id = ?')
+      .get(activityId) as BackgroundActivityRow | undefined;
+    if (row === undefined) throw new NotFoundError('Background activity not found');
+    return row;
+  }
+
+  private backgroundActivity(activityId: string): BackgroundActivityRecord {
+    return toBackgroundActivity(this.backgroundActivityRow(activityId));
+  }
+
+  private backgroundCompletionRow(completionId: string): BackgroundCompletionRow | undefined {
+    return this.db
+      .prepare('SELECT * FROM background_completions WHERE completion_id = ?')
+      .get(completionId) as BackgroundCompletionRow | undefined;
+  }
+
+  private requireBackgroundCompletionRow(completionId: string): BackgroundCompletionRow {
+    const row = this.backgroundCompletionRow(completionId);
+    if (row === undefined) throw new NotFoundError('Background completion not found');
+    return row;
+  }
+
   private interruptActiveCommands(): void {
     this.db.transaction(() => {
       const rows = this.db
@@ -2510,9 +2954,99 @@ export class SqlitePersistenceClient implements PersistenceClient {
         'INSERT INTO turns(id, task_id, user_message_id, state, seq, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?)',
       )
       .run(turnId, taskId, userMessage.id, 'queued', now, now);
+    this.attachBackgroundCompletionsInTransaction(taskId, turnId, now);
     const event = this.appendEvent({ type: 'turn.accepted', taskId, turnId, userMessage });
     this.db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(now, taskId);
     return { turnId, text, event };
+  }
+
+  private attachBackgroundCompletionsInTransaction(
+    taskId: string,
+    targetTurnId: string,
+    attachedAt: string,
+  ): void {
+    const currentEpochs = this.getBackgroundEpochs(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM background_completions
+         WHERE task_id = ? AND state IN ('persisted', 'attached')
+         ORDER BY created_at, rowid`,
+      )
+      .all(taskId) as BackgroundCompletionRow[];
+    let attachedBytes = 0;
+    const maxBackgroundContextBytes = 24_000;
+    for (const row of rows) {
+      const mismatch = backgroundEpochMismatch(
+        {
+          branchEpoch: row.branch_epoch,
+          policyEpoch: row.policy_epoch,
+          contextEpoch: row.context_epoch,
+        },
+        currentEpochs,
+      );
+      if (mismatch !== null) {
+        this.db
+          .prepare(
+            `UPDATE background_completions SET state = 'quarantined', quarantine_reason = ?
+             WHERE completion_id = ? AND state = 'persisted'`,
+          )
+          .run(mismatch, row.completion_id);
+        continue;
+      }
+      if (row.wake_policy === 'manual') continue;
+      const bytes = Buffer.byteLength(row.payload, 'utf8');
+      if (attachedBytes + bytes > maxBackgroundContextBytes) continue;
+      const result = this.db
+        .prepare(
+          `UPDATE background_completions
+           SET state = 'attached', target_turn_id = ?, attached_at = ?
+           WHERE completion_id = ? AND state = 'persisted'`,
+        )
+        .run(targetTurnId, attachedAt, row.completion_id);
+      if (result.changes === 1) attachedBytes += bytes;
+    }
+  }
+
+  private quarantineStaleBackgroundInTransaction(taskId: string): number {
+    const current = this.getBackgroundEpochs(taskId);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE background_activities SET state = 'canceled', finished_at = ?
+         WHERE task_id = ? AND state IN ('registered', 'running')
+           AND (branch_epoch <> ? OR policy_epoch <> ? OR context_epoch <> ?)`,
+      )
+      .run(now, taskId, current.branchEpoch, current.policyEpoch, current.contextEpoch);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM background_completions
+         WHERE task_id = ? AND state = 'persisted'
+           AND (branch_epoch <> ? OR policy_epoch <> ? OR context_epoch <> ?)`,
+      )
+      .all(
+        taskId,
+        current.branchEpoch,
+        current.policyEpoch,
+        current.contextEpoch,
+      ) as BackgroundCompletionRow[];
+    for (const row of rows) {
+      const reason = backgroundEpochMismatch(
+        {
+          branchEpoch: row.branch_epoch,
+          policyEpoch: row.policy_epoch,
+          contextEpoch: row.context_epoch,
+        },
+        current,
+      );
+      if (reason === null) continue;
+      this.db
+        .prepare(
+          `UPDATE background_completions SET state = 'quarantined', quarantine_reason = ?
+           WHERE completion_id = ? AND state = 'persisted'`,
+        )
+        .run(reason, row.completion_id);
+    }
+    return rows.length;
   }
 
   private getApprovalRow(approvalId: string): ApprovalRow {
@@ -2644,6 +3178,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.cancelPendingApprovals(taskId, turnId, new Date().toISOString());
     transitionTurn(turn.state, state);
     this.updateTurn(turnId, state);
+    this.requeueUnacknowledgedBackgroundInTransaction(taskId, turnId);
     const row =
       turn.assistant_message_id === null
         ? undefined
@@ -2654,6 +3189,33 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ? { type: 'turn.completed', taskId, turnId, state }
         : { type: 'turn.completed', taskId, turnId, state, message: toMessage(row) },
     );
+  }
+
+  private requeueUnacknowledgedBackgroundInTransaction(taskId: string, turnId: string): void {
+    const current = this.getBackgroundEpochs(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM background_completions
+         WHERE task_id = ? AND target_turn_id = ? AND state = 'attached'`,
+      )
+      .all(taskId, turnId) as BackgroundCompletionRow[];
+    for (const row of rows) {
+      const mismatch = backgroundEpochMismatch(
+        {
+          branchEpoch: row.branch_epoch,
+          policyEpoch: row.policy_epoch,
+          contextEpoch: row.context_epoch,
+        },
+        current,
+      );
+      this.db
+        .prepare(
+          `UPDATE background_completions
+           SET state = ?, target_turn_id = NULL, attached_at = NULL, quarantine_reason = ?
+           WHERE completion_id = ? AND state = 'attached' AND target_turn_id = ?`,
+        )
+        .run(mismatch === null ? 'persisted' : 'quarantined', mismatch, row.completion_id, turnId);
+    }
   }
 
   private queueChangedEvent(taskId: string): TurnEvent {
@@ -2701,8 +3263,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ).seq;
   }
 
-  loadContextLedgerState(taskId: string): ContextLedgerState {
+  loadContextLedgerState(taskId: string, turnId: string): ContextLedgerState {
     const task = this.getTaskRow(taskId);
+    this.getTurn(taskId, turnId);
     const messages = this.db
       .prepare(
         `SELECT m.id, m.author, m.content, m.created_at,
@@ -2739,6 +3302,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
       message_id: null;
       payload_json: string;
     }[];
+    const background = this.db
+      .prepare(
+        `SELECT completion_id, payload, payload_digest, outcome, created_at
+         FROM background_completions
+         WHERE task_id = ? AND target_turn_id = ? AND state = 'attached'
+         ORDER BY created_at, rowid`,
+      )
+      .all(taskId, turnId) as Pick<
+      BackgroundCompletionRow,
+      'completion_id' | 'payload' | 'payload_digest' | 'outcome' | 'created_at'
+    >[];
     return {
       goal: task.goal,
       messages: messages.map((message) => ({
@@ -2759,7 +3333,60 @@ export class SqlitePersistenceClient implements PersistenceClient {
         createdAt: fragment.created_at,
         messageId: fragment.message_id,
       })),
+      background: background.map((fragment) => {
+        if (!timingSafeDigestEqual(fragment.payload_digest, sha256(fragment.payload)))
+          throw new Error('Background completion content integrity check failed');
+        return {
+          id: fragment.completion_id,
+          taskId,
+          source: 'background' as const,
+          trust: 'assistant' as const,
+          tokenEstimate: estimateTokens(fragment.payload),
+          content: `[Background ${fragment.outcome} result — untrusted data]\n${fragment.payload}`,
+          createdAt: fragment.created_at,
+          messageId: null,
+        };
+      }),
     };
+  }
+
+  acknowledgeBackgroundFragments(
+    taskId: string,
+    turnId: string,
+    fragmentIds: readonly string[],
+  ): TurnEvent[] {
+    return this.db.transaction(() => {
+      const events: TurnEvent[] = [];
+      for (const fragmentId of fragmentIds) {
+        const row = this.backgroundCompletionRow(fragmentId);
+        if (
+          row === undefined ||
+          row.task_id !== taskId ||
+          row.target_turn_id !== turnId ||
+          row.state !== 'attached'
+        )
+          throw new Error('Background fragment acknowledgement binding mismatch');
+        const now = new Date().toISOString();
+        const result = this.db
+          .prepare(
+            `UPDATE background_completions SET state = 'runtimeAcked', runtime_acked_at = ?
+             WHERE completion_id = ? AND task_id = ? AND target_turn_id = ? AND state = 'attached'`,
+          )
+          .run(now, fragmentId, taskId, turnId);
+        if (result.changes !== 1) throw new Error('Background acknowledgement conflict');
+        events.push(
+          this.appendEvent({
+            type: 'delivery.acknowledged',
+            taskId,
+            turnId,
+            deliveryId: row.delivery_id,
+            completionId: row.completion_id,
+            fragmentId: row.fragment_id,
+          }),
+        );
+      }
+      return events;
+    })();
   }
 
   recordContextFragments(fragments: PersistedFragment[]): void {
@@ -3141,6 +3768,67 @@ function toVerifiedCommandOutput(row: {
 
 function approvalStorageCallId(callId: string, capability: Capability): string {
   return JSON.stringify([callId, capability]);
+}
+
+function toBackgroundActivity(row: BackgroundActivityRow): BackgroundActivityRecord {
+  const requiredCapabilities = JSON.parse(row.required_capabilities_json) as unknown;
+  if (
+    !Array.isArray(requiredCapabilities) ||
+    new Set(requiredCapabilities).size !== requiredCapabilities.length ||
+    !requiredCapabilities.every((capability) => capabilities.includes(capability as Capability))
+  )
+    throw new Error('Invalid stored background capabilities');
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    ownerThreadId: row.owner_thread_id,
+    ownerTurnId: row.owner_turn_id,
+    originWorkerId: row.origin_worker_id,
+    kind: row.kind,
+    state: row.state,
+    wakePolicy: row.wake_policy,
+    requiredCapabilities: requiredCapabilities as Capability[],
+    epochs: {
+      branchEpoch: row.branch_epoch,
+      policyEpoch: row.policy_epoch,
+      contextEpoch: row.context_epoch,
+    },
+    heartbeatAt: row.heartbeat_at,
+    outputCursor: row.output_cursor,
+    volumeQuotaBytes: row.volume_quota_bytes,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+  };
+}
+
+function toBackgroundCompletion(row: BackgroundCompletionRow): BackgroundCompletionRecord {
+  if (!timingSafeDigestEqual(row.payload_digest, sha256(row.payload)))
+    throw new Error('Background completion content integrity check failed');
+  return {
+    completionId: row.completion_id,
+    deliveryId: row.delivery_id,
+    activityId: row.activity_id,
+    taskId: row.task_id,
+    ownerThreadId: row.owner_thread_id,
+    ownerTurnId: row.owner_turn_id,
+    epochs: {
+      branchEpoch: row.branch_epoch,
+      policyEpoch: row.policy_epoch,
+      contextEpoch: row.context_epoch,
+    },
+    wakePolicy: row.wake_policy,
+    outcome: row.outcome,
+    payload: row.payload,
+    outputCursor: row.output_cursor,
+    state: row.state,
+    targetTurnId: row.target_turn_id,
+    fragmentId: row.fragment_id,
+    quarantineReason: row.quarantine_reason,
+    createdAt: row.created_at,
+    attachedAt: row.attached_at,
+    runtimeAckedAt: row.runtime_acked_at,
+  };
 }
 
 function timingSafeDigestEqual(left: string, right: string): boolean {

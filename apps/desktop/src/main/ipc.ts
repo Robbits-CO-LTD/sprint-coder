@@ -109,7 +109,16 @@ export class IpcRouter {
         if (parsed.success) this.publish(parsed.data);
       },
     });
-    this.permissionBroker = new PermissionBroker(persistence, this.approvalCoordinator);
+    this.permissionBroker = new PermissionBroker(persistence, {
+      policyEpochChanged: (taskId, policyEpoch) => {
+        this.approvalCoordinator.policyEpochChanged(taskId, policyEpoch);
+        this.persistence.quarantineBackgroundForPolicyEpoch(
+          taskId,
+          policyEpoch,
+          new Date().toISOString(),
+        );
+      },
+    });
     this.mockRuntime = new MockRuntimeAdapter(
       persistence,
       (event) => this.publish(event),
@@ -120,11 +129,13 @@ export class IpcRouter {
       },
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
+      (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) => this.handleCodexEvent(taskId, turnId, runtimeEvent),
       (taskId, turnId, error) => this.handleCodexFailure(taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
+      (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
     );
   }
 
@@ -867,6 +878,29 @@ export class IpcRouter {
     const prepared = this.persistence.prepareContext(taskId, turnId);
     for (const event of prepared.usageEvents) this.publish(event);
     return prepared;
+  }
+
+  private acknowledgeRuntimeContext(
+    taskId: string,
+    turnId: string,
+    acceptedFragmentIds: readonly string[],
+  ): void {
+    const accepted = new Set(acceptedFragmentIds);
+    const backgroundIds = this.persistence
+      .listBackgroundCompletions(taskId)
+      .filter(
+        (completion) =>
+          completion.state === 'attached' &&
+          completion.targetTurnId === turnId &&
+          accepted.has(completion.fragmentId),
+      )
+      .map((completion) => completion.fragmentId);
+    for (const event of this.persistence.acknowledgeBackgroundFragments(
+      taskId,
+      turnId,
+      backgroundIds,
+    ))
+      this.publish(event);
   }
 
   private async cancelRuntime(taskId: string, turnId: string): Promise<void> {

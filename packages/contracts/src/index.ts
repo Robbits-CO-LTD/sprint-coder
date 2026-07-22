@@ -158,7 +158,7 @@ export const contextUsageSchema = z
     fragments: z.array(
       z
         .object({
-          source: z.enum(['system', 'history', 'goal', 'compaction']),
+          source: z.enum(['system', 'history', 'goal', 'compaction', 'background']),
           tokens: z.number().int().nonnegative(),
         })
         .strict(),
@@ -393,6 +393,15 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       type: z.literal('permission.auto_decided'),
       ...turnEventBase,
       autoDecision: autoPermissionDecisionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('delivery.acknowledged'),
+      ...turnEventBase,
+      deliveryId: digestSchema,
+      completionId: idSchema,
+      fragmentId: idSchema,
     })
     .strict(),
   z

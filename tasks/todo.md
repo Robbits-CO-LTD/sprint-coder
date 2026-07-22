@@ -70,6 +70,14 @@ Wave 2(完了 2026-07-22):
   - Auto reviewerを固定local/no-I/O production reviewerとして分離し、allow-once限定、high-risk deny、timeout/schema/model failure fail-closed、immutable input/spec/Turn/call digest bindingとcache replay conflict検出を実装
   - Auto許可・拒否・reviewer失敗をeffective decision/source/outcome/model/template/request digest付きcompact auditとして永続表示し、再起動後も復元
   - 検証: typecheck/test(367件)/lint/format/E2E 7本 green、独立要件/テスト再レビューGO。Computer UseでApproval Cardをkeyboard拒否し、Runを失敗させずcompact auditへ遷移することを実機確認
+- [x] Slice 4.6 Background execution
+  - SQLite migration v17へbranch/policy/context epoch付きBackgroundActivityと`persisted→attached→runtimeAcked` completion ledgerを追加。completionIdをstable context fragment ID、owner/activity-bound SHA-256をdeliveryIdとしてat-least-once再送をdedup
+  - immediate/nextSafePointは次のTurnAcceptedと同一transactionでattachし、manualは明示releaseまで保留。ACK前のTurn中断はpersistedへ戻し、workspace/goal/archive/policy epoch変更はquarantineして自動注入しない
+  - Runtime protocol v4へbounded context fragmentと`started(acceptedContextFragmentIds)` ACKを追加。Mock/Codex双方でRuntime受理後だけruntimeAckedをcommitし、background/compactionはinstruction authority `none`として固定
+  - background payloadは1 fragment 10k token未満・Turnあたり24 KBに制限し、保存前にANSI/control/bidi除去とcredential redaction、content hash再検証を実施。restart-durable process/monitor/scheduler自体は計画どおりPublic Betaへ延期
+  - 検証: typecheck/test(374件、SQLite Electron ABI内31件)/lint/format/E2E 7本 green。rollback、restart再送、manual、epoch隔離、重複/conflict、prompt authorityを固定し、Computer UseでCodex/GPT-5.6-Terraのprotocol v4実AI応答「確認OK」を実機確認
+- [ ] Slice 4.7 Edit Transaction and Standard Assurance
+- [ ] Phase 4 acceptance gate: provider.egress policy/監査、local-only拒否、30-case corpus、未解決High/Critical 0を最終確認
 
 ---
 

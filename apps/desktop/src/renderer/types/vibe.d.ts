@@ -130,7 +130,10 @@ export type CommandOutputPage = {
 export type ContextUsage = {
   usedTokens: number;
   hardCapTokens: number;
-  fragments: { source: 'system' | 'history' | 'goal' | 'compaction'; tokens: number }[];
+  fragments: {
+    source: 'system' | 'history' | 'goal' | 'compaction' | 'background';
+    tokens: number;
+  }[];
 };
 
 export type TurnEvent =
@@ -200,6 +203,15 @@ export type TurnEvent =
       turnId: string;
       seq: number;
       autoDecision: AutoPermissionDecision;
+    }
+  | {
+      type: 'delivery.acknowledged';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      deliveryId: string;
+      completionId: string;
+      fragmentId: string;
     }
   | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
   | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage };

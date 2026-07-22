@@ -5,7 +5,7 @@ export const CONTEXT_HARD_CAP_TOKENS = 32_000;
 export const CONTEXT_SYSTEM_PROMPT =
   'You are the Vibe task assistant. Follow the active task goal and conversation context.';
 
-export type ContextSource = 'system' | 'history' | 'goal' | 'compaction';
+export type ContextSource = 'system' | 'history' | 'goal' | 'compaction' | 'background';
 export type ContextTrust = 'system' | 'user' | 'assistant';
 
 export type ContextFragment = {
@@ -32,12 +32,13 @@ export type ContextLedgerState = {
   goal: string | null;
   messages: LedgerMessage[];
   compactions: ContextFragment[];
+  background: ContextFragment[];
 };
 
 export type PersistedFragment = Omit<ContextFragment, 'content'>;
 
 export interface ContextLedgerStorage {
-  loadContextLedgerState(taskId: string): ContextLedgerState;
+  loadContextLedgerState(taskId: string, turnId: string): ContextLedgerState;
   recordContextFragments(fragments: PersistedFragment[]): void;
   recordContextUsage(taskId: string, turnId: string, usage: ContextUsage): TurnEvent;
   recordContextCompaction(
@@ -58,7 +59,7 @@ export class ContextLedger {
   constructor(private readonly storage: ContextLedgerStorage) {}
 
   prepare(taskId: string, turnId: string): PreparedContext {
-    const state = this.storage.loadContextLedgerState(taskId);
+    const state = this.storage.loadContextLedgerState(taskId, turnId);
     const now = new Date().toISOString();
     const persisted: PersistedFragment[] = [];
     const system = makeFragment(taskId, 'system', 'system', CONTEXT_SYSTEM_PROMPT, now, null);
@@ -94,6 +95,7 @@ export class ContextLedger {
       ...(goal === null ? [] : [goal]),
       ...activeHistory,
       ...state.compactions,
+      ...state.background,
     ];
     const usageEvents = [
       this.storage.recordContextUsage(taskId, turnId, aggregateContextUsage(before)),
@@ -123,6 +125,7 @@ export class ContextLedger {
       ...activeHistory.filter((fragment) => !supersededIds.has(fragment.id)),
       ...state.compactions,
       compaction,
+      ...state.background,
     ];
     usageEvents.push(this.storage.recordContextUsage(taskId, turnId, aggregateContextUsage(after)));
     return { fragments: after, usageEvents, compacted: true };
@@ -157,7 +160,7 @@ export function aggregateContextUsage(
       fragment.source,
       (tokensBySource.get(fragment.source) ?? 0) + fragment.tokenEstimate,
     );
-  const sources: ContextSource[] = ['system', 'history', 'goal', 'compaction'];
+  const sources: ContextSource[] = ['system', 'history', 'goal', 'compaction', 'background'];
   const aggregated = sources.flatMap((source) => {
     const tokens = tokensBySource.get(source);
     return tokens === undefined ? [] : [{ source, tokens }];

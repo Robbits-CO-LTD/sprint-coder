@@ -10,7 +10,15 @@ import {
 } from '@vibe/contracts';
 import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@vibe/domain';
 
-export const RUNTIME_PROTOCOL_VERSION = 3;
+export const RUNTIME_PROTOCOL_VERSION = 4;
+
+export type RuntimeContextFragment = Readonly<{
+  id: string;
+  source: 'system' | 'history' | 'goal' | 'compaction' | 'background';
+  trust: 'system' | 'user' | 'assistant';
+  authority: 'system' | 'user' | 'none';
+  content: string;
+}>;
 
 type EnvelopeBase = {
   protocolVersion: typeof RUNTIME_PROTOCOL_VERSION;
@@ -33,6 +41,7 @@ export type MainToRuntimeEnvelope =
       input: string;
       workspacePath: string | null;
       model: string;
+      contextFragments: RuntimeContextFragment[];
       toolCatalogSnapshot: ToolCatalogSnapshot;
     })
   | (EnvelopeBase & { type: 'cancel' });
@@ -44,6 +53,7 @@ export type RuntimeToMainEnvelope =
       codexVersion?: string;
       codexModels: CodexModelOption[];
     })
+  | (EnvelopeBase & { type: 'started'; acceptedContextFragmentIds: string[] })
   | (EnvelopeBase & { type: 'event'; event: RuntimeCanonicalEvent })
   | (EnvelopeBase & { type: 'exit'; code: number; canceled: boolean })
   | (EnvelopeBase & { type: 'error'; error: PublicError });
@@ -59,9 +69,51 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     (value.workspacePath === null || typeof value.workspacePath === 'string') &&
     'model' in value &&
     codexModelIdSchema.safeParse(value.model).success &&
+    'contextFragments' in value &&
+    isRuntimeContextFragments(value.contextFragments) &&
     'toolCatalogSnapshot' in value &&
     isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot)
   );
+}
+
+function isRuntimeContextFragments(value: unknown): value is RuntimeContextFragment[] {
+  if (!Array.isArray(value) || value.length > 256) return false;
+  let totalCharacters = 0;
+  const ids = new Set<string>();
+  for (const fragment of value) {
+    if (typeof fragment !== 'object' || fragment === null) return false;
+    const record = fragment as Record<string, unknown>;
+    if (
+      Object.keys(record).some(
+        (key) => !['id', 'source', 'trust', 'authority', 'content'].includes(key),
+      ) ||
+      typeof record['id'] !== 'string' ||
+      record['id'].length < 1 ||
+      record['id'].length > 128 ||
+      ids.has(record['id']) ||
+      !['system', 'history', 'goal', 'compaction', 'background'].includes(
+        record['source'] as string,
+      ) ||
+      !['system', 'user', 'assistant'].includes(record['trust'] as string) ||
+      !['system', 'user', 'none'].includes(record['authority'] as string) ||
+      !hasValidFragmentAuthority(record) ||
+      typeof record['content'] !== 'string' ||
+      record['content'].length > 40_000
+    )
+      return false;
+    ids.add(record['id']);
+    totalCharacters += record['content'].length;
+    if (totalCharacters > 128_000) return false;
+  }
+  return true;
+}
+
+function hasValidFragmentAuthority(fragment: Record<string, unknown>): boolean {
+  if (fragment['source'] === 'system') return fragment['authority'] === 'system';
+  if (fragment['source'] === 'goal') return fragment['authority'] === 'user';
+  if (fragment['source'] === 'history')
+    return fragment['authority'] === (fragment['trust'] === 'user' ? 'user' : 'none');
+  return fragment['authority'] === 'none';
 }
 
 function isVerifiedReadOnlyCatalog(value: unknown): value is ToolCatalogSnapshot {
@@ -84,6 +136,16 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       Array.isArray(value.codexModels) &&
       value.codexModels.length <= 32 &&
       value.codexModels.every((model) => codexModelOptionSchema.safeParse(model).success)
+    );
+  if (value.type === 'started')
+    return (
+      'acceptedContextFragmentIds' in value &&
+      Array.isArray(value.acceptedContextFragmentIds) &&
+      value.acceptedContextFragmentIds.length <= 256 &&
+      new Set(value.acceptedContextFragmentIds).size === value.acceptedContextFragmentIds.length &&
+      value.acceptedContextFragmentIds.every(
+        (id) => typeof id === 'string' && id.length > 0 && id.length <= 128,
+      )
     );
   if (value.type === 'event') return 'event' in value && isRuntimeCanonicalEvent(value.event);
   if (value.type === 'exit')

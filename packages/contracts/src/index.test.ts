@@ -87,6 +87,17 @@ describe('public contracts', () => {
       }),
     ).toMatchObject({ type: 'context.usage', seq: 4 });
     expect(
+      turnEventSchema.parse({
+        type: 'delivery.acknowledged',
+        taskId: 't',
+        turnId: 'u',
+        seq: 5,
+        deliveryId: 'a'.repeat(64),
+        completionId: 'completion-1',
+        fragmentId: 'completion-1',
+      }),
+    ).toMatchObject({ type: 'delivery.acknowledged', seq: 5 });
+    expect(
       turnSnapshotSchema.parse({
         lastSeq: 3,
         activeTurn: {
@@ -100,7 +111,10 @@ describe('public contracts', () => {
         contextUsage: {
           usedTokens: 7,
           hardCapTokens: 32_000,
-          fragments: [{ source: 'history', tokens: 7 }],
+          fragments: [
+            { source: 'history', tokens: 6 },
+            { source: 'background', tokens: 1 },
+          ],
         },
       }).lastSeq,
     ).toBe(3);

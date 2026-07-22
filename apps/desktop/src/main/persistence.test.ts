@@ -79,7 +79,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v16', () => {
+  describe('SqlitePersistenceClient v17', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -1082,6 +1082,211 @@ if (runsWithElectronAbi)
       db.close();
     });
 
+    it('delivers a restart-durable background completion exactly once at a safe Turn boundary', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const owner = startExecutingTurn(persistence, task.id);
+      persistence.createBackgroundActivity({
+        id: 'activity-durable',
+        taskId: task.id,
+        ownerThreadId: task.id,
+        ownerTurnId: owner.turnId,
+        kind: 'command',
+        wakePolicy: 'nextSafePoint',
+        requiredCapabilities: ['shell.execute'],
+        volumeQuotaBytes: 64_000,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      persistence.transitionBackgroundActivity(
+        'activity-durable',
+        'running',
+        '2026-07-23T00:00:01.000Z',
+      );
+      persistence.changeStage(task.id, owner.turnId, 'synthesizing');
+      persistence.completeTurn(task.id, owner.turnId, 'completed');
+      const completion = persistence.completeBackgroundActivity({
+        activityId: 'activity-durable',
+        completionId: 'completion-durable',
+        outcome: 'completed',
+        payload: 'background \u001b[31mresult\u001b[0m password=hunter2',
+        outputCursor: 42,
+        completedAt: '2026-07-23T00:00:02.000Z',
+      });
+      expect(completion.state).toBe('persisted');
+      expect(completion).toMatchObject({
+        outputCursor: 42,
+        payload: 'background result password=[REDACTED]',
+      });
+      expect(
+        persistence.completeBackgroundActivity({
+          activityId: 'activity-durable',
+          completionId: 'completion-durable',
+          outcome: 'completed',
+          payload: 'background \u001b[31mresult\u001b[0m password=hunter2',
+          outputCursor: 42,
+          completedAt: '2026-07-23T00:00:02.000Z',
+        }),
+      ).toEqual(completion);
+      expect(() =>
+        persistence.completeBackgroundActivity({
+          activityId: 'activity-durable',
+          completionId: 'completion-durable',
+          outcome: 'completed',
+          payload: 'conflicting replay',
+          outputCursor: 42,
+          completedAt: '2026-07-23T00:00:02.000Z',
+        }),
+      ).toThrow(OperationConflictError);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      const interruptedTarget = reopened.startTurn(task.id, 'crash before runtime acknowledgement');
+      expect(reopened.listBackgroundCompletions(task.id)[0]).toMatchObject({
+        state: 'attached',
+        targetTurnId: interruptedTarget.turnId,
+        fragmentId: 'completion-durable',
+      });
+      expect(reopened.interruptActiveTurns()).toBe(1);
+      expect(reopened.listBackgroundCompletions(task.id)[0]).toMatchObject({
+        state: 'persisted',
+        targetTurnId: null,
+      });
+      const target = reopened.startTurn(task.id, 'consume completion');
+      const prepared = reopened.prepareContext(task.id, target.turnId);
+      expect(prepared.fragments).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'completion-durable',
+            source: 'background',
+            trust: 'assistant',
+            content: expect.stringContaining('background result'),
+          }),
+        ]),
+      );
+      expect(prepared.fragments.map((fragment) => fragment.content).join('\n')).not.toContain(
+        'hunter2',
+      );
+      expect(reopened.listBackgroundCompletions(task.id)[0]?.state).toBe('attached');
+      const acknowledged = reopened.acknowledgeBackgroundFragments(task.id, target.turnId, [
+        'completion-durable',
+      ]);
+      expect(acknowledged).toEqual([
+        expect.objectContaining({
+          type: 'delivery.acknowledged',
+          completionId: 'completion-durable',
+        }),
+      ]);
+      expect(reopened.listBackgroundCompletions(task.id)[0]?.state).toBe('runtimeAcked');
+      const repeated = reopened.prepareContext(task.id, target.turnId);
+      expect(repeated.fragments.some((fragment) => fragment.id === 'completion-durable')).toBe(
+        false,
+      );
+      expect(
+        reopened
+          .listEventsAfter(task.id, 0)
+          .filter((event) => event.type === 'delivery.acknowledged'),
+      ).toHaveLength(1);
+      reopened.close();
+    });
+
+    it('rolls back completion attachment when TurnAccepted cannot commit', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const owner = startExecutingTurn(persistence, task.id);
+      persistence.createBackgroundActivity({
+        id: 'activity-atomic',
+        taskId: task.id,
+        ownerThreadId: task.id,
+        ownerTurnId: owner.turnId,
+        kind: 'monitor',
+        wakePolicy: 'immediate',
+        requiredCapabilities: ['workspace.read'],
+        volumeQuotaBytes: 10_000,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      persistence.transitionBackgroundActivity(
+        'activity-atomic',
+        'running',
+        '2026-07-23T00:00:01.000Z',
+      );
+      persistence.changeStage(task.id, owner.turnId, 'synthesizing');
+      persistence.completeTurn(task.id, owner.turnId, 'completed');
+      persistence.completeBackgroundActivity({
+        activityId: 'activity-atomic',
+        completionId: 'completion-atomic',
+        outcome: 'completed',
+        payload: 'atomic result',
+        outputCursor: 1,
+        completedAt: '2026-07-23T00:00:02.000Z',
+      });
+      persistence.close();
+
+      const db = new Database(path);
+      db.exec(`CREATE TRIGGER reject_turn_accepted BEFORE INSERT ON turn_events
+        WHEN NEW.type = 'turn.accepted' BEGIN SELECT RAISE(ABORT, 'forced turn failure'); END;`);
+      db.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(() => reopened.startTurn(task.id, 'must roll back')).toThrow('forced turn failure');
+      expect(reopened.listBackgroundCompletions(task.id)[0]).toMatchObject({
+        state: 'persisted',
+        targetTurnId: null,
+      });
+      expect(reopened.listMessages(task.id)).toHaveLength(1);
+      reopened.close();
+    });
+
+    it('keeps manual completions pending and quarantines stale context epochs', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const owner = startExecutingTurn(persistence, task.id);
+      persistence.createBackgroundActivity({
+        id: 'activity-manual',
+        taskId: task.id,
+        ownerThreadId: task.id,
+        ownerTurnId: owner.turnId,
+        kind: 'scheduler',
+        wakePolicy: 'manual',
+        requiredCapabilities: [],
+        volumeQuotaBytes: 10_000,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      persistence.transitionBackgroundActivity(
+        'activity-manual',
+        'running',
+        '2026-07-23T00:00:01.000Z',
+      );
+      persistence.changeStage(task.id, owner.turnId, 'synthesizing');
+      persistence.completeTurn(task.id, owner.turnId, 'completed');
+      persistence.completeBackgroundActivity({
+        activityId: 'activity-manual',
+        completionId: 'completion-manual',
+        outcome: 'completed',
+        payload: 'manual result',
+        outputCursor: 1,
+        completedAt: '2026-07-23T00:00:02.000Z',
+      });
+      const first = persistence.startTurn(task.id, 'manual stays pending');
+      expect(persistence.listBackgroundCompletions(task.id)[0]?.state).toBe('persisted');
+      persistence.changeStage(task.id, first.turnId, 'understanding');
+      persistence.changeStage(task.id, first.turnId, 'planning');
+      persistence.changeStage(task.id, first.turnId, 'executing');
+      persistence.changeStage(task.id, first.turnId, 'synthesizing');
+      persistence.completeTurn(task.id, first.turnId, 'completed');
+      persistence.releaseBackgroundCompletion('completion-manual');
+      persistence.setGoal(task.id, 'new context epoch');
+      expect(persistence.listBackgroundCompletions(task.id)[0]).toMatchObject({
+        state: 'quarantined',
+        quarantineReason: 'context_epoch_changed',
+      });
+      const target = persistence.startTurn(task.id, 'stale completion is excluded');
+      expect(
+        persistence
+          .prepareContext(task.id, target.turnId)
+          .fragments.some((fragment) => fragment.id === 'completion-manual'),
+      ).toBe(false);
+      persistence.close();
+    });
+
     it('persists immutable intelligence step snapshots in turn order', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -1422,6 +1627,7 @@ if (runsWithElectronAbi)
         { version: 14 },
         { version: 15 },
         { version: 16 },
+        { version: 17 },
       ]);
       expect(
         migrated
@@ -1500,7 +1706,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v16 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v17 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

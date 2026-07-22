@@ -126,7 +126,7 @@ export function digestCanonical(value: unknown): string {
 function authorityFor(fragment: ContextFragment): InstructionAuthority {
   if (fragment.source === 'system') return 'system';
   if (fragment.source === 'goal') return 'user';
-  if (fragment.source === 'compaction') return 'none';
+  if (fragment.source === 'compaction' || fragment.source === 'background') return 'none';
   return fragment.trust === 'user' ? 'user' : 'none';
 }
 

@@ -15,6 +15,7 @@ describe('ContextCompiler', () => {
         fragment('goal', 'goal', 'user'),
         fragment('assistant', 'history', 'assistant'),
         fragment('summary', 'compaction', 'user'),
+        fragment('background', 'background', 'user'),
       ],
       workspaceRules: [{ path: 'AGENTS.md', content: 'Repository rule' }],
     });
@@ -28,6 +29,7 @@ describe('ContextCompiler', () => {
       ['goal', 'user', 'user'],
       ['assistant', 'none', 'assistant'],
       ['summary', 'none', 'user'],
+      ['background', 'none', 'user'],
       ['workspace:AGENTS.md', 'workspace', 'workspace'],
     ]);
   });

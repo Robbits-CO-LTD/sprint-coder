@@ -3,17 +3,25 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { CodexModelOption, PublicError } from '@vibe/contracts';
 import type { ToolCatalogSnapshot } from '@vibe/domain';
+import type { PreparedContext } from './context-ledger';
 import {
   RUNTIME_PROTOCOL_VERSION,
   isRuntimeToMainEnvelope,
   type MainToRuntimeEnvelope,
   type RuntimeCanonicalEvent,
+  type RuntimeContextFragment,
 } from '../runtime-host/protocol';
 
-type ActiveTurn = { taskId: string; operationId: string; lastSeq: number };
+type ActiveTurn = {
+  taskId: string;
+  operationId: string;
+  lastSeq: number;
+  contextFragmentIds: string[];
+};
 type EventHandler = (taskId: string, turnId: string, event: RuntimeCanonicalEvent) => void;
 type FailureHandler = (taskId: string, turnId: string, error: PublicError) => void;
-type PrepareContext = (taskId: string, turnId: string) => void;
+type PrepareContext = (taskId: string, turnId: string) => PreparedContext;
+type ContextAccepted = (taskId: string, turnId: string, fragmentIds: readonly string[]) => void;
 export type RuntimeCapabilityReport = {
   available: boolean;
   models: CodexModelOption[];
@@ -35,6 +43,7 @@ export class RuntimeHostClient {
     private readonly onEvent: EventHandler,
     private readonly onFailure: FailureHandler,
     private readonly prepareContext?: PrepareContext,
+    private readonly onContextAccepted?: ContextAccepted,
   ) {
     this.launch();
   }
@@ -52,7 +61,9 @@ export class RuntimeHostClient {
     model: string,
     toolCatalogSnapshot: ToolCatalogSnapshot,
   ): void {
-    this.prepareContext?.(taskId, turnId);
+    const contextFragments = (this.prepareContext?.(taskId, turnId).fragments ?? []).map(
+      toRuntimeContextFragment,
+    );
     if (this.disposed) {
       this.onFailure(taskId, turnId, unavailableError());
       return;
@@ -63,13 +74,19 @@ export class RuntimeHostClient {
       return;
     }
     const operationId = randomUUID();
-    this.active.set(turnId, { taskId, operationId, lastSeq: 0 });
+    this.active.set(turnId, {
+      taskId,
+      operationId,
+      lastSeq: 0,
+      contextFragmentIds: contextFragments.map((fragment) => fragment.id),
+    });
     this.post({
       ...this.base(taskId, turnId, operationId, 1),
       type: 'start',
       input,
       workspacePath,
       model,
+      contextFragments,
       toolCatalogSnapshot,
     });
   }
@@ -151,6 +168,26 @@ export class RuntimeHostClient {
     if (raw.type === 'event') {
       this.onEvent(raw.taskId, raw.turnId, raw.event);
       if (raw.event.type === 'completed') this.active.delete(raw.turnId);
+    } else if (raw.type === 'started') {
+      if (!sameIds(active.contextFragmentIds, raw.acceptedContextFragmentIds)) {
+        this.cancel(raw.taskId, raw.turnId);
+        this.onFailure(raw.taskId, raw.turnId, {
+          code: 'RUNTIME_PROTOCOL_ERROR',
+          userMessage: 'Runtime Hostのcontext受理応答が一致しません。',
+          retryable: false,
+        });
+        return;
+      }
+      try {
+        this.onContextAccepted?.(raw.taskId, raw.turnId, raw.acceptedContextFragmentIds);
+      } catch {
+        this.cancel(raw.taskId, raw.turnId);
+        this.onFailure(raw.taskId, raw.turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage: 'Runtime contextの受理記録に失敗しました。',
+          retryable: true,
+        });
+      }
     } else if (raw.type === 'error') {
       this.active.delete(raw.turnId);
       this.onFailure(raw.taskId, raw.turnId, raw.error);
@@ -201,6 +238,28 @@ export class RuntimeHostClient {
       operationId,
     };
   }
+}
+
+function toRuntimeContextFragment(
+  fragment: PreparedContext['fragments'][number],
+): RuntimeContextFragment {
+  const authority =
+    fragment.source === 'system'
+      ? 'system'
+      : fragment.source === 'goal' || (fragment.source === 'history' && fragment.trust === 'user')
+        ? 'user'
+        : 'none';
+  return {
+    id: fragment.id,
+    source: fragment.source,
+    trust: fragment.trust,
+    authority,
+    content: fragment.content,
+  };
+}
+
+function sameIds(expected: readonly string[], actual: readonly string[]): boolean {
+  return expected.length === actual.length && expected.every((id, index) => id === actual[index]);
 }
 
 function unavailableError(): PublicError {

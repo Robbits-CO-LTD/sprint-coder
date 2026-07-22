@@ -9,6 +9,7 @@ const SOURCE_LABEL: Record<ContextUsage['fragments'][number]['source'], string> 
   history: '履歴',
   goal: 'Goal',
   compaction: '圧縮済み',
+  background: 'バックグラウンド',
 };
 
 const WARNING_THRESHOLD_PCT = 80;
