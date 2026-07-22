@@ -44,7 +44,13 @@ Wave 2(完了 2026-07-22):
   - Shellは全segment parse/evaluateをMainの強制入口にし、CommandRunner完成前は全segmentをmanaged deny。write/createもEdit Transaction完成前は実行境界でfail-closed
   - Access mode UI、Main所有Full確認、Task header表示、model/access設定の再起動復元E2Eを追加
   - 検証: typecheck/test(207件)/lint/format/E2E 5本 green、Computer UseでAccess変更・Full native確認・Codex model選択を実機確認
-- [ ] Slice 4.2 Tool Registry
+- [x] Slice 4.2 Tool Registry
+  - provider/namespace/name/versionを固定するToolId、closed ToolKind、schema/side-effect/risk/capability/targetを持つToolDefinitionを実装
+  - provider compatibility・workspace binding・priorityで解決し、Turnごとにdeep-freezeしたToolCatalogSnapshotを作成。ModelSamplerとRuntime protocol v3へ明示伝達
+  - Main ToolBrokerでsnapshot外name、epoch変更、Turn終了、input TOCTOU、callId replay、MCP接続をfail-closed化。CommandRunnerは同一registryに予約登録しSlice 4.4まで実行不可
+  - Codex production Runtimeは暗号学的に検証したempty catalogのみ受理し、read-only/no-toolsを維持
+  - 検証: typecheck/test(234件)/lint/format/E2E 5本 green、Computer UseでCodex model候補8件と選択状態を実機確認、独立要件/テストレビューGO
+- [ ] Slice 4.3 Approval flow
 
 ---
 

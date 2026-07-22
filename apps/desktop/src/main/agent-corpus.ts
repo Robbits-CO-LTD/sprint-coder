@@ -1,10 +1,7 @@
 import { digestCanonical } from './context-compiler';
 import { estimateTokens } from './context-ledger';
-import {
-  createDeterministicMockSampler,
-  deterministicMockToolExecutor,
-  runIntelligenceLoop,
-} from './intelligence-loop';
+import { createDeterministicMockSampler, runIntelligenceLoop } from './intelligence-loop';
+import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 
 export type BaselineCorpusCase = {
   id: string;
@@ -55,21 +52,41 @@ export async function runBaselineCorpus(
   const results: BaselineCorpusCaseResult[] = [];
   for (const corpusCase of cases) {
     const startedAt = performance.now();
+    const taskId = `corpus:${corpusCase.id}`;
+    const turnId = `turn:${corpusCase.id}`;
+    const toolBroker = createDefaultToolBroker(() => 0);
+    const toolCatalogSnapshot = startMockTurnCatalog(toolBroker, {
+      taskId,
+      turnId,
+      workspaceId: null,
+      policyEpoch: 0,
+    });
     const result = await runIntelligenceLoop({
-      taskId: `corpus:${corpusCase.id}`,
-      turnId: `turn:${corpusCase.id}`,
+      taskId,
+      turnId,
       fragments: [],
       model: 'mock-v1',
       effort: 'low',
       policyEpoch: 0,
       workspaceRevision: 'corpus-fixture-v1',
       contractRevision: null,
+      toolCatalogSnapshot,
       sample: createDeterministicMockSampler(
         corpusCase.input,
         corpusCase.expectedText,
         corpusCase.mode,
       ),
-      executeTool: deterministicMockToolExecutor,
+      executeTool: async (call) => {
+        const output = await toolBroker.dispatch({
+          taskId,
+          turnId,
+          callId: call.callId,
+          providerName: call.toolName,
+          input: call.arguments,
+        });
+        if (typeof output !== 'string') throw new Error('Corpus tool returned non-string output');
+        return output;
+      },
     });
     const success =
       result.text === corpusCase.expectedText &&

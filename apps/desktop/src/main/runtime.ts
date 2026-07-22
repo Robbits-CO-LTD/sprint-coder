@@ -5,10 +5,10 @@ import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
 import {
   createDeterministicMockSampler,
-  deterministicMockToolExecutor,
   runIntelligenceLoop,
   type IntelligenceStepRecorder,
 } from './intelligence-loop';
+import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 
 type Publish = (event: TurnEvent) => void;
 type Serialize = <T>(taskId: string, action: () => T) => Promise<T>;
@@ -31,6 +31,7 @@ const stages: TurnStage[] = ['understanding', 'planning', 'executing', 'synthesi
 
 export class MockRuntimeAdapter {
   private readonly active = new Map<string, ActiveTurn>();
+  private readonly toolBroker;
 
   constructor(
     private readonly persistence: RuntimePersistence,
@@ -39,7 +40,11 @@ export class MockRuntimeAdapter {
     private readonly serialize: Serialize = async (_taskId, action) => action(),
     private readonly terminal?: Terminal,
     private readonly prepareContext?: PrepareContext,
-  ) {}
+  ) {
+    this.toolBroker = createDefaultToolBroker(
+      (taskId) => this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0,
+    );
+  }
 
   start(taskId: string, turnId: string, input: string): void {
     const context = this.prepareContext?.(taskId, turnId);
@@ -79,6 +84,9 @@ export class MockRuntimeAdapter {
 
       const workspacePath = this.persistence.getWorkspace?.(taskId) ?? null;
       const policyEpoch = this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0;
+      const workspaceId = workspacePath === null ? null : digestCanonical({ workspacePath });
+      const toolContext = { taskId, turnId, workspaceId, policyEpoch } as const;
+      const toolCatalogSnapshot = startMockTurnCatalog(this.toolBroker, toolContext);
       const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
       const loop = await runIntelligenceLoop({
         taskId,
@@ -89,8 +97,19 @@ export class MockRuntimeAdapter {
         policyEpoch,
         workspaceRevision: `untracked:${digestCanonical({ workspacePath })}`,
         contractRevision: null,
+        toolCatalogSnapshot,
         sample: createDeterministicMockSampler(input, buildReply(input)),
-        executeTool: deterministicMockToolExecutor,
+        executeTool: async (call) => {
+          const result = await this.toolBroker.dispatch({
+            taskId,
+            turnId,
+            callId: call.callId,
+            providerName: call.toolName,
+            input: call.arguments,
+          });
+          if (typeof result !== 'string') throw new Error('Mock tool returned a non-string result');
+          return result;
+        },
         ...(recorder === undefined ? {} : { recorder }),
       });
       const messageId = randomUUID();
@@ -119,6 +138,7 @@ export class MockRuntimeAdapter {
         }
       }
     } finally {
+      this.toolBroker.finishTurn(taskId, turnId);
       this.active.delete(turnId);
     }
   }

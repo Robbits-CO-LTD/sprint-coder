@@ -4,6 +4,116 @@ const idSchema = z.string().min(1).max(128);
 const timestampSchema = z.string().datetime();
 const taskTextSchema = z.string().max(100_000);
 
+export const toolIdSchema = z
+  .string()
+  .regex(
+    /^[a-z0-9][a-z0-9._-]{0,63}:[a-z0-9][a-z0-9._-]{0,63}:[a-z0-9][a-z0-9._-]{0,63}@[0-9][a-zA-Z0-9._-]{0,31}$/,
+  );
+export const toolKindSchema = z.enum([
+  'fileRead',
+  'fileWrite',
+  'search',
+  'shell',
+  'network',
+  'backgroundTask',
+  'agentControl',
+]);
+export const toolSideEffectSchema = z.enum([
+  'none',
+  'read',
+  'write',
+  'process',
+  'network',
+  'control',
+]);
+export const toolRiskSchema = z.enum(['low', 'medium', 'high']);
+export const toolCapabilitySchema = z.enum([
+  'workspace.read',
+  'workspace.write',
+  'filesystem.external.read',
+  'filesystem.external.write',
+  'shell.execute',
+  'network.fetch',
+  'external.open',
+  'secret.use',
+  'provider.egress',
+]);
+const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export const toolCatalogEntrySchema = z
+  .object({
+    providerName: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+    toolId: toolIdSchema,
+    version: z.string().regex(/^[0-9][a-zA-Z0-9._-]{0,31}$/),
+    kind: toolKindSchema,
+    schemaVersion: z.number().int().positive(),
+    inputSchema: z.record(z.string(), z.json()),
+    inputSchemaDigest: digestSchema,
+    outputSchemaDigest: digestSchema,
+    schemaDigest: digestSchema,
+    sideEffect: toolSideEffectSchema,
+    risk: toolRiskSchema,
+    requiredCapabilities: z.array(toolCapabilitySchema),
+    executionTarget: z.enum(['main', 'utility', 'command-runner', 'mcp-gateway']),
+    implementationKind: z.enum(['built-in', 'command-runner', 'mcp-gateway']),
+  })
+  .strict();
+export const toolCatalogSnapshotSchema = z
+  .object({
+    revision: z.number().int().nonnegative(),
+    providerId: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
+    workspaceId: z.string().min(1).nullable(),
+    entries: z.array(toolCatalogEntrySchema),
+    digest: digestSchema,
+  })
+  .strict()
+  .superRefine((snapshot, context) => {
+    const names = new Set<string>();
+    const toolIds = new Set<string>();
+    for (const [index, entry] of snapshot.entries.entries()) {
+      if (names.has(entry.providerName))
+        context.addIssue({
+          code: 'custom',
+          message: 'Duplicate provider tool name',
+          path: ['entries', index, 'providerName'],
+        });
+      if (toolIds.has(entry.toolId))
+        context.addIssue({
+          code: 'custom',
+          message: 'Duplicate ToolId',
+          path: ['entries', index, 'toolId'],
+        });
+      if (new Set(entry.requiredCapabilities).size !== entry.requiredCapabilities.length)
+        context.addIssue({
+          code: 'custom',
+          message: 'Duplicate required capability',
+          path: ['entries', index, 'requiredCapabilities'],
+        });
+      if (
+        (entry.implementationKind === 'command-runner' &&
+          entry.executionTarget !== 'command-runner') ||
+        (entry.implementationKind === 'mcp-gateway' && entry.executionTarget !== 'mcp-gateway') ||
+        (entry.implementationKind === 'built-in' &&
+          entry.executionTarget !== 'main' &&
+          entry.executionTarget !== 'utility')
+      )
+        context.addIssue({
+          code: 'custom',
+          message: 'Implementation kind and execution target mismatch',
+          path: ['entries', index, 'implementationKind'],
+        });
+      if (entry.toolId.slice(entry.toolId.lastIndexOf('@') + 1) !== entry.version)
+        context.addIssue({
+          code: 'custom',
+          message: 'ToolId version mismatch',
+          path: ['entries', index, 'version'],
+        });
+      names.add(entry.providerName);
+      toolIds.add(entry.toolId);
+    }
+  });
+export type ToolCatalogEntry = z.infer<typeof toolCatalogEntrySchema>;
+export type ToolCatalogSnapshot = z.infer<typeof toolCatalogSnapshotSchema>;
+
 export const taskSummarySchema = z
   .object({
     id: idSchema,

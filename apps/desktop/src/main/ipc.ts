@@ -49,6 +49,8 @@ import {
   type TurnEvent,
 } from '@vibe/contracts';
 import type { PreparedContext } from './context-ledger';
+import { digestCanonical } from './context-compiler';
+import { createEmptyToolCatalogSnapshot } from './default-tools';
 import type { PersistenceClient, QueueTransition, StartedTurn } from './persistence';
 import {
   NotFoundError,
@@ -583,12 +585,16 @@ export class IpcRouter {
     if (kind === 'mock') {
       this.mockRuntime.start(taskId, started.turnId, started.text);
     } else {
+      const workspacePath = this.persistence.getWorkspace(taskId);
+      const workspaceId =
+        workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
       this.codexRuntime.start(
         taskId,
         started.turnId,
         started.text,
-        this.persistence.getWorkspace(taskId),
+        workspacePath,
         this.persistence.getModel(),
+        createEmptyToolCatalogSnapshot('codex', workspaceId),
       );
     }
   }

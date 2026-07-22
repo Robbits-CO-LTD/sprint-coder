@@ -2,6 +2,7 @@ import { utilityProcess, type UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { CodexModelOption, PublicError } from '@vibe/contracts';
+import type { ToolCatalogSnapshot } from '@vibe/domain';
 import {
   RUNTIME_PROTOCOL_VERSION,
   isRuntimeToMainEnvelope,
@@ -49,6 +50,7 @@ export class RuntimeHostClient {
     input: string,
     workspacePath: string | null,
     model: string,
+    toolCatalogSnapshot: ToolCatalogSnapshot,
   ): void {
     this.prepareContext?.(taskId, turnId);
     if (this.disposed) {
@@ -68,6 +70,7 @@ export class RuntimeHostClient {
       input,
       workspacePath,
       model,
+      toolCatalogSnapshot,
     });
   }
 

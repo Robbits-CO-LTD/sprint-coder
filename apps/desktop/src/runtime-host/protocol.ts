@@ -2,13 +2,15 @@ import {
   codexModelIdSchema,
   codexModelOptionSchema,
   publicErrorSchema,
+  toolCatalogSnapshotSchema,
   turnStageSchema,
   type PublicError,
   type CodexModelOption,
   type TurnStage,
 } from '@vibe/contracts';
+import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@vibe/domain';
 
-export const RUNTIME_PROTOCOL_VERSION = 2;
+export const RUNTIME_PROTOCOL_VERSION = 3;
 
 type EnvelopeBase = {
   protocolVersion: typeof RUNTIME_PROTOCOL_VERSION;
@@ -31,6 +33,7 @@ export type MainToRuntimeEnvelope =
       input: string;
       workspacePath: string | null;
       model: string;
+      toolCatalogSnapshot: ToolCatalogSnapshot;
     })
   | (EnvelopeBase & { type: 'cancel' });
 
@@ -55,7 +58,18 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     'workspacePath' in value &&
     (value.workspacePath === null || typeof value.workspacePath === 'string') &&
     'model' in value &&
-    codexModelIdSchema.safeParse(value.model).success
+    codexModelIdSchema.safeParse(value.model).success &&
+    'toolCatalogSnapshot' in value &&
+    isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot)
+  );
+}
+
+function isVerifiedReadOnlyCatalog(value: unknown): value is ToolCatalogSnapshot {
+  const parsed = toolCatalogSnapshotSchema.safeParse(value);
+  return (
+    parsed.success &&
+    parsed.data.entries.length === 0 &&
+    verifyToolCatalogSnapshot(parsed.data as unknown as ToolCatalogSnapshot)
   );
 }
 

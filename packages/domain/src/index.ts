@@ -106,3 +106,4 @@ export function transitionIntelligenceStep(
 }
 
 export * from './permission';
+export * from './tool-registry';

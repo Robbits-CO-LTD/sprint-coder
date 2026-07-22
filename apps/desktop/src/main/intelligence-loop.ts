@@ -1,4 +1,9 @@
-import type { IntelligenceStepState, ReasoningEffort, StepSnapshot } from '@vibe/domain';
+import type {
+  IntelligenceStepState,
+  ReasoningEffort,
+  StepSnapshot,
+  ToolCatalogSnapshot,
+} from '@vibe/domain';
 import {
   ContextCompiler,
   digestCanonical,
@@ -6,26 +11,6 @@ import {
   type WorldState,
 } from './context-compiler';
 import type { ContextFragment } from './context-ledger';
-
-export type ToolCatalogEntry = {
-  toolId: string;
-  providerName: string;
-  version: string;
-  kind: 'pure';
-  inputSchemaDigest: string;
-};
-
-export const MOCK_TOOL_CATALOG: readonly ToolCatalogEntry[] = Object.freeze([
-  Object.freeze({
-    toolId: 'builtin:mock.echo@1',
-    providerName: 'mock_echo',
-    version: '1',
-    kind: 'pure' as const,
-    inputSchemaDigest: digestCanonical({ type: 'object', required: ['text'], text: 'string' }),
-  }),
-]);
-
-export const MOCK_TOOL_CATALOG_DIGEST = digestCanonical(MOCK_TOOL_CATALOG);
 
 export type ModelToolCall = {
   callId: string;
@@ -40,6 +25,7 @@ export type ModelSampler = (input: {
   stepOrdinal: number;
   compiledContextDigest: string;
   transcript: readonly ToolTranscriptItem[];
+  toolCatalogSnapshot: ToolCatalogSnapshot;
 }) => Promise<ModelSample> | ModelSample;
 
 export type ToolExecutor = (call: ModelToolCall) => Promise<string> | string;
@@ -68,6 +54,7 @@ export type IntelligenceLoopInput = {
   policyEpoch: number;
   workspaceRevision: string;
   contractRevision: number | null;
+  toolCatalogSnapshot: ToolCatalogSnapshot;
   sample: ModelSampler;
   executeTool: ToolExecutor;
   recorder?: IntelligenceStepRecorder;
@@ -111,7 +98,7 @@ export async function runIntelligenceLoop(
             model: input.model,
             effort: input.effort,
             contextDigest: compiled.digest,
-            toolCatalogDigest: MOCK_TOOL_CATALOG_DIGEST,
+            toolCatalogDigest: input.toolCatalogSnapshot.digest,
             policyEpoch: input.policyEpoch,
             workspaceRevision: input.workspaceRevision,
             contractRevision: input.contractRevision,
@@ -127,6 +114,7 @@ export async function runIntelligenceLoop(
         stepOrdinal: ordinal,
         compiledContextDigest: compiled.digest,
         transcript,
+        toolCatalogSnapshot: input.toolCatalogSnapshot,
       });
       await transition('sampled');
       if (sampled.kind === 'final') {
@@ -136,7 +124,15 @@ export async function runIntelligenceLoop(
 
       await transition('dispatching');
       const results = await Promise.all(
-        sampled.calls.map(async (call) => ({ call, content: await input.executeTool(call) })),
+        sampled.calls.map(async (call) => {
+          if (
+            !input.toolCatalogSnapshot.entries.some(
+              ({ providerName }) => providerName === call.toolName,
+            )
+          )
+            throw new Error(`Tool is not present in the immutable Turn catalog: ${call.toolName}`);
+          return { call, content: await input.executeTool(call) };
+        }),
       );
       for (const { call, content } of results) {
         transcript.push({

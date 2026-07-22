@@ -6,6 +6,7 @@ import {
   publicErrorSchema,
   runtimeSettingsSchema,
   taskRenameInputSchema,
+  toolCatalogSnapshotSchema,
   turnEventSchema,
   turnSnapshotSchema,
 } from './index';
@@ -114,5 +115,53 @@ describe('public contracts', () => {
       }),
     ).toMatchObject({ preset: 'full', expectedPolicyEpoch: 3 });
     expect(() => permissionSetInputSchema.parse({ taskId: 'task-1', preset: 'full' })).toThrow();
+  });
+
+  it('validates immutable Tool Catalog metadata at the runtime boundary', () => {
+    const digest = 'a'.repeat(64);
+    const snapshot = {
+      revision: 2,
+      providerId: 'codex',
+      workspaceId: 'workspace-1',
+      entries: [
+        {
+          providerName: 'read_file',
+          toolId: 'builtin:workspace:read-file@1',
+          version: '1',
+          kind: 'fileRead',
+          schemaVersion: 1,
+          inputSchema: { type: 'object' },
+          inputSchemaDigest: digest,
+          outputSchemaDigest: digest,
+          schemaDigest: digest,
+          sideEffect: 'read',
+          risk: 'low',
+          requiredCapabilities: ['workspace.read'],
+          executionTarget: 'main',
+          implementationKind: 'built-in',
+        },
+      ],
+      digest,
+    };
+    expect(toolCatalogSnapshotSchema.parse(snapshot)).toMatchObject({ providerId: 'codex' });
+    for (const invalid of [
+      { ...snapshot, entries: [{ ...snapshot.entries[0], risk: 'root' }] },
+      { ...snapshot, entries: [{ ...snapshot.entries[0], sideEffect: 'unknown' }] },
+      { ...snapshot, entries: [{ ...snapshot.entries[0], schemaVersion: 0 }] },
+      { ...snapshot, entries: [{ ...snapshot.entries[0], requiredCapabilities: ['root'] }] },
+      { ...snapshot, entries: [{ ...snapshot.entries[0], version: '2' }] },
+      {
+        ...snapshot,
+        entries: [
+          {
+            ...snapshot.entries[0],
+            implementationKind: 'built-in',
+            executionTarget: 'mcp-gateway',
+          },
+        ],
+      },
+      { ...snapshot, providerId: 'Codex\nspoof' },
+    ])
+      expect(() => toolCatalogSnapshotSchema.parse(invalid)).toThrow();
   });
 });
