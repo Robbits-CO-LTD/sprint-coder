@@ -1,15 +1,26 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DESKTOP_ROOT, OUT_DIR } from './helpers';
+import {
+  DESKTOP_ROOT,
+  OUT_DIR,
+  ensureDevServerReady,
+  resolveE2EMode,
+  stopDevServer,
+} from './helpers';
+import type { DevServerHandle } from './helpers';
 
 /**
- * Runs `electron-forge package` once before the whole E2E suite (§15.5 golden paths are all
- * production-runtime tests; `npm start` is a dev-server launch and is unusable here).
+ * Prepares whichever launch mode resolveE2EMode() selects (see tests/e2e/helpers.ts):
  *
- * A stamp file (out/.e2e-package-stamp) records when packaging last succeeded; if every
- * relevant source file is older than the stamp, packaging is skipped so repeated `npm run e2e`
- * runs during local iteration don't pay the multi-minute packaging cost every time.
+ *  - "packaged": runs `electron-forge package` once (skipped if apps/desktop/out/** is already
+ *    up to date, tracked via a stamp file compared against source mtimes).
+ *  - "dev": makes sure a Vite dev server + main/preload dev build are reachable, starting
+ *    `npm start` in the background if nothing is already listening. A pre-existing dev instance
+ *    (a developer's own `npm start`, or a previous leftover) is detected and reused as-is — it
+ *    is never killed. Playwright treats a function returned from globalSetup as the matching
+ *    globalTeardown, which is how the dev server we spawned here (and only that one) gets torn
+ *    down once the whole suite finishes.
  */
 const STAMP_FILE = join(OUT_DIR, '.e2e-package-stamp');
 
@@ -43,7 +54,7 @@ function isPackageStale(): boolean {
   return newestSourceMs > stampMs;
 }
 
-export default async function globalSetup(): Promise<void> {
+function packageIfStale(): void {
   if (!isPackageStale()) {
     console.log(`[e2e globalSetup] ${OUT_DIR} is up to date, skipping electron-forge package.`);
     return;
@@ -58,13 +69,40 @@ export default async function globalSetup(): Promise<void> {
 
   if (!existsSync(OUT_DIR)) {
     throw new Error(
-      `electron-forge package reported success but ${OUT_DIR} was not created. ` +
-        'This has been observed to be an environment/toolchain issue (electron-packager\'s ' +
-        'zip extraction of the Electron binary never settles on this Node version) rather ' +
-        'than an application bug — see the E2E task notes. Re-run with ' +
-        '`DEBUG=electron-packager npx electron-forge package` inside apps/desktop to inspect.',
+      `electron-forge package reported success but ${OUT_DIR} was not created. This has been ` +
+        "confirmed to be an environment/toolchain bug (@electron/packager's zip extraction of " +
+        'the Electron binary hangs deterministically on the electron.icns entry, independent ' +
+        'of Node version) rather than an application bug. Use VIBE_E2E_MODE=dev to run E2E ' +
+        'against `npm start` instead.',
     );
   }
   writeFileSync(STAMP_FILE, new Date().toISOString());
   console.log('[e2e globalSetup] Packaging complete.');
+}
+
+export default async function globalSetup(): Promise<() => Promise<void>> {
+  const mode = resolveE2EMode();
+  console.log(`[e2e globalSetup] mode=${mode}`);
+
+  if (mode === 'packaged') {
+    packageIfStale();
+    return async () => {
+      /* nothing spawned in packaged mode — each test owns/closes its own process */
+    };
+  }
+
+  console.log('[e2e globalSetup] Ensuring dev server + main/preload dev build are ready...');
+  const devServer: DevServerHandle = await ensureDevServerReady(90_000);
+  console.log(
+    devServer.alreadyRunning
+      ? '[e2e globalSetup] Reusing an already-running dev server (not touching it).'
+      : '[e2e globalSetup] Started our own `npm start` in the background.',
+  );
+
+  return async () => {
+    if (!devServer.alreadyRunning) {
+      console.log('[e2e globalTeardown] Stopping the `npm start` we spawned for this run.');
+    }
+    stopDevServer(devServer);
+  };
 }

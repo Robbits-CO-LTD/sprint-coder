@@ -1,19 +1,41 @@
 import { _electron as electron } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import type { ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /**
- * Package済み(production build)のvibe-editor3 Electron E2Eヘルパー。
+ * vibe-editor3 Electron E2E launch helpers.
  *
- * `npm start` はdevサーバ起動型のためE2Eには使わない。ここでは
- * `apps/desktop/out/**` に生成されたpackaged app (electron-forge package) の
- * 実行ファイルを自動検出し、テストごとに隔離した VIBE_USER_DATA_DIR で起動する。
+ * `npm start` on its own is a dev-server launch and was never meant to be driven directly by
+ * E2E — but in this environment `electron-forge package` cannot produce a usable build at all
+ * (confirmed: @electron/packager's zip extraction of the Electron binary hangs deterministically
+ * on the electron.icns entry, independent of Node version — reproduced under both Node 26 and
+ * Electron's bundled Node 22). So two launch modes are supported:
+ *
+ *  - "packaged": launches the electron-forge packaged app under apps/desktop/out/** (original,
+ *    preferred path — used automatically wherever packaging actually works, e.g. future CI).
+ *  - "dev": launches the repo's own Electron binary (node_modules/electron) directly against
+ *    apps/desktop, reusing whatever `npm start` (dev server + main/preload dev build) is
+ *    reachable. This is the fallback this environment relies on today.
+ *
+ * Mode selection: `VIBE_E2E_MODE=packaged|dev` forces a mode; otherwise `packaged` is used if
+ * apps/desktop/out/** already contains a usable build, else `dev`.
  */
 
 export const DESKTOP_ROOT = join(__dirname, '..', '..', 'apps', 'desktop');
+export const REPO_ROOT = join(__dirname, '..', '..');
 export const OUT_DIR = join(DESKTOP_ROOT, 'out');
+export const MAIN_BUILD_OUTPUT = join(DESKTOP_ROOT, '.vite', 'build', 'index.js');
+export const DEV_SERVER_CANDIDATE_URLS = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://[::1]:5173',
+];
+
+export type E2EMode = 'packaged' | 'dev';
 
 /**
  * `out/` 配下のpackaged app実行ファイルをOSに応じて自動検出する。
@@ -22,10 +44,7 @@ export const OUT_DIR = join(DESKTOP_ROOT, 'out');
  */
 export function findPackagedExecutable(): string {
   if (!existsSync(OUT_DIR)) {
-    throw new Error(
-      `Packaged app not found at ${OUT_DIR}. Run "npx electron-forge package" inside ` +
-        `${DESKTOP_ROOT} first (globalSetup should have done this automatically).`,
-    );
+    throw new Error(`Packaged app not found at ${OUT_DIR}.`);
   }
 
   const topLevel = readdirSync(OUT_DIR, { withFileTypes: true })
@@ -38,8 +57,7 @@ export function findPackagedExecutable(): string {
 
   // Prefer a directory that mentions the current platform (e.g. "-darwin-arm64"),
   // fall back to the first (and usually only) directory otherwise.
-  const platformDirName =
-    topLevel.find((name) => name.includes(process.platform)) ?? topLevel[0];
+  const platformDirName = topLevel.find((name) => name.includes(process.platform)) ?? topLevel[0];
   if (platformDirName === undefined) {
     throw new Error(`No packaged output directories found under ${OUT_DIR}.`);
   }
@@ -67,10 +85,39 @@ export function findPackagedExecutable(): string {
   // linux: an extensionless executable named after the product, sitting next to
   // resources/, locales/, etc.
   const candidate = readdirSync(packDir, { withFileTypes: true }).find(
-    (e) => e.isFile() && statSync(join(packDir, e.name)).mode & 0o111,
+    (e) => e.isFile() && (statSync(join(packDir, e.name)).mode & 0o111) !== 0,
   );
   if (!candidate) throw new Error(`No executable found in ${packDir}.`);
   return join(packDir, candidate.name);
+}
+
+export function isPackagedAvailable(): boolean {
+  try {
+    findPackagedExecutable();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `VIBE_E2E_MODE` forces a mode; otherwise prefer "packaged" when it's actually usable. */
+export function resolveE2EMode(): E2EMode {
+  const forced = process.env['VIBE_E2E_MODE'];
+  if (forced === 'packaged' || forced === 'dev') return forced;
+  return isPackagedAvailable() ? 'packaged' : 'dev';
+}
+
+/** Resolves the repo's own Electron binary via node_modules/electron/path.txt, the same
+ * indirection the `electron` npm package itself uses — works across mac/win/linux without
+ * hardcoding a platform-specific layout. */
+export function resolveDevElectronBinary(): string {
+  const electronDir = join(REPO_ROOT, 'node_modules', 'electron');
+  const relPath = readFileSync(join(electronDir, 'path.txt'), 'utf8').trim();
+  const binPath = join(electronDir, 'dist', relPath);
+  if (!existsSync(binPath)) {
+    throw new Error(`Dev-mode Electron binary not found at ${binPath}.`);
+  }
+  return binPath;
 }
 
 /** Creates a fresh, uniquely-named userData directory for a single test. */
@@ -88,19 +135,117 @@ export function removeUserDataDir(dir: string | null | undefined): void {
   }
 }
 
+async function pingUrl(url: string, timeoutMs = 1500): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    return res.status >= 200; // any response at all means something is listening
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function isDevServerUp(): Promise<boolean> {
+  for (const url of DEV_SERVER_CANDIDATE_URLS) {
+    if (await pingUrl(url)) return true;
+  }
+  return false;
+}
+
+async function waitForCondition(
+  predicate: () => Promise<boolean> | boolean,
+  timeoutMs: number,
+  intervalMs = 750,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out after ${timeoutMs}ms waiting for condition.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+export type DevServerHandle = { alreadyRunning: boolean; proc: ChildProcess | null };
+
 /**
- * Launches the packaged app with an isolated VIBE_USER_DATA_DIR (own SQLite file +
- * own single-instance lock), so tests never collide with a developer's running
- * `npm start` instance or with each other.
+ * Ensures the Vite dev server + main/preload dev build (apps/desktop/.vite/build/index.js) are
+ * ready for dev-mode E2E.
+ *
+ * If a dev server is already reachable (e.g. a developer's own `npm start`, or one left running
+ * from a previous run), it is reused untouched — we must never kill or otherwise interfere with
+ * an already-running dev instance. Only a dev server WE spawn here is torn down later
+ * (see stopDevServer).
  */
-export async function launchApp(userDataDir: string): Promise<ElectronApplication> {
-  const executablePath = findPackagedExecutable();
+export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServerHandle> {
+  if (await isDevServerUp()) {
+    return { alreadyRunning: true, proc: null };
+  }
+
+  const proc = spawn('npm', ['start'], {
+    cwd: REPO_ROOT,
+    detached: true, // its own process group, so we can signal the whole tree on teardown
+    stdio: 'ignore',
+    env: process.env,
+  });
+  proc.unref();
+
+  try {
+    await waitForCondition(
+      async () => (await isDevServerUp()) && existsSync(MAIN_BUILD_OUTPUT),
+      timeoutMs,
+    );
+  } catch (err) {
+    stopDevServer({ alreadyRunning: false, proc });
+    throw new Error(
+      `Dev server / main build did not become ready within ${timeoutMs}ms: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  return { alreadyRunning: false, proc };
+}
+
+/** Tears down only a dev server WE started via ensureDevServerReady — a pre-existing developer
+ * instance (alreadyRunning: true) is left running untouched, per the E2E task's constraint. */
+export function stopDevServer(handle: DevServerHandle | null | undefined): void {
+  if (!handle || handle.alreadyRunning || !handle.proc || handle.proc.pid === undefined) return;
+  try {
+    // `detached: true` put the spawned `npm start` in its own process group; signalling the
+    // negative pid kills the whole tree (npm -> electron-forge start -> electron/vite/etc).
+    process.kill(-handle.proc.pid, 'SIGTERM');
+  } catch {
+    // Already exited, or the process group is already gone — nothing further to do.
+  }
+}
+
+/**
+ * Launches vibe-editor3 with an isolated VIBE_USER_DATA_DIR (own SQLite file + own
+ * single-instance lock), so tests never collide with a developer's running instance or with
+ * each other. Mode defaults to resolveE2EMode() (see module doc comment).
+ */
+export async function launchApp(
+  userDataDir: string,
+  mode: E2EMode = resolveE2EMode(),
+): Promise<ElectronApplication> {
+  const env = { ...process.env, VIBE_USER_DATA_DIR: userDataDir };
+
+  if (mode === 'packaged') {
+    return electron.launch({ executablePath: findPackagedExecutable(), env });
+  }
+
+  // dev mode: run the repo's own Electron binary directly against apps/desktop. The main/preload
+  // bundle at apps/desktop/.vite/build/*.js was produced by `npm start` (see
+  // ensureDevServerReady) and has MAIN_WINDOW_VITE_DEV_SERVER_URL baked in, so the renderer loads
+  // from the already-running Vite dev server rather than the app://bundle production protocol.
   return electron.launch({
-    executablePath,
-    env: {
-      ...process.env,
-      VIBE_USER_DATA_DIR: userDataDir,
-    },
+    executablePath: resolveDevElectronBinary(),
+    args: [DESKTOP_ROOT],
+    env,
   });
 }
 
