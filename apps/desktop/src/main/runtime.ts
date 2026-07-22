@@ -5,6 +5,7 @@ import type { PersistenceClient } from './persistence';
 type Publish = (event: TurnEvent) => void;
 type Serialize = (taskId: string, action: () => void) => Promise<void>;
 type Terminal = (taskId: string, turnId: string, state: 'completed' | 'failed') => void;
+type PrepareContext = (taskId: string, turnId: string) => void;
 type ActiveTurn = { canceled: boolean; steering: string[] };
 type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' | 'completeTurn'>;
 
@@ -19,9 +20,11 @@ export class MockRuntimeAdapter {
     private readonly delayMs = 240,
     private readonly serialize: Serialize = async (_taskId, action) => action(),
     private readonly terminal?: Terminal,
+    private readonly prepareContext?: PrepareContext,
   ) {}
 
   start(taskId: string, turnId: string, input: string): void {
+    this.prepareContext?.(taskId, turnId);
     const control: ActiveTurn = { canceled: false, steering: [] };
     this.active.set(turnId, control);
     void this.run(taskId, turnId, input, control);

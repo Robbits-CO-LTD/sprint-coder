@@ -26,7 +26,7 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v3', () => {
+  describe('SqlitePersistenceClient v4', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -155,6 +155,53 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('publishes context usage around audit-only compaction without changing displayed history', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      persistence.setGoal(task.id, 'Keep the answer deterministic');
+      const original = 'x'.repeat(76_803);
+      const started = persistence.startTurn(task.id, original);
+      const prepared = persistence.prepareContext(task.id, started.turnId);
+
+      expect(prepared.compacted).toBe(true);
+      expect(prepared.usageEvents.map((event) => [event.type, event.seq])).toEqual([
+        ['context.usage', 2],
+        ['context.usage', 4],
+      ]);
+      expect(persistence.listMessages(task.id)).toHaveLength(1);
+      expect(persistence.listMessages(task.id)[0]?.content).toBe(original);
+      expect(
+        persistence.listEventsAfter(task.id, 0).map((event) => [event.type, event.seq]),
+      ).toEqual([
+        ['turn.accepted', 1],
+        ['context.usage', 2],
+        ['context.usage', 4],
+      ]);
+      expect(persistence.snapshot(task.id)).toMatchObject({
+        lastSeq: 4,
+        contextUsage:
+          prepared.usageEvents[1]?.type === 'context.usage'
+            ? prepared.usageEvents[1].usage
+            : undefined,
+      });
+      persistence.close();
+
+      const db = new Database(path, { readonly: true });
+      expect(
+        db
+          .prepare("SELECT COUNT(*) AS count FROM turn_events WHERE type = 'context.compacted'")
+          .get(),
+      ).toEqual({ count: 1 });
+      expect(
+        db
+          .prepare(
+            'SELECT COUNT(*) AS count FROM context_fragments WHERE superseded_by_compaction_id IS NOT NULL',
+          )
+          .get(),
+      ).toEqual({ count: 1 });
+      db.close();
+    });
+
     it('migrates a v1 database with duplicate active turns without crashing', () => {
       const directory = mkdtempSync(join(tmpdir(), 'vibe-migration-'));
       cleanup.push(directory);
@@ -165,10 +212,31 @@ if (runsWithElectronAbi)
       expect(persistence.interruptActiveTurns()).toBe(1);
       expect(persistence.listEventsAfter('task-1', 0).map((event) => event.seq)).toEqual([1, 2, 3]);
       persistence.close();
+
+      const migrated = new Database(path, { readonly: true });
+      expect(
+        migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all(),
+      ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+      expect(
+        migrated
+          .prepare('PRAGMA table_info(context_fragments)')
+          .all()
+          .map((column) => (column as { name: string }).name),
+      ).toEqual([
+        'id',
+        'task_id',
+        'source',
+        'trust',
+        'token_estimate',
+        'created_at',
+        'superseded_by_compaction_id',
+        'message_id',
+      ]);
+      migrated.close();
     });
   });
 else
-  describe('SqlitePersistenceClient v3 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v4 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

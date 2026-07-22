@@ -225,12 +225,7 @@ function RuntimeChip() {
 
   if (!runtimeSupported) {
     return (
-      <button
-        type="button"
-        className="cmp-chip"
-        disabled
-        title="モデル選択は今回のスコープ外です"
-      >
+      <button type="button" className="cmp-chip" disabled title="モデル選択は今回のスコープ外です">
         GPT-6.2 mini
       </button>
     );

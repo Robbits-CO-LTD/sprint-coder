@@ -79,10 +79,12 @@ export class IpcRouter {
       (taskId, turnId, state) => {
         if (this.turnRuntimes.get(turnId) === 'mock') this.finishAndAdvance(taskId, turnId, state);
       },
+      (taskId, turnId) => this.prepareContext(taskId, turnId),
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) => this.handleCodexEvent(taskId, turnId, runtimeEvent),
       (taskId, turnId, error) => this.handleCodexFailure(taskId, turnId, error),
+      (taskId, turnId) => this.prepareContext(taskId, turnId),
     );
   }
 
@@ -496,6 +498,11 @@ export class IpcRouter {
         this.persistence.getWorkspace(taskId),
       );
     }
+  }
+
+  private prepareContext(taskId: string, turnId: string): void {
+    const prepared = this.persistence.prepareContext(taskId, turnId);
+    for (const event of prepared.usageEvents) this.publish(event);
   }
 
   private cancelRuntime(taskId: string, turnId: string): void {

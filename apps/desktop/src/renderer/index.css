@@ -686,6 +686,55 @@ button {
   margin-left: auto;
 }
 
+.ctx-usage-wrap {
+  position: relative;
+}
+.ctx-usage-warning {
+  color: var(--state-warning);
+}
+.ctx-usage-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 6;
+  min-width: 200px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  animation: msgIn var(--t-quick) var(--ease-ui);
+}
+.ctx-usage-total {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  padding-bottom: 8px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ctx-usage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ctx-usage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.ctx-usage-tokens {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
 /* Queue/Steer/Stop & Send (FR-RUN-12/13) */
 .queued-list {
   display: flex;

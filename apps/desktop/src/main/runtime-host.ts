@@ -12,6 +12,7 @@ import {
 type ActiveTurn = { taskId: string; operationId: string; lastSeq: number };
 type EventHandler = (taskId: string, turnId: string, event: RuntimeCanonicalEvent) => void;
 type FailureHandler = (taskId: string, turnId: string, error: PublicError) => void;
+type PrepareContext = (taskId: string, turnId: string) => void;
 
 export class RuntimeHostClient {
   private process: UtilityProcess | null = null;
@@ -25,6 +26,7 @@ export class RuntimeHostClient {
   constructor(
     private readonly onEvent: EventHandler,
     private readonly onFailure: FailureHandler,
+    private readonly prepareContext?: PrepareContext,
   ) {
     this.launch();
   }
@@ -35,6 +37,7 @@ export class RuntimeHostClient {
   }
 
   start(taskId: string, turnId: string, input: string, workspacePath: string | null): void {
+    this.prepareContext?.(taskId, turnId);
     if (this.disposed) {
       this.onFailure(taskId, turnId, unavailableError());
       return;

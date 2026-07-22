@@ -41,6 +41,22 @@ export const queuedInputSchema = z
   .strict();
 export type QueuedInput = z.infer<typeof queuedInputSchema>;
 
+export const contextUsageSchema = z
+  .object({
+    usedTokens: z.number().int().nonnegative(),
+    hardCapTokens: z.number().int().positive(),
+    fragments: z.array(
+      z
+        .object({
+          source: z.enum(['system', 'history', 'goal', 'compaction']),
+          tokens: z.number().int().nonnegative(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+export type ContextUsage = z.infer<typeof contextUsageSchema>;
+
 const turnEventBase = { taskId: idSchema, turnId: idSchema, seq: z.number().int().positive() };
 export const turnEventSchema = z.discriminatedUnion('type', [
   z
@@ -71,6 +87,14 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       queued: z.array(queuedInputSchema),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal('context.usage'),
+      taskId: idSchema,
+      seq: z.number().int().positive(),
+      usage: contextUsageSchema,
+    })
+    .strict(),
 ]);
 export type TurnEvent = z.infer<typeof turnEventSchema>;
 
@@ -88,6 +112,7 @@ export const turnSnapshotSchema = z
       .strict()
       .nullable(),
     queued: z.array(queuedInputSchema),
+    contextUsage: contextUsageSchema,
   })
   .strict();
 export type TurnSnapshot = z.infer<typeof turnSnapshotSchema>;

@@ -48,7 +48,15 @@ describe('MockRuntimeAdapter', () => {
   it('streams deterministic Japanese output through every stage', async () => {
     const persistence = new FakePersistence();
     const published: TurnEvent[] = [];
-    const runtime = new MockRuntimeAdapter(persistence, (event) => published.push(event), 1);
+    const prepared: string[] = [];
+    const runtime = new MockRuntimeAdapter(
+      persistence,
+      (event) => published.push(event),
+      1,
+      undefined,
+      undefined,
+      (taskId, turnId) => prepared.push(`${taskId}:${turnId}`),
+    );
     runtime.start('task', 'turn', '同じ入力');
     await waitFor(() => persistence.state === 'completed');
 
@@ -61,6 +69,7 @@ describe('MockRuntimeAdapter', () => {
       published.filter((event) => event.type === 'message.delta').length,
     ).toBeGreaterThanOrEqual(20);
     expect(persistence.content).toContain('同じ入力');
+    expect(prepared).toEqual(['task:turn']);
     expect(published.at(-1)).toMatchObject({ type: 'turn.completed', state: 'completed' });
     expect(published.map((event) => event.seq)).toEqual(
       [...published.map((event) => event.seq)].sort((a, b) => a - b),

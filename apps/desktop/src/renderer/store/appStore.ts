@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type {
   ChatMessage,
+  ContextUsage,
   QueuedInput,
   RuntimeKind,
   TaskSummary,
@@ -60,6 +61,10 @@ type AppState = {
   messagesByTask: Record<string, ChatMessage[]>;
   turnByTask: Record<string, TurnRuntimeState | undefined>;
   queuedByTask: Record<string, QueuedInput[]>;
+  /** Context-window usage breakdown per task (FR-CTX). Absent while the backend hasn't sent a
+   * `TurnSnapshot.contextUsage` or `context.usage` event yet — the ContextBar degrades to a
+   * "context —" placeholder in that case. */
+  contextUsageByTask: Record<string, ContextUsage | undefined>;
   lastSeqByTask: Record<string, number>;
   sendingByTask: Record<string, boolean>;
   draftByTask: Record<string, string>;
@@ -285,6 +290,12 @@ function handleTurnEvent(
       }));
       break;
     }
+    case 'context.usage': {
+      apply((state) => ({
+        contextUsageByTask: { ...state.contextUsageByTask, [taskId]: ev.usage },
+      }));
+      break;
+    }
     default:
       break;
   }
@@ -305,6 +316,7 @@ export const useAppStore = create<AppState>((set, get) => {
     messagesByTask: {},
     turnByTask: {},
     queuedByTask: {},
+    contextUsageByTask: {},
     lastSeqByTask: {},
     sendingByTask: {},
     draftByTask: {},
@@ -419,6 +431,9 @@ export const useAppStore = create<AppState>((set, get) => {
           },
           queuedByTask: { ...state.queuedByTask, [taskId]: snapshot.queued },
           lastSeqByTask: { ...state.lastSeqByTask, [taskId]: snapshot.lastSeq },
+          contextUsageByTask: snapshot.contextUsage
+            ? { ...state.contextUsageByTask, [taskId]: snapshot.contextUsage }
+            : state.contextUsageByTask,
         }));
       }
 
@@ -571,7 +586,10 @@ export const useAppStore = create<AppState>((set, get) => {
         const code = errorCode(err);
         set((state) => ({
           draftByTask: { ...state.draftByTask, [taskId]: trimmed },
-          error: code === 'STEER_STALE' || code === 'STEER_UNSUPPORTED' ? state.error : describeError(err),
+          error:
+            code === 'STEER_STALE' || code === 'STEER_UNSUPPORTED'
+              ? state.error
+              : describeError(err),
         }));
         if (code === 'STEER_STALE') {
           get().showToast('Turnが切り替わったため送信し直してください');

@@ -31,6 +31,15 @@ export type TurnStage = 'understanding' | 'planning' | 'executing' | 'synthesizi
 
 export type QueuedInput = { ordinal: number; text: string };
 
+/** Context-window usage breakdown (FR-CTX). Backend may not have wired this yet — renderer
+ * must treat both `TurnSnapshot.contextUsage` and the `context.usage` event as optional/absent
+ * and degrade to a "context —" display until real data arrives (see store/appStore.ts). */
+export type ContextUsage = {
+  usedTokens: number;
+  hardCapTokens: number;
+  fragments: { source: 'system' | 'history' | 'goal' | 'compaction'; tokens: number }[];
+};
+
 export type TurnEvent =
   | { type: 'turn.accepted'; taskId: string; turnId: string; seq: number; userMessage: ChatMessage }
   | { type: 'stage.changed'; taskId: string; turnId: string; seq: number; stage: TurnStage }
@@ -50,7 +59,8 @@ export type TurnEvent =
       state: 'completed' | 'canceled' | 'failed' | 'interrupted';
       message?: ChatMessage;
     }
-  | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] };
+  | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
+  | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage };
 
 export type TurnSnapshot = {
   lastSeq: number;
@@ -62,15 +72,13 @@ export type TurnSnapshot = {
     messageId: string | null;
   } | null;
   queued: QueuedInput[];
+  /** Absent until the backend implements context-usage tracking (graceful degrade). */
+  contextUsage?: ContextUsage;
 };
 
 /** err.code values the IPC layer may attach to a rejected VibeApi promise. */
 export type VibeErrorCode =
-  | 'TURN_ACTIVE'
-  | 'STEER_STALE'
-  | 'RUNTIME_UNAVAILABLE'
-  | 'STEER_UNSUPPORTED'
-  | string;
+  'TURN_ACTIVE' | 'STEER_STALE' | 'RUNTIME_UNAVAILABLE' | 'STEER_UNSUPPORTED' | string;
 
 export type RuntimeKind = 'mock' | 'codex';
 

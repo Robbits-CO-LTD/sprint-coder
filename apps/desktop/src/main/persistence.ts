@@ -8,6 +8,7 @@ import {
   turnEventSchema,
   turnSnapshotSchema,
   type ChatMessage,
+  type ContextUsage,
   type QueuedInput,
   type RuntimeKind,
   type TaskSummary,
@@ -16,6 +17,14 @@ import {
   type TurnStage,
 } from '@vibe/contracts';
 import { transitionTurn, type TurnState } from '@vibe/domain';
+import {
+  ContextLedger,
+  defaultContextUsage,
+  type ContextFragment,
+  type ContextLedgerState,
+  type PersistedFragment,
+  type PreparedContext,
+} from './context-ledger';
 
 type TaskRow = {
   id: string;
@@ -172,6 +181,26 @@ const migrations = [
         VALUES ('runtime.kind', 'mock', datetime('now'));
     `,
   },
+  {
+    version: 4,
+    checksum: 'chat-alpha-v4-context-fragments',
+    sql: `
+      CREATE TABLE context_fragments (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        source TEXT NOT NULL CHECK (source IN ('system', 'history', 'goal', 'compaction')),
+        trust TEXT NOT NULL CHECK (trust IN ('system', 'user', 'assistant')),
+        token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+        created_at TEXT NOT NULL,
+        superseded_by_compaction_id TEXT REFERENCES context_fragments(id),
+        message_id TEXT REFERENCES messages(id) ON DELETE CASCADE
+      );
+      CREATE INDEX context_fragments_task_active_idx
+        ON context_fragments(task_id, source, superseded_by_compaction_id, created_at);
+      CREATE UNIQUE INDEX context_fragments_message_idx
+        ON context_fragments(message_id) WHERE message_id IS NOT NULL;
+    `,
+  },
 ];
 
 export type StartedTurn = { turnId: string; text: string; event: TurnEvent };
@@ -209,6 +238,7 @@ export interface PersistenceClient {
   ): TurnEvent;
   cancelTurn(taskId: string, turnId: string): TurnEvent | null;
   snapshot(taskId: string): TurnSnapshot;
+  prepareContext(taskId: string, turnId: string): PreparedContext;
   listEventsAfter(taskId: string, afterSeq: number): TurnEvent[];
   executeOperation<T>(
     principal: string,
@@ -231,6 +261,7 @@ export interface PersistenceClient {
 
 export class SqlitePersistenceClient implements PersistenceClient {
   private readonly db: Database.Database;
+  private readonly contextLedger: ContextLedger;
 
   constructor(databasePath: string) {
     mkdirSync(dirname(databasePath), { recursive: true });
@@ -239,6 +270,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     this.runMigrations(databasePath);
+    this.contextLedger = new ContextLedger(this);
   }
 
   private runMigrations(databasePath: string): void {
@@ -516,14 +548,34 @@ export class SqlitePersistenceClient implements PersistenceClient {
                   ).content,
             messageId: active.assistant_message_id,
           };
-    return turnSnapshotSchema.parse({ lastSeq, activeTurn, queued: this.listQueued(taskId) });
+    const usageRow = this.db
+      .prepare(
+        "SELECT payload_json FROM turn_events WHERE task_id = ? AND type = 'context.usage' ORDER BY seq DESC LIMIT 1",
+      )
+      .get(taskId) as { payload_json: string } | undefined;
+    const contextUsage =
+      usageRow === undefined
+        ? defaultContextUsage()
+        : extractContextUsage(turnEventSchema.parse(JSON.parse(usageRow.payload_json)));
+    return turnSnapshotSchema.parse({
+      lastSeq,
+      activeTurn,
+      queued: this.listQueued(taskId),
+      contextUsage,
+    });
+  }
+
+  prepareContext(taskId: string, turnId: string): PreparedContext {
+    return this.db.transaction(() => this.contextLedger.prepare(taskId, turnId))();
   }
 
   listEventsAfter(taskId: string, afterSeq: number): TurnEvent[] {
     this.assertTask(taskId);
     return (
       this.db
-        .prepare('SELECT payload_json FROM turn_events WHERE task_id = ? AND seq > ? ORDER BY seq')
+        .prepare(
+          "SELECT payload_json FROM turn_events WHERE task_id = ? AND seq > ? AND type != 'context.compacted' ORDER BY seq",
+        )
         .all(taskId, afterSeq) as { payload_json: string }[]
     ).map((row) => turnEventSchema.parse(JSON.parse(row.payload_json)));
   }
@@ -665,11 +717,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   private appendEvent(event: EventWithoutSeq): TurnEvent {
-    const seq = (
-      this.db
-        .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM turn_events WHERE task_id = ?')
-        .get(event.taskId) as { seq: number }
-    ).seq;
+    const seq = this.nextEventSeq(event.taskId);
     const parsed = turnEventSchema.parse({ ...event, seq });
     const turnId = 'turnId' in parsed ? parsed.turnId : null;
     this.db
@@ -686,6 +734,139 @@ export class SqlitePersistenceClient implements PersistenceClient {
         new Date().toISOString(),
       );
     return parsed;
+  }
+
+  private nextEventSeq(taskId: string): number {
+    return (
+      this.db
+        .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM turn_events WHERE task_id = ?')
+        .get(taskId) as { seq: number }
+    ).seq;
+  }
+
+  loadContextLedgerState(taskId: string): ContextLedgerState {
+    const task = this.getTaskRow(taskId);
+    const messages = this.db
+      .prepare(
+        `SELECT m.id, m.author, m.content, m.created_at,
+          f.id AS fragment_id, f.superseded_by_compaction_id
+        FROM messages m
+        LEFT JOIN context_fragments f ON f.message_id = m.id AND f.source = 'history'
+        WHERE m.task_id = ? AND m.author IN ('user', 'assistant')
+        ORDER BY m.created_at, m.rowid`,
+      )
+      .all(taskId) as {
+      id: string;
+      author: 'user' | 'assistant';
+      content: string;
+      created_at: string;
+      fragment_id: string | null;
+      superseded_by_compaction_id: string | null;
+    }[];
+    const compactions = this.db
+      .prepare(
+        `SELECT f.id, f.task_id, f.source, f.trust, f.token_estimate, f.created_at,
+          f.message_id, e.payload_json
+        FROM context_fragments f
+        JOIN turn_events e ON e.id = f.id
+        WHERE f.task_id = ? AND f.source = 'compaction'
+        ORDER BY f.created_at, f.rowid`,
+      )
+      .all(taskId) as {
+      id: string;
+      task_id: string;
+      source: 'compaction';
+      trust: ContextFragment['trust'];
+      token_estimate: number;
+      created_at: string;
+      message_id: null;
+      payload_json: string;
+    }[];
+    return {
+      goal: task.goal,
+      messages: messages.map((message) => ({
+        id: message.id,
+        author: message.author,
+        content: message.content,
+        createdAt: message.created_at,
+        fragmentId: message.fragment_id,
+        supersededByCompactionId: message.superseded_by_compaction_id,
+      })),
+      compactions: compactions.map((fragment) => ({
+        id: fragment.id,
+        taskId: fragment.task_id,
+        source: fragment.source,
+        trust: fragment.trust,
+        tokenEstimate: fragment.token_estimate,
+        content: readCompactionSummary(fragment.payload_json),
+        createdAt: fragment.created_at,
+        messageId: fragment.message_id,
+      })),
+    };
+  }
+
+  recordContextFragments(fragments: PersistedFragment[]): void {
+    const insert = this.db.prepare(
+      `INSERT INTO context_fragments(
+        id, task_id, source, trust, token_estimate, created_at,
+        superseded_by_compaction_id, message_id
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+    );
+    for (const fragment of fragments)
+      insert.run(
+        fragment.id,
+        fragment.taskId,
+        fragment.source,
+        fragment.trust,
+        fragment.tokenEstimate,
+        fragment.createdAt,
+        fragment.messageId,
+      );
+  }
+
+  recordContextUsage(taskId: string, _turnId: string, usage: ContextUsage): TurnEvent {
+    return this.appendEvent({ type: 'context.usage', taskId, usage });
+  }
+
+  recordContextCompaction(
+    taskId: string,
+    turnId: string,
+    fragment: ContextFragment,
+    supersededFragmentIds: string[],
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO context_fragments(
+          id, task_id, source, trust, token_estimate, created_at,
+          superseded_by_compaction_id, message_id
+        ) VALUES (?, ?, 'compaction', ?, ?, ?, NULL, NULL)`,
+      )
+      .run(fragment.id, taskId, fragment.trust, fragment.tokenEstimate, fragment.createdAt);
+    const placeholders = supersededFragmentIds.map(() => '?').join(', ');
+    const updated = this.db
+      .prepare(
+        `UPDATE context_fragments SET superseded_by_compaction_id = ?
+        WHERE task_id = ? AND source = 'history' AND superseded_by_compaction_id IS NULL
+          AND id IN (${placeholders})`,
+      )
+      .run(fragment.id, taskId, ...supersededFragmentIds);
+    if (updated.changes !== supersededFragmentIds.length)
+      throw new Error('Context compaction superseded an unexpected fragment set');
+    const seq = this.nextEventSeq(taskId);
+    const audit = {
+      type: 'context.compacted',
+      taskId,
+      turnId,
+      seq,
+      compactionId: fragment.id,
+      supersededFragmentIds,
+      summary: fragment.content,
+    };
+    this.db
+      .prepare(
+        'INSERT INTO turn_events(id, task_id, turn_id, seq, schema_version, type, payload_json, created_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)',
+      )
+      .run(fragment.id, taskId, turnId, seq, audit.type, JSON.stringify(audit), fragment.createdAt);
   }
 
   private updateTask(
@@ -765,4 +946,23 @@ function isTerminal(state: TurnState): boolean {
 function stateToStage(state: TurnState): TurnStage {
   if (state === 'planning' || state === 'executing' || state === 'synthesizing') return state;
   return 'understanding';
+}
+
+function extractContextUsage(event: TurnEvent): ContextUsage {
+  if (event.type !== 'context.usage') throw new Error('Expected a context usage event');
+  return event.usage;
+}
+
+function readCompactionSummary(payloadJson: string): string {
+  const payload = JSON.parse(payloadJson) as unknown;
+  if (
+    typeof payload !== 'object' ||
+    payload === null ||
+    !('type' in payload) ||
+    payload.type !== 'context.compacted' ||
+    !('summary' in payload) ||
+    typeof payload.summary !== 'string'
+  )
+    throw new Error('Invalid context compaction audit payload');
+  return payload.summary;
 }

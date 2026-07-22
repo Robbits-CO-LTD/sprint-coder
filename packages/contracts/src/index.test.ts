@@ -33,7 +33,7 @@ describe('public contracts', () => {
     ).toThrow();
   });
 
-  it('accepts queue events without a turn id and v2 snapshots', () => {
+  it('accepts task-scoped events and snapshots with context usage', () => {
     expect(
       turnEventSchema.parse({
         type: 'queue.changed',
@@ -42,6 +42,18 @@ describe('public contracts', () => {
         queued: [{ ordinal: 1, text: 'next' }],
       }),
     ).toMatchObject({ type: 'queue.changed', seq: 3 });
+    expect(
+      turnEventSchema.parse({
+        type: 'context.usage',
+        taskId: 't',
+        seq: 4,
+        usage: {
+          usedTokens: 7,
+          hardCapTokens: 32_000,
+          fragments: [{ source: 'history', tokens: 7 }],
+        },
+      }),
+    ).toMatchObject({ type: 'context.usage', seq: 4 });
     expect(
       turnSnapshotSchema.parse({
         lastSeq: 3,
@@ -53,6 +65,11 @@ describe('public contracts', () => {
           messageId: 'message',
         },
         queued: [{ ordinal: 1, text: 'next' }],
+        contextUsage: {
+          usedTokens: 7,
+          hardCapTokens: 32_000,
+          fragments: [{ source: 'history', tokens: 7 }],
+        },
       }).lastSeq,
     ).toBe(3);
   });
