@@ -1,0 +1,1041 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vibe-editor3 — UX Demo</title>
+<style>
+  :root{
+    --bg-canvas:#12110F;
+    --bg-surface:#1B1A17;
+    --bg-elevated:#24221E;
+    --border-subtle:rgba(255,244,224,.09);
+    --text-primary:#F4EFE6;
+    --text-secondary:#AAA49A;
+    --accent-primary:#E39A62;
+    --accent-cool:#78A9C2;
+    --success:#79B58A;
+    --warning:#D5A85B;
+    --danger:#D9786B;
+    --ease-ui:cubic-bezier(.2,.8,.2,1);
+    --ease-spatial:cubic-bezier(.22,1,.36,1);
+    --t-instant:90ms; --t-quick:160ms; --t-standard:240ms; --t-spatial:420ms; --t-cinematic:560ms;
+    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;
+    --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}
+  body{
+    background:var(--bg-canvas);color:var(--text-primary);
+    font-family:var(--font-ui);font-size:14px;line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:rgba(255,244,224,.12);border-radius:5px;border:2px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-track{background:transparent}
+
+  /* ---------- App shell ---------- */
+  #app{display:flex;height:100%;position:relative}
+
+  /* Sidebar */
+  #sidebar{
+    width:264px;flex:none;background:var(--bg-surface);
+    border-right:1px solid var(--border-subtle);
+    display:flex;flex-direction:column;padding:14px 10px;gap:4px;
+    transition:transform var(--t-standard) var(--ease-ui),opacity var(--t-standard) var(--ease-ui);
+    z-index:5;
+  }
+  .team-mode #sidebar{transform:translateX(-40px);opacity:0;pointer-events:none}
+  .sb-new{
+    display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:9px;
+    background:var(--bg-elevated);border:1px solid var(--border-subtle);
+    font-weight:600;font-size:13px;margin-bottom:6px;
+  }
+  .sb-new:hover{border-color:rgba(227,154,98,.4)}
+  .sb-search{
+    display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:9px;
+    color:var(--text-secondary);font-size:13px;margin-bottom:10px;
+  }
+  .sb-group{font-size:11px;letter-spacing:.06em;color:var(--text-secondary);padding:10px 12px 4px;text-transform:uppercase}
+  .sb-item{
+    padding:7px 12px;border-radius:8px;font-size:13px;color:var(--text-secondary);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;
+  }
+  .sb-item:hover{background:rgba(255,244,224,.05);color:var(--text-primary)}
+  .sb-item.active{background:rgba(227,154,98,.13);color:var(--text-primary)}
+  .sb-footer{margin-top:auto;padding:8px 12px;color:var(--text-secondary);font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;border-radius:8px}
+  .sb-footer:hover{background:rgba(255,244,224,.05)}
+
+  /* Main */
+  #main{flex:1;display:flex;flex-direction:column;min-width:0;position:relative;z-index:4}
+  #taskHeader{
+    height:52px;flex:none;display:flex;align-items:center;gap:12px;padding:0 20px;
+    border-bottom:1px solid var(--border-subtle);
+    transition:transform var(--t-standard) var(--ease-ui),opacity var(--t-standard) var(--ease-ui);
+  }
+  .team-mode #taskHeader{transform:translateY(-16px);opacity:0;pointer-events:none}
+  #taskTitle{font-weight:600;font-size:14px}
+  .goal-chip{
+    font-size:12px;color:var(--text-secondary);padding:3px 10px;border-radius:99px;
+    border:1px dashed var(--border-subtle);cursor:pointer;
+  }
+  .goal-chip:hover{color:var(--text-primary);border-color:rgba(255,244,224,.2)}
+  #teamBtn{
+    margin-left:auto;display:flex;align-items:center;gap:7px;
+    font-size:13px;font-weight:600;padding:7px 14px;border-radius:9px;
+    border:1px solid var(--border-subtle);color:var(--text-secondary);
+    transition:all var(--t-quick) var(--ease-ui);
+  }
+  #teamBtn:hover{color:var(--text-primary);border-color:rgba(120,169,194,.5)}
+  #teamBtn.hinted{
+    color:var(--accent-cool);border-color:rgba(120,169,194,.55);
+    box-shadow:0 0 0 0 rgba(120,169,194,.35);
+    animation:hintPulse 2.2s var(--ease-ui) infinite;
+  }
+  @keyframes hintPulse{
+    0%{box-shadow:0 0 0 0 rgba(120,169,194,.30)}
+    60%{box-shadow:0 0 0 9px rgba(120,169,194,0)}
+    100%{box-shadow:0 0 0 0 rgba(120,169,194,0)}
+  }
+  .icon-btn{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:var(--text-secondary)}
+  .icon-btn:hover{background:rgba(255,244,224,.06);color:var(--text-primary)}
+
+  /* ---------- Canvas layer ---------- */
+  #canvasLayer{
+    position:absolute;inset:0;z-index:3;opacity:0;pointer-events:none;
+    transition:opacity 220ms var(--ease-ui);
+    background:
+      radial-gradient(rgba(255,244,224,.075) 1px, transparent 1.4px);
+    background-size:26px 26px;
+    background-color:var(--bg-canvas);
+  }
+  .team-mode #canvasLayer{opacity:1;pointer-events:auto}
+  #world{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
+  #cables{position:absolute;left:-2000px;top:-2000px;width:7000px;height:6000px;overflow:visible;pointer-events:none}
+
+  /* Canvas controls */
+  #canvasControls{
+    position:absolute;right:18px;bottom:18px;z-index:6;display:flex;flex-direction:column;gap:8px;align-items:flex-end;
+    opacity:0;pointer-events:none;transition:opacity var(--t-standard) var(--ease-ui) 300ms;
+  }
+  .team-mode #canvasControls{opacity:1;pointer-events:auto}
+  .cc-row{display:flex;gap:8px}
+  .cc-btn{
+    background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:9px;
+    padding:7px 12px;font-size:12.5px;color:var(--text-secondary);
+  }
+  .cc-btn:hover{color:var(--text-primary);border-color:rgba(255,244,224,.2)}
+  .cc-hint{font-size:11.5px;color:var(--text-secondary);opacity:.75;background:rgba(18,17,15,.7);padding:4px 10px;border-radius:8px}
+
+  #teamHeader{
+    position:absolute;left:0;right:0;top:0;height:52px;z-index:6;
+    display:flex;align-items:center;gap:12px;padding:0 20px;
+    opacity:0;pointer-events:none;transform:translateY(-10px);
+    transition:opacity var(--t-standard) var(--ease-ui) 260ms,transform var(--t-standard) var(--ease-ui) 260ms;
+  }
+  .team-mode #teamHeader{opacity:1;pointer-events:auto;transform:none}
+  #backBtn{
+    display:flex;align-items:center;gap:7px;font-size:13px;color:var(--text-secondary);
+    padding:6px 12px;border-radius:9px;border:1px solid var(--border-subtle);background:var(--bg-elevated);
+  }
+  #backBtn:hover{color:var(--text-primary)}
+  .team-title{font-weight:600;font-size:14px}
+  .team-badge{font-size:11px;color:var(--accent-cool);border:1px solid rgba(120,169,194,.4);padding:2px 9px;border-radius:99px}
+
+  /* ---------- ChatSurface ---------- */
+  #surfaceWrap{
+    display:flex;flex-direction:column;flex:1;min-height:0;position:relative;
+  }
+  #surfaceWrap.node{
+    position:absolute;left:0;top:0;width:720px;
+    background:var(--bg-surface);
+    border:1px solid var(--border-subtle);
+    border-radius:16px;
+    box-shadow:0 24px 60px rgba(0,0,0,.45);
+    overflow:hidden;
+    transition:height var(--t-spatial) var(--ease-spatial);
+  }
+  #surfaceHeader{
+    display:none;align-items:center;gap:10px;padding:12px 18px;
+    border-bottom:1px solid var(--border-subtle);flex:none;background:var(--bg-surface);
+  }
+  #surfaceWrap.node #surfaceHeader{display:flex}
+  .avatar{
+    width:28px;height:28px;border-radius:9px;flex:none;
+    display:grid;place-items:center;font-size:13px;font-weight:700;
+    background:linear-gradient(135deg,rgba(227,154,98,.9),rgba(213,168,91,.8));color:#1B1A17;
+  }
+  .role-line{display:flex;flex-direction:column;line-height:1.3}
+  .role-name{font-size:13px;font-weight:600}
+  .role-sub{font-size:11px;color:var(--text-secondary)}
+  .leader-chip{
+    margin-left:auto;font-size:11px;font-weight:600;color:var(--accent-primary);
+    border:1px solid rgba(227,154,98,.45);padding:2px 10px;border-radius:99px;
+  }
+
+  #timelineScroll{flex:1;overflow-y:auto;min-height:0}
+  #timeline{
+    max-width:780px;margin:0 auto;padding:28px 24px 16px;
+    display:flex;flex-direction:column;gap:20px;
+  }
+  #surfaceWrap.node #timeline{padding:20px 20px 10px}
+
+  .empty-state{
+    display:flex;flex-direction:column;align-items:center;gap:14px;padding:80px 0 30px;text-align:center;
+  }
+  .empty-state h2{font-size:19px;font-weight:600}
+  .empty-state p{color:var(--text-secondary);font-size:13.5px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:6px}
+  .chip{
+    font-size:12.5px;color:var(--text-secondary);border:1px solid var(--border-subtle);
+    padding:7px 14px;border-radius:99px;transition:all var(--t-quick) var(--ease-ui);
+  }
+  .chip:hover{color:var(--text-primary);border-color:rgba(227,154,98,.45);background:rgba(227,154,98,.07)}
+
+  .msg{display:flex;flex-direction:column;gap:6px;animation:msgIn var(--t-standard) var(--ease-ui)}
+  @keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .msg-user{align-items:flex-end}
+  .msg-user .bubble{
+    background:var(--bg-elevated);border:1px solid var(--border-subtle);
+    padding:10px 16px;border-radius:16px 16px 4px 16px;max-width:82%;
+    font-size:15px;line-height:1.65;
+  }
+  .msg-assistant .bubble{font-size:15px;line-height:1.65;max-width:100%}
+  .msg-assistant .bubble p{margin-bottom:10px}
+  .msg-assistant .bubble p:last-child{margin-bottom:0}
+  .msg-assistant .bubble ul{margin:4px 0 10px 20px}
+  .msg-assistant .bubble li{margin-bottom:3px}
+  .msg-assistant .bubble code{
+    font-family:var(--font-mono);font-size:12.5px;background:rgba(255,244,224,.07);
+    padding:1.5px 6px;border-radius:5px;
+  }
+  .msg-label{font-size:11px;color:var(--text-secondary)}
+  .caret::after{content:"▍";color:var(--accent-primary);animation:blink 1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  .sys-notice{
+    align-self:center;font-size:12px;color:var(--text-secondary);
+    padding:5px 14px;border-radius:99px;background:rgba(255,244,224,.05);
+    animation:msgIn var(--t-standard) var(--ease-ui);
+  }
+
+  /* Run Card */
+  .run-card{
+    border:1px solid var(--border-subtle);border-radius:13px;background:var(--bg-surface);
+    overflow:hidden;animation:msgIn var(--t-standard) var(--ease-ui);
+  }
+  .run-head{display:flex;align-items:center;gap:10px;padding:11px 16px}
+  .run-dot{width:8px;height:8px;border-radius:50%;background:var(--accent-primary);flex:none}
+  .run-card.running .run-dot{animation:runPulse 1.4s ease-in-out infinite}
+  @keyframes runPulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .run-card.done .run-dot{background:var(--success);animation:none}
+  .run-card.blocked .run-dot{background:var(--danger);animation:none}
+  .run-title{font-size:13px;font-weight:600}
+  .run-elapsed{margin-left:auto;font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+  .run-stop{
+    font-size:12px;color:var(--text-secondary);border:1px solid var(--border-subtle);
+    padding:3px 11px;border-radius:8px;
+  }
+  .run-stop:hover{color:var(--danger);border-color:rgba(217,120,107,.5)}
+  .run-stages{padding:2px 16px 12px;display:flex;flex-direction:column;gap:2px}
+  .stage{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--text-secondary);padding:3px 0;min-height:26px;transition:color var(--t-quick)}
+  .stage .s-icon{width:15px;flex:none;text-align:center;font-size:12px}
+  .stage.current{color:var(--text-primary)}
+  .stage.current .s-icon{color:var(--accent-primary)}
+  .stage.done{color:var(--text-secondary)}
+  .stage.done .s-icon{color:var(--success)}
+  .stage .s-detail{font-size:12px;color:var(--text-secondary);margin-left:4px}
+  .run-card.compact .run-stages{display:none}
+  .run-card.compact{opacity:.85}
+  .run-card.compact .run-head{padding:9px 16px}
+
+  /* Command card */
+  .cmd-card{
+    border:1px solid var(--border-subtle);border-radius:13px;background:var(--bg-surface);
+    overflow:hidden;animation:msgIn var(--t-standard) var(--ease-ui);
+  }
+  .cmd-head{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border-subtle)}
+  .cmd-kind{font-size:12px;font-weight:600;color:var(--accent-cool)}
+  .cmd-status{font-size:12px;color:var(--text-secondary)}
+  .cmd-status.ok{color:var(--success)}
+  .cmd-time{margin-left:auto;font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+  .cmd-body{padding:10px 16px 4px}
+  .cmd-purpose{font-size:13px;margin-bottom:7px}
+  .cmd-line{
+    font-family:var(--font-mono);font-size:12.5px;line-height:1.55;color:var(--text-secondary);
+    background:rgba(0,0,0,.25);border-radius:8px;padding:7px 12px;margin-bottom:8px;
+  }
+  .cmd-line .cwd{color:var(--text-secondary);opacity:.7;margin-right:8px}
+  .cmd-line .cmd{color:var(--text-primary)}
+  .cmd-out{
+    font-family:var(--font-mono);font-size:12.5px;line-height:1.55;
+    padding:8px 16px 12px;color:var(--text-secondary);
+    max-height:170px;overflow-y:auto;white-space:pre-wrap;
+    border-top:1px solid var(--border-subtle);
+  }
+  .cmd-out .pass{color:var(--success)}
+  .cmd-out .head{color:var(--text-primary)}
+
+  /* Approval card */
+  .apr-card{
+    border:1px solid rgba(213,168,91,.4);border-radius:13px;background:var(--bg-surface);
+    overflow:hidden;animation:msgIn var(--t-standard) var(--ease-ui);
+  }
+  .apr-head{display:flex;align-items:center;gap:9px;padding:11px 16px;border-bottom:1px solid var(--border-subtle)}
+  .apr-icon{color:var(--warning);font-size:14px}
+  .apr-title{font-size:13px;font-weight:600}
+  .apr-risk{
+    margin-left:auto;font-size:11px;color:var(--warning);
+    border:1px solid rgba(213,168,91,.4);padding:2px 9px;border-radius:99px;
+  }
+  .apr-body{padding:11px 16px;font-size:13px;display:flex;flex-direction:column;gap:7px}
+  .apr-row{display:flex;gap:10px}
+  .apr-key{width:64px;flex:none;color:var(--text-secondary);font-size:12px;padding-top:1px}
+  .apr-val{font-size:12.5px}
+  .apr-val code{font-family:var(--font-mono);font-size:12px;background:rgba(0,0,0,.25);padding:2px 8px;border-radius:6px}
+  .apr-actions{display:flex;gap:8px;padding:4px 16px 14px}
+  .apr-btn{
+    font-size:12.5px;font-weight:600;padding:7px 14px;border-radius:9px;
+    border:1px solid var(--border-subtle);color:var(--text-secondary);
+    transition:all var(--t-quick) var(--ease-ui);
+  }
+  .apr-btn.primary{background:rgba(227,154,98,.14);border-color:rgba(227,154,98,.5);color:var(--accent-primary)}
+  .apr-btn.primary:hover{background:rgba(227,154,98,.22)}
+  .apr-btn:hover{color:var(--text-primary)}
+  .apr-btn.deny:hover{color:var(--danger);border-color:rgba(217,120,107,.5)}
+  .apr-card.decided .apr-actions{display:none}
+  .apr-decision{padding:0 16px 12px;font-size:12.5px;color:var(--text-secondary)}
+  .apr-decision .ok{color:var(--success)}
+  .apr-decision .no{color:var(--danger)}
+
+  /* ContextBar + Composer */
+  #composerZone{flex:none;padding:6px 24px 18px}
+  #surfaceWrap.node #composerZone{padding:6px 16px 14px;background:var(--bg-surface)}
+  .composer-inner{max-width:780px;margin:0 auto}
+  #contextBar{
+    display:flex;align-items:center;gap:8px;padding:0 6px 7px;font-size:11.5px;color:var(--text-secondary);
+  }
+  .ctx-chip{display:flex;align-items:center;gap:5px;padding:2px 9px;border-radius:99px;border:1px solid var(--border-subtle)}
+  .ctx-chip .dot{width:6px;height:6px;border-radius:50%;background:var(--success)}
+  #composer{
+    background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:14px;
+    padding:10px 12px 8px;transition:border-color var(--t-quick) var(--ease-ui);
+  }
+  #composer:focus-within{border-color:rgba(227,154,98,.45)}
+  #input{
+    width:100%;background:none;border:none;outline:none;resize:none;
+    color:var(--text-primary);font-family:inherit;font-size:15px;line-height:1.6;
+    max-height:140px;
+  }
+  #input::placeholder{color:var(--text-secondary);opacity:.7}
+  .composer-row{display:flex;align-items:center;gap:6px;margin-top:6px}
+  .cmp-chip{
+    font-size:11.5px;color:var(--text-secondary);padding:3px 10px;border-radius:8px;
+    border:1px solid transparent;
+  }
+  .cmp-chip:hover{border-color:var(--border-subtle);color:var(--text-primary)}
+  #sendBtn{
+    margin-left:auto;width:32px;height:32px;border-radius:10px;
+    background:var(--accent-primary);color:#1B1A17;display:grid;place-items:center;
+    font-size:15px;transition:all var(--t-quick) var(--ease-ui);
+  }
+  #sendBtn:disabled{background:rgba(255,244,224,.12);color:var(--text-secondary);cursor:default}
+  #sendBtn.stop{background:var(--bg-canvas);color:var(--danger);border:1px solid rgba(217,120,107,.5)}
+
+  /* ---------- Worker nodes ---------- */
+  .worker{
+    position:absolute;width:480px;background:var(--bg-surface);
+    border:1px solid var(--border-subtle);border-radius:14px;
+    box-shadow:0 16px 44px rgba(0,0,0,.4);overflow:hidden;
+    opacity:0;
+  }
+  .worker.spawn{animation:workerIn var(--t-spatial) var(--ease-spatial) forwards}
+  @keyframes workerIn{
+    from{opacity:0;transform:translateY(18px) scale(.94);filter:blur(10px)}
+    to{opacity:1;transform:none;filter:blur(0)}
+  }
+  .reduced .worker.spawn{animation:workerFade var(--t-quick) var(--ease-ui) forwards}
+  @keyframes workerFade{from{opacity:0}to{opacity:1}}
+  .w-head{display:flex;align-items:center;gap:10px;padding:11px 15px;border-bottom:1px solid var(--border-subtle);position:relative}
+  .w-avatar{
+    width:26px;height:26px;border-radius:8px;display:grid;place-items:center;
+    font-size:12px;font-weight:700;color:#1B1A17;flex:none;
+    background:linear-gradient(135deg,rgba(120,169,194,.9),rgba(121,181,138,.75));
+  }
+  .w-status{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-secondary)}
+  .w-status .dot{width:7px;height:7px;border-radius:50%;background:var(--text-secondary)}
+  .w-status.ready .dot{background:var(--success)}
+  .w-status.busy .dot{background:var(--accent-primary);animation:runPulse 1.4s infinite}
+  .w-status.done .dot{background:var(--success)}
+  .w-head.glow::after{
+    content:"";position:absolute;inset:0;border-radius:0;
+    box-shadow:inset 0 0 0 1.5px rgba(120,169,194,.7);
+    animation:glowFade 700ms var(--ease-ui) forwards;pointer-events:none;
+  }
+  @keyframes glowFade{from{opacity:1}to{opacity:0}}
+  .w-body{padding:12px 15px;display:flex;flex-direction:column;gap:9px;min-height:96px}
+  .w-line{font-size:12.5px;color:var(--text-secondary);animation:msgIn var(--t-quick) var(--ease-ui)}
+  .w-line.msg-in{color:var(--text-primary)}
+  .w-line .tag{font-size:10.5px;color:var(--accent-cool);margin-right:7px;border:1px solid rgba(120,169,194,.35);padding:1px 7px;border-radius:99px}
+  .w-line .tag.out{color:var(--accent-primary);border-color:rgba(227,154,98,.4)}
+  .w-run{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary)}
+  .w-run .spinner{
+    width:11px;height:11px;border:1.5px solid rgba(227,154,98,.3);border-top-color:var(--accent-primary);
+    border-radius:50%;animation:spin 1s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* cable */
+  .cable-path{fill:none;stroke:var(--accent-cool);stroke-width:1.6;opacity:.85}
+  .cable-path.afterglow{transition:opacity 500ms var(--ease-ui);opacity:0}
+  .packet{fill:var(--accent-primary)}
+
+  /* toast */
+  #toast{
+    position:absolute;left:50%;bottom:26px;transform:translate(-50%,10px);z-index:20;
+    background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:10px;
+    padding:8px 16px;font-size:12.5px;color:var(--text-secondary);opacity:0;pointer-events:none;
+    transition:all var(--t-standard) var(--ease-ui);
+  }
+  #toast.show{opacity:1;transform:translate(-50%,0)}
+
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Canvas layer (behind main, revealed on team mode) -->
+  <div id="canvasLayer">
+    <div id="world">
+      <svg id="cables" viewBox="0 0 7000 6000"></svg>
+      <div id="worldNodes" style="position:relative"></div>
+    </div>
+  </div>
+
+  <div id="teamHeader">
+    <button id="backBtn">← Chatに戻る</button>
+    <span class="team-title">リリース前チェックの相談</span>
+    <span class="team-badge">Team · 3 workers</span>
+  </div>
+
+  <div id="canvasControls">
+    <div class="cc-row">
+      <button class="cc-btn" id="fitBtn">Fit view</button>
+      <button class="cc-btn" id="focusLeaderBtn">Leaderへ</button>
+    </div>
+    <div class="cc-hint">ドラッグで移動 · ホイール/ピンチでズーム</div>
+  </div>
+
+  <!-- Sidebar -->
+  <nav id="sidebar">
+    <button class="sb-new">＋ 新しいTask</button>
+    <div class="sb-search">🔍 検索…</div>
+    <div class="sb-group">Pinned</div>
+    <div class="sb-item">📌 vibe-editor3 設計メモ</div>
+    <div class="sb-group">Today</div>
+    <div class="sb-item active">リリース前チェックの相談</div>
+    <div class="sb-item">SQLite migrationの方針</div>
+    <div class="sb-group">Previous</div>
+    <div class="sb-item">Canvas性能の実測計画</div>
+    <div class="sb-item">Electron hardeningチェック</div>
+    <div class="sb-item">通信ケーブルの表現検討</div>
+    <div class="sb-footer">⚙ 設定</div>
+  </nav>
+
+  <!-- Main -->
+  <div id="main">
+    <header id="taskHeader">
+      <span id="taskTitle">リリース前チェックの相談</span>
+      <span class="goal-chip" title="Goalを編集">🎯 Goal: 変更の整合性を確認して要約する</span>
+      <button id="teamBtn">⬡ Team</button>
+      <button class="icon-btn">⋯</button>
+    </header>
+
+    <!-- ChatSurface -->
+    <div id="surfaceWrap">
+      <div id="surfaceHeader">
+        <div class="avatar">V</div>
+        <div class="role-line">
+          <span class="role-name">Assistant</span>
+          <span class="role-sub" id="leaderSub">リリース前チェックの相談</span>
+        </div>
+        <span class="leader-chip">Leader</span>
+      </div>
+      <div id="timelineScroll">
+        <div id="timeline">
+          <div class="empty-state" id="emptyState">
+            <div class="avatar" style="width:44px;height:44px;border-radius:14px;font-size:20px">V</div>
+            <h2>なんでも相談してください</h2>
+            <p>Workspaceを選ばなくても会話できます。実行が必要になったら承認を求めます。</p>
+            <div class="chips">
+              <button class="chip" data-fill="変更をテストして、結果を要約して">変更をテストして、結果を要約して</button>
+              <button class="chip" data-fill="このリポジトリの構成を教えて">このリポジトリの構成を教えて</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="composerZone">
+        <div class="composer-inner">
+          <div id="contextBar">
+            <span class="ctx-chip"><span class="dot"></span>~/project</span>
+            <span class="ctx-chip">main</span>
+            <span class="ctx-chip">確認して実行</span>
+            <span style="margin-left:auto">context 12%</span>
+          </div>
+          <div id="composer">
+            <textarea id="input" rows="1" placeholder="メッセージを送信 (Enterで送信 / Shift+Enterで改行)"></textarea>
+            <div class="composer-row">
+              <button class="cmp-chip">GPT-6.2 mini</button>
+              <button class="cmp-chip">effort: medium</button>
+              <button class="cmp-chip">📎</button>
+              <button id="sendBtn" disabled>↑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+</div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const raf = () => new Promise(r => requestAnimationFrame(r));
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (reduced) document.body.classList.add('reduced');
+const D = f => reduced ? Math.min(f, 1) : f; // duration scaler
+
+const app = $('#app'), timeline = $('#timeline'), tscroll = $('#timelineScroll');
+const input = $('#input'), sendBtn = $('#sendBtn');
+const surfaceWrap = $('#surfaceWrap');
+const canvasLayer = $('#canvasLayer'), world = $('#world'), worldNodes = $('#worldNodes'), cablesSvg = $('#cables');
+const CABLE_OFF = 2000; // svg offset
+
+let running = false, ranOnce = false, teamMode = false, teamBuilt = false;
+
+/* ---------- helpers ---------- */
+function toast(msg){
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 2600);
+}
+function scrollBottom(){ tscroll.scrollTop = tscroll.scrollHeight; }
+function el(html){ const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstElementChild; }
+function add(node){ timeline.appendChild(node); scrollBottom(); return node; }
+
+async function streamText(target, text, cps=80){
+  target.classList.add('caret');
+  const t0 = performance.now();
+  let i = 0;
+  while (i < text.length){
+    await sleep(D(33));
+    const n = Math.min(text.length, Math.round((performance.now() - t0) / 1000 * cps));
+    if (n > i){ target.textContent = text.slice(0, n); i = n; scrollBottom(); }
+  }
+  target.classList.remove('caret');
+  scrollBottom();
+}
+
+/* ---------- chat scenario ---------- */
+input.addEventListener('input', () => {
+  sendBtn.disabled = !input.value.trim() || running;
+  input.style.height = '';
+  if (input.value) input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+});
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+});
+sendBtn.addEventListener('click', send);
+document.querySelectorAll('.chip[data-fill]').forEach(c => c.addEventListener('click', () => {
+  input.value = c.dataset.fill; input.dispatchEvent(new Event('input')); input.focus();
+}));
+
+function send(){
+  const text = input.value.trim();
+  if (!text || running) return;
+  input.value = ''; input.dispatchEvent(new Event('input'));
+  $('#emptyState')?.remove();
+  add(el(`<div class="msg msg-user"><div class="bubble"></div></div>`)).querySelector('.bubble').textContent = text;
+  runTurn();
+}
+
+const STAGES = [
+  ['依頼を理解中', ''],
+  ['方針を組み立て中', ''],
+  ['ファイル・情報を確認中', 'src/domain/task.ts ほか3件を読み取り'],
+  ['コマンドまたは変更を実行中', ''],
+  ['回答をまとめ中', ''],
+];
+
+function makeRunCard(){
+  const card = el(`
+    <div class="msg"><div class="run-card running">
+      <div class="run-head">
+        <span class="run-dot"></span>
+        <span class="run-title">実行中</span>
+        <span class="run-elapsed">00:00</span>
+        <button class="run-stop">停止</button>
+      </div>
+      <div class="run-stages"></div>
+    </div></div>`);
+  const rc = card.querySelector('.run-card');
+  const stagesEl = card.querySelector('.run-stages');
+  STAGES.forEach(([label, detail]) => {
+    stagesEl.appendChild(el(`
+      <div class="stage"><span class="s-icon">○</span><span class="s-label">${label}</span>
+      ${detail?`<span class="s-detail" hidden>${detail}</span>`:''}</div>`));
+  });
+  const t0 = Date.now();
+  const elapsedEl = card.querySelector('.run-elapsed');
+  rc._timer = setInterval(() => {
+    const s = Math.floor((Date.now()-t0)/1000);
+    elapsedEl.textContent = String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+  }, 500);
+  rc._setStage = i => {
+    [...stagesEl.children].forEach((st, j) => {
+      st.classList.toggle('done', j < i);
+      st.classList.toggle('current', j === i);
+      st.querySelector('.s-icon').textContent = j < i ? '✓' : (j === i ? '●' : '○');
+      const d = st.querySelector('.s-detail'); if (d) d.hidden = j !== i;
+    });
+    scrollBottom();
+  };
+  rc._finish = (ok=true) => {
+    clearInterval(rc._timer);
+    rc.classList.remove('running');
+    rc.classList.add(ok ? 'done' : 'blocked', 'compact');
+    card.querySelector('.run-title').textContent = ok ? '完了' : '中断';
+    card.querySelector('.run-stop').remove();
+  };
+  card.querySelector('.run-stop').addEventListener('click', () => toast('デモのため停止は省略しています(実装では協調キャンセル→プロセス終了)'));
+  add(card);
+  return rc;
+}
+
+function makeApprovalCard(){
+  const card = el(`
+    <div class="msg"><div class="apr-card">
+      <div class="apr-head">
+        <span class="apr-icon">⚠</span>
+        <span class="apr-title">コマンド実行の承認</span>
+        <span class="apr-risk">Shell · 中リスク</span>
+      </div>
+      <div class="apr-body">
+        <div class="apr-row"><span class="apr-key">理由</span><span class="apr-val">テストを実行して変更の整合性を確認します</span></div>
+        <div class="apr-row"><span class="apr-key">実行内容</span><span class="apr-val"><code>npm test</code></span></div>
+        <div class="apr-row"><span class="apr-key">cwd</span><span class="apr-val"><code>~/project</code></span></div>
+        <div class="apr-row"><span class="apr-key">影響範囲</span><span class="apr-val">読み取りのみ・workspace外へ書き込みなし</span></div>
+      </div>
+      <div class="apr-actions">
+        <button class="apr-btn primary" data-d="once">今回のみ許可</button>
+        <button class="apr-btn" data-d="task">Task中許可</button>
+        <button class="apr-btn deny" data-d="deny">拒否</button>
+      </div>
+    </div></div>`);
+  add(card);
+  const ac = card.querySelector('.apr-card');
+  return new Promise(resolve => {
+    card.querySelectorAll('.apr-btn').forEach(b => b.addEventListener('click', () => {
+      ac.classList.add('decided');
+      const d = b.dataset.d;
+      const label = d === 'deny'
+        ? '<span class="no">✕ 拒否しました</span> — Runtimeへ拒否結果を返し、代替案を生成します'
+        : `<span class="ok">✓ 許可しました</span>（${d === 'once' ? '今回のみ' : 'このTask中'}・scope: shell.execute @ ~/project）`;
+      ac.appendChild(el(`<div class="apr-decision">${label}</div>`));
+      scrollBottom();
+      resolve(d);
+    }));
+  });
+}
+
+async function runCommandCard(){
+  const card = el(`
+    <div class="msg"><div class="cmd-card">
+      <div class="cmd-head">
+        <span class="cmd-kind">Command</span>
+        <span class="cmd-status">running</span>
+        <span class="cmd-time">00:00</span>
+      </div>
+      <div class="cmd-body">
+        <div class="cmd-purpose">テストを実行して変更の整合性を確認します</div>
+        <div class="cmd-line"><span class="cwd">~/project</span><span class="cmd">$ npm test</span></div>
+      </div>
+      <div class="cmd-out"></div>
+    </div></div>`);
+  add(card);
+  const out = card.querySelector('.cmd-out');
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    const s = Math.floor((Date.now()-t0)/1000);
+    card.querySelector('.cmd-time').textContent = '00:' + String(s).padStart(2,'0');
+  }, 500);
+  const lines = [
+    ['head','> project@0.4.1 test'],
+    ['head','> vitest run'],
+    ['', ''],
+    ['pass',' ✓ src/domain/task.test.ts (12 tests) 84ms'],
+    ['pass',' ✓ src/domain/turn-state.test.ts (18 tests) 121ms'],
+    ['pass',' ✓ src/ipc/contract.test.ts (9 tests) 63ms'],
+    ['pass',' ✓ src/ui/chat-surface.test.tsx (14 tests) 402ms'],
+    ['', ''],
+    ['head',' Test Files  4 passed (4)'],
+    ['head','      Tests  53 passed (53)'],
+  ];
+  for (const [cls, text] of lines){
+    const span = document.createElement('div');
+    if (cls) span.className = cls;
+    span.textContent = text || ' ';
+    out.appendChild(span);
+    out.scrollTop = out.scrollHeight;
+    scrollBottom();
+    await sleep(D(220 + Math.random()*260));
+  }
+  clearInterval(timer);
+  const st = card.querySelector('.cmd-status');
+  st.textContent = 'exit 0'; st.classList.add('ok');
+}
+
+async function streamAnswer(paragraphs){
+  const card = add(el(`<div class="msg msg-assistant"><span class="msg-label">Assistant</span><div class="bubble"></div></div>`));
+  const bubble = card.querySelector('.bubble');
+  for (const para of paragraphs){
+    if (para.html){
+      bubble.appendChild(el(para.html)); scrollBottom(); await sleep(D(300));
+    } else {
+      const p = document.createElement('p'); bubble.appendChild(p);
+      await streamText(p, para.text);
+    }
+  }
+}
+
+async function runTurn(){
+  running = true; sendBtn.disabled = true;
+  const rc = makeRunCard();
+  rc._setStage(0); await sleep(D(900));
+  rc._setStage(1); await sleep(D(1000));
+  rc._setStage(2); await sleep(D(1400));
+  rc._setStage(3);
+  await sleep(D(500));
+  const decision = await makeApprovalCard();
+  if (decision === 'deny'){
+    add(el(`<div class="sys-notice">実行はスキップされました — Runは継続します</div>`));
+    rc._setStage(4); await sleep(D(800));
+    rc._finish(true);
+    await streamAnswer([
+      {text:'了解しました。コマンド実行なしで進めます。'},
+      {text:'代替として、直近の変更差分を静的に確認しました。src/domain/task.ts の変更は型レベルでは既存テストの期待と整合しています。ただし実行時の確認ができていないため、確信度は下がります。'},
+      {text:'準備ができたら、もう一度テスト実行を許可してください。読み取りのみの dry-run から始めることもできます。'},
+    ]);
+  } else {
+    await runCommandCard();
+    rc._setStage(4); await sleep(D(900));
+    rc._finish(true);
+    await streamAnswer([
+      {text:'テストが完了しました。53件すべて成功しています。'},
+      {html:`<ul>
+        <li><code>task.test.ts</code> / <code>turn-state.test.ts</code> — 状態機械の全遷移をカバー、退行なし</li>
+        <li><code>contract.test.ts</code> — IPC schemaのsnapshot一致を確認</li>
+        <li><code>chat-surface.test.tsx</code> — normal / canvas 両コンテナで同一suiteが成功</li>
+      </ul>`},
+      {text:'このまま進めて問題ありません。リリース前チェックの残りは、E2E golden path とパフォーマンス計測です。調査・実装・レビューを並行させたい場合は、この会話をそのままTeamに昇格できます。'},
+    ]);
+  }
+  running = false; ranOnce = true;
+  sendBtn.disabled = !input.value.trim();
+  if (!teamMode){
+    $('#teamBtn').classList.add('hinted');
+    toast('右上の「⬡ Team」でこの会話をLeaderに昇格できます');
+  }
+}
+
+/* ---------- camera ---------- */
+const cam = {x:0, y:0, s:1};
+let camAnim = null;
+function applyCam(){
+  world.style.transform = `translate(${cam.x}px, ${cam.y}px) scale(${cam.s})`;
+  canvasLayer.style.backgroundPosition = `${cam.x}px ${cam.y}px`;
+  canvasLayer.style.backgroundSize = `${26*cam.s}px ${26*cam.s}px`;
+}
+function cancelCamAnim(){ if (camAnim){ cancelAnimationFrame(camAnim.raf); camAnim = null; } }
+function animateCamTo(target, dur=560){
+  cancelCamAnim();
+  if (reduced){ Object.assign(cam, target); applyCam(); return Promise.resolve(); }
+  const from = {...cam};
+  const ease = t => 1 - Math.pow(1-t, 3);
+  return new Promise(resolve => {
+    const t0 = performance.now();
+    const step = now => {
+      const t = Math.min(1, (now-t0)/dur), e = ease(t);
+      cam.x = from.x + (target.x-from.x)*e;
+      cam.y = from.y + (target.y-from.y)*e;
+      cam.s = from.s + (target.s-from.s)*e;
+      applyCam();
+      if (t < 1 && camAnim) camAnim.raf = requestAnimationFrame(step);
+      else { camAnim = null; resolve(); }
+    };
+    camAnim = {raf: requestAnimationFrame(step)};
+  });
+}
+function worldRect(elm){ return {x: elm.offsetLeft, y: elm.offsetTop, w: elm.offsetWidth, h: elm.offsetHeight}; }
+function camToFit(rects, pad=90){
+  const minX = Math.min(...rects.map(r=>r.x)) - pad;
+  const minY = Math.min(...rects.map(r=>r.y)) - pad;
+  const maxX = Math.max(...rects.map(r=>r.x+r.w)) + pad;
+  const maxY = Math.max(...rects.map(r=>r.y+r.h)) + pad;
+  const vw = canvasLayer.clientWidth, vh = canvasLayer.clientHeight;
+  const s = Math.min(vw/(maxX-minX), vh/(maxY-minY), 1.4);
+  return {s, x: (vw-(maxX-minX)*s)/2 - minX*s, y: (vh-(maxY-minY)*s)/2 - minY*s};
+}
+function camToFocus(rect, occupancy=.7){
+  const vw = canvasLayer.clientWidth, vh = canvasLayer.clientHeight;
+  const s = Math.min(vh*occupancy/rect.h, vw*occupancy/rect.w, 1.3);
+  return {s, x: vw/2 - (rect.x+rect.w/2)*s, y: vh/2 - (rect.y+rect.h/2)*s};
+}
+
+/* pan & zoom */
+let dragging = null;
+canvasLayer.addEventListener('pointerdown', e => {
+  if (e.target.closest('#surfaceWrap') || e.target.closest('.worker')) return;
+  cancelCamAnim();
+  dragging = {x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y};
+  canvasLayer.setPointerCapture(e.pointerId);
+});
+canvasLayer.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  cam.x = dragging.cx + (e.clientX - dragging.x);
+  cam.y = dragging.cy + (e.clientY - dragging.y);
+  applyCam();
+});
+canvasLayer.addEventListener('pointerup', () => dragging = null);
+canvasLayer.addEventListener('wheel', e => {
+  if (!teamMode) return;
+  e.preventDefault(); cancelCamAnim();
+  if (e.ctrlKey || Math.abs(e.deltaY) > Math.abs(e.deltaX)){
+    const k = Math.exp(-e.deltaY * (e.ctrlKey ? .01 : .0016));
+    const ns = Math.min(1.6, Math.max(.18, cam.s * k));
+    cam.x = e.clientX - (e.clientX - cam.x) * (ns/cam.s);
+    cam.y = e.clientY - (e.clientY - cam.y) * (ns/cam.s);
+    cam.s = ns;
+  } else {
+    cam.x -= e.deltaX;
+  }
+  applyCam();
+}, {passive:false});
+
+/* ---------- cables ---------- */
+function anchorOf(rect, side){
+  return side === 'right'
+    ? {x: rect.x + rect.w, y: rect.y + Math.min(90, rect.h/2)}
+    : {x: rect.x, y: rect.y + Math.min(60, rect.h/2)};
+}
+async function sendCable(fromEl, toEl, {reverse=false} = {}){
+  const a = anchorOf(worldRect(fromEl), reverse ? 'left' : 'right');
+  const b = anchorOf(worldRect(toEl), reverse ? 'right' : 'left');
+  const dx = Math.max(70, Math.abs(b.x - a.x) * .45);
+  const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+  const O = CABLE_OFF;
+  p.setAttribute('d', `M ${a.x+O} ${a.y+O} C ${a.x+O+(reverse?-dx:dx)} ${a.y+O}, ${b.x+O+(reverse?dx:-dx)} ${b.y+O}, ${b.x+O} ${b.y+O}`);
+  p.setAttribute('class','cable-path');
+  cablesSvg.appendChild(p);
+  const len = p.getTotalLength();
+
+  if (!reduced){
+    p.style.strokeDasharray = len;
+    p.style.strokeDashoffset = len;
+    p.animate([{strokeDashoffset: len},{strokeDashoffset: 0}], {duration: 240, easing:'cubic-bezier(.22,1,.36,1)', fill:'forwards'});
+    await sleep(240);
+    // packet pulses
+    const packets = [];
+    for (let i=0;i<3;i++){
+      const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+      c.setAttribute('r', 3.2); c.setAttribute('class','packet');
+      cablesSvg.appendChild(c); packets.push(c);
+    }
+    const dur = 520, gap = 130;
+    await new Promise(resolve => {
+      const t0 = performance.now();
+      const step = now => {
+        let alive = false;
+        packets.forEach((c, i) => {
+          const t = (now - t0 - i*gap) / dur;
+          if (t < 0){ alive = true; return; }
+          if (t > 1){ c.setAttribute('opacity', 0); return; }
+          alive = true;
+          const pt = p.getPointAtLength(len * t);
+          c.setAttribute('cx', pt.x); c.setAttribute('cy', pt.y);
+          c.setAttribute('opacity', .95);
+        });
+        if (alive) requestAnimationFrame(step); else resolve();
+      };
+      requestAnimationFrame(step);
+    });
+    packets.forEach(c => c.remove());
+  } else {
+    await sleep(60);
+  }
+  // receive glow
+  const head = toEl.querySelector('.w-head') || toEl.querySelector('#surfaceHeader');
+  if (head){ head.classList.remove('glow'); void head.offsetWidth; head.classList.add('glow'); }
+  // afterglow fade
+  await sleep(340);
+  p.classList.add('afterglow');
+  setTimeout(() => p.remove(), 600);
+}
+
+/* ---------- team ---------- */
+const WORKERS = [
+  {id:'w1', name:'Researcher', role:'調査担当', x:960, y:-70,
+   task:'E2E golden path 7本の実施可否と、Playwright Electronの既知issueを調査して'},
+  {id:'w2', name:'Implementer', role:'実装担当', x:1000, y:420,
+   task:'10 Worker × 200 message のCanvas性能fixtureを作成して計測して'},
+  {id:'w3', name:'Reviewer', role:'レビュー担当', x:440, y:760,
+   task:'Electron hardening checklist(sandbox / CSP / IPC検証)を監査して'},
+];
+const workerEls = {};
+
+function makeWorker(w){
+  const node = el(`
+    <div class="worker" id="${w.id}" style="left:${w.x}px;top:${w.y}px">
+      <div class="w-head">
+        <div class="w-avatar">${w.name[0]}</div>
+        <div class="role-line">
+          <span class="role-name">${w.name}</span>
+          <span class="role-sub">${w.role}</span>
+        </div>
+        <span class="w-status connecting"><span class="dot"></span><span class="w-status-label">connecting</span></span>
+      </div>
+      <div class="w-body"></div>
+    </div>`);
+  worldNodes.appendChild(node);
+  workerEls[w.id] = node;
+  return node;
+}
+function wStatus(node, cls, label){
+  const s = node.querySelector('.w-status');
+  s.className = 'w-status ' + cls;
+  s.querySelector('.w-status-label').textContent = label;
+}
+function wLine(node, html, cls=''){
+  const body = node.querySelector('.w-body');
+  body.appendChild(el(`<div class="w-line ${cls}">${html}</div>`));
+  return body.lastElementChild;
+}
+
+async function promoteToTeam(){
+  if (teamMode) return;
+  teamMode = true;
+  $('#teamBtn').classList.remove('hinted');
+  input.blur();
+
+  // 1) measure current surface bounds (fallback: layoutが停止した非表示タブ等でrectが0になる場合)
+  let rectA = surfaceWrap.getBoundingClientRect();
+  if (rectA.width < 200){
+    rectA = {left: 264, top: 52, width: Math.max(720, innerWidth - 264), height: Math.max(480, innerHeight - 52)};
+  }
+
+  // 2-3) fade chrome, reveal canvas grid
+  app.classList.add('team-mode');
+
+  // move surface into world; set camera so it appears exactly where it was (FLIP via camera)
+  const worldH = Math.round(rectA.height * 720 / rectA.width);
+  surfaceWrap.classList.add('node');
+  surfaceWrap.style.height = worldH + 'px';
+  worldNodes.appendChild(surfaceWrap);
+  cam.s = rectA.width / 720;
+  cam.x = rectA.left; cam.y = rectA.top;
+  applyCam();
+  $('#leaderSub').textContent = 'Team Leader · リリース前チェック';
+  await raf(); await raf();
+
+  // 4) camera settles to leader-centred view
+  surfaceWrap.style.height = '620px';
+  const leaderRect = {x:0, y:0, w:720, h:620};
+  await animateCamTo(camToFocus(leaderRect, .8), reduced ? 0 : 560);
+
+  if (!teamBuilt){ teamBuilt = true; await buildTeam(); }
+}
+
+async function buildTeam(){
+  add(el(`<div class="sys-notice">TeamはLeaderと同じ会話を引き継ぎます — taskId / 履歴は維持されます</div>`));
+  await sleep(D(500));
+
+  // 6) stagger spawn workers
+  for (const w of WORKERS){
+    const node = makeWorker(w);
+    node.classList.add('spawn');
+    // camera follows ~120ms after spawn start
+    setTimeout(() => {
+      if (!dragging) animateCamTo(camToFocus(worldRect(node), .62), 480);
+    }, 120);
+    await sleep(D(140));
+  }
+  await sleep(D(600));
+  for (const w of WORKERS){ wStatus(workerEls[w.id], 'ready', 'ready'); }
+  add(el(`<div class="sys-notice">3人のWorkerを雇用しました（調査 / 実装 / レビュー）</div>`));
+  await sleep(D(500));
+
+  await animateCamTo(camToFit([{x:0,y:0,w:720,h:620}, ...WORKERS.map(w => worldRect(workerEls[w.id]))]), 600);
+  await sleep(D(400));
+
+  // leader dispatches tasks over cables
+  for (const w of WORKERS){
+    const node = workerEls[w.id];
+    add(el(`<div class="sys-notice">→ ${w.name} へ依頼を送信</div>`));
+    await sendCable(surfaceWrap, node);
+    wStatus(node, 'busy', 'busy');
+    wLine(node, `<span class="tag">Leaderから</span>${w.task}`, 'msg-in');
+    const run = wLine(node, `<div class="w-run"><span class="spinner"></span><span>実行中…</span></div>`);
+    node._run = run;
+    await sleep(D(300));
+  }
+
+  // workers complete one by one and report back
+  const results = {
+    w1:'golden path 7本すべて自動化可能。Playwright ElectronはOS dialogのstub必須（設計どおり）',
+    w2:'fixture作成・計測完了。pan/zoom 54fps — NFR-PERF-03 を満たします',
+    w3:'sandbox / contextIsolation / CSP はOK。navigation allowlistに1件の漏れを検出',
+  };
+  const done = [['w2',1600],['w1',900],['w3',1100]];
+  for (const [id, wait] of done){
+    await sleep(D(wait));
+    const node = workerEls[id];
+    node._run?.remove();
+    wStatus(node, 'done', 'done');
+    wLine(node, `<span class="tag out">報告</span>${results[id]}`);
+    await sendCable(node, surfaceWrap, {reverse:true});
+    add(el(`<div class="sys-notice">← ${WORKERS.find(w=>w.id===id).name} から完了報告（structured envelope）</div>`));
+  }
+
+  await sleep(D(500));
+  await streamAnswer([
+    {text:'3人のWorkerの結果を統合しました。'},
+    {html:`<ul>
+      <li><b>調査</b> — E2E golden path 7本は自動化可能。OS dialogはMain側stubで対応</li>
+      <li><b>実装</b> — Canvas性能fixtureで54fpsを確認、NFR-PERF-03クリア</li>
+      <li><b>レビュー</b> — navigation allowlistに漏れが1件。修正パッチを提案済み</li>
+    </ul>`},
+    {text:'allowlistの修正だけ対応すれば、Team MVPのblocking subsetを通過できる見込みです。'},
+  ]);
+  toast('デモ完了 — Canvasは自由にpan / zoomできます');
+}
+
+$('#teamBtn').addEventListener('click', () => {
+  if (!ranOnce){ toast('まず1回メッセージを送ってからTeamへ昇格してみてください'); return; }
+  promoteToTeam();
+});
+$('#fitBtn').addEventListener('click', () => {
+  const rects = [{x:0,y:0,w:720,h:surfaceWrap.offsetHeight}, ...Object.values(workerEls).map(worldRect)];
+  animateCamTo(camToFit(rects), 500);
+});
+$('#focusLeaderBtn').addEventListener('click', () => {
+  animateCamTo(camToFocus({x:0,y:0,w:720,h:surfaceWrap.offsetHeight}, .8), 500);
+});
+$('#backBtn').addEventListener('click', () => toast('デモではChatレイアウトへの復帰は省略しています（実装では逆方向のFLIP）'));
+</script>
+</body>
+</html>
