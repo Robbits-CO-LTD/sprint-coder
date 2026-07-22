@@ -4,7 +4,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createSessionGrant } from '@vibe/domain';
+import { ToolRegistry, createSessionGrant, createToolDefinition, createToolId } from '@vibe/domain';
+import { randomUUID } from 'node:crypto';
+import { ApprovalCoordinator } from './approval-coordinator';
+import { ToolBroker } from './tool-broker';
 import {
   OperationConflictError,
   SqlitePersistenceClient,
@@ -26,8 +29,50 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
   return { persistence: new SqlitePersistenceClient(path), path };
 }
 
+function startExecutingTurn(persistence: SqlitePersistenceClient, taskId: string) {
+  const started = persistence.startTurn(taskId, 'approval test');
+  persistence.changeStage(taskId, started.turnId, 'understanding');
+  persistence.changeStage(taskId, started.turnId, 'planning');
+  persistence.changeStage(taskId, started.turnId, 'executing');
+  return started;
+}
+
+function approvalRequest(taskId: string, turnId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'approval-1',
+    taskId,
+    turnId,
+    itemId: 'item-1',
+    callId: 'call-1',
+    runtimeInstanceId: 'runtime-1',
+    subjectId: 'leader',
+    providerName: 'write_file',
+    toolId: 'builtin:workspace.write:file@1',
+    toolCatalogDigest: 'a'.repeat(64),
+    schemaDigest: 'b'.repeat(64),
+    specDigest: 'c'.repeat(64),
+    policyEpoch: 0,
+    capability: 'workspace.write' as const,
+    resource: { kind: 'path-prefix' as const, canonicalPath: '/workspace' },
+    operation: 'write' as const,
+    providerEgress: 'none' as const,
+    sandboxProfile: 'workspace-write' as const,
+    risk: 'medium' as const,
+    reasonUntrusted: 'The requested edit needs workspace write access.',
+    display: {
+      target: '/workspace/file.txt',
+      impact: 'Writes one workspace file',
+      execution: 'Write /workspace/file.txt',
+    },
+    challenge: 'challenge-1',
+    expiresAt: '2026-07-22T12:05:00.000Z',
+    requestedAt: '2026-07-22T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v11', () => {
+  describe('SqlitePersistenceClient v13', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -293,6 +338,504 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('commits a pending approval, waiting state, and requested event atomically', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+
+      const requested = persistence.requestApproval(approvalRequest(task.id, turn.turnId));
+
+      expect(requested.approval).toMatchObject({
+        id: 'approval-1',
+        taskId: task.id,
+        turnId: turn.turnId,
+        state: 'pending',
+        decision: null,
+        revision: 0,
+        policyEpoch: 0,
+        specDigest: 'c'.repeat(64),
+      });
+      expect(requested.event).toMatchObject({
+        type: 'approval.requested',
+        taskId: task.id,
+        turnId: turn.turnId,
+        approvalId: 'approval-1',
+        seq: 5,
+      });
+      expect(persistence.snapshot(task.id).activeTurn).toMatchObject({
+        turnId: turn.turnId,
+        stage: 'waiting_approval',
+      });
+
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection
+          .prepare('SELECT state, revision, decision FROM approvals WHERE id = ?')
+          .get('approval-1'),
+      ).toEqual({ state: 'pending', revision: 0, decision: null });
+      expect(inspection.prepare('SELECT state FROM turns WHERE id = ?').get(turn.turnId)).toEqual({
+        state: 'waiting_approval',
+      });
+      expect(
+        inspection
+          .prepare('SELECT type FROM turn_events WHERE task_id = ? AND seq = 5')
+          .get(task.id),
+      ).toEqual({ type: 'approval.requested' });
+      inspection.close();
+      persistence.close();
+    });
+
+    it('deduplicates an at-least-once approval request after the Turn starts waiting', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const first = persistence.requestApproval(approvalRequest(task.id, turn.turnId));
+      const retried = persistence.requestApproval(
+        approvalRequest(task.id, turn.turnId, {
+          id: 'approval-retry-id',
+          itemId: 'item-retry-id',
+          challenge: 'challenge-retry',
+          requestedAt: '2026-07-22T12:00:01.000Z',
+          expiresAt: '2026-07-22T12:10:00.000Z',
+        }),
+      );
+
+      expect(retried).toEqual(first);
+      expect(persistence.listPendingApprovals(task.id)).toHaveLength(1);
+      expect(
+        persistence.listEventsAfter(task.id, 0).filter(({ type }) => type === 'approval.requested'),
+      ).toHaveLength(1);
+      persistence.close();
+    });
+
+    it('coordinates multiple capability approvals and shared retries against real SQLite', async () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const published: ReturnType<SqlitePersistenceClient['getApproval']>[] = [];
+      const coordinator = new ApprovalCoordinator({
+        persistence,
+        now: () => '2026-07-22T12:00:00.000Z',
+        expiresAt: () => '2026-07-22T13:00:00.000Z',
+        getCurrentPolicyEpoch: () => 0,
+        isTurnActive: (_taskId, turnId) => persistence.getActiveTurnId(task.id) === turnId,
+        evaluatePermission: () => 'approval_required',
+        publish: (approval) => published.push(persistence.getApproval(task.id, approval.id)),
+      });
+      const registry = new ToolRegistry();
+      const definition = createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'approval',
+          name: 'multi',
+          version: '1',
+        }),
+        providerName: 'approval_multi',
+        kind: 'network',
+        schemaVersion: 1,
+        inputSchema: { type: 'object' },
+        outputSchema: { type: 'string' },
+        sideEffect: 'network',
+        risk: 'medium',
+        requiredCapabilities: ['network.fetch', 'provider.egress'],
+        executionTarget: 'main',
+        implementationKind: 'built-in',
+        priority: 1,
+        workspaceBinding: { kind: 'none' },
+        providerCompatibility: ['mock'],
+      });
+      registry.register(definition);
+      const broker = new ToolBroker(registry, () => 0, coordinator.authorizeTool.bind(coordinator));
+      let executions = 0;
+      broker.registerImplementation({
+        toolId: definition.toolId,
+        implementationKind: 'built-in',
+        execute: () => {
+          executions += 1;
+          return 'ok';
+        },
+      });
+      const context = { taskId: task.id, turnId: turn.turnId, workspaceId: null, policyEpoch: 0 };
+      const snapshot = broker.startTurn(context, 'mock');
+      const request = {
+        context,
+        callId: 'call-retry-shared',
+        entry: snapshot.entries[0]!,
+        input: {},
+      };
+      const retryOne = coordinator.authorizeTool(request);
+      const retryTwo = coordinator.authorizeTool(request);
+      await expect.poll(() => published.length).toBe(1);
+      const shared = published[0]!;
+      coordinator.resolve({
+        taskId: task.id,
+        turnId: turn.turnId,
+        approvalId: shared.id,
+        decision: 'allow_once',
+        expectedRevision: 0,
+        challenge: shared.challenge,
+        operationId: randomUUID(),
+      });
+      await expect.poll(() => published.length).toBe(2);
+      const sharedSecond = published[1]!;
+      coordinator.resolve({
+        taskId: task.id,
+        turnId: turn.turnId,
+        approvalId: sharedSecond.id,
+        decision: 'allow_once',
+        expectedRevision: 0,
+        challenge: sharedSecond.challenge,
+        operationId: randomUUID(),
+      });
+      await expect(Promise.all([retryOne, retryTwo])).resolves.toHaveLength(2);
+
+      const dispatch = broker.dispatch({
+        taskId: task.id,
+        turnId: turn.turnId,
+        callId: 'call-multi',
+        providerName: 'approval_multi',
+        input: {},
+      });
+      await expect.poll(() => published.length).toBe(3);
+      const first = published.at(-1)!;
+      coordinator.resolve({
+        taskId: task.id,
+        turnId: turn.turnId,
+        approvalId: first.id,
+        decision: 'allow_once',
+        expectedRevision: 0,
+        challenge: first.challenge,
+        operationId: randomUUID(),
+      });
+      await expect.poll(() => published.length).toBe(4);
+      expect(executions).toBe(0);
+      const second = published.at(-1)!;
+      expect(second.capability).toBe('provider.egress');
+      coordinator.resolve({
+        taskId: task.id,
+        turnId: turn.turnId,
+        approvalId: second.id,
+        decision: 'allow_once',
+        expectedRevision: 0,
+        challenge: second.challenge,
+        operationId: randomUUID(),
+      });
+      await expect(dispatch).resolves.toBe('ok');
+      expect(executions).toBe(1);
+      persistence.close();
+    });
+
+    it('lists pending approvals after restart without losing their immutable binding', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      persistence.requestApproval(approvalRequest(task.id, turn.turnId));
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listPendingApprovals(task.id)).toEqual([
+        expect.objectContaining({
+          id: 'approval-1',
+          turnId: turn.turnId,
+          callId: 'call-1',
+          runtimeInstanceId: 'runtime-1',
+          toolCatalogDigest: 'a'.repeat(64),
+          schemaDigest: 'b'.repeat(64),
+          specDigest: 'c'.repeat(64),
+          state: 'pending',
+          revision: 0,
+        }),
+      ]);
+      expect(reopened.snapshot(task.id).activeTurn).toMatchObject({
+        turnId: turn.turnId,
+        stage: 'waiting_approval',
+      });
+      reopened.close();
+    });
+
+    it('resolves allow-once, task grant, and deny without failing the Turn', () => {
+      const decisions = ['allow_once', 'allow_task', 'deny'] as const;
+      for (const [index, decision] of decisions.entries()) {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const turn = startExecutingTurn(persistence, task.id);
+        const approvalId = `approval-${index + 1}`;
+        const challenge = `challenge-${index + 1}`;
+        persistence.requestApproval(
+          approvalRequest(task.id, turn.turnId, { id: approvalId, challenge }),
+        );
+
+        const resolved = persistence.resolveApproval({
+          taskId: task.id,
+          approvalId,
+          expectedTurnId: turn.turnId,
+          expectedRevision: 0,
+          challenge,
+          decision,
+          operationId: `resolve-${decision}`,
+          decidedAt: '2026-07-22T12:01:00.000Z',
+          grantExpiresAt: '2026-07-22T13:00:00.000Z',
+        });
+
+        expect(resolved.approval).toMatchObject({
+          id: approvalId,
+          state: 'resolved',
+          decision,
+          revision: 1,
+        });
+        expect(resolved.event).toMatchObject({
+          type: 'approval.resolved',
+          approvalId,
+          decision,
+          seq: 6,
+        });
+        expect(persistence.snapshot(task.id).activeTurn).toMatchObject({
+          turnId: turn.turnId,
+          stage: 'executing',
+        });
+
+        if (decision === 'allow_once') {
+          expect(resolved.oneTimePermitToken).toEqual(expect.any(String));
+          expect(() =>
+            persistence.consumePermissionOneTimeToken(
+              task.id,
+              resolved.oneTimePermitToken!,
+              0,
+              '2026-07-22T12:01:01.000Z',
+              {
+                approvalId,
+                turnId: turn.turnId,
+                callId: 'forged-call',
+                subjectId: 'leader',
+                specDigest: 'c'.repeat(64),
+              },
+            ),
+          ).toThrow('One-time permit binding mismatch');
+          expect(
+            persistence.consumePermissionOneTimeToken(
+              task.id,
+              resolved.oneTimePermitToken!,
+              0,
+              '2026-07-22T12:01:01.000Z',
+              {
+                approvalId,
+                turnId: turn.turnId,
+                callId: 'call-1',
+                subjectId: 'leader',
+                specDigest: 'c'.repeat(64),
+              },
+            ),
+          ).toBe(true);
+          expect(
+            persistence.listPermissionGrants(task.id, 'leader', '2026-07-22T12:01:01.000Z'),
+          ).toEqual([]);
+        } else if (decision === 'allow_task') {
+          expect(resolved.oneTimePermitToken).toBeUndefined();
+          expect(
+            persistence.listPermissionGrants(task.id, 'leader', '2026-07-22T12:01:01.000Z'),
+          ).toEqual([
+            expect.objectContaining({
+              scope: 'task',
+              capability: 'workspace.write',
+              executionSpecDigest: 'c'.repeat(64),
+              policyEpoch: 0,
+            }),
+          ]);
+        } else {
+          expect(resolved.oneTimePermitToken).toBeUndefined();
+          expect(
+            persistence.listPermissionGrants(task.id, 'leader', '2026-07-22T12:01:01.000Z'),
+          ).toEqual([]);
+        }
+        persistence.close();
+      }
+    });
+
+    it('binds resolution to task, turn, revision, and a single-use challenge', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const otherTask = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      persistence.requestApproval(approvalRequest(task.id, turn.turnId));
+      const base = {
+        taskId: task.id,
+        approvalId: 'approval-1',
+        expectedTurnId: turn.turnId,
+        expectedRevision: 0,
+        challenge: 'challenge-1',
+        decision: 'deny' as const,
+        operationId: 'resolve-1',
+        decidedAt: '2026-07-22T12:01:00.000Z',
+      };
+
+      expect(() => persistence.resolveApproval({ ...base, taskId: otherTask.id })).toThrow(
+        'Approval does not belong to this Task',
+      );
+      expect(() => persistence.resolveApproval({ ...base, expectedTurnId: 'stale-turn' })).toThrow(
+        'Approval Turn changed',
+      );
+      expect(() => persistence.resolveApproval({ ...base, expectedRevision: 1 })).toThrow(
+        'Approval revision changed',
+      );
+      expect(() => persistence.resolveApproval({ ...base, challenge: 'wrong-challenge' })).toThrow(
+        'Approval challenge mismatch',
+      );
+      expect(persistence.listPendingApprovals(task.id)).toHaveLength(1);
+
+      const first = persistence.resolveApproval(base);
+      expect(persistence.resolveApproval(base)).toEqual(first);
+      expect(() =>
+        persistence.resolveApproval({ ...base, operationId: 'resolve-2', decision: 'allow_once' }),
+      ).toThrow('Approval is already resolved');
+      expect(
+        persistence.listEventsAfter(task.id, 0).filter(({ type }) => type === 'approval.resolved'),
+      ).toHaveLength(1);
+      persistence.close();
+    });
+
+    it('expires stale responses and invalidates pending approval after a policy epoch change', () => {
+      const { persistence } = createPersistence();
+      const expiredTask = persistence.createTask();
+      const expiredTurn = startExecutingTurn(persistence, expiredTask.id);
+      persistence.requestApproval(approvalRequest(expiredTask.id, expiredTurn.turnId));
+      const expired = persistence.resolveApproval({
+        taskId: expiredTask.id,
+        approvalId: 'approval-1',
+        expectedTurnId: expiredTurn.turnId,
+        expectedRevision: 0,
+        challenge: 'challenge-1',
+        decision: 'allow_once',
+        operationId: 'resolve-expired',
+        decidedAt: '2026-07-22T12:06:00.000Z',
+      });
+      expect(expired.approval).toMatchObject({ state: 'expired', decision: null, revision: 1 });
+      expect(expired.event).toMatchObject({ type: 'approval.expired' });
+      expect(expired.oneTimePermitToken).toBeUndefined();
+
+      const staleTask = persistence.createTask();
+      const staleTurn = startExecutingTurn(persistence, staleTask.id);
+      persistence.requestApproval(
+        approvalRequest(staleTask.id, staleTurn.turnId, {
+          id: 'approval-stale',
+          challenge: 'challenge-stale',
+        }),
+      );
+      persistence.setAccessPreset(staleTask.id, 'auto', 0);
+      const stale = persistence.resolveApproval({
+        taskId: staleTask.id,
+        approvalId: 'approval-stale',
+        expectedTurnId: staleTurn.turnId,
+        expectedRevision: 0,
+        challenge: 'challenge-stale',
+        decision: 'allow_task',
+        operationId: 'resolve-stale',
+        decidedAt: '2026-07-22T12:01:00.000Z',
+      });
+      expect(stale.approval).toMatchObject({ state: 'stale', decision: null, revision: 1 });
+      expect(stale.event).toMatchObject({ type: 'approval.stale' });
+      expect(
+        persistence.listPermissionGrants(staleTask.id, 'leader', '2026-07-22T12:01:01.000Z'),
+      ).toEqual([]);
+      expect(persistence.listPendingApprovals(staleTask.id)).toEqual([]);
+
+      const pushedTask = persistence.createTask();
+      const pushedTurn = startExecutingTurn(persistence, pushedTask.id);
+      persistence.requestApproval(
+        approvalRequest(pushedTask.id, pushedTurn.turnId, {
+          id: 'approval-pushed-stale',
+          challenge: 'challenge-pushed-stale',
+        }),
+      );
+      persistence.setAccessPreset(pushedTask.id, 'auto', 0);
+      const pushed = persistence.invalidatePendingApprovalsForTask(
+        pushedTask.id,
+        1,
+        '2026-07-22T12:01:00.000Z',
+      );
+      expect(pushed).toHaveLength(1);
+      expect(pushed[0]).toMatchObject({
+        approval: { state: 'stale', decision: null, revision: 1 },
+        event: { type: 'approval.stale' },
+      });
+      expect(persistence.snapshot(pushedTask.id).activeTurn).toMatchObject({
+        stage: 'executing',
+      });
+      persistence.close();
+    });
+
+    it('cancels every pending approval before publishing Turn cancellation', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      persistence.requestApproval(approvalRequest(task.id, turn.turnId));
+
+      const canceled = persistence.cancelTurn(task.id, turn.turnId);
+
+      expect(canceled).toMatchObject({ type: 'turn.completed', state: 'canceled', seq: 7 });
+      expect(persistence.getApproval(task.id, 'approval-1')).toMatchObject({
+        state: 'canceled',
+        decision: null,
+        revision: 1,
+      });
+      expect(persistence.listPendingApprovals(task.id)).toEqual([]);
+      expect(
+        persistence.listEventsAfter(task.id, 4).map((event) => [event.type, event.seq]),
+      ).toEqual([
+        ['approval.requested', 5],
+        ['approval.canceled', 6],
+        ['turn.completed', 7],
+      ]);
+      expect(() =>
+        persistence.resolveApproval({
+          taskId: task.id,
+          approvalId: 'approval-1',
+          expectedTurnId: turn.turnId,
+          expectedRevision: 0,
+          challenge: 'challenge-1',
+          decision: 'allow_once',
+          operationId: 'late-response',
+          decidedAt: '2026-07-22T12:01:00.000Z',
+        }),
+      ).toThrow('Approval is no longer pending');
+      persistence.close();
+    });
+
+    it('replays approval lifecycle events in the task sequence after restart', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      persistence.requestApproval(approvalRequest(task.id, turn.turnId));
+      persistence.resolveApproval({
+        taskId: task.id,
+        approvalId: 'approval-1',
+        expectedTurnId: turn.turnId,
+        expectedRevision: 0,
+        challenge: 'challenge-1',
+        decision: 'deny',
+        operationId: 'resolve-deny',
+        decidedAt: '2026-07-22T12:01:00.000Z',
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(
+        reopened.listEventsAfter(task.id, 4).map((event) => ({
+          type: event.type,
+          seq: event.seq,
+          approvalId: 'approvalId' in event ? event.approvalId : undefined,
+        })),
+      ).toEqual([
+        { type: 'approval.requested', seq: 5, approvalId: 'approval-1' },
+        { type: 'approval.resolved', seq: 6, approvalId: 'approval-1' },
+      ]);
+      expect(reopened.getApproval(task.id, 'approval-1')).toMatchObject({
+        state: 'resolved',
+        decision: 'deny',
+        revision: 1,
+      });
+      reopened.close();
+    });
+
     it('persists permission audit trace and reviewer evidence', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -468,6 +1011,8 @@ if (runsWithElectronAbi)
         { version: 9 },
         { version: 10 },
         { version: 11 },
+        { version: 12 },
+        { version: 13 },
       ]);
       expect(
         migrated
@@ -505,11 +1050,48 @@ if (runsWithElectronAbi)
         'created_at',
         'updated_at',
       ]);
+      expect(
+        migrated
+          .prepare('PRAGMA table_info(approvals)')
+          .all()
+          .map((column) => (column as { name: string }).name),
+      ).toEqual([
+        'id',
+        'task_id',
+        'turn_id',
+        'item_id',
+        'call_id',
+        'runtime_instance_id',
+        'subject_id',
+        'provider_name',
+        'tool_id',
+        'tool_catalog_digest',
+        'schema_digest',
+        'spec_digest',
+        'policy_epoch',
+        'capability',
+        'resource_json',
+        'operation',
+        'provider_egress',
+        'sandbox_profile',
+        'risk',
+        'reason_untrusted',
+        'display_json',
+        'state',
+        'decision',
+        'challenge_digest',
+        'revision',
+        'expires_at',
+        'requested_at',
+        'resolved_at',
+        'decision_operation_id',
+        'runtime_call_id',
+      ]);
       migrated.close();
     });
   });
 else
-  describe('SqlitePersistenceClient v11 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v13 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

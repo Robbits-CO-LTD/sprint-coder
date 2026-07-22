@@ -9,6 +9,7 @@ import {
   type IntelligenceStepRecorder,
 } from './intelligence-loop';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
+import { ToolAuthorizationDeniedError, type ToolAuthorizer } from './tool-broker';
 
 type Publish = (event: TurnEvent) => void;
 type Serialize = <T>(taskId: string, action: () => T) => Promise<T>;
@@ -27,7 +28,7 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
     >
   >;
 
-const stages: TurnStage[] = ['understanding', 'planning', 'executing', 'synthesizing'];
+const executionStages: TurnStage[] = ['understanding', 'planning', 'executing'];
 
 export class MockRuntimeAdapter {
   private readonly active = new Map<string, ActiveTurn>();
@@ -40,9 +41,11 @@ export class MockRuntimeAdapter {
     private readonly serialize: Serialize = async (_taskId, action) => action(),
     private readonly terminal?: Terminal,
     private readonly prepareContext?: PrepareContext,
+    authorizer?: ToolAuthorizer,
   ) {
     this.toolBroker = createDefaultToolBroker(
       (taskId) => this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0,
+      authorizer,
     );
   }
 
@@ -74,7 +77,7 @@ export class MockRuntimeAdapter {
     control: ActiveTurn,
   ): Promise<void> {
     try {
-      for (const stage of stages) {
+      for (const stage of executionStages) {
         await pause(this.delayMs);
         if (control.canceled) return;
         await this.serialize(taskId, () =>
@@ -100,19 +103,33 @@ export class MockRuntimeAdapter {
         toolCatalogSnapshot,
         sample: createDeterministicMockSampler(input, buildReply(input)),
         executeTool: async (call) => {
-          const result = await this.toolBroker.dispatch({
-            taskId,
-            turnId,
-            callId: call.callId,
-            providerName: call.toolName,
-            input: call.arguments,
-          });
+          let result: unknown;
+          try {
+            result = await this.toolBroker.dispatch({
+              taskId,
+              turnId,
+              callId: call.callId,
+              providerName: call.toolName,
+              input: call.arguments,
+            });
+          } catch (error) {
+            if (error instanceof ToolAuthorizationDeniedError)
+              return {
+                ok: false,
+                code: 'PERMISSION_DENIED',
+                content: `ツール実行は拒否されました: ${error.authorization.reason}`,
+              };
+            throw error;
+          }
           if (typeof result !== 'string') throw new Error('Mock tool returned a non-string result');
           return result;
         },
         ...(recorder === undefined ? {} : { recorder }),
       });
       const messageId = randomUUID();
+      await this.serialize(taskId, () =>
+        this.publish(this.persistence.changeStage(taskId, turnId, 'synthesizing')),
+      );
       const chunks = chunkReply(loop.text);
       while (chunks.length > 0 || control.steering.length > 0) {
         if (chunks.length === 0) {

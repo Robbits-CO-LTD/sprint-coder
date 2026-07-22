@@ -1,17 +1,22 @@
 import { useEffect, useRef } from 'react';
-import type { ChatMessage } from '../../types/vibe';
+import type { ApprovalSummary, ChatMessage } from '../../types/vibe';
 import { useAppStore } from '../../store/appStore';
 import { MessageBubble } from '../MessageBubble';
 import { RunCard } from '../RunCard';
+import { ApprovalCard } from '../ApprovalCard';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
 const NO_MESSAGES: ChatMessage[] = [];
+const NO_APPROVALS: ApprovalSummary[] = [];
 
 export function Timeline({ taskId }: { taskId: string }) {
   const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? NO_MESSAGES;
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const setDraft = useAppStore((s) => s.setDraft);
   const cancelActiveTurn = useAppStore((s) => s.cancelActiveTurn);
+  const approvals = useAppStore((s) => s.approvalsByTask[taskId]) ?? NO_APPROVALS;
+  const resolving = useAppStore((s) => s.resolvingApprovalIds);
+  const resolveApproval = useAppStore((s) => s.resolveApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const isActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
@@ -19,7 +24,7 @@ export function Timeline({ taskId }: { taskId: string }) {
   useEffect(() => {
     const node = scrollRef.current;
     if (node) node.scrollTop = node.scrollHeight;
-  }, [messages, turn?.stage, turn?.streamingContent, turn?.status]);
+  }, [messages, approvals, turn?.stage, turn?.streamingContent, turn?.status]);
 
   const isEmpty = messages.length === 0 && !turn;
 
@@ -59,6 +64,14 @@ export function Timeline({ taskId }: { taskId: string }) {
         {isActive && turn && turn.streamingMessageId && (
           <MessageBubble author="assistant" content={turn.streamingContent} isStreaming />
         )}
+        {approvals.map((approval) => (
+          <ApprovalCard
+            key={approval.id}
+            approval={approval}
+            busy={resolving[approval.id] === true}
+            onDecision={(decision) => void resolveApproval(taskId, approval.id, decision)}
+          />
+        ))}
       </div>
     </div>
   );

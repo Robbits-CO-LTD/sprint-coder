@@ -3,6 +3,8 @@ import { z } from 'zod';
 import {
   IPC_CHANNELS,
   appInfoSchema,
+  approvalResolveInputSchema,
+  approvalSummarySchema,
   chatMessageSchema,
   commandEnvelopeSchema,
   commandResultSchema,
@@ -144,6 +146,24 @@ const api: VibeApi = {
         preset,
         expectedPolicyEpoch,
       }),
+  },
+  approvals: {
+    listPending: (taskId) =>
+      invoke(
+        IPC_CHANNELS.approvalsListPending,
+        taskIdPayloadSchema,
+        z.array(approvalSummarySchema),
+        {
+          taskId,
+        },
+      ),
+    resolve: (input) =>
+      invoke(
+        IPC_CHANNELS.approvalsResolve,
+        approvalResolveInputSchema,
+        approvalSummarySchema,
+        input,
+      ),
   },
   turns: {
     start: (input) =>

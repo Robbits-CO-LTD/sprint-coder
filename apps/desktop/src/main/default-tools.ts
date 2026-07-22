@@ -5,7 +5,7 @@ import {
   type ToolCatalogSnapshot,
   type ToolExecutionContext,
 } from '@vibe/domain';
-import { ToolBroker } from './tool-broker';
+import { ToolBroker, type ToolAuthorizer } from './tool-broker';
 
 export const MOCK_ECHO_TOOL = createToolDefinition({
   toolId: createToolId({ provider: 'builtin', namespace: 'mock', name: 'echo', version: '1' }),
@@ -54,20 +54,53 @@ export const COMMAND_RUNNER_TOOL = createToolDefinition({
   providerCompatibility: ['mock', 'codex'],
 });
 
+export const APPROVAL_PROBE_TOOL = createToolDefinition({
+  toolId: createToolId({ provider: 'builtin', namespace: 'approval', name: 'probe', version: '1' }),
+  providerName: 'approval_probe',
+  kind: 'network',
+  schemaVersion: 1,
+  inputSchema: {
+    type: 'object',
+    properties: { origin: { type: 'string' } },
+    required: ['origin'],
+    additionalProperties: false,
+  },
+  outputSchema: { type: 'string' },
+  sideEffect: 'network',
+  risk: 'medium',
+  requiredCapabilities: ['network.fetch'],
+  executionTarget: 'main',
+  implementationKind: 'built-in',
+  priority: 10,
+  workspaceBinding: { kind: 'none' },
+  providerCompatibility: ['mock'],
+});
+
 export function createDefaultToolBroker(
   getCurrentPolicyEpoch: (taskId: string) => number,
+  authorizer?: ToolAuthorizer,
 ): ToolBroker {
   const registry = new ToolRegistry();
   registry.register(MOCK_ECHO_TOOL);
   registry.register(COMMAND_RUNNER_TOOL);
-  const broker = new ToolBroker(registry, getCurrentPolicyEpoch, ({ entry }) =>
+  registry.register(APPROVAL_PROBE_TOOL);
+  const defaultAuthorizer: ToolAuthorizer = ({ entry }) =>
     entry.sideEffect === 'none' && entry.requiredCapabilities.length === 0
       ? { decision: 'allow', reason: 'pure_builtin' }
       : {
           decision: 'deny',
           reason: 'capability authorization is unavailable until Slice 4.3',
-        },
-  );
+        };
+  const broker = new ToolBroker(registry, getCurrentPolicyEpoch, authorizer ?? defaultAuthorizer);
+  broker.registerImplementation({
+    toolId: APPROVAL_PROBE_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input) => {
+      const origin = (input as { origin?: unknown }).origin;
+      if (typeof origin !== 'string') throw new Error('approval_probe requires an origin');
+      return `承認された確認対象: ${origin}（外部通信は実行していません）`;
+    },
+  });
   broker.registerImplementation({
     toolId: MOCK_ECHO_TOOL.toolId,
     implementationKind: 'built-in',

@@ -25,10 +25,18 @@ export type ToolAuthorizationRequest = Readonly<{
 export type ToolAuthorizationDecision = Readonly<{
   decision: 'allow' | 'deny' | 'approval_required';
   reason: string;
+  beforeExecute?: () => boolean;
 }>;
 export type ToolAuthorizer = (
   request: ToolAuthorizationRequest,
 ) => Promise<ToolAuthorizationDecision> | ToolAuthorizationDecision;
+
+export class ToolAuthorizationDeniedError extends Error {
+  constructor(readonly authorization: ToolAuthorizationDecision) {
+    super(`Tool authorization ${authorization.decision}: ${authorization.reason}`);
+    this.name = 'ToolAuthorizationDeniedError';
+  }
+}
 
 type BoundTurn = {
   context: ToolExecutionContext;
@@ -127,12 +135,16 @@ export class ToolBroker {
       entry,
       input: pinnedInput,
     });
-    if (authorization.decision !== 'allow')
-      throw new Error(`Tool authorization ${authorization.decision}: ${authorization.reason}`);
+    if (authorization.decision !== 'allow') throw new ToolAuthorizationDeniedError(authorization);
     if (this.turns.get(turnKey(request.taskId, request.turnId)) !== bound)
       throw new Error('Tool dispatch rejected because the Turn ended during authorization');
     if (this.getCurrentPolicyEpoch(request.taskId) !== bound.context.policyEpoch)
       throw new Error('Tool dispatch rejected because the policy epoch changed');
+    if (authorization.beforeExecute?.() === false)
+      throw new ToolAuthorizationDeniedError({
+        decision: 'deny',
+        reason: 'execution_revalidation_failed',
+      });
     const output = await implementation.execute(pinnedInput, bound.context);
     if (!toolValueMatchesSchema(definition.outputSchema, output))
       throw new Error('Tool output does not match the pinned schema');

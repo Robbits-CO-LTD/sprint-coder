@@ -147,4 +147,59 @@ describe('runIntelligenceLoop', () => {
     ).rejects.toThrow('not present in the immutable Turn catalog');
     expect(executed).toBe(false);
   });
+
+  it('commits a denied tool result and lets the next sample produce an alternative answer', async () => {
+    const recorder = new MemoryRecorder();
+    let toolResponseCount = 0;
+    const result = await runIntelligenceLoop({
+      taskId: 'task',
+      turnId: 'turn',
+      fragments: [],
+      model: 'mock-v1',
+      effort: 'low',
+      policyEpoch: 0,
+      workspaceRevision: 'none',
+      contractRevision: null,
+      toolCatalogSnapshot: mockCatalog(),
+      sample: ({ stepOrdinal, transcript }) => {
+        if (stepOrdinal === 1)
+          return {
+            kind: 'tool-calls',
+            calls: [{ callId: 'denied-call', toolName: 'mock_echo', arguments: { text: 'deny' } }],
+          };
+        expect(transcript).toContainEqual({
+          type: 'tool-result',
+          callId: 'denied-call',
+          content: 'User denied this operation',
+          isError: true,
+        });
+        return { kind: 'final', text: '権限を使わない代替案です。' };
+      },
+      executeTool: () => {
+        toolResponseCount += 1;
+        return {
+          ok: false,
+          code: 'PERMISSION_DENIED',
+          content: 'User denied this operation',
+        } as never;
+      },
+      recorder,
+    });
+
+    expect(toolResponseCount).toBe(1);
+    expect(result).toMatchObject({
+      text: '権限を使わない代替案です。',
+      stepCount: 2,
+      toolCallCount: 1,
+    });
+    expect(recorder.transitions.get('step-1')).toEqual([
+      'sampling',
+      'sampled',
+      'dispatching',
+      'toolsCommitted',
+      'completed',
+    ]);
+    expect(recorder.transitions.get('step-2')).toEqual(['sampling', 'sampled', 'completed']);
+    expect([...recorder.transitions.values()].flat()).not.toContain('failed');
+  });
 });

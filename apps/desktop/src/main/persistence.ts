@@ -1,13 +1,17 @@
 import Database from 'better-sqlite3';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   chatMessageSchema,
+  approvalSummarySchema,
   taskSummarySchema,
   turnEventSchema,
   turnSnapshotSchema,
   type ChatMessage,
+  type ApprovalDecision,
+  type ApprovalState,
+  type ApprovalSummary,
   type ContextUsage,
   type QueuedInput,
   type RuntimeKind,
@@ -116,6 +120,38 @@ type PermissionGrantRow = {
   expires_at: string;
   issued_policy_epoch: number;
   revoked_at: string | null;
+};
+type ApprovalRow = {
+  id: string;
+  task_id: string;
+  turn_id: string;
+  item_id: string;
+  call_id: string;
+  runtime_call_id: string;
+  runtime_instance_id: string;
+  subject_id: string;
+  provider_name: string;
+  tool_id: string;
+  tool_catalog_digest: string;
+  schema_digest: string;
+  spec_digest: string;
+  policy_epoch: number;
+  capability: Capability;
+  resource_json: string;
+  operation: PermissionOperation;
+  provider_egress: ProviderEgress;
+  sandbox_profile: SandboxProfile;
+  risk: 'low' | 'medium' | 'high';
+  reason_untrusted: string;
+  display_json: string;
+  state: ApprovalState;
+  decision: ApprovalDecision | null;
+  challenge_digest: string;
+  revision: number;
+  expires_at: string;
+  requested_at: string;
+  resolved_at: string | null;
+  decision_operation_id: string | null;
 };
 type EventWithoutSeq = TurnEvent extends infer Event
   ? Event extends TurnEvent
@@ -412,7 +448,127 @@ const migrations = [
         ADD COLUMN sandbox_profiles_json TEXT NOT NULL DEFAULT '[]';
     `,
   },
+  {
+    version: 12,
+    checksum: 'approvals-v12-lifecycle-binding-grants',
+    sql: `
+      DROP INDEX turns_one_active_per_task;
+      CREATE UNIQUE INDEX turns_one_active_per_task ON turns(task_id)
+        WHERE state IN (
+          'queued', 'understanding', 'planning', 'executing', 'waiting_approval',
+          'blocked', 'synthesizing', 'canceling'
+        );
+      CREATE TABLE approvals (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        runtime_instance_id TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        provider_name TEXT NOT NULL,
+        tool_id TEXT NOT NULL,
+        tool_catalog_digest TEXT NOT NULL CHECK (length(tool_catalog_digest) = 64),
+        schema_digest TEXT NOT NULL CHECK (length(schema_digest) = 64),
+        spec_digest TEXT NOT NULL CHECK (length(spec_digest) = 64),
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        capability TEXT NOT NULL,
+        resource_json TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        provider_egress TEXT NOT NULL,
+        sandbox_profile TEXT NOT NULL,
+        risk TEXT NOT NULL CHECK (risk IN ('low', 'medium', 'high')),
+        reason_untrusted TEXT NOT NULL,
+        display_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'resolved', 'canceled', 'stale', 'expired')),
+        decision TEXT CHECK (decision IN ('allow_once', 'allow_task', 'deny')),
+        challenge_digest TEXT NOT NULL CHECK (length(challenge_digest) = 64),
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        expires_at TEXT NOT NULL,
+        requested_at TEXT NOT NULL,
+        resolved_at TEXT,
+        decision_operation_id TEXT,
+        UNIQUE(turn_id, call_id)
+      );
+      CREATE INDEX approvals_task_pending_idx ON approvals(task_id, state, requested_at, id);
+      ALTER TABLE permission_one_time_permits ADD COLUMN approval_id TEXT REFERENCES approvals(id);
+      ALTER TABLE permission_one_time_permits ADD COLUMN request_digest TEXT;
+      ALTER TABLE permission_one_time_permits ADD COLUMN spec_digest TEXT;
+      ALTER TABLE permission_one_time_permits ADD COLUMN turn_id TEXT;
+      ALTER TABLE permission_one_time_permits ADD COLUMN call_id TEXT;
+      ALTER TABLE permission_one_time_permits ADD COLUMN subject_id TEXT;
+    `,
+  },
+  {
+    version: 13,
+    checksum: 'approvals-v13-capability-requirement-key',
+    sql: `
+      ALTER TABLE approvals ADD COLUMN runtime_call_id TEXT;
+      UPDATE approvals SET runtime_call_id = call_id WHERE runtime_call_id IS NULL;
+      CREATE INDEX approvals_runtime_call_capability_idx
+        ON approvals(turn_id, runtime_call_id, capability);
+    `,
+  },
 ];
+
+export type ApprovalRequestInput = {
+  id: string;
+  taskId: string;
+  turnId: string;
+  itemId: string;
+  callId: string;
+  runtimeInstanceId: string;
+  subjectId: string;
+  providerName: string;
+  toolId: string;
+  toolCatalogDigest: string;
+  schemaDigest: string;
+  specDigest: string;
+  policyEpoch: number;
+  capability: Capability;
+  resource: ResourceSet;
+  operation: PermissionOperation;
+  providerEgress: ProviderEgress;
+  sandboxProfile: SandboxProfile;
+  risk: 'low' | 'medium' | 'high';
+  reasonUntrusted: string;
+  display: { target: string; impact: string; execution: string };
+  challenge: string;
+  expiresAt: string;
+  requestedAt: string;
+};
+
+export type PersistedApproval = ApprovalSummary & {
+  itemId: string;
+  runtimeInstanceId: string;
+  subjectId: string;
+  toolId: string;
+  toolCatalogDigest: string;
+  schemaDigest: string;
+  specDigest: string;
+  resource: ResourceSet;
+  operation: PermissionOperation;
+  providerEgress: ProviderEgress;
+  sandboxProfile: SandboxProfile;
+};
+
+export type ApprovalResolutionInput = {
+  taskId: string;
+  approvalId: string;
+  expectedTurnId: string;
+  expectedRevision: number;
+  challenge: string;
+  decision: ApprovalDecision;
+  operationId: string;
+  decidedAt: string;
+  grantExpiresAt?: string;
+};
+
+export type ApprovalPersistenceResult = {
+  approval: PersistedApproval;
+  event: TurnEvent;
+  oneTimePermitToken?: string;
+};
 
 export type PermissionPolicyRecord = {
   preset: AccessPreset;
@@ -465,12 +621,28 @@ export interface PersistenceClient {
     token: string,
     policyEpoch: number,
     now: string,
+    binding?: {
+      approvalId: string;
+      turnId: string;
+      callId: string;
+      subjectId: string;
+      specDigest: string;
+    },
   ): boolean;
   recordPermissionAudit(
     taskId: string,
     request: PermissionRequest,
     evaluation: PermissionEvaluation,
   ): void;
+  requestApproval(input: ApprovalRequestInput): ApprovalPersistenceResult;
+  listPendingApprovals(taskId: string): PersistedApproval[];
+  getApproval(taskId: string, approvalId: string): PersistedApproval;
+  resolveApproval(input: ApprovalResolutionInput): ApprovalPersistenceResult;
+  invalidatePendingApprovalsForTask(
+    taskId: string,
+    policyEpoch: number,
+    invalidatedAt: string,
+  ): ApprovalPersistenceResult[];
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
   queueInput(
@@ -918,11 +1090,281 @@ export class SqlitePersistenceClient implements PersistenceClient {
       );
   }
 
+  requestApproval(input: ApprovalRequestInput): ApprovalPersistenceResult {
+    return this.db.transaction(() => {
+      validateApprovalRequest(input);
+      const duplicate = this.db
+        .prepare(
+          'SELECT * FROM approvals WHERE turn_id = ? AND runtime_call_id = ? AND capability = ?',
+        )
+        .get(input.turnId, input.callId, input.capability) as ApprovalRow | undefined;
+      if (duplicate !== undefined) {
+        const existingChallenge = this.challengeForApproval(duplicate.task_id, duplicate.id);
+        const existing = this.toPersistedApproval(duplicate, existingChallenge);
+        if (approvalRequestDigest(input) !== persistedApprovalRequestDigest(existing))
+          throw new OperationConflictError();
+        const event = this.findApprovalEvent(input.taskId, duplicate.id, 'approval.requested');
+        return { approval: existing, event };
+      }
+      const turn = this.getTurn(input.taskId, input.turnId);
+      if (turn.state !== 'executing' && turn.state !== 'planning')
+        throw new Error('Turn is not eligible to request approval');
+      if (this.getPermissionPolicy(input.taskId).policyEpoch !== input.policyEpoch)
+        throw new Error('Approval policy epoch is stale');
+      this.db
+        .prepare(
+          `INSERT INTO approvals(
+            id, task_id, turn_id, item_id, call_id, runtime_instance_id, subject_id,
+            provider_name, tool_id, tool_catalog_digest, schema_digest, spec_digest,
+            policy_epoch, capability, resource_json, operation, provider_egress,
+            sandbox_profile, risk, reason_untrusted, display_json, state, decision,
+            challenge_digest, revision, expires_at, requested_at, resolved_at,
+            decision_operation_id, runtime_call_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            'pending', NULL, ?, 0, ?, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          input.id,
+          input.taskId,
+          input.turnId,
+          input.itemId,
+          approvalStorageCallId(input.callId, input.capability),
+          input.runtimeInstanceId,
+          input.subjectId,
+          input.providerName,
+          input.toolId,
+          input.toolCatalogDigest,
+          input.schemaDigest,
+          input.specDigest,
+          input.policyEpoch,
+          input.capability,
+          JSON.stringify(input.resource),
+          input.operation,
+          input.providerEgress,
+          input.sandboxProfile,
+          input.risk,
+          sanitizeApprovalText(input.reasonUntrusted, 500),
+          JSON.stringify({
+            target: sanitizeApprovalText(input.display.target, 500),
+            impact: sanitizeApprovalText(input.display.impact, 500),
+            execution: sanitizeApprovalText(input.display.execution, 2_000),
+          }),
+          sha256(input.challenge),
+          new Date(input.expiresAt).toISOString(),
+          new Date(input.requestedAt).toISOString(),
+          input.callId,
+        );
+      transitionTurn(turn.state, 'waiting_approval');
+      this.updateTurn(input.turnId, 'waiting_approval');
+      const approval = this.getApprovalWithChallenge(input.taskId, input.id, input.challenge);
+      const event = this.appendEvent({
+        type: 'approval.requested',
+        taskId: input.taskId,
+        turnId: input.turnId,
+        approvalId: input.id,
+        approval: toApprovalSummary(approval),
+      });
+      return { approval, event };
+    })();
+  }
+
+  listPendingApprovals(taskId: string): PersistedApproval[] {
+    this.assertTask(taskId);
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM approvals WHERE task_id = ? AND state = 'pending' ORDER BY requested_at, id",
+        )
+        .all(taskId) as ApprovalRow[]
+    ).map((row) => this.toPersistedApproval(row, this.challengeForApproval(taskId, row.id)));
+  }
+
+  getApproval(taskId: string, approvalId: string): PersistedApproval {
+    const row = this.getApprovalRow(approvalId);
+    if (row.task_id !== taskId) throw new Error('Approval does not belong to this Task');
+    return this.toPersistedApproval(row, this.challengeForApproval(taskId, approvalId));
+  }
+
+  resolveApproval(input: ApprovalResolutionInput): ApprovalPersistenceResult {
+    const requestHash = sha256(JSON.stringify(input));
+    const cached = this.getOperationResult<ApprovalPersistenceResult>(
+      'approval',
+      input.taskId,
+      'approval.resolve',
+      input.operationId,
+      requestHash,
+    );
+    if (cached.found) return cached.value!;
+    return this.executeOperation(
+      'approval',
+      input.taskId,
+      'approval.resolve',
+      input.operationId,
+      requestHash,
+      () => this.resolveApprovalInTransaction(input),
+    );
+  }
+
+  invalidatePendingApprovalsForTask(
+    taskId: string,
+    policyEpoch: number,
+    invalidatedAt: string,
+  ): ApprovalPersistenceResult[] {
+    return this.db.transaction(() => {
+      this.assertTask(taskId);
+      const at = new Date(invalidatedAt).toISOString();
+      const rows = this.db
+        .prepare(
+          "SELECT * FROM approvals WHERE task_id = ? AND state = 'pending' AND policy_epoch <> ? ORDER BY requested_at, id",
+        )
+        .all(taskId, policyEpoch) as ApprovalRow[];
+      const results: ApprovalPersistenceResult[] = [];
+      for (const row of rows) {
+        const updated = this.db
+          .prepare(
+            `UPDATE approvals SET state = 'stale', decision = NULL, revision = revision + 1,
+              resolved_at = ? WHERE id = ? AND state = 'pending' AND revision = ?`,
+          )
+          .run(at, row.id, row.revision);
+        if (updated.changes !== 1) continue;
+        this.resumeTurnAfterApproval(row.task_id, row.turn_id);
+        const approval = this.getApprovalWithChallenge(
+          row.task_id,
+          row.id,
+          this.challengeForApproval(row.task_id, row.id),
+        );
+        const event = this.appendEvent({
+          type: 'approval.stale',
+          taskId: row.task_id,
+          turnId: row.turn_id,
+          approvalId: row.id,
+          approval: toApprovalSummary(approval),
+        });
+        results.push({ approval, event });
+      }
+      return results;
+    })();
+  }
+
+  private resolveApprovalInTransaction(input: ApprovalResolutionInput): ApprovalPersistenceResult {
+    const row = this.getApprovalRow(input.approvalId);
+    if (row.task_id !== input.taskId) throw new Error('Approval does not belong to this Task');
+    if (row.turn_id !== input.expectedTurnId) throw new Error('Approval Turn changed');
+    if (row.state === 'resolved') throw new Error('Approval is already resolved');
+    if (row.state !== 'pending') throw new Error('Approval is no longer pending');
+    if (row.revision !== input.expectedRevision) throw new Error('Approval revision changed');
+    if (!timingSafeDigestEqual(row.challenge_digest, sha256(input.challenge)))
+      throw new Error('Approval challenge mismatch');
+    const decidedAt = new Date(input.decidedAt).toISOString();
+    const currentEpoch = this.getPermissionPolicy(input.taskId).policyEpoch;
+    const nextState: ApprovalState =
+      Date.parse(row.expires_at) <= Date.parse(decidedAt)
+        ? 'expired'
+        : currentEpoch !== row.policy_epoch
+          ? 'stale'
+          : 'resolved';
+    const decision = nextState === 'resolved' ? input.decision : null;
+    const updated = this.db
+      .prepare(
+        `UPDATE approvals SET state = ?, decision = ?, revision = revision + 1,
+          resolved_at = ?, decision_operation_id = ?
+        WHERE id = ? AND state = 'pending' AND revision = ?`,
+      )
+      .run(
+        nextState,
+        decision,
+        decidedAt,
+        input.operationId,
+        input.approvalId,
+        input.expectedRevision,
+      );
+    if (updated.changes !== 1) throw new Error('Approval was resolved concurrently');
+
+    let oneTimePermitToken: string | undefined;
+    if (decision === 'allow_once') {
+      oneTimePermitToken = `${randomUUID()}${randomUUID()}`;
+      this.db
+        .prepare(
+          `INSERT INTO permission_one_time_permits(
+            token_hash, task_id, policy_epoch, expires_at, consumed_at, created_at,
+            approval_id, request_digest, spec_digest, turn_id, call_id, subject_id
+          ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          sha256(oneTimePermitToken),
+          input.taskId,
+          row.policy_epoch,
+          row.expires_at,
+          decidedAt,
+          row.id,
+          approvalRowRequestDigest(row),
+          row.spec_digest,
+          row.turn_id,
+          row.runtime_call_id,
+          row.subject_id,
+        );
+    } else if (decision === 'allow_task') {
+      const grantExpiresAt = new Date(input.grantExpiresAt ?? row.expires_at).toISOString();
+      if (Date.parse(grantExpiresAt) <= Date.parse(decidedAt))
+        throw new Error('Approval grant expiry must be in the future');
+      this.savePermissionGrant(
+        input.taskId,
+        createSessionGrant({
+          id: randomUUID(),
+          subjectId: row.subject_id,
+          capability: row.capability,
+          resourceSet: parseResourceSet(row.resource_json),
+          operations: [row.operation],
+          scope: 'task',
+          expiresAt: grantExpiresAt,
+          policyEpoch: row.policy_epoch,
+          providerEgress: [row.provider_egress],
+          sandboxProfiles: [row.sandbox_profile],
+          executionSpecDigest: row.spec_digest,
+        }),
+      );
+    }
+
+    this.resumeTurnAfterApproval(row.task_id, row.turn_id);
+    const approval = this.getApprovalWithChallenge(row.task_id, row.id, input.challenge);
+    const type = `approval.${nextState}` as
+      'approval.resolved' | 'approval.stale' | 'approval.expired';
+    const event =
+      type === 'approval.resolved'
+        ? this.appendEvent({
+            type,
+            taskId: row.task_id,
+            turnId: row.turn_id,
+            approvalId: row.id,
+            decision: decision!,
+            approval: toApprovalSummary(approval),
+          })
+        : this.appendEvent({
+            type,
+            taskId: row.task_id,
+            turnId: row.turn_id,
+            approvalId: row.id,
+            approval: toApprovalSummary(approval),
+          });
+    return {
+      approval,
+      event,
+      ...(oneTimePermitToken === undefined ? {} : { oneTimePermitToken }),
+    };
+  }
+
   consumePermissionOneTimeToken(
     taskId: string,
     token: string,
     policyEpoch: number,
     now: string,
+    binding?: {
+      approvalId: string;
+      turnId: string;
+      callId: string;
+      subjectId: string;
+      specDigest: string;
+    },
   ): boolean {
     const canonicalNow = new Date(now).toISOString();
     return this.db.transaction(() => {
@@ -939,7 +1381,33 @@ export class SqlitePersistenceClient implements PersistenceClient {
           policyEpoch,
           canonicalNow,
         );
-      return result.changes === 1;
+      if (result.changes !== 1) return false;
+      if (binding !== undefined) {
+        const row = this.db
+          .prepare(
+            `SELECT approval_id, turn_id, call_id, subject_id, spec_digest
+             FROM permission_one_time_permits WHERE token_hash = ?`,
+          )
+          .get(sha256(token)) as
+          | {
+              approval_id: string | null;
+              turn_id: string | null;
+              call_id: string | null;
+              subject_id: string | null;
+              spec_digest: string | null;
+            }
+          | undefined;
+        if (
+          row === undefined ||
+          row.approval_id !== binding.approvalId ||
+          row.turn_id !== binding.turnId ||
+          row.call_id !== binding.callId ||
+          row.subject_id !== binding.subjectId ||
+          row.spec_digest !== binding.specDigest
+        )
+          throw new Error('One-time permit binding mismatch');
+      }
+      return true;
     })();
   }
 
@@ -1078,7 +1546,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const row = this.db
       .prepare(
         `SELECT id FROM turns WHERE task_id = ? AND state IN
-      ('queued', 'understanding', 'planning', 'executing', 'synthesizing', 'canceling') ORDER BY created_at DESC LIMIT 1`,
+      ('queued', 'understanding', 'planning', 'executing', 'waiting_approval', 'blocked',
+       'synthesizing', 'canceling') ORDER BY created_at DESC LIMIT 1`,
       )
       .get(taskId) as { id: string } | undefined;
     return row?.id ?? null;
@@ -1147,7 +1616,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const active = this.db
       .prepare(
         `SELECT * FROM turns WHERE task_id = ? AND state IN
-      ('queued', 'understanding', 'planning', 'executing', 'synthesizing', 'canceling') ORDER BY created_at DESC LIMIT 1`,
+      ('queued', 'understanding', 'planning', 'executing', 'waiting_approval', 'blocked',
+       'synthesizing', 'canceling') ORDER BY created_at DESC LIMIT 1`,
       )
       .get(taskId) as TurnRow | undefined;
     const activeTurn =
@@ -1181,6 +1651,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       activeTurn,
       queued: this.listQueued(taskId),
       contextUsage,
+      pendingApprovals: this.listPendingApprovals(taskId).map(toApprovalSummary),
     });
   }
 
@@ -1333,7 +1804,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const turns = this.db
         .prepare(
           `SELECT * FROM turns WHERE state IN
-        ('queued', 'understanding', 'planning', 'executing', 'synthesizing', 'canceling')`,
+        ('queued', 'understanding', 'planning', 'executing', 'waiting_approval', 'blocked',
+         'synthesizing', 'canceling')`,
         )
         .all() as TurnRow[];
       for (const turn of turns)
@@ -1372,12 +1844,133 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return { turnId, text, event };
   }
 
+  private getApprovalRow(approvalId: string): ApprovalRow {
+    const row = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId) as
+      ApprovalRow | undefined;
+    if (row === undefined) throw new NotFoundError('Approval not found');
+    return row;
+  }
+
+  private getApprovalWithChallenge(
+    taskId: string,
+    approvalId: string,
+    challenge: string,
+  ): PersistedApproval {
+    const row = this.getApprovalRow(approvalId);
+    if (row.task_id !== taskId) throw new Error('Approval does not belong to this Task');
+    return this.toPersistedApproval(row, challenge);
+  }
+
+  private toPersistedApproval(row: ApprovalRow, challenge: string): PersistedApproval {
+    const display = parseApprovalDisplay(row.display_json);
+    return {
+      id: row.id,
+      taskId: row.task_id,
+      turnId: row.turn_id,
+      callId: row.runtime_call_id,
+      state: row.state,
+      decision: row.decision,
+      revision: row.revision,
+      policyEpoch: row.policy_epoch,
+      toolName: row.provider_name,
+      reason: row.reason_untrusted,
+      target: display.target,
+      impact: display.impact,
+      execution: display.execution,
+      risk: row.risk,
+      capability: row.capability,
+      challenge,
+      createdAt: row.requested_at,
+      expiresAt: row.expires_at,
+      ...(row.resolved_at === null ? {} : { decidedAt: row.resolved_at }),
+      itemId: row.item_id,
+      runtimeInstanceId: row.runtime_instance_id,
+      subjectId: row.subject_id,
+      toolId: row.tool_id,
+      toolCatalogDigest: row.tool_catalog_digest,
+      schemaDigest: row.schema_digest,
+      specDigest: row.spec_digest,
+      resource: parseResourceSet(row.resource_json),
+      operation: row.operation,
+      providerEgress: row.provider_egress,
+      sandboxProfile: row.sandbox_profile,
+    };
+  }
+
+  private challengeForApproval(taskId: string, approvalId: string): string {
+    const rows = this.db
+      .prepare(
+        "SELECT payload_json FROM turn_events WHERE task_id = ? AND type = 'approval.requested' ORDER BY seq DESC",
+      )
+      .all(taskId) as { payload_json: string }[];
+    for (const { payload_json } of rows) {
+      const event = turnEventSchema.parse(JSON.parse(payload_json));
+      if (event.type === 'approval.requested' && event.approvalId === approvalId)
+        return event.approval.challenge;
+    }
+    throw new Error('Approval challenge event is missing');
+  }
+
+  private findApprovalEvent(
+    taskId: string,
+    approvalId: string,
+    type: TurnEvent['type'],
+  ): TurnEvent {
+    const rows = this.db
+      .prepare('SELECT payload_json FROM turn_events WHERE task_id = ? AND type = ? ORDER BY seq')
+      .all(taskId, type) as { payload_json: string }[];
+    const event = rows
+      .map(({ payload_json }) => turnEventSchema.parse(JSON.parse(payload_json)))
+      .find((candidate) => 'approvalId' in candidate && candidate.approvalId === approvalId);
+    if (event === undefined) throw new Error('Approval event is missing');
+    return event;
+  }
+
+  private resumeTurnAfterApproval(taskId: string, turnId: string): void {
+    const pending = (
+      this.db
+        .prepare("SELECT COUNT(*) AS count FROM approvals WHERE turn_id = ? AND state = 'pending'")
+        .get(turnId) as { count: number }
+    ).count;
+    if (pending !== 0) return;
+    const turn = this.getTurn(taskId, turnId);
+    if (turn.state !== 'waiting_approval') return;
+    transitionTurn(turn.state, 'executing');
+    this.updateTurn(turnId, 'executing');
+  }
+
+  private cancelPendingApprovals(taskId: string, turnId: string, at: string): void {
+    const rows = this.db
+      .prepare("SELECT * FROM approvals WHERE task_id = ? AND turn_id = ? AND state = 'pending'")
+      .all(taskId, turnId) as ApprovalRow[];
+    for (const row of rows) {
+      this.db
+        .prepare(
+          `UPDATE approvals SET state = 'canceled', decision = NULL, revision = revision + 1,
+            resolved_at = ? WHERE id = ? AND state = 'pending'`,
+        )
+        .run(at, row.id);
+      const approval = this.toPersistedApproval(
+        this.getApprovalRow(row.id),
+        this.challengeForApproval(taskId, row.id),
+      );
+      this.appendEvent({
+        type: 'approval.canceled',
+        taskId,
+        turnId,
+        approvalId: row.id,
+        approval: toApprovalSummary(approval),
+      });
+    }
+  }
+
   private completeTurnInTransaction(
     taskId: string,
     turnId: string,
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
   ): TurnEvent {
     const turn = this.getTurn(taskId, turnId);
+    this.cancelPendingApprovals(taskId, turnId, new Date().toISOString());
     transitionTurn(turn.state, state);
     this.updateTurn(turnId, state);
     const row =
@@ -1647,14 +2240,201 @@ function toStepSnapshot(row: IntelligenceStepRow): StepSnapshot {
   };
 }
 
+export function toApprovalSummary(approval: PersistedApproval): ApprovalSummary {
+  return approvalSummarySchema.parse({
+    id: approval.id,
+    taskId: approval.taskId,
+    turnId: approval.turnId,
+    callId: approval.callId,
+    state: approval.state,
+    decision: approval.decision,
+    revision: approval.revision,
+    policyEpoch: approval.policyEpoch,
+    toolName: approval.toolName,
+    reason: approval.reason,
+    target: approval.target,
+    impact: approval.impact,
+    execution: approval.execution,
+    risk: approval.risk,
+    capability: approval.capability,
+    challenge: approval.challenge,
+    createdAt: approval.createdAt,
+    expiresAt: approval.expiresAt,
+    ...(approval.decidedAt === undefined ? {} : { decidedAt: approval.decidedAt }),
+  });
+}
+
+function validateApprovalRequest(input: ApprovalRequestInput): void {
+  for (const value of [
+    input.id,
+    input.taskId,
+    input.turnId,
+    input.itemId,
+    input.callId,
+    input.runtimeInstanceId,
+    input.subjectId,
+    input.providerName,
+    input.toolId,
+  ])
+    if (value.length === 0 || value.length > 256) throw new Error('Invalid approval identity');
+  for (const digest of [input.toolCatalogDigest, input.schemaDigest, input.specDigest])
+    if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('Invalid approval digest');
+  if (!capabilities.includes(input.capability)) throw new Error('Invalid approval capability');
+  if (!Number.isInteger(input.policyEpoch) || input.policyEpoch < 0)
+    throw new Error('Invalid approval policy epoch');
+  if (input.challenge.length < 8 || input.challenge.length > 256)
+    throw new Error('Invalid approval challenge');
+  if (
+    !Number.isFinite(Date.parse(input.expiresAt)) ||
+    !Number.isFinite(Date.parse(input.requestedAt)) ||
+    Date.parse(input.expiresAt) <= Date.parse(input.requestedAt)
+  )
+    throw new Error('Invalid approval lifetime');
+  parseResourceSet(JSON.stringify(input.resource));
+}
+
+function parseApprovalDisplay(value: string): {
+  target: string;
+  impact: string;
+  execution: string;
+} {
+  const parsed = JSON.parse(value) as Record<string, unknown>;
+  if (
+    typeof parsed.target !== 'string' ||
+    typeof parsed.impact !== 'string' ||
+    typeof parsed.execution !== 'string'
+  )
+    throw new Error('Invalid approval display projection');
+  return {
+    target: sanitizeApprovalText(parsed.target, 500),
+    impact: sanitizeApprovalText(parsed.impact, 500),
+    execution: sanitizeApprovalText(parsed.execution, 2_000),
+  };
+}
+
+function sanitizeApprovalText(value: string, maxLength: number): string {
+  const sanitized = Array.from(value, (character) => {
+    const code = character.charCodeAt(0);
+    return code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31) || code === 127
+      ? '�'
+      : character;
+  })
+    .join('')
+    .trim();
+  if (sanitized.length === 0) return '詳細なし';
+  return sanitized.slice(0, maxLength);
+}
+
+function approvalRequestDigest(input: ApprovalRequestInput): string {
+  return sha256(
+    JSON.stringify({
+      taskId: input.taskId,
+      turnId: input.turnId,
+      callId: input.callId,
+      runtimeInstanceId: input.runtimeInstanceId,
+      subjectId: input.subjectId,
+      providerName: input.providerName,
+      toolId: input.toolId,
+      toolCatalogDigest: input.toolCatalogDigest,
+      schemaDigest: input.schemaDigest,
+      specDigest: input.specDigest,
+      policyEpoch: input.policyEpoch,
+      capability: input.capability,
+      resource: input.resource,
+      operation: input.operation,
+      providerEgress: input.providerEgress,
+      sandboxProfile: input.sandboxProfile,
+      risk: input.risk,
+      reason: sanitizeApprovalText(input.reasonUntrusted, 500),
+      display: {
+        target: sanitizeApprovalText(input.display.target, 500),
+        impact: sanitizeApprovalText(input.display.impact, 500),
+        execution: sanitizeApprovalText(input.display.execution, 2_000),
+      },
+    }),
+  );
+}
+
+function persistedApprovalRequestDigest(approval: PersistedApproval): string {
+  return sha256(
+    JSON.stringify({
+      taskId: approval.taskId,
+      turnId: approval.turnId,
+      callId: approval.callId,
+      runtimeInstanceId: approval.runtimeInstanceId,
+      subjectId: approval.subjectId,
+      providerName: approval.toolName,
+      toolId: approval.toolId,
+      toolCatalogDigest: approval.toolCatalogDigest,
+      schemaDigest: approval.schemaDigest,
+      specDigest: approval.specDigest,
+      policyEpoch: approval.policyEpoch,
+      capability: approval.capability,
+      resource: approval.resource,
+      operation: approval.operation,
+      providerEgress: approval.providerEgress,
+      sandboxProfile: approval.sandboxProfile,
+      risk: approval.risk,
+      reason: approval.reason,
+      display: {
+        target: approval.target,
+        impact: approval.impact,
+        execution: approval.execution,
+      },
+    }),
+  );
+}
+
+function approvalRowRequestDigest(row: ApprovalRow): string {
+  return sha256(
+    JSON.stringify({
+      taskId: row.task_id,
+      turnId: row.turn_id,
+      callId: row.runtime_call_id,
+      itemId: row.item_id,
+      runtimeInstanceId: row.runtime_instance_id,
+      subjectId: row.subject_id,
+      providerName: row.provider_name,
+      toolId: row.tool_id,
+      toolCatalogDigest: row.tool_catalog_digest,
+      schemaDigest: row.schema_digest,
+      specDigest: row.spec_digest,
+      policyEpoch: row.policy_epoch,
+      capability: row.capability,
+      resource: parseResourceSet(row.resource_json),
+      operation: row.operation,
+      providerEgress: row.provider_egress,
+      sandboxProfile: row.sandbox_profile,
+      risk: row.risk,
+      reason: row.reason_untrusted,
+      display: parseApprovalDisplay(row.display_json),
+    }),
+  );
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function approvalStorageCallId(callId: string, capability: Capability): string {
+  return JSON.stringify([callId, capability]);
+}
+
+function timingSafeDigestEqual(left: string, right: string): boolean {
+  if (!/^[a-f0-9]{64}$/.test(left) || !/^[a-f0-9]{64}$/.test(right)) return false;
+  return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
+}
+
 function isTerminal(state: TurnState): boolean {
   return (
     state === 'completed' || state === 'canceled' || state === 'failed' || state === 'interrupted'
   );
 }
 
-function stateToStage(state: TurnState): TurnStage {
+function stateToStage(state: TurnState): NonNullable<TurnSnapshot['activeTurn']>['stage'] {
+  if (state === 'waiting_approval') return 'waiting_approval';
   if (state === 'planning' || state === 'executing' || state === 'synthesizing') return state;
+  if (state === 'blocked') return 'executing';
   return 'understanding';
 }
 

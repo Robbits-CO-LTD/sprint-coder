@@ -27,7 +27,41 @@ export type ChatMessage = {
   createdAt: string;
 };
 
-export type TurnStage = 'understanding' | 'planning' | 'executing' | 'synthesizing';
+export type TurnStage =
+  'understanding' | 'planning' | 'executing' | 'waiting_approval' | 'synthesizing';
+
+export type ApprovalDecision = 'allow_once' | 'allow_task' | 'deny';
+export type Capability =
+  | 'workspace.read'
+  | 'workspace.write'
+  | 'filesystem.external.read'
+  | 'filesystem.external.write'
+  | 'shell.execute'
+  | 'network.fetch'
+  | 'external.open'
+  | 'secret.use'
+  | 'provider.egress';
+export type ApprovalSummary = {
+  id: string;
+  taskId: string;
+  turnId: string;
+  callId: string;
+  state: 'pending' | 'resolved' | 'canceled' | 'stale' | 'expired';
+  decision: ApprovalDecision | null;
+  revision: number;
+  policyEpoch: number;
+  toolName: string;
+  reason: string;
+  target: string;
+  impact: string;
+  execution: string;
+  risk: 'low' | 'medium' | 'high';
+  capability: Capability;
+  challenge: string;
+  createdAt: string;
+  expiresAt: string;
+  decidedAt?: string;
+};
 
 export type QueuedInput = { ordinal: number; text: string };
 
@@ -59,6 +93,23 @@ export type TurnEvent =
       state: 'completed' | 'canceled' | 'failed' | 'interrupted';
       message?: ChatMessage;
     }
+  | {
+      type: 'approval.requested' | 'approval.canceled' | 'approval.stale' | 'approval.expired';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      approvalId: string;
+      approval: ApprovalSummary;
+    }
+  | {
+      type: 'approval.resolved';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      approvalId: string;
+      decision: ApprovalDecision;
+      approval: ApprovalSummary;
+    }
   | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
   | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage };
 
@@ -74,6 +125,7 @@ export type TurnSnapshot = {
   queued: QueuedInput[];
   /** Absent until the backend implements context-usage tracking (graceful degrade). */
   contextUsage?: ContextUsage;
+  pendingApprovals: ApprovalSummary[];
 };
 
 /** err.code values the IPC layer may attach to a rejected VibeApi promise. */
@@ -134,6 +186,17 @@ export interface VibeApi {
       preset: AccessPreset,
       expectedPolicyEpoch: number,
     ): Promise<PermissionSettings>;
+  };
+  approvals: {
+    listPending(taskId: string): Promise<ApprovalSummary[]>;
+    resolve(input: {
+      taskId: string;
+      approvalId: string;
+      decision: ApprovalDecision;
+      expectedRevision: number;
+      expectedPolicyEpoch: number;
+      challenge: string;
+    }): Promise<ApprovalSummary>;
   };
 }
 

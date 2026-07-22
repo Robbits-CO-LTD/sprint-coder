@@ -28,7 +28,16 @@ export type ModelSampler = (input: {
   toolCatalogSnapshot: ToolCatalogSnapshot;
 }) => Promise<ModelSample> | ModelSample;
 
-export type ToolExecutor = (call: ModelToolCall) => Promise<string> | string;
+export type ToolDeniedResult = Readonly<{
+  ok: false;
+  code:
+    'PERMISSION_DENIED' | 'POLICY_DENIED' | 'APPROVAL_EXPIRED' | 'APPROVAL_STALE' | 'TURN_CANCELED';
+  content: string;
+}>;
+
+export type ToolExecutor = (
+  call: ModelToolCall,
+) => Promise<string | ToolDeniedResult> | string | ToolDeniedResult;
 
 export type IntelligenceStepRecorder = {
   createIntelligenceStep(input: {
@@ -123,25 +132,23 @@ export async function runIntelligenceLoop(
       }
 
       await transition('dispatching');
-      const results = await Promise.all(
-        sampled.calls.map(async (call) => {
-          if (
-            !input.toolCatalogSnapshot.entries.some(
-              ({ providerName }) => providerName === call.toolName,
-            )
+      for (const call of sampled.calls) {
+        if (
+          !input.toolCatalogSnapshot.entries.some(
+            ({ providerName }) => providerName === call.toolName,
           )
-            throw new Error(`Tool is not present in the immutable Turn catalog: ${call.toolName}`);
-          return { call, content: await input.executeTool(call) };
-        }),
-      );
-      for (const { call, content } of results) {
+        )
+          throw new Error(`Tool is not present in the immutable Turn catalog: ${call.toolName}`);
+        const outcome = await input.executeTool(call);
+        const denied = typeof outcome !== 'string';
+        const content = denied ? outcome.content : outcome;
         transcript.push({
           type: 'tool-call',
           callId: call.callId,
           toolName: call.toolName,
           arguments: call.arguments,
         });
-        transcript.push({ type: 'tool-result', callId: call.callId, content, isError: false });
+        transcript.push({ type: 'tool-result', callId: call.callId, content, isError: denied });
       }
       toolCallCount += sampled.calls.length;
       await transition('toolsCommitted');
@@ -161,6 +168,17 @@ export function createDeterministicMockSampler(
 ): ModelSampler {
   return ({ transcript }) => {
     if (mode === 'answer-only' || transcript.length > 0) return { kind: 'final', text: finalText };
+    if (input.includes('承認テスト'))
+      return {
+        kind: 'tool-calls',
+        calls: [
+          {
+            callId: `approval-${digestCanonical(input).slice(0, 16)}`,
+            toolName: 'approval_probe',
+            arguments: { origin: 'https://example.test' },
+          },
+        ],
+      };
     return {
       kind: 'tool-calls',
       calls: [

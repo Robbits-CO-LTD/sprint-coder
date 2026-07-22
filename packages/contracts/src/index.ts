@@ -167,6 +167,60 @@ export const contextUsageSchema = z
   .strict();
 export type ContextUsage = z.infer<typeof contextUsageSchema>;
 
+export const approvalDecisionSchema = z.enum(['allow_once', 'allow_task', 'deny']);
+export type ApprovalDecision = z.infer<typeof approvalDecisionSchema>;
+export const approvalStateSchema = z.enum(['pending', 'resolved', 'canceled', 'stale', 'expired']);
+export type ApprovalState = z.infer<typeof approvalStateSchema>;
+export const approvalSummarySchema = z
+  .object({
+    id: idSchema,
+    taskId: idSchema,
+    turnId: idSchema,
+    callId: idSchema,
+    state: approvalStateSchema,
+    decision: approvalDecisionSchema.nullable(),
+    revision: z.number().int().nonnegative(),
+    policyEpoch: z.number().int().nonnegative(),
+    toolName: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+    reason: z.string().min(1).max(500),
+    target: z.string().min(1).max(500),
+    impact: z.string().min(1).max(500),
+    execution: z.string().min(1).max(2_000),
+    risk: toolRiskSchema,
+    capability: toolCapabilitySchema,
+    challenge: z.string().min(8).max(256),
+    createdAt: timestampSchema,
+    expiresAt: timestampSchema,
+    decidedAt: timestampSchema.optional(),
+  })
+  .strict()
+  .superRefine((approval, context) => {
+    if (approval.state === 'resolved') {
+      if (approval.decision === null)
+        context.addIssue({ code: 'custom', message: 'Resolved approval requires a decision' });
+      if (approval.decidedAt === undefined)
+        context.addIssue({ code: 'custom', message: 'Resolved approval requires decidedAt' });
+    } else {
+      if (approval.decision !== null)
+        context.addIssue({ code: 'custom', message: 'Only resolved approvals have a decision' });
+      if (approval.state === 'pending' && approval.decidedAt !== undefined)
+        context.addIssue({ code: 'custom', message: 'Pending approval cannot have decidedAt' });
+    }
+  });
+export type ApprovalSummary = z.infer<typeof approvalSummarySchema>;
+
+export const approvalResolveInputSchema = z
+  .object({
+    taskId: idSchema,
+    approvalId: idSchema,
+    decision: approvalDecisionSchema,
+    expectedRevision: z.number().int().nonnegative(),
+    expectedPolicyEpoch: z.number().int().nonnegative(),
+    challenge: z.string().min(8).max(256),
+  })
+  .strict();
+export type ApprovalResolveInput = z.infer<typeof approvalResolveInputSchema>;
+
 const turnEventBase = { taskId: idSchema, turnId: idSchema, seq: z.number().int().positive() };
 export const turnEventSchema = z.discriminatedUnion('type', [
   z
@@ -181,6 +235,33 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       delta: z.string().min(1).max(16_384),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal('approval.requested'),
+      ...turnEventBase,
+      approvalId: idSchema,
+      approval: approvalSummarySchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('approval.resolved'),
+      ...turnEventBase,
+      approvalId: idSchema,
+      decision: approvalDecisionSchema,
+      approval: approvalSummarySchema,
+    })
+    .strict(),
+  ...(['canceled', 'stale', 'expired'] as const).map((state) =>
+    z
+      .object({
+        type: z.literal(`approval.${state}`),
+        ...turnEventBase,
+        approvalId: idSchema,
+        approval: approvalSummarySchema,
+      })
+      .strict(),
+  ),
   z
     .object({
       type: z.literal('turn.completed'),
@@ -214,7 +295,7 @@ export const turnSnapshotSchema = z
     activeTurn: z
       .object({
         turnId: idSchema,
-        stage: turnStageSchema,
+        stage: z.union([turnStageSchema, z.literal('waiting_approval')]),
         startedAtEpochMs: z.number().int().nonnegative(),
         streamedText: z.string(),
         messageId: idSchema.nullable(),
@@ -223,6 +304,7 @@ export const turnSnapshotSchema = z
       .nullable(),
     queued: z.array(queuedInputSchema),
     contextUsage: contextUsageSchema,
+    pendingApprovals: z.array(approvalSummarySchema).default([]),
   })
   .strict();
 export type TurnSnapshot = z.infer<typeof turnSnapshotSchema>;
@@ -403,6 +485,10 @@ export interface VibeApi {
       expectedPolicyEpoch: number,
     ): Promise<PermissionSettings>;
   };
+  approvals: {
+    listPending(taskId: string): Promise<ApprovalSummary[]>;
+    resolve(input: ApprovalResolveInput): Promise<ApprovalSummary>;
+  };
   turns: {
     start(input: { taskId: string; text: string }): Promise<{ turnId: string }>;
     queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
@@ -436,6 +522,8 @@ export const IPC_CHANNELS = {
   settingsSetModel: 'vibe:settings:set-model',
   permissionsGet: 'vibe:permissions:get',
   permissionsSet: 'vibe:permissions:set',
+  approvalsListPending: 'vibe:approvals:list-pending',
+  approvalsResolve: 'vibe:approvals:resolve',
   turnsStart: 'vibe:turns:start',
   turnsQueue: 'vibe:turns:queue',
   turnsSteer: 'vibe:turns:steer',

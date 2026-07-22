@@ -14,6 +14,8 @@ import { z } from 'zod';
 import {
   IPC_CHANNELS,
   appInfoSchema,
+  approvalResolveInputSchema,
+  approvalSummarySchema,
   chatMessageSchema,
   commandEnvelopeSchema,
   emptyPayloadSchema,
@@ -52,6 +54,7 @@ import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
 import type { PersistenceClient, QueueTransition, StartedTurn } from './persistence';
+import { toApprovalSummary } from './persistence';
 import {
   NotFoundError,
   OperationConflictError,
@@ -62,7 +65,10 @@ import {
 import { MockRuntimeAdapter } from './runtime';
 import { RuntimeHostClient } from './runtime-host';
 import { PermissionBroker } from './permission-broker';
+import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
+import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
+import type { Capability } from '@vibe/domain';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -74,13 +80,27 @@ export class IpcRouter {
   private readonly codexRuntime: RuntimeHostClient;
   private readonly turnRuntimes = new Map<string, RuntimeKind>();
   private readonly permissionBroker: PermissionBroker;
+  private readonly approvalCoordinator: ApprovalCoordinator;
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
   ) {
-    this.permissionBroker = new PermissionBroker(persistence);
+    this.approvalCoordinator = new ApprovalCoordinator({
+      persistence,
+      now: () => new Date().toISOString(),
+      expiresAt: () => new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+      getCurrentPolicyEpoch: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
+      isTurnActive: (taskId, turnId) => this.persistence.getActiveTurnId(taskId) === turnId,
+      evaluatePermission: ({ capability, request }) =>
+        this.evaluateToolPermission(request, capability),
+      publish: (_approval, event) => {
+        const parsed = turnEventSchema.safeParse(event);
+        if (parsed.success) this.publish(parsed.data);
+      },
+    });
+    this.permissionBroker = new PermissionBroker(persistence, this.approvalCoordinator);
     this.mockRuntime = new MockRuntimeAdapter(
       persistence,
       (event) => this.publish(event),
@@ -90,6 +110,7 @@ export class IpcRouter {
         if (this.turnRuntimes.get(turnId) === 'mock') this.finishAndAdvance(taskId, turnId, state);
       },
       (taskId, turnId) => this.prepareContext(taskId, turnId),
+      this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) => this.handleCodexEvent(taskId, turnId, runtimeEvent),
@@ -202,6 +223,39 @@ export class IpcRouter {
         );
         await this.permissionBroker.drainPolicyEpochOutbox().catch(() => undefined);
         return value;
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.approvalsListPending,
+      taskIdPayloadSchema,
+      z.array(approvalSummarySchema),
+      (input) => this.persistence.listPendingApprovals(input.taskId).map(toApprovalSummary),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.approvalsResolve,
+      approvalResolveInputSchema,
+      approvalSummarySchema,
+      (input, _event, envelope) => {
+        const approval = this.persistence.getApproval(input.taskId, input.approvalId);
+        if (approval.policyEpoch !== input.expectedPolicyEpoch)
+          throw new StalePermissionPolicyError();
+        this.approvalCoordinator.resolve({
+          taskId: input.taskId,
+          turnId: approval.turnId,
+          approvalId: input.approvalId,
+          decision: input.decision,
+          expectedRevision: input.expectedRevision,
+          challenge: input.challenge,
+          operationId: envelope.operationId,
+        });
+        const event = [...this.persistence.listEventsAfter(input.taskId, 0)]
+          .reverse()
+          .find(
+            (candidate) =>
+              candidate.type === 'approval.resolved' && candidate.approvalId === input.approvalId,
+          );
+        if (event !== undefined) this.publish(event);
+        return toApprovalSummary(this.persistence.getApproval(input.taskId, input.approvalId));
       },
     );
     this.handle(IPC_CHANNELS.tasksList, emptyPayloadSchema, z.array(taskSummarySchema), () =>
@@ -405,7 +459,10 @@ export class IpcRouter {
           },
         );
         if (result.executed) {
-          if (canceledTurnId !== null) this.cancelRuntime(input.taskId, canceledTurnId);
+          if (canceledTurnId !== null) {
+            this.approvalCoordinator.turnEnded(input.taskId, canceledTurnId, 'canceled');
+            this.cancelRuntime(input.taskId, canceledTurnId);
+          }
           if (canceledEvent !== null) this.publish(canceledEvent);
           if (started !== undefined) this.dispatchStarted(started);
         }
@@ -430,6 +487,7 @@ export class IpcRouter {
           },
         );
         if (result.executed) {
+          this.approvalCoordinator.turnEnded(input.taskId, input.turnId, 'canceled');
           this.cancelRuntime(input.taskId, input.turnId);
           if (canceledEvent !== null) this.publish(canceledEvent);
           this.dispatchQueueTransition(next);
@@ -563,7 +621,50 @@ export class IpcRouter {
   private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {
     this.turnRuntimes.delete(turnId);
     this.publish(this.persistence.completeTurn(taskId, turnId, state));
+    this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
     this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
+  }
+
+  private evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
+    if (request.entry.implementationKind === 'command-runner') return 'deny' as const;
+    const facts = approvalFactsForTool(request, capability);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
+    const ceilingEntry = {
+      capability,
+      resourceSet: facts.resourceSet,
+      operations: [facts.operation],
+      expiresAt,
+      providerEgress: ['none' as const],
+      sandboxProfiles: ['read-only' as const],
+    };
+    const evaluation = this.permissionBroker.evaluate({
+      taskId: request.context.taskId,
+      request: {
+        taskId: request.context.taskId,
+        subjectId: facts.subjectId,
+        capability,
+        resource: facts.resource,
+        operation: facts.operation,
+        providerEgress: 'none',
+        sandboxProfile: 'read-only',
+        executionSpecDigest: facts.specDigest,
+        reviewerInputDigest: createHash('sha256')
+          .update(JSON.stringify(request.input))
+          .digest('hex'),
+        risk: request.entry.risk,
+      },
+      basePolicy: {
+        managedDeny: [],
+        projectDeny: [],
+        parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        sandbox: { feasible: true, profile: 'read-only' },
+      },
+      now: new Date().toISOString(),
+    });
+    return evaluation.decision === 'allow' || evaluation.decision === 'allow_once'
+      ? ('allow' as const)
+      : evaluation.decision;
   }
 
   private dispatchStarted(started: StartedTurn): void {

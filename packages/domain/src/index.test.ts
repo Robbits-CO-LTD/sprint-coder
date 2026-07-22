@@ -12,8 +12,10 @@ import {
 const valid: Record<TurnState, readonly TurnState[]> = {
   queued: ['understanding', 'canceling', 'failed', 'interrupted'],
   understanding: ['planning', 'canceling', 'failed', 'interrupted'],
-  planning: ['executing', 'canceling', 'failed', 'interrupted'],
-  executing: ['synthesizing', 'canceling', 'failed', 'interrupted'],
+  planning: ['executing', 'waiting_approval', 'canceling', 'failed', 'interrupted'],
+  executing: ['waiting_approval', 'synthesizing', 'canceling', 'failed', 'interrupted'],
+  waiting_approval: ['executing', 'blocked', 'canceling', 'failed', 'interrupted'],
+  blocked: ['executing', 'canceling', 'failed', 'interrupted'],
   synthesizing: ['completed', 'canceling', 'failed', 'interrupted'],
   canceling: ['canceled', 'failed', 'interrupted'],
   completed: [],

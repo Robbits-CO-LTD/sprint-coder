@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import type {
   AccessPreset,
+  ApprovalDecision,
+  ApprovalSummary,
   ChatMessage,
   ContextUsage,
   CodexModelOption,
@@ -38,9 +40,16 @@ export const STAGE_LABEL: Record<TurnStage, string> = {
   planning: '方針を組み立て中',
   executing: 'ファイル・コマンドを実行中',
   synthesizing: '回答をまとめ中',
+  waiting_approval: '承認を待っています',
 };
 
-export const STAGE_ORDER: TurnStage[] = ['understanding', 'planning', 'executing', 'synthesizing'];
+export const STAGE_ORDER: TurnStage[] = [
+  'understanding',
+  'planning',
+  'executing',
+  'waiting_approval',
+  'synthesizing',
+];
 
 function finalStateLabel(status: TurnStatus): string {
   switch (status) {
@@ -78,6 +87,8 @@ type AppState = {
   draftByTask: Record<string, string>;
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   permissionByTask: Record<string, PermissionSettings | undefined>;
+  approvalsByTask: Record<string, ApprovalSummary[]>;
+  resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
 
   /** Runtime (Mock/Codex) selection surfaced by the Composer runtime chip (FR-SET-03).
@@ -95,6 +106,7 @@ type AppState = {
   setRuntime(kind: RuntimeKind): Promise<void>;
   setModel(model: string): Promise<void>;
   setAccessPreset(taskId: string, preset: AccessPreset): Promise<void>;
+  resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision): Promise<void>;
   selectTask(taskId: string): Promise<void>;
   createTask(): Promise<void>;
   renameTask(taskId: string, title: string): Promise<void>;
@@ -267,6 +279,37 @@ function handleTurnEvent(
       });
       break;
     }
+    case 'approval.requested': {
+      apply((state) => ({
+        approvalsByTask: {
+          ...state.approvalsByTask,
+          [taskId]: [
+            ...(state.approvalsByTask[taskId] ?? []).filter(({ id }) => id !== ev.approvalId),
+            ev.approval,
+          ],
+        },
+        turnByTask: state.turnByTask[taskId]
+          ? {
+              ...state.turnByTask,
+              [taskId]: { ...state.turnByTask[taskId]!, stage: 'waiting_approval' },
+            }
+          : state.turnByTask,
+        stageAnnouncement: STAGE_LABEL.waiting_approval,
+      }));
+      break;
+    }
+    case 'approval.resolved':
+    case 'approval.canceled':
+    case 'approval.stale':
+    case 'approval.expired': {
+      apply((state) => ({
+        approvalsByTask: {
+          ...state.approvalsByTask,
+          [taskId]: (state.approvalsByTask[taskId] ?? []).filter(({ id }) => id !== ev.approvalId),
+        },
+      }));
+      break;
+    }
     case 'message.delta': {
       apply((state) => {
         const turn = state.turnByTask[taskId];
@@ -350,6 +393,8 @@ export const useAppStore = create<AppState>((set, get) => {
     draftByTask: {},
     workspaceByTask: {},
     permissionByTask: {},
+    approvalsByTask: {},
+    resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     runtime: {
       kind: 'mock',
@@ -459,6 +504,37 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    async resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision) {
+      if (!window.vibe || typeof window.vibe.approvals?.resolve !== 'function') return;
+      const approval = (get().approvalsByTask[taskId] ?? []).find(({ id }) => id === approvalId);
+      if (approval === undefined || get().resolvingApprovalIds[approvalId]) return;
+      set((state) => ({
+        resolvingApprovalIds: { ...state.resolvingApprovalIds, [approvalId]: true },
+      }));
+      try {
+        await window.vibe.approvals.resolve({
+          taskId,
+          approvalId,
+          decision,
+          expectedRevision: approval.revision,
+          expectedPolicyEpoch: approval.policyEpoch,
+          challenge: approval.challenge,
+        });
+        set((state) => ({
+          approvalsByTask: {
+            ...state.approvalsByTask,
+            [taskId]: (state.approvalsByTask[taskId] ?? []).filter(({ id }) => id !== approvalId),
+          },
+        }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      } finally {
+        set((state) => ({
+          resolvingApprovalIds: { ...state.resolvingApprovalIds, [approvalId]: undefined },
+        }));
+      }
+    },
+
     async selectTask(taskId: string) {
       set({ selectedTaskId: taskId, loadingMessages: true, error: null });
       if (currentUnsubscribe) {
@@ -520,6 +596,10 @@ export const useAppStore = create<AppState>((set, get) => {
           contextUsageByTask: snapshot.contextUsage
             ? { ...state.contextUsageByTask, [taskId]: snapshot.contextUsage }
             : state.contextUsageByTask,
+          approvalsByTask: {
+            ...state.approvalsByTask,
+            [taskId]: snapshot.pendingApprovals ?? [],
+          },
         }));
       }
 

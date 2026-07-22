@@ -1,0 +1,63 @@
+import { expect, test } from '@playwright/test';
+import type { ElectronApplication, Page } from '@playwright/test';
+import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
+
+test.describe('approval flow', () => {
+  let userDataDir: string;
+  let app: ElectronApplication | null = null;
+
+  test.beforeAll(() => {
+    userDataDir = createUserDataDir('approval-flow');
+  });
+
+  test.afterAll(async () => {
+    await closeApp(app);
+    removeUserDataDir(userDataDir);
+  });
+
+  test('denial is persisted and returned to the runtime without failing the Turn', async () => {
+    app = await launchApp(userDataDir);
+    const page: Page = await firstWindow(app);
+    await page.getByTestId('sidebar-new-task-button').click();
+
+    const textarea = page.getByTestId('composer-textarea');
+    await textarea.fill('承認テストをしてください');
+    await textarea.press('Enter');
+
+    const card = page.getByTestId('approval-card');
+    await expect(card).toBeVisible();
+    await expect(card).toContainText('approval_probe');
+    await expect(card).toContainText('https://example.test');
+    await page.getByTestId('approval-deny').click();
+
+    await expect(card).toHaveCount(0);
+    await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
+      timeout: 20_000,
+    });
+    await expect(page.getByTestId('assistant-message')).toContainText('決定論的なモック応答です');
+
+    await page.getByTestId('sidebar-new-task-button').click();
+    await textarea.fill('承認テストをしてください');
+    await textarea.press('Enter');
+    await expect(card).toBeVisible();
+    await page.getByRole('button', { name: '今回のみ許可' }).click();
+    await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed');
+    await textarea.fill('承認テストをしてください');
+    await textarea.press('Enter');
+    await expect(card).toBeVisible();
+    await page.getByTestId('approval-deny').click();
+    await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed');
+
+    await page.getByTestId('sidebar-new-task-button').click();
+    await textarea.fill('承認テストをしてください');
+    await textarea.press('Enter');
+    await expect(card).toBeVisible();
+    await page.getByTestId('approval-allow-task').click();
+    await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed');
+    await textarea.fill('承認テストをしてください');
+    await textarea.press('Enter');
+    await page.waitForTimeout(1_000);
+    await expect(card).toHaveCount(0);
+    await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed');
+  });
+});

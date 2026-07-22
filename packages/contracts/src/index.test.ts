@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as contracts from './index';
 import {
   commandEnvelopeSchema,
   permissionSettingsSchema,
@@ -10,6 +11,34 @@ import {
   turnEventSchema,
   turnSnapshotSchema,
 } from './index';
+
+type Parser = { parse(value: unknown): unknown };
+const approvalContracts = contracts as typeof contracts & {
+  approvalDecisionSchema: Parser;
+  approvalSummarySchema: Parser;
+  approvalResolveInputSchema: Parser;
+};
+
+const pendingApproval = {
+  id: 'approval-1',
+  taskId: 'task-1',
+  turnId: 'turn-1',
+  callId: 'call-1',
+  state: 'pending',
+  decision: null,
+  revision: 0,
+  policyEpoch: 3,
+  toolName: 'fetch_url',
+  reason: 'The task requested network access.',
+  target: 'https://example.com',
+  impact: 'Sends a request to an external service.',
+  execution: 'GET https://example.com',
+  risk: 'medium',
+  capability: 'network.fetch',
+  challenge: 'approval-challenge-0001',
+  createdAt: '2026-07-22T12:00:00.000Z',
+  expiresAt: '2026-07-22T12:05:00.000Z',
+} as const;
 
 describe('public contracts', () => {
   it('rejects unknown command fields', () => {
@@ -163,5 +192,105 @@ describe('public contracts', () => {
       { ...snapshot, providerId: 'Codex\nspoof' },
     ])
       expect(() => toolCatalogSnapshotSchema.parse(invalid)).toThrow();
+  });
+
+  it('validates the three user approval decisions and rejects unknown values', () => {
+    for (const decision of ['allow_once', 'allow_task', 'deny'])
+      expect(approvalContracts.approvalDecisionSchema.parse(decision)).toBe(decision);
+    expect(() => approvalContracts.approvalDecisionSchema.parse('allow_forever')).toThrow();
+  });
+
+  it('validates the sanitized pending Approval DTO', () => {
+    expect(approvalContracts.approvalSummarySchema.parse(pendingApproval)).toEqual(pendingApproval);
+  });
+
+  it('requires a decision only for resolved approvals', () => {
+    const resolved = {
+      ...pendingApproval,
+      state: 'resolved',
+      decision: 'deny',
+      revision: 1,
+      decidedAt: '2026-07-22T12:01:00.000Z',
+    };
+    expect(approvalContracts.approvalSummarySchema.parse(resolved)).toEqual(resolved);
+    expect(() =>
+      approvalContracts.approvalSummarySchema.parse({
+        ...pendingApproval,
+        decision: 'allow_once',
+      }),
+    ).toThrow();
+    expect(() =>
+      approvalContracts.approvalSummarySchema.parse({
+        ...resolved,
+        decision: null,
+      }),
+    ).toThrow();
+  });
+
+  it('keeps approval resolution strict and does not accept Renderer-supplied authority facts', () => {
+    const resolve = {
+      taskId: 'task-1',
+      approvalId: 'approval-1',
+      decision: 'allow_once',
+      expectedRevision: 0,
+      expectedPolicyEpoch: 3,
+      challenge: 'approval-challenge-0001',
+    };
+    expect(approvalContracts.approvalResolveInputSchema.parse(resolve)).toEqual(resolve);
+    for (const forged of [
+      { ...resolve, capability: 'shell.execute' },
+      { ...resolve, resource: { kind: 'all' } },
+      { ...resolve, executionSpecDigest: '0'.repeat(64) },
+      { ...resolve, unknown: true },
+    ])
+      expect(() => approvalContracts.approvalResolveInputSchema.parse(forged)).toThrow();
+  });
+
+  it('validates approval lifecycle Turn events', () => {
+    expect(
+      turnEventSchema.parse({
+        type: 'approval.requested',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        seq: 5,
+        approvalId: 'approval-1',
+        approval: pendingApproval,
+      }),
+    ).toMatchObject({ type: 'approval.requested', approval: { state: 'pending' } });
+    expect(
+      turnEventSchema.parse({
+        type: 'approval.resolved',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        seq: 6,
+        approvalId: 'approval-1',
+        decision: 'deny',
+        approval: {
+          ...pendingApproval,
+          state: 'resolved',
+          decision: 'deny',
+          revision: 1,
+          decidedAt: '2026-07-22T12:01:00.000Z',
+        },
+      }),
+    ).toMatchObject({ type: 'approval.resolved', approval: { decision: 'deny' } });
+  });
+
+  it('represents waiting approval in reconnect snapshots without widening Runtime stages', () => {
+    const snapshot = {
+      lastSeq: 5,
+      activeTurn: {
+        turnId: 'turn-1',
+        stage: 'waiting_approval',
+        startedAtEpochMs: 1,
+        streamedText: '',
+        messageId: null,
+      },
+      queued: [],
+      contextUsage: { usedTokens: 0, hardCapTokens: 32_000, fragments: [] },
+    };
+    expect(turnSnapshotSchema.parse(snapshot)).toMatchObject({
+      activeTurn: { turnId: 'turn-1', stage: 'waiting_approval' },
+    });
   });
 });
