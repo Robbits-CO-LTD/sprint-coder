@@ -1,5 +1,11 @@
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
+import {
+  parseNativeMutationIntentSnapshot,
+  type NativeMutationEffectObservation,
+  type NativeMutationIntentSnapshot,
+  type NativeMutationRevision,
+} from './native-mutation-intent';
 
 export type NativeSafeFsErrorCode =
   | 'ADDON_UNAVAILABLE'
@@ -59,13 +65,48 @@ export interface NativeSafeFs {
   openSession(input: NativeSafeFsOpenInput): Promise<NativeSafeFsSession>;
   assertSession(binding: Readonly<{ id: string; workspaceKey: string; fence: string }>): void;
   invalidateWorkspace(workspaceKey: string, minimumFence: string): void;
+  observeIntent(
+    session: NativeSafeFsSession,
+    intent: NativeMutationIntentSnapshot,
+  ): Promise<NativeMutationEffectObservation>;
+  stageIntentArtifact(
+    session: NativeSafeFsSession,
+    intent: NativeMutationIntentSnapshot,
+    bytes: Buffer,
+  ): Promise<NativeMutationRevision>;
   closeSession(session: NativeSafeFsSession): Promise<void>;
 }
+
+type RawJournalBinding = Readonly<{
+  sessionId: string;
+  intentId: string;
+  intentDigest: string;
+  recordDigest: string;
+  revision: number;
+}>;
+
+type RawObserveInput = RawJournalBinding &
+  Readonly<{
+    sourceSegments: readonly string[];
+    destinationSegments: readonly string[] | null;
+    auxiliarySegments: readonly string[] | null;
+  }>;
+
+type RawStageInput = RawJournalBinding &
+  Readonly<{
+    parentSegments: readonly string[];
+    leafName: string;
+    expectedContentHash: string;
+    expectedSize: number;
+    expectedMode: number;
+  }>;
 
 type RawAddon = Readonly<{
   probe(): unknown;
   openSession(input: NativeSafeFsOpenInput): Promise<unknown>;
   invalidateWorkspace(workspaceKey: string, minimumFence: string): unknown;
+  observeIntent(input: RawObserveInput): Promise<unknown>;
+  stageIntentArtifact(input: RawStageInput, bytes: Buffer): Promise<unknown>;
   closeSession(id: string): Promise<unknown>;
 }>;
 
@@ -153,6 +194,67 @@ export function loadNativeSafeFs(
       }
     },
 
+    async observeIntent(
+      session: NativeSafeFsSession,
+      intent: NativeMutationIntentSnapshot,
+    ): Promise<NativeMutationEffectObservation> {
+      assertIssuedSession(issuedSessions, session);
+      const parsed = parseNativeMutationIntentSnapshot(intent);
+      assertIntentSession(parsed, session);
+      const auxiliary = parsed.temp ?? parsed.tombstone;
+      try {
+        const observation = await addon!.observeIntent(
+          Object.freeze({
+            ...journalBinding(session, parsed),
+            sourceSegments: parsed.sourceSegments,
+            destinationSegments: parsed.destinationSegments,
+            auxiliarySegments:
+              auxiliary === null
+                ? null
+                : Object.freeze([...auxiliary.parentSegments, auxiliary.leafName]),
+          }),
+        );
+        assertIssuedSession(issuedSessions, session);
+        return parseEffectObservation(observation);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    async stageIntentArtifact(
+      session: NativeSafeFsSession,
+      intent: NativeMutationIntentSnapshot,
+      bytes: Buffer,
+    ): Promise<NativeMutationRevision> {
+      assertIssuedSession(issuedSessions, session);
+      const parsed = parseNativeMutationIntentSnapshot(intent);
+      assertIntentSession(parsed, session);
+      if (parsed.state !== 'aux_pending' || parsed.temp === null || parsed.artifact === null)
+        throw new NativeSafeFsError(
+          'INVALID_INPUT',
+          'NativeSafeFs staging requires a journaled pending artifact',
+        );
+      if (!Buffer.isBuffer(bytes))
+        throw new NativeSafeFsError('INVALID_INPUT', 'NativeSafeFs staging bytes are invalid');
+      try {
+        const observation = await addon!.stageIntentArtifact(
+          Object.freeze({
+            ...journalBinding(session, parsed),
+            parentSegments: parsed.temp.parentSegments,
+            leafName: parsed.temp.leafName,
+            expectedContentHash: parsed.temp.expectedContentHash,
+            expectedSize: parsed.temp.expectedSize,
+            expectedMode: parsed.temp.expectedMode,
+          }),
+          Buffer.from(bytes),
+        );
+        assertIssuedSession(issuedSessions, session);
+        return parseRevision(observation);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
     async closeSession(session: NativeSafeFsSession): Promise<void> {
       if (addon === null)
         throw new NativeSafeFsError('ADDON_UNAVAILABLE', 'NativeSafeFs addon is unavailable');
@@ -175,10 +277,98 @@ function validateRawAddon(value: unknown): RawAddon {
     typeof (value as Partial<RawAddon>).probe !== 'function' ||
     typeof (value as Partial<RawAddon>).openSession !== 'function' ||
     typeof (value as Partial<RawAddon>).invalidateWorkspace !== 'function' ||
+    typeof (value as Partial<RawAddon>).observeIntent !== 'function' ||
+    typeof (value as Partial<RawAddon>).stageIntentArtifact !== 'function' ||
     typeof (value as Partial<RawAddon>).closeSession !== 'function'
   )
     throw new Error('NativeSafeFs addon contract mismatch');
   return value as RawAddon;
+}
+
+function assertIssuedSession(
+  issuedSessions: ReadonlyMap<string, NativeSafeFsSession>,
+  session: NativeSafeFsSession,
+): void {
+  if (issuedSessions.get(session.id) !== session)
+    throw new NativeSafeFsError('STALE_SESSION', 'NativeSafeFs session is stale');
+}
+
+function assertIntentSession(
+  intent: NativeMutationIntentSnapshot,
+  session: NativeSafeFsSession,
+): void {
+  if (
+    intent.workspaceKey !== session.workspaceKey ||
+    intent.leaseFence !== session.fence ||
+    intent.nativeSessionId !== session.id
+  )
+    throw new NativeSafeFsError('STALE_SESSION', 'Native mutation intent session is stale');
+}
+
+function journalBinding(
+  session: NativeSafeFsSession,
+  intent: NativeMutationIntentSnapshot,
+): RawJournalBinding {
+  return Object.freeze({
+    sessionId: session.id,
+    intentId: intent.id,
+    intentDigest: intent.intentDigest,
+    recordDigest: intent.recordDigest,
+    revision: intent.revision,
+  });
+}
+
+function parseEffectObservation(value: unknown): NativeMutationEffectObservation {
+  if (!isRecord(value) || !hasExactKeys(value, ['source', 'destination', 'auxiliary']))
+    throw new Error('Invalid NativeSafeFs effect observation');
+  return Object.freeze({
+    source: parseEndpoint(value['source']),
+    destination: parseEndpoint(value['destination']),
+    auxiliary: parseEndpoint(value['auxiliary']),
+  });
+}
+
+function parseEndpoint(value: unknown): NativeMutationEffectObservation['source'] {
+  if (isRecord(value) && hasExactKeys(value, ['state']) && value['state'] === 'absent')
+    return Object.freeze({ state: 'absent' as const });
+  return parseRevision(value);
+}
+
+function parseRevision(value: unknown): NativeMutationRevision {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['state', 'identityDigest', 'contentHash', 'size', 'mode', 'nlink']) ||
+    value['state'] !== 'present' ||
+    typeof value['identityDigest'] !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(value['identityDigest']) ||
+    typeof value['contentHash'] !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(value['contentHash']) ||
+    !Number.isSafeInteger(value['size']) ||
+    (value['size'] as number) < 0 ||
+    (value['size'] as number) > 1024 * 1024 ||
+    !Number.isSafeInteger(value['mode']) ||
+    ((value['mode'] as number) & 0o170000) !== 0o100000 ||
+    value['nlink'] !== 1
+  )
+    throw new Error('Invalid NativeSafeFs revision observation');
+  return Object.freeze({
+    state: 'present',
+    identityDigest: value['identityDigest'],
+    contentHash: value['contentHash'],
+    size: value['size'] as number,
+    mode: value['mode'] as number,
+    nlink: 1,
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
 function validateOpenInput(input: NativeSafeFsOpenInput): void {

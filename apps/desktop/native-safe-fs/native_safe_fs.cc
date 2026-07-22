@@ -6,10 +6,13 @@
 #include <unistd.h>
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -27,6 +30,7 @@ struct NativeFailure {
 struct Session {
   std::string id;
   std::string workspace_key;
+  std::string workspace_path;
   std::string root_dev;
   std::string root_ino;
   uint64_t fence = 0;
@@ -98,6 +102,186 @@ bool ReadString(napi_env env, napi_value object, const char* name, std::string* 
     return false;
   output->assign(buffer.data(), length);
   return output->find('\0') == std::string::npos;
+}
+
+bool ReadUint32(napi_env env, napi_value object, const char* name, uint32_t* output) {
+  napi_value value;
+  if (napi_get_named_property(env, object, name, &value) != napi_ok) return false;
+  napi_valuetype type;
+  if (napi_typeof(env, value, &type) != napi_ok || type != napi_number) return false;
+  double parsed = 0;
+  if (napi_get_value_double(env, value, &parsed) != napi_ok || !std::isfinite(parsed) ||
+      std::floor(parsed) != parsed || parsed < 0 ||
+      parsed > static_cast<double>(std::numeric_limits<uint32_t>::max()))
+    return false;
+  *output = static_cast<uint32_t>(parsed);
+  return true;
+}
+
+bool ValidSegment(const std::string& value) {
+  return !value.empty() && value != "." && value != ".." && value.size() <= 255 &&
+         value.find('/') == std::string::npos && value.find('\\') == std::string::npos &&
+         value.find(':') == std::string::npos && value.find('\0') == std::string::npos;
+}
+
+bool ReadSegments(napi_env env, napi_value object, const char* name, bool nullable,
+                  bool allow_empty,
+                  std::vector<std::string>* output, bool* is_null = nullptr) {
+  napi_value value;
+  if (napi_get_named_property(env, object, name, &value) != napi_ok) return false;
+  napi_valuetype type;
+  if (napi_typeof(env, value, &type) != napi_ok) return false;
+  if (nullable && type == napi_null) {
+    if (is_null != nullptr) *is_null = true;
+    return true;
+  }
+  bool is_array = false;
+  if (napi_is_array(env, value, &is_array) != napi_ok || !is_array) return false;
+  uint32_t length = 0;
+  if (napi_get_array_length(env, value, &length) != napi_ok || length > 128) return false;
+  if (!allow_empty && length == 0) return false;
+  if (is_null != nullptr) *is_null = false;
+  output->reserve(length);
+  for (uint32_t index = 0; index < length; ++index) {
+    napi_value element;
+    if (napi_get_element(env, value, index, &element) != napi_ok) return false;
+    napi_value holder;
+    if (napi_create_object(env, &holder) != napi_ok ||
+        napi_set_named_property(env, holder, "segment", element) != napi_ok)
+      return false;
+    std::string segment;
+    if (!ReadString(env, holder, "segment", &segment) || !ValidSegment(segment)) return false;
+    output->push_back(std::move(segment));
+  }
+  return true;
+}
+
+class Sha256 {
+ public:
+  Sha256() { Reset(); }
+
+  void Update(const unsigned char* data, size_t length) {
+    for (size_t index = 0; index < length; ++index) {
+      block_[block_length_++] = data[index];
+      if (block_length_ == block_.size()) {
+        Transform();
+        bit_length_ += 512;
+        block_length_ = 0;
+      }
+    }
+  }
+
+  std::array<unsigned char, 32> Final() {
+    const uint64_t total_bits = bit_length_ + static_cast<uint64_t>(block_length_) * 8;
+    block_[block_length_++] = 0x80;
+    if (block_length_ > 56) {
+      while (block_length_ < 64) block_[block_length_++] = 0;
+      Transform();
+      block_length_ = 0;
+    }
+    while (block_length_ < 56) block_[block_length_++] = 0;
+    for (int shift = 56; shift >= 0; shift -= 8)
+      block_[block_length_++] = static_cast<unsigned char>((total_bits >> shift) & 0xff);
+    Transform();
+    std::array<unsigned char, 32> digest{};
+    for (size_t index = 0; index < state_.size(); ++index) {
+      digest[index * 4] = static_cast<unsigned char>((state_[index] >> 24) & 0xff);
+      digest[index * 4 + 1] = static_cast<unsigned char>((state_[index] >> 16) & 0xff);
+      digest[index * 4 + 2] = static_cast<unsigned char>((state_[index] >> 8) & 0xff);
+      digest[index * 4 + 3] = static_cast<unsigned char>(state_[index] & 0xff);
+    }
+    return digest;
+  }
+
+ private:
+  static uint32_t RotateRight(uint32_t value, uint32_t amount) {
+    return (value >> amount) | (value << (32 - amount));
+  }
+
+  void Reset() {
+    state_ = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+              0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    block_.fill(0);
+    block_length_ = 0;
+    bit_length_ = 0;
+  }
+
+  void Transform() {
+    static constexpr std::array<uint32_t, 64> constants = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    std::array<uint32_t, 64> words{};
+    for (size_t index = 0; index < 16; ++index) {
+      const size_t offset = index * 4;
+      words[index] = (static_cast<uint32_t>(block_[offset]) << 24) |
+                     (static_cast<uint32_t>(block_[offset + 1]) << 16) |
+                     (static_cast<uint32_t>(block_[offset + 2]) << 8) |
+                     static_cast<uint32_t>(block_[offset + 3]);
+    }
+    for (size_t index = 16; index < 64; ++index) {
+      const uint32_t s0 = RotateRight(words[index - 15], 7) ^
+                          RotateRight(words[index - 15], 18) ^ (words[index - 15] >> 3);
+      const uint32_t s1 = RotateRight(words[index - 2], 17) ^
+                          RotateRight(words[index - 2], 19) ^ (words[index - 2] >> 10);
+      words[index] = words[index - 16] + s0 + words[index - 7] + s1;
+    }
+    uint32_t a = state_[0], b = state_[1], c = state_[2], d = state_[3];
+    uint32_t e = state_[4], f = state_[5], g = state_[6], h = state_[7];
+    for (size_t index = 0; index < 64; ++index) {
+      const uint32_t s1 = RotateRight(e, 6) ^ RotateRight(e, 11) ^ RotateRight(e, 25);
+      const uint32_t choice = (e & f) ^ ((~e) & g);
+      const uint32_t temp1 = h + s1 + choice + constants[index] + words[index];
+      const uint32_t s0 = RotateRight(a, 2) ^ RotateRight(a, 13) ^ RotateRight(a, 22);
+      const uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+      const uint32_t temp2 = s0 + majority;
+      h = g;
+      g = f;
+      f = e;
+      e = d + temp1;
+      d = c;
+      c = b;
+      b = a;
+      a = temp1 + temp2;
+    }
+    state_[0] += a;
+    state_[1] += b;
+    state_[2] += c;
+    state_[3] += d;
+    state_[4] += e;
+    state_[5] += f;
+    state_[6] += g;
+    state_[7] += h;
+  }
+
+  std::array<uint32_t, 8> state_{};
+  std::array<unsigned char, 64> block_{};
+  size_t block_length_ = 0;
+  uint64_t bit_length_ = 0;
+};
+
+std::string HexDigest(const std::array<unsigned char, 32>& bytes) {
+  constexpr char digits[] = "0123456789abcdef";
+  std::string result(64, '0');
+  for (size_t index = 0; index < bytes.size(); ++index) {
+    result[index * 2] = digits[bytes[index] >> 4];
+    result[index * 2 + 1] = digits[bytes[index] & 0x0f];
+  }
+  return result;
+}
+
+std::string Sha256Bytes(const unsigned char* bytes, size_t length) {
+  Sha256 hash;
+  hash.Update(bytes, length);
+  return HexDigest(hash.Final());
 }
 
 napi_value MakeString(napi_env env, const std::string& value) {
@@ -366,8 +550,9 @@ struct OpenWork {
   bool success = false;
 };
 
-bool VerifyDirectoryNamespace(const std::string& path, int pinned_fd, NativeFailure* failure) {
-  int current_fd = OpenDirectoryChain(path, failure, "UNSAFE_LOCK");
+bool VerifyDirectoryNamespace(const std::string& path, int pinned_fd, NativeFailure* failure,
+                              const char* unsafe_code = "UNSAFE_LOCK") {
+  int current_fd = OpenDirectoryChain(path, failure, unsafe_code);
   if (current_fd < 0) return false;
   struct stat pinned_stat {};
   struct stat current_stat {};
@@ -377,7 +562,7 @@ bool VerifyDirectoryNamespace(const std::string& path, int pinned_fd, NativeFail
                        pinned_stat.st_ino == current_stat.st_ino;
   CloseFd(&current_fd);
   if (!matches) {
-    *failure = {"UNSAFE_LOCK", "NativeSafeFs lock directory namespace changed"};
+    *failure = {unsafe_code, "NativeSafeFs pinned directory namespace changed"};
     return false;
   }
   return true;
@@ -535,6 +720,7 @@ napi_value OpenSession(napi_env env, napi_callback_info info) {
     delete context;
     return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs open input");
   }
+  context->session.workspace_path = context->workspace_path;
   {
     std::lock_guard<std::mutex> guard(state.mutex);
     const std::string& key = context->session.workspace_key;
@@ -702,6 +888,616 @@ napi_value InvalidateWorkspace(napi_env env, napi_callback_info info) {
   return undefined;
 }
 
+constexpr off_t kMaximumMutationFileBytes = 1024 * 1024;
+
+struct RevisionObservation {
+  bool present = false;
+  std::string identity_digest;
+  std::string content_hash;
+  uint32_t size = 0;
+  uint32_t mode = 0;
+};
+
+bool StableStatMatches(const struct stat& before, const struct stat& after) {
+  if (before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+      before.st_mode != after.st_mode || before.st_nlink != after.st_nlink ||
+      before.st_size != after.st_size)
+    return false;
+#if defined(__APPLE__)
+  return before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec &&
+         before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec &&
+         before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec &&
+         before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec;
+#else
+  return before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+         before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+         before.st_ctim.tv_nsec == after.st_ctim.tv_nsec;
+#endif
+}
+
+std::string FileIdentityDigest(const struct stat& file_stat) {
+  const std::string facts =
+      "[\"native-file-identity-v1\",\"" +
+      std::to_string(static_cast<uint64_t>(file_stat.st_dev)) + "\",\"" +
+      std::to_string(static_cast<uint64_t>(file_stat.st_ino)) + "\"," +
+      std::to_string(static_cast<uint32_t>(file_stat.st_mode)) + "," +
+      std::to_string(static_cast<uint64_t>(file_stat.st_nlink)) + ",\"file\"]";
+  return Sha256Bytes(reinterpret_cast<const unsigned char*>(facts.data()), facts.size());
+}
+
+bool ObserveOpenFile(int fd, const struct stat& namespace_stat, RevisionObservation* observation,
+                     NativeFailure* failure) {
+  struct stat before {};
+  if (fstat(fd, &before) != 0) {
+    *failure = {"NATIVE_FAILURE", ErrnoMessage("stat observed file")};
+    return false;
+  }
+  if (!S_ISREG(namespace_stat.st_mode) || !S_ISREG(before.st_mode) ||
+      namespace_stat.st_dev != before.st_dev || namespace_stat.st_ino != before.st_ino ||
+      namespace_stat.st_mode != before.st_mode || namespace_stat.st_nlink != before.st_nlink ||
+      before.st_nlink != 1 || before.st_size < 0 || before.st_size > kMaximumMutationFileBytes) {
+    *failure = {"UNSAFE_PATH", "NativeSafeFs only observes unique regular files"};
+    return false;
+  }
+  std::vector<unsigned char> bytes(static_cast<size_t>(before.st_size));
+  size_t offset = 0;
+  while (offset < bytes.size()) {
+    const ssize_t count = pread(fd, bytes.data() + offset, bytes.size() - offset,
+                                static_cast<off_t>(offset));
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) {
+      *failure = {"NATIVE_FAILURE", ErrnoMessage("read observed file")};
+      return false;
+    }
+    offset += static_cast<size_t>(count);
+  }
+  struct stat after {};
+  if (fstat(fd, &after) != 0) {
+    *failure = {"NATIVE_FAILURE", ErrnoMessage("restat observed file")};
+    return false;
+  }
+  if (!StableStatMatches(before, after)) {
+    *failure = {"UNSAFE_PATH", "NativeSafeFs observed a concurrent file change"};
+    return false;
+  }
+  observation->present = true;
+  observation->identity_digest = FileIdentityDigest(after);
+  observation->content_hash = Sha256Bytes(bytes.data(), bytes.size());
+  observation->size = static_cast<uint32_t>(bytes.size());
+  observation->mode = static_cast<uint32_t>(after.st_mode);
+  return true;
+}
+
+int OpenRelativeParent(int root_fd, const std::vector<std::string>& segments,
+                       NativeFailure* failure) {
+  if (segments.empty()) {
+    *failure = {"INVALID_INPUT", "NativeSafeFs endpoint requires a leaf"};
+    return -1;
+  }
+  int current = dup(root_fd);
+  if (current < 0) {
+    *failure = {"NATIVE_FAILURE", ErrnoMessage("duplicate workspace root")};
+    return -1;
+  }
+  for (size_t index = 0; index + 1 < segments.size(); ++index) {
+    int next = openat(current, segments[index].c_str(),
+                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (next < 0) {
+      const int saved_errno = errno;
+      CloseFd(&current);
+      errno = saved_errno;
+      *failure = {"UNSAFE_PATH", ErrnoMessage("open mutation parent")};
+      return -1;
+    }
+    CloseFd(&current);
+    current = next;
+  }
+  return current;
+}
+
+bool VerifyRelativeParentNamespace(int root_fd, const std::vector<std::string>& segments,
+                                   int pinned_parent_fd, NativeFailure* failure) {
+  int current_fd = OpenRelativeParent(root_fd, segments, failure);
+  if (current_fd < 0) return false;
+  struct stat pinned {};
+  struct stat current {};
+  const bool matches = fstat(pinned_parent_fd, &pinned) == 0 && fstat(current_fd, &current) == 0 &&
+                       pinned.st_dev == current.st_dev && pinned.st_ino == current.st_ino;
+  CloseFd(&current_fd);
+  if (!matches) {
+    *failure = {"UNSAFE_PATH", "NativeSafeFs mutation parent namespace changed"};
+    return false;
+  }
+  return true;
+}
+
+struct PinnedEndpoint {
+  std::vector<std::string> segments;
+  bool present = false;
+  int fd = -1;
+  struct stat namespace_stat {};
+};
+
+void ClosePinnedEndpoint(PinnedEndpoint* endpoint) { CloseFd(&endpoint->fd); }
+
+bool PinEndpoint(int root_fd, const std::vector<std::string>& segments,
+                 PinnedEndpoint* endpoint, NativeFailure* failure) {
+  endpoint->segments = segments;
+  int parent_fd = OpenRelativeParent(root_fd, segments, failure);
+  if (parent_fd < 0) return false;
+  const std::string& leaf = segments.back();
+  if (fstatat(parent_fd, leaf.c_str(), &endpoint->namespace_stat, AT_SYMLINK_NOFOLLOW) != 0) {
+    const int saved_errno = errno;
+    CloseFd(&parent_fd);
+    if (saved_errno == ENOENT) {
+      endpoint->present = false;
+      return true;
+    }
+    errno = saved_errno;
+    *failure = {"UNSAFE_PATH", ErrnoMessage("stat mutation endpoint")};
+    return false;
+  }
+  if (!S_ISREG(endpoint->namespace_stat.st_mode) || endpoint->namespace_stat.st_nlink != 1) {
+    CloseFd(&parent_fd);
+    *failure = {"UNSAFE_PATH", "NativeSafeFs endpoint is not a unique regular file"};
+    return false;
+  }
+  endpoint->fd =
+      openat(parent_fd, leaf.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  const int saved_errno = errno;
+  CloseFd(&parent_fd);
+  if (endpoint->fd < 0) {
+    errno = saved_errno;
+    *failure = {"UNSAFE_PATH", ErrnoMessage("open mutation endpoint")};
+    return false;
+  }
+  struct stat opened {};
+  if (fstat(endpoint->fd, &opened) != 0 || !S_ISREG(opened.st_mode) || opened.st_nlink != 1 ||
+      opened.st_dev != endpoint->namespace_stat.st_dev ||
+      opened.st_ino != endpoint->namespace_stat.st_ino ||
+      opened.st_mode != endpoint->namespace_stat.st_mode ||
+      opened.st_nlink != endpoint->namespace_stat.st_nlink) {
+    *failure = {"UNSAFE_PATH", "NativeSafeFs endpoint changed while it was pinned"};
+    return false;
+  }
+  endpoint->present = true;
+  return true;
+}
+
+bool ObservePinnedEndpoint(const PinnedEndpoint& endpoint, RevisionObservation* observation,
+                           NativeFailure* failure) {
+  if (!endpoint.present) {
+    observation->present = false;
+    return true;
+  }
+  return ObserveOpenFile(endpoint.fd, endpoint.namespace_stat, observation, failure);
+}
+
+bool RevalidatePinnedEndpoint(int root_fd, const PinnedEndpoint& endpoint,
+                              NativeFailure* failure) {
+  int parent_fd = OpenRelativeParent(root_fd, endpoint.segments, failure);
+  if (parent_fd < 0) return false;
+  struct stat current {};
+  const int result =
+      fstatat(parent_fd, endpoint.segments.back().c_str(), &current, AT_SYMLINK_NOFOLLOW);
+  const int saved_errno = errno;
+  CloseFd(&parent_fd);
+  if (!endpoint.present) {
+    if (result != 0 && saved_errno == ENOENT) return true;
+    *failure = {"UNSAFE_PATH", "NativeSafeFs absent endpoint changed during observation"};
+    return false;
+  }
+  if (result != 0 || !S_ISREG(current.st_mode) || current.st_nlink != 1 ||
+      current.st_dev != endpoint.namespace_stat.st_dev ||
+      current.st_ino != endpoint.namespace_stat.st_ino ||
+      current.st_mode != endpoint.namespace_stat.st_mode ||
+      current.st_nlink != endpoint.namespace_stat.st_nlink) {
+    *failure = {"UNSAFE_PATH", "NativeSafeFs endpoint namespace changed during observation"};
+    return false;
+  }
+  return true;
+}
+
+napi_value MakeRevisionObservation(napi_env env, const RevisionObservation& observation) {
+  napi_value result;
+  napi_create_object(env, &result);
+  if (!observation.present) {
+    napi_set_named_property(env, result, "state", MakeString(env, "absent"));
+    return result;
+  }
+  napi_set_named_property(env, result, "state", MakeString(env, "present"));
+  napi_set_named_property(env, result, "identityDigest",
+                          MakeString(env, observation.identity_digest));
+  napi_set_named_property(env, result, "contentHash", MakeString(env, observation.content_hash));
+  napi_value size;
+  napi_create_uint32(env, observation.size, &size);
+  napi_set_named_property(env, result, "size", size);
+  napi_value mode;
+  napi_create_uint32(env, observation.mode, &mode);
+  napi_set_named_property(env, result, "mode", mode);
+  napi_value nlink;
+  napi_create_uint32(env, 1, &nlink);
+  napi_set_named_property(env, result, "nlink", nlink);
+  return result;
+}
+
+bool ReadJournalBinding(napi_env env, napi_value input, std::string* session_id,
+                        NativeFailure* failure) {
+  std::string intent_id;
+  std::string intent_digest;
+  std::string record_digest;
+  uint32_t revision = 0;
+  if (!ReadString(env, input, "sessionId", session_id) ||
+      !ReadString(env, input, "intentId", &intent_id) ||
+      !ReadString(env, input, "intentDigest", &intent_digest) ||
+      !ReadString(env, input, "recordDigest", &record_digest) ||
+      !ReadUint32(env, input, "revision", &revision) || !IsLowerHex(*session_id, 32) ||
+      intent_id.empty() || intent_id.size() > 200 || !IsLowerHex(intent_digest, 64) ||
+      !IsLowerHex(record_digest, 64)) {
+    *failure = {"INVALID_INPUT", "Invalid NativeSafeFs journal binding"};
+    return false;
+  }
+  return true;
+}
+
+bool CaptureSessionRoot(const std::string& session_id, int* root_fd,
+                        std::string* workspace_key, std::string* workspace_path,
+                        uint64_t* invalidation_version,
+                        NativeFailure* failure) {
+  std::lock_guard<std::mutex> guard(state.mutex);
+  auto found = state.sessions.find(session_id);
+  if (found == state.sessions.end()) {
+    *failure = {"STALE_SESSION", "NativeSafeFs session is stale"};
+    return false;
+  }
+  *root_fd = dup(found->second.root_fd);
+  if (*root_fd < 0) {
+    *failure = {"NATIVE_FAILURE", ErrnoMessage("duplicate mutation session root")};
+    return false;
+  }
+  *workspace_key = found->second.workspace_key;
+  *workspace_path = found->second.workspace_path;
+  *invalidation_version = state.invalidation_versions[*workspace_key];
+  return true;
+}
+
+struct ObserveWork {
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  std::string session_id;
+  std::string workspace_key;
+  std::string workspace_path;
+  uint64_t invalidation_version = 0;
+  int root_fd = -1;
+  std::vector<std::string> source;
+  std::vector<std::string> destination;
+  std::vector<std::string> auxiliary;
+  bool has_destination = false;
+  bool has_auxiliary = false;
+  RevisionObservation source_observation;
+  RevisionObservation destination_observation;
+  RevisionObservation auxiliary_observation;
+  NativeFailure failure;
+  bool success = false;
+};
+
+void ExecuteObserve(napi_env, void* data) {
+  auto* context = static_cast<ObserveWork*>(data);
+  PinnedEndpoint source;
+  PinnedEndpoint destination;
+  PinnedEndpoint auxiliary;
+  do {
+    if (!VerifyDirectoryNamespace(context->workspace_path, context->root_fd, &context->failure,
+                                  "UNSAFE_PATH"))
+      break;
+    if (!PinEndpoint(context->root_fd, context->source, &source, &context->failure)) break;
+    if (context->has_destination &&
+        !PinEndpoint(context->root_fd, context->destination, &destination, &context->failure))
+      break;
+    if (context->has_auxiliary &&
+        !PinEndpoint(context->root_fd, context->auxiliary, &auxiliary, &context->failure))
+      break;
+    if (!ObservePinnedEndpoint(source, &context->source_observation, &context->failure)) break;
+    if (context->has_destination &&
+        !ObservePinnedEndpoint(destination, &context->destination_observation,
+                               &context->failure))
+      break;
+    if (context->has_auxiliary &&
+        !ObservePinnedEndpoint(auxiliary, &context->auxiliary_observation, &context->failure))
+      break;
+    if (!RevalidatePinnedEndpoint(context->root_fd, source, &context->failure)) break;
+    if (context->has_destination &&
+        !RevalidatePinnedEndpoint(context->root_fd, destination, &context->failure))
+      break;
+    if (context->has_auxiliary &&
+        !RevalidatePinnedEndpoint(context->root_fd, auxiliary, &context->failure))
+      break;
+    if (!VerifyDirectoryNamespace(context->workspace_path, context->root_fd, &context->failure,
+                                  "UNSAFE_PATH"))
+      break;
+    context->success = true;
+  } while (false);
+  ClosePinnedEndpoint(&source);
+  ClosePinnedEndpoint(&destination);
+  ClosePinnedEndpoint(&auxiliary);
+}
+
+void CompleteObserve(napi_env env, napi_status status, void* data) {
+  auto* context = static_cast<ObserveWork*>(data);
+  CloseFd(&context->root_fd);
+  if (status != napi_ok || !context->success) {
+    if (context->failure.code.empty())
+      context->failure = {"NATIVE_FAILURE", "NativeSafeFs observation failed"};
+    napi_reject_deferred(env, context->deferred, MakeError(env, context->failure));
+  } else {
+    napi_value result;
+    napi_create_object(env, &result);
+    napi_set_named_property(env, result, "source",
+                            MakeRevisionObservation(env, context->source_observation));
+    napi_set_named_property(
+        env, result, "destination",
+        MakeRevisionObservation(env, context->has_destination
+                                         ? context->destination_observation
+                                         : RevisionObservation{}));
+    napi_set_named_property(
+        env, result, "auxiliary",
+        MakeRevisionObservation(env, context->has_auxiliary ? context->auxiliary_observation
+                                                            : RevisionObservation{}));
+    napi_resolve_deferred(env, context->deferred, result);
+  }
+  napi_delete_async_work(env, context->work);
+  delete context;
+}
+
+napi_value ObserveIntent(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object)
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs observation input must be an object");
+  auto* context = new ObserveWork();
+  bool destination_null = false;
+  bool auxiliary_null = false;
+  if (!ReadJournalBinding(env, argv[0], &context->session_id, &context->failure) ||
+      !ReadSegments(env, argv[0], "sourceSegments", false, false, &context->source) ||
+      !ReadSegments(env, argv[0], "destinationSegments", true, false, &context->destination,
+                    &destination_null) ||
+      !ReadSegments(env, argv[0], "auxiliarySegments", true, false, &context->auxiliary,
+                    &auxiliary_null)) {
+    NativeFailure failure = context->failure.code.empty()
+                                ? NativeFailure{"INVALID_INPUT", "Invalid observation paths"}
+                                : context->failure;
+    delete context;
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  context->has_destination = !destination_null;
+  context->has_auxiliary = !auxiliary_null;
+  if (!CaptureSessionRoot(context->session_id, &context->root_fd, &context->workspace_key,
+                          &context->workspace_path, &context->invalidation_version,
+                          &context->failure)) {
+    NativeFailure failure = context->failure;
+    delete context;
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  napi_value promise;
+  napi_create_promise(env, &context->deferred, &promise);
+  napi_value resource_name = MakeString(env, "NativeSafeFs.observeIntent");
+  const napi_status create_status = napi_create_async_work(
+      env, nullptr, resource_name, ExecuteObserve, CompleteObserve, context, &context->work);
+  const napi_status queue_status =
+      create_status == napi_ok ? napi_queue_async_work(env, context->work) : create_status;
+  if (create_status != napi_ok || queue_status != napi_ok) {
+    if (create_status == napi_ok) napi_delete_async_work(env, context->work);
+    CloseFd(&context->root_fd);
+    delete context;
+    return ThrowFailure(env, "NATIVE_FAILURE", "Failed to queue NativeSafeFs observation");
+  }
+  return promise;
+}
+
+struct StageWork {
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  std::string session_id;
+  std::string workspace_key;
+  std::string workspace_path;
+  uint64_t invalidation_version = 0;
+  int root_fd = -1;
+  std::vector<std::string> path;
+  std::vector<unsigned char> bytes;
+  std::string expected_hash;
+  uint32_t expected_size = 0;
+  uint32_t expected_mode = 0;
+  RevisionObservation observation;
+  NativeFailure failure;
+  bool success = false;
+};
+
+void RemoveCreatedIfSame(int parent_fd, const std::string& leaf, const struct stat& created) {
+  struct stat current {};
+  if (fstatat(parent_fd, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+      current.st_dev == created.st_dev && current.st_ino == created.st_ino)
+    unlinkat(parent_fd, leaf.c_str(), 0);
+}
+
+void ExecuteStage(napi_env, void* data) {
+  auto* context = static_cast<StageWork*>(data);
+  if (context->bytes.size() != context->expected_size ||
+      Sha256Bytes(context->bytes.data(), context->bytes.size()) != context->expected_hash) {
+    context->failure = {"INVALID_INPUT", "Staged bytes do not match the sealed artifact"};
+    return;
+  }
+  if (!VerifyDirectoryNamespace(context->workspace_path, context->root_fd, &context->failure,
+                                "UNSAFE_PATH"))
+    return;
+  int parent_fd = OpenRelativeParent(context->root_fd, context->path, &context->failure);
+  if (parent_fd < 0) return;
+  if (!VerifyRelativeParentNamespace(context->root_fd, context->path, parent_fd,
+                                     &context->failure)) {
+    CloseFd(&parent_fd);
+    return;
+  }
+  const std::string& leaf = context->path.back();
+  int file_fd = -1;
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(context->session_id);
+    if (session == state.sessions.end() ||
+        session->second.workspace_key != context->workspace_key ||
+        state.invalidation_versions[context->workspace_key] != context->invalidation_version) {
+      CloseFd(&parent_fd);
+      context->failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before staging"};
+      return;
+    }
+    file_fd = openat(parent_fd, leaf.c_str(),
+                     O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  }
+  if (file_fd < 0) {
+    const int saved_errno = errno;
+    CloseFd(&parent_fd);
+    errno = saved_errno;
+    context->failure = {errno == EEXIST ? "UNSAFE_PATH" : "NATIVE_FAILURE",
+                        ErrnoMessage("create staged artifact")};
+    return;
+  }
+  struct stat created {};
+  bool file_synced = false;
+  if (fstat(file_fd, &created) != 0 || !S_ISREG(created.st_mode) || created.st_nlink != 1) {
+    context->failure = {"UNSAFE_PATH", "Staged artifact is not a unique regular file"};
+  } else {
+    size_t offset = 0;
+    while (offset < context->bytes.size()) {
+      const ssize_t written = pwrite(file_fd, context->bytes.data() + offset,
+                                     context->bytes.size() - offset,
+                                     static_cast<off_t>(offset));
+      if (written < 0 && errno == EINTR) continue;
+      if (written <= 0) {
+        context->failure = {"NATIVE_FAILURE", ErrnoMessage("write staged artifact")};
+        break;
+      }
+      offset += static_cast<size_t>(written);
+    }
+    if (context->failure.code.empty() &&
+        fchmod(file_fd, static_cast<mode_t>(context->expected_mode & 07777)) != 0)
+      context->failure = {"NATIVE_FAILURE", ErrnoMessage("chmod staged artifact")};
+    if (context->failure.code.empty()) {
+      if (fsync(file_fd) != 0)
+        context->failure = {"NATIVE_FAILURE", ErrnoMessage("fsync staged artifact")};
+      else
+        file_synced = true;
+    }
+    struct stat namespace_stat {};
+    if (context->failure.code.empty() &&
+        (fstatat(parent_fd, leaf.c_str(), &namespace_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
+         !ObserveOpenFile(file_fd, namespace_stat, &context->observation, &context->failure))) {
+      if (context->failure.code.empty())
+        context->failure = {"UNSAFE_PATH", "Staged artifact namespace changed"};
+    }
+    if (context->failure.code.empty() &&
+        (context->observation.content_hash != context->expected_hash ||
+         context->observation.size != context->expected_size ||
+         context->observation.mode != context->expected_mode))
+      context->failure = {"UNSAFE_PATH", "Staged artifact observation does not match intent"};
+    if (context->failure.code.empty() &&
+        (!VerifyRelativeParentNamespace(context->root_fd, context->path, parent_fd,
+                                        &context->failure) ||
+         !VerifyDirectoryNamespace(context->workspace_path, context->root_fd,
+                                   &context->failure, "UNSAFE_PATH"))) {
+      if (context->failure.code.empty())
+        context->failure = {"UNSAFE_PATH", "Staged artifact ancestry changed"};
+    }
+    if (context->failure.code.empty() && fsync(parent_fd) != 0)
+      context->failure = {"NATIVE_FAILURE", ErrnoMessage("fsync staged artifact parent")};
+  }
+  if (!context->failure.code.empty() && !file_synced) {
+    RemoveCreatedIfSame(parent_fd, leaf, created);
+    fsync(parent_fd);
+  }
+  CloseFd(&file_fd);
+  CloseFd(&parent_fd);
+  context->success = context->failure.code.empty();
+}
+
+void CompleteStage(napi_env env, napi_status status, void* data) {
+  auto* context = static_cast<StageWork*>(data);
+  CloseFd(&context->root_fd);
+  if (status != napi_ok || !context->success) {
+    if (context->failure.code.empty())
+      context->failure = {"NATIVE_FAILURE", "NativeSafeFs staging failed"};
+    napi_reject_deferred(env, context->deferred, MakeError(env, context->failure));
+  } else {
+    napi_resolve_deferred(env, context->deferred,
+                          MakeRevisionObservation(env, context->observation));
+  }
+  napi_delete_async_work(env, context->work);
+  delete context;
+}
+
+napi_value StageIntentArtifact(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype input_type;
+  bool is_buffer = false;
+  if (argc != 2 || napi_typeof(env, argv[0], &input_type) != napi_ok ||
+      input_type != napi_object || napi_is_buffer(env, argv[1], &is_buffer) != napi_ok ||
+      !is_buffer)
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs staging input is invalid");
+  auto* context = new StageWork();
+  std::vector<std::string> parent;
+  std::string leaf;
+  void* buffer_data = nullptr;
+  size_t buffer_length = 0;
+  if (!ReadJournalBinding(env, argv[0], &context->session_id, &context->failure) ||
+      !ReadSegments(env, argv[0], "parentSegments", false, true, &parent) ||
+      !ReadString(env, argv[0], "leafName", &leaf) || !ValidSegment(leaf) ||
+      !leaf.starts_with(".vibe-temp-") || leaf.size() != 43 ||
+      !IsLowerHex(leaf.substr(11), 32) ||
+      !ReadString(env, argv[0], "expectedContentHash", &context->expected_hash) ||
+      !ReadUint32(env, argv[0], "expectedSize", &context->expected_size) ||
+      !ReadUint32(env, argv[0], "expectedMode", &context->expected_mode) ||
+      !IsLowerHex(context->expected_hash, 64) ||
+      context->expected_size > static_cast<uint32_t>(kMaximumMutationFileBytes) ||
+      (context->expected_mode & S_IFMT) != S_IFREG ||
+      napi_get_buffer_info(env, argv[1], &buffer_data, &buffer_length) != napi_ok ||
+      buffer_length > static_cast<size_t>(kMaximumMutationFileBytes)) {
+    NativeFailure failure = context->failure.code.empty()
+                                ? NativeFailure{"INVALID_INPUT", "Invalid staged artifact input"}
+                                : context->failure;
+    delete context;
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  context->path = std::move(parent);
+  context->path.push_back(std::move(leaf));
+  if (buffer_length > 0) {
+    const auto* begin = static_cast<const unsigned char*>(buffer_data);
+    context->bytes.assign(begin, begin + buffer_length);
+  }
+  if (!CaptureSessionRoot(context->session_id, &context->root_fd, &context->workspace_key,
+                          &context->workspace_path, &context->invalidation_version,
+                          &context->failure)) {
+    NativeFailure failure = context->failure;
+    delete context;
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  napi_value promise;
+  napi_create_promise(env, &context->deferred, &promise);
+  napi_value resource_name = MakeString(env, "NativeSafeFs.stageIntentArtifact");
+  const napi_status create_status = napi_create_async_work(
+      env, nullptr, resource_name, ExecuteStage, CompleteStage, context, &context->work);
+  const napi_status queue_status =
+      create_status == napi_ok ? napi_queue_async_work(env, context->work) : create_status;
+  if (create_status != napi_ok || queue_status != napi_ok) {
+    if (create_status == napi_ok) napi_delete_async_work(env, context->work);
+    CloseFd(&context->root_fd);
+    delete context;
+    return ThrowFailure(env, "NATIVE_FAILURE", "Failed to queue NativeSafeFs staging");
+  }
+  return promise;
+}
+
 napi_value Probe(napi_env env, napi_callback_info) {
   napi_value result;
   napi_create_object(env, &result);
@@ -751,6 +1547,9 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"openSession", nullptr, OpenSession, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"invalidateWorkspace", nullptr, InvalidateWorkspace, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
+      {"observeIntent", nullptr, ObserveIntent, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"stageIntentArtifact", nullptr, StageIntentArtifact, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"closeSession", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
   };

@@ -28,6 +28,14 @@ Implement a minimal asynchronous raw Node-API addon behind a Main-only `NativeSa
 - If native invalidation itself fails, the SQLite quarantine still commits and the Persistence client permanently disables native mutation authority for the remainder of the process. Availability may fail closed; the durable quarantine must never roll back with an external addon error.
 - Addon load failure, capability-probe failure, unsupported volume/API, or packaging mismatch removes write tools from the Turn catalog. There is no JavaScript pathname mutation fallback.
 
+## Incremental implementation status
+
+S4b3a implements only the non-publishing observation and journal-bound staging subset. `observeIntent` pins every requested endpoint before reading, computes identity/SHA-256/size/mode/nlink in native code, then revalidates every leaf and the selected workspace namespace before returning. `stageIntentArtifact` accepts only a parsed immutable intent in `aux_pending`, copies the Buffer before queueing async work, restricts the raw leaf to `.vibe-temp-<128-bit lowercase hex>`, creates it with `O_EXCL | O_NOFOLLOW` and initial `0600`, seals mode/hash/size, and fsyncs both file and parent directory.
+
+The worker duplicates the session root fd under the authority mutex. Read/hash/write/fsync run outside that mutex; staging reacquires it only for the live generation check plus the `openat(O_EXCL)` linearization point. Main rechecks the issued session after native completion, so an invalidation race cannot publish success. A fully synced auxiliary may remain for journal recovery when revocation wins after creation.
+
+The selected root and relative parent namespaces are checked before and after staging, and all observed leaves are pinned before the read set is produced. This detects deterministic root/parent replacement and leaf drift. It does not claim a platform proof against an external rename occurring entirely between the pre/post checks. Consequently `capabilities.mutation` remains `false`, no production caller or write tool is connected, and the parent-swap/fault/crash harness in the platform gate remains mandatory before effects are enabled.
+
 ## Platform verification gate
 
 - macOS arm64/x64: add/update/delete/rename plus symlink, hardlink, parent-swap, leaf-swap, crash, directory durability, and compensation-race harnesses.

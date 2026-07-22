@@ -5,12 +5,14 @@ import {
   link,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
@@ -18,7 +20,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadNativeSafeFs, nativeSafeFsAddonPath } from './native-safe-fs';
-import type { NativeSafeFsError, NativeSafeFsOpenInput } from './native-safe-fs';
+import type {
+  NativeSafeFs,
+  NativeSafeFsError,
+  NativeSafeFsOpenInput,
+  NativeSafeFsSession,
+} from './native-safe-fs';
+import {
+  createNativeMutationIntentSeed,
+  createNativeMutationIntentSnapshot,
+  transitionNativeMutationIntent,
+  type NativeMutationEffectObservation,
+  type NativeMutationEndpointExpectation,
+  type NativeMutationIntentKind,
+  type NativeMutationIntentSnapshot,
+  type NativeMutationRevision,
+} from './native-mutation-intent';
 
 const cleanup: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -74,6 +91,97 @@ function fixtureBoundary(
   addonPath = nativeSafeFsAddonPath(),
 ) {
   return loadNativeSafeFs({ addonPath, lockDirectoryPath: input.lockDirectoryPath });
+}
+
+type MutationTestBoundary = NativeSafeFs &
+  Readonly<{
+    observeIntent(
+      session: NativeSafeFsSession,
+      intent: NativeMutationIntentSnapshot,
+    ): Promise<NativeMutationEffectObservation>;
+    stageIntentArtifact(
+      session: NativeSafeFsSession,
+      intent: NativeMutationIntentSnapshot,
+      bytes: Buffer,
+    ): Promise<NativeMutationRevision>;
+  }>;
+
+function mutationBoundary(boundary: NativeSafeFs): MutationTestBoundary {
+  return boundary as MutationTestBoundary;
+}
+
+async function revision(path: string): Promise<NativeMutationRevision> {
+  const stats = await lstat(path, { bigint: true });
+  const bytes = await readFile(path);
+  const mode = Number(stats.mode);
+  const nlink = Number(stats.nlink);
+  const identityDigest = createHash('sha256')
+    .update(
+      JSON.stringify([
+        'native-file-identity-v1',
+        stats.dev.toString(),
+        stats.ino.toString(),
+        mode,
+        nlink,
+        'file',
+      ]),
+    )
+    .digest('hex');
+  return Object.freeze({
+    state: 'present',
+    identityDigest,
+    contentHash: createHash('sha256').update(bytes).digest('hex'),
+    size: bytes.byteLength,
+    mode,
+    nlink: 1,
+  });
+}
+
+function nativeIntent(input: {
+  session: NativeSafeFsSession;
+  kind: NativeMutationIntentKind;
+  sourceSegments: readonly string[];
+  destinationSegments?: readonly string[] | null;
+  expectedSource: NativeMutationEndpointExpectation;
+  artifactBytes?: Buffer;
+}): NativeMutationIntentSnapshot {
+  const artifactBytes = input.artifactBytes ?? null;
+  const expectedMode =
+    input.kind === 'add'
+      ? 0o100600
+      : input.expectedSource.state === 'present'
+        ? input.expectedSource.mode
+        : 0o100600;
+  return createNativeMutationIntentSnapshot(
+    createNativeMutationIntentSeed({
+      id: `intent-${input.kind}`,
+      sagaId: 'saga-native-safe-fs',
+      ordinal: 1,
+      direction: 'forward',
+      kind: input.kind,
+      operationDigest: '1'.repeat(64),
+      workspaceKey: input.session.workspaceKey,
+      rootIdentityDigest: '2'.repeat(64),
+      policyEpoch: 1,
+      leaseFence: input.session.fence,
+      nativeSessionId: input.session.id,
+      sourceSegments: input.sourceSegments,
+      destinationSegments: input.destinationSegments ?? null,
+      expectedSource: input.expectedSource,
+      expectedDestination: { state: 'absent' },
+      artifact:
+        artifactBytes === null
+          ? null
+          : {
+              artifactId: 'artifact-native-safe-fs',
+              contentHash: createHash('sha256').update(artifactBytes).digest('hex'),
+              size: artifactBytes.byteLength,
+              expectedMode,
+            },
+      createdAt: '2026-07-23T00:00:00.000Z',
+    }),
+    'a'.repeat(32),
+  );
 }
 
 describe('NativeSafeFs authority boundary', () => {
@@ -347,6 +455,258 @@ describe('NativeSafeFs authority boundary', () => {
         'STALE_FENCE',
       );
       await expect(childOpenOutcome(addonPath, { ...input, fence: '61' })).resolves.toBe('OPENED');
+    });
+
+    it('observes source, destination, and journaled auxiliary paths from the pinned root', async () => {
+      const input = await fixture();
+      await mkdir(join(input.workspace, 'src'));
+      await writeFile(join(input.workspace, 'src', 'before.txt'), 'before', { mode: 0o600 });
+      const expectedSource = await revision(join(input.workspace, 'src', 'before.txt'));
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '80' });
+      const intent = nativeIntent({
+        session,
+        kind: 'rename',
+        sourceSegments: ['src', 'before.txt'],
+        destinationSegments: ['src', 'after.txt'],
+        expectedSource,
+      });
+
+      await expect(boundary.observeIntent(session, intent)).resolves.toEqual({
+        source: expectedSource,
+        destination: { state: 'absent' },
+        auxiliary: { state: 'absent' },
+      });
+      await boundary.closeSession(session);
+    });
+
+    it('rejects symlink, hardlink, and special-file observations without following them', async () => {
+      const input = await fixture();
+      await writeFile(join(input.workspace, 'target.txt'), 'target', { mode: 0o600 });
+      const expectedSource = await revision(join(input.workspace, 'target.txt'));
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '81' });
+      const unsafeLeaves = ['symlink.txt', 'hardlink.txt', 'fifo'];
+      await symlink('target.txt', join(input.workspace, unsafeLeaves[0]!));
+      await link(join(input.workspace, 'target.txt'), join(input.workspace, unsafeLeaves[1]!));
+      await execFileAsync('mkfifo', [join(input.workspace, unsafeLeaves[2]!)]);
+
+      for (const leaf of unsafeLeaves) {
+        const intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: [leaf],
+          expectedSource,
+        });
+        await expect(boundary.observeIntent(session, intent)).rejects.toMatchObject({
+          code: 'UNSAFE_PATH',
+        } satisfies Partial<NativeSafeFsError>);
+      }
+      await boundary.closeSession(session);
+    });
+
+    it('rejects unsafe segments and forged staged bytes inside the raw addon contract', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '811' });
+      const bytes = Buffer.from('sealed');
+      let intent = nativeIntent({
+        session,
+        kind: 'add',
+        sourceSegments: ['new.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: bytes,
+      });
+      intent = transitionNativeMutationIntent(intent, { state: 'aux_pending' });
+      const raw = require(nativeSafeFsAddonPath()) as Readonly<{
+        observeIntent(input: Readonly<Record<string, unknown>>): Promise<unknown>;
+        stageIntentArtifact(
+          input: Readonly<Record<string, unknown>>,
+          bytes: Buffer,
+        ): Promise<unknown>;
+      }>;
+      const journal = {
+        sessionId: session.id,
+        intentId: intent.id,
+        intentDigest: intent.intentDigest,
+        recordDigest: intent.recordDigest,
+        revision: intent.revision,
+      };
+      expect(() =>
+        raw.observeIntent({
+          ...journal,
+          sourceSegments: ['..'],
+          destinationSegments: null,
+          auxiliarySegments: null,
+        }),
+      ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+      expect(() =>
+        raw.observeIntent({
+          ...journal,
+          revision: 1.5,
+          sourceSegments: ['new.txt'],
+          destinationSegments: null,
+          auxiliarySegments: null,
+        }),
+      ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+      expect(() =>
+        raw.stageIntentArtifact(
+          {
+            ...journal,
+            parentSegments: null,
+            leafName: intent.temp!.leafName,
+            expectedContentHash: intent.temp!.expectedContentHash,
+            expectedSize: intent.temp!.expectedSize,
+            expectedMode: intent.temp!.expectedMode,
+          },
+          bytes,
+        ),
+      ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+      expect(() =>
+        raw.stageIntentArtifact(
+          {
+            ...journal,
+            parentSegments: [],
+            leafName: 'not-a-journal-temp',
+            expectedContentHash: intent.temp!.expectedContentHash,
+            expectedSize: intent.temp!.expectedSize,
+            expectedMode: intent.temp!.expectedMode,
+          },
+          bytes,
+        ),
+      ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+      await expect(
+        raw.stageIntentArtifact(
+          {
+            ...journal,
+            parentSegments: intent.temp!.parentSegments,
+            leafName: intent.temp!.leafName,
+            expectedContentHash: intent.temp!.expectedContentHash,
+            expectedSize: intent.temp!.expectedSize,
+            expectedMode: intent.temp!.expectedMode,
+          },
+          Buffer.from('forged'),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      await expect(readFile(join(input.workspace, intent.temp!.leafName))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await boundary.closeSession(session);
+    });
+
+    it('rejects a workspace root namespace replacement instead of staging through the stale fd', async () => {
+      const input = await fixture();
+      const bytes = Buffer.from('must stay inside the selected workspace');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '812' });
+      let intent = nativeIntent({
+        session,
+        kind: 'add',
+        sourceSegments: ['new.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: bytes,
+      });
+      intent = transitionNativeMutationIntent(intent, { state: 'aux_pending' });
+      const movedWorkspace = join(input.root, 'moved-workspace');
+      await rename(input.workspace, movedWorkspace);
+      await mkdir(input.workspace);
+
+      await expect(boundary.stageIntentArtifact(session, intent, bytes)).rejects.toMatchObject({
+        code: 'UNSAFE_PATH',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(join(movedWorkspace, intent.temp!.leafName))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(readFile(join(input.workspace, intent.temp!.leafName))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await boundary.closeSession(session);
+    });
+
+    it('stages only the sealed journal artifact asynchronously with exact bytes and mode', async () => {
+      const input = await fixture();
+      await mkdir(join(input.workspace, 'nested'));
+      const bytes = Buffer.from('staged post-image\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '82' });
+      let intent = nativeIntent({
+        session,
+        kind: 'add',
+        sourceSegments: ['nested', 'new.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: bytes,
+      });
+      intent = transitionNativeMutationIntent(intent, { state: 'aux_pending' });
+      let settled = false;
+      const staging = boundary.stageIntentArtifact(session, intent, bytes).then((value) => {
+        settled = true;
+        return value;
+      });
+      expect(settled).toBe(false);
+      const observed = await staging;
+      expect(observed).toEqual(
+        await revision(join(input.workspace, 'nested', intent.temp!.leafName)),
+      );
+      expect(observed).toMatchObject({
+        contentHash: intent.artifact!.contentHash,
+        size: bytes.byteLength,
+        mode: 0o100600,
+        nlink: 1,
+      });
+      await expect(
+        readFile(join(input.workspace, 'nested', intent.temp!.leafName)),
+      ).resolves.toEqual(bytes);
+      await boundary.closeSession(session);
+    });
+
+    it('fails closed on a staged-name collision and after synchronous session invalidation', async () => {
+      const input = await fixture();
+      const bytes = Buffer.from('post-image');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '83' });
+      let intent = nativeIntent({
+        session,
+        kind: 'add',
+        sourceSegments: ['new.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: bytes,
+      });
+      intent = transitionNativeMutationIntent(intent, { state: 'aux_pending' });
+      const tempPath = join(input.workspace, intent.temp!.leafName);
+      await writeFile(tempPath, 'external', { mode: 0o600 });
+      await expect(boundary.stageIntentArtifact(session, intent, bytes)).rejects.toMatchObject({
+        code: 'UNSAFE_PATH',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(tempPath, 'utf8')).resolves.toBe('external');
+
+      await rm(tempPath);
+      boundary.invalidateWorkspace(input.workspaceKey, '84');
+      await expect(boundary.stageIntentArtifact(session, intent, bytes)).rejects.toMatchObject({
+        code: 'STALE_SESSION',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(tempPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('never reports staging success after invalidation races a one-megabyte async stage', async () => {
+      const input = await fixture();
+      const bytes = Buffer.alloc(1024 * 1024, 0x5a);
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '85' });
+      let intent = nativeIntent({
+        session,
+        kind: 'add',
+        sourceSegments: ['large.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: bytes,
+      });
+      intent = transitionNativeMutationIntent(intent, { state: 'aux_pending' });
+      const staging = boundary.stageIntentArtifact(session, intent, bytes);
+      boundary.invalidateWorkspace(input.workspaceKey, '86');
+      await expect(staging).rejects.toMatchObject({ code: 'STALE_SESSION' });
+      const tempPath = join(input.workspace, intent.temp!.leafName);
+      const stagedOrError = await readFile(tempPath).catch((error: unknown) => error);
+      if (Buffer.isBuffer(stagedOrError)) expect(stagedOrError).toEqual(bytes);
+      else expect(stagedOrError).toMatchObject({ code: 'ENOENT' });
     });
 
     it('loads the addon in the Electron runtime ABI', async () => {
