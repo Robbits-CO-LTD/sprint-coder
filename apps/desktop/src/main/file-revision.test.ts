@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rename, rm, symlink, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  FileRevisionRegistry,
   readRevisionBoundFile,
   revalidateFileRevisionToken,
 } from './file-revision';
@@ -160,5 +161,57 @@ describe('FileRevisionToken', () => {
         maxBytes: 32,
       }),
     ).rejects.toMatchObject({ code: 'FILE_TOO_LARGE' } satisfies Partial<FileRevisionError>);
+  });
+
+  it('exposes only opaque references and binds them to one Task and Turn', async () => {
+    const { workspace } = await fixture();
+    const registry = new FileRevisionRegistry();
+    const read = await registry.read({
+      owner: { taskId: 'task-1', turnId: 'turn-1' },
+      workspacePath: workspace,
+      targetPath: 'src/file.ts',
+      policyEpoch: 2,
+    });
+
+    expect(read.reference).toEqual({ version: 1, tokenId: expect.any(String) });
+    expect(JSON.stringify(read.reference)).not.toContain(workspace);
+    await expect(
+      registry.resolve({
+        owner: { taskId: 'task-1', turnId: 'turn-1' },
+        reference: read.reference,
+        workspacePath: workspace,
+        targetPath: 'src/file.ts',
+        policyEpoch: 2,
+      }),
+    ).resolves.toMatchObject({ content: 'export const value = 1;\n' });
+    await expect(
+      registry.resolve({
+        owner: { taskId: 'task-1', turnId: 'turn-2' },
+        reference: read.reference,
+        workspacePath: workspace,
+        targetPath: 'src/file.ts',
+        policyEpoch: 2,
+      }),
+    ).rejects.toMatchObject({ code: 'TOKEN_SCOPE_MISMATCH' } satisfies Partial<FileRevisionError>);
+    await expect(
+      registry.resolve({
+        owner: { taskId: 'task-1', turnId: 'turn-1' },
+        reference: { version: 1, tokenId: 'forged' },
+        workspacePath: workspace,
+        targetPath: 'src/file.ts',
+        policyEpoch: 2,
+      }),
+    ).rejects.toMatchObject({ code: 'FORGED_TOKEN' } satisfies Partial<FileRevisionError>);
+
+    expect(registry.finishTurn({ taskId: 'task-1', turnId: 'turn-1' })).toBe(1);
+    await expect(
+      registry.resolve({
+        owner: { taskId: 'task-1', turnId: 'turn-1' },
+        reference: read.reference,
+        workspacePath: workspace,
+        targetPath: 'src/file.ts',
+        policyEpoch: 2,
+      }),
+    ).rejects.toMatchObject({ code: 'FORGED_TOKEN' } satisfies Partial<FileRevisionError>);
   });
 });

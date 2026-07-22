@@ -17,6 +17,7 @@ export type FileRevisionErrorCode =
   | 'NON_TEXT_FILE'
   | 'READ_RACE'
   | 'FORGED_TOKEN'
+  | 'TOKEN_SCOPE_MISMATCH'
   | 'POLICY_EPOCH_CHANGED'
   | 'TARGET_CHANGED'
   | 'STALE_REVISION';
@@ -48,6 +49,78 @@ export type RevisionBoundFile = Readonly<{
   content: string;
   token: FileRevisionToken;
 }>;
+
+export type FileRevisionReference = Readonly<{ version: 1; tokenId: string }>;
+export type FileRevisionOwner = Readonly<{ taskId: string; turnId: string }>;
+
+type RegisteredRevision = Readonly<{
+  owner: FileRevisionOwner;
+  content: string;
+  token: FileRevisionToken;
+}>;
+
+export class FileRevisionRegistry {
+  private readonly records = new Map<string, RegisteredRevision>();
+
+  async read(input: {
+    owner: FileRevisionOwner;
+    workspacePath: string;
+    targetPath: string;
+    policyEpoch: number;
+    maxBytes?: number;
+  }): Promise<Readonly<{ content: string; reference: FileRevisionReference }>> {
+    validateOwner(input.owner);
+    const read = await readRevisionBoundFile(input);
+    this.records.set(
+      read.token.id,
+      Object.freeze({
+        owner: Object.freeze({ ...input.owner }),
+        content: read.content,
+        token: read.token,
+      }),
+    );
+    return Object.freeze({
+      content: read.content,
+      reference: Object.freeze({ version: 1 as const, tokenId: read.token.id }),
+    });
+  }
+
+  async resolve(input: {
+    owner: FileRevisionOwner;
+    reference: FileRevisionReference;
+    workspacePath: string;
+    targetPath: string;
+    policyEpoch: number;
+  }): Promise<RevisionBoundFile> {
+    validateOwner(input.owner);
+    const record = this.records.get(input.reference.tokenId);
+    if (record === undefined || input.reference.version !== 1)
+      throw new FileRevisionError('FORGED_TOKEN', 'Unknown revision token reference');
+    if (record.owner.taskId !== input.owner.taskId || record.owner.turnId !== input.owner.turnId)
+      throw new FileRevisionError(
+        'TOKEN_SCOPE_MISMATCH',
+        'Revision token belongs to another Task or Turn',
+      );
+    await revalidateFileRevisionToken({
+      token: record.token,
+      workspacePath: input.workspacePath,
+      targetPath: input.targetPath,
+      policyEpoch: input.policyEpoch,
+    });
+    return Object.freeze({ content: record.content, token: record.token });
+  }
+
+  finishTurn(owner: FileRevisionOwner): number {
+    validateOwner(owner);
+    let removed = 0;
+    for (const [id, record] of this.records) {
+      if (record.owner.taskId !== owner.taskId || record.owner.turnId !== owner.turnId) continue;
+      this.records.delete(id);
+      removed += 1;
+    }
+    return removed;
+  }
+}
 
 export async function readRevisionBoundFile(input: {
   workspacePath: string;
@@ -211,4 +284,14 @@ function validatePositiveInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 1)
     throw new FileRevisionError('INVALID_REQUEST', `${name} must be a positive integer`);
   return value;
+}
+
+function validateOwner(owner: FileRevisionOwner): void {
+  if (
+    owner.taskId.length === 0 ||
+    owner.taskId.length > 200 ||
+    owner.turnId.length === 0 ||
+    owner.turnId.length > 200
+  )
+    throw new FileRevisionError('INVALID_REQUEST', 'Invalid revision token owner');
 }
