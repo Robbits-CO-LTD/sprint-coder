@@ -79,7 +79,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v17', () => {
+  describe('SqlitePersistenceClient v18', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -209,6 +209,23 @@ if (runsWithElectronAbi)
       expect(reopened.getRuntime()).toBe('codex');
       expect(reopened.getModel()).toBe('gpt-5.6-terra');
       reopened.close();
+    });
+
+    it('pins the selected runtime and model when a Turn is accepted', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+
+      const started = persistence.startTurn(task.id, 'use the selected model');
+      persistence.setRuntime('mock');
+      persistence.setModel('auto');
+
+      expect(started).toMatchObject({
+        runtimeKind: 'codex',
+        model: 'gpt-5.6-terra',
+      });
+      persistence.close();
     });
 
     it('persists expanded access policy rules and revokes task-scoped grants by epoch', () => {
@@ -1628,6 +1645,7 @@ if (runsWithElectronAbi)
         { version: 15 },
         { version: 16 },
         { version: 17 },
+        { version: 18 },
       ]);
       expect(
         migrated
@@ -1706,7 +1724,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v17 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v18 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

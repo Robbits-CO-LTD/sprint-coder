@@ -138,6 +138,8 @@ type TurnRow = {
   task_id: string;
   state: TurnState;
   assistant_message_id: string | null;
+  runtime_kind: RuntimeKind;
+  model: string;
   created_at: string;
 };
 type QueueRow = { ordinal: number; payload_json: string };
@@ -726,6 +728,15 @@ const migrations = [
         ON background_completions(task_id, state, wake_policy, created_at, completion_id);
     `,
   },
+  {
+    version: 18,
+    checksum: 'runtime-v18-turn-model-snapshot',
+    sql: `
+      ALTER TABLE turns ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'mock'
+        CHECK (runtime_kind IN ('mock', 'codex'));
+      ALTER TABLE turns ADD COLUMN model TEXT NOT NULL DEFAULT 'auto';
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -801,7 +812,13 @@ export type PermissionPolicyRecord = {
   revokedCapabilities: Capability[];
 };
 
-export type StartedTurn = { turnId: string; text: string; event: TurnEvent };
+export type StartedTurn = {
+  turnId: string;
+  text: string;
+  runtimeKind: RuntimeKind;
+  model: string;
+  event: TurnEvent;
+};
 export type QueueTransition = { started: StartedTurn; queueEvent: TurnEvent } | null;
 export type BackgroundActivityRecord = Readonly<{
   id: string;
@@ -2936,6 +2953,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private startTurnInTransaction(taskId: string, text: string): StartedTurn {
     const now = new Date().toISOString();
     const turnId = randomUUID();
+    const runtimeKind = this.getRuntime();
+    const model = this.getModel();
     const userMessage = chatMessageSchema.parse({
       id: randomUUID(),
       taskId,
@@ -2951,13 +2970,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(userMessage.id, taskId, turnId, userMessage.author, userMessage.content, now);
     this.db
       .prepare(
-        'INSERT INTO turns(id, task_id, user_message_id, state, seq, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?)',
+        `INSERT INTO turns(
+          id, task_id, user_message_id, state, seq, runtime_kind, model, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`,
       )
-      .run(turnId, taskId, userMessage.id, 'queued', now, now);
+      .run(turnId, taskId, userMessage.id, 'queued', runtimeKind, model, now, now);
     this.attachBackgroundCompletionsInTransaction(taskId, turnId, now);
     const event = this.appendEvent({ type: 'turn.accepted', taskId, turnId, userMessage });
     this.db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(now, taskId);
-    return { turnId, text, event };
+    return { turnId, text, runtimeKind, model, event };
   }
 
   private attachBackgroundCompletionsInTransaction(

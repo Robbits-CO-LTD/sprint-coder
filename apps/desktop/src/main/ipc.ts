@@ -855,7 +855,7 @@ export class IpcRouter {
 
   private startSelectedRuntime(started: StartedTurn): void {
     const taskId = started.event.taskId;
-    const kind = this.persistence.getRuntime();
+    const kind = started.runtimeKind;
     this.turnRuntimes.set(started.turnId, kind);
     if (kind === 'mock') {
       this.mockRuntime.start(taskId, started.turnId, started.text);
@@ -868,7 +868,7 @@ export class IpcRouter {
         started.turnId,
         started.text,
         workspacePath,
-        this.persistence.getModel(),
+        started.model,
         createEmptyToolCatalogSnapshot('codex', workspaceId),
       );
     }
