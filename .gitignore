@@ -1,2 +1,6 @@
 .reference-repos/
-
+node_modules/
+apps/desktop/.vite/
+apps/desktop/out/
+apps/desktop/.vite-user-data/
+*.log
