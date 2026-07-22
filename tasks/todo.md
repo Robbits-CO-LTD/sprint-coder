@@ -77,6 +77,13 @@ Wave 2(完了 2026-07-22):
   - background payloadは1 fragment 10k token未満・Turnあたり24 KBに制限し、保存前にANSI/control/bidi除去とcredential redaction、content hash再検証を実施。restart-durable process/monitor/scheduler自体は計画どおりPublic Betaへ延期
   - 検証: typecheck/test(374件、SQLite Electron ABI内31件)/lint/format/E2E 7本 green。rollback、restart再送、manual、epoch隔離、重複/conflict、prompt authorityを固定し、Computer UseでCodex/GPT-5.6-Terraのprotocol v4実AI応答「確認OK」を実機確認
 - [ ] Slice 4.7 Edit Transaction and Standard Assurance
+  - [x] FileRevisionTokenをTask/Turn/policy epoch/identity/content hashへ束縛し、Turn開始時のruntime/model snapshotと同様に編集入力を固定
+  - [x] structured patch全体のadd/update/delete/rename preflight、anchor/overlap/path collision/revision検証、opaque artifact-backed Edit Saga journalを実装
+  - [x] journal-first materialization、source/destination absent/present観測、逆順補償、crash-unknown quarantine、strict persisted schema、stable Saga diff、restart recoveryを実装
+  - [x] raw pre/post imageをSQLite/WAL/SHMから排除。app-private artifactはowner/hash/size/secret flagを束縛し、deterministic retry、quota、tamper/symlink/hardlink permission、partial pair cleanup、durable terminal GCを実装
+  - [x] 非production S3a safe-point: typecheck/test(403件)/lint/format/E2E 7本 green、独立要件/テスト再レビュー CRITICAL 0 / HIGH 0
+  - [ ] NativeSafeFs boundary、workspace temp/tombstone identityの事前journal、mutation lease/single-flight、startup Task quarantineとproduction tool wiring（完了までwrite tool非公開）
+  - [ ] Turn全体baseline diff集約、Acceptance Contract/Evidence Ledger、Standard repair最大1、30-case corpus baseline
 - [ ] Phase 4 acceptance gate: provider.egress policy/監査、local-only拒否、30-case corpus、未解決High/Critical 0を最終確認
 
 ---

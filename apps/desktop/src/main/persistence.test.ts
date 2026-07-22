@@ -1,8 +1,8 @@
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   ToolRegistry,
@@ -11,7 +11,7 @@ import {
   createToolDefinition,
   createToolId,
 } from '@vibe/domain';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { ToolBroker } from './tool-broker';
@@ -21,6 +21,23 @@ import {
   SteerStaleError,
   TurnActiveError,
 } from './persistence';
+import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
+import {
+  EditSagaCrashError,
+  EditSagaExecutor,
+  PersistenceEditSagaStore,
+  stageEditSagaRequest,
+  type EditArtifactRepository,
+  type EditEffectBoundary,
+  type EditSagaStep,
+  type OperationObservation,
+} from './edit-saga';
+import {
+  EditArtifactStore,
+  createEditArtifactReference,
+  type EditArtifactOwner,
+  type EditArtifactRef,
+} from './edit-artifact-store';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.VIBE_ELECTRON_DB_TEST === '1';
@@ -34,6 +51,23 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
   cleanup.push(directory);
   const path = join(directory, 'test.sqlite3');
   return { persistence: new SqlitePersistenceClient(path), path };
+}
+
+class PersistenceTestArtifacts implements EditArtifactRepository {
+  readonly values = new Map<string, Buffer>();
+  async put(input: { owner: EditArtifactOwner; bytes: Buffer }): Promise<EditArtifactRef> {
+    const reference = createEditArtifactReference(input.owner, input.bytes);
+    this.values.set(reference.artifactId, Buffer.from(input.bytes));
+    return reference;
+  }
+  async read(reference: EditArtifactRef): Promise<Buffer> {
+    const bytes = this.values.get(reference.artifactId);
+    if (bytes === undefined) throw new Error('artifact missing');
+    return Buffer.from(bytes);
+  }
+  async release(reference: EditArtifactRef): Promise<void> {
+    this.values.delete(reference.artifactId);
+  }
 }
 
 function startExecutingTurn(persistence: SqlitePersistenceClient, taskId: string) {
@@ -79,7 +113,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v18', () => {
+  describe('SqlitePersistenceClient v19', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -226,6 +260,266 @@ if (runsWithElectronAbi)
         model: 'gpt-5.6-terra',
       });
       persistence.close();
+    });
+
+    it('durably journals Edit Saga state before effects and restores it after restart', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'edit safely');
+      const applyRequest = {
+        id: 'saga-1',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'edit-operation-1',
+        plan: persistedEditPlan('SENSITIVE_PRE_SENTINEL_7F31', 'SENSITIVE_POST_SENTINEL_9A42'),
+        createdAt: '2026-07-23T00:00:00.000Z',
+      } as const;
+      const request = await stageEditSagaRequest(applyRequest, new PersistenceTestArtifacts());
+      const prepared = persistence.prepareEditSaga(request);
+      const inspection = new Database(path, { readonly: true });
+      const stored = inspection
+        .prepare('SELECT snapshot_json FROM edit_sagas WHERE id = ?')
+        .pluck()
+        .get('saga-1') as string;
+      inspection.close();
+      expect(stored).not.toContain('SENSITIVE_PRE_SENTINEL_7F31');
+      expect(stored).not.toContain('SENSITIVE_POST_SENTINEL_9A42');
+      expect(stored).not.toContain('preImage');
+      expect(stored).not.toContain('postImage');
+      for (const databaseFile of [path, `${path}-wal`, `${path}-shm`]) {
+        if (!existsSync(databaseFile)) continue;
+        const bytes = readFileSync(databaseFile).toString('utf8');
+        expect(bytes).not.toContain('SENSITIVE_PRE_SENTINEL_7F31');
+        expect(bytes).not.toContain('SENSITIVE_POST_SENTINEL_9A42');
+      }
+      const applying = persistence.updateEditSaga(prepared.id, prepared.revision, (current) => {
+        const { revision: _revision, ...snapshot } = current;
+        return {
+          ...snapshot,
+          state: 'applying',
+          steps: current.steps.map((step) => ({ ...step, state: 'effect_pending' as const })),
+          updatedAt: '2026-07-23T00:00:01.000Z',
+        };
+      });
+      expect(applying.revision).toBe(1);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listRecoverableEditSagas()).toEqual([
+        expect.objectContaining({ id: 'saga-1', state: 'applying', revision: 1 }),
+      ]);
+      expect(reopened.prepareEditSaga(request)).toMatchObject({ id: 'saga-1', revision: 1 });
+      expect(() =>
+        reopened.prepareEditSaga({
+          ...request,
+          planDigest: 'f'.repeat(64),
+        }),
+      ).toThrow(OperationConflictError);
+      reopened.close();
+    });
+
+    it('rejects a persisted Edit plan whose sealed operation payload was modified', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'tamper test');
+      persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'tamper-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'tamper-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+      persistence.close();
+      const raw = new Database(path);
+      const row = raw
+        .prepare('SELECT snapshot_json FROM edit_sagas WHERE id = ?')
+        .get('tamper-saga') as {
+        snapshot_json: string;
+      };
+      const snapshot = JSON.parse(row.snapshot_json) as {
+        steps: { operation: { canonicalPath: string } }[];
+      };
+      snapshot.steps[0]!.operation.canonicalPath = '/outside/modified.ts';
+      raw
+        .prepare('UPDATE edit_sagas SET snapshot_json = ? WHERE id = ?')
+        .run(JSON.stringify(snapshot), 'tamper-saga');
+      raw.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(() => reopened.getEditSaga('tamper-saga')).toThrow('journal digest mismatch');
+      reopened.close();
+    });
+
+    it('reconciles a crash-unknown Edit effect from the durable journal without replay', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'edit then crash');
+      let content = 'before';
+      let applyCount = 0;
+      const boundary: EditEffectBoundary = {
+        async apply() {
+          applyCount += 1;
+          content = 'after';
+          return persistedObservation('after', 'post-identity');
+        },
+        async observe() {
+          return content === 'before'
+            ? {
+                state: 'pre' as const,
+                observation: persistedObservation('before', 'pre-identity'),
+              }
+            : content === 'after'
+              ? {
+                  state: 'post' as const,
+                  observation: persistedObservation('after', 'post-identity'),
+                }
+              : {
+                  state: 'drift' as const,
+                  observation: persistedObservation(content, 'drift-identity'),
+                };
+        },
+        async restore() {
+          content = 'before';
+          return persistedObservation('before', 'restored-identity');
+        },
+      };
+      const request = {
+        id: 'crash-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'crash-operation',
+        plan: persistedEditPlan(),
+        createdAt: '2026-07-23T00:00:00.000Z',
+      } as const;
+      const artifacts = new PersistenceTestArtifacts();
+      await expect(
+        new EditSagaExecutor(new PersistenceEditSagaStore(persistence), boundary, artifacts, {
+          hit(point) {
+            if (point.kind === 'afterEffectBeforeJournal') throw new EditSagaCrashError('crash');
+          },
+        }).apply(request),
+      ).rejects.toBeInstanceOf(EditSagaCrashError);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      const recovered = await new EditSagaExecutor(
+        new PersistenceEditSagaStore(reopened),
+        boundary,
+        artifacts,
+      ).recover('crash-saga');
+      expect(recovered.state).toBe('recovery_required');
+      expect(content).toBe('after');
+      expect(applyCount).toBe(1);
+      reopened.close();
+    });
+
+    it('reopens real artifacts and a real file before compensating a restart', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'durable artifact restart');
+      const workspaceFile = join(dirname(path), 'workspace.txt');
+      const artifactRoot = join(dirname(path), 'edit-artifacts');
+      writeFileSync(workspaceFile, 'before');
+      const artifacts = await EditArtifactStore.open({ rootPath: artifactRoot, quotaBytes: 4096 });
+      const boundary = fileBoundary(workspaceFile, artifacts);
+      const request = {
+        id: 'disk-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'disk-operation',
+        plan: persistedEditPlan(),
+        createdAt: '2026-07-23T00:00:00.000Z',
+      } as const;
+      await expect(
+        new EditSagaExecutor(new PersistenceEditSagaStore(persistence), boundary, artifacts, {
+          hit(point) {
+            if (point.kind === 'beforeFinalize') throw new EditSagaCrashError('restart');
+          },
+        }).apply(request),
+      ).rejects.toBeInstanceOf(EditSagaCrashError);
+      expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
+      persistence.close();
+
+      const reopenedPersistence = new SqlitePersistenceClient(path);
+      const reopenedArtifacts = await EditArtifactStore.open({
+        rootPath: artifactRoot,
+        quotaBytes: 4096,
+      });
+      const recovered = await new EditSagaExecutor(
+        new PersistenceEditSagaStore(reopenedPersistence),
+        fileBoundary(workspaceFile, reopenedArtifacts),
+        reopenedArtifacts,
+      ).reconcileAll();
+      expect(recovered).toEqual([expect.objectContaining({ id: 'disk-saga', state: 'restored' })]);
+      expect(readFileSync(workspaceFile, 'utf8')).toBe('before');
+      expect(
+        await new EditSagaExecutor(
+          new PersistenceEditSagaStore(reopenedPersistence),
+          fileBoundary(workspaceFile, reopenedArtifacts),
+          reopenedArtifacts,
+        ).reconcileAll(),
+      ).toEqual([]);
+      reopenedPersistence.close();
+    });
+
+    it('retries durable terminal artifact cleanup after restart', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'terminal cleanup restart');
+      const workspaceFile = join(dirname(path), 'cleanup-workspace.txt');
+      const artifactRoot = join(dirname(path), 'cleanup-artifacts');
+      writeFileSync(workspaceFile, 'before');
+      const artifacts = await EditArtifactStore.open({ rootPath: artifactRoot, quotaBytes: 4096 });
+      await expect(
+        new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts),
+          artifacts,
+          {
+            hit(point) {
+              if (point.kind === 'afterTerminalBeforeCleanup')
+                throw new EditSagaCrashError('terminal cleanup crash');
+            },
+          },
+        ).apply({
+          id: 'cleanup-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'cleanup-operation',
+          plan: persistedEditPlan(),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        }),
+      ).rejects.toBeInstanceOf(EditSagaCrashError);
+      expect(persistence.getEditSaga('cleanup-saga')).toMatchObject({
+        state: 'committed',
+        artifactCleanupPending: true,
+      });
+      persistence.close();
+
+      const reopenedPersistence = new SqlitePersistenceClient(path);
+      const reopenedArtifacts = await EditArtifactStore.open({
+        rootPath: artifactRoot,
+        quotaBytes: 4096,
+      });
+      const reconciled = await new EditSagaExecutor(
+        new PersistenceEditSagaStore(reopenedPersistence),
+        fileBoundary(workspaceFile, reopenedArtifacts),
+        reopenedArtifacts,
+      ).reconcileAll();
+      expect(reconciled).toEqual([
+        expect.objectContaining({ state: 'committed', artifactCleanupPending: false }),
+      ]);
+      expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
+      expect(await import('node:fs/promises').then(({ readdir }) => readdir(artifactRoot))).toEqual(
+        [],
+      );
+      reopenedPersistence.close();
     });
 
     it('persists expanded access policy rules and revokes task-scoped grants by epoch', () => {
@@ -1646,6 +1940,7 @@ if (runsWithElectronAbi)
         { version: 16 },
         { version: 17 },
         { version: 18 },
+        { version: 19 },
       ]);
       expect(
         migrated
@@ -1724,7 +2019,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v18 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v19 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),
@@ -1743,6 +2038,71 @@ else
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     }, 35_000);
   });
+
+function persistedEditPlan(preImage = 'before', postImage = 'after'): PreparedStructuredPatch {
+  const facts = {
+    version: 1,
+    policyEpoch: 0,
+    operations: Object.freeze([
+      Object.freeze({
+        kind: 'update' as const,
+        path: 'src/a.ts',
+        canonicalPath: '/workspace/src/a.ts',
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: 'token-1',
+        preImage,
+        postImage,
+        preHash: editHash(preImage),
+        postHash: editHash(postImage),
+      }),
+    ]),
+  } as const;
+  return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+}
+
+function editHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function persistedObservation(value: string, identityDigest: string): OperationObservation {
+  return {
+    source: {
+      state: 'present',
+      revision: { identityDigest, contentHash: editHash(value), size: Buffer.byteLength(value) },
+    },
+    destination: { state: 'absent' },
+  };
+}
+
+function fileBoundary(filePath: string, artifacts: EditArtifactStore): EditEffectBoundary {
+  const observeValue = (value: string) => persistedObservation(value, `file:${editHash(value)}`);
+  return {
+    async apply(step: EditSagaStep) {
+      if (readFileSync(filePath, 'utf8') !== 'before') throw new Error('unexpected pre-image');
+      const reference = step.operation.postArtifact;
+      if (reference === null) throw new Error('missing post artifact');
+      const value = (await artifacts.read(reference)).toString('utf8');
+      writeFileSync(filePath, value);
+      return observeValue(value);
+    },
+    async observe() {
+      const value = readFileSync(filePath, 'utf8');
+      return value === 'before'
+        ? { state: 'pre' as const, observation: observeValue(value) }
+        : value === 'after'
+          ? { state: 'post' as const, observation: observeValue(value) }
+          : { state: 'drift' as const, observation: observeValue(value) };
+    },
+    async restore(step: EditSagaStep) {
+      const reference = step.operation.preArtifact;
+      if (reference === null) throw new Error('missing pre artifact');
+      const value = (await artifacts.read(reference)).toString('utf8');
+      writeFileSync(filePath, value);
+      return observeValue(value);
+    },
+  };
+}
 
 function createLegacyV1Database(path: string): void {
   const db = new Database(path);

@@ -68,6 +68,13 @@ import {
 } from './context-ledger';
 import { redactSecrets } from './secret-redactor';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
+import {
+  createEditSagaSnapshot,
+  parseEditSagaSnapshot,
+  transitionEditSagaSnapshot,
+  type EditSagaCreateRequest,
+  type EditSagaSnapshot,
+} from './edit-saga';
 
 type TaskRow = {
   id: string;
@@ -237,6 +244,20 @@ type CommandRow = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+};
+type EditSagaRow = {
+  id: string;
+  task_id: string;
+  turn_id: string;
+  operation_id: string;
+  plan_digest: string;
+  policy_epoch: number;
+  state: EditSagaSnapshot['state'];
+  revision: number;
+  artifact_cleanup_pending: number;
+  snapshot_json: string;
+  created_at: string;
+  updated_at: string;
 };
 type EventWithoutSeq = TurnEvent extends infer Event
   ? Event extends TurnEvent
@@ -737,6 +758,30 @@ const migrations = [
       ALTER TABLE turns ADD COLUMN model TEXT NOT NULL DEFAULT 'auto';
     `,
   },
+  {
+    version: 19,
+    checksum: 'edit-saga-v19-durable-journal',
+    sql: `
+      CREATE TABLE edit_sagas (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        operation_id TEXT NOT NULL,
+        plan_digest TEXT NOT NULL CHECK (length(plan_digest) = 64),
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        state TEXT NOT NULL CHECK (state IN (
+          'prepared', 'applying', 'compensating', 'committed', 'restored', 'recovery_required'
+        )),
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0 CHECK (artifact_cleanup_pending IN (0, 1)),
+        snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(task_id, turn_id, operation_id)
+      );
+      CREATE INDEX edit_sagas_recovery_idx ON edit_sagas(state, updated_at, id);
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -1036,6 +1081,15 @@ export interface PersistenceClient {
     fragmentIds: readonly string[],
   ): TurnEvent[];
   quarantineBackgroundForPolicyEpoch(taskId: string, policyEpoch: number, now: string): number;
+  prepareEditSaga(request: EditSagaCreateRequest): EditSagaSnapshot;
+  findEditSaga(taskId: string, turnId: string, operationId: string): EditSagaSnapshot | null;
+  getEditSaga(id: string): EditSagaSnapshot;
+  updateEditSaga(
+    id: string,
+    expectedRevision: number,
+    mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
+  ): EditSagaSnapshot;
+  listRecoverableEditSagas(): readonly EditSagaSnapshot[];
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
   queueInput(
@@ -2573,6 +2627,99 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  prepareEditSaga(request: EditSagaCreateRequest): EditSagaSnapshot {
+    return this.db.transaction(() => {
+      this.getTurn(request.taskId, request.turnId);
+      const existing = this.db
+        .prepare('SELECT * FROM edit_sagas WHERE task_id = ? AND turn_id = ? AND operation_id = ?')
+        .get(request.taskId, request.turnId, request.operationId) as EditSagaRow | undefined;
+      if (existing !== undefined) {
+        const snapshot = toEditSaga(existing);
+        if (snapshot.planDigest !== request.planDigest)
+          throw new OperationConflictError('Edit operation id was reused with another patch');
+        return snapshot;
+      }
+      const snapshot = createEditSagaSnapshot(request);
+      this.db
+        .prepare(
+          `INSERT INTO edit_sagas(
+            id, task_id, turn_id, operation_id, plan_digest, policy_epoch,
+            state, revision, artifact_cleanup_pending, snapshot_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          snapshot.id,
+          snapshot.taskId,
+          snapshot.turnId,
+          snapshot.operationId,
+          snapshot.planDigest,
+          snapshot.policyEpoch,
+          snapshot.state,
+          snapshot.revision,
+          snapshot.artifactCleanupPending ? 1 : 0,
+          JSON.stringify(snapshot),
+          snapshot.createdAt,
+          snapshot.updatedAt,
+        );
+      return snapshot;
+    })();
+  }
+
+  findEditSaga(taskId: string, turnId: string, operationId: string): EditSagaSnapshot | null {
+    const row = this.db
+      .prepare('SELECT * FROM edit_sagas WHERE task_id = ? AND turn_id = ? AND operation_id = ?')
+      .get(taskId, turnId, operationId) as EditSagaRow | undefined;
+    return row === undefined ? null : toEditSaga(row);
+  }
+
+  getEditSaga(id: string): EditSagaSnapshot {
+    const row = this.db.prepare('SELECT * FROM edit_sagas WHERE id = ?').get(id) as
+      EditSagaRow | undefined;
+    if (row === undefined) throw new NotFoundError('Edit Saga not found');
+    return toEditSaga(row);
+  }
+
+  updateEditSaga(
+    id: string,
+    expectedRevision: number,
+    mutate: (current: EditSagaSnapshot) => Omit<EditSagaSnapshot, 'revision'>,
+  ): EditSagaSnapshot {
+    return this.db.transaction(() => {
+      const current = this.getEditSaga(id);
+      if (current.revision !== expectedRevision)
+        throw new OperationConflictError('Stale Edit Saga revision');
+      const next = transitionEditSagaSnapshot(current, mutate);
+      const result = this.db
+        .prepare(
+          `UPDATE edit_sagas SET state = ?, revision = ?, artifact_cleanup_pending = ?, snapshot_json = ?, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(
+          next.state,
+          next.revision,
+          next.artifactCleanupPending ? 1 : 0,
+          JSON.stringify(next),
+          next.updatedAt,
+          id,
+          expectedRevision,
+        );
+      if (result.changes !== 1) throw new OperationConflictError('Stale Edit Saga revision');
+      return next;
+    })();
+  }
+
+  listRecoverableEditSagas(): readonly EditSagaSnapshot[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM edit_sagas
+           WHERE state IN ('prepared', 'applying', 'compensating') OR artifact_cleanup_pending = 1
+           ORDER BY created_at, id`,
+        )
+        .all() as EditSagaRow[]
+    ).map(toEditSaga);
+  }
+
   listMessages(taskId: string): ChatMessage[] {
     this.assertTask(taskId);
     return (
@@ -4084,4 +4231,29 @@ function permissionRuleKey(input: {
     [...input.rule.operations],
     input.rule.auditReason ?? null,
   ]);
+}
+
+function toEditSaga(row: EditSagaRow): EditSagaSnapshot {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.snapshot_json);
+  } catch {
+    throw new Error('Invalid persisted Edit Saga JSON');
+  }
+  const snapshot = parseEditSagaSnapshot(parsed);
+  if (
+    snapshot.id !== row.id ||
+    snapshot.taskId !== row.task_id ||
+    snapshot.turnId !== row.turn_id ||
+    snapshot.operationId !== row.operation_id ||
+    snapshot.planDigest !== row.plan_digest ||
+    snapshot.policyEpoch !== row.policy_epoch ||
+    snapshot.state !== row.state ||
+    snapshot.revision !== row.revision ||
+    snapshot.artifactCleanupPending !== (row.artifact_cleanup_pending === 1) ||
+    snapshot.createdAt !== row.created_at ||
+    snapshot.updatedAt !== row.updated_at
+  )
+    throw new Error('Persisted Edit Saga columns do not match its sealed snapshot');
+  return snapshot;
 }

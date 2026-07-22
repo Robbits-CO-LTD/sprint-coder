@@ -186,7 +186,21 @@ export async function prepareStructuredPatch(input: {
     policyEpoch: input.policyEpoch,
     operations: Object.freeze(prepared),
   };
-  return Object.freeze({ ...facts, digest: hash(JSON.stringify(facts)) });
+  return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+}
+
+export function structuredPatchDigest(input: {
+  version: 1;
+  policyEpoch: number;
+  operations: readonly PreparedPatchOperation[];
+}): string {
+  return hash(
+    JSON.stringify({
+      version: input.version,
+      policyEpoch: input.policyEpoch,
+      operations: input.operations,
+    }),
+  );
 }
 
 function applyAnchoredEdits(
