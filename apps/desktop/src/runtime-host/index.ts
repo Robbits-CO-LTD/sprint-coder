@@ -1,14 +1,15 @@
-import { parentPort } from 'electron/utility';
 import { CodexRuntimeAdapter, probeCodex } from './codex-adapter';
 import {
   RUNTIME_PROTOCOL_VERSION,
   isMainToRuntimeEnvelope,
   type RuntimeToMainEnvelope,
 } from './protocol';
+import { requireParentPort } from './parent-port';
 
 const runtimeInstanceId = readRuntimeInstanceId();
 const adapter = new CodexRuntimeAdapter();
 const sequences = new Map<string, number>();
+const parentPort = requireParentPort(process);
 
 parentPort.on('message', ({ data }: Electron.MessageEvent) => {
   if (!isMainToRuntimeEnvelope(data) || data.runtimeInstanceId !== runtimeInstanceId) return;

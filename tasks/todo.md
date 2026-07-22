@@ -21,6 +21,9 @@ Wave 2(完了 2026-07-22):
 
 ## Phase 4 実装進捗(2026-07-22)
 
+- [x] Production Runtime probe hotfix
+  - UtilityProcess子側のIPC取得を実行時にundefinedとなる`electron/utility.parentPort`からElectron正本の`process.parentPort`へ修正
+  - 同一UtilityProcess診断で`codexAvailable:true`を確認し、Computer Use実機操作でCodex選択→実AI応答「疎通確認OK」まで完走
 - [x] Phase 4冒頭 / Slice 3.6 Intelligence Loop baseline
   - `intelligence_steps` migration v5とimmutable StepSnapshot(model/effort/context・tool digest/policy epoch/workspace・contract revision)を追加
   - Step lifecycle(`prepared→sampling→sampled→dispatching→toolsCommitted→completed`)をdomain state machineとSQLiteで強制
