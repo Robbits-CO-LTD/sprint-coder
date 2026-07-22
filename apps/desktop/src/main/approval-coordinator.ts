@@ -92,7 +92,12 @@ export class ApprovalCoordinator {
       evaluatePermission: (input: {
         capability: Capability;
         request: ToolAuthorizationRequest;
-      }) => 'allow' | 'deny' | 'approval_required';
+      }) =>
+        | ToolAuthorizationDecision
+        | 'allow'
+        | 'deny'
+        | 'approval_required'
+        | Promise<ToolAuthorizationDecision | 'allow' | 'deny' | 'approval_required'>;
       publish: {
         bivarianceHack(approval: ApprovalLike, event?: unknown): void;
       }['bivarianceHack'];
@@ -103,22 +108,17 @@ export class ApprovalCoordinator {
     const required = request.entry.requiredCapabilities;
     if (required.length === 0) return { decision: 'allow', reason: 'no_capability_required' };
 
-    const evaluations = required.map((capability) => ({
-      capability,
-      decision: this.options.evaluatePermission({ capability, request }),
-    }));
-    if (evaluations.some(({ decision }) => decision === 'deny'))
+    const evaluations: Array<{ capability: Capability; decision: ToolAuthorizationDecision }> = [];
+    for (const capability of required) {
+      const evaluated = await this.options.evaluatePermission({ capability, request });
+      evaluations.push({ capability, decision: normalizeAuthorization(evaluated) });
+    }
+    if (evaluations.some(({ decision }) => decision.decision === 'deny'))
       return { decision: 'deny', reason: 'permission_denied' };
     const revalidators: (() => boolean)[] = [];
     for (const evaluation of evaluations) {
-      if (evaluation.decision === 'allow') {
-        revalidators.push(
-          () =>
-            this.options.evaluatePermission({
-              capability: evaluation.capability,
-              request,
-            }) === 'allow',
-        );
+      if (evaluation.decision.decision === 'allow') {
+        revalidators.push(evaluation.decision.beforeExecute ?? (() => false));
         continue;
       }
       const decision = await this.requestCapabilityApproval(request, evaluation.capability);
@@ -309,12 +309,7 @@ export class ApprovalCoordinator {
                 })
               )
                 return true;
-              return (
-                this.options.evaluatePermission({
-                  capability: waiter.capability,
-                  request: waiter.request,
-                }) === 'allow'
-              );
+              return false;
             },
           }),
     });
@@ -356,6 +351,12 @@ export class ApprovalCoordinator {
     this.waiters.delete(id);
     for (const resolve of waiter.resolvers) resolve(decision);
   }
+}
+
+function normalizeAuthorization(
+  decision: ToolAuthorizationDecision | 'allow' | 'deny' | 'approval_required',
+): ToolAuthorizationDecision {
+  return typeof decision === 'string' ? { decision, reason: `permission_${decision}` } : decision;
 }
 
 function resourceFor(request: ToolAuthorizationRequest): ResourceSet {

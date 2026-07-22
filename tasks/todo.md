@@ -63,6 +63,13 @@ Wave 2(完了 2026-07-22):
   - cancelはUnix process group / Windows `taskkill /T`で協調停止→grace後強制停止。親が先に終了する孫残留fixture、sink failure、アプリ終了時drainを含めて回収
   - CommandRunnerをToolBroker/Approval/Intelligence Loopへ接続。承認対象はexact spec digest、OS sandboxなしのfull user authorityとして表示し、Workspace外・networkアクセス警告を追加
   - 検証: typecheck/test(354件)/lint/format/E2E 7本 green。model選択・再起動復元E2Eも同時通過
+- [x] Slice 4.5 Command and Approval cards
+  - SQLite migration v15/v16へCommand Card表示projection、content hash/byte integrity付きoutput paging、Auto reviewerのdecision/audit/one-time permit bindingを追加。権限決定・audit・permit・TurnEventを同一transactionでcommit
+  - demo準拠のCommand Cardへpurpose/cwd/exact executable+argv/env delta/risk/status/exit/duration、collapsed tailとexpanded outputを表示。10 MiBの改行なし・dense newline出力をbounded rowへ投影し、入力とscrollを阻害しない構造へ固定
+  - Approval Cardのprimary/task/denyをkeyboard操作可能にし、解決後はcompact audit rowへ縮約。challenge/permit secretはRenderer向けevent/list/responseからredact
+  - Auto reviewerを固定local/no-I/O production reviewerとして分離し、allow-once限定、high-risk deny、timeout/schema/model failure fail-closed、immutable input/spec/Turn/call digest bindingとcache replay conflict検出を実装
+  - Auto許可・拒否・reviewer失敗をeffective decision/source/outcome/model/template/request digest付きcompact auditとして永続表示し、再起動後も復元
+  - 検証: typecheck/test(367件)/lint/format/E2E 7本 green、独立要件/テスト再レビューGO。Computer UseでApproval Cardをkeyboard拒否し、Runを失敗させずcompact auditへ遷移することを実機確認
 
 ---
 

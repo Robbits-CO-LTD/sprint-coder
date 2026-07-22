@@ -209,6 +209,30 @@ export const approvalSummarySchema = z
   });
 export type ApprovalSummary = z.infer<typeof approvalSummarySchema>;
 
+export const autoPermissionDecisionSchema = z
+  .object({
+    id: idSchema,
+    taskId: idSchema,
+    turnId: idSchema,
+    callId: idSchema,
+    reviewRequestId: idSchema,
+    capability: toolCapabilitySchema,
+    source: z.enum(['policy', 'narrow_allow', 'reviewer']),
+    decision: z.enum(['allow', 'allow_once', 'deny']),
+    outcome: z.string().min(1).max(100),
+    reason: z.string().min(1).max(500),
+    risk: toolRiskSchema,
+    model: z.string().min(1).max(200),
+    templateVersion: z.string().min(1).max(100),
+    requestFingerprint: digestSchema,
+    executionSpecDigest: digestSchema,
+    inputDigest: digestSchema,
+    policyEpoch: z.number().int().nonnegative(),
+    createdAt: timestampSchema,
+  })
+  .strict();
+export type AutoPermissionDecision = z.infer<typeof autoPermissionDecisionSchema>;
+
 export const approvalResolveInputSchema = z
   .object({
     taskId: idSchema,
@@ -241,6 +265,9 @@ export const commandSummarySchema = z
     executable: z.string().min(1).max(32_768),
     argv: z.array(z.string().max(1_000_000)).max(4_096),
     cwd: z.string().min(1).max(32_768),
+    envDelta: z.record(z.string(), z.string().max(1_000_000)),
+    purpose: z.string().min(1).max(500),
+    risk: toolRiskSchema,
     state: commandStateSchema,
     pid: z.number().int().positive().nullable(),
     exitCode: z.number().int().nullable(),
@@ -253,6 +280,47 @@ export const commandSummarySchema = z
   })
   .strict();
 export type CommandSummary = z.infer<typeof commandSummarySchema>;
+
+export const commandOutputRecordSchema = z
+  .object({
+    seq: z.number().int().positive(),
+    stream: z.enum(['stdout', 'stderr']),
+    text: z.string().max(65_536),
+    byteLength: z.number().int().nonnegative().max(65_536),
+  })
+  .strict();
+export type CommandOutputRecord = z.infer<typeof commandOutputRecordSchema>;
+
+export const commandOutputPageInputSchema = z
+  .object({
+    taskId: idSchema,
+    commandId: idSchema,
+    afterSeq: z.number().int().nonnegative().default(0),
+    limit: z.number().int().min(1).max(500).default(200),
+    maxBytes: z.number().int().min(65_536).max(1_048_576).default(262_144),
+  })
+  .strict();
+export type CommandOutputPageInput = z.infer<typeof commandOutputPageInputSchema>;
+
+export const commandOutputTailInputSchema = z
+  .object({
+    taskId: idSchema,
+    commandId: idSchema,
+    maxBytes: z.number().int().min(65_536).max(262_144).default(131_072),
+  })
+  .strict();
+export type CommandOutputTailInput = z.infer<typeof commandOutputTailInputSchema>;
+
+export const commandOutputPageSchema = z
+  .object({
+    commandId: idSchema,
+    items: z.array(commandOutputRecordSchema).max(500),
+    nextAfterSeq: z.number().int().nonnegative(),
+    eof: z.boolean(),
+    pageBytes: z.number().int().nonnegative().max(1_048_576),
+  })
+  .strict();
+export type CommandOutputPage = z.infer<typeof commandOutputPageSchema>;
 
 const turnEventBase = { taskId: idSchema, turnId: idSchema, seq: z.number().int().positive() };
 export const turnEventSchema = z.discriminatedUnion('type', [
@@ -318,6 +386,13 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       type: z.literal('command.completed'),
       ...turnEventBase,
       command: commandSummarySchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('permission.auto_decided'),
+      ...turnEventBase,
+      autoDecision: autoPermissionDecisionSchema,
     })
     .strict(),
   z
@@ -537,6 +612,7 @@ export interface VibeApi {
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
+    listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;
     set(
       taskId: string,
       preset: AccessPreset,
@@ -545,7 +621,13 @@ export interface VibeApi {
   };
   approvals: {
     listPending(taskId: string): Promise<ApprovalSummary[]>;
+    listRecent(taskId: string): Promise<ApprovalSummary[]>;
     resolve(input: ApprovalResolveInput): Promise<ApprovalSummary>;
+  };
+  commands: {
+    list(taskId: string): Promise<CommandSummary[]>;
+    outputPage(input: CommandOutputPageInput): Promise<CommandOutputPage>;
+    outputTail(input: CommandOutputTailInput): Promise<CommandOutputPage>;
   };
   turns: {
     start(input: { taskId: string; text: string }): Promise<{ turnId: string }>;
@@ -580,8 +662,13 @@ export const IPC_CHANNELS = {
   settingsSetModel: 'vibe:settings:set-model',
   permissionsGet: 'vibe:permissions:get',
   permissionsSet: 'vibe:permissions:set',
+  permissionsListAutoDecisions: 'vibe:permissions:list-auto-decisions',
   approvalsListPending: 'vibe:approvals:list-pending',
+  approvalsListRecent: 'vibe:approvals:list-recent',
   approvalsResolve: 'vibe:approvals:resolve',
+  commandsList: 'vibe:commands:list',
+  commandsOutputPage: 'vibe:commands:output-page',
+  commandsOutputTail: 'vibe:commands:output-tail',
   turnsStart: 'vibe:turns:start',
   turnsQueue: 'vibe:turns:queue',
   turnsSteer: 'vibe:turns:steer',

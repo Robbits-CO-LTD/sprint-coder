@@ -63,6 +63,27 @@ export type ApprovalSummary = {
   decidedAt?: string;
 };
 
+export type AutoPermissionDecision = {
+  id: string;
+  taskId: string;
+  turnId: string;
+  callId: string;
+  reviewRequestId: string;
+  capability: Capability;
+  source: 'policy' | 'narrow_allow' | 'reviewer';
+  decision: 'allow' | 'allow_once' | 'deny';
+  outcome: string;
+  reason: string;
+  risk: 'low' | 'medium' | 'high';
+  model: string;
+  templateVersion: string;
+  requestFingerprint: string;
+  executionSpecDigest: string;
+  inputDigest: string;
+  policyEpoch: number;
+  createdAt: string;
+};
+
 export type QueuedInput = { ordinal: number; text: string };
 
 export type CommandSummary = {
@@ -74,6 +95,9 @@ export type CommandSummary = {
   executable: string;
   argv: string[];
   cwd: string;
+  envDelta: Record<string, string>;
+  purpose: string;
+  risk: 'low' | 'medium' | 'high';
   state: 'prepared' | 'starting' | 'running' | 'exited' | 'canceled' | 'failed' | 'interrupted';
   pid: number | null;
   exitCode: number | null;
@@ -83,6 +107,21 @@ export type CommandSummary = {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+};
+
+export type CommandOutputRecord = {
+  seq: number;
+  stream: 'stdout' | 'stderr';
+  text: string;
+  byteLength: number;
+};
+
+export type CommandOutputPage = {
+  commandId: string;
+  items: CommandOutputRecord[];
+  nextAfterSeq: number;
+  eof: boolean;
+  pageBytes: number;
 };
 
 /** Context-window usage breakdown (FR-CTX). Backend may not have wired this yet — renderer
@@ -155,6 +194,13 @@ export type TurnEvent =
       seq: number;
       command: CommandSummary;
     }
+  | {
+      type: 'permission.auto_decided';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      autoDecision: AutoPermissionDecision;
+    }
   | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
   | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage };
 
@@ -226,6 +272,7 @@ export interface VibeApi {
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
+    listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;
     set(
       taskId: string,
       preset: AccessPreset,
@@ -234,6 +281,7 @@ export interface VibeApi {
   };
   approvals: {
     listPending(taskId: string): Promise<ApprovalSummary[]>;
+    listRecent(taskId: string): Promise<ApprovalSummary[]>;
     resolve(input: {
       taskId: string;
       approvalId: string;
@@ -242,6 +290,21 @@ export interface VibeApi {
       expectedPolicyEpoch: number;
       challenge: string;
     }): Promise<ApprovalSummary>;
+  };
+  commands: {
+    list(taskId: string): Promise<CommandSummary[]>;
+    outputPage(input: {
+      taskId: string;
+      commandId: string;
+      afterSeq: number;
+      limit: number;
+      maxBytes: number;
+    }): Promise<CommandOutputPage>;
+    outputTail(input: {
+      taskId: string;
+      commandId: string;
+      maxBytes: number;
+    }): Promise<CommandOutputPage>;
   };
 }
 

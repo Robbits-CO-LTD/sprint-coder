@@ -11,10 +11,12 @@ import {
   turnSnapshotSchema,
   type ChatMessage,
   type ApprovalDecision,
+  type AutoPermissionDecision,
   type ApprovalState,
   type ApprovalSummary,
   type CommandState,
   type CommandSummary,
+  type CommandOutputPage,
   type ContextUsage,
   type QueuedInput,
   type RuntimeKind,
@@ -165,6 +167,8 @@ type CommandRow = {
   call_id: string;
   spec_json: string;
   spec_digest: string;
+  purpose: string;
+  risk: 'low' | 'medium' | 'high';
   state: CommandState;
   pid: number | null;
   process_start_time: string | null;
@@ -570,6 +574,47 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 15,
+    checksum: 'commands-v15-display-projection',
+    sql: `
+      ALTER TABLE command_runs
+        ADD COLUMN purpose TEXT NOT NULL DEFAULT 'コマンドを実行します';
+      ALTER TABLE command_runs
+        ADD COLUMN risk TEXT NOT NULL DEFAULT 'high'
+        CHECK (risk IN ('low', 'medium', 'high'));
+    `,
+  },
+  {
+    version: 16,
+    checksum: 'permissions-v16-reviewer-permit-binding',
+    sql: `
+      ALTER TABLE permission_one_time_permits ADD COLUMN review_request_id TEXT;
+      CREATE UNIQUE INDEX permission_one_time_permits_review_request_idx
+        ON permission_one_time_permits(review_request_id)
+        WHERE review_request_id IS NOT NULL;
+      CREATE TABLE auto_permission_decisions (
+        review_request_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        call_id TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('policy', 'narrow_allow', 'reviewer')),
+        effective_decision TEXT NOT NULL CHECK (effective_decision IN ('allow', 'allow_once', 'deny')),
+        outcome TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        risk TEXT NOT NULL CHECK (risk IN ('low', 'medium', 'high')),
+        model TEXT NOT NULL,
+        template_version TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64),
+        execution_spec_digest TEXT NOT NULL CHECK (length(execution_spec_digest) = 64),
+        input_digest TEXT NOT NULL CHECK (length(input_digest) = 64),
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        created_at TEXT NOT NULL,
+        UNIQUE(task_id, turn_id, call_id, capability)
+      );
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -683,6 +728,13 @@ export interface PersistenceClient {
     token: string,
     policyEpoch: number,
     expiresAt: string,
+    binding?: {
+      reviewRequestId: string;
+      turnId: string;
+      callId: string;
+      subjectId: string;
+      specDigest: string;
+    },
   ): void;
   consumePermissionOneTimeToken(
     taskId: string,
@@ -690,7 +742,8 @@ export interface PersistenceClient {
     policyEpoch: number,
     now: string,
     binding?: {
-      approvalId: string;
+      approvalId?: string;
+      reviewRequestId?: string;
       turnId: string;
       callId: string;
       subjectId: string;
@@ -702,8 +755,15 @@ export interface PersistenceClient {
     request: PermissionRequest,
     evaluation: PermissionEvaluation,
   ): void;
+  commitPermissionEvaluation(
+    taskId: string,
+    request: PermissionRequest,
+    evaluation: PermissionEvaluation,
+    autoDecision?: AutoPermissionDecision,
+  ): TurnEvent | undefined;
   requestApproval(input: ApprovalRequestInput): ApprovalPersistenceResult;
   listPendingApprovals(taskId: string): PersistedApproval[];
+  listRecentApprovals(taskId: string, limit?: number): PersistedApproval[];
   getApproval(taskId: string, approvalId: string): PersistedApproval;
   resolveApproval(input: ApprovalResolutionInput): ApprovalPersistenceResult;
   invalidatePendingApprovalsForTask(
@@ -717,6 +777,8 @@ export interface PersistenceClient {
     turnId: string;
     callId: string;
     spec: ExecutionSpec;
+    purpose: string;
+    risk: 'low' | 'medium' | 'high';
     createdAt: string;
   }): CommandSummary;
   startCommand(input: {
@@ -754,7 +816,26 @@ export interface PersistenceClient {
     finishedAt: string;
   }): { command: CommandSummary; event: TurnEvent };
   getCommand(commandId: string): CommandSummary;
-  listCommandOutput(commandId: string, afterSeq?: number, limit?: number): CommandOutputRecord[];
+  listCommands(taskId: string): CommandSummary[];
+  listCommandOutput(
+    commandId: string,
+    afterSeq?: number,
+    limit?: number,
+    maxBytes?: number,
+  ): CommandOutputRecord[];
+  commandOutputPage(input: {
+    taskId: string;
+    commandId: string;
+    afterSeq: number;
+    limit: number;
+    maxBytes: number;
+  }): CommandOutputPage;
+  commandOutputTail(input: {
+    taskId: string;
+    commandId: string;
+    maxBytes: number;
+  }): CommandOutputPage;
+  listAutoPermissionDecisions(taskId: string): AutoPermissionDecision[];
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
   queueInput(
@@ -1185,13 +1266,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     token: string,
     policyEpoch: number,
     expiresAt: string,
+    binding?: {
+      reviewRequestId: string;
+      turnId: string;
+      callId: string;
+      subjectId: string;
+      specDigest: string;
+    },
   ): void {
     this.assertTask(taskId);
-    this.db
+    const inserted = this.db
       .prepare(
         `INSERT INTO permission_one_time_permits(
-          token_hash, task_id, policy_epoch, expires_at, consumed_at, created_at
-        ) VALUES (?, ?, ?, ?, NULL, ?)
+          token_hash, task_id, policy_epoch, expires_at, consumed_at, created_at,
+          review_request_id, turn_id, call_id, subject_id, spec_digest
+        ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(token_hash) DO NOTHING`,
       )
       .run(
@@ -1200,7 +1289,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
         policyEpoch,
         new Date(expiresAt).toISOString(),
         new Date().toISOString(),
+        binding?.reviewRequestId ?? null,
+        binding?.turnId ?? null,
+        binding?.callId ?? null,
+        binding?.subjectId ?? null,
+        binding?.specDigest ?? null,
       );
+    if (binding !== undefined && inserted.changes !== 1)
+      throw new Error('Reviewer one-time permit already exists');
   }
 
   requestApproval(input: ApprovalRequestInput): ApprovalPersistenceResult {
@@ -1292,6 +1388,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ).map((row) => this.toPersistedApproval(row, this.challengeForApproval(taskId, row.id)));
   }
 
+  listRecentApprovals(taskId: string, limit = 200): PersistedApproval[] {
+    this.assertTask(taskId);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500)
+      throw new Error('Invalid approval history limit');
+    return (
+      this.db
+        .prepare('SELECT * FROM approvals WHERE task_id = ? ORDER BY requested_at DESC, id LIMIT ?')
+        .all(taskId, limit) as ApprovalRow[]
+    )
+      .reverse()
+      .map((row) => this.toPersistedApproval(row, this.challengeForApproval(taskId, row.id)));
+  }
+
   getApproval(taskId: string, approvalId: string): PersistedApproval {
     const row = this.getApprovalRow(approvalId);
     if (row.task_id !== taskId) throw new Error('Approval does not belong to this Task');
@@ -1351,7 +1460,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           taskId: row.task_id,
           turnId: row.turn_id,
           approvalId: row.id,
-          approval: toApprovalSummary(approval),
+          approval: toApprovalAuditSummary(approval),
         });
         results.push({ approval, event });
       }
@@ -1450,14 +1559,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
             turnId: row.turn_id,
             approvalId: row.id,
             decision: decision!,
-            approval: toApprovalSummary(approval),
+            approval: toApprovalAuditSummary(approval),
           })
         : this.appendEvent({
             type,
             taskId: row.task_id,
             turnId: row.turn_id,
             approvalId: row.id,
-            approval: toApprovalSummary(approval),
+            approval: toApprovalAuditSummary(approval),
           });
     return {
       approval,
@@ -1472,7 +1581,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     policyEpoch: number,
     now: string,
     binding?: {
-      approvalId: string;
+      approvalId?: string;
+      reviewRequestId?: string;
       turnId: string;
       callId: string;
       subjectId: string;
@@ -1498,12 +1608,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (binding !== undefined) {
         const row = this.db
           .prepare(
-            `SELECT approval_id, turn_id, call_id, subject_id, spec_digest
+            `SELECT approval_id, review_request_id, turn_id, call_id, subject_id, spec_digest
              FROM permission_one_time_permits WHERE token_hash = ?`,
           )
           .get(sha256(token)) as
           | {
               approval_id: string | null;
+              review_request_id: string | null;
               turn_id: string | null;
               call_id: string | null;
               subject_id: string | null;
@@ -1512,7 +1623,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
           | undefined;
         if (
           row === undefined ||
-          row.approval_id !== binding.approvalId ||
+          (binding.approvalId !== undefined && row.approval_id !== binding.approvalId) ||
+          (binding.reviewRequestId !== undefined &&
+            row.review_request_id !== binding.reviewRequestId) ||
           row.turn_id !== binding.turnId ||
           row.call_id !== binding.callId ||
           row.subject_id !== binding.subjectId ||
@@ -1580,12 +1693,82 @@ export class SqlitePersistenceClient implements PersistenceClient {
       );
   }
 
+  commitPermissionEvaluation(
+    taskId: string,
+    request: PermissionRequest,
+    evaluation: PermissionEvaluation,
+    autoDecision?: AutoPermissionDecision,
+  ): TurnEvent | undefined {
+    return this.db.transaction(() => {
+      if (autoDecision !== undefined)
+        this.db
+          .prepare(
+            `INSERT INTO auto_permission_decisions(
+              review_request_id, task_id, turn_id, call_id, capability, source,
+              effective_decision, outcome, reason, risk, model, template_version,
+              request_fingerprint, execution_spec_digest, input_digest, policy_epoch, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            autoDecision.reviewRequestId,
+            autoDecision.taskId,
+            autoDecision.turnId,
+            autoDecision.callId,
+            autoDecision.capability,
+            autoDecision.source,
+            autoDecision.decision,
+            autoDecision.outcome,
+            autoDecision.reason,
+            autoDecision.risk,
+            autoDecision.model,
+            autoDecision.templateVersion,
+            autoDecision.requestFingerprint,
+            autoDecision.executionSpecDigest,
+            autoDecision.inputDigest,
+            autoDecision.policyEpoch,
+            autoDecision.createdAt,
+          );
+      if (
+        evaluation.permit?.source === 'reviewer_allow_once' &&
+        evaluation.permit.oneTimeToken !== undefined
+      ) {
+        const permit = evaluation.permit;
+        if (
+          permit.oneTimeToken === undefined ||
+          permit.reviewRequestId === undefined ||
+          permit.turnId === undefined ||
+          permit.callId === undefined
+        )
+          throw new Error('Reviewer permit binding is incomplete');
+        this.registerPermissionOneTimeToken(
+          taskId,
+          permit.oneTimeToken,
+          permit.policyEpoch,
+          permit.expiresAt,
+          {
+            reviewRequestId: permit.reviewRequestId,
+            turnId: permit.turnId,
+            callId: permit.callId,
+            subjectId: permit.subjectId,
+            specDigest: permit.executionSpecDigest,
+          },
+        );
+      }
+      this.recordPermissionAudit(taskId, request, evaluation);
+      return autoDecision === undefined
+        ? undefined
+        : this.recordAutoPermissionDecision(autoDecision);
+    })();
+  }
+
   prepareCommand(input: {
     id: string;
     taskId: string;
     turnId: string;
     callId: string;
     spec: ExecutionSpec;
+    purpose: string;
+    risk: 'low' | 'medium' | 'high';
     createdAt: string;
   }): CommandSummary {
     const specDigest = executionSpecDigest(input.spec);
@@ -1601,10 +1784,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare(
           `INSERT INTO command_runs(
-            id, task_id, turn_id, call_id, spec_json, spec_digest, state,
+            id, task_id, turn_id, call_id, spec_json, spec_digest, purpose, risk, state,
             pid, process_start_time, exit_code, signal, output_bytes, truncated,
             created_at, started_at, finished_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, NULL, NULL, 0, 0, ?, NULL, NULL)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, NULL, NULL, 0, 0, ?, NULL, NULL)`,
         )
         .run(
           input.id,
@@ -1613,6 +1796,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
           input.callId,
           JSON.stringify(input.spec),
           specDigest,
+          sanitizeApprovalText(input.purpose, 500),
+          input.risk,
           createdAt,
         );
       return this.getCommand(input.id);
@@ -1774,29 +1959,126 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toCommandSummary(this.commandRow(commandId));
   }
 
-  listCommandOutput(commandId: string, afterSeq = 0, limit = 200): CommandOutputRecord[] {
+  listCommands(taskId: string): CommandSummary[] {
+    this.assertTask(taskId);
+    return (
+      this.db
+        .prepare('SELECT * FROM command_runs WHERE task_id = ? ORDER BY created_at, rowid')
+        .all(taskId) as CommandRow[]
+    ).map(toCommandSummary);
+  }
+
+  listCommandOutput(
+    commandId: string,
+    afterSeq = 0,
+    limit = 200,
+    maxBytes = 262_144,
+  ): CommandOutputRecord[] {
     this.commandRow(commandId);
     if (!Number.isInteger(afterSeq) || afterSeq < 0) throw new Error('Invalid output cursor');
     if (!Number.isInteger(limit) || limit < 1 || limit > 500)
       throw new Error('Invalid output limit');
+    if (!Number.isInteger(maxBytes) || maxBytes < 65_536 || maxBytes > 1_048_576)
+      throw new Error('Invalid output byte budget');
     return (
       this.db
         .prepare(
-          `SELECT seq, stream, text, byte_length FROM command_output_chunks
-           WHERE command_id = ? AND seq > ? ORDER BY seq LIMIT ?`,
+          `WITH candidates AS (
+             SELECT seq, stream, text, byte_length, content_hash,
+               SUM(byte_length) OVER (ORDER BY seq) AS running_bytes,
+               ROW_NUMBER() OVER (ORDER BY seq) AS page_ordinal
+             FROM command_output_chunks WHERE command_id = ? AND seq > ?
+           )
+           SELECT seq, stream, text, byte_length, content_hash FROM candidates
+           WHERE running_bytes <= ? OR page_ordinal = 1
+           ORDER BY seq LIMIT ?`,
         )
-        .all(commandId, afterSeq, limit) as {
+        .all(commandId, afterSeq, maxBytes, limit) as {
         seq: number;
         stream: 'stdout' | 'stderr';
         text: string;
         byte_length: number;
+        content_hash: string;
       }[]
-    ).map((row) => ({
-      seq: row.seq,
-      stream: row.stream,
-      text: row.text,
-      byteLength: row.byte_length,
-    }));
+    ).map(toVerifiedCommandOutput);
+  }
+
+  commandOutputPage(input: {
+    taskId: string;
+    commandId: string;
+    afterSeq: number;
+    limit: number;
+    maxBytes: number;
+  }): CommandOutputPage {
+    const command = this.getCommand(input.commandId);
+    if (command.taskId !== input.taskId) throw new NotFoundError('Command not found');
+    const items = this.listCommandOutput(
+      input.commandId,
+      input.afterSeq,
+      input.limit,
+      input.maxBytes,
+    );
+    const nextAfterSeq = items.at(-1)?.seq ?? input.afterSeq;
+    const next = this.db
+      .prepare(
+        'SELECT 1 AS present FROM command_output_chunks WHERE command_id = ? AND seq > ? LIMIT 1',
+      )
+      .get(input.commandId, nextAfterSeq) as { present: number } | undefined;
+    return {
+      commandId: input.commandId,
+      items,
+      nextAfterSeq,
+      eof: next === undefined,
+      pageBytes: items.reduce((total, item) => total + item.byteLength, 0),
+    };
+  }
+
+  commandOutputTail(input: {
+    taskId: string;
+    commandId: string;
+    maxBytes: number;
+  }): CommandOutputPage {
+    const command = this.getCommand(input.commandId);
+    if (command.taskId !== input.taskId) throw new NotFoundError('Command not found');
+    if (!Number.isInteger(input.maxBytes) || input.maxBytes < 65_536 || input.maxBytes > 262_144)
+      throw new Error('Invalid output byte budget');
+    const items = (
+      this.db
+        .prepare(
+          `WITH candidates AS (
+             SELECT seq, stream, text, byte_length, content_hash,
+               SUM(byte_length) OVER (ORDER BY seq DESC) AS running_bytes,
+               ROW_NUMBER() OVER (ORDER BY seq DESC) AS page_ordinal
+             FROM command_output_chunks WHERE command_id = ?
+           )
+           SELECT seq, stream, text, byte_length, content_hash FROM candidates
+           WHERE running_bytes <= ? OR page_ordinal = 1
+           ORDER BY seq`,
+        )
+        .all(input.commandId, input.maxBytes) as {
+        seq: number;
+        stream: 'stdout' | 'stderr';
+        text: string;
+        byte_length: number;
+        content_hash: string;
+      }[]
+    ).map(toVerifiedCommandOutput);
+    const firstSeq = items[0]?.seq;
+    const hasEarlier =
+      firstSeq === undefined
+        ? false
+        : (this.db
+            .prepare(
+              'SELECT 1 AS present FROM command_output_chunks WHERE command_id = ? AND seq < ? LIMIT 1',
+            )
+            .get(input.commandId, firstSeq) as { present: number } | undefined) !== undefined;
+    return {
+      commandId: input.commandId,
+      items,
+      nextAfterSeq: items.at(-1)?.seq ?? 0,
+      eof: !hasEarlier,
+      pageBytes: items.reduce((total, item) => total + item.byteLength, 0),
+    };
   }
 
   private commandRow(commandId: string): CommandRow {
@@ -2107,6 +2389,32 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ).map((row) => turnEventSchema.parse(JSON.parse(row.payload_json)));
   }
 
+  private recordAutoPermissionDecision(decision: AutoPermissionDecision): TurnEvent {
+    this.assertTask(decision.taskId);
+    return this.appendEvent({
+      type: 'permission.auto_decided',
+      taskId: decision.taskId,
+      turnId: decision.turnId,
+      autoDecision: decision,
+    });
+  }
+
+  listAutoPermissionDecisions(taskId: string): AutoPermissionDecision[] {
+    this.assertTask(taskId);
+    return (
+      this.db
+        .prepare(
+          `SELECT payload_json FROM turn_events
+           WHERE task_id = ? AND type = 'permission.auto_decided'
+           ORDER BY seq DESC LIMIT 200`,
+        )
+        .all(taskId) as { payload_json: string }[]
+    )
+      .map((row) => turnEventSchema.parse(JSON.parse(row.payload_json)))
+      .flatMap((event) => (event.type === 'permission.auto_decided' ? [event.autoDecision] : []))
+      .reverse();
+  }
+
   executeOperation<T>(
     principal: string,
     taskId: string,
@@ -2322,7 +2630,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         taskId,
         turnId,
         approvalId: row.id,
-        approval: toApprovalSummary(approval),
+        approval: toApprovalAuditSummary(approval),
       });
     }
   }
@@ -2627,6 +2935,10 @@ export function toApprovalSummary(approval: PersistedApproval): ApprovalSummary 
   });
 }
 
+export function toApprovalAuditSummary(approval: PersistedApproval): ApprovalSummary {
+  return approvalSummarySchema.parse({ ...toApprovalSummary(approval), challenge: 'redacted' });
+}
+
 function toCommandSummary(row: CommandRow): CommandSummary {
   const spec = JSON.parse(row.spec_json) as ExecutionSpec;
   if (executionSpecDigest(spec) !== row.spec_digest)
@@ -2640,6 +2952,9 @@ function toCommandSummary(row: CommandRow): CommandSummary {
     executable: spec.absoluteExecutable,
     argv: [...spec.argv],
     cwd: spec.cwdIdentity.canonicalPath,
+    envDelta: { ...spec.envDelta },
+    purpose: row.purpose,
+    risk: row.risk,
     state: row.state,
     pid: row.pid,
     exitCode: row.exit_code,
@@ -2802,6 +3117,26 @@ function approvalRowRequestDigest(row: ApprovalRow): string {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function toVerifiedCommandOutput(row: {
+  seq: number;
+  stream: 'stdout' | 'stderr';
+  text: string;
+  byte_length: number;
+  content_hash: string;
+}): CommandOutputRecord {
+  if (
+    Buffer.byteLength(row.text) !== row.byte_length ||
+    !timingSafeDigestEqual(sha256(row.text), row.content_hash)
+  )
+    throw new Error('Command output integrity check failed');
+  return {
+    seq: row.seq,
+    stream: row.stream,
+    text: row.text,
+    byteLength: row.byte_length,
+  };
 }
 
 function approvalStorageCallId(callId: string, capability: Capability): string {

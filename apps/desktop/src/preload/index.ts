@@ -5,7 +5,12 @@ import {
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
+  autoPermissionDecisionSchema,
   chatMessageSchema,
+  commandSummarySchema,
+  commandOutputPageInputSchema,
+  commandOutputPageSchema,
+  commandOutputTailInputSchema,
   commandEnvelopeSchema,
   commandResultSchema,
   emptyPayloadSchema,
@@ -140,6 +145,13 @@ const api: VibeApi = {
       invoke(IPC_CHANNELS.permissionsGet, taskIdPayloadSchema, permissionSettingsSchema, {
         taskId,
       }),
+    listAutoDecisions: (taskId) =>
+      invoke(
+        IPC_CHANNELS.permissionsListAutoDecisions,
+        taskIdPayloadSchema,
+        z.array(autoPermissionDecisionSchema),
+        { taskId },
+      ),
     set: (taskId, preset, expectedPolicyEpoch) =>
       invoke(IPC_CHANNELS.permissionsSet, permissionSetInputSchema, permissionSettingsSchema, {
         taskId,
@@ -157,11 +169,38 @@ const api: VibeApi = {
           taskId,
         },
       ),
+    listRecent: (taskId) =>
+      invoke(
+        IPC_CHANNELS.approvalsListRecent,
+        taskIdPayloadSchema,
+        z.array(approvalSummarySchema),
+        { taskId },
+      ),
     resolve: (input) =>
       invoke(
         IPC_CHANNELS.approvalsResolve,
         approvalResolveInputSchema,
         approvalSummarySchema,
+        input,
+      ),
+  },
+  commands: {
+    list: (taskId) =>
+      invoke(IPC_CHANNELS.commandsList, taskIdPayloadSchema, z.array(commandSummarySchema), {
+        taskId,
+      }),
+    outputPage: (input) =>
+      invoke(
+        IPC_CHANNELS.commandsOutputPage,
+        commandOutputPageInputSchema,
+        commandOutputPageSchema,
+        input,
+      ),
+    outputTail: (input) =>
+      invoke(
+        IPC_CHANNELS.commandsOutputTail,
+        commandOutputTailInputSchema,
+        commandOutputPageSchema,
         input,
       ),
   },

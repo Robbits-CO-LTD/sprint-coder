@@ -1,13 +1,18 @@
 import { useEffect, useRef } from 'react';
-import type { ApprovalSummary, ChatMessage } from '../../types/vibe';
+import type { ApprovalSummary, AutoPermissionDecision, ChatMessage } from '../../types/vibe';
 import { useAppStore } from '../../store/appStore';
 import { MessageBubble } from '../MessageBubble';
 import { RunCard } from '../RunCard';
 import { ApprovalCard } from '../ApprovalCard';
+import { CommandCard } from '../CommandCard';
+import { ApprovalAuditRow } from '../ApprovalAuditRow';
+import { AutoDecisionAuditRow } from '../AutoDecisionAuditRow';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
 const NO_MESSAGES: ChatMessage[] = [];
 const NO_APPROVALS: ApprovalSummary[] = [];
+const NO_COMMANDS: ReturnType<typeof useAppStore.getState>['commandsByTask'][string] = [];
+const NO_AUTO_DECISIONS: AutoPermissionDecision[] = [];
 
 export function Timeline({ taskId }: { taskId: string }) {
   const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? NO_MESSAGES;
@@ -15,6 +20,9 @@ export function Timeline({ taskId }: { taskId: string }) {
   const setDraft = useAppStore((s) => s.setDraft);
   const cancelActiveTurn = useAppStore((s) => s.cancelActiveTurn);
   const approvals = useAppStore((s) => s.approvalsByTask[taskId]) ?? NO_APPROVALS;
+  const commands = useAppStore((s) => s.commandsByTask[taskId]) ?? NO_COMMANDS;
+  const approvalHistory = useAppStore((s) => s.approvalHistoryByTask[taskId]) ?? NO_APPROVALS;
+  const autoDecisions = useAppStore((s) => s.autoDecisionsByTask[taskId]) ?? NO_AUTO_DECISIONS;
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
   const resolveApproval = useAppStore((s) => s.resolveApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -24,7 +32,16 @@ export function Timeline({ taskId }: { taskId: string }) {
   useEffect(() => {
     const node = scrollRef.current;
     if (node) node.scrollTop = node.scrollHeight;
-  }, [messages, approvals, turn?.stage, turn?.streamingContent, turn?.status]);
+  }, [
+    messages,
+    approvals,
+    approvalHistory,
+    autoDecisions,
+    commands,
+    turn?.stage,
+    turn?.streamingContent,
+    turn?.status,
+  ]);
 
   const isEmpty = messages.length === 0 && !turn;
 
@@ -51,12 +68,33 @@ export function Timeline({ taskId }: { taskId: string }) {
         {messages.map((message) => {
           const showRunCardAfter =
             turn && message.author === 'user' && message.turnId === turn.turnId;
+          const commandCards =
+            message.author === 'user' && message.turnId !== null
+              ? commands.filter(({ command }) => command.turnId === message.turnId)
+              : [];
+          const approvalRows =
+            message.author === 'user' && message.turnId !== null
+              ? approvalHistory.filter((approval) => approval.turnId === message.turnId)
+              : [];
+          const autoDecisionRows =
+            message.author === 'user' && message.turnId !== null
+              ? autoDecisions.filter((decision) => decision.turnId === message.turnId)
+              : [];
           return (
             <div key={message.id} style={{ display: 'contents' }}>
               <MessageBubble author={message.author} content={message.content} />
               {showRunCardAfter && (
                 <RunCard turn={turn} onStop={() => void cancelActiveTurn(taskId)} />
               )}
+              {approvalRows.map((approval) => (
+                <ApprovalAuditRow key={approval.id} approval={approval} />
+              ))}
+              {autoDecisionRows.map((decision) => (
+                <AutoDecisionAuditRow key={decision.id} decision={decision} />
+              ))}
+              {commandCards.map((card) => (
+                <CommandCard key={card.command.id} taskId={taskId} card={card} />
+              ))}
             </div>
           );
         })}

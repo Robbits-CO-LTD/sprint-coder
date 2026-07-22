@@ -79,7 +79,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v14', () => {
+  describe('SqlitePersistenceClient v16', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -882,6 +882,9 @@ if (runsWithElectronAbi)
           policyEpoch: 2,
           evaluationTrace: ['managed-deny', 'reviewer', 'execution-revalidation'],
           reviewerAudit: {
+            reviewRequestId: 'review-audit-1',
+            turnId: 'turn-audit-1',
+            callId: 'call-audit-1',
             requestFingerprint: 'c'.repeat(64),
             executionSpecDigest: 'a'.repeat(64),
             policyEpoch: 2,
@@ -913,6 +916,123 @@ if (runsWithElectronAbi)
       expect(row.reviewer_json).not.toContain('https://example.test');
       inspection.close();
       persistence.close();
+    });
+
+    it('atomically commits reviewer authority, audit, bound permit, and UI event', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const request = {
+        taskId: task.id,
+        subjectId: 'tool:builtin:read',
+        capability: 'workspace.read' as const,
+        resource: { kind: 'external' as const, target: 'fixture' },
+        operation: 'read' as const,
+        providerEgress: 'none' as const,
+        sandboxProfile: 'read-only' as const,
+        executionSpecDigest: 'd'.repeat(64),
+        reviewerInputDigest: 'e'.repeat(64),
+        risk: 'low' as const,
+      };
+      const reviewRequestId = 'review-atomic-1';
+      const token = 'reviewer-token-atomic-1';
+      const evaluation = {
+        decision: 'allow_once' as const,
+        reason: 'safe_read_only',
+        policyEpoch: 0,
+        evaluationTrace: ['reviewer' as const],
+        permit: {
+          taskId: task.id,
+          subjectId: request.subjectId,
+          capability: request.capability,
+          operation: request.operation,
+          resourceIdentity: 'external:fixture',
+          executionSpecDigest: request.executionSpecDigest,
+          policyEpoch: 0,
+          expiresAt: '2099-01-01T00:00:00.000Z',
+          source: 'reviewer_allow_once' as const,
+          oneTimeToken: token,
+          reviewRequestId,
+          turnId: turn.turnId,
+          callId: 'call-atomic-1',
+        },
+        reviewerAudit: {
+          reviewRequestId,
+          turnId: turn.turnId,
+          callId: 'call-atomic-1',
+          requestFingerprint: 'f'.repeat(64),
+          executionSpecDigest: request.executionSpecDigest,
+          policyEpoch: 0,
+          model: 'builtin-deterministic-risk-v1',
+          templateVersion: '1',
+          inputDigest: request.reviewerInputDigest,
+          decision: 'allow_once' as const,
+        },
+      };
+      const autoDecision = {
+        id: 'auto-atomic-1',
+        taskId: task.id,
+        turnId: turn.turnId,
+        callId: 'call-atomic-1',
+        reviewRequestId,
+        capability: request.capability,
+        source: 'reviewer' as const,
+        decision: 'allow_once' as const,
+        outcome: 'allow_once',
+        reason: 'safe_read_only',
+        risk: 'low' as const,
+        model: 'builtin-deterministic-risk-v1',
+        templateVersion: '1',
+        requestFingerprint: 'f'.repeat(64),
+        executionSpecDigest: request.executionSpecDigest,
+        inputDigest: request.reviewerInputDigest,
+        policyEpoch: 0,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      };
+
+      expect(() =>
+        persistence.commitPermissionEvaluation(task.id, request, evaluation, {
+          ...autoDecision,
+          capability: 'invalid-capability' as never,
+        }),
+      ).toThrow();
+      const inspection = new Database(path, { readonly: true });
+      expect(inspection.prepare('SELECT count(*) AS count FROM permission_audit').get()).toEqual({
+        count: 0,
+      });
+      expect(
+        inspection.prepare('SELECT count(*) AS count FROM permission_one_time_permits').get(),
+      ).toEqual({ count: 0 });
+      expect(
+        inspection.prepare('SELECT count(*) AS count FROM auto_permission_decisions').get(),
+      ).toEqual({ count: 0 });
+      inspection.close();
+
+      expect(
+        persistence.commitPermissionEvaluation(task.id, request, evaluation, autoDecision),
+      ).toMatchObject({ type: 'permission.auto_decided', autoDecision });
+      expect(() =>
+        persistence.consumePermissionOneTimeToken(task.id, token, 0, new Date().toISOString(), {
+          reviewRequestId,
+          turnId: 'wrong-turn',
+          callId: 'call-atomic-1',
+          subjectId: request.subjectId,
+          specDigest: request.executionSpecDigest,
+        }),
+      ).toThrow('One-time permit binding mismatch');
+      expect(
+        persistence.consumePermissionOneTimeToken(task.id, token, 0, new Date().toISOString(), {
+          reviewRequestId,
+          turnId: turn.turnId,
+          callId: 'call-atomic-1',
+          subjectId: request.subjectId,
+          specDigest: request.executionSpecDigest,
+        }),
+      ).toBe(true);
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listAutoPermissionDecisions(task.id)).toEqual([autoDecision]);
+      reopened.close();
     });
 
     it('publishes context usage around audit-only compaction without changing displayed history', () => {
@@ -1020,15 +1140,22 @@ if (runsWithElectronAbi)
         stdinMode: 'closed',
         shell: 'none',
       });
-      const prepared = persistence.prepareCommand({
+      const commandInput = {
         id: 'command-1',
         taskId: task.id,
         turnId: started.turnId,
         callId: 'call-1',
         spec,
+        purpose: '変更の整合性を確認します',
+        risk: 'high' as const,
         createdAt: '2026-07-23T00:00:00.000Z',
-      });
+      };
+      const prepared = persistence.prepareCommand(commandInput);
       expect(prepared.state).toBe('prepared');
+      expect(prepared).toMatchObject({
+        purpose: '変更の整合性を確認します',
+        risk: 'high',
+      });
       expect(persistence.beginCommand(prepared.id).state).toBe('starting');
       expect(
         persistence.startCommand({
@@ -1063,6 +1190,14 @@ if (runsWithElectronAbi)
       persistence.close();
 
       const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listCommands(task.id)).toMatchObject([
+        {
+          id: prepared.id,
+          purpose: '変更の整合性を確認します',
+          risk: 'high',
+          state: 'exited',
+        },
+      ]);
       expect(reopened.listCommandOutput(prepared.id)).toEqual(
         observed.map((chunk) => ({ ...chunk, byteLength: Buffer.byteLength(chunk.text) })),
       );
@@ -1079,6 +1214,19 @@ if (runsWithElectronAbi)
         'command.completed',
       ]);
       reopened.close();
+
+      const tamper = new Database(path);
+      tamper
+        .prepare(
+          'UPDATE command_output_chunks SET content_hash = ? WHERE command_id = ? AND seq = 1',
+        )
+        .run('0'.repeat(64), prepared.id);
+      tamper.close();
+      const compromised = new SqlitePersistenceClient(path);
+      expect(() => compromised.listCommandOutput(prepared.id)).toThrow(
+        'Command output integrity check failed',
+      );
+      compromised.close();
     });
 
     it('marks a running command interrupted on restart and never reconnects by PID', () => {
@@ -1099,6 +1247,8 @@ if (runsWithElectronAbi)
         turnId: started.turnId,
         callId: 'call-interrupted',
         spec,
+        purpose: '再起動テスト',
+        risk: 'high',
         createdAt: '2026-07-23T00:00:00.000Z',
       });
       persistence.beginCommand('command-interrupted');
@@ -1114,6 +1264,8 @@ if (runsWithElectronAbi)
         turnId: started.turnId,
         callId: 'call-never-dispatched',
         spec,
+        purpose: '未開始コマンドテスト',
+        risk: 'high',
         createdAt: '2026-07-23T00:00:02.000Z',
       });
       persistence.close();
@@ -1166,7 +1318,12 @@ if (runsWithElectronAbi)
         turnId: started.turnId,
         callId: 'command-call-1',
         providerName: 'run_command',
-        input: { executable, argv, cwd: '.' },
+        input: {
+          executable,
+          argv,
+          cwd: '.',
+          purpose: '変更の整合性を確認します',
+        },
       })) as { exitCode: number; outputBytes: number };
 
       expect(result.exitCode).toBe(0);
@@ -1216,6 +1373,7 @@ if (runsWithElectronAbi)
               process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : '/usr/bin/printf',
             argv: ['denied'],
             cwd: '.',
+            purpose: '拒否時の挙動を確認します',
           },
         }),
       ).rejects.toMatchObject({ name: 'ToolAuthorizationDeniedError' });
@@ -1262,6 +1420,8 @@ if (runsWithElectronAbi)
         { version: 12 },
         { version: 13 },
         { version: 14 },
+        { version: 15 },
+        { version: 16 },
       ]);
       expect(
         migrated
@@ -1340,7 +1500,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v14 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v16 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

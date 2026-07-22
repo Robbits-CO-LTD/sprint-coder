@@ -121,6 +121,16 @@ function fixture(notify?: () => void, revokedCapabilities: Capability[] = []) {
       _request: PermissionRequest,
       evaluation: PermissionEvaluation,
     ) => audits.push(evaluation),
+    commitPermissionEvaluation: (
+      _taskId: string,
+      _request: PermissionRequest,
+      evaluation: PermissionEvaluation,
+    ) => {
+      if (evaluation.permit?.oneTimeToken !== undefined)
+        oneTimeTokens.add(evaluation.permit.oneTimeToken);
+      audits.push(evaluation);
+      return undefined;
+    },
   };
   const broker = new PermissionBroker(persistence, {
     policyEpochChanged: () => {

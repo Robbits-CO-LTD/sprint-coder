@@ -191,6 +191,7 @@ export function createDeterministicMockSampler(
               executable: fixture.executable,
               argv: fixture.argv,
               cwd: '.',
+              purpose: '変更の整合性を確認するため、コマンドを実行します',
             },
           },
         ],

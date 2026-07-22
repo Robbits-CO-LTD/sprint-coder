@@ -26,9 +26,13 @@ test.describe('approval flow', () => {
 
     const card = page.getByTestId('approval-card');
     await expect(card).toBeVisible();
+    await expect(card).toBeFocused();
     await expect(card).toContainText('approval_probe');
     await expect(card).toContainText('https://example.test');
-    await page.getByTestId('approval-deny').click();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Enter');
 
     await expect(card).toHaveCount(0);
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
@@ -40,19 +44,28 @@ test.describe('approval flow', () => {
     await textarea.fill('承認テストをしてください');
     await textarea.press('Enter');
     await expect(card).toBeVisible();
-    await page.getByRole('button', { name: '今回のみ許可' }).click();
+    await expect(card).toBeFocused();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Enter');
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed');
     await textarea.fill('承認テストをしてください');
     await textarea.press('Enter');
     await expect(card).toBeVisible();
-    await page.getByTestId('approval-deny').click();
+    await expect(card).toBeFocused();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Space');
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed');
 
     await page.getByTestId('sidebar-new-task-button').click();
     await textarea.fill('承認テストをしてください');
     await textarea.press('Enter');
     await expect(card).toBeVisible();
-    await page.getByTestId('approval-allow-task').click();
+    await expect(card).toBeFocused();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Space');
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed');
     await textarea.fill('承認テストをしてください');
     await textarea.press('Enter');

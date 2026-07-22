@@ -85,6 +85,9 @@ function basePolicy() {
 
 function reviewerAllow(request: PermissionRequest = workspaceWriteRequest) {
   return {
+    reviewRequestId: 'review-request-1',
+    turnId: 'turn-1',
+    callId: 'call-1',
     decision: 'allow_once',
     reason: 'reviewer_safe',
     requestFingerprint: permissionRequestFingerprint(request),

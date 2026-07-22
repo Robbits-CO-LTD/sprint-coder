@@ -1,11 +1,14 @@
 import { create } from 'zustand';
 import type {
   AccessPreset,
+  AutoPermissionDecision,
   ApprovalDecision,
   ApprovalSummary,
   ChatMessage,
   ContextUsage,
   CodexModelOption,
+  CommandSummary,
+  CommandOutputRecord,
   QueuedInput,
   PermissionSettings,
   RuntimeKind,
@@ -13,6 +16,11 @@ import type {
   TurnEvent,
   TurnStage,
 } from '../types/vibe';
+import {
+  appendCommandOutput,
+  projectCommandTail,
+  type CommandTailProjection,
+} from './command-projection';
 
 export type TurnStatus =
   'running' | 'canceling' | 'completed' | 'canceled' | 'failed' | 'interrupted';
@@ -34,6 +42,11 @@ export type RuntimeState = {
   model: string;
   models: CodexModelOption[];
 };
+
+export type CommandCardState = Readonly<{
+  command: CommandSummary;
+  tail: CommandTailProjection;
+}>;
 
 export const STAGE_LABEL: Record<TurnStage, string> = {
   understanding: 'ユーザーの依頼を理解中',
@@ -88,6 +101,9 @@ type AppState = {
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   permissionByTask: Record<string, PermissionSettings | undefined>;
   approvalsByTask: Record<string, ApprovalSummary[]>;
+  approvalHistoryByTask: Record<string, ApprovalSummary[]>;
+  autoDecisionsByTask: Record<string, AutoPermissionDecision[]>;
+  commandsByTask: Record<string, CommandCardState[]>;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
 
@@ -211,6 +227,7 @@ async function loadPermission(
 function subscribeToTask(
   taskId: string,
   apply: (fn: (state: AppState) => Partial<AppState>) => void,
+  get: () => AppState,
   afterSeq?: number,
 ) {
   if (currentUnsubscribe) {
@@ -223,12 +240,65 @@ function subscribeToTask(
     // Ignore stray events if the user has since switched tasks and this callback
     // has not been torn down yet (defensive; unsubscribe should prevent this).
     if (currentSubscribedTaskId !== taskId) return;
+    const lastSeq = get().lastSeqByTask[taskId] ?? 0;
+    if (ev.seq <= lastSeq) return;
+    if (ev.seq > lastSeq + 1) {
+      void get().selectTask(taskId);
+      return;
+    }
     handleTurnEvent(taskId, ev, apply);
   };
   currentUnsubscribe =
     afterSeq !== undefined
       ? window.vibe.turns.subscribe(taskId, listener, { afterSeq })
       : window.vibe.turns.subscribe(taskId, listener);
+}
+
+function upsertCommand(
+  cards: readonly CommandCardState[],
+  command: CommandSummary,
+): CommandCardState[] {
+  const existing = cards.find((card) => card.command.id === command.id);
+  const next: CommandCardState = {
+    command,
+    tail: existing?.tail ?? { lines: Object.freeze([]), lastOutputSeq: 0 },
+  };
+  return [...cards.filter((card) => card.command.id !== command.id), next].sort((left, right) =>
+    left.command.createdAt.localeCompare(right.command.createdAt),
+  );
+}
+
+function mergeRestoredCommands(
+  restored: readonly CommandCardState[],
+  live: readonly CommandCardState[],
+): CommandCardState[] {
+  const merged = new Map(restored.map((card) => [card.command.id, card]));
+  for (const card of live) {
+    const persisted = merged.get(card.command.id);
+    if (persisted === undefined || card.tail.lastOutputSeq > persisted.tail.lastOutputSeq)
+      merged.set(card.command.id, card);
+  }
+  return [...merged.values()].sort((left, right) =>
+    left.command.createdAt.localeCompare(right.command.createdAt),
+  );
+}
+
+function upsertApprovalHistory(
+  approvals: readonly ApprovalSummary[],
+  approval: ApprovalSummary,
+): ApprovalSummary[] {
+  return [...approvals.filter(({ id }) => id !== approval.id), approval].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt),
+  );
+}
+
+function upsertAutoDecision(
+  decisions: readonly AutoPermissionDecision[],
+  decision: AutoPermissionDecision,
+): AutoPermissionDecision[] {
+  return [...decisions.filter(({ id }) => id !== decision.id), decision].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt),
+  );
 }
 
 function handleTurnEvent(
@@ -306,6 +376,64 @@ function handleTurnEvent(
         approvalsByTask: {
           ...state.approvalsByTask,
           [taskId]: (state.approvalsByTask[taskId] ?? []).filter(({ id }) => id !== ev.approvalId),
+        },
+        approvalHistoryByTask:
+          ev.type === 'approval.resolved'
+            ? {
+                ...state.approvalHistoryByTask,
+                [taskId]: upsertApprovalHistory(
+                  state.approvalHistoryByTask[taskId] ?? [],
+                  ev.approval,
+                ),
+              }
+            : state.approvalHistoryByTask,
+      }));
+      break;
+    }
+    case 'command.started': {
+      apply((state) => ({
+        commandsByTask: {
+          ...state.commandsByTask,
+          [taskId]: upsertCommand(state.commandsByTask[taskId] ?? [], ev.command),
+        },
+      }));
+      break;
+    }
+    case 'command.output': {
+      apply((state) => ({
+        commandsByTask: {
+          ...state.commandsByTask,
+          [taskId]: (state.commandsByTask[taskId] ?? []).map((card) =>
+            card.command.id === ev.commandId
+              ? {
+                  ...card,
+                  tail: appendCommandOutput(card.tail, {
+                    seq: ev.outputSeq,
+                    stream: ev.stream,
+                    text: ev.text,
+                    byteLength: ev.byteLength,
+                  }),
+                }
+              : card,
+          ),
+        },
+      }));
+      break;
+    }
+    case 'command.completed': {
+      apply((state) => ({
+        commandsByTask: {
+          ...state.commandsByTask,
+          [taskId]: upsertCommand(state.commandsByTask[taskId] ?? [], ev.command),
+        },
+      }));
+      break;
+    }
+    case 'permission.auto_decided': {
+      apply((state) => ({
+        autoDecisionsByTask: {
+          ...state.autoDecisionsByTask,
+          [taskId]: upsertAutoDecision(state.autoDecisionsByTask[taskId] ?? [], ev.autoDecision),
         },
       }));
       break;
@@ -394,6 +522,9 @@ export const useAppStore = create<AppState>((set, get) => {
     workspaceByTask: {},
     permissionByTask: {},
     approvalsByTask: {},
+    approvalHistoryByTask: {},
+    autoDecisionsByTask: {},
+    commandsByTask: {},
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     runtime: {
@@ -512,7 +643,7 @@ export const useAppStore = create<AppState>((set, get) => {
         resolvingApprovalIds: { ...state.resolvingApprovalIds, [approvalId]: true },
       }));
       try {
-        await window.vibe.approvals.resolve({
+        const resolved = await window.vibe.approvals.resolve({
           taskId,
           approvalId,
           decision,
@@ -524,6 +655,10 @@ export const useAppStore = create<AppState>((set, get) => {
           approvalsByTask: {
             ...state.approvalsByTask,
             [taskId]: (state.approvalsByTask[taskId] ?? []).filter(({ id }) => id !== approvalId),
+          },
+          approvalHistoryByTask: {
+            ...state.approvalHistoryByTask,
+            [taskId]: upsertApprovalHistory(state.approvalHistoryByTask[taskId] ?? [], resolved),
           },
         }));
       } catch (err) {
@@ -552,15 +687,44 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       const vibe = window.vibe;
 
-      const [messagesResult, snapshot] = await Promise.all([
-        vibe.tasks
-          .messages(taskId)
-          .then((v) => ({ ok: true as const, v }))
-          .catch((err: unknown) => ({ ok: false as const, err })),
-        typeof vibe.turns.snapshot === 'function'
-          ? vibe.turns.snapshot(taskId).catch(() => null)
-          : Promise.resolve(null),
-      ]);
+      const [messagesResult, snapshot, commandsResult, approvalHistoryResult, autoDecisionsResult] =
+        await Promise.all([
+          vibe.tasks
+            .messages(taskId)
+            .then((v) => ({ ok: true as const, v }))
+            .catch((err: unknown) => ({ ok: false as const, err })),
+          typeof vibe.turns.snapshot === 'function'
+            ? vibe.turns.snapshot(taskId).catch(() => null)
+            : Promise.resolve(null),
+          typeof vibe.commands?.list === 'function'
+            ? vibe.commands
+                .list(taskId)
+                .then(async (commands) => {
+                  const cards = await Promise.all(
+                    commands.map(async (command): Promise<CommandCardState> => {
+                      const output = await vibe.commands
+                        .outputTail({ taskId, commandId: command.id, maxBytes: 131_072 })
+                        .catch(() => ({ items: [] as CommandOutputRecord[] }));
+                      return { command, tail: projectCommandTail(output.items) };
+                    }),
+                  );
+                  return { ok: true as const, cards };
+                })
+                .catch((err: unknown) => ({ ok: false as const, err }))
+            : Promise.resolve({ ok: true as const, cards: [] as CommandCardState[] }),
+          typeof vibe.approvals?.listRecent === 'function'
+            ? vibe.approvals
+                .listRecent(taskId)
+                .then((approvals) => ({ ok: true as const, approvals }))
+                .catch((err: unknown) => ({ ok: false as const, err }))
+            : Promise.resolve({ ok: true as const, approvals: [] as ApprovalSummary[] }),
+          typeof vibe.permissions?.listAutoDecisions === 'function'
+            ? vibe.permissions
+                .listAutoDecisions(taskId)
+                .then((decisions) => ({ ok: true as const, decisions }))
+                .catch((err: unknown) => ({ ok: false as const, err }))
+            : Promise.resolve({ ok: true as const, decisions: [] as AutoPermissionDecision[] }),
+        ]);
 
       if (get().selectedTaskId !== taskId) return; // user switched away while these were in flight
 
@@ -571,6 +735,38 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
       } else {
         set({ loadingMessages: false, error: describeError(messagesResult.err) });
+      }
+
+      if (commandsResult.ok) {
+        apply((state) => ({
+          commandsByTask: {
+            ...state.commandsByTask,
+            [taskId]: mergeRestoredCommands(
+              commandsResult.cards,
+              state.commandsByTask[taskId] ?? [],
+            ),
+          },
+        }));
+      }
+
+      if (approvalHistoryResult.ok) {
+        apply((state) => ({
+          approvalHistoryByTask: {
+            ...state.approvalHistoryByTask,
+            [taskId]: approvalHistoryResult.approvals.filter(
+              (approval) => approval.state === 'resolved',
+            ),
+          },
+        }));
+      }
+
+      if (autoDecisionsResult.ok) {
+        apply((state) => ({
+          autoDecisionsByTask: {
+            ...state.autoDecisionsByTask,
+            [taskId]: autoDecisionsResult.decisions,
+          },
+        }));
       }
 
       let afterSeq: number | undefined;
@@ -604,7 +800,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
 
       if (get().selectedTaskId !== taskId) return;
-      subscribeToTask(taskId, apply, afterSeq);
+      subscribeToTask(taskId, apply, get, afterSeq);
     },
 
     async createTask() {

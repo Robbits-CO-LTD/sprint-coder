@@ -16,7 +16,12 @@ import {
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
+  autoPermissionDecisionSchema,
   chatMessageSchema,
+  commandSummarySchema,
+  commandOutputPageInputSchema,
+  commandOutputPageSchema,
+  commandOutputTailInputSchema,
   commandEnvelopeSchema,
   emptyPayloadSchema,
   permissionSetInputSchema,
@@ -54,7 +59,7 @@ import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
 import type { PersistenceClient, QueueTransition, StartedTurn } from './persistence';
-import { toApprovalSummary } from './persistence';
+import { toApprovalAuditSummary, toApprovalSummary } from './persistence';
 import {
   NotFoundError,
   OperationConflictError,
@@ -68,9 +73,10 @@ import { PermissionBroker } from './permission-broker';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
-import type { Capability } from '@vibe/domain';
+import { permissionRequestFingerprint, type Capability } from '@vibe/domain';
 import type { ExecutionSpec } from '@vibe/domain';
 import { executionSpecPathGuard } from './command-runner';
+import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -83,6 +89,7 @@ export class IpcRouter {
   private readonly turnRuntimes = new Map<string, RuntimeKind>();
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
+  private readonly autoReviewer = AutoReviewer.createProduction();
 
   constructor(
     private readonly window: BrowserWindow,
@@ -178,6 +185,12 @@ export class IpcRouter {
         return { preset: policy.preset, policyEpoch: policy.policyEpoch };
       },
     );
+    this.handle(
+      IPC_CHANNELS.permissionsListAutoDecisions,
+      taskIdPayloadSchema,
+      z.array(autoPermissionDecisionSchema),
+      (input) => this.persistence.listAutoPermissionDecisions(input.taskId),
+    );
     this.handleMutation(
       IPC_CHANNELS.permissionsSet,
       permissionSetInputSchema,
@@ -233,6 +246,12 @@ export class IpcRouter {
       z.array(approvalSummarySchema),
       (input) => this.persistence.listPendingApprovals(input.taskId).map(toApprovalSummary),
     );
+    this.handle(
+      IPC_CHANNELS.approvalsListRecent,
+      taskIdPayloadSchema,
+      z.array(approvalSummarySchema),
+      (input) => this.persistence.listRecentApprovals(input.taskId).map(toApprovalAuditSummary),
+    );
     this.handleMutation(
       IPC_CHANNELS.approvalsResolve,
       approvalResolveInputSchema,
@@ -257,8 +276,26 @@ export class IpcRouter {
               candidate.type === 'approval.resolved' && candidate.approvalId === input.approvalId,
           );
         if (event !== undefined) this.publish(event);
-        return toApprovalSummary(this.persistence.getApproval(input.taskId, input.approvalId));
+        return toApprovalAuditSummary(this.persistence.getApproval(input.taskId, input.approvalId));
       },
+    );
+    this.handle(
+      IPC_CHANNELS.commandsList,
+      taskIdPayloadSchema,
+      z.array(commandSummarySchema),
+      (input) => this.persistence.listCommands(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.commandsOutputPage,
+      commandOutputPageInputSchema,
+      commandOutputPageSchema,
+      (input) => this.persistence.commandOutputPage(input),
+    );
+    this.handle(
+      IPC_CHANNELS.commandsOutputTail,
+      commandOutputTailInputSchema,
+      commandOutputPageSchema,
+      (input) => this.persistence.commandOutputTail(input),
     );
     this.handle(IPC_CHANNELS.tasksList, emptyPayloadSchema, z.array(taskSummarySchema), () =>
       this.persistence.listTasks(),
@@ -639,7 +676,7 @@ export class IpcRouter {
     this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
   }
 
-  private evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
+  private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     const facts = approvalFactsForTool(request, capability);
     const commandRunner = request.entry.implementationKind === 'command-runner';
     const sandboxProfile = commandRunner ? ('full' as const) : ('read-only' as const);
@@ -652,21 +689,31 @@ export class IpcRouter {
       providerEgress: ['none' as const],
       sandboxProfiles: [sandboxProfile],
     };
+    const toolFacts = {
+      kind: request.entry.kind,
+      sideEffect: request.entry.sideEffect,
+      risk: request.entry.risk,
+    } as const;
+    const permissionRequestBase = {
+      taskId: request.context.taskId,
+      subjectId: facts.subjectId,
+      capability,
+      resource: facts.resource,
+      operation: facts.operation,
+      providerEgress: 'none' as const,
+      sandboxProfile,
+      executionSpecDigest: facts.specDigest,
+      risk: request.entry.risk,
+    };
     const evaluationInput: Parameters<PermissionBroker['evaluate']>[0] = {
       taskId: request.context.taskId,
       request: {
-        taskId: request.context.taskId,
-        subjectId: facts.subjectId,
-        capability,
-        resource: facts.resource,
-        operation: facts.operation,
-        providerEgress: 'none',
-        sandboxProfile,
-        executionSpecDigest: facts.specDigest,
-        reviewerInputDigest: createHash('sha256')
-          .update(JSON.stringify(request.input))
-          .digest('hex'),
-        risk: request.entry.risk,
+        ...permissionRequestBase,
+        reviewerInputDigest: autoReviewerInputDigest({
+          request: permissionRequestBase,
+          tool: toolFacts,
+          policyEpoch: request.context.policyEpoch,
+        }),
       },
       basePolicy: {
         managedDeny: [],
@@ -677,16 +724,110 @@ export class IpcRouter {
       },
       now: new Date().toISOString(),
     };
-    const evaluation =
+    const pathGuard =
       request.entry.implementationKind === 'command-runner'
-        ? this.permissionBroker.evaluateExecutionSpec({
-            ...evaluationInput,
-            pathGuard: executionSpecPathGuard(request.input as ExecutionSpec),
+        ? executionSpecPathGuard(request.input as ExecutionSpec)
+        : undefined;
+    const evaluate = (reviewerDecision?: Awaited<ReturnType<AutoReviewer['review']>>) => {
+      const input = {
+        ...evaluationInput,
+        basePolicy: {
+          ...evaluationInput.basePolicy,
+          ...(reviewerDecision === undefined ? {} : { reviewerDecision }),
+        },
+        ...(pathGuard === undefined ? {} : { pathGuard }),
+      };
+      return request.entry.implementationKind === 'command-runner'
+        ? this.permissionBroker.previewExecutionSpec(input)
+        : this.permissionBroker.preview(input);
+    };
+    let evaluation = evaluate();
+    let reviewerDecision: Awaited<ReturnType<AutoReviewer['review']>> | undefined;
+    const autoPreset = this.permissionBroker.getPolicy(request.context.taskId).preset === 'auto';
+    const reviewRequestId = randomUUID();
+    if (evaluation.decision === 'approval_required' && autoPreset) {
+      reviewerDecision = await this.autoReviewer.review({
+        reviewRequestId,
+        turnId: request.context.turnId,
+        callId: request.callId,
+        request: evaluationInput.request,
+        tool: toolFacts,
+        policyEpoch: evaluation.policyEpoch,
+      });
+      evaluation = evaluate(reviewerDecision);
+    }
+    const committedEvent = this.permissionBroker.commitEvaluation(
+      {
+        ...evaluationInput,
+        basePolicy: {
+          ...evaluationInput.basePolicy,
+          ...(reviewerDecision === undefined ? {} : { reviewerDecision }),
+        },
+        ...(pathGuard === undefined ? {} : { pathGuard }),
+      },
+      evaluation,
+      autoPreset
+        ? autoPermissionDecisionSchema.parse({
+            id: randomUUID(),
+            taskId: request.context.taskId,
+            turnId: request.context.turnId,
+            callId: request.callId,
+            reviewRequestId,
+            capability,
+            source:
+              reviewerDecision !== undefined
+                ? 'reviewer'
+                : evaluation.reason === 'preset_auto_safe'
+                  ? 'narrow_allow'
+                  : 'policy',
+            decision:
+              evaluation.decision === 'allow' || evaluation.decision === 'allow_once'
+                ? evaluation.decision
+                : 'deny',
+            outcome: reviewerDecision?.decision ?? evaluation.reason,
+            reason: evaluation.reason,
+            risk: request.entry.risk,
+            model: reviewerDecision?.model ?? 'policy-engine',
+            templateVersion: reviewerDecision?.templateVersion ?? 'preset-auto-v1',
+            requestFingerprint:
+              reviewerDecision?.requestFingerprint ??
+              permissionRequestFingerprint(evaluationInput.request),
+            executionSpecDigest: evaluationInput.request.executionSpecDigest,
+            inputDigest: evaluationInput.request.reviewerInputDigest,
+            policyEpoch: evaluation.policyEpoch,
+            createdAt: new Date().toISOString(),
           })
-        : this.permissionBroker.evaluate(evaluationInput);
-    return evaluation.decision === 'allow' || evaluation.decision === 'allow_once'
-      ? ('allow' as const)
-      : evaluation.decision;
+        : undefined,
+    );
+    if (committedEvent !== undefined) this.publish(committedEvent);
+    if (
+      (evaluation.decision === 'allow' || evaluation.decision === 'allow_once') &&
+      evaluation.permit !== undefined
+    ) {
+      const permit = evaluation.permit;
+      return {
+        decision: 'allow' as const,
+        reason: evaluation.reason,
+        beforeExecute: () =>
+          this.permissionBroker.revalidate({
+            ...evaluationInput,
+            basePolicy: {
+              ...evaluationInput.basePolicy,
+              ...(reviewerDecision === undefined ? {} : { reviewerDecision }),
+            },
+            permit,
+            now: new Date().toISOString(),
+            ...(pathGuard === undefined ? {} : { pathGuard }),
+          }).valid,
+      };
+    }
+    return {
+      decision: evaluation.decision === 'allow_once' ? ('deny' as const) : evaluation.decision,
+      reason:
+        evaluation.decision === 'allow_once'
+          ? 'permission_allow_once_missing_permit'
+          : evaluation.reason,
+    };
   }
 
   private dispatchStarted(started: StartedTurn): void {

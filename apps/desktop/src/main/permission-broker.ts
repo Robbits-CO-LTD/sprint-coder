@@ -54,6 +54,7 @@ type PermissionPersistence = Pick<
   | 'getWorkspace'
   | 'registerPermissionOneTimeToken'
   | 'consumePermissionOneTimeToken'
+  | 'commitPermissionEvaluation'
 >;
 
 export class PermissionBroker {
@@ -119,6 +120,54 @@ export class PermissionBroker {
     return this.evaluateSingle(input);
   }
 
+  preview(input: {
+    taskId: string;
+    request: PermissionRequest;
+    basePolicy: PermissionPolicyBase;
+    now: string;
+    pathGuard?: PathGuard;
+  }): PermissionEvaluation {
+    if (input.request.capability === 'shell.execute')
+      throw new Error('Shell requests must use previewExecutionSpec');
+    this.assertTrustedRequestFacts(input);
+    return this.evaluateCurrentPolicy(input);
+  }
+
+  previewExecutionSpec(input: {
+    taskId: string;
+    request: PermissionRequest;
+    basePolicy: PermissionPolicyBase;
+    now: string;
+    pathGuard?: PathGuard;
+  }): PermissionEvaluation {
+    if (input.request.capability !== 'shell.execute')
+      throw new Error('ExecutionSpec preview requires shell.execute');
+    this.assertTrustedRequestFacts(input);
+    return this.evaluateCurrentPolicy(input);
+  }
+
+  commitEvaluation(
+    input: {
+      taskId: string;
+      request: PermissionRequest;
+      basePolicy: PermissionPolicyBase;
+      now: string;
+      pathGuard?: PathGuard;
+    },
+    evaluation: PermissionEvaluation,
+    autoDecision?: Parameters<PermissionPersistence['commitPermissionEvaluation']>[3],
+  ) {
+    this.assertTrustedRequestFacts(input);
+    if (this.persistence.getPermissionPolicy(input.taskId).policyEpoch !== evaluation.policyEpoch)
+      throw new Error('Permission policy epoch changed before commit');
+    return this.persistence.commitPermissionEvaluation(
+      input.taskId,
+      input.request,
+      evaluation,
+      autoDecision,
+    );
+  }
+
   evaluateExecutionSpec(input: {
     taskId: string;
     request: PermissionRequest;
@@ -176,17 +225,7 @@ export class PermissionBroker {
   }): PermissionEvaluation {
     this.assertTrustedRequestFacts(input);
     const evaluation = this.evaluateCurrentPolicy(input);
-    if (
-      evaluation.permit?.source === 'reviewer_allow_once' &&
-      evaluation.permit.oneTimeToken !== undefined
-    )
-      this.persistence.registerPermissionOneTimeToken(
-        input.taskId,
-        evaluation.permit.oneTimeToken,
-        evaluation.permit.policyEpoch,
-        evaluation.permit.expiresAt,
-      );
-    this.persistence.recordPermissionAudit(input.taskId, input.request, evaluation);
+    this.commitEvaluation(input, evaluation);
     return evaluation;
   }
 
@@ -253,12 +292,24 @@ export class PermissionBroker {
       policyEpoch: this.persistence.getPermissionPolicy(input.taskId).policyEpoch,
       now: input.now,
       consumeOneTimeToken: (token) =>
-        this.persistence.consumePermissionOneTimeToken(
-          input.taskId,
-          token,
-          input.permit.policyEpoch,
-          input.now,
-        ),
+        input.permit.source !== 'reviewer_allow_once' ||
+        input.permit.reviewRequestId === undefined ||
+        input.permit.turnId === undefined ||
+        input.permit.callId === undefined
+          ? false
+          : this.persistence.consumePermissionOneTimeToken(
+              input.taskId,
+              token,
+              input.permit.policyEpoch,
+              input.now,
+              {
+                reviewRequestId: input.permit.reviewRequestId,
+                turnId: input.permit.turnId,
+                callId: input.permit.callId,
+                subjectId: input.permit.subjectId,
+                specDigest: input.permit.executionSpecDigest,
+              },
+            ),
     });
     const result =
       currentEvaluation.decision === 'allow' || currentEvaluation.decision === 'allow_once'

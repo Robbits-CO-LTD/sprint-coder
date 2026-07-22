@@ -286,6 +286,9 @@ describe('public contracts', () => {
       executable: '/usr/bin/printf',
       argv: ['ok'],
       cwd: '/workspace',
+      envDelta: { PATH: '/usr/bin:/bin' },
+      purpose: '変更の整合性を確認します',
+      risk: 'high',
       state: 'running',
       pid: 123,
       exitCode: null,
@@ -318,6 +321,46 @@ describe('public contracts', () => {
         byteLength: 11,
       }),
     ).toMatchObject({ type: 'command.output', outputSeq: 1 });
+  });
+
+  it('binds Auto audit events to immutable reviewer and effective-decision facts', () => {
+    const event = turnEventSchema.parse({
+      type: 'permission.auto_decided',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 9,
+      autoDecision: {
+        id: 'auto-1',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        callId: 'call-1',
+        reviewRequestId: 'review-1',
+        capability: 'workspace.read',
+        source: 'narrow_allow',
+        decision: 'allow',
+        outcome: 'preset_auto_safe',
+        reason: 'preset_auto_safe',
+        risk: 'low',
+        model: 'policy-engine',
+        templateVersion: 'preset-auto-v1',
+        requestFingerprint: 'a'.repeat(64),
+        executionSpecDigest: 'b'.repeat(64),
+        inputDigest: 'c'.repeat(64),
+        policyEpoch: 3,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      },
+    });
+    expect(event).toMatchObject({
+      type: 'permission.auto_decided',
+      autoDecision: { decision: 'allow', inputDigest: 'c'.repeat(64) },
+    });
+    if (event.type !== 'permission.auto_decided') throw new Error('Expected Auto decision event');
+    expect(() =>
+      turnEventSchema.parse({
+        ...event,
+        autoDecision: { ...event.autoDecision, inputDigest: 'not-a-digest' },
+      }),
+    ).toThrow();
   });
 
   it('represents waiting approval in reconnect snapshots without widening Runtime stages', () => {

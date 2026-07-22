@@ -131,6 +131,9 @@ export type SessionGrant = {
 };
 
 type ReviewerDecisionFacts = {
+  reviewRequestId: string;
+  turnId: string;
+  callId: string;
   requestFingerprint: string;
   executionSpecDigest: string;
   policyEpoch: number;
@@ -185,6 +188,9 @@ export type PermissionEvaluation = {
   evaluationTrace: EvaluationStage[];
   permit?: ExecutionPermit;
   reviewerAudit?: {
+    reviewRequestId: string;
+    turnId: string;
+    callId: string;
     requestFingerprint: string;
     executionSpecDigest: string;
     policyEpoch: number;
@@ -207,6 +213,9 @@ export type ExecutionPermit = {
   source: 'remembered_grant' | 'narrow_allow' | 'reviewer_allow_once';
   sourceGrantId?: string;
   oneTimeToken?: string;
+  reviewRequestId?: string;
+  turnId?: string;
+  callId?: string;
 };
 
 export type ExpandedAccessPolicy = Pick<
@@ -452,6 +461,9 @@ export function evaluatePermissionPolicy(input: {
     policy.reviewerDecision.executionSpecDigest === request.executionSpecDigest &&
     policy.reviewerDecision.inputDigest === request.reviewerInputDigest &&
     /^[a-f0-9]{64}$/.test(policy.reviewerDecision.inputDigest) &&
+    policy.reviewerDecision.reviewRequestId.length >= 8 &&
+    policy.reviewerDecision.turnId.length > 0 &&
+    policy.reviewerDecision.callId.length > 0 &&
     policy.reviewerDecision.decisionNonce.length >= 16 &&
     policy.reviewerDecision.policyEpoch === policy.policyEpoch &&
     policy.reviewerDecision.model.length > 0 &&
@@ -505,6 +517,9 @@ function withReviewerAudit(
   return {
     ...evaluationResult,
     reviewerAudit: {
+      reviewRequestId: reviewer.reviewRequestId,
+      turnId: reviewer.turnId,
+      callId: reviewer.callId,
       requestFingerprint: reviewer.requestFingerprint,
       executionSpecDigest: reviewer.executionSpecDigest,
       policyEpoch: reviewer.policyEpoch,
@@ -654,6 +669,13 @@ function createPermit(
     source,
     ...(sourceGrantId === undefined ? {} : { sourceGrantId }),
     ...(oneTimeToken === undefined ? {} : { oneTimeToken }),
+    ...(source !== 'reviewer_allow_once' || policy.reviewerDecision === undefined
+      ? {}
+      : {
+          reviewRequestId: policy.reviewerDecision.reviewRequestId,
+          turnId: policy.reviewerDecision.turnId,
+          callId: policy.reviewerDecision.callId,
+        }),
   });
 }
 

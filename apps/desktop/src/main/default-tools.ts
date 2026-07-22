@@ -50,8 +50,9 @@ export const COMMAND_RUNNER_TOOL = createToolDefinition({
       executable: { type: 'string' },
       argv: { type: 'array', items: { type: 'string' } },
       cwd: { type: 'string' },
+      purpose: { type: 'string' },
     },
-    required: ['executable', 'argv'],
+    required: ['executable', 'argv', 'purpose'],
     additionalProperties: false,
   },
   outputSchema: { type: 'object' },
@@ -150,7 +151,12 @@ export function createDefaultToolBroker(
         throw new Error('CommandRunner execution boundary is not configured');
       const workspacePath = command.persistence.getWorkspace(context.taskId);
       if (workspacePath === null) throw new Error('CommandRunner requires a selected Workspace');
-      const request = input as { executable: string; argv: string[]; cwd?: string };
+      const request = input as {
+        executable: string;
+        argv: string[];
+        cwd?: string;
+        purpose: string;
+      };
       const spec = await prepareExecutionSpec({
         workspacePath,
         executable: request.executable,
@@ -163,6 +169,8 @@ export function createDefaultToolBroker(
         turnId: context.turnId,
         callId: control.callId,
         spec,
+        purpose: request.purpose,
+        risk: COMMAND_RUNNER_TOOL.risk,
         createdAt: new Date().toISOString(),
       });
       commandIds.set(spec, persisted.id);
