@@ -74,6 +74,14 @@ export interface NativeSafeFs {
     intent: NativeMutationIntentSnapshot,
     bytes: Buffer,
   ): Promise<NativeMutationRevision>;
+  applyIntentEffect(
+    session: NativeSafeFsSession,
+    intent: NativeMutationIntentSnapshot,
+  ): Promise<NativeMutationEffectObservation>;
+  cleanupIntentAuxiliary(
+    session: NativeSafeFsSession,
+    intent: NativeMutationIntentSnapshot,
+  ): Promise<Readonly<{ state: 'absent' }>>;
   closeSession(session: NativeSafeFsSession): Promise<void>;
 }
 
@@ -101,12 +109,31 @@ type RawStageInput = RawJournalBinding &
     expectedMode: number;
   }>;
 
+type RawEffectInput = RawJournalBinding &
+  Readonly<{
+    kind: NativeMutationIntentSnapshot['kind'];
+    sourceSegments: readonly string[];
+    destinationSegments: readonly string[] | null;
+    auxiliarySegments: readonly string[] | null;
+    expectedSource: NativeMutationIntentSnapshot['expectedSource'];
+    expectedDestination: NativeMutationIntentSnapshot['expectedDestination'];
+    expectedAuxiliary: NativeMutationIntentSnapshot['expectedSource'];
+  }>;
+
+type RawCleanupInput = RawJournalBinding &
+  Readonly<{
+    auxiliarySegments: readonly string[];
+    expectedAuxiliary: NativeMutationIntentSnapshot['expectedSource'];
+  }>;
+
 type RawAddon = Readonly<{
   probe(): unknown;
   openSession(input: NativeSafeFsOpenInput): Promise<unknown>;
   invalidateWorkspace(workspaceKey: string, minimumFence: string): unknown;
   observeIntent(input: RawObserveInput): Promise<unknown>;
   stageIntentArtifact(input: RawStageInput, bytes: Buffer): Promise<unknown>;
+  applyIntentEffect(input: RawEffectInput): Promise<unknown>;
+  cleanupIntentAuxiliary(input: RawCleanupInput): Promise<unknown>;
   closeSession(id: string): Promise<unknown>;
 }>;
 
@@ -255,6 +282,81 @@ export function loadNativeSafeFs(
       }
     },
 
+    async applyIntentEffect(
+      session: NativeSafeFsSession,
+      intent: NativeMutationIntentSnapshot,
+    ): Promise<NativeMutationEffectObservation> {
+      assertIssuedSession(issuedSessions, session);
+      const parsed = parseNativeMutationIntentSnapshot(intent);
+      assertIntentSession(parsed, session);
+      if (parsed.state !== 'effect_pending')
+        throw new NativeSafeFsError(
+          'INVALID_INPUT',
+          'NativeSafeFs effect requires a durable pending intent',
+        );
+      const auxiliary = parsed.temp ?? parsed.tombstone;
+      const expectedAuxiliary =
+        parsed.temp !== null
+          ? (parsed.auxObservation ?? failInvalidNativeIntent())
+          : ({ state: 'absent' } as const);
+      try {
+        const observation = await addon!.applyIntentEffect(
+          Object.freeze({
+            ...journalBinding(session, parsed),
+            kind: parsed.kind,
+            sourceSegments: parsed.sourceSegments,
+            destinationSegments: parsed.destinationSegments,
+            auxiliarySegments:
+              auxiliary === null
+                ? null
+                : Object.freeze([...auxiliary.parentSegments, auxiliary.leafName]),
+            expectedSource: parsed.expectedSource,
+            expectedDestination: parsed.expectedDestination,
+            expectedAuxiliary,
+          }),
+        );
+        assertIssuedSession(issuedSessions, session);
+        return parseEffectObservation(observation);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    async cleanupIntentAuxiliary(
+      session: NativeSafeFsSession,
+      intent: NativeMutationIntentSnapshot,
+    ): Promise<Readonly<{ state: 'absent' }>> {
+      assertIssuedSession(issuedSessions, session);
+      const parsed = parseNativeMutationIntentSnapshot(intent);
+      assertIntentSession(parsed, session);
+      const auxiliary = parsed.temp ?? parsed.tombstone;
+      if (
+        parsed.state !== 'cleanup_pending' ||
+        auxiliary === null ||
+        parsed.effectObservation === null
+      )
+        throw new NativeSafeFsError(
+          'INVALID_INPUT',
+          'NativeSafeFs cleanup requires a durable observed auxiliary',
+        );
+      try {
+        const observation = await addon!.cleanupIntentAuxiliary(
+          Object.freeze({
+            ...journalBinding(session, parsed),
+            auxiliarySegments: Object.freeze([...auxiliary.parentSegments, auxiliary.leafName]),
+            expectedAuxiliary: parsed.effectObservation.auxiliary,
+          }),
+        );
+        assertIssuedSession(issuedSessions, session);
+        const parsedObservation = parseEndpoint(observation);
+        if (parsedObservation.state !== 'absent')
+          throw new Error('Invalid NativeSafeFs cleanup observation');
+        return parsedObservation;
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
     async closeSession(session: NativeSafeFsSession): Promise<void> {
       if (addon === null)
         throw new NativeSafeFsError('ADDON_UNAVAILABLE', 'NativeSafeFs addon is unavailable');
@@ -279,10 +381,16 @@ function validateRawAddon(value: unknown): RawAddon {
     typeof (value as Partial<RawAddon>).invalidateWorkspace !== 'function' ||
     typeof (value as Partial<RawAddon>).observeIntent !== 'function' ||
     typeof (value as Partial<RawAddon>).stageIntentArtifact !== 'function' ||
+    typeof (value as Partial<RawAddon>).applyIntentEffect !== 'function' ||
+    typeof (value as Partial<RawAddon>).cleanupIntentAuxiliary !== 'function' ||
     typeof (value as Partial<RawAddon>).closeSession !== 'function'
   )
     throw new Error('NativeSafeFs addon contract mismatch');
   return value as RawAddon;
+}
+
+function failInvalidNativeIntent(): never {
+  throw new NativeSafeFsError('INVALID_INPUT', 'NativeSafeFs intent is missing staged identity');
 }
 
 function assertIssuedSession(

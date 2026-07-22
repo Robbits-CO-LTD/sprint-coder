@@ -88,7 +88,9 @@ Wave 2(完了 2026-07-22):
   - [x] S4b2 gate: typecheck/test(448件、desktop 186 + contracts 14 + domain 248、SQLite Electron ABI内61件)/lint/format/E2E 7本 green、最新コードで`npm start`とdev DB migration v23を確認、独立要件/テスト再レビュー CRITICAL 0 / HIGH 0
   - [x] S4b3a Native observe/stage: async N-APIで全endpoint pin→SHA-256/identity/mode/nlink観測→leaf/root再検証、journal temp限定の`O_EXCL|O_NOFOLLOW` staging、file/parent fsync、session generation線形化と完了後失効検証を実装。root replacement、raw traversal/任意leaf、symlink/hardlink/FIFO、collision、1 MiB invalidation raceをfail-closed化。独立再レビュー CRITICAL/HIGH/MEDIUM 0
   - [x] S4b3a gate: native addon Electron ABI rebuild、typecheck/test(455件、desktop 193 + contracts 14 + domain 248)/lint/format/E2E 7本 green、最新コードで`npm start`のmain/preload/runtime buildとElectron launchを確認
-  - [ ] S4b3b〜S4b4: atomic no-replace/exchange/cleanup、deterministic parent/leaf race・fault/crash harness、Saga executor wiring、packaged `app.asar.unpacked`実ロードとplatform gate（完了まで`mutation:false`・write tool非公開）
+  - [x] S4b3b atomic effects/cleanup: add/delete/renameのkernel no-replace、updateのatomic exchange、全endpoint pre/post exact observation、session generation線形化、全parent fsync、journal temp/tombstone限定のexact/idempotent cleanupを実装。競合target、外部source/content改変、hardlink、raw malformed shapeをfail-closed化
+  - [x] S4b3b gate: native addon Electron ABI rebuild、typecheck/test(464件、desktop 202 + contracts 14 + domain 248、Windows 1件skip)/lint/format/E2E 7本 green、`npm start`のmain/preload/runtime buildとElectron launchを確認。独立2系統レビュー CRITICAL 0 / HIGH 0
+  - [ ] S4b4: deterministic parent/leaf race・fault/crash harness、Saga executor wiring、packaged `app.asar.unpacked`実ロードとplatform gate（完了まで`mutation:false`・write tool非公開）
   - [ ] Turn全体baseline diff集約、Acceptance Contract/Evidence Ledger、Standard repair最大1、30-case corpus baseline
 - [ ] Phase 4 acceptance gate: provider.egress policy/監査、local-only拒否、30-case corpus、未解決High/Critical 0を最終確認
 

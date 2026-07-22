@@ -3,6 +3,12 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <sys/stdio.h>
+#elif defined(__linux__)
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 #include <array>
@@ -1182,45 +1188,57 @@ struct ObserveWork {
   bool success = false;
 };
 
-void ExecuteObserve(napi_env, void* data) {
-  auto* context = static_cast<ObserveWork*>(data);
+bool ObserveSnapshot(int root_fd, const std::string& workspace_path,
+                     const std::vector<std::string>& source_segments,
+                     const std::vector<std::string>* destination_segments,
+                     const std::vector<std::string>* auxiliary_segments,
+                     RevisionObservation* source_observation,
+                     RevisionObservation* destination_observation,
+                     RevisionObservation* auxiliary_observation, NativeFailure* failure) {
   PinnedEndpoint source;
   PinnedEndpoint destination;
   PinnedEndpoint auxiliary;
+  bool success = false;
   do {
-    if (!VerifyDirectoryNamespace(context->workspace_path, context->root_fd, &context->failure,
-                                  "UNSAFE_PATH"))
+    if (!VerifyDirectoryNamespace(workspace_path, root_fd, failure, "UNSAFE_PATH"))
       break;
-    if (!PinEndpoint(context->root_fd, context->source, &source, &context->failure)) break;
-    if (context->has_destination &&
-        !PinEndpoint(context->root_fd, context->destination, &destination, &context->failure))
+    if (!PinEndpoint(root_fd, source_segments, &source, failure)) break;
+    if (destination_segments != nullptr &&
+        !PinEndpoint(root_fd, *destination_segments, &destination, failure))
       break;
-    if (context->has_auxiliary &&
-        !PinEndpoint(context->root_fd, context->auxiliary, &auxiliary, &context->failure))
+    if (auxiliary_segments != nullptr &&
+        !PinEndpoint(root_fd, *auxiliary_segments, &auxiliary, failure))
       break;
-    if (!ObservePinnedEndpoint(source, &context->source_observation, &context->failure)) break;
-    if (context->has_destination &&
-        !ObservePinnedEndpoint(destination, &context->destination_observation,
-                               &context->failure))
+    if (!ObservePinnedEndpoint(source, source_observation, failure)) break;
+    if (destination_segments != nullptr &&
+        !ObservePinnedEndpoint(destination, destination_observation, failure))
       break;
-    if (context->has_auxiliary &&
-        !ObservePinnedEndpoint(auxiliary, &context->auxiliary_observation, &context->failure))
+    if (auxiliary_segments != nullptr &&
+        !ObservePinnedEndpoint(auxiliary, auxiliary_observation, failure))
       break;
-    if (!RevalidatePinnedEndpoint(context->root_fd, source, &context->failure)) break;
-    if (context->has_destination &&
-        !RevalidatePinnedEndpoint(context->root_fd, destination, &context->failure))
+    if (!RevalidatePinnedEndpoint(root_fd, source, failure)) break;
+    if (destination_segments != nullptr &&
+        !RevalidatePinnedEndpoint(root_fd, destination, failure))
       break;
-    if (context->has_auxiliary &&
-        !RevalidatePinnedEndpoint(context->root_fd, auxiliary, &context->failure))
+    if (auxiliary_segments != nullptr && !RevalidatePinnedEndpoint(root_fd, auxiliary, failure))
       break;
-    if (!VerifyDirectoryNamespace(context->workspace_path, context->root_fd, &context->failure,
-                                  "UNSAFE_PATH"))
+    if (!VerifyDirectoryNamespace(workspace_path, root_fd, failure, "UNSAFE_PATH"))
       break;
-    context->success = true;
+    success = true;
   } while (false);
   ClosePinnedEndpoint(&source);
   ClosePinnedEndpoint(&destination);
   ClosePinnedEndpoint(&auxiliary);
+  return success;
+}
+
+void ExecuteObserve(napi_env, void* data) {
+  auto* context = static_cast<ObserveWork*>(data);
+  context->success = ObserveSnapshot(
+      context->root_fd, context->workspace_path, context->source,
+      context->has_destination ? &context->destination : nullptr,
+      context->has_auxiliary ? &context->auxiliary : nullptr, &context->source_observation,
+      &context->destination_observation, &context->auxiliary_observation, &context->failure);
 }
 
 void CompleteObserve(napi_env env, napi_status status, void* data) {
@@ -1498,6 +1516,478 @@ napi_value StageIntentArtifact(napi_env env, napi_callback_info info) {
   return promise;
 }
 
+bool ReadExpectation(napi_env env, napi_value input, const char* name,
+                     RevisionObservation* expectation) {
+  napi_value value;
+  if (napi_get_named_property(env, input, name, &value) != napi_ok) return false;
+  napi_valuetype type;
+  if (napi_typeof(env, value, &type) != napi_ok || type != napi_object) return false;
+  std::string state_value;
+  if (!ReadString(env, value, "state", &state_value)) return false;
+  if (state_value == "absent") {
+    expectation->present = false;
+    return true;
+  }
+  uint32_t nlink = 0;
+  if (state_value != "present" ||
+      !ReadString(env, value, "identityDigest", &expectation->identity_digest) ||
+      !ReadString(env, value, "contentHash", &expectation->content_hash) ||
+      !ReadUint32(env, value, "size", &expectation->size) ||
+      !ReadUint32(env, value, "mode", &expectation->mode) ||
+      !ReadUint32(env, value, "nlink", &nlink) ||
+      !IsLowerHex(expectation->identity_digest, 64) ||
+      !IsLowerHex(expectation->content_hash, 64) ||
+      expectation->size > static_cast<uint32_t>(kMaximumMutationFileBytes) ||
+      (expectation->mode & S_IFMT) != S_IFREG || nlink != 1)
+    return false;
+  expectation->present = true;
+  return true;
+}
+
+bool ObservationMatches(const RevisionObservation& actual,
+                        const RevisionObservation& expected) {
+  if (actual.present != expected.present) return false;
+  return !actual.present ||
+         (actual.identity_digest == expected.identity_digest &&
+          actual.content_hash == expected.content_hash && actual.size == expected.size &&
+          actual.mode == expected.mode);
+}
+
+bool IsAuxiliaryLeaf(const std::string& leaf, const char* prefix) {
+  const std::string expected_prefix(prefix);
+  return leaf.size() == expected_prefix.size() + 32 && leaf.starts_with(expected_prefix) &&
+         IsLowerHex(leaf.substr(expected_prefix.size()), 32);
+}
+
+int AtomicMoveNoReplace(int source_parent_fd, const char* source_leaf,
+                        int destination_parent_fd, const char* destination_leaf) {
+#if defined(__APPLE__)
+  return renameatx_np(source_parent_fd, source_leaf, destination_parent_fd, destination_leaf,
+                      RENAME_EXCL);
+#elif defined(__linux__)
+  return static_cast<int>(syscall(SYS_renameat2, source_parent_fd, source_leaf,
+                                  destination_parent_fd, destination_leaf, RENAME_NOREPLACE));
+#else
+  errno = ENOTSUP;
+  return -1;
+#endif
+}
+
+int AtomicExchange(int first_parent_fd, const char* first_leaf, int second_parent_fd,
+                   const char* second_leaf) {
+#if defined(__APPLE__)
+  return renameatx_np(first_parent_fd, first_leaf, second_parent_fd, second_leaf, RENAME_SWAP);
+#elif defined(__linux__)
+  return static_cast<int>(syscall(SYS_renameat2, first_parent_fd, first_leaf, second_parent_fd,
+                                  second_leaf, RENAME_EXCHANGE));
+#else
+  errno = ENOTSUP;
+  return -1;
+#endif
+}
+
+NativeFailure AtomicMutationFailure(const char* operation) {
+  if (errno == EEXIST || errno == ENOTEMPTY || errno == ENOENT)
+    return {"UNSAFE_PATH", ErrnoMessage(operation)};
+  if (errno == ENOTSUP || errno == EOPNOTSUPP || errno == ENOSYS || errno == EXDEV ||
+      errno == EINVAL)
+    return {"UNSUPPORTED_PLATFORM", ErrnoMessage(operation)};
+  return {"NATIVE_FAILURE", ErrnoMessage(operation)};
+}
+
+struct EffectWork {
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  std::string session_id;
+  std::string workspace_key;
+  std::string workspace_path;
+  uint64_t invalidation_version = 0;
+  int root_fd = -1;
+  std::string kind;
+  std::vector<std::string> source;
+  std::vector<std::string> destination;
+  std::vector<std::string> auxiliary;
+  bool has_destination = false;
+  bool has_auxiliary = false;
+  RevisionObservation expected_source;
+  RevisionObservation expected_destination;
+  RevisionObservation expected_auxiliary;
+  RevisionObservation source_observation;
+  RevisionObservation destination_observation;
+  RevisionObservation auxiliary_observation;
+  NativeFailure failure;
+  bool success = false;
+};
+
+bool EffectShapeIsValid(const EffectWork& context) {
+  const bool source_present = context.expected_source.present;
+  const bool destination_absent = !context.expected_destination.present;
+  if (context.kind == "add")
+    return !source_present && destination_absent && !context.has_destination &&
+           context.has_auxiliary && context.expected_auxiliary.present &&
+           IsAuxiliaryLeaf(context.auxiliary.back(), ".vibe-temp-");
+  if (context.kind == "update")
+    return source_present && destination_absent && !context.has_destination &&
+           context.has_auxiliary && context.expected_auxiliary.present &&
+           IsAuxiliaryLeaf(context.auxiliary.back(), ".vibe-temp-");
+  if (context.kind == "delete")
+    return source_present && destination_absent && !context.has_destination &&
+           context.has_auxiliary && !context.expected_auxiliary.present &&
+           IsAuxiliaryLeaf(context.auxiliary.back(), ".vibe-tomb-");
+  if (context.kind == "rename")
+    return source_present && destination_absent && context.has_destination &&
+           !context.has_auxiliary && !context.expected_auxiliary.present;
+  return false;
+}
+
+bool EffectObservationIsValid(const EffectWork& context) {
+  RevisionObservation absent;
+  if (context.kind == "add")
+    return ObservationMatches(context.source_observation, context.expected_auxiliary) &&
+           ObservationMatches(context.destination_observation, absent) &&
+           ObservationMatches(context.auxiliary_observation, absent);
+  if (context.kind == "update")
+    return ObservationMatches(context.source_observation, context.expected_auxiliary) &&
+           ObservationMatches(context.destination_observation, absent) &&
+           ObservationMatches(context.auxiliary_observation, context.expected_source);
+  if (context.kind == "delete")
+    return ObservationMatches(context.source_observation, absent) &&
+           ObservationMatches(context.destination_observation, absent) &&
+           ObservationMatches(context.auxiliary_observation, context.expected_source);
+  return ObservationMatches(context.source_observation, absent) &&
+         ObservationMatches(context.destination_observation, context.expected_source) &&
+         ObservationMatches(context.auxiliary_observation, absent);
+}
+
+void ExecuteEffect(napi_env, void* data) {
+  auto* context = static_cast<EffectWork*>(data);
+  RevisionObservation before_source;
+  RevisionObservation before_destination;
+  RevisionObservation before_auxiliary;
+  if (!ObserveSnapshot(
+          context->root_fd, context->workspace_path, context->source,
+          context->has_destination ? &context->destination : nullptr,
+          context->has_auxiliary ? &context->auxiliary : nullptr, &before_source,
+          &before_destination, &before_auxiliary, &context->failure))
+    return;
+  if (!ObservationMatches(before_source, context->expected_source) ||
+      !ObservationMatches(before_destination, context->expected_destination) ||
+      !ObservationMatches(before_auxiliary, context->expected_auxiliary)) {
+    context->failure = {"UNSAFE_PATH", "NativeSafeFs effect precondition changed"};
+    return;
+  }
+
+  int source_parent_fd = OpenRelativeParent(context->root_fd, context->source, &context->failure);
+  if (source_parent_fd < 0) return;
+  int destination_parent_fd = -1;
+  int auxiliary_parent_fd = -1;
+  if (context->has_destination)
+    destination_parent_fd =
+        OpenRelativeParent(context->root_fd, context->destination, &context->failure);
+  if (context->has_auxiliary)
+    auxiliary_parent_fd =
+        OpenRelativeParent(context->root_fd, context->auxiliary, &context->failure);
+  if ((context->has_destination && destination_parent_fd < 0) ||
+      (context->has_auxiliary && auxiliary_parent_fd < 0)) {
+    CloseFd(&source_parent_fd);
+    CloseFd(&destination_parent_fd);
+    CloseFd(&auxiliary_parent_fd);
+    return;
+  }
+  const bool parents_valid =
+      VerifyRelativeParentNamespace(context->root_fd, context->source, source_parent_fd,
+                                    &context->failure) &&
+      (!context->has_destination ||
+       VerifyRelativeParentNamespace(context->root_fd, context->destination,
+                                     destination_parent_fd, &context->failure)) &&
+      (!context->has_auxiliary ||
+       VerifyRelativeParentNamespace(context->root_fd, context->auxiliary, auxiliary_parent_fd,
+                                     &context->failure)) &&
+      VerifyDirectoryNamespace(context->workspace_path, context->root_fd, &context->failure,
+                               "UNSAFE_PATH");
+  if (!parents_valid) {
+    CloseFd(&source_parent_fd);
+    CloseFd(&destination_parent_fd);
+    CloseFd(&auxiliary_parent_fd);
+    return;
+  }
+
+  int mutation_result = -1;
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(context->session_id);
+    if (session == state.sessions.end() ||
+        session->second.workspace_key != context->workspace_key ||
+        state.invalidation_versions[context->workspace_key] != context->invalidation_version) {
+      context->failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before effect"};
+    } else if (context->kind == "add") {
+      mutation_result = AtomicMoveNoReplace(auxiliary_parent_fd, context->auxiliary.back().c_str(),
+                                            source_parent_fd, context->source.back().c_str());
+    } else if (context->kind == "update") {
+      mutation_result = AtomicExchange(source_parent_fd, context->source.back().c_str(),
+                                       auxiliary_parent_fd, context->auxiliary.back().c_str());
+    } else if (context->kind == "delete") {
+      mutation_result = AtomicMoveNoReplace(source_parent_fd, context->source.back().c_str(),
+                                            auxiliary_parent_fd,
+                                            context->auxiliary.back().c_str());
+    } else {
+      mutation_result = AtomicMoveNoReplace(source_parent_fd, context->source.back().c_str(),
+                                            destination_parent_fd,
+                                            context->destination.back().c_str());
+    }
+  }
+  if (!context->failure.code.empty()) {
+    CloseFd(&source_parent_fd);
+    CloseFd(&destination_parent_fd);
+    CloseFd(&auxiliary_parent_fd);
+    return;
+  }
+  if (mutation_result != 0) {
+    context->failure = AtomicMutationFailure("apply atomic mutation");
+    CloseFd(&source_parent_fd);
+    CloseFd(&destination_parent_fd);
+    CloseFd(&auxiliary_parent_fd);
+    return;
+  }
+
+  if (fsync(source_parent_fd) != 0 ||
+      (destination_parent_fd >= 0 && destination_parent_fd != source_parent_fd &&
+       fsync(destination_parent_fd) != 0) ||
+      (auxiliary_parent_fd >= 0 && auxiliary_parent_fd != source_parent_fd &&
+       auxiliary_parent_fd != destination_parent_fd && fsync(auxiliary_parent_fd) != 0)) {
+    context->failure = {"NATIVE_FAILURE", ErrnoMessage("fsync mutation parent")};
+  }
+  CloseFd(&source_parent_fd);
+  CloseFd(&destination_parent_fd);
+  CloseFd(&auxiliary_parent_fd);
+  if (!context->failure.code.empty()) return;
+
+  if (!ObserveSnapshot(
+          context->root_fd, context->workspace_path, context->source,
+          context->has_destination ? &context->destination : nullptr,
+          context->has_auxiliary ? &context->auxiliary : nullptr, &context->source_observation,
+          &context->destination_observation, &context->auxiliary_observation,
+          &context->failure))
+    return;
+  if (!EffectObservationIsValid(*context)) {
+    context->failure = {"NATIVE_FAILURE", "NativeSafeFs effect topology is indeterminate"};
+    return;
+  }
+  context->success = true;
+}
+
+void CompleteEffect(napi_env env, napi_status status, void* data) {
+  auto* context = static_cast<EffectWork*>(data);
+  CloseFd(&context->root_fd);
+  if (status != napi_ok || !context->success) {
+    if (context->failure.code.empty())
+      context->failure = {"NATIVE_FAILURE", "NativeSafeFs effect failed"};
+    napi_reject_deferred(env, context->deferred, MakeError(env, context->failure));
+  } else {
+    napi_value result;
+    napi_create_object(env, &result);
+    napi_set_named_property(env, result, "source",
+                            MakeRevisionObservation(env, context->source_observation));
+    napi_set_named_property(env, result, "destination",
+                            MakeRevisionObservation(env, context->destination_observation));
+    napi_set_named_property(env, result, "auxiliary",
+                            MakeRevisionObservation(env, context->auxiliary_observation));
+    napi_resolve_deferred(env, context->deferred, result);
+  }
+  napi_delete_async_work(env, context->work);
+  delete context;
+}
+
+napi_value ApplyIntentEffect(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object)
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs effect input must be an object");
+  auto* context = new EffectWork();
+  bool destination_null = false;
+  bool auxiliary_null = false;
+  if (!ReadJournalBinding(env, argv[0], &context->session_id, &context->failure) ||
+      !ReadString(env, argv[0], "kind", &context->kind) ||
+      !ReadSegments(env, argv[0], "sourceSegments", false, false, &context->source) ||
+      !ReadSegments(env, argv[0], "destinationSegments", true, false, &context->destination,
+                    &destination_null) ||
+      !ReadSegments(env, argv[0], "auxiliarySegments", true, false, &context->auxiliary,
+                    &auxiliary_null) ||
+      !ReadExpectation(env, argv[0], "expectedSource", &context->expected_source) ||
+      !ReadExpectation(env, argv[0], "expectedDestination", &context->expected_destination) ||
+      !ReadExpectation(env, argv[0], "expectedAuxiliary", &context->expected_auxiliary)) {
+    NativeFailure failure = context->failure.code.empty()
+                                ? NativeFailure{"INVALID_INPUT", "Invalid NativeSafeFs effect"}
+                                : context->failure;
+    delete context;
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  context->has_destination = !destination_null;
+  context->has_auxiliary = !auxiliary_null;
+  if (!EffectShapeIsValid(*context)) {
+    delete context;
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs effect shape");
+  }
+  if (!CaptureSessionRoot(context->session_id, &context->root_fd, &context->workspace_key,
+                          &context->workspace_path, &context->invalidation_version,
+                          &context->failure)) {
+    NativeFailure failure = context->failure;
+    delete context;
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  napi_value promise;
+  napi_create_promise(env, &context->deferred, &promise);
+  napi_value resource_name = MakeString(env, "NativeSafeFs.applyIntentEffect");
+  const napi_status create_status = napi_create_async_work(
+      env, nullptr, resource_name, ExecuteEffect, CompleteEffect, context, &context->work);
+  const napi_status queue_status =
+      create_status == napi_ok ? napi_queue_async_work(env, context->work) : create_status;
+  if (create_status != napi_ok || queue_status != napi_ok) {
+    if (create_status == napi_ok) napi_delete_async_work(env, context->work);
+    CloseFd(&context->root_fd);
+    delete context;
+    return ThrowFailure(env, "NATIVE_FAILURE", "Failed to queue NativeSafeFs effect");
+  }
+  return promise;
+}
+
+struct CleanupWork {
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  std::string session_id;
+  std::string workspace_key;
+  std::string workspace_path;
+  uint64_t invalidation_version = 0;
+  int root_fd = -1;
+  std::vector<std::string> auxiliary;
+  RevisionObservation expected_auxiliary;
+  NativeFailure failure;
+  bool success = false;
+};
+
+void ExecuteCleanup(napi_env, void* data) {
+  auto* context = static_cast<CleanupWork*>(data);
+  RevisionObservation current;
+  RevisionObservation ignored_destination;
+  RevisionObservation ignored_auxiliary;
+  if (!ObserveSnapshot(context->root_fd, context->workspace_path, context->auxiliary, nullptr,
+                       nullptr, &current, &ignored_destination, &ignored_auxiliary,
+                       &context->failure))
+    return;
+  if (!current.present) {
+    context->success = true;
+    return;
+  }
+  if (!ObservationMatches(current, context->expected_auxiliary)) {
+    context->failure = {"UNSAFE_PATH", "NativeSafeFs cleanup identity changed"};
+    return;
+  }
+  int parent_fd =
+      OpenRelativeParent(context->root_fd, context->auxiliary, &context->failure);
+  if (parent_fd < 0) return;
+  if (!VerifyRelativeParentNamespace(context->root_fd, context->auxiliary, parent_fd,
+                                     &context->failure) ||
+      !VerifyDirectoryNamespace(context->workspace_path, context->root_fd, &context->failure,
+                                "UNSAFE_PATH")) {
+    CloseFd(&parent_fd);
+    return;
+  }
+  int unlink_result = -1;
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(context->session_id);
+    if (session == state.sessions.end() ||
+        session->second.workspace_key != context->workspace_key ||
+        state.invalidation_versions[context->workspace_key] != context->invalidation_version) {
+      context->failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before cleanup"};
+    } else {
+      struct stat namespace_stat {};
+      if (fstatat(parent_fd, context->auxiliary.back().c_str(), &namespace_stat,
+                  AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(namespace_stat.st_mode) ||
+          namespace_stat.st_nlink != 1 ||
+          FileIdentityDigest(namespace_stat) != context->expected_auxiliary.identity_digest) {
+        context->failure = {"UNSAFE_PATH", "NativeSafeFs cleanup target changed"};
+      } else {
+        unlink_result = unlinkat(parent_fd, context->auxiliary.back().c_str(), 0);
+      }
+    }
+  }
+  if (context->failure.code.empty() && unlink_result != 0)
+    context->failure = {"NATIVE_FAILURE", ErrnoMessage("unlink mutation auxiliary")};
+  if (context->failure.code.empty() && fsync(parent_fd) != 0)
+    context->failure = {"NATIVE_FAILURE", ErrnoMessage("fsync cleanup parent")};
+  CloseFd(&parent_fd);
+  if (!context->failure.code.empty()) return;
+  RevisionObservation after;
+  if (!ObserveSnapshot(context->root_fd, context->workspace_path, context->auxiliary, nullptr,
+                       nullptr, &after, &ignored_destination, &ignored_auxiliary,
+                       &context->failure))
+    return;
+  if (after.present) {
+    context->failure = {"NATIVE_FAILURE", "NativeSafeFs cleanup did not become absent"};
+    return;
+  }
+  context->success = true;
+}
+
+void CompleteCleanup(napi_env env, napi_status status, void* data) {
+  auto* context = static_cast<CleanupWork*>(data);
+  CloseFd(&context->root_fd);
+  if (status != napi_ok || !context->success) {
+    if (context->failure.code.empty())
+      context->failure = {"NATIVE_FAILURE", "NativeSafeFs cleanup failed"};
+    napi_reject_deferred(env, context->deferred, MakeError(env, context->failure));
+  } else {
+    napi_resolve_deferred(env, context->deferred, MakeRevisionObservation(env, {}));
+  }
+  napi_delete_async_work(env, context->work);
+  delete context;
+}
+
+napi_value CleanupIntentAuxiliary(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object)
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs cleanup input must be an object");
+  auto* context = new CleanupWork();
+  if (!ReadJournalBinding(env, argv[0], &context->session_id, &context->failure) ||
+      !ReadSegments(env, argv[0], "auxiliarySegments", false, false, &context->auxiliary) ||
+      !ReadExpectation(env, argv[0], "expectedAuxiliary", &context->expected_auxiliary) ||
+      (!IsAuxiliaryLeaf(context->auxiliary.back(), ".vibe-temp-") &&
+       !IsAuxiliaryLeaf(context->auxiliary.back(), ".vibe-tomb-"))) {
+    NativeFailure failure = context->failure.code.empty()
+                                ? NativeFailure{"INVALID_INPUT", "Invalid cleanup auxiliary"}
+                                : context->failure;
+    delete context;
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  if (!CaptureSessionRoot(context->session_id, &context->root_fd, &context->workspace_key,
+                          &context->workspace_path, &context->invalidation_version,
+                          &context->failure)) {
+    NativeFailure failure = context->failure;
+    delete context;
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  napi_value promise;
+  napi_create_promise(env, &context->deferred, &promise);
+  napi_value resource_name = MakeString(env, "NativeSafeFs.cleanupIntentAuxiliary");
+  const napi_status create_status = napi_create_async_work(
+      env, nullptr, resource_name, ExecuteCleanup, CompleteCleanup, context, &context->work);
+  const napi_status queue_status =
+      create_status == napi_ok ? napi_queue_async_work(env, context->work) : create_status;
+  if (create_status != napi_ok || queue_status != napi_ok) {
+    if (create_status == napi_ok) napi_delete_async_work(env, context->work);
+    CloseFd(&context->root_fd);
+    delete context;
+    return ThrowFailure(env, "NATIVE_FAILURE", "Failed to queue NativeSafeFs cleanup");
+  }
+  return promise;
+}
+
 napi_value Probe(napi_env env, napi_callback_info) {
   napi_value result;
   napi_create_object(env, &result);
@@ -1551,6 +2041,10 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"observeIntent", nullptr, ObserveIntent, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"stageIntentArtifact", nullptr, StageIntentArtifact, nullptr, nullptr, nullptr, napi_default,
        nullptr},
+      {"applyIntentEffect", nullptr, ApplyIntentEffect, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
+      {"cleanupIntentAuxiliary", nullptr, CleanupIntentAuxiliary, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"closeSession", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
