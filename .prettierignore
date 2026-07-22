@@ -1,0 +1,8 @@
+node_modules
+.reference-repos
+demo
+**/.vite
+**/.vite-user-data
+**/out
+package-lock.json
+*.sqlite3

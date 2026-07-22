@@ -25,7 +25,8 @@ export default function App() {
           <h1>Electron環境で起動してください</h1>
           <p>
             このUIはElectronアプリのRendererとして動作します。ブラウザから直接開いた場合、
-            <code>window.vibe</code> が公開されないため、Taskの読み込みやメッセージ送信はできません。
+            <code>window.vibe</code>{' '}
+            が公開されないため、Taskの読み込みやメッセージ送信はできません。
           </p>
         </div>
       </div>

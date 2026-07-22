@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../types/vibe';
+import { Markdown } from './Markdown';
 
 type Props = {
   author: ChatMessage['author'];
@@ -16,6 +17,7 @@ export function MessageBubble({ author, content, isStreaming = false }: Props) {
   }
 
   if (author === 'user') {
+    // User content is always rendered as plain text — never passed through Markdown.
     return (
       <div className="msg msg-user">
         <div className="bubble">{content}</div>
@@ -26,7 +28,9 @@ export function MessageBubble({ author, content, isStreaming = false }: Props) {
   return (
     <div className="msg msg-assistant">
       <span className="msg-label">Assistant</span>
-      <div className={`bubble${isStreaming ? ' caret' : ''}`}>{content}</div>
+      <div className={`bubble${isStreaming ? ' caret' : ''}`}>
+        <Markdown content={content} />
+      </div>
     </div>
   );
 }

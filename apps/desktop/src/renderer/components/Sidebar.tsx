@@ -5,7 +5,9 @@ import type { TaskSummary } from '../types/vibe';
 
 function groupTasks(tasks: TaskSummary[], query: string) {
   const q = query.trim().toLowerCase();
-  const visible = tasks.filter((t) => !t.archived && (q === '' || t.title.toLowerCase().includes(q)));
+  const matches = (t: TaskSummary) => q === '' || t.title.toLowerCase().includes(q);
+  const visible = tasks.filter((t) => !t.archived && matches(t));
+  const archived = tasks.filter((t) => t.archived && matches(t));
   const nowIso = new Date().toISOString();
 
   const pinned = visible.filter((t) => t.pinned);
@@ -18,6 +20,7 @@ function groupTasks(tasks: TaskSummary[], query: string) {
     pinned: [...pinned].sort(byRecency),
     today: [...today].sort(byRecency),
     previous: [...previous].sort(byRecency),
+    archived: [...archived].sort(byRecency),
   };
 }
 
@@ -26,10 +29,29 @@ export function Sidebar() {
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const selectTask = useAppStore((s) => s.selectTask);
   const createTask = useAppStore((s) => s.createTask);
+  const setPinned = useAppStore((s) => s.setPinned);
+  const setArchived = useAppStore((s) => s.setArchived);
   const [query, setQuery] = useState('');
 
   const groups = useMemo(() => groupTasks(tasks, query), [tasks, query]);
-  const isEmpty = groups.pinned.length === 0 && groups.today.length === 0 && groups.previous.length === 0;
+  const isEmpty =
+    groups.pinned.length === 0 &&
+    groups.today.length === 0 &&
+    groups.previous.length === 0 &&
+    groups.archived.length === 0;
+
+  const canManage =
+    typeof window !== 'undefined' &&
+    typeof window.vibe?.tasks?.setPinned === 'function' &&
+    typeof window.vibe?.tasks?.setArchived === 'function';
+
+  const rowProps = {
+    selectedTaskId,
+    onSelect: selectTask,
+    canManage,
+    onTogglePin: (task: TaskSummary) => void setPinned(task.id, !task.pinned),
+    onToggleArchive: (task: TaskSummary) => void setArchived(task.id, !task.archived),
+  };
 
   return (
     <nav className="sidebar" aria-label="Task履歴">
@@ -51,9 +73,21 @@ export function Sidebar() {
           <div className="sb-empty">Taskはまだありません</div>
         ) : (
           <>
-            <TaskGroup label="Pinned" items={groups.pinned} selectedTaskId={selectedTaskId} onSelect={selectTask} />
-            <TaskGroup label="Today" items={groups.today} selectedTaskId={selectedTaskId} onSelect={selectTask} />
-            <TaskGroup label="Previous" items={groups.previous} selectedTaskId={selectedTaskId} onSelect={selectTask} />
+            <TaskGroup label="Pinned" items={groups.pinned} {...rowProps} />
+            <TaskGroup label="Today" items={groups.today} {...rowProps} />
+            <TaskGroup label="Previous" items={groups.previous} {...rowProps} />
+            {groups.archived.length > 0 && (
+              <details className="sb-archived">
+                <summary className="sb-group sb-group--toggle">
+                  Archived ({groups.archived.length})
+                </summary>
+                <div>
+                  {groups.archived.map((task) => (
+                    <TaskRow key={task.id} task={task} {...rowProps} />
+                  ))}
+                </div>
+              </details>
+            )}
           </>
         )}
       </div>
@@ -64,38 +98,83 @@ export function Sidebar() {
   );
 }
 
+type RowProps = {
+  selectedTaskId: string | null;
+  onSelect: (taskId: string) => void;
+  canManage: boolean;
+  onTogglePin: (task: TaskSummary) => void;
+  onToggleArchive: (task: TaskSummary) => void;
+};
+
 function TaskGroup({
   label,
   items,
-  selectedTaskId,
-  onSelect,
-}: {
-  label: string;
-  items: TaskSummary[];
-  selectedTaskId: string | null;
-  onSelect: (taskId: string) => void;
-}) {
+  ...rowProps
+}: { label: string; items: TaskSummary[] } & RowProps) {
   if (items.length === 0) return null;
   return (
     <div>
       <div className="sb-group">{label}</div>
       {items.map((task) => (
-        <button
-          type="button"
-          key={task.id}
-          className={`sb-item${task.id === selectedTaskId ? ' active' : ''}`}
-          aria-current={task.id === selectedTaskId ? 'true' : undefined}
-          onClick={() => onSelect(task.id)}
-          title={task.title}
-        >
-          {task.pinned && (
-            <span className="pin" aria-hidden="true">
-              📌
-            </span>
-          )}
-          {task.title || '無題のTask'}
-        </button>
+        <TaskRow key={task.id} task={task} {...rowProps} />
       ))}
+    </div>
+  );
+}
+
+function TaskRow({
+  task,
+  selectedTaskId,
+  onSelect,
+  canManage,
+  onTogglePin,
+  onToggleArchive,
+}: { task: TaskSummary } & RowProps) {
+  const isActive = task.id === selectedTaskId;
+  return (
+    <div className={`sb-row${isActive ? ' active' : ''}`}>
+      <button
+        type="button"
+        className="sb-item"
+        aria-current={isActive ? 'true' : undefined}
+        onClick={() => onSelect(task.id)}
+        title={task.title}
+      >
+        {task.pinned && (
+          <span className="pin" aria-hidden="true">
+            📌
+          </span>
+        )}
+        {task.title || '無題のTask'}
+      </button>
+      {canManage && (
+        <span className="sb-actions">
+          <button
+            type="button"
+            className="sb-action-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              onTogglePin(task);
+            }}
+            title={task.pinned ? 'ピン留めを解除' : 'ピン留め'}
+            aria-label={task.pinned ? 'ピン留めを解除' : 'ピン留め'}
+          >
+            {task.pinned ? '📌' : '📍'}
+          </button>
+          <button
+            type="button"
+            className="sb-action-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleArchive(task);
+            }}
+            title={task.archived ? 'アーカイブを解除' : 'アーカイブ'}
+            aria-label={task.archived ? 'アーカイブを解除' : 'アーカイブ'}
+          >
+            {task.archived ? '⤴' : '🗄'}
+          </button>
+        </span>
+      )}
     </div>
   );
 }

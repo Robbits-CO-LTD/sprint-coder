@@ -21,7 +21,13 @@ export function RunCard({ turn, onStop }: { turn: TurnRuntimeState; onStop: () =
     return () => window.clearInterval(id);
   }, [isActive]);
 
-  const cardStateClass = isActive ? 'running' : turn.status === 'completed' ? 'done' : turn.status === 'failed' ? 'blocked' : 'done';
+  const cardStateClass = isActive
+    ? 'running'
+    : turn.status === 'completed'
+      ? 'done'
+      : turn.status === 'failed'
+        ? 'blocked'
+        : 'done';
   const currentIndex = STAGE_ORDER.indexOf(turn.stage);
 
   return (

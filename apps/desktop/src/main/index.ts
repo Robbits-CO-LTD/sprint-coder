@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, net, protocol, session } from 'electron';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
@@ -10,10 +10,12 @@ let mainWindow: BrowserWindow | null = null;
 let persistence: SqlitePersistenceClient | null = null;
 let router: IpcRouter | null = null;
 
-protocol.registerSchemesAsPrivileged([{
-  scheme: 'app',
-  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false },
-}]);
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'app',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false },
+  },
+]);
 app.enableSandbox();
 
 if (isDevelopment) app.setPath('userData', resolve(process.cwd(), '.vite-user-data'));
@@ -29,25 +31,36 @@ if (!hasLock) {
     }
   });
 
-  void app.whenReady().then(async () => {
-    if (!isDevelopment) registerProductionProtocol();
-    persistence = new SqlitePersistenceClient(join(app.getPath('userData'), 'vibe-editor3.sqlite3'));
-    persistence.interruptActiveTurns();
-    mainWindow = createWindow();
-    const trustedOrigin = MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined
-      ? 'app://bundle'
-      : new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL).origin;
-    router = new IpcRouter(mainWindow, persistence, trustedOrigin);
-    router.register();
-    await loadRenderer(mainWindow);
-  }).catch((error: unknown) => {
-    // Fatal initialization failure must be visible, never silently swallowed (Slice 1.1).
-    dialog.showErrorBox('vibe-editor3 の起動に失敗しました', error instanceof Error ? `${error.message}\n\n${error.stack ?? ''}` : String(error));
-    app.exit(1);
-  });
+  void app
+    .whenReady()
+    .then(async () => {
+      if (!isDevelopment) registerProductionProtocol();
+      persistence = new SqlitePersistenceClient(
+        join(app.getPath('userData'), 'vibe-editor3.sqlite3'),
+      );
+      persistence.interruptActiveTurns();
+      mainWindow = createWindow();
+      const trustedOrigin =
+        MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined
+          ? 'app://bundle'
+          : new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL).origin;
+      router = new IpcRouter(mainWindow, persistence, trustedOrigin);
+      router.register();
+      await loadRenderer(mainWindow);
+    })
+    .catch((error: unknown) => {
+      // Fatal initialization failure must be visible, never silently swallowed (Slice 1.1).
+      dialog.showErrorBox(
+        'vibe-editor3 の起動に失敗しました',
+        error instanceof Error ? `${error.message}\n\n${error.stack ?? ''}` : String(error),
+      );
+      app.exit(1);
+    });
 }
 
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
 app.on('before-quit', () => {
   router?.dispose();
   persistence?.close();
@@ -69,7 +82,9 @@ function createWindow(): BrowserWindow {
   });
   window.webContents.on('will-navigate', (event) => event.preventDefault());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) =>
+    callback(false),
+  );
   session.defaultSession.setPermissionCheckHandler(() => false);
   window.once('ready-to-show', () => window.show());
   return window;
@@ -90,10 +105,14 @@ function registerProductionProtocol(): void {
     const url = new URL(request.url);
     const key = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html';
     const filePath = resources.get(key);
-    if (url.host !== 'bundle' || filePath === undefined) return new Response('Not found', { status: 404 });
+    if (url.host !== 'bundle' || filePath === undefined)
+      return new Response('Not found', { status: 404 });
     const response = await net.fetch(pathToFileURL(filePath).toString());
     const headers = new Headers(response.headers);
-    headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+    headers.set(
+      'Content-Security-Policy',
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    );
     headers.set('Content-Type', mimeType(filePath));
     return new Response(response.body, { status: response.status, headers });
   });
@@ -114,9 +133,19 @@ function buildResourceManifest(root: string): Map<string, string> {
 }
 
 function mimeType(filePath: string): string {
-  return ({
-    '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
-    '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml',
-    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.woff2': 'font/woff2',
-  } as Record<string, string>)[extname(filePath).toLowerCase()] ?? 'application/octet-stream';
+  return (
+    (
+      {
+        '.html': 'text/html; charset=utf-8',
+        '.js': 'text/javascript; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.json': 'application/json',
+        '.svg': 'image/svg+xml',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.woff2': 'font/woff2',
+      } as Record<string, string>
+    )[extname(filePath).toLowerCase()] ?? 'application/octet-stream'
+  );
 }

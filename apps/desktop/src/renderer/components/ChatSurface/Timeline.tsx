@@ -1,12 +1,14 @@
 import { useEffect, useRef } from 'react';
+import type { ChatMessage } from '../../types/vibe';
 import { useAppStore } from '../../store/appStore';
 import { MessageBubble } from '../MessageBubble';
 import { RunCard } from '../RunCard';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
+const NO_MESSAGES: ChatMessage[] = [];
 
 export function Timeline({ taskId }: { taskId: string }) {
-  const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? [];
+  const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? NO_MESSAGES;
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const setDraft = useAppStore((s) => s.setDraft);
   const cancelActiveTurn = useAppStore((s) => s.cancelActiveTurn);
@@ -42,11 +44,14 @@ export function Timeline({ taskId }: { taskId: string }) {
         )}
 
         {messages.map((message) => {
-          const showRunCardAfter = turn && message.author === 'user' && message.turnId === turn.turnId;
+          const showRunCardAfter =
+            turn && message.author === 'user' && message.turnId === turn.turnId;
           return (
             <div key={message.id} style={{ display: 'contents' }}>
               <MessageBubble author={message.author} content={message.content} />
-              {showRunCardAfter && <RunCard turn={turn} onStop={() => void cancelActiveTurn(taskId)} />}
+              {showRunCardAfter && (
+                <RunCard turn={turn} onStop={() => void cancelActiveTurn(taskId)} />
+              )}
             </div>
           );
         })}

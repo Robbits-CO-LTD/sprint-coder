@@ -7,15 +7,25 @@ import {
   commandEnvelopeSchema,
   commandResultSchema,
   emptyPayloadSchema,
+  taskArchivedInputSchema,
   taskCreateInputSchema,
+  taskDraftInputSchema,
+  taskGoalInputSchema,
   taskIdPayloadSchema,
+  taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
   turnCancelInputSchema,
   turnEventSchema,
+  turnQueueInputSchema,
+  turnQueueResultSchema,
+  turnSnapshotSchema,
   turnStartInputSchema,
   turnStartResultSchema,
+  turnSteerInputSchema,
+  turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
+  workspaceSelectionSchema,
   type CommandEnvelope,
   type CommandResult,
   type VibeApi,
@@ -27,59 +37,156 @@ async function invoke<TInput, TOutput>(
   outputSchema: z.ZodType<TOutput>,
   payload: TInput,
 ): Promise<TOutput> {
-  const requestId = crypto.randomUUID();
+  return invokeEnvelope(
+    channel,
+    inputSchema,
+    outputSchema,
+    payload,
+    crypto.randomUUID(),
+    crypto.randomUUID(),
+  );
+}
+
+async function invokeEnvelope<TInput, TOutput>(
+  channel: string,
+  inputSchema: z.ZodType<TInput>,
+  outputSchema: z.ZodType<TOutput>,
+  payload: TInput,
+  requestId: string,
+  operationId: string,
+): Promise<TOutput> {
   const parsedPayload = inputSchema.parse(payload);
   const scopedTaskId = getTaskId(parsedPayload);
-  const envelope: CommandEnvelope<TInput> = scopedTaskId === undefined
-    ? { requestId, operationId: crypto.randomUUID(), payload: parsedPayload }
-    : { requestId, operationId: crypto.randomUUID(), taskId: scopedTaskId, payload: parsedPayload };
+  const envelope: CommandEnvelope<TInput> =
+    scopedTaskId === undefined
+      ? { requestId, operationId, payload: parsedPayload }
+      : { requestId, operationId, taskId: scopedTaskId, payload: parsedPayload };
   const validatedEnvelope = commandEnvelopeSchema(inputSchema).parse(envelope);
-  const result = commandResultSchema(outputSchema).parse(await ipcRenderer.invoke(channel, validatedEnvelope)) as CommandResult<TOutput>;
+  const result = commandResultSchema(outputSchema).parse(
+    await ipcRenderer.invoke(channel, validatedEnvelope),
+  ) as CommandResult<TOutput>;
   if (result.requestId !== requestId) throw new Error('IPC response correlation failed');
   if (!result.ok) {
-    const e = new Error(result.error.userMessage);
-    (e as any).code = result.error.code;
-    throw e;
+    const error = new Error(result.error.userMessage);
+    (error as Error & { code?: string }).code = result.error.code;
+    throw error;
   }
   return result.value;
 }
 
 function getTaskId(value: unknown): string | undefined {
-  return typeof value === 'object' && value !== null && 'taskId' in value && typeof value.taskId === 'string'
+  return typeof value === 'object' &&
+    value !== null &&
+    'taskId' in value &&
+    typeof value.taskId === 'string'
     ? value.taskId
     : undefined;
 }
 
 const api: VibeApi = {
-  app: {
-    getInfo: () => invoke(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, {}),
-  },
+  app: { getInfo: () => invoke(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, {}) },
   tasks: {
     list: () => invoke(IPC_CHANNELS.tasksList, emptyPayloadSchema, z.array(taskSummarySchema), {}),
-    create: (input = {}) => invoke(IPC_CHANNELS.tasksCreate, taskCreateInputSchema, taskSummarySchema, input),
-    messages: (taskId) => invoke(IPC_CHANNELS.tasksMessages, taskIdPayloadSchema, z.array(chatMessageSchema), { taskId }),
-    rename: (taskId, title) => invoke(IPC_CHANNELS.tasksRename, taskRenameInputSchema, taskSummarySchema, { taskId, title }),
+    create: (input = {}) =>
+      invoke(IPC_CHANNELS.tasksCreate, taskCreateInputSchema, taskSummarySchema, input),
+    messages: (taskId) =>
+      invoke(IPC_CHANNELS.tasksMessages, taskIdPayloadSchema, z.array(chatMessageSchema), {
+        taskId,
+      }),
+    rename: (taskId, title) =>
+      invoke(IPC_CHANNELS.tasksRename, taskRenameInputSchema, taskSummarySchema, { taskId, title }),
+    setPinned: (taskId, pinned) =>
+      invoke(IPC_CHANNELS.tasksSetPinned, taskPinnedInputSchema, taskSummarySchema, {
+        taskId,
+        pinned,
+      }),
+    setArchived: (taskId, archived) =>
+      invoke(IPC_CHANNELS.tasksSetArchived, taskArchivedInputSchema, taskSummarySchema, {
+        taskId,
+        archived,
+      }),
+    setGoal: (taskId, goal) =>
+      invoke(IPC_CHANNELS.tasksSetGoal, taskGoalInputSchema, taskSummarySchema, { taskId, goal }),
+    getDraft: (taskId) =>
+      invoke(IPC_CHANNELS.tasksGetDraft, taskIdPayloadSchema, z.string(), { taskId }),
+    setDraft: (taskId, draft) =>
+      invoke(IPC_CHANNELS.tasksSetDraft, taskDraftInputSchema, z.undefined(), { taskId, draft }),
+  },
+  workspace: {
+    get: (taskId) =>
+      invoke(IPC_CHANNELS.workspaceGet, taskIdPayloadSchema, workspaceSelectionSchema, { taskId }),
+    select: (taskId) =>
+      invoke(IPC_CHANNELS.workspaceSelect, taskIdPayloadSchema, workspaceSelectionSchema, {
+        taskId,
+      }),
   },
   turns: {
-    start: (input) => invoke(IPC_CHANNELS.turnsStart, turnStartInputSchema, turnStartResultSchema, input),
-    cancel: (input) => invoke(IPC_CHANNELS.turnsCancel, turnCancelInputSchema, z.undefined(), input),
-    subscribe: (taskId, cb) => {
-      const listener = (_event: Electron.IpcRendererEvent, raw: unknown): void => {
-        const parsed = turnEventSchema.safeParse(raw);
-        if (parsed.success && parsed.data.taskId === taskId) cb(parsed.data);
+    start: (input) =>
+      invoke(IPC_CHANNELS.turnsStart, turnStartInputSchema, turnStartResultSchema, input),
+    queue: (input) =>
+      invoke(IPC_CHANNELS.turnsQueue, turnQueueInputSchema, turnQueueResultSchema, input),
+    steer: (input) => invoke(IPC_CHANNELS.turnsSteer, turnSteerInputSchema, z.undefined(), input),
+    stopAndSend: (input) =>
+      invoke(IPC_CHANNELS.turnsStopAndSend, turnStopAndSendInputSchema, z.undefined(), input),
+    cancel: (input) =>
+      invoke(IPC_CHANNELS.turnsCancel, turnCancelInputSchema, z.undefined(), input),
+    snapshot: (taskId) =>
+      invoke(IPC_CHANNELS.turnsSnapshot, taskIdPayloadSchema, turnSnapshotSchema, { taskId }),
+    subscribe: (taskId, cb, opts) => {
+      const requestId = crypto.randomUUID();
+      let active = true;
+      let port: MessagePort | undefined;
+      const listener = (event: Electron.IpcRendererEvent, raw: unknown): void => {
+        if (!isPortResponse(raw, requestId, taskId)) return;
+        ipcRenderer.removeListener(IPC_CHANNELS.turnsPort, listener);
+        const received = event.ports[0];
+        if (received === undefined) return;
+        port = received;
+        if (!active) {
+          port.close();
+          return;
+        }
+        port.onmessage = (message: MessageEvent<unknown>) => {
+          const parsed = turnEventSchema.safeParse(message.data);
+          if (active && parsed.success && parsed.data.taskId === taskId) cb(parsed.data);
+        };
+        port.start();
       };
-      ipcRenderer.on(IPC_CHANNELS.turnEvent, listener);
-      void invoke(IPC_CHANNELS.turnsSubscribe, turnSubscriptionInputSchema, z.undefined(), { taskId })
-        .catch(() => ipcRenderer.removeListener(IPC_CHANNELS.turnEvent, listener));
-      let subscribed = true;
+      ipcRenderer.on(IPC_CHANNELS.turnsPort, listener);
+      const payload =
+        opts?.afterSeq === undefined ? { taskId } : { taskId, afterSeq: opts.afterSeq };
+      void invokeEnvelope(
+        IPC_CHANNELS.turnsSubscribe,
+        turnSubscriptionInputSchema,
+        z.undefined(),
+        payload,
+        requestId,
+        crypto.randomUUID(),
+      ).catch(() => {
+        active = false;
+        ipcRenderer.removeListener(IPC_CHANNELS.turnsPort, listener);
+        port?.close();
+      });
       return () => {
-        if (!subscribed) return;
-        subscribed = false;
-        ipcRenderer.removeListener(IPC_CHANNELS.turnEvent, listener);
-        void invoke(IPC_CHANNELS.turnsUnsubscribe, turnSubscriptionInputSchema, z.undefined(), { taskId }).catch(() => undefined);
+        if (!active) return;
+        active = false;
+        ipcRenderer.removeListener(IPC_CHANNELS.turnsPort, listener);
+        port?.postMessage({ type: 'unsubscribe' });
+        port?.close();
       };
     },
   },
 };
+
+function isPortResponse(value: unknown, requestId: string, taskId: string): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'requestId' in value &&
+    value.requestId === requestId &&
+    'taskId' in value &&
+    value.taskId === taskId
+  );
+}
 
 contextBridge.exposeInMainWorld('vibe', api);

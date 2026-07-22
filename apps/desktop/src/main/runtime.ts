@@ -3,7 +3,10 @@ import type { TurnEvent, TurnStage } from '@vibe/contracts';
 import type { PersistenceClient } from './persistence';
 
 type Publish = (event: TurnEvent) => void;
-type ActiveTurn = { canceled: boolean };
+type Serialize = (taskId: string, action: () => void) => Promise<void>;
+type Terminal = (taskId: string, turnId: string, state: 'completed' | 'failed') => void;
+type ActiveTurn = { canceled: boolean; steering: string[] };
+type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' | 'completeTurn'>;
 
 const stages: TurnStage[] = ['understanding', 'planning', 'executing', 'synthesizing'];
 
@@ -11,65 +14,102 @@ export class MockRuntimeAdapter {
   private readonly active = new Map<string, ActiveTurn>();
 
   constructor(
-    private readonly persistence: PersistenceClient,
+    private readonly persistence: RuntimePersistence,
     private readonly publish: Publish,
     private readonly delayMs = 240,
+    private readonly serialize: Serialize = async (_taskId, action) => action(),
+    private readonly terminal?: Terminal,
   ) {}
 
   start(taskId: string, turnId: string, input: string): void {
-    const control: ActiveTurn = { canceled: false };
+    const control: ActiveTurn = { canceled: false, steering: [] };
     this.active.set(turnId, control);
     void this.run(taskId, turnId, input, control);
   }
 
-  cancel(taskId: string, turnId: string): void {
+  steer(turnId: string, text: string): void {
     const control = this.active.get(turnId);
-    if (control !== undefined) control.canceled = true;
-    const event = this.persistence.cancelTurn(taskId, turnId);
-    if (event !== null) this.publish(event);
-    this.active.delete(turnId);
+    if (control !== undefined) control.steering.push(text);
   }
 
-  private async run(taskId: string, turnId: string, input: string, control: ActiveTurn): Promise<void> {
+  cancel(turnId: string): void {
+    const control = this.active.get(turnId);
+    if (control !== undefined) control.canceled = true;
+  }
+
+  private async run(
+    taskId: string,
+    turnId: string,
+    input: string,
+    control: ActiveTurn,
+  ): Promise<void> {
     try {
       for (const stage of stages) {
         await pause(this.delayMs);
         if (control.canceled) return;
-        this.publish(this.persistence.changeStage(taskId, turnId, stage));
+        await this.serialize(taskId, () =>
+          this.publish(this.persistence.changeStage(taskId, turnId, stage)),
+        );
       }
 
       const messageId = randomUUID();
-      for (const delta of chunkReply(buildReply(input))) {
+      const chunks = chunkReply(buildReply(input));
+      while (chunks.length > 0 || control.steering.length > 0) {
+        if (chunks.length === 0) {
+          const instruction = control.steering.shift();
+          if (instruction !== undefined)
+            chunks.push(...chunkReply(`\n\n追加指示を反映しました: ${instruction}`));
+        }
+        const delta = chunks.shift();
+        if (delta === undefined) continue;
         await pause(Math.max(12, Math.floor(this.delayMs / 4)));
         if (control.canceled) return;
-        this.publish(this.persistence.appendDelta(taskId, turnId, messageId, delta));
+        await this.serialize(taskId, () =>
+          this.publish(this.persistence.appendDelta(taskId, turnId, messageId, delta)),
+        );
       }
-      if (!control.canceled) this.publish(this.persistence.completeTurn(taskId, turnId, 'completed'));
+      if (!control.canceled) await this.finish(taskId, turnId, 'completed');
     } catch {
       if (!control.canceled) {
-        try { this.publish(this.persistence.completeTurn(taskId, turnId, 'failed')); } catch { /* already terminal */ }
+        try {
+          await this.finish(taskId, turnId, 'failed');
+        } catch {
+          /* already terminal */
+        }
       }
     } finally {
       this.active.delete(turnId);
     }
   }
+
+  private async finish(
+    taskId: string,
+    turnId: string,
+    state: 'completed' | 'failed',
+  ): Promise<void> {
+    await this.serialize(taskId, () => {
+      if (this.terminal !== undefined) this.terminal(taskId, turnId, state);
+      else this.publish(this.persistence.completeTurn(taskId, turnId, state));
+    });
+  }
 }
 
 function buildReply(input: string): string {
   const excerpt = input.replace(/\s+/g, ' ').trim().slice(0, 160);
-  return `「${excerpt}」について受け取りました。これはChat Alphaの決定論的なモック応答です。` +
+  return (
+    `「${excerpt}」について受け取りました。これはChat Alphaの決定論的なモック応答です。` +
     '依頼内容を理解し、方針を整理し、実行段階を確認したうえで回答をまとめました。' +
     '現在は外部AIやツールを呼び出しておらず、同じ入力には常に同じ本文を返します。' +
-    'ストリーミング、中止、永続化、再起動後の復元を安全に確認できます。';
+    'ストリーミング、中止、永続化、再起動後の復元を安全に確認できます。'
+  );
 }
 
 function chunkReply(reply: string): string[] {
   const characters = Array.from(reply);
   const chunkSize = Math.max(1, Math.ceil(characters.length / 32));
   const chunks: string[] = [];
-  for (let index = 0; index < characters.length; index += chunkSize) {
+  for (let index = 0; index < characters.length; index += chunkSize)
     chunks.push(characters.slice(index, index + chunkSize).join(''));
-  }
   return chunks;
 }
 

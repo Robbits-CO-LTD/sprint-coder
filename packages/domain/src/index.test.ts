@@ -8,7 +8,10 @@ const valid: Record<TurnState, readonly TurnState[]> = {
   executing: ['synthesizing', 'canceling', 'failed', 'interrupted'],
   synthesizing: ['completed', 'canceling', 'failed', 'interrupted'],
   canceling: ['canceled', 'failed', 'interrupted'],
-  completed: [], canceled: [], failed: [], interrupted: [],
+  completed: [],
+  canceled: [],
+  failed: [],
+  interrupted: [],
 };
 
 describe('Turn state machine', () => {

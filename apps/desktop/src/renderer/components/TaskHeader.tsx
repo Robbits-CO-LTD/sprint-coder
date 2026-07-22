@@ -1,16 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
+import { WorkspaceChip } from './WorkspaceChip';
 import type { TaskSummary } from '../types/vibe';
 
 export function TaskHeader({ task }: { task: TaskSummary }) {
   const renameTask = useAppStore((s) => s.renameTask);
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(task.title);
+  const [syncedTitle, setSyncedTitle] = useState(task.title);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    if (!editing) setDraftTitle(task.title);
-  }, [task.title, editing]);
+  // Keep the draft in sync with the persisted title while not editing (render-time adjustment
+  // instead of an effect, per react-hooks/set-state-in-effect).
+  if (!editing && task.title !== syncedTitle) {
+    setSyncedTitle(task.title);
+    setDraftTitle(task.title);
+  }
 
   useEffect(() => {
     if (editing) {
@@ -75,9 +80,8 @@ export function TaskHeader({ task }: { task: TaskSummary }) {
           {task.title || '無題のTask'}
         </button>
       )}
-      <span className="goal-chip" title="Goal編集は今後のフェーズで対応予定です">
-        🎯 Goal: 未設定
-      </span>
+      <GoalChip task={task} />
+      <WorkspaceChip taskId={task.id} variant="header" />
       <button
         type="button"
         className="team-btn"
@@ -87,9 +91,95 @@ export function TaskHeader({ task }: { task: TaskSummary }) {
       >
         ⬡ Team
       </button>
-      <button type="button" className="icon-btn" disabled title="今回のスコープ外です" aria-disabled="true">
+      <button
+        type="button"
+        className="icon-btn"
+        disabled
+        title="今回のスコープ外です"
+        aria-disabled="true"
+      >
         ⋯
       </button>
     </header>
+  );
+}
+
+// Goal chip: click → inline edit → tasks.setGoal (FR-COMP-05). Falls back to a read-only chip
+// when the backend hasn't wired setGoal yet (graceful degrade).
+function GoalChip({ task }: { task: TaskSummary }) {
+  const setGoal = useAppStore((s) => s.setGoal);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(task.goal ?? '');
+  const [syncedGoal, setSyncedGoal] = useState(task.goal ?? '');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const supported =
+    typeof window !== 'undefined' && typeof window.vibe?.tasks?.setGoal === 'function';
+
+  // Render-time adjustment instead of an effect, per react-hooks/set-state-in-effect.
+  if (!editing && (task.goal ?? '') !== syncedGoal) {
+    setSyncedGoal(task.goal ?? '');
+    setDraft(task.goal ?? '');
+  }
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  function commit() {
+    setEditing(false);
+    const trimmed = draft.trim();
+    if (trimmed !== (task.goal ?? '')) {
+      void setGoal(task.id, trimmed);
+    }
+  }
+
+  function cancel() {
+    setEditing(false);
+    setDraft(task.goal ?? '');
+  }
+
+  if (!supported) {
+    return (
+      <span className="goal-chip" title="Goal編集は今回のバックエンドでは未対応です">
+        🎯 Goal: {task.goal ?? '未設定'}
+      </span>
+    );
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="goal-input"
+        value={draft}
+        placeholder="Goalを入力"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            cancel();
+          }
+        }}
+        aria-label="Goalを編集"
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="goal-chip chip-btn"
+      onClick={() => setEditing(true)}
+      title="クリックしてGoalを編集"
+    >
+      🎯 Goal: {task.goal ?? '未設定'}
+    </button>
   );
 }
