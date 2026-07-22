@@ -250,6 +250,7 @@ function RuntimeChip() {
       }}
     >
       <button
+        data-testid="runtime-selector"
         type="button"
         className="cmp-chip runtime-chip"
         aria-haspopup="menu"
@@ -265,6 +266,7 @@ function RuntimeChip() {
             const disabled = kind === 'codex' && !runtime.codexAvailable;
             return (
               <button
+                data-testid={`runtime-option-${kind}`}
                 key={kind}
                 type="button"
                 role="menuitemradio"
@@ -325,6 +327,7 @@ function ModelChip() {
       }}
     >
       <button
+        data-testid="model-selector"
         type="button"
         className="cmp-chip runtime-chip model-chip"
         aria-haspopup="menu"
@@ -339,6 +342,7 @@ function ModelChip() {
         <div className="runtime-menu model-menu" role="menu" aria-label="Model選択">
           {runtime.models.map((model) => (
             <button
+              data-testid={`model-option-${model.id}`}
               key={model.id}
               type="button"
               role="menuitemradio"

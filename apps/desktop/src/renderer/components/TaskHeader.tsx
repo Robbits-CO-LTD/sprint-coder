@@ -5,6 +5,7 @@ import type { TaskSummary } from '../types/vibe';
 
 export function TaskHeader({ task }: { task: TaskSummary }) {
   const renameTask = useAppStore((s) => s.renameTask);
+  const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(task.title);
   const [syncedTitle, setSyncedTitle] = useState(task.title);
@@ -82,6 +83,9 @@ export function TaskHeader({ task }: { task: TaskSummary }) {
       )}
       <GoalChip task={task} />
       <WorkspaceChip taskId={task.id} variant="header" />
+      <span className="goal-chip" title="現在のAccess mode">
+        Access: {accessPreset === 'ask' ? '確認する' : accessPreset === 'auto' ? '自動' : 'フル'}
+      </span>
       <button
         type="button"
         className="team-btn"

@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   chatMessageSchema,
   taskSummarySchema,
@@ -17,10 +17,24 @@ import {
   type TurnStage,
 } from '@vibe/contracts';
 import {
+  capabilities,
+  createSessionGrant,
+  expandAccessPreset,
   transitionIntelligenceStep,
   transitionTurn,
+  type AccessPreset,
+  type Capability,
+  type ExpandedAccessPolicy,
   type IntelligenceStepState,
+  type PermissionEvaluation,
+  type PermissionOperation,
+  type PermissionRequest,
+  type PermissionRule,
+  type ProviderEgress,
   type ReasoningEffort,
+  type ResourceSet,
+  type SessionGrant,
+  type SandboxProfile,
   type StepSnapshot,
   type TurnState,
 } from '@vibe/domain';
@@ -75,6 +89,33 @@ type IntelligenceStepRow = {
   workspace_revision: string;
   contract_revision: number | null;
   created_at: string;
+};
+type PermissionPolicyRow = {
+  preset_label: AccessPreset;
+  approval_policy: 'ask' | 'auto';
+  approval_reason: string | null;
+  policy_epoch: number;
+};
+type PermissionRuleRow = {
+  effect: 'allow' | 'immutable-deny';
+  capability: Capability;
+  resource_json: string;
+  operations_json: string;
+  audit_reason: string | null;
+};
+type PermissionGrantRow = {
+  id: string;
+  subject_id: string;
+  capability: Capability;
+  resource_json: string;
+  operations_json: string;
+  provider_egress_json: string;
+  sandbox_profiles_json: string;
+  scope: SessionGrant['scope'];
+  execution_spec_digest: string | null;
+  expires_at: string;
+  issued_policy_epoch: number;
+  revoked_at: string | null;
 };
 type EventWithoutSeq = TurnEvent extends infer Event
   ? Event extends TurnEvent
@@ -249,7 +290,136 @@ const migrations = [
       CREATE INDEX intelligence_steps_turn_idx ON intelligence_steps(turn_id, ordinal);
     `,
   },
+  {
+    version: 6,
+    checksum: 'permissions-v6-policy-rules-grants-audit',
+    sql: `
+      CREATE TABLE permission_policy_state (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        preset_label TEXT NOT NULL CHECK (preset_label IN ('ask', 'auto', 'full')),
+        approval_policy TEXT NOT NULL CHECK (approval_policy IN ('ask', 'auto')),
+        approval_reason TEXT,
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE permission_rules (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        source TEXT NOT NULL CHECK (source IN ('preset')),
+        effect TEXT NOT NULL CHECK (effect IN ('allow', 'immutable-deny')),
+        capability TEXT NOT NULL,
+        resource_json TEXT NOT NULL,
+        operations_json TEXT NOT NULL,
+        audit_reason TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX permission_rules_task_idx ON permission_rules(task_id, effect);
+      CREATE TABLE permission_grants (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        subject_id TEXT NOT NULL,
+        scope TEXT NOT NULL CHECK (scope IN ('once', 'task')),
+        capability TEXT NOT NULL,
+        resource_json TEXT NOT NULL,
+        operations_json TEXT NOT NULL,
+        execution_spec_digest TEXT,
+        expires_at TEXT NOT NULL,
+        issued_policy_epoch INTEGER NOT NULL CHECK (issued_policy_epoch >= 0),
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX permission_grants_active_idx
+        ON permission_grants(task_id, subject_id, capability, expires_at)
+        WHERE revoked_at IS NULL;
+      CREATE TABLE permission_audit (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        subject_id TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        resource_digest TEXT NOT NULL CHECK (length(resource_digest) = 64),
+        execution_spec_digest TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        evaluation_trace_json TEXT NOT NULL,
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX permission_audit_task_created_idx
+        ON permission_audit(task_id, created_at, id);
+    `,
+  },
+  {
+    version: 7,
+    checksum: 'permissions-v7-policy-epoch-outbox',
+    sql: `
+      CREATE TABLE permission_policy_epoch_outbox (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        created_at TEXT NOT NULL,
+        delivered_at TEXT,
+        UNIQUE(task_id, policy_epoch)
+      );
+      CREATE INDEX permission_policy_epoch_outbox_pending_idx
+        ON permission_policy_epoch_outbox(delivered_at, created_at, id);
+    `,
+  },
+  {
+    version: 8,
+    checksum: 'permissions-v8-reviewer-audit-facts',
+    sql: `
+      ALTER TABLE permission_audit ADD COLUMN reviewer_json TEXT;
+    `,
+  },
+  {
+    version: 9,
+    checksum: 'permissions-v9-one-time-permit-consumption',
+    sql: `
+      CREATE TABLE permission_one_time_permits (
+        token_hash TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX permission_one_time_permits_active_idx
+        ON permission_one_time_permits(task_id, policy_epoch, expires_at)
+        WHERE consumed_at IS NULL;
+    `,
+  },
+  {
+    version: 10,
+    checksum: 'permissions-v10-capability-revocations',
+    sql: `
+      CREATE TABLE permission_capability_revocations (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        capability TEXT NOT NULL,
+        revoked_at TEXT NOT NULL,
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        PRIMARY KEY(task_id, capability)
+      );
+    `,
+  },
+  {
+    version: 11,
+    checksum: 'permissions-v11-grant-egress-sandbox-bounds',
+    sql: `
+      ALTER TABLE permission_grants
+        ADD COLUMN provider_egress_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE permission_grants
+        ADD COLUMN sandbox_profiles_json TEXT NOT NULL DEFAULT '[]';
+    `,
+  },
 ];
+
+export type PermissionPolicyRecord = {
+  preset: AccessPreset;
+  policyEpoch: number;
+  expandedPolicy: ExpandedAccessPolicy;
+  revokedCapabilities: Capability[];
+};
 
 export type StartedTurn = { turnId: string; text: string; event: TurnEvent };
 export type QueueTransition = { started: StartedTurn; queueEvent: TurnEvent } | null;
@@ -269,6 +439,38 @@ export interface PersistenceClient {
   setRuntime(kind: RuntimeKind): void;
   getModel(): string;
   setModel(model: string): void;
+  getPermissionPolicy(taskId: string): PermissionPolicyRecord;
+  setAccessPreset(
+    taskId: string,
+    preset: AccessPreset,
+    expectedPolicyEpoch?: number,
+  ): PermissionPolicyRecord;
+  savePermissionGrant(taskId: string, grant: SessionGrant): void;
+  listPermissionGrants(taskId: string, subjectId: string, now: string): SessionGrant[];
+  revokePermissionCapability(taskId: string, capability: Capability, now: string): number;
+  listPendingPermissionPolicyEpochs(): {
+    id: string;
+    taskId: string;
+    policyEpoch: number;
+  }[];
+  markPermissionPolicyEpochDelivered(id: string, deliveredAt: string): void;
+  registerPermissionOneTimeToken(
+    taskId: string,
+    token: string,
+    policyEpoch: number,
+    expiresAt: string,
+  ): void;
+  consumePermissionOneTimeToken(
+    taskId: string,
+    token: string,
+    policyEpoch: number,
+    now: string,
+  ): boolean;
+  recordPermissionAudit(
+    taskId: string,
+    request: PermissionRequest,
+    evaluation: PermissionEvaluation,
+  ): void;
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
   queueInput(
@@ -457,6 +659,344 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(model, new Date().toISOString());
+  }
+
+  getPermissionPolicy(taskId: string): PermissionPolicyRecord {
+    this.assertTask(taskId);
+    const state = this.db
+      .prepare('SELECT * FROM permission_policy_state WHERE task_id = ?')
+      .get(taskId) as PermissionPolicyRow | undefined;
+    if (state === undefined)
+      return {
+        preset: 'ask',
+        policyEpoch: 0,
+        expandedPolicy: expandAccessPreset('ask'),
+        revokedCapabilities: [],
+      };
+    const revokedCapabilities = (
+      this.db
+        .prepare(
+          'SELECT capability FROM permission_capability_revocations WHERE task_id = ? ORDER BY capability',
+        )
+        .all(taskId) as { capability: Capability }[]
+    ).map(({ capability }) => capability);
+    if (revokedCapabilities.some((capability) => !capabilities.includes(capability)))
+      throw new Error('Invalid stored revoked capability');
+    const rules = this.db
+      .prepare(
+        `SELECT effect, capability, resource_json, operations_json, audit_reason
+        FROM permission_rules WHERE task_id = ? ORDER BY rowid`,
+      )
+      .all(taskId) as PermissionRuleRow[];
+    const parsed = rules.map(parsePermissionRuleRow);
+    const canonical = expandAccessPreset(state.preset_label);
+    const expectedRules = [
+      ...canonical.allowRules.map((rule) => ({ effect: 'allow' as const, rule })),
+      ...(canonical.immutableDeny ?? []).map((rule) => ({
+        effect: 'immutable-deny' as const,
+        rule,
+      })),
+    ];
+    if (
+      state.approval_policy !== canonical.approvalPolicy ||
+      state.approval_reason !== (canonical.approvalReason ?? null) ||
+      JSON.stringify(parsed.map(permissionRuleKey).sort()) !==
+        JSON.stringify(expectedRules.map(permissionRuleKey).sort())
+    )
+      return {
+        preset: 'ask',
+        policyEpoch: state.policy_epoch,
+        expandedPolicy: expandAccessPreset('ask'),
+        revokedCapabilities,
+      };
+    return {
+      preset: state.preset_label,
+      policyEpoch: state.policy_epoch,
+      expandedPolicy: canonical,
+      revokedCapabilities,
+    };
+  }
+
+  setAccessPreset(
+    taskId: string,
+    preset: AccessPreset,
+    expectedPolicyEpoch?: number,
+  ): PermissionPolicyRecord {
+    return this.db.transaction(() => {
+      this.assertTask(taskId);
+      const current = this.getPermissionPolicy(taskId);
+      if (expectedPolicyEpoch !== undefined && current.policyEpoch !== expectedPolicyEpoch)
+        throw new Error('Permission policy epoch changed');
+      const expanded = expandAccessPreset(preset);
+      const now = new Date().toISOString();
+      const policyEpoch = current.policyEpoch + 1;
+      this.db
+        .prepare(
+          `INSERT INTO permission_policy_state(
+            task_id, preset_label, approval_policy, approval_reason, policy_epoch, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(task_id) DO UPDATE SET
+            preset_label = excluded.preset_label,
+            approval_policy = excluded.approval_policy,
+            approval_reason = excluded.approval_reason,
+            policy_epoch = excluded.policy_epoch,
+            updated_at = excluded.updated_at`,
+        )
+        .run(
+          taskId,
+          preset,
+          expanded.approvalPolicy,
+          expanded.approvalReason ?? null,
+          policyEpoch,
+          now,
+        );
+      this.db.prepare('DELETE FROM permission_rules WHERE task_id = ?').run(taskId);
+      const insert = this.db.prepare(
+        `INSERT INTO permission_rules(
+          id, task_id, source, effect, capability, resource_json,
+          operations_json, audit_reason, created_at
+        ) VALUES (?, ?, 'preset', ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const [effect, rules] of [
+        ['allow', expanded.allowRules],
+        ['immutable-deny', expanded.immutableDeny ?? []],
+      ] as const)
+        for (const rule of rules)
+          insert.run(
+            randomUUID(),
+            taskId,
+            effect,
+            rule.capability,
+            JSON.stringify(rule.resourceSet),
+            JSON.stringify(rule.operations),
+            rule.auditReason ?? null,
+            now,
+          );
+      this.enqueuePermissionPolicyEpoch(taskId, policyEpoch, now);
+      return {
+        preset,
+        policyEpoch,
+        expandedPolicy: expanded,
+        revokedCapabilities: current.revokedCapabilities,
+      };
+    })();
+  }
+
+  savePermissionGrant(taskId: string, grant: SessionGrant): void {
+    this.db.transaction(() => {
+      this.assertTask(taskId);
+      const validated = createSessionGrant(grant);
+      if (validated.policyEpoch !== this.getPermissionPolicy(taskId).policyEpoch)
+        throw new Error('Grant policy epoch must match the current Task policy epoch');
+      this.db
+        .prepare(
+          `INSERT INTO permission_grants(
+            id, task_id, subject_id, scope, capability, resource_json, operations_json,
+            provider_egress_json, sandbox_profiles_json, execution_spec_digest,
+            expires_at, issued_policy_epoch, revoked_at, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          validated.id,
+          taskId,
+          validated.subjectId,
+          validated.scope,
+          validated.capability,
+          JSON.stringify(validated.resourceSet),
+          JSON.stringify(validated.operations),
+          JSON.stringify(validated.providerEgress),
+          JSON.stringify(validated.sandboxProfiles),
+          validated.executionSpecDigest ?? null,
+          new Date(validated.expiresAt).toISOString(),
+          validated.policyEpoch,
+          validated.revokedAt ?? null,
+          new Date().toISOString(),
+        );
+    })();
+  }
+
+  listPermissionGrants(taskId: string, subjectId: string, now: string): SessionGrant[] {
+    this.assertTask(taskId);
+    const canonicalNow = new Date(now).toISOString();
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM permission_grants
+          WHERE task_id = ? AND subject_id = ? AND revoked_at IS NULL AND expires_at > ?
+          ORDER BY created_at, id`,
+        )
+        .all(taskId, subjectId, canonicalNow) as PermissionGrantRow[]
+    ).map(parsePermissionGrantRow);
+  }
+
+  revokePermissionCapability(taskId: string, capability: Capability, now: string): number {
+    return this.db.transaction(() => {
+      const canonicalNow = new Date(now).toISOString();
+      const current = this.getPermissionPolicy(taskId);
+      const updated = this.db
+        .prepare(
+          `UPDATE permission_grants SET revoked_at = ?
+          WHERE task_id = ? AND capability = ? AND revoked_at IS NULL`,
+        )
+        .run(canonicalNow, taskId, capability);
+      const nextEpoch = current.policyEpoch + 1;
+      const expanded = current.expandedPolicy;
+      this.db
+        .prepare(
+          `INSERT INTO permission_policy_state(
+            task_id, preset_label, approval_policy, approval_reason, policy_epoch, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(task_id) DO UPDATE SET policy_epoch = excluded.policy_epoch,
+            updated_at = excluded.updated_at`,
+        )
+        .run(
+          taskId,
+          current.preset,
+          expanded.approvalPolicy,
+          expanded.approvalReason ?? null,
+          nextEpoch,
+          canonicalNow,
+        );
+      this.db
+        .prepare(
+          `INSERT INTO permission_capability_revocations(
+            task_id, capability, revoked_at, policy_epoch
+          ) VALUES (?, ?, ?, ?)
+          ON CONFLICT(task_id, capability) DO UPDATE SET
+            revoked_at = excluded.revoked_at, policy_epoch = excluded.policy_epoch`,
+        )
+        .run(taskId, capability, canonicalNow, nextEpoch);
+      this.enqueuePermissionPolicyEpoch(taskId, nextEpoch, canonicalNow);
+      return updated.changes;
+    })();
+  }
+
+  listPendingPermissionPolicyEpochs(): {
+    id: string;
+    taskId: string;
+    policyEpoch: number;
+  }[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT id, task_id, policy_epoch FROM permission_policy_epoch_outbox
+          WHERE delivered_at IS NULL ORDER BY created_at, id`,
+        )
+        .all() as { id: string; task_id: string; policy_epoch: number }[]
+    ).map((row) => ({ id: row.id, taskId: row.task_id, policyEpoch: row.policy_epoch }));
+  }
+
+  markPermissionPolicyEpochDelivered(id: string, deliveredAt: string): void {
+    this.db
+      .prepare(
+        `UPDATE permission_policy_epoch_outbox SET delivered_at = ?
+        WHERE id = ? AND delivered_at IS NULL`,
+      )
+      .run(new Date(deliveredAt).toISOString(), id);
+  }
+
+  registerPermissionOneTimeToken(
+    taskId: string,
+    token: string,
+    policyEpoch: number,
+    expiresAt: string,
+  ): void {
+    this.assertTask(taskId);
+    this.db
+      .prepare(
+        `INSERT INTO permission_one_time_permits(
+          token_hash, task_id, policy_epoch, expires_at, consumed_at, created_at
+        ) VALUES (?, ?, ?, ?, NULL, ?)
+        ON CONFLICT(token_hash) DO NOTHING`,
+      )
+      .run(
+        createHash('sha256').update(token).digest('hex'),
+        taskId,
+        policyEpoch,
+        new Date(expiresAt).toISOString(),
+        new Date().toISOString(),
+      );
+  }
+
+  consumePermissionOneTimeToken(
+    taskId: string,
+    token: string,
+    policyEpoch: number,
+    now: string,
+  ): boolean {
+    const canonicalNow = new Date(now).toISOString();
+    return this.db.transaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE permission_one_time_permits SET consumed_at = ?
+          WHERE token_hash = ? AND task_id = ? AND policy_epoch = ?
+            AND consumed_at IS NULL AND expires_at > ?`,
+        )
+        .run(
+          canonicalNow,
+          createHash('sha256').update(token).digest('hex'),
+          taskId,
+          policyEpoch,
+          canonicalNow,
+        );
+      return result.changes === 1;
+    })();
+  }
+
+  private enqueuePermissionPolicyEpoch(
+    taskId: string,
+    policyEpoch: number,
+    createdAt: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO permission_policy_epoch_outbox(
+          id, task_id, policy_epoch, created_at, delivered_at
+        ) VALUES (?, ?, ?, ?, NULL)
+        ON CONFLICT(task_id, policy_epoch) DO NOTHING`,
+      )
+      .run(randomUUID(), taskId, policyEpoch, createdAt);
+  }
+
+  recordPermissionAudit(
+    taskId: string,
+    request: PermissionRequest,
+    evaluation: PermissionEvaluation,
+  ): void {
+    this.assertTask(taskId);
+    if (
+      evaluation.reviewerAudit !== undefined &&
+      (!/^[a-f0-9]{64}$/.test(evaluation.reviewerAudit.requestFingerprint) ||
+        !/^[a-f0-9]{64}$/.test(evaluation.reviewerAudit.executionSpecDigest) ||
+        !/^[a-f0-9]{64}$/.test(evaluation.reviewerAudit.inputDigest))
+    )
+      throw new Error('Invalid reviewer audit digest');
+    const resourceDigest = createHash('sha256')
+      .update(JSON.stringify(request.resource))
+      .digest('hex');
+    this.db
+      .prepare(
+        `INSERT INTO permission_audit(
+          id, task_id, subject_id, capability, operation, resource_digest,
+          execution_spec_digest, decision, reason, evaluation_trace_json, policy_epoch,
+          reviewer_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        taskId,
+        request.subjectId,
+        request.capability,
+        request.operation,
+        resourceDigest,
+        request.executionSpecDigest,
+        evaluation.decision,
+        evaluation.reason,
+        JSON.stringify(evaluation.evaluationTrace),
+        evaluation.policyEpoch,
+        evaluation.reviewerAudit === undefined ? null : JSON.stringify(evaluation.reviewerAudit),
+        new Date().toISOString(),
+      );
   }
 
   listMessages(taskId: string): ChatMessage[] {
@@ -1135,4 +1675,201 @@ function readCompactionSummary(payloadJson: string): string {
   )
     throw new Error('Invalid context compaction audit payload');
   return payload.summary;
+}
+
+function parsePermissionRuleRow(row: PermissionRuleRow): {
+  effect: PermissionRuleRow['effect'];
+  rule: PermissionRule;
+} {
+  if (!capabilities.includes(row.capability)) throw new Error('Invalid stored capability');
+  const operations = parsePermissionOperations(row.operations_json);
+  const resourceSet = parseResourceSet(row.resource_json);
+  return {
+    effect: row.effect,
+    rule: {
+      capability: row.capability,
+      resourceSet,
+      operations,
+      ...(row.audit_reason === null ? {} : { auditReason: row.audit_reason }),
+    },
+  };
+}
+
+function parsePermissionGrantRow(row: PermissionGrantRow): SessionGrant {
+  if (!capabilities.includes(row.capability)) throw new Error('Invalid stored grant capability');
+  return createSessionGrant({
+    id: row.id,
+    subjectId: row.subject_id,
+    capability: row.capability,
+    resourceSet: parseResourceSet(row.resource_json),
+    operations: parsePermissionOperations(row.operations_json),
+    scope: row.scope,
+    expiresAt: row.expires_at,
+    policyEpoch: row.issued_policy_epoch,
+    providerEgress: parseStringEnumArray(
+      row.provider_egress_json,
+      ['none', 'trusted-local', 'trusted-remote', 'untrusted-remote'] as const,
+      'provider egress',
+    ) as ProviderEgress[],
+    sandboxProfiles: parseStringEnumArray(
+      row.sandbox_profiles_json,
+      ['read-only', 'workspace-write', 'full'] as const,
+      'sandbox profiles',
+    ) as SandboxProfile[],
+    ...(row.execution_spec_digest === null
+      ? {}
+      : { executionSpecDigest: row.execution_spec_digest }),
+    ...(row.revoked_at === null ? {} : { revokedAt: row.revoked_at }),
+  });
+}
+
+function parsePermissionOperations(json: string): PermissionOperation[] {
+  const value = JSON.parse(json) as unknown;
+  const valid = ['read', 'write', 'execute', 'fetch', 'open', 'use', 'egress'] as const;
+  if (!Array.isArray(value) || !value.every((item) => valid.includes(item as PermissionOperation)))
+    throw new Error('Invalid stored permission operations');
+  return value as PermissionOperation[];
+}
+
+function parseStringEnumArray<T extends string>(
+  json: string,
+  valid: readonly T[],
+  label: string,
+): T[] {
+  const value = JSON.parse(json) as unknown;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    new Set(value).size !== value.length ||
+    !value.every((item) => typeof item === 'string' && valid.includes(item as T))
+  )
+    throw new Error(`Invalid stored ${label}`);
+  return value as T[];
+}
+
+function parseResourceSet(json: string): ResourceSet {
+  const value = JSON.parse(json) as unknown;
+  if (typeof value !== 'object' || value === null || !('kind' in value))
+    throw new Error('Invalid stored resource set');
+  const record = value as Record<string, unknown>;
+  if (record['kind'] === 'all' && Object.keys(record).length === 1) return { kind: 'all' };
+  if (
+    record['kind'] === 'workspace' &&
+    Object.keys(record).every((key) => key === 'kind' || key === 'workspaceId') &&
+    (record['workspaceId'] === undefined ||
+      (typeof record['workspaceId'] === 'string' && record['workspaceId'].length > 0))
+  )
+    return record['workspaceId'] === undefined
+      ? { kind: 'workspace' }
+      : { kind: 'workspace', workspaceId: record['workspaceId'] as string };
+  if (
+    (record['kind'] === 'path-exact' || record['kind'] === 'path-prefix') &&
+    Object.keys(record).every(
+      (key) => key === 'kind' || key === 'canonicalPath' || key === 'workspaceId',
+    ) &&
+    typeof record['canonicalPath'] === 'string' &&
+    record['canonicalPath'].length > 0 &&
+    (record['workspaceId'] === undefined ||
+      (typeof record['workspaceId'] === 'string' && record['workspaceId'].length > 0))
+  )
+    return {
+      kind: record['kind'],
+      canonicalPath: record['canonicalPath'],
+      ...(record['workspaceId'] === undefined
+        ? {}
+        : { workspaceId: record['workspaceId'] as string }),
+    };
+  if (
+    record['kind'] === 'path-classification' &&
+    Object.keys(record).every((key) => key === 'kind' || key === 'classifications') &&
+    Array.isArray(record['classifications']) &&
+    record['classifications'].length > 0 &&
+    record['classifications'].every((item) =>
+      [
+        'workspace',
+        'external',
+        'app-private',
+        'os-protected',
+        'credential',
+        'signing-key',
+        'update-key',
+        'unclassified',
+      ].includes(item as string),
+    )
+  )
+    return {
+      kind: 'path-classification',
+      classifications: record['classifications'] as ResourceSet & string[],
+    } as ResourceSet;
+  if (record['kind'] === 'network-origin' && typeof record['origin'] === 'string')
+    return { kind: 'network-origin', origin: record['origin'] };
+  if (record['kind'] === 'secret-exact' && typeof record['secretId'] === 'string')
+    return { kind: 'secret-exact', secretId: record['secretId'] };
+  if (record['kind'] === 'external-exact' && typeof record['target'] === 'string')
+    return { kind: 'external-exact', target: record['target'] };
+  if (
+    record['kind'] === 'provider-egress' &&
+    Array.isArray(record['providerIds']) &&
+    record['providerIds'].every((item) => typeof item === 'string') &&
+    Array.isArray(record['fragmentKinds']) &&
+    record['fragmentKinds'].every((item) => typeof item === 'string') &&
+    Array.isArray(record['allowedProviderTrust']) &&
+    record['allowedProviderTrust'].every(
+      (item) =>
+        item === 'trusted-local' || item === 'trusted-remote' || item === 'untrusted-remote',
+    ) &&
+    Array.isArray(record['allowedResidencies']) &&
+    record['allowedResidencies'].every((item) => typeof item === 'string' && item.length > 0) &&
+    Array.isArray(record['allowedProvenance']) &&
+    record['allowedProvenance'].every(
+      (item) =>
+        item === 'system' || item === 'user' || item === 'workspace' || item === 'untrusted',
+    ) &&
+    Object.keys(record).every(
+      (key) =>
+        key === 'kind' ||
+        key === 'providerIds' ||
+        key === 'fragmentKinds' ||
+        key === 'maxBytes' ||
+        key === 'allowedProviderTrust' ||
+        key === 'allowedResidencies' ||
+        key === 'allowedProvenance' ||
+        key === 'requireSecretScanClean' ||
+        key === 'allowLocalOnlyTaskRemote',
+    ) &&
+    typeof record['maxBytes'] === 'number' &&
+    Number.isSafeInteger(record['maxBytes']) &&
+    record['maxBytes'] >= 0 &&
+    typeof record['requireSecretScanClean'] === 'boolean' &&
+    typeof record['allowLocalOnlyTaskRemote'] === 'boolean'
+  )
+    return {
+      kind: 'provider-egress',
+      providerIds: record['providerIds'] as string[],
+      fragmentKinds: record['fragmentKinds'] as string[],
+      maxBytes: record['maxBytes'],
+      allowedProviderTrust: record['allowedProviderTrust'] as (
+        'trusted-local' | 'trusted-remote' | 'untrusted-remote'
+      )[],
+      allowedResidencies: record['allowedResidencies'] as string[],
+      allowedProvenance: record['allowedProvenance'] as (
+        'system' | 'user' | 'workspace' | 'untrusted'
+      )[],
+      requireSecretScanClean: record['requireSecretScanClean'],
+      allowLocalOnlyTaskRemote: record['allowLocalOnlyTaskRemote'],
+    };
+  throw new Error('Invalid stored resource set');
+}
+
+function permissionRuleKey(input: {
+  effect: 'allow' | 'immutable-deny';
+  rule: PermissionRule;
+}): string {
+  return JSON.stringify([
+    input.effect,
+    input.rule.capability,
+    input.rule.resourceSet,
+    [...input.rule.operations],
+    input.rule.auditReason ?? null,
+  ]);
 }

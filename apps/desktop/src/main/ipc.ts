@@ -17,6 +17,8 @@ import {
   chatMessageSchema,
   commandEnvelopeSchema,
   emptyPayloadSchema,
+  permissionSetInputSchema,
+  permissionSettingsSchema,
   runtimeSetInputSchema,
   runtimeModelSetInputSchema,
   runtimeSettingsSchema,
@@ -41,6 +43,7 @@ import {
   workspaceSelectionSchema,
   type CommandEnvelope,
   type CommandResult,
+  type AccessPreset,
   type PublicError,
   type RuntimeKind,
   type TurnEvent,
@@ -56,6 +59,7 @@ import {
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
 import { RuntimeHostClient } from './runtime-host';
+import { PermissionBroker } from './permission-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
 
 type InvokeEvent = IpcMainInvokeEvent;
@@ -67,12 +71,14 @@ export class IpcRouter {
   private readonly mockRuntime: MockRuntimeAdapter;
   private readonly codexRuntime: RuntimeHostClient;
   private readonly turnRuntimes = new Map<string, RuntimeKind>();
+  private readonly permissionBroker: PermissionBroker;
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
   ) {
+    this.permissionBroker = new PermissionBroker(persistence);
     this.mockRuntime = new MockRuntimeAdapter(
       persistence,
       (event) => this.publish(event),
@@ -136,6 +142,64 @@ export class IpcRouter {
         return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () =>
           this.persistence.setModel(input.model),
         ).value;
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.permissionsGet,
+      taskIdPayloadSchema,
+      permissionSettingsSchema,
+      (input) => {
+        const policy = this.permissionBroker.getPolicy(input.taskId);
+        return { preset: policy.preset, policyEpoch: policy.policyEpoch };
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.permissionsSet,
+      permissionSetInputSchema,
+      permissionSettingsSchema,
+      async (input, event, envelope) => {
+        const principal = principalFor(event);
+        const hash = requestHash(envelope.payload);
+        const cached = this.persistence.getOperationResult<{
+          preset: AccessPreset;
+          policyEpoch: number;
+        }>(principal, input.taskId, IPC_CHANNELS.permissionsSet, envelope.operationId, hash);
+        if (cached.found) return cached.value!;
+        const current = this.permissionBroker.getPolicy(input.taskId);
+        if (current.policyEpoch !== input.expectedPolicyEpoch)
+          throw new StalePermissionPolicyError();
+        if (input.preset === 'full') {
+          const confirmation = await dialog.showMessageBox(this.window, {
+            type: 'warning',
+            title: 'フルアクセスを有効にしますか？',
+            message: 'フルアクセスはTaskのWorkspace操作を拡張します。',
+            detail: '管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。',
+            buttons: ['キャンセル', 'フルアクセスを有効化'],
+            defaultId: 0,
+            cancelId: 0,
+            noLink: true,
+          });
+          if (confirmation.response !== 1) throw new FullAccessConfirmationDeclinedError();
+        }
+        if (this.permissionBroker.getPolicy(input.taskId).policyEpoch !== input.expectedPolicyEpoch)
+          throw new StalePermissionPolicyError();
+        const value = this.persistence.executeOperation(
+          principal,
+          input.taskId,
+          IPC_CHANNELS.permissionsSet,
+          envelope.operationId,
+          hash,
+          () => {
+            const policy = this.persistence.setAccessPreset(
+              input.taskId,
+              input.preset,
+              input.expectedPolicyEpoch,
+            );
+            return { preset: policy.preset, policyEpoch: policy.policyEpoch };
+          },
+        );
+        await this.permissionBroker.drainPolicyEpochOutbox().catch(() => undefined);
+        return value;
       },
     );
     this.handle(IPC_CHANNELS.tasksList, emptyPayloadSchema, z.array(taskSummarySchema), () =>
@@ -410,6 +474,10 @@ export class IpcRouter {
     this.window.webContents.once('destroyed', () => this.closeAllPorts());
   }
 
+  async initialize(): Promise<void> {
+    await this.permissionBroker.drainPolicyEpochOutbox();
+  }
+
   dispose(): void {
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
@@ -620,6 +688,8 @@ export class TaskMailbox {
 class SecurityError extends Error {}
 class RuntimeUnavailableError extends Error {}
 class InvalidModelError extends Error {}
+class StalePermissionPolicyError extends Error {}
+class FullAccessConfirmationDeclinedError extends Error {}
 class SteerUnsupportedError extends Error {}
 
 function principalFor(_event: InvokeEvent): string {
@@ -707,6 +777,18 @@ function toPublicError(error: unknown): PublicError {
     return {
       code: 'INVALID_REQUEST',
       userMessage: '選択したモデルは現在のCodex CLIで利用できません。',
+      retryable: false,
+    };
+  if (error instanceof StalePermissionPolicyError)
+    return {
+      code: 'OPERATION_CONFLICT',
+      userMessage: 'Access modeが別の操作で更新されました。最新状態を読み直してください。',
+      retryable: true,
+    };
+  if (error instanceof FullAccessConfirmationDeclinedError)
+    return {
+      code: 'FORBIDDEN',
+      userMessage: 'フルアクセスへの変更をキャンセルしました。',
       retryable: false,
     };
   if (error instanceof OperationConflictError)

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createSessionGrant } from '@vibe/domain';
 import {
   OperationConflictError,
   SqlitePersistenceClient,
@@ -26,7 +27,7 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v5', () => {
+  describe('SqlitePersistenceClient v11', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -158,6 +159,196 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('persists expanded access policy rules and revokes task-scoped grants by epoch', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      expect(persistence.getPermissionPolicy(task.id)).toMatchObject({
+        preset: 'ask',
+        policyEpoch: 0,
+        expandedPolicy: { approvalPolicy: 'ask', allowRules: [] },
+      });
+      const selected = persistence.setAccessPreset(task.id, 'auto');
+      expect(selected).toMatchObject({
+        preset: 'auto',
+        policyEpoch: 1,
+        expandedPolicy: { approvalPolicy: 'auto' },
+      });
+      expect(selected.expandedPolicy.allowRules).toContainEqual(
+        expect.objectContaining({ capability: 'workspace.read' }),
+      );
+      expect(persistence.listPendingPermissionPolicyEpochs()).toEqual([
+        expect.objectContaining({ taskId: task.id, policyEpoch: 1 }),
+      ]);
+      const firstOutbox = persistence.listPendingPermissionPolicyEpochs()[0]!;
+      persistence.markPermissionPolicyEpochDelivered(firstOutbox.id, '2026-07-22T12:00:00.000Z');
+      expect(persistence.listPendingPermissionPolicyEpochs()).toEqual([]);
+      const grant = createSessionGrant({
+        id: 'grant-1',
+        subjectId: 'leader',
+        capability: 'workspace.read',
+        resourceSet: { kind: 'path-prefix', canonicalPath: '/workspace' },
+        operations: ['read'],
+        scope: 'task',
+        expiresAt: '2026-07-22T13:00:00.000Z',
+        policyEpoch: 1,
+        providerEgress: ['none'],
+        sandboxProfiles: ['read-only'],
+      });
+      expect(() =>
+        persistence.savePermissionGrant(task.id, {
+          ...grant,
+          id: 'future-grant',
+          policyEpoch: 2,
+        }),
+      ).toThrow('Grant policy epoch must match');
+      persistence.savePermissionGrant(task.id, grant);
+      expect(
+        persistence.listPermissionGrants(task.id, 'leader', '2026-07-22T12:00:00.000Z'),
+      ).toEqual([grant]);
+      expect(
+        persistence.revokePermissionCapability(
+          task.id,
+          'workspace.read',
+          '2026-07-22T12:01:00.000Z',
+        ),
+      ).toBe(1);
+      expect(
+        persistence.listPermissionGrants(task.id, 'leader', '2026-07-22T12:02:00.000Z'),
+      ).toEqual([]);
+      expect(persistence.getPermissionPolicy(task.id)).toMatchObject({
+        policyEpoch: 2,
+        revokedCapabilities: ['workspace.read'],
+      });
+      expect(persistence.setAccessPreset(task.id, 'full', 2)).toMatchObject({
+        policyEpoch: 3,
+        revokedCapabilities: ['workspace.read'],
+      });
+      expect(() => persistence.setAccessPreset(task.id, 'ask', 2)).toThrow(
+        'Permission policy epoch changed',
+      );
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getPermissionPolicy(task.id)).toMatchObject({
+        preset: 'full',
+        policyEpoch: 3,
+        expandedPolicy: { approvalPolicy: 'ask' },
+        revokedCapabilities: ['workspace.read'],
+      });
+      reopened.close();
+    });
+
+    it('fails closed when stored preset rows are syntactically valid but non-canonical', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      persistence.setAccessPreset(task.id, 'auto');
+      const tamper = new Database(path);
+      tamper
+        .prepare(
+          `UPDATE permission_rules SET capability = 'shell.execute',
+          resource_json = '{"kind":"all"}', operations_json = '["execute"]'
+          WHERE task_id = ? AND effect = 'allow'`,
+        )
+        .run(task.id);
+      tamper.close();
+
+      expect(persistence.getPermissionPolicy(task.id)).toMatchObject({
+        preset: 'ask',
+        policyEpoch: 1,
+        expandedPolicy: { approvalPolicy: 'ask', allowRules: [] },
+      });
+      expect(persistence.setAccessPreset(task.id, 'full')).toMatchObject({
+        preset: 'full',
+        policyEpoch: 2,
+      });
+      persistence.close();
+    });
+
+    it('atomically consumes a reviewer one-time token exactly once', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.registerPermissionOneTimeToken(
+        task.id,
+        'reviewer-token',
+        3,
+        '2026-07-22T12:05:00.000Z',
+      );
+
+      expect(
+        persistence.consumePermissionOneTimeToken(
+          task.id,
+          'reviewer-token',
+          3,
+          '2026-07-22T12:00:00.000Z',
+        ),
+      ).toBe(true);
+      expect(
+        persistence.consumePermissionOneTimeToken(
+          task.id,
+          'reviewer-token',
+          3,
+          '2026-07-22T12:00:01.000Z',
+        ),
+      ).toBe(false);
+      persistence.close();
+    });
+
+    it('persists permission audit trace and reviewer evidence', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      persistence.recordPermissionAudit(
+        task.id,
+        {
+          taskId: task.id,
+          subjectId: 'leader',
+          capability: 'network.fetch',
+          resource: { kind: 'network', origin: 'https://example.test' },
+          operation: 'fetch',
+          providerEgress: 'none',
+          sandboxProfile: 'read-only',
+          executionSpecDigest: 'a'.repeat(64),
+          reviewerInputDigest: 'b'.repeat(64),
+          risk: 'medium',
+        },
+        {
+          decision: 'deny',
+          reason: 'reviewer_timeout',
+          policyEpoch: 2,
+          evaluationTrace: ['managed-deny', 'reviewer', 'execution-revalidation'],
+          reviewerAudit: {
+            requestFingerprint: 'c'.repeat(64),
+            executionSpecDigest: 'a'.repeat(64),
+            policyEpoch: 2,
+            model: 'reviewer-v1',
+            templateVersion: '1',
+            inputDigest: 'b'.repeat(64),
+            decision: 'timeout',
+          },
+        },
+      );
+      const inspection = new Database(path, { readonly: true });
+      const row = inspection.prepare('SELECT * FROM permission_audit').get() as {
+        decision: string;
+        reason: string;
+        evaluation_trace_json: string;
+        reviewer_json: string;
+      };
+      expect(row).toMatchObject({ decision: 'deny', reason: 'reviewer_timeout' });
+      expect(JSON.parse(row.evaluation_trace_json)).toEqual([
+        'managed-deny',
+        'reviewer',
+        'execution-revalidation',
+      ]);
+      expect(JSON.parse(row.reviewer_json)).toMatchObject({
+        model: 'reviewer-v1',
+        decision: 'timeout',
+        requestFingerprint: 'c'.repeat(64),
+      });
+      expect(row.reviewer_json).not.toContain('https://example.test');
+      inspection.close();
+      persistence.close();
+    });
+
     it('publishes context usage around audit-only compaction without changing displayed history', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -265,7 +456,19 @@ if (runsWithElectronAbi)
       const migrated = new Database(path, { readonly: true });
       expect(
         migrated.prepare('SELECT version FROM schema_migrations ORDER BY version').all(),
-      ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }]);
+      ).toEqual([
+        { version: 1 },
+        { version: 2 },
+        { version: 3 },
+        { version: 4 },
+        { version: 5 },
+        { version: 6 },
+        { version: 7 },
+        { version: 8 },
+        { version: 9 },
+        { version: 10 },
+        { version: 11 },
+      ]);
       expect(
         migrated
           .prepare('PRAGMA table_info(context_fragments)')
@@ -306,7 +509,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v5 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v11 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   commandEnvelopeSchema,
+  permissionSettingsSchema,
+  permissionSetInputSchema,
   publicErrorSchema,
   runtimeSettingsSchema,
   taskRenameInputSchema,
@@ -96,5 +98,21 @@ describe('public contracts', () => {
         retryable: false,
       }).code,
     ).toBe('STEER_UNSUPPORTED');
+  });
+
+  it('validates task-scoped permission preset settings', () => {
+    expect(permissionSettingsSchema.parse({ preset: 'auto', policyEpoch: 3 })).toEqual({
+      preset: 'auto',
+      policyEpoch: 3,
+    });
+    expect(() => permissionSettingsSchema.parse({ preset: 'root', policyEpoch: -1 })).toThrow();
+    expect(
+      permissionSetInputSchema.parse({
+        taskId: 'task-1',
+        preset: 'full',
+        expectedPolicyEpoch: 3,
+      }),
+    ).toMatchObject({ preset: 'full', expectedPolicyEpoch: 3 });
+    expect(() => permissionSetInputSchema.parse({ taskId: 'task-1', preset: 'full' })).toThrow();
   });
 });

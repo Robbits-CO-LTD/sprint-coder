@@ -104,3 +104,5 @@ export function transitionIntelligenceStep(
     throw new InvalidIntelligenceStepTransitionError(from, to);
   return to;
 }
+
+export * from './permission';

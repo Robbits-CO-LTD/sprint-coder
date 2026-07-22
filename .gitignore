@@ -7,3 +7,4 @@ apps/desktop/.vite-user-data/
 test-results/
 playwright-report/
 .dev-data/
+.vibe-team/tmp/

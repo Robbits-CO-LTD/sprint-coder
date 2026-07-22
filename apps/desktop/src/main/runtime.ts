@@ -20,6 +20,7 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
     Pick<
       PersistenceClient,
       | 'getWorkspace'
+      | 'getPermissionPolicy'
       | 'createIntelligenceStep'
       | 'transitionIntelligenceStep'
       | 'listIntelligenceSteps'
@@ -77,6 +78,7 @@ export class MockRuntimeAdapter {
       }
 
       const workspacePath = this.persistence.getWorkspace?.(taskId) ?? null;
+      const policyEpoch = this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0;
       const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
       const loop = await runIntelligenceLoop({
         taskId,
@@ -84,7 +86,7 @@ export class MockRuntimeAdapter {
         fragments: control.context?.fragments ?? [],
         model: 'mock-v1',
         effort: 'low',
-        policyEpoch: 0,
+        policyEpoch,
         workspaceRevision: `untracked:${digestCanonical({ workspacePath })}`,
         contractRevision: null,
         sample: createDeterministicMockSampler(input, buildReply(input)),

@@ -1,9 +1,11 @@
 import { create } from 'zustand';
 import type {
+  AccessPreset,
   ChatMessage,
   ContextUsage,
   CodexModelOption,
   QueuedInput,
+  PermissionSettings,
   RuntimeKind,
   TaskSummary,
   TurnEvent,
@@ -75,6 +77,7 @@ type AppState = {
   sendingByTask: Record<string, boolean>;
   draftByTask: Record<string, string>;
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
+  permissionByTask: Record<string, PermissionSettings | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
 
   /** Runtime (Mock/Codex) selection surfaced by the Composer runtime chip (FR-SET-03).
@@ -91,6 +94,7 @@ type AppState = {
   loadRuntime(): Promise<void>;
   setRuntime(kind: RuntimeKind): Promise<void>;
   setModel(model: string): Promise<void>;
+  setAccessPreset(taskId: string, preset: AccessPreset): Promise<void>;
   selectTask(taskId: string): Promise<void>;
   createTask(): Promise<void>;
   renameTask(taskId: string, title: string): Promise<void>;
@@ -172,6 +176,23 @@ async function loadWorkspace(
     }));
   } else {
     apply((state) => ({ workspaceByTask: { ...state.workspaceByTask, [taskId]: null } }));
+  }
+}
+
+async function loadPermission(
+  taskId: string,
+  apply: (fn: (state: AppState) => Partial<AppState>) => void,
+  get: () => AppState,
+) {
+  if (!window.vibe || typeof window.vibe.permissions?.get !== 'function') return;
+  try {
+    const permission = await window.vibe.permissions.get(taskId);
+    if (get().selectedTaskId !== taskId) return;
+    apply((state) => ({
+      permissionByTask: { ...state.permissionByTask, [taskId]: permission },
+    }));
+  } catch {
+    // Non-fatal: keep the deny-by-default Ask preset while task data remains usable.
   }
 }
 
@@ -328,6 +349,7 @@ export const useAppStore = create<AppState>((set, get) => {
     sendingByTask: {},
     draftByTask: {},
     workspaceByTask: {},
+    permissionByTask: {},
     pendingOptimisticIdByTask: {},
     runtime: {
       kind: 'mock',
@@ -400,6 +422,43 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    async setAccessPreset(taskId: string, preset: AccessPreset) {
+      if (!window.vibe || typeof window.vibe.permissions?.set !== 'function') return;
+      const previous = get().permissionByTask[taskId] ?? { preset: 'ask', policyEpoch: 0 };
+      if (previous.preset === preset) return;
+      set((state) => ({
+        permissionByTask: {
+          ...state.permissionByTask,
+          [taskId]: { ...previous, preset },
+        },
+      }));
+      try {
+        const permission = await window.vibe.permissions.set(taskId, preset, previous.policyEpoch);
+        set((state) => ({
+          permissionByTask:
+            state.permissionByTask[taskId]?.preset === preset &&
+            state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
+              ? { ...state.permissionByTask, [taskId]: permission }
+              : state.permissionByTask,
+        }));
+      } catch (err) {
+        let restored = previous;
+        try {
+          restored = await window.vibe.permissions.get(taskId);
+        } catch {
+          // Keep the last confirmed local value when refresh is unavailable.
+        }
+        set((state) => ({
+          permissionByTask:
+            state.permissionByTask[taskId]?.preset === preset &&
+            state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
+              ? { ...state.permissionByTask, [taskId]: restored }
+              : state.permissionByTask,
+          error: describeError(err),
+        }));
+      }
+    },
+
     async selectTask(taskId: string) {
       set({ selectedTaskId: taskId, loadingMessages: true, error: null });
       if (currentUnsubscribe) {
@@ -409,6 +468,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       void restoreDraft(taskId, apply, get);
       void loadWorkspace(taskId, apply, get);
+      void loadPermission(taskId, apply, get);
 
       if (!window.vibe) {
         set({ loadingMessages: false });

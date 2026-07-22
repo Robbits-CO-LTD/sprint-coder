@@ -177,6 +177,20 @@ export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;
 export const runtimeSetInputSchema = z.object({ kind: runtimeKindSchema }).strict();
 export const runtimeModelSetInputSchema = z.object({ model: codexModelIdSchema }).strict();
 
+export const accessPresetSchema = z.enum(['ask', 'auto', 'full']);
+export type AccessPreset = z.infer<typeof accessPresetSchema>;
+export const permissionSettingsSchema = z
+  .object({ preset: accessPresetSchema, policyEpoch: z.number().int().nonnegative() })
+  .strict();
+export type PermissionSettings = z.infer<typeof permissionSettingsSchema>;
+export const permissionSetInputSchema = z
+  .object({
+    taskId: idSchema,
+    preset: accessPresetSchema,
+    expectedPolicyEpoch: z.number().int().nonnegative(),
+  })
+  .strict();
+
 export const commandEnvelopeSchema = <T extends z.ZodType>(payload: T) =>
   z
     .object({
@@ -271,6 +285,14 @@ export interface VibeApi {
     setRuntime(kind: 'mock' | 'codex'): Promise<void>;
     setModel(model: string): Promise<void>;
   };
+  permissions: {
+    get(taskId: string): Promise<PermissionSettings>;
+    set(
+      taskId: string,
+      preset: AccessPreset,
+      expectedPolicyEpoch: number,
+    ): Promise<PermissionSettings>;
+  };
   turns: {
     start(input: { taskId: string; text: string }): Promise<{ turnId: string }>;
     queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
@@ -302,6 +324,8 @@ export const IPC_CHANNELS = {
   settingsGetRuntime: 'vibe:settings:get-runtime',
   settingsSetRuntime: 'vibe:settings:set-runtime',
   settingsSetModel: 'vibe:settings:set-model',
+  permissionsGet: 'vibe:permissions:get',
+  permissionsSet: 'vibe:permissions:set',
   turnsStart: 'vibe:turns:start',
   turnsQueue: 'vibe:turns:queue',
   turnsSteer: 'vibe:turns:steer',

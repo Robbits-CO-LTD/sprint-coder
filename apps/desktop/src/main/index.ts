@@ -51,6 +51,7 @@ if (!hasLock) {
           ? 'app://bundle'
           : new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL).origin;
       router = new IpcRouter(mainWindow, persistence, trustedOrigin);
+      await router.initialize();
       router.register();
       await loadRenderer(mainWindow);
     })

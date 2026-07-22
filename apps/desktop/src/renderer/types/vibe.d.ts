@@ -82,6 +82,8 @@ export type VibeErrorCode =
 
 export type RuntimeKind = 'mock' | 'codex';
 export type CodexModelOption = { id: string; displayName: string; description: string };
+export type AccessPreset = 'ask' | 'auto' | 'full';
+export type PermissionSettings = { preset: AccessPreset; policyEpoch: number };
 
 export interface VibeApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
@@ -124,6 +126,14 @@ export interface VibeApi {
     }>;
     setRuntime(kind: RuntimeKind): Promise<void>;
     setModel(model: string): Promise<void>;
+  };
+  permissions: {
+    get(taskId: string): Promise<PermissionSettings>;
+    set(
+      taskId: string,
+      preset: AccessPreset,
+      expectedPolicyEpoch: number,
+    ): Promise<PermissionSettings>;
   };
 }
 

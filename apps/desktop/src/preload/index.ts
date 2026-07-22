@@ -7,6 +7,8 @@ import {
   commandEnvelopeSchema,
   commandResultSchema,
   emptyPayloadSchema,
+  permissionSetInputSchema,
+  permissionSettingsSchema,
   runtimeModelSetInputSchema,
   runtimeSetInputSchema,
   runtimeSettingsSchema,
@@ -130,6 +132,18 @@ const api: VibeApi = {
       invoke(IPC_CHANNELS.settingsSetRuntime, runtimeSetInputSchema, z.undefined(), { kind }),
     setModel: (model) =>
       invoke(IPC_CHANNELS.settingsSetModel, runtimeModelSetInputSchema, z.undefined(), { model }),
+  },
+  permissions: {
+    get: (taskId) =>
+      invoke(IPC_CHANNELS.permissionsGet, taskIdPayloadSchema, permissionSettingsSchema, {
+        taskId,
+      }),
+    set: (taskId, preset, expectedPolicyEpoch) =>
+      invoke(IPC_CHANNELS.permissionsSet, permissionSetInputSchema, permissionSettingsSchema, {
+        taskId,
+        preset,
+        expectedPolicyEpoch,
+      }),
   },
   turns: {
     start: (input) =>

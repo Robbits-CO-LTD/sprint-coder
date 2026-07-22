@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { WorkspaceChip } from '../WorkspaceChip';
 import { useAppStore } from '../../store/appStore';
 import type { ContextUsage } from '../../types/vibe';
+import type { AccessPreset } from '../../types/vibe';
 
 const SOURCE_LABEL: Record<ContextUsage['fragments'][number]['source'], string> = {
   system: 'システム',
@@ -21,9 +22,135 @@ export function ContextBar({ taskId }: { taskId: string }) {
   return (
     <div className="context-bar">
       <WorkspaceChip taskId={taskId} variant="context" />
-      <span className="ctx-chip">確認して実行</span>
+      <PermissionChip taskId={taskId} />
       <span className="ctx-spacer" />
       <ContextUsageChip taskId={taskId} />
+    </div>
+  );
+}
+
+const PRESET_LABEL: Record<AccessPreset, string> = {
+  ask: '確認する',
+  auto: '安全時は自動',
+  full: 'フルアクセス',
+};
+
+const PRESET_DESC: Record<AccessPreset, string> = {
+  ask: '権限が必要な操作は毎回確認します',
+  auto: '安全と証明できた操作だけ自動許可します',
+  full: '広い操作を許可しますが、管理denyと秘密保護は維持します',
+};
+
+function PermissionChip({ taskId }: { taskId: string }) {
+  const permission = useAppStore((state) => state.permissionByTask[taskId]) ?? {
+    preset: 'ask' as const,
+    policyEpoch: 0,
+  };
+  const setAccessPreset = useAppStore((state) => state.setAccessPreset);
+  const [open, setOpen] = useState(false);
+  const [confirmingFull, setConfirmingFull] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const supported =
+    typeof window !== 'undefined' && typeof window.vibe?.permissions?.set === 'function';
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(event: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) {
+        setOpen(false);
+        setConfirmingFull(false);
+      }
+    }
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  function choose(preset: AccessPreset) {
+    if (preset === 'full' && permission.preset !== 'full') {
+      setConfirmingFull(true);
+      return;
+    }
+    setOpen(false);
+    setConfirmingFull(false);
+    void setAccessPreset(taskId, preset);
+  }
+
+  if (!supported) return <span className="ctx-chip">{PRESET_LABEL[permission.preset]}</span>;
+
+  return (
+    <div
+      className="ctx-permission-wrap"
+      ref={wrapRef}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          setOpen(false);
+          setConfirmingFull(false);
+        }
+      }}
+    >
+      <button
+        data-testid="access-selector"
+        type="button"
+        className="ctx-chip chip-btn"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => {
+          setOpen((value) => !value);
+          setConfirmingFull(false);
+        }}
+        title={`Access modeを選択（policy epoch ${permission.policyEpoch}）`}
+      >
+        {PRESET_LABEL[permission.preset]}
+      </button>
+      {open && (
+        <div className="runtime-menu permission-menu" role="menu" aria-label="Access mode選択">
+          {confirmingFull ? (
+            <div className="permission-confirm">
+              <span className="runtime-menu-title">フルアクセスの影響</span>
+              <span className="runtime-menu-desc">
+                Workspace操作、Shell、Networkなどをpolicy上は許可します。実際の書込み・コマンド実行は
+                安全な実行境界が完成した機能だけ利用できます。管理deny、秘密情報、provider egress、
+                Renderer非特権は常に維持されます。
+              </span>
+              <button
+                data-testid="access-full-confirm"
+                type="button"
+                className="permission-confirm-action"
+                onClick={() => {
+                  setOpen(false);
+                  setConfirmingFull(false);
+                  void setAccessPreset(taskId, 'full');
+                }}
+              >
+                影響を理解してフルアクセスにする
+              </button>
+              <button
+                type="button"
+                className="permission-confirm-cancel"
+                onClick={() => setConfirmingFull(false)}
+              >
+                戻る
+              </button>
+            </div>
+          ) : (
+            (['ask', 'auto', 'full'] as AccessPreset[]).map((preset) => (
+              <button
+                key={preset}
+                data-testid={`access-option-${preset}`}
+                type="button"
+                role="menuitemradio"
+                aria-checked={permission.preset === preset}
+                className={`runtime-menu-item${permission.preset === preset ? ' active' : ''}`}
+                onClick={() => choose(preset)}
+              >
+                <span className="runtime-menu-title">{PRESET_LABEL[preset]}</span>
+                <span className="runtime-menu-desc">{PRESET_DESC[preset]}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }

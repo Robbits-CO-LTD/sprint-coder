@@ -37,7 +37,14 @@ Wave 2(完了 2026-07-22):
   - answer-only/mock-tool 2-case corpus runner骨格と比較用digest/metricを追加。coding 30-case gateはSlice 4.7
   - workspaceの内容revisionはまだ追跡不能なためStepSnapshotへ`untracked:<canonical workspace identity digest>`を明示保存。FileRevisionToken/実revisionはSlice 4.7
   - 検証: typecheck/test(125件)/lint/format/E2E 4本 green、既存forge dev起動とE2E Electron実起動でsmoke済み
-- [ ] Slice 4.1 PermissionBroker
+- [x] Slice 4.1 PermissionBroker
+  - Capability lattice、Ask/Auto/Fullの個別rule展開、managed deny→reviewerまでの評価順、Task grant expiry/revocation、policyEpoch/CAS/outboxを実装
+  - PathGuardをrealpath/symlink chain/inode identity/handle-bound readへ固定。protected root・credential・app-private分類、traversal/escape/TOCTOUをfail-closed化
+  - reviewer allow-onceをrequest facts SHA-256、input/spec digest、epoch、high-risk deny、永続one-time consumeへbinding。auditへ絶対pathを保存しない
+  - Shellは全segment parse/evaluateをMainの強制入口にし、CommandRunner完成前は全segmentをmanaged deny。write/createもEdit Transaction完成前は実行境界でfail-closed
+  - Access mode UI、Main所有Full確認、Task header表示、model/access設定の再起動復元E2Eを追加
+  - 検証: typecheck/test(207件)/lint/format/E2E 5本 green、Computer UseでAccess変更・Full native確認・Codex model選択を実機確認
+- [ ] Slice 4.2 Tool Registry
 
 ---
 

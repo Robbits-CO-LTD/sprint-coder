@@ -688,6 +688,42 @@ button {
 .ctx-spacer {
   margin-left: auto;
 }
+.ctx-permission-wrap {
+  position: relative;
+}
+.permission-menu {
+  min-width: 290px;
+}
+.permission-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+}
+.permission-confirm-action,
+.permission-confirm-cancel {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 7px;
+  text-align: left;
+  font-size: 11.5px;
+}
+.permission-confirm-action {
+  margin-top: 3px;
+  color: var(--state-danger);
+  border: 1px solid color-mix(in srgb, var(--state-danger) 38%, transparent);
+  background: color-mix(in srgb, var(--state-danger) 8%, transparent);
+}
+.permission-confirm-action:hover {
+  background: color-mix(in srgb, var(--state-danger) 14%, transparent);
+}
+.permission-confirm-cancel {
+  color: var(--text-secondary);
+}
+.permission-confirm-cancel:hover {
+  color: var(--text-primary);
+  background: rgba(255, 244, 224, 0.06);
+}
 
 .ctx-usage-wrap {
   position: relative;
