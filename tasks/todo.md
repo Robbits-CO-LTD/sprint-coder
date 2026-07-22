@@ -1,3 +1,17 @@
+# Round 2: Chat Alphaゲート正式通過(2026-07-22開始)
+
+Wave 1(並列):
+- [ ] A(Codex): operations ledger / MessagePort+snapshot+afterSeq / input queue(Queue/Steer/Stop&Send) / goal・pin・archive・draft・workspace永続化 / contracts v2
+- [ ] B(Sonnet): Markdown+sanitizer描画 / pin・archive・goal・workspace UI / draft永続化接続 / queue・steer UI / snapshot復元
+- [ ] C(Sonnet): eslint+prettier+CI(GitHub Actions 3OS matrix)
+Wave 2(Wave 1監査後):
+- [ ] D(Codex): Production adapter(Codex CLI、read-only/no-tools、UtilityProcess)
+- [ ] E(Sonnet): Playwright Electron E2E golden paths
+- [ ] F: Context Ledger minimum
+- [ ] Fable: 各wave監査 → ゲート判定 → ADR更新
+
+---
+
 # Chat Alpha骨格 実装TODO(commander運用)
 
 - 対象: VE3-PLAN-001 Phase 1〜3のvertical slice(Chat Alpha骨格)
