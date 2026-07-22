@@ -37,4 +37,8 @@
   4. 検証エージェント適用: preloadのPublicErrorをErrorインスタンス化(renderer側 "[object Object]" 防止)
   5. better-sqlite3をElectron ABI向けにrebuild(@electron/rebuild、リスクR2が実際に発現)
 - 検証: npm install成功 / typecheck 3 workspace成功 / test 104件全PASS / Electron実起動でRenderer window生成・DB(WAL)作成をmacOS実機確認
+- 追加の起動系バグ2件をFableが特定・修正(commit済み):
+  6. index.htmlがsrc/renderer配下にありVite rootの`/`が404 → apps/desktop直下へ移動(白画面の原因)
+  7. main/preload両entryがindex.tsで`.vite/build/index.js`を上書き合戦 → preload出力名を明示分離(window.vibe未公開の原因)
+- 2026-07-22 ユーザー実機確認: golden path #1(Task作成→hello送信→Run Card→mock streaming応答)成功のスクリーンショットを受領。Chat Alpha骨格ラウンド完了
 - 未了(次ラウンド送り): operations ledger(冪等性、Slice 1.2)、Forge起動時のnative自動rebuild恒久化(workspace hoisting対策)、npm audit 24件(critical 1)、E2E(Playwright Electron、Phase 0 spike対象)、Team/Canvas(Phase 5-6)
