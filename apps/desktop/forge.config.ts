@@ -5,7 +5,9 @@ import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
 const config: ForgeConfig = {
-  packagerConfig: { asar: true },
+  packagerConfig: {
+    asar: { unpack: 'native-safe-fs/build/Release/*.node' },
+  },
   makers: [new MakerZIP({}, ['darwin', 'win32', 'linux'])],
   plugins: [
     new VitePlugin({

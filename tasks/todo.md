@@ -83,7 +83,8 @@ Wave 2(完了 2026-07-22):
   - [x] raw pre/post imageをSQLite/WAL/SHMから排除。app-private artifactはowner/hash/size/secret flagを束縛し、deterministic retry、quota、tamper/symlink/hardlink permission、partial pair cleanup、durable terminal GCを実装
   - [x] 非production S3a safe-point: typecheck/test(403件)/lint/format/E2E 7本 green、独立要件/テスト再レビュー CRITICAL 0 / HIGH 0
   - [x] 非production S3b lease safe-point: workspace実体identity、永続monotonic fence/CAS、Saga immutable binding、policy/clock/expiry fencing、startup Task quarantine、並行executor隔離を実装（migration v20〜v22）
-  - [ ] NativeSafeFs boundary、workspace temp/tombstone identityの事前journal、mutation intent、OS lockとproduction tool wiring（完了までwrite tool非公開）
+  - [x] S4b1 NativeSafeFs non-mutation safe-point: Main-only N-API loader、component-wise no-follow root pin、root inode OS lock、append-only checksummed durable fence、同期invalidate、lock namespace/owner/mode検証、Electron ABI loadを実装。missing/corrupt/unsupportedはfail-closed、Windows backendとproduction mutationは未公開
+  - [ ] S4b2〜S4b4: workspace temp/tombstone identityの事前journal、mutation intent、native mutation primitives、Saga executor wiring、packaged `app.asar.unpacked`実ロードとplatform gate（完了までwrite tool非公開）
   - [ ] Turn全体baseline diff集約、Acceptance Contract/Evidence Ledger、Standard repair最大1、30-case corpus baseline
 - [ ] Phase 4 acceptance gate: provider.egress policy/監査、local-only拒否、30-case corpus、未解決High/Critical 0を最終確認
 

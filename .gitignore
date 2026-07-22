@@ -2,6 +2,7 @@
 node_modules/
 apps/desktop/.vite/
 apps/desktop/out/
+apps/desktop/native-safe-fs/build/
 apps/desktop/.vite-user-data/
 *.log
 test-results/

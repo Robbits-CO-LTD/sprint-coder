@@ -48,6 +48,9 @@ jobs:
         working-directory: apps/desktop
         run: npx --yes @electron/rebuild -f -w better-sqlite3
 
+      - name: Build NativeSafeFs for Electron ABI
+        run: npm run build:native-safe-fs
+
       - name: Test
         run: npm run test
 

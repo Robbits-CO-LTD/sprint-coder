@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "start": "npm run start --workspace @vibe/desktop",
+    "build:native-safe-fs": "node build-native-safe-fs.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "lint": "eslint apps/*/src packages/*/src",
