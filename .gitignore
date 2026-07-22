@@ -4,3 +4,6 @@ apps/desktop/.vite/
 apps/desktop/out/
 apps/desktop/.vite-user-data/
 *.log
+test-results/
+playwright-report/
+.dev-data/
