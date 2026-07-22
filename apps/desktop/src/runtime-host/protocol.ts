@@ -1,11 +1,14 @@
 import {
+  codexModelIdSchema,
+  codexModelOptionSchema,
   publicErrorSchema,
   turnStageSchema,
   type PublicError,
+  type CodexModelOption,
   type TurnStage,
 } from '@vibe/contracts';
 
-export const RUNTIME_PROTOCOL_VERSION = 1;
+export const RUNTIME_PROTOCOL_VERSION = 2;
 
 type EnvelopeBase = {
   protocolVersion: typeof RUNTIME_PROTOCOL_VERSION;
@@ -27,11 +30,17 @@ export type MainToRuntimeEnvelope =
       type: 'start';
       input: string;
       workspacePath: string | null;
+      model: string;
     })
   | (EnvelopeBase & { type: 'cancel' });
 
 export type RuntimeToMainEnvelope =
-  | (EnvelopeBase & { type: 'hello'; codexAvailable: boolean; codexVersion?: string })
+  | (EnvelopeBase & {
+      type: 'hello';
+      codexAvailable: boolean;
+      codexVersion?: string;
+      codexModels: CodexModelOption[];
+    })
   | (EnvelopeBase & { type: 'event'; event: RuntimeCanonicalEvent })
   | (EnvelopeBase & { type: 'exit'; code: number; canceled: boolean })
   | (EnvelopeBase & { type: 'error'; error: PublicError });
@@ -44,7 +53,9 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     'input' in value &&
     typeof value.input === 'string' &&
     'workspacePath' in value &&
-    (value.workspacePath === null || typeof value.workspacePath === 'string')
+    (value.workspacePath === null || typeof value.workspacePath === 'string') &&
+    'model' in value &&
+    codexModelIdSchema.safeParse(value.model).success
   );
 }
 
@@ -54,7 +65,11 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
     return (
       'codexAvailable' in value &&
       typeof value.codexAvailable === 'boolean' &&
-      (!('codexVersion' in value) || typeof value.codexVersion === 'string')
+      (!('codexVersion' in value) || typeof value.codexVersion === 'string') &&
+      'codexModels' in value &&
+      Array.isArray(value.codexModels) &&
+      value.codexModels.length <= 32 &&
+      value.codexModels.every((model) => codexModelOptionSchema.safeParse(model).success)
     );
   if (value.type === 'event') return 'event' in value && isRuntimeCanonicalEvent(value.event);
   if (value.type === 'exit')

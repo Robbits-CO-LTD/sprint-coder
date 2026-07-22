@@ -127,6 +127,7 @@ export function Composer({ taskId }: { taskId: string }) {
           />
           <div className="composer-row">
             <RuntimeChip />
+            <ModelChip />
             <button
               type="button"
               className="cmp-chip"
@@ -278,6 +279,77 @@ function RuntimeChip() {
               </button>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModelChip() {
+  const runtime = useAppStore((s) => s.runtime);
+  const setModel = useAppStore((s) => s.setModel);
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const supported =
+    typeof window !== 'undefined' && typeof window.vibe?.settings?.setModel === 'function';
+  const enabled = supported && runtime.kind === 'codex' && runtime.codexAvailable;
+  const selected = runtime.models.find(({ id }) => id === runtime.model) ?? {
+    id: runtime.model,
+    displayName: runtime.model,
+    description: '',
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  function choose(model: string) {
+    setOpen(false);
+    if (model !== runtime.model) void setModel(model);
+  }
+
+  return (
+    <div
+      className="runtime-chip-wrap"
+      ref={wrapRef}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        className="cmp-chip runtime-chip model-chip"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={!enabled}
+        onClick={() => setOpen((value) => !value)}
+        title={enabled ? 'Modelを選択' : 'Codex Runtime選択時にモデルを変更できます'}
+      >
+        {selected.displayName}
+      </button>
+      {open && (
+        <div className="runtime-menu model-menu" role="menu" aria-label="Model選択">
+          {runtime.models.map((model) => (
+            <button
+              key={model.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={runtime.model === model.id}
+              className={`runtime-menu-item${runtime.model === model.id ? ' active' : ''}`}
+              onClick={() => choose(model.id)}
+            >
+              <span className="runtime-menu-title">{model.displayName}</span>
+              <span className="runtime-menu-desc">{model.description}</span>
+            </button>
+          ))}
         </div>
       )}
     </div>

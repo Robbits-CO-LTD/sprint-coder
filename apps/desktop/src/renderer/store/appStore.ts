@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type {
   ChatMessage,
   ContextUsage,
+  CodexModelOption,
   QueuedInput,
   RuntimeKind,
   TaskSummary,
@@ -23,7 +24,12 @@ export type TurnRuntimeState = {
 
 export type WorkspaceInfo = { path: string; name: string };
 
-export type RuntimeState = { kind: RuntimeKind; codexAvailable: boolean };
+export type RuntimeState = {
+  kind: RuntimeKind;
+  codexAvailable: boolean;
+  model: string;
+  models: CodexModelOption[];
+};
 
 export const STAGE_LABEL: Record<TurnStage, string> = {
   understanding: 'ユーザーの依頼を理解中',
@@ -84,6 +90,7 @@ type AppState = {
   init(): Promise<void>;
   loadRuntime(): Promise<void>;
   setRuntime(kind: RuntimeKind): Promise<void>;
+  setModel(model: string): Promise<void>;
   selectTask(taskId: string): Promise<void>;
   createTask(): Promise<void>;
   renameTask(taskId: string, title: string): Promise<void>;
@@ -322,7 +329,12 @@ export const useAppStore = create<AppState>((set, get) => {
     draftByTask: {},
     workspaceByTask: {},
     pendingOptimisticIdByTask: {},
-    runtime: { kind: 'mock', codexAvailable: false },
+    runtime: {
+      kind: 'mock',
+      codexAvailable: false,
+      model: 'auto',
+      models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
+    },
     stageAnnouncement: '',
     toast: null,
 
@@ -371,6 +383,20 @@ export const useAppStore = create<AppState>((set, get) => {
         } else {
           set({ error: describeError(err) });
         }
+      }
+    },
+
+    async setModel(model: string) {
+      if (!window.vibe || typeof window.vibe.settings?.setModel !== 'function') return;
+      const previous = get().runtime;
+      if (previous.model === model || !previous.models.some(({ id }) => id === model)) return;
+      set({ runtime: { ...previous, model } });
+      try {
+        await window.vibe.settings.setModel(model);
+        await get().loadRuntime();
+      } catch (err) {
+        set({ runtime: previous });
+        set({ error: describeError(err) });
       }
     },
 

@@ -1,9 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError } from '@vibe/contracts';
+import type { CodexModelOption } from '@vibe/contracts';
 import { ApprovalRequestedError, CodexJsonlNormalizer } from './codex-normalizer';
 import type { RuntimeCanonicalEvent } from './protocol';
 
@@ -15,10 +16,14 @@ type ActiveProcess = {
 type EmitEvent = (event: RuntimeCanonicalEvent) => void;
 type EmitError = (error: PublicError) => void;
 
-export type CodexProbe = { available: boolean; version?: string };
+export type CodexProbe = {
+  available: boolean;
+  version?: string;
+  models: CodexModelOption[];
+};
 
 export async function probeCodex(command = 'codex'): Promise<CodexProbe> {
-  return new Promise((resolve) => {
+  const availability = await new Promise<Omit<CodexProbe, 'models'>>((resolve) => {
     let settled = false;
     const child = spawn(command, ['--version'], {
       env: minimalEnvironment(),
@@ -26,7 +31,7 @@ export async function probeCodex(command = 'codex'): Promise<CodexProbe> {
     });
     const chunks: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const finish = (result: CodexProbe): void => {
+    const finish = (result: Omit<CodexProbe, 'models'>): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -46,6 +51,10 @@ export async function probeCodex(command = 'codex'): Promise<CodexProbe> {
       finish({ available: false });
     }, 5_000);
   });
+  return {
+    ...availability,
+    models: availability.available ? readCodexModels() : [],
+  };
 }
 
 export class CodexRuntimeAdapter {
@@ -57,6 +66,7 @@ export class CodexRuntimeAdapter {
     turnId: string,
     input: string,
     workspacePath: string | null,
+    model: string,
     emit: EmitEvent,
     fail: EmitError,
     exited: (code: number, canceled: boolean) => void,
@@ -68,32 +78,12 @@ export class CodexRuntimeAdapter {
     let temporaryDirectory: string | null = null;
     const cwd = workspacePath ?? (temporaryDirectory = mkdtempSync(join(tmpdir(), 'vibe-codex-')));
     const normalizer = new CodexJsonlNormalizer();
-    const child = spawn(
-      'codex',
-      [
-        'exec',
-        '--json',
-        '--sandbox',
-        'read-only',
-        '--ephemeral',
-        '--ignore-user-config',
-        '--ignore-rules',
-        '--skip-git-repo-check',
-        '--color',
-        'never',
-        '-c',
-        'approval_policy="never"',
-        '-c',
-        'shell_environment_policy.inherit="none"',
-        '-',
-      ],
-      {
-        cwd,
-        env: minimalEnvironment(),
-        detached: process.platform !== 'win32',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
-    );
+    const child = spawn('codex', buildCodexArgs(model), {
+      cwd,
+      env: minimalEnvironment(),
+      detached: process.platform !== 'win32',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     const cleanup = (): void => {
       if (temporaryDirectory !== null) rmSync(temporaryDirectory, { recursive: true, force: true });
     };
@@ -172,6 +162,73 @@ export class CodexRuntimeAdapter {
 
   dispose(): void {
     for (const [turnId] of this.active) this.cancel(turnId);
+  }
+}
+
+export function buildCodexArgs(model: string): string[] {
+  return [
+    'exec',
+    '--json',
+    '--sandbox',
+    'read-only',
+    '--ephemeral',
+    '--ignore-user-config',
+    '--ignore-rules',
+    '--skip-git-repo-check',
+    '--color',
+    'never',
+    '-c',
+    'approval_policy="never"',
+    '-c',
+    'shell_environment_policy.inherit="none"',
+    ...(model === 'auto' ? [] : ['--model', model]),
+    '-',
+  ];
+}
+
+export function parseCodexModels(value: unknown): CodexModelOption[] {
+  if (typeof value !== 'object' || value === null || !('models' in value)) return [];
+  const models = (value as { models?: unknown }).models;
+  if (!Array.isArray(models)) return [];
+  const result: CodexModelOption[] = [];
+  const seen = new Set<string>();
+  for (const item of models) {
+    if (typeof item !== 'object' || item === null) continue;
+    const record = item as Record<string, unknown>;
+    const id = record['slug'];
+    const displayName = record['display_name'];
+    const description = record['description'];
+    if (
+      record['visibility'] !== 'list' ||
+      typeof id !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,128}$/.test(id) ||
+      typeof displayName !== 'string' ||
+      displayName.length === 0 ||
+      displayName.length > 128 ||
+      typeof description !== 'string' ||
+      description.length > 300 ||
+      seen.has(id)
+    )
+      continue;
+    seen.add(id);
+    result.push({ id, displayName, description });
+    if (result.length === 31) break;
+  }
+  return result;
+}
+
+function readCodexModels(): CodexModelOption[] {
+  const codexRoot = process.env['CODEX_HOME'] ?? join(process.env['HOME'] ?? '', '.codex');
+  try {
+    const parsed = JSON.parse(
+      readFileSync(join(codexRoot, 'models_cache.json'), 'utf8'),
+    ) as unknown;
+    return [
+      { id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' },
+      ...parseCodexModels(parsed),
+    ];
+  } catch {
+    return [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }];
   }
 }
 

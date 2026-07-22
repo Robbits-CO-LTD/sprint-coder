@@ -22,7 +22,8 @@
   --t-spatial: 420ms;
   --t-cinematic: 560ms;
 
-  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -327,7 +328,9 @@ button {
 }
 .chip-btn {
   cursor: pointer;
-  transition: color var(--t-quick) var(--ease-ui), border-color var(--t-quick) var(--ease-ui);
+  transition:
+    color var(--t-quick) var(--ease-ui),
+    border-color var(--t-quick) var(--ease-ui);
 }
 .chip-btn:hover {
   color: var(--text-primary);
@@ -858,6 +861,12 @@ button {
   border-color: var(--border-subtle);
   color: var(--text-primary);
 }
+.model-chip {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .runtime-menu {
   position: absolute;
   bottom: calc(100% + 6px);
@@ -870,6 +879,12 @@ button {
   padding: 4px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   animation: msgIn var(--t-quick) var(--ease-ui);
+}
+.model-menu {
+  min-width: 280px;
+  max-width: min(360px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow-y: auto;
 }
 .runtime-menu-item {
   display: flex;
@@ -1018,7 +1033,9 @@ button {
   border-radius: 7px;
   background: var(--bg-surface);
   opacity: 0;
-  transition: opacity var(--t-quick) var(--ease-ui), color var(--t-quick) var(--ease-ui);
+  transition:
+    opacity var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui);
 }
 .md-pre-wrap:hover .md-copy-btn,
 .md-copy-btn:focus-visible {

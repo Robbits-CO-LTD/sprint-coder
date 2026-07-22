@@ -267,6 +267,8 @@ export interface PersistenceClient {
   setWorkspace(taskId: string, path: string): void;
   getRuntime(): RuntimeKind;
   setRuntime(kind: RuntimeKind): void;
+  getModel(): string;
+  setModel(model: string): void;
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
   queueInput(
@@ -439,6 +441,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(kind, new Date().toISOString());
+  }
+
+  getModel(): string {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'runtime.codex.model'")
+      .get() as { value: string } | undefined;
+    return row?.value ?? 'auto';
+  }
+
+  setModel(model: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.codex.model', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(model, new Date().toISOString());
   }
 
   listMessages(taskId: string): ChatMessage[] {

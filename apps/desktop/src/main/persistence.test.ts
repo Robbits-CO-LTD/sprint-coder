@@ -147,11 +147,14 @@ if (runsWithElectronAbi)
     it('defaults to mock and persists the selected runtime across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getRuntime()).toBe('mock');
+      expect(persistence.getModel()).toBe('auto');
       persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
       persistence.close();
 
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.getRuntime()).toBe('codex');
+      expect(reopened.getModel()).toBe('gpt-5.6-terra');
       reopened.close();
     });
 

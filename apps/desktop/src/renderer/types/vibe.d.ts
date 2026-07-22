@@ -81,6 +81,7 @@ export type VibeErrorCode =
   'TURN_ACTIVE' | 'STEER_STALE' | 'RUNTIME_UNAVAILABLE' | 'STEER_UNSUPPORTED' | string;
 
 export type RuntimeKind = 'mock' | 'codex';
+export type CodexModelOption = { id: string; displayName: string; description: string };
 
 export interface VibeApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
@@ -115,8 +116,14 @@ export interface VibeApi {
   /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
    * runtime-check `typeof window.vibe?.settings?.getRuntime === 'function'` before use. */
   settings: {
-    getRuntime(): Promise<{ kind: RuntimeKind; codexAvailable: boolean }>;
+    getRuntime(): Promise<{
+      kind: RuntimeKind;
+      codexAvailable: boolean;
+      model: string;
+      models: CodexModelOption[];
+    }>;
     setRuntime(kind: RuntimeKind): Promise<void>;
+    setModel(model: string): Promise<void>;
   };
 }
 

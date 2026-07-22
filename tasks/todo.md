@@ -24,6 +24,11 @@ Wave 2(完了 2026-07-22):
 - [x] Production Runtime probe hotfix
   - UtilityProcess子側のIPC取得を実行時にundefinedとなる`electron/utility.parentPort`からElectron正本の`process.parentPort`へ修正
   - 同一UtilityProcess診断で`codexAvailable:true`を確認し、Computer Use実機操作でCodex選択→実AI応答「疎通確認OK」まで完走
+- [x] Codex Model選択UI / 実行設定
+  - ローカルCodexの`models_cache.json`から表示可能モデルを動的取得し、Autoを含む選択肢をComposerへ追加
+  - 選択値をSQLite settingsへ永続化し、Runtime Hostのimmutable start envelopeからCodex CLIの`--model`引数へ反映
+  - Mainで一覧外Model IDを拒否し、Rendererには検証済みの表示名・説明だけを公開
+  - Computer Use実機操作でGPT-5.6-Terra選択→実AI応答「モデル選択確認OK」→Electron再起動後の選択保持まで確認
 - [x] Phase 4冒頭 / Slice 3.6 Intelligence Loop baseline
   - `intelligence_steps` migration v5とimmutable StepSnapshot(model/effort/context・tool digest/policy epoch/workspace・contract revision)を追加
   - Step lifecycle(`prepared→sampling→sampled→dispatching→toolsCommitted→completed`)をdomain state machineとSQLiteで強制

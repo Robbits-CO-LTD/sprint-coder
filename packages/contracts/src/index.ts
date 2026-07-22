@@ -152,11 +152,30 @@ export type PublicError = z.infer<typeof publicErrorSchema>;
 
 export const runtimeKindSchema = z.enum(['mock', 'codex']);
 export type RuntimeKind = z.infer<typeof runtimeKindSchema>;
+export const codexModelIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+export const codexModelOptionSchema = z
+  .object({
+    id: codexModelIdSchema,
+    displayName: z.string().min(1).max(128),
+    description: z.string().max(300),
+  })
+  .strict();
+export type CodexModelOption = z.infer<typeof codexModelOptionSchema>;
 export const runtimeSettingsSchema = z
-  .object({ kind: runtimeKindSchema, codexAvailable: z.boolean() })
+  .object({
+    kind: runtimeKindSchema,
+    codexAvailable: z.boolean(),
+    model: codexModelIdSchema,
+    models: z.array(codexModelOptionSchema).max(32),
+  })
   .strict();
 export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;
 export const runtimeSetInputSchema = z.object({ kind: runtimeKindSchema }).strict();
+export const runtimeModelSetInputSchema = z.object({ model: codexModelIdSchema }).strict();
 
 export const commandEnvelopeSchema = <T extends z.ZodType>(payload: T) =>
   z
@@ -248,8 +267,9 @@ export interface VibeApi {
     select(taskId: string): Promise<WorkspaceSelection>;
   };
   settings: {
-    getRuntime(): Promise<{ kind: 'mock' | 'codex'; codexAvailable: boolean }>;
+    getRuntime(): Promise<RuntimeSettings>;
     setRuntime(kind: 'mock' | 'codex'): Promise<void>;
+    setModel(model: string): Promise<void>;
   };
   turns: {
     start(input: { taskId: string; text: string }): Promise<{ turnId: string }>;
@@ -281,6 +301,7 @@ export const IPC_CHANNELS = {
   workspaceSelect: 'vibe:workspace:select',
   settingsGetRuntime: 'vibe:settings:get-runtime',
   settingsSetRuntime: 'vibe:settings:set-runtime',
+  settingsSetModel: 'vibe:settings:set-model',
   turnsStart: 'vibe:turns:start',
   turnsQueue: 'vibe:turns:queue',
   turnsSteer: 'vibe:turns:steer',

@@ -7,6 +7,7 @@ import {
   commandEnvelopeSchema,
   commandResultSchema,
   emptyPayloadSchema,
+  runtimeModelSetInputSchema,
   runtimeSetInputSchema,
   runtimeSettingsSchema,
   taskArchivedInputSchema,
@@ -127,6 +128,8 @@ const api: VibeApi = {
       invoke(IPC_CHANNELS.settingsGetRuntime, emptyPayloadSchema, runtimeSettingsSchema, {}),
     setRuntime: (kind) =>
       invoke(IPC_CHANNELS.settingsSetRuntime, runtimeSetInputSchema, z.undefined(), { kind }),
+    setModel: (model) =>
+      invoke(IPC_CHANNELS.settingsSetModel, runtimeModelSetInputSchema, z.undefined(), { model }),
   },
   turns: {
     start: (input) =>

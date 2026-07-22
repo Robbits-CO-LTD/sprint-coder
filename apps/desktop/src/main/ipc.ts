@@ -18,6 +18,7 @@ import {
   commandEnvelopeSchema,
   emptyPayloadSchema,
   runtimeSetInputSchema,
+  runtimeModelSetInputSchema,
   runtimeSettingsSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
@@ -98,20 +99,42 @@ export class IpcRouter {
       IPC_CHANNELS.settingsGetRuntime,
       emptyPayloadSchema,
       runtimeSettingsSchema,
-      async () => ({
-        kind: this.persistence.getRuntime(),
-        codexAvailable: await this.codexRuntime.probe(),
-      }),
+      async () => {
+        const capability = await this.codexRuntime.probe();
+        const storedModel = this.persistence.getModel();
+        const model = capability.models.some(({ id }) => id === storedModel) ? storedModel : 'auto';
+        return {
+          kind: this.persistence.getRuntime(),
+          codexAvailable: capability.available,
+          model,
+          models: capability.models,
+        };
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.settingsSetRuntime,
       runtimeSetInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
-        if (input.kind === 'codex' && !(await this.codexRuntime.probe()))
-          throw new RuntimeUnavailableError();
+        if (input.kind === 'codex') {
+          const capability = await this.codexRuntime.probe();
+          if (!capability.available) throw new RuntimeUnavailableError();
+        }
         return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetRuntime, () =>
           this.persistence.setRuntime(input.kind),
+        ).value;
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetModel,
+      runtimeModelSetInputSchema,
+      z.undefined(),
+      async (input, event, envelope) => {
+        const capability = await this.codexRuntime.probe();
+        if (!capability.available) throw new RuntimeUnavailableError();
+        if (!capability.models.some(({ id }) => id === input.model)) throw new InvalidModelError();
+        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () =>
+          this.persistence.setModel(input.model),
         ).value;
       },
     );
@@ -497,6 +520,7 @@ export class IpcRouter {
         started.turnId,
         started.text,
         this.persistence.getWorkspace(taskId),
+        this.persistence.getModel(),
       );
     }
   }
@@ -595,6 +619,7 @@ export class TaskMailbox {
 
 class SecurityError extends Error {}
 class RuntimeUnavailableError extends Error {}
+class InvalidModelError extends Error {}
 class SteerUnsupportedError extends Error {}
 
 function principalFor(_event: InvokeEvent): string {
@@ -676,6 +701,12 @@ function toPublicError(error: unknown): PublicError {
     return {
       code: 'RUNTIME_UNAVAILABLE',
       userMessage: 'Codex CLIが利用できないため、このruntimeを選択できません。',
+      retryable: false,
+    };
+  if (error instanceof InvalidModelError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: '選択したモデルは現在のCodex CLIで利用できません。',
       retryable: false,
     };
   if (error instanceof OperationConflictError)

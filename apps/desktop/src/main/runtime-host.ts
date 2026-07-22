@@ -1,7 +1,7 @@
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { PublicError } from '@vibe/contracts';
+import type { CodexModelOption, PublicError } from '@vibe/contracts';
 import {
   RUNTIME_PROTOCOL_VERSION,
   isRuntimeToMainEnvelope,
@@ -13,13 +13,20 @@ type ActiveTurn = { taskId: string; operationId: string; lastSeq: number };
 type EventHandler = (taskId: string, turnId: string, event: RuntimeCanonicalEvent) => void;
 type FailureHandler = (taskId: string, turnId: string, error: PublicError) => void;
 type PrepareContext = (taskId: string, turnId: string) => void;
+export type RuntimeCapabilityReport = {
+  available: boolean;
+  models: CodexModelOption[];
+};
 
 export class RuntimeHostClient {
   private process: UtilityProcess | null = null;
   private runtimeInstanceId = '';
   private spawnReady: Promise<void> = Promise.resolve();
-  private resolveProbe: ((available: boolean) => void) | null = null;
-  private probeResult: Promise<boolean> = Promise.resolve(false);
+  private resolveProbe: ((report: RuntimeCapabilityReport) => void) | null = null;
+  private probeResult: Promise<RuntimeCapabilityReport> = Promise.resolve({
+    available: false,
+    models: [],
+  });
   private readonly active = new Map<string, ActiveTurn>();
   private disposed = false;
 
@@ -31,12 +38,18 @@ export class RuntimeHostClient {
     this.launch();
   }
 
-  async probe(): Promise<boolean> {
+  async probe(): Promise<RuntimeCapabilityReport> {
     if (this.process === null && !this.disposed) this.launch();
     return this.probeResult;
   }
 
-  start(taskId: string, turnId: string, input: string, workspacePath: string | null): void {
+  start(
+    taskId: string,
+    turnId: string,
+    input: string,
+    workspacePath: string | null,
+    model: string,
+  ): void {
     this.prepareContext?.(taskId, turnId);
     if (this.disposed) {
       this.onFailure(taskId, turnId, unavailableError());
@@ -54,6 +67,7 @@ export class RuntimeHostClient {
       type: 'start',
       input,
       workspacePath,
+      model,
     });
   }
 
@@ -77,12 +91,12 @@ export class RuntimeHostClient {
   private launch(): void {
     this.runtimeInstanceId = randomUUID();
     const instanceId = this.runtimeInstanceId;
-    this.probeResult = new Promise<boolean>((resolve) => {
+    this.probeResult = new Promise<RuntimeCapabilityReport>((resolve) => {
       this.resolveProbe = resolve;
       setTimeout(() => {
         if (this.resolveProbe === resolve) {
           this.resolveProbe = null;
-          resolve(false);
+          resolve({ available: false, models: [] });
         }
       }, 7_000);
     });
@@ -94,7 +108,7 @@ export class RuntimeHostClient {
         { serviceName: 'Vibe Codex Runtime Host', stdio: 'ignore' },
       );
     } catch {
-      this.resolveProbe?.(false);
+      this.resolveProbe?.({ available: false, models: [] });
       this.resolveProbe = null;
       this.process = null;
       return;
@@ -118,7 +132,7 @@ export class RuntimeHostClient {
     )
       return;
     if (raw.type === 'hello') {
-      this.resolveProbe?.(raw.codexAvailable);
+      this.resolveProbe?.({ available: raw.codexAvailable, models: raw.codexModels });
       this.resolveProbe = null;
       return;
     }
@@ -149,7 +163,7 @@ export class RuntimeHostClient {
 
   private handleExit(instanceId: string): void {
     if (instanceId !== this.runtimeInstanceId) return;
-    this.resolveProbe?.(false);
+    this.resolveProbe?.({ available: false, models: [] });
     this.resolveProbe = null;
     this.process = null;
     const failures = [...this.active.entries()];

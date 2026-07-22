@@ -18,6 +18,7 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
       data.turnId,
       data.input,
       data.workspacePath,
+      data.model,
       (event) => send(data.taskId, data.turnId, data.operationId, { type: 'event', event }),
       (error) => send(data.taskId, data.turnId, data.operationId, { type: 'error', error }),
       (code, canceled) =>
@@ -32,6 +33,7 @@ void probeCodex().then((probe) =>
   send('', '', 'probe', {
     type: 'hello',
     codexAvailable: probe.available,
+    codexModels: probe.models,
     ...(probe.version === undefined ? {} : { codexVersion: probe.version }),
   }),
 );
@@ -45,7 +47,7 @@ function send(
   payload:
     | Pick<
         Extract<RuntimeToMainEnvelope, { type: 'hello' }>,
-        'type' | 'codexAvailable' | 'codexVersion'
+        'type' | 'codexAvailable' | 'codexVersion' | 'codexModels'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'event' }>, 'type' | 'event'>
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'exit' }>, 'type' | 'code' | 'canceled'>

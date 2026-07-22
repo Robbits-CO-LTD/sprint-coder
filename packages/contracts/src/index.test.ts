@@ -75,10 +75,20 @@ describe('public contracts', () => {
   });
 
   it('validates runtime settings and the runtime error codes', () => {
-    expect(runtimeSettingsSchema.parse({ kind: 'codex', codexAvailable: false })).toEqual({
-      kind: 'codex',
-      codexAvailable: false,
-    });
+    expect(
+      runtimeSettingsSchema.parse({
+        kind: 'codex',
+        codexAvailable: true,
+        model: 'gpt-5.6-terra',
+        models: [
+          {
+            id: 'gpt-5.6-terra',
+            displayName: 'GPT-5.6-Terra',
+            description: 'Balanced model',
+          },
+        ],
+      }),
+    ).toMatchObject({ kind: 'codex', model: 'gpt-5.6-terra' });
     expect(
       publicErrorSchema.parse({
         code: 'STEER_UNSUPPORTED',
