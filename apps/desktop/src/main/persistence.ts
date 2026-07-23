@@ -56,6 +56,16 @@ import {
   type BackgroundCompletionState,
   type BackgroundEpochs,
   type BackgroundWakePolicy,
+  assertLeaderRoutedMessage,
+  assertWorkerPersistenceInput,
+  transitionTeam,
+  transitionTeamMessage,
+  transitionWorker,
+  type CapabilityCeiling,
+  type ContextInheritancePolicy,
+  type TeamMessageState,
+  type TeamState,
+  type WorkerState,
 } from '@vibe/domain';
 import {
   ContextLedger,
@@ -177,6 +187,7 @@ export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
 
 type TaskRow = {
   id: string;
+  primary_thread_id: string;
   title: string;
   pinned: number;
   archived: number;
@@ -188,6 +199,42 @@ type TaskRow = {
   draft: string;
   branch_epoch: number;
   context_epoch: number;
+  created_at: string;
+  updated_at: string;
+};
+type TeamRow = {
+  id: string;
+  task_id: string;
+  state: TeamState;
+  leader_agent_id: string;
+  budget_json: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+type AgentRow = {
+  id: string;
+  team_id: string | null;
+  thread_id: string;
+  task_id: string;
+  kind: 'leader' | 'worker';
+  role: string;
+  state: WorkerState;
+  objective: string | null;
+  parent_capability_ceiling_json: string | null;
+  context_inheritance_policy: ContextInheritancePolicy | null;
+  created_at: string;
+  updated_at: string;
+};
+type TeamMessageRow = {
+  id: string;
+  team_id: string;
+  source_agent_id: string;
+  target_agent_id: string;
+  seq: number;
+  state: TeamMessageState;
+  content: string;
+  revision: number;
   created_at: string;
   updated_at: string;
 };
@@ -1146,6 +1193,117 @@ const migrations = [
         CHECK (local_only IN (0, 1));
     `,
   },
+  {
+    version: 27,
+    checksum: 'team-persistence-v27-threads-membership-delivery',
+    sql: `
+      CREATE TABLE agent_threads (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('mock', 'codex')),
+        state TEXT NOT NULL CHECK (state IN ('idle', 'active', 'paused', 'interrupted', 'completed')),
+        active_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX agent_threads_task_idx ON agent_threads(task_id, created_at, id);
+
+      ALTER TABLE tasks ADD COLUMN primary_thread_id TEXT REFERENCES agent_threads(id);
+
+      CREATE TABLE teams (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+        state TEXT NOT NULL CHECK (
+          state IN ('draft', 'forming', 'active', 'paused', 'winding_down', 'completed', 'failed')
+        ),
+        leader_agent_id TEXT NOT NULL UNIQUE REFERENCES agents(id) DEFERRABLE INITIALLY DEFERRED,
+        budget_json TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE agents (
+        id TEXT PRIMARY KEY,
+        team_id TEXT REFERENCES teams(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL UNIQUE REFERENCES agent_threads(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('leader', 'worker')),
+        role TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (
+          state IN ('invited', 'spawning', 'ready', 'busy', 'waiting', 'done', 'failed', 'stopped')
+        ),
+        objective TEXT,
+        parent_capability_ceiling_json TEXT,
+        context_inheritance_policy TEXT CHECK (
+          context_inheritance_policy IS NULL OR
+          context_inheritance_policy IN ('none', 'summary', 'selected_items', 'full_fork')
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (kind = 'leader' AND objective IS NULL AND parent_capability_ceiling_json IS NULL
+            AND context_inheritance_policy IS NULL) OR
+          (kind = 'worker' AND objective IS NOT NULL AND parent_capability_ceiling_json IS NOT NULL
+            AND context_inheritance_policy IS NOT NULL)
+        )
+      );
+      CREATE INDEX agents_team_idx ON agents(team_id, kind, created_at, id);
+
+      CREATE TABLE team_memberships (
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL UNIQUE REFERENCES agents(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('leader', 'worker')),
+        joined_at TEXT NOT NULL,
+        left_at TEXT,
+        PRIMARY KEY(team_id, agent_id)
+      );
+
+      CREATE TABLE team_messages (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        source_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        target_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        seq INTEGER NOT NULL CHECK (seq > 0),
+        state TEXT NOT NULL CHECK (
+          state IN ('created', 'persisted', 'dispatching', 'delivered', 'acknowledged')
+        ),
+        content TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(team_id, seq),
+        CHECK (source_agent_id <> target_agent_id)
+      );
+      CREATE INDEX team_messages_delivery_idx ON team_messages(team_id, state, seq);
+
+      CREATE TABLE team_message_events (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL REFERENCES team_messages(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        from_state TEXT,
+        to_state TEXT NOT NULL CHECK (
+          to_state IN ('created', 'persisted', 'dispatching', 'delivered', 'acknowledged')
+        ),
+        recorded_at TEXT NOT NULL,
+        UNIQUE(message_id, revision)
+      );
+
+      INSERT INTO agent_threads(
+        id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
+      )
+        SELECT id, id, 'mock', 'active', NULL, 0, created_at, updated_at FROM tasks;
+      UPDATE tasks SET primary_thread_id = id;
+      INSERT INTO agents(
+        id, team_id, thread_id, task_id, kind, role, state, objective,
+        parent_capability_ceiling_json, context_inheritance_policy, created_at, updated_at
+      )
+        SELECT id || ':leader', NULL, id, id, 'leader', 'leader', 'ready', NULL,
+          NULL, NULL, created_at, updated_at
+        FROM tasks;
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -1267,6 +1425,47 @@ export type BackgroundCompletionRecord = Readonly<{
   attachedAt: string | null;
   runtimeAckedAt: string | null;
 }>;
+export type TeamRecord = Readonly<{
+  id: string;
+  taskId: string;
+  state: TeamState;
+  leaderAgentId: string;
+  budget: Readonly<Record<string, unknown>>;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}>;
+export type AgentRecord = Readonly<{
+  id: string;
+  teamId: string | null;
+  threadId: string;
+  taskId: string;
+  kind: 'leader' | 'worker';
+  role: string;
+  state: WorkerState;
+  objective: string | null;
+  parentCapabilityCeiling: CapabilityCeiling | null;
+  contextInheritancePolicy: ContextInheritancePolicy | null;
+  createdAt: string;
+  updatedAt: string;
+}>;
+export type TeamMessageRecord = Readonly<{
+  id: string;
+  teamId: string;
+  sourceAgentId: string;
+  targetAgentId: string;
+  seq: number;
+  state: TeamMessageState;
+  content: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}>;
+export type TeamSnapshot = Readonly<{
+  team: TeamRecord;
+  agents: readonly AgentRecord[];
+  messages: readonly TeamMessageRecord[];
+}>;
 
 export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
 
@@ -1274,6 +1473,28 @@ export interface PersistenceClient {
   listTasks(): TaskSummary[];
   getTask(taskId: string): TaskSummary;
   createTask(title?: string, localOnly?: boolean): TaskSummary;
+  getTaskLeader(taskId: string): AgentRecord;
+  promoteTaskToTeam(taskId: string): TeamRecord;
+  getTeam(teamId: string): TeamRecord;
+  getTeamByTask(taskId: string): TeamRecord | null;
+  getTeamSnapshot(teamId: string): TeamSnapshot;
+  transitionTeamState(teamId: string, to: TeamState): TeamRecord;
+  registerTeamWorker(input: {
+    teamId: string;
+    role: string;
+    objective: string;
+    parentCapabilityCeiling: CapabilityCeiling;
+    contextInheritancePolicy: ContextInheritancePolicy;
+    runtimeKind?: RuntimeKind;
+  }): AgentRecord;
+  transitionWorkerState(agentId: string, to: WorkerState): AgentRecord;
+  createTeamMessage(input: {
+    teamId: string;
+    sourceAgentId: string;
+    targetAgentId: string;
+    content: string;
+  }): TeamMessageRecord;
+  transitionTeamMessageState(messageId: string, to: TeamMessageState): TeamMessageRecord;
   renameTask(taskId: string, title: string): TaskSummary;
   setPinned(taskId: string, pinned: boolean): TaskSummary;
   setArchived(taskId: string, archived: boolean): TaskSummary;
@@ -1817,6 +2038,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   createTask(title = '新しいタスク', localOnly = false): TaskSummary {
     const now = new Date().toISOString();
+    const primaryThreadId = randomUUID();
+    const leaderAgentId = randomUUID();
     const task = taskSummarySchema.parse({
       id: randomUUID(),
       title,
@@ -1828,14 +2051,252 @@ export class SqlitePersistenceClient implements PersistenceClient {
       createdAt: now,
       updatedAt: now,
     });
-    this.db
-      .prepare(
-        `INSERT INTO tasks(
-           id, title, pinned, archived, goal, workspace_path, local_only, draft, created_at, updated_at
-         ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', ?, ?)`,
-      )
-      .run(task.id, task.title, localOnly ? 1 : 0, now, now);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO tasks(
+             id, title, pinned, archived, goal, workspace_path, local_only, draft,
+             primary_thread_id, created_at, updated_at
+           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?)`,
+        )
+        .run(task.id, task.title, localOnly ? 1 : 0, now, now);
+      this.db
+        .prepare(
+          `INSERT INTO agent_threads(
+             id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
+           ) VALUES (?, ?, ?, 'active', NULL, 0, ?, ?)`,
+        )
+        .run(primaryThreadId, task.id, this.getRuntime(), now, now);
+      this.db
+        .prepare(
+          `INSERT INTO agents(
+             id, team_id, thread_id, task_id, kind, role, state, objective,
+             parent_capability_ceiling_json, context_inheritance_policy, created_at, updated_at
+           ) VALUES (?, NULL, ?, ?, 'leader', 'leader', 'ready', NULL, NULL, NULL, ?, ?)`,
+        )
+        .run(leaderAgentId, primaryThreadId, task.id, now, now);
+      this.db
+        .prepare('UPDATE tasks SET primary_thread_id = ? WHERE id = ?')
+        .run(primaryThreadId, task.id);
+    })();
     return task;
+  }
+
+  getTaskLeader(taskId: string): AgentRecord {
+    const task = this.getTaskRow(taskId);
+    const row = this.db
+      .prepare(
+        `SELECT * FROM agents
+         WHERE task_id = ? AND thread_id = ? AND kind = 'leader'`,
+      )
+      .get(taskId, task.primary_thread_id) as AgentRow | undefined;
+    if (row === undefined) throw new NotFoundError('Task leader not found');
+    return toAgent(row);
+  }
+
+  promoteTaskToTeam(taskId: string): TeamRecord {
+    return this.db.transaction(() => {
+      this.getTaskRow(taskId);
+      const existing = this.getTeamByTask(taskId);
+      if (existing !== null) return existing;
+      const leader = this.getTaskLeader(taskId);
+      if (leader.teamId !== null) throw new Error('Task leader already belongs to a team');
+      const now = new Date().toISOString();
+      const teamId = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO teams(
+             id, task_id, state, leader_agent_id, budget_json, revision, created_at, updated_at
+           ) VALUES (?, ?, 'draft', ?, '{}', 0, ?, ?)`,
+        )
+        .run(teamId, taskId, leader.id, now, now);
+      const assigned = this.db
+        .prepare('UPDATE agents SET team_id = ?, updated_at = ? WHERE id = ? AND team_id IS NULL')
+        .run(teamId, now, leader.id);
+      if (assigned.changes !== 1) throw new Error('Task leader assignment conflict');
+      this.db
+        .prepare(
+          `INSERT INTO team_memberships(team_id, agent_id, kind, joined_at, left_at)
+           VALUES (?, ?, 'leader', ?, NULL)`,
+        )
+        .run(teamId, leader.id, now);
+      return this.getTeam(teamId);
+    })();
+  }
+
+  getTeam(teamId: string): TeamRecord {
+    const row = this.db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as
+      TeamRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team not found');
+    return toTeam(row);
+  }
+
+  getTeamByTask(taskId: string): TeamRecord | null {
+    const row = this.db.prepare('SELECT * FROM teams WHERE task_id = ?').get(taskId) as
+      TeamRow | undefined;
+    return row === undefined ? null : toTeam(row);
+  }
+
+  getTeamSnapshot(teamId: string): TeamSnapshot {
+    const team = this.getTeam(teamId);
+    const agents = (
+      this.db
+        .prepare('SELECT * FROM agents WHERE team_id = ? ORDER BY kind, created_at, id')
+        .all(teamId) as AgentRow[]
+    ).map(toAgent);
+    const messages = (
+      this.db
+        .prepare('SELECT * FROM team_messages WHERE team_id = ? ORDER BY seq')
+        .all(teamId) as TeamMessageRow[]
+    ).map(toTeamMessage);
+    return { team, agents, messages };
+  }
+
+  transitionTeamState(teamId: string, to: TeamState): TeamRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeam(teamId);
+      transitionTeam(current.state, to);
+      const result = this.db
+        .prepare(
+          `UPDATE teams SET state = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ? AND state = ? AND revision = ?`,
+        )
+        .run(to, new Date().toISOString(), teamId, current.state, current.revision);
+      if (result.changes !== 1) throw new TeamConflictError();
+      return this.getTeam(teamId);
+    })();
+  }
+
+  registerTeamWorker(input: {
+    teamId: string;
+    role: string;
+    objective: string;
+    parentCapabilityCeiling: CapabilityCeiling;
+    contextInheritancePolicy: ContextInheritancePolicy;
+    runtimeKind?: RuntimeKind;
+  }): AgentRecord {
+    assertWorkerPersistenceInput(input);
+    return this.db.transaction(() => {
+      const team = this.getTeam(input.teamId);
+      if (!['draft', 'forming', 'active', 'paused'].includes(team.state))
+        throw new Error('Team does not accept new workers');
+      const now = new Date().toISOString();
+      const threadId = randomUUID();
+      const agentId = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO agent_threads(
+             id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
+           ) VALUES (?, ?, ?, 'idle', NULL, 0, ?, ?)`,
+        )
+        .run(threadId, team.taskId, input.runtimeKind ?? this.getRuntime(), now, now);
+      this.db
+        .prepare(
+          `INSERT INTO agents(
+             id, team_id, thread_id, task_id, kind, role, state, objective,
+             parent_capability_ceiling_json, context_inheritance_policy, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          agentId,
+          team.id,
+          threadId,
+          team.taskId,
+          input.role.trim(),
+          input.objective.trim(),
+          JSON.stringify(input.parentCapabilityCeiling),
+          input.contextInheritancePolicy,
+          now,
+          now,
+        );
+      this.db
+        .prepare(
+          `INSERT INTO team_memberships(team_id, agent_id, kind, joined_at, left_at)
+           VALUES (?, ?, 'worker', ?, NULL)`,
+        )
+        .run(team.id, agentId, now);
+      return this.getAgent(agentId);
+    })();
+  }
+
+  transitionWorkerState(agentId: string, to: WorkerState): AgentRecord {
+    return this.db.transaction(() => {
+      const current = this.getAgent(agentId);
+      if (current.kind !== 'worker') throw new Error('Leader lifecycle is owned by the Team');
+      transitionWorker(current.state, to);
+      const result = this.db
+        .prepare('UPDATE agents SET state = ?, updated_at = ? WHERE id = ? AND state = ?')
+        .run(to, new Date().toISOString(), agentId, current.state);
+      if (result.changes !== 1) throw new TeamConflictError();
+      return this.getAgent(agentId);
+    })();
+  }
+
+  createTeamMessage(input: {
+    teamId: string;
+    sourceAgentId: string;
+    targetAgentId: string;
+    content: string;
+  }): TeamMessageRecord {
+    if (input.content.length < 1 || input.content.length > 100_000)
+      throw new Error('Invalid team message content');
+    return this.db.transaction(() => {
+      const team = this.getTeam(input.teamId);
+      if (team.state !== 'active') throw new Error('Team must be active to send messages');
+      const source = this.getAgent(input.sourceAgentId);
+      const target = this.getAgent(input.targetAgentId);
+      if (source.teamId !== team.id || target.teamId !== team.id)
+        throw new Error('Team message agent is not an active member');
+      assertLeaderRoutedMessage(source.kind, target.kind);
+      const now = new Date().toISOString();
+      const id = randomUUID();
+      const nextSeq = (
+        this.db
+          .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM team_messages WHERE team_id = ?')
+          .get(team.id) as { seq: number }
+      ).seq;
+      transitionTeamMessage('created', 'persisted');
+      this.db
+        .prepare(
+          `INSERT INTO team_messages(
+             id, team_id, source_agent_id, target_agent_id, seq, state, content,
+             revision, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, 'persisted', ?, 1, ?, ?)`,
+        )
+        .run(id, team.id, source.id, target.id, nextSeq, input.content, now, now);
+      const insertEvent = this.db.prepare(
+        `INSERT INTO team_message_events(
+           id, message_id, revision, from_state, to_state, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      insertEvent.run(randomUUID(), id, 0, null, 'created', now);
+      insertEvent.run(randomUUID(), id, 1, 'created', 'persisted', now);
+      return this.getTeamMessage(id);
+    })();
+  }
+
+  transitionTeamMessageState(messageId: string, to: TeamMessageState): TeamMessageRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamMessage(messageId);
+      transitionTeamMessage(current.state, to);
+      const now = new Date().toISOString();
+      const nextRevision = current.revision + 1;
+      const result = this.db
+        .prepare(
+          `UPDATE team_messages SET state = ?, revision = ?, updated_at = ?
+           WHERE id = ? AND state = ? AND revision = ?`,
+        )
+        .run(to, nextRevision, now, messageId, current.state, current.revision);
+      if (result.changes !== 1) throw new TeamConflictError();
+      this.db
+        .prepare(
+          `INSERT INTO team_message_events(
+             id, message_id, revision, from_state, to_state, recorded_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(randomUUID(), messageId, nextRevision, current.state, to, now);
+      return this.getTeamMessage(messageId);
+    })();
   }
 
   renameTask(taskId: string, title: string): TaskSummary {
@@ -5522,6 +5983,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return row;
   }
 
+  private getAgent(agentId: string): AgentRecord {
+    const row = this.db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as
+      AgentRow | undefined;
+    if (row === undefined) throw new NotFoundError('Agent not found');
+    return toAgent(row);
+  }
+
+  private getTeamMessage(messageId: string): TeamMessageRecord {
+    const row = this.db.prepare('SELECT * FROM team_messages WHERE id = ?').get(messageId) as
+      TeamMessageRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team message not found');
+    return toTeamMessage(row);
+  }
+
   private assertTask(taskId: string): void {
     this.getTaskRow(taskId);
   }
@@ -5550,6 +6025,7 @@ export class TurnActiveError extends Error {}
 export class SteerStaleError extends Error {}
 export class OperationConflictError extends Error {}
 export class OperationInProgressError extends Error {}
+export class TeamConflictError extends Error {}
 export class AcceptanceEvidenceMissingError extends Error {
   constructor(readonly openCriterionIds: readonly string[]) {
     super(`Acceptance evidence is missing: ${openCriterionIds.join(', ')}`);
@@ -5568,6 +6044,54 @@ function toTask(row: TaskRow): TaskSummary {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
+}
+
+function toTeam(row: TeamRow): TeamRecord {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    state: row.state,
+    leaderAgentId: row.leader_agent_id,
+    budget: JSON.parse(row.budget_json) as Record<string, unknown>,
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toAgent(row: AgentRow): AgentRecord {
+  return {
+    id: row.id,
+    teamId: row.team_id,
+    threadId: row.thread_id,
+    taskId: row.task_id,
+    kind: row.kind,
+    role: row.role,
+    state: row.state,
+    objective: row.objective,
+    parentCapabilityCeiling:
+      row.parent_capability_ceiling_json === null
+        ? null
+        : (JSON.parse(row.parent_capability_ceiling_json) as CapabilityCeiling),
+    contextInheritancePolicy: row.context_inheritance_policy,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toTeamMessage(row: TeamMessageRow): TeamMessageRecord {
+  return {
+    id: row.id,
+    teamId: row.team_id,
+    sourceAgentId: row.source_agent_id,
+    targetAgentId: row.target_agent_id,
+    seq: row.seq,
+    state: row.state,
+    content: row.content,
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function toMessage(row: MessageRow): ChatMessage {

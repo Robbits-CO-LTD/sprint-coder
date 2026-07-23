@@ -27,6 +27,7 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
+  teamSummarySchema,
   turnCancelInputSchema,
   turnEventSchema,
   turnQueueInputSchema,
@@ -123,6 +124,10 @@ const api: VibeApi = {
       invoke(IPC_CHANNELS.tasksGetDraft, taskIdPayloadSchema, z.string(), { taskId }),
     setDraft: (taskId, draft) =>
       invoke(IPC_CHANNELS.tasksSetDraft, taskDraftInputSchema, z.undefined(), { taskId, draft }),
+  },
+  teams: {
+    promote: (taskId) =>
+      invoke(IPC_CHANNELS.teamsPromote, taskIdPayloadSchema, teamSummarySchema, { taskId }),
   },
   workspace: {
     get: (taskId) =>

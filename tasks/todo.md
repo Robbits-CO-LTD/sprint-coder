@@ -102,6 +102,19 @@ Wave 2(完了 2026-07-22):
   - provider egress `de7b2f8`。local-only/secret/revokeはRuntime dispatch 0、clean non-localはexact permit再検証後だけ送信し、全判定をpermission auditへ保存
   - 最終gate: typecheck/lint/format green、unit 508 pass + 1 platform skip、E2E 7件 exit 0、darwin arm64 package + unpacked addon probe green。独立production mutationは`mutation:false`のまま非公開
 
+## Phase 5 実装進捗(2026-07-23)
+
+- [x] Slice 5.1 Team persistence
+  - SQLite migration v27へ`agent_threads`、`teams`、`agents`、`team_memberships`、`team_messages`とdelivery auditを追加。既存Taskへprimary threadとstable Leader Agentをbackfill
+  - Task→Team promotionを冪等commandとしてMain/Preload契約へ公開し、taskId・primary thread・Leader Agent identityを維持
+  - Team / Worker / message delivery state machineをdomainへ追加。WorkerはAgent + AgentThread + TeamMembershipとして保存し、parent capability ceilingとcontext inheritance policyを記録
+  - Leader↔Workerだけを許可し、Worker間直接messageをdomain/persistenceの両境界で拒否。message sequenceと全delivery transitionを永続化
+  - 検証: typecheck/lint/format green、unit 508 pass + 8 platform skip、v1→v27 migration、Electron ABI Team SQLite統合test green
+- [ ] Slice 5.2 TeamCoordinator
+  - 非対象として維持: Worker runtime起動、budget reserve/settle、dispatch/ack retry、process tree、worktree
+- [ ] Slice 5.3 Team List View
+  - 非対象として維持: accessible Team projection、Worker操作UI、message timeline
+
 ---
 
 # Chat Alpha骨格 実装TODO(commander運用)

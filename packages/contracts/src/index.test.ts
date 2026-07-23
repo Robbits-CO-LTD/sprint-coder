@@ -7,6 +7,7 @@ import {
   publicErrorSchema,
   runtimeSettingsSchema,
   taskRenameInputSchema,
+  teamSummarySchema,
   toolCatalogSnapshotSchema,
   turnEventSchema,
   turnSnapshotSchema,
@@ -41,6 +42,33 @@ const pendingApproval = {
 } as const;
 
 describe('public contracts', () => {
+  it('validates the bounded Team promotion result', () => {
+    expect(
+      teamSummarySchema.parse({
+        id: 'team-1',
+        taskId: 'task-1',
+        state: 'draft',
+        leaderAgentId: 'agent-1',
+        budget: {},
+        revision: 0,
+        createdAt: '2026-07-23T00:00:00.000Z',
+        updatedAt: '2026-07-23T00:00:00.000Z',
+      }),
+    ).toMatchObject({ taskId: 'task-1', state: 'draft', leaderAgentId: 'agent-1' });
+    expect(() =>
+      teamSummarySchema.parse({
+        id: 'team-1',
+        taskId: 'task-1',
+        state: 'running',
+        leaderAgentId: 'agent-1',
+        budget: {},
+        revision: 0,
+        createdAt: '2026-07-23T00:00:00.000Z',
+        updatedAt: '2026-07-23T00:00:00.000Z',
+      }),
+    ).toThrow();
+  });
+
   it('rejects unknown command fields', () => {
     expect(() =>
       commandEnvelopeSchema(taskRenameInputSchema).parse({

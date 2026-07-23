@@ -37,6 +37,7 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
+  teamSummarySchema,
   turnCancelInputSchema,
   turnEventSchema,
   turnQueueInputSchema,
@@ -374,6 +375,16 @@ export class IpcRouter {
       (input, event, envelope) =>
         this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.tasksSetDraft, () =>
           this.persistence.setDraft(input.taskId, input.draft),
+        ).value,
+    );
+
+    this.handleMutation(
+      IPC_CHANNELS.teamsPromote,
+      taskIdPayloadSchema,
+      teamSummarySchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.teamsPromote, () =>
+          this.persistence.promoteTaskToTeam(input.taskId),
         ).value,
     );
 

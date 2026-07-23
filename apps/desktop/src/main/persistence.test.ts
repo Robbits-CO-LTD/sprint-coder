@@ -165,7 +165,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v26', () => {
+  describe('SqlitePersistenceClient v27', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -4077,7 +4077,20 @@ if (runsWithElectronAbi)
         { version: 24 },
         { version: 25 },
         { version: 26 },
+        { version: 27 },
       ]);
+      const backfilledTeamIdentity = migrated
+        .prepare(
+          `SELECT tasks.primary_thread_id, agents.id AS leader_id
+           FROM tasks JOIN agents
+             ON agents.thread_id = tasks.primary_thread_id AND agents.kind = 'leader'
+           WHERE tasks.id = 'task-1'`,
+        )
+        .get() as { primary_thread_id: string; leader_id: string };
+      expect(backfilledTeamIdentity).toEqual({
+        primary_thread_id: 'task-1',
+        leader_id: 'task-1:leader',
+      });
       expect(
         migrated
           .prepare('PRAGMA table_info(context_fragments)')
@@ -4155,7 +4168,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v26 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v27 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

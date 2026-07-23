@@ -129,6 +129,29 @@ export const taskSummarySchema = z
   .strict();
 export type TaskSummary = z.infer<typeof taskSummarySchema>;
 
+export const teamStateSchema = z.enum([
+  'draft',
+  'forming',
+  'active',
+  'paused',
+  'winding_down',
+  'completed',
+  'failed',
+]);
+export const teamSummarySchema = z
+  .object({
+    id: idSchema,
+    taskId: idSchema,
+    state: teamStateSchema,
+    leaderAgentId: idSchema,
+    budget: z.record(z.string(), z.json()),
+    revision: z.number().int().nonnegative(),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type TeamSummary = z.infer<typeof teamSummarySchema>;
+
 export const chatMessageSchema = z
   .object({
     id: idSchema,
@@ -640,6 +663,9 @@ export interface VibeApi {
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
   };
+  teams: {
+    promote(taskId: string): Promise<TeamSummary>;
+  };
   workspace: {
     get(taskId: string): Promise<WorkspaceSelection>;
     select(taskId: string): Promise<WorkspaceSelection>;
@@ -694,6 +720,7 @@ export const IPC_CHANNELS = {
   tasksSetGoal: 'vibe:tasks:set-goal',
   tasksGetDraft: 'vibe:tasks:get-draft',
   tasksSetDraft: 'vibe:tasks:set-draft',
+  teamsPromote: 'vibe:teams:promote',
   workspaceGet: 'vibe:workspace:get',
   workspaceSelect: 'vibe:workspace:select',
   settingsGetRuntime: 'vibe:settings:get-runtime',
