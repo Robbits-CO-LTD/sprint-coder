@@ -1,8 +1,8 @@
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { CodexModelOption, PublicError } from '@vibe/contracts';
-import type { ToolCatalogSnapshot } from '@vibe/domain';
+import type { CodexModelOption, PublicError } from '@sprint-coder/contracts';
+import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { PreparedContext } from './context-ledger';
 import {
   RUNTIME_PROTOCOL_VERSION,
@@ -128,7 +128,7 @@ export class RuntimeHostClient {
       child = utilityProcess.fork(
         join(__dirname, 'runtime-host.js'),
         ['--runtime-instance-id', instanceId],
-        { serviceName: 'Vibe Codex Runtime Host', stdio: 'ignore' },
+        { serviceName: 'Sprint Coder Runtime Host', stdio: 'ignore' },
       );
     } catch {
       this.resolveProbe?.({ available: false, models: [] });

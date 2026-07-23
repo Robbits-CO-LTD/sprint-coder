@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CommandOutputRecord } from '../types/vibe';
+import type { CommandOutputRecord } from '../types/sprint-coder';
 import type { CommandCardState } from '../store/appStore';
 import {
   commandDurationMs,
@@ -38,7 +38,8 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
   }, [command.state]);
 
   async function loadOutput(reset: boolean): Promise<void> {
-    if (!window.vibe || typeof window.vibe.commands?.outputPage !== 'function') return;
+    if (!window.sprintCoder || typeof window.sprintCoder.commands?.outputPage !== 'function')
+      return;
     if (loadingRef.current) return;
     loadingRef.current = true;
     setLoading(true);
@@ -48,7 +49,7 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
     let succeeded = false;
     try {
       for (;;) {
-        const page = await window.vibe.commands.outputPage({
+        const page = await window.sprintCoder.commands.outputPage({
           taskId,
           commandId: command.id,
           afterSeq,

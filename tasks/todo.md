@@ -94,7 +94,7 @@ Wave 2(完了 2026-07-22):
     - 内部分割(2026-07-23 スコープ固定): 4.7a Native操作+staging=済(S4b1-S4b3a) / 4.7b add-update-delete-rename=済(S4b3b) / 4.7c 競合検知+crash復旧=済(S3a/S3b/S4b2) / 4.7d Saga executor wiring=済 / 4.7e packaged実ロード+platform gate=済 / 4.7f 統合テスト+完了確認=済
     - Later送り(記録): Windows/Linux write実証(ADR定義のCI必須、fail-closed維持で安全) / 3 OS CI実走・CI packaged smoke(remote未設定の環境依存) / 非決定論的外部rename raceの完全platform proof(post-observation+quarantine封じ込めで受け入れ条件充足、ADR「close or safely contain」準拠) / Verified profile(Phase 7) / restart-durable process・MCP(Public Beta)
     - 4.7d: NativeSafeFsEditEffectBoundaryをproduction EditSagaExecutor/restart recoveryへ接続。intent journal遷移、lease/session再検証、補償を実Native統合テストで確認。write ToolDefinitionは未登録
-    - 4.7e: Node 24でdarwin arm64 packageを生成し、`app.asar.unpacked/native-safe-fs/build/Release/vibe_native_safe_fs.node`を実ロード。probeは`available:true`かつ`mutation:false`で、platform gateは安全側へ閉じる。Node 26 Electron Packagerの停止はNode 24で回避
+    - 4.7e: Node 24でdarwin arm64 packageを生成し、`app.asar.unpacked/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node`を実ロード。probeは`available:true`かつ`mutation:false`で、platform gateは安全側へ閉じる。Node 26 Electron Packagerの停止はNode 24で回避
     - S4b4 harness: test専用addon分離・token認可barrier・kernel直前再検証・cleanup再ハッシュを採用し、コミット`2b4de59`
   - [x] Turn全体baseline diff集約、Acceptance Contract/Evidence Ledger、Standard repair最大1、30-case corpus baseline
     - Turn diff `3e109f8`、contract/evidence `e2f8402`、bounded repair `842e6f4`、30-case baseline `9898250`
@@ -132,7 +132,7 @@ Wave 2(完了 2026-07-22):
 ## 契約(Fableが確定)
 
 - repo構成: 計画書§2どおり(apps/desktop, packages/contracts, packages/domain, npm workspaces)
-- preload公開API `window.vibe`: tasks.list/create/messages/rename, turns.start/cancel/subscribe(型は各起動プロンプトに記載)
+- preload公開API `window.sprintCoder`: tasks.list/create/messages/rename, turns.start/cancel/subscribe(型は各起動プロンプトに記載)
 - Turn stage: understanding→planning→executing→synthesizing(FR-RUN-02のサブセット)
 - 永続化: Main直置きSQLite(ADR-Phase0比較は保留、暫定採用と記録)
 - Runtime: deterministic MockRuntimeAdapterのみ(Phase 3.2)。production adapterは次ラウンド
@@ -164,6 +164,6 @@ Wave 2(完了 2026-07-22):
 - 検証: npm install成功 / typecheck 3 workspace成功 / test 104件全PASS / Electron実起動でRenderer window生成・DB(WAL)作成をmacOS実機確認
 - 追加の起動系バグ2件をFableが特定・修正(commit済み):
   6. index.htmlがsrc/renderer配下にありVite rootの`/`が404 → apps/desktop直下へ移動(白画面の原因)
-  7. main/preload両entryがindex.tsで`.vite/build/index.js`を上書き合戦 → preload出力名を明示分離(window.vibe未公開の原因)
+  7. main/preload両entryがindex.tsで`.vite/build/index.js`を上書き合戦 → preload出力名を明示分離(window.sprintCoder未公開の原因)
 - 2026-07-22 ユーザー実機確認: golden path #1(Task作成→hello送信→Run Card→mock streaming応答)成功のスクリーンショットを受領。Chat Alpha骨格ラウンド完了
 - 未了(次ラウンド送り): operations ledger(冪等性、Slice 1.2)、Forge起動時のnative自動rebuild恒久化(workspace hoisting対策)、npm audit 24件(critical 1)、E2E(Playwright Electron、Phase 0 spike対象)、Team/Canvas(Phase 5-6)

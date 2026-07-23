@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { WorkspaceChip } from './WorkspaceChip';
-import type { TaskSummary } from '../types/vibe';
+import type { TaskSummary } from '../types/sprint-coder';
 
 export function TaskHeader({ task }: { task: TaskSummary }) {
   const renameTask = useAppStore((s) => s.renameTask);
@@ -122,7 +122,7 @@ function GoalChip({ task }: { task: TaskSummary }) {
   const [syncedGoal, setSyncedGoal] = useState(task.goal ?? '');
   const inputRef = useRef<HTMLInputElement>(null);
   const supported =
-    typeof window !== 'undefined' && typeof window.vibe?.tasks?.setGoal === 'function';
+    typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
 
   // Render-time adjustment instead of an effect, per react-hooks/set-state-in-effect.
   if (!editing && (task.goal ?? '') !== syncedGoal) {

@@ -1,4 +1,4 @@
-# vibe-editor3 Foundation 設計レビュー記録
+# Sprint Coder Foundation 設計レビュー記録
 
 - 対象: `docs/PRODUCT_AND_TECHNICAL_DESIGN.md`
 - 日付: 2026-07-20

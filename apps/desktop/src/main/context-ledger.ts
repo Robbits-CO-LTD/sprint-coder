@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import type { ContextUsage, TurnEvent } from '@vibe/contracts';
+import type { ContextUsage, TurnEvent } from '@sprint-coder/contracts';
 
 export const CONTEXT_HARD_CAP_TOKENS = 32_000;
 export const CONTEXT_SYSTEM_PROMPT =
-  'You are the Vibe task assistant. Follow the active task goal and conversation context.';
+  'You are the Sprint Coder task assistant. Follow the active task goal and conversation context.';
 
 export type ContextSource = 'system' | 'history' | 'goal' | 'compaction' | 'background';
 export type ContextTrust = 'system' | 'user' | 'assistant';

@@ -80,14 +80,14 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     manager: WorkerWorktreeManager;
   }> {
     const { repoPath, head } = await makeRepo();
-    const worktreesRoot = await mkdtemp(join(tmpdir(), 'vibe-worktree-root-'));
+    const worktreesRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-worktree-root-'));
     cleanupRoots.push(repoPath, worktreesRoot);
     return { repoPath, head, worktreesRoot, manager: new WorkerWorktreeManager({ worktreesRoot }) };
   }
 });
 
 async function makeRepo(): Promise<{ repoPath: string; head: string }> {
-  const repoPath = await mkdtemp(join(tmpdir(), 'vibe-worktree-repo-'));
+  const repoPath = await mkdtemp(join(tmpdir(), 'sprint-coder-worktree-repo-'));
   await git(['init', '-q', repoPath]);
   await writeFile(join(repoPath, 'README.md'), 'hello\n');
   await git([

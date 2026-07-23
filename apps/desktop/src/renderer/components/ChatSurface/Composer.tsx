@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
-import type { QueuedInput, RuntimeKind } from '../../types/vibe';
+import type { QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
 const STEER_UNSUPPORTED_HINT =
   'Codex runtimeでは実行中の追加指示に対応していません。キュー追加を使ってください';
@@ -46,9 +46,9 @@ export function Composer({ taskId }: { taskId: string }) {
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
-  const canQueue = typeof window.vibe?.turns?.queue === 'function';
-  const canSteer = typeof window.vibe?.turns?.steer === 'function';
-  const canStopAndSend = typeof window.vibe?.turns?.stopAndSend === 'function';
+  const canQueue = typeof window.sprintCoder?.turns?.queue === 'function';
+  const canSteer = typeof window.sprintCoder?.turns?.steer === 'function';
+  const canStopAndSend = typeof window.sprintCoder?.turns?.stopAndSend === 'function';
   const hasAnyActiveModeCapability = canQueue || canSteer || canStopAndSend;
   // Codex runtime does not support mid-turn steering (STEER_UNSUPPORTED) — the Steer segment
   // stays visible but disabled so the user understands why, per FR-SET-03.
@@ -206,10 +206,10 @@ const RUNTIME_DESC: Record<RuntimeKind, string> = {
 };
 
 // Runtime selector chip (FR-SET-03). Falls back to the legacy dummy "GPT-6.2 mini" chip when
-// the backend hasn't wired the `settings` API yet — graceful degrade per the vibe.d.ts contract.
+// the backend hasn't wired the `settings` API yet — graceful degrade per the sprint-coder.d.ts contract.
 function RuntimeChip() {
   const runtimeSupported =
-    typeof window !== 'undefined' && typeof window.vibe?.settings?.getRuntime === 'function';
+    typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.getRuntime === 'function';
   const runtime = useAppStore((s) => s.runtime);
   const setRuntime = useAppStore((s) => s.setRuntime);
   const [open, setOpen] = useState(false);
@@ -293,7 +293,7 @@ function ModelChip() {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const supported =
-    typeof window !== 'undefined' && typeof window.vibe?.settings?.setModel === 'function';
+    typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.setModel === 'function';
   const enabled = supported && runtime.kind === 'codex' && runtime.codexAvailable;
   const selected = runtime.models.find(({ id }) => id === runtime.model) ?? {
     id: runtime.model,

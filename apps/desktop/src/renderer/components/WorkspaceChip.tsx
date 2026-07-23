@@ -14,7 +14,7 @@ export function WorkspaceChip({
   const workspace = useAppStore((s) => s.workspaceByTask[taskId]);
   const selectWorkspace = useAppStore((s) => s.selectWorkspace);
   const supported =
-    typeof window !== 'undefined' && typeof window.vibe?.workspace?.select === 'function';
+    typeof window !== 'undefined' && typeof window.sprintCoder?.workspace?.select === 'function';
 
   const label = workspace ? workspace.name : 'Workspace未選択';
   const dot =

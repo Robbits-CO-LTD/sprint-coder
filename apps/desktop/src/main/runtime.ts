@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { TurnEvent, TurnStage } from '@vibe/contracts';
+import type { TurnEvent, TurnStage } from '@sprint-coder/contracts';
 import type { PersistenceClient } from './persistence';
 import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';

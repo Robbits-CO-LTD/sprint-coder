@@ -1,4 +1,4 @@
-import type { TurnDiff } from '../types/vibe';
+import type { TurnDiff } from '../types/sprint-coder';
 
 export function TurnDiffCard({ diff }: { diff: TurnDiff }) {
   if (diff.entries.length === 0) return null;

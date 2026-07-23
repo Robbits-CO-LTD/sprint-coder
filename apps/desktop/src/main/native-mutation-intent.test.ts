@@ -55,7 +55,7 @@ describe('Native mutation intent journal', () => {
       expect(intent.tombstone?.role ?? null).toBe(tombstoneRole);
       const auxiliaryName = intent.temp?.leafName ?? intent.tombstone?.leafName ?? null;
       if (kind === 'rename') expect(auxiliaryName).toBeNull();
-      else expect(auxiliaryName).toMatch(/^\.vibe-(?:temp|tomb)-[a-f0-9]{32}$/);
+      else expect(auxiliaryName).toMatch(/^\.sprint-coder-(?:temp|tomb)-[a-f0-9]{32}$/);
       expect(intent.intentDigest).toMatch(/^[a-f0-9]{64}$/);
     },
   );

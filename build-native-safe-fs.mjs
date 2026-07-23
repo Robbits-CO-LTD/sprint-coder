@@ -50,7 +50,7 @@ const result = spawnSync(
     `--target=${electronVersion}`,
     '--dist-url=https://electronjs.org/headers',
     '--loglevel=error',
-    ...(buildTestAddon ? ['--vibe_test_hooks=1'] : []),
+    ...(buildTestAddon ? ['--sprint_coder_test_hooks=1'] : []),
   ],
   { env: buildEnvironment, stdio: 'inherit' },
 );

@@ -398,7 +398,7 @@ export function createNativeMutationIntentSnapshot(
       ? Object.freeze({
           role: 'post_temp' as const,
           parentSegments,
-          leafName: `.vibe-temp-${nonce}`,
+          leafName: `.sprint-coder-temp-${nonce}`,
           expectedContentHash: seed.artifact!.contentHash,
           expectedSize: seed.artifact!.size,
           expectedMode: seed.artifact!.expectedMode,
@@ -410,7 +410,7 @@ export function createNativeMutationIntentSnapshot(
       ? Object.freeze({
           role: 'tombstone' as const,
           parentSegments,
-          leafName: `.vibe-tomb-${nonce}`,
+          leafName: `.sprint-coder-tomb-${nonce}`,
           expectedContentHash:
             seed.expectedSource.state === 'present' ? seed.expectedSource.contentHash : '',
           expectedSize: seed.expectedSource.state === 'present' ? seed.expectedSource.size : 0,
@@ -591,7 +591,7 @@ function validateAuxiliary(
   ]);
   if (
     value.role !== role ||
-    !/^\.vibe-(?:temp|tomb)-[a-f0-9]{32}$/.test(value.leafName) ||
+    !/^\.sprint-coder-(?:temp|tomb)-[a-f0-9]{32}$/.test(value.leafName) ||
     !isDigest(value.expectedContentHash) ||
     !Number.isSafeInteger(value.expectedSize) ||
     value.expectedSize < 0 ||

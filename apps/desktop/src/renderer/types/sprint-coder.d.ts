@@ -4,7 +4,7 @@
 // v2: adds Task pin/archive/goal, workspace binding, per-task draft persistence, and the
 // Queue/Steer/Stop&Send input-queue surface (FR-RUN-12/13, FR-COMP-05, FR-SET-03).
 // The backend may still only implement the v1 subset of this contract at runtime; renderer
-// code must runtime-check `typeof window.vibe?.x?.y === 'function'` before calling any v2-only
+// code must runtime-check `typeof window.sprintCoder?.x?.y === 'function'` before calling any v2-only
 // method and degrade gracefully when it is absent (see store/appStore.ts).
 
 export type TaskSummary = {
@@ -248,8 +248,8 @@ export type TurnSnapshot = {
   latestTurnDiff: TurnDiff | null;
 };
 
-/** err.code values the IPC layer may attach to a rejected VibeApi promise. */
-export type VibeErrorCode =
+/** err.code values the IPC layer may attach to a rejected SprintCoderApi promise. */
+export type SprintCoderErrorCode =
   'TURN_ACTIVE' | 'STEER_STALE' | 'RUNTIME_UNAVAILABLE' | 'STEER_UNSUPPORTED' | string;
 
 export type RuntimeKind = 'mock' | 'codex';
@@ -315,7 +315,7 @@ export type TeamDetail = {
   }[];
 };
 
-export interface VibeApi {
+export interface SprintCoderApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
   tasks: {
     list(): Promise<TaskSummary[]>;
@@ -368,7 +368,7 @@ export interface VibeApi {
     ): () => void; // returns unsubscribe
   };
   /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
-   * runtime-check `typeof window.vibe?.settings?.getRuntime === 'function'` before use. */
+   * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
   settings: {
     getRuntime(): Promise<{
       kind: RuntimeKind;
@@ -419,7 +419,7 @@ export interface VibeApi {
 
 declare global {
   interface Window {
-    vibe?: VibeApi;
+    sprintCoder?: SprintCoderApi;
   }
 }
 

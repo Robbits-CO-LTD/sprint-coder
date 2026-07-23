@@ -7,8 +7,8 @@ import {
   type PublicError,
   type CodexModelOption,
   type TurnStage,
-} from '@vibe/contracts';
-import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@vibe/domain';
+} from '@sprint-coder/contracts';
+import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
 
 export const RUNTIME_PROTOCOL_VERSION = 4;
 

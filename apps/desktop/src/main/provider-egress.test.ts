@@ -11,7 +11,7 @@ import type { PreparedContext } from './context-ledger';
 
 const cleanup: string[] = [];
 const context: PreparedContext = { fragments: [], usageEvents: [], compacted: false };
-const runsWithElectronAbi = process.env.VIBE_ELECTRON_EGRESS_TEST === '1';
+const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_EGRESS_TEST === '1';
 
 afterEach(() => {
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -136,7 +136,11 @@ else
         {
           cwd: process.cwd(),
           encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', VIBE_ELECTRON_EGRESS_TEST: '1' },
+          env: {
+            ...process.env,
+            ELECTRON_RUN_AS_NODE: '1',
+            SPRINT_CODER_ELECTRON_EGRESS_TEST: '1',
+          },
           timeout: 30_000,
         },
       );
@@ -145,7 +149,7 @@ else
   });
 
 function createFixture(localOnly: boolean) {
-  const directory = mkdtempSync(join(tmpdir(), 'vibe-provider-egress-'));
+  const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-provider-egress-'));
   cleanup.push(directory);
   const path = join(directory, 'test.sqlite3');
   const persistence = new SqlitePersistenceClient(path);

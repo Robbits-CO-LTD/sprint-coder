@@ -62,7 +62,7 @@ import {
   type PublicError,
   type RuntimeKind,
   type TurnEvent,
-} from '@vibe/contracts';
+} from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
@@ -81,8 +81,8 @@ import { PermissionBroker } from './permission-broker';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
-import { permissionRequestFingerprint, type Capability } from '@vibe/domain';
-import type { ExecutionSpec } from '@vibe/domain';
+import { permissionRequestFingerprint, type Capability } from '@sprint-coder/domain';
+import type { ExecutionSpec } from '@sprint-coder/domain';
 import { executionSpecPathGuard } from './command-runner';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
 import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lease';

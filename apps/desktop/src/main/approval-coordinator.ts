@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ApprovalDecision } from '@vibe/contracts';
+import type { ApprovalDecision } from '@sprint-coder/contracts';
 import type {
   Capability,
   PermissionOperation,
   PermissionResource,
   ResourceSet,
   ExecutionSpec,
-} from '@vibe/domain';
-import { executionSpecDigest, validateExecutionSpec } from '@vibe/domain';
+} from '@sprint-coder/domain';
+import { executionSpecDigest, validateExecutionSpec } from '@sprint-coder/domain';
 import type { ToolAuthorizationDecision, ToolAuthorizationRequest } from './tool-broker';
 import type { ApprovalRequestInput, ApprovalResolutionInput } from './persistence';
 

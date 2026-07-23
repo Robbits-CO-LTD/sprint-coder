@@ -10,7 +10,7 @@ import {
   createSessionGrant,
   createToolDefinition,
   createToolId,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
@@ -56,7 +56,7 @@ import {
 } from './native-mutation-intent';
 
 const cleanup: string[] = [];
-const runsWithElectronAbi = process.env.VIBE_ELECTRON_DB_TEST === '1';
+const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 
 afterEach(() => {
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -68,7 +68,7 @@ function createPersistence(
     invalidateNativeWorkspace?: (workspaceKey: string, minimumFence: string) => void;
   } = {},
 ): { persistence: SqlitePersistenceClient; path: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'vibe-persistence-'));
+  const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-persistence-'));
   cleanup.push(directory);
   const path = join(directory, 'test.sqlite3');
   return {
@@ -4037,7 +4037,7 @@ if (runsWithElectronAbi)
     });
 
     it('migrates a v1 database with duplicate active turns without crashing', () => {
-      const directory = mkdtempSync(join(tmpdir(), 'vibe-migration-'));
+      const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-migration-'));
       cleanup.push(directory);
       const path = join(directory, 'legacy.sqlite3');
       createLegacyV1Database(path);
@@ -4216,7 +4216,7 @@ else
         {
           cwd: process.cwd(),
           encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', VIBE_ELECTRON_DB_TEST: '1' },
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
           timeout: 30_000,
         },
       );

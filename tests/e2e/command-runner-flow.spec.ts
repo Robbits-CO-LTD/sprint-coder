@@ -33,7 +33,7 @@ test.describe('command runner flow', () => {
       });
     }, REPO_ROOT);
     await page.getByRole('button', { name: 'Workspace未選択' }).first().click();
-    await expect(page.getByRole('button', { name: 'vibe-editor3' }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'sprint-coder' }).first()).toBeVisible();
 
     const textarea = page.getByTestId('composer-textarea');
     const card = page.getByTestId('approval-card');
@@ -78,29 +78,29 @@ test.describe('command runner flow', () => {
     await expect(commandCard.getByTestId('command-duration')).toContainText(/\d/);
 
     const outputApiProof = await page.evaluate(async () => {
-      if (!window.vibe) throw new Error('vibe API unavailable');
-      const task = (await window.vibe.tasks.list()).find((candidate) => !candidate.archived);
+      if (!window.sprintCoder) throw new Error('Sprint Coder API unavailable');
+      const task = (await window.sprintCoder.tasks.list()).find((candidate) => !candidate.archived);
       if (!task) throw new Error('task unavailable');
-      const command = (await window.vibe.commands.list(task.id)).find(
+      const command = (await window.sprintCoder.commands.list(task.id)).find(
         (candidate) => candidate.state === 'exited',
       );
       if (!command) throw new Error('command unavailable');
-      const output = await window.vibe.commands.outputPage({
+      const output = await window.sprintCoder.commands.outputPage({
         taskId: task.id,
         commandId: command.id,
         afterSeq: 0,
         limit: 200,
         maxBytes: 65_536,
       });
-      const tail = await window.vibe.commands.outputTail({
+      const tail = await window.sprintCoder.commands.outputTail({
         taskId: task.id,
         commandId: command.id,
         maxBytes: 65_536,
       });
-      const other = await window.vibe.tasks.create({ title: 'ownership probe' });
+      const other = await window.sprintCoder.tasks.create({ title: 'ownership probe' });
       let crossTaskRejected = false;
       try {
-        await window.vibe.commands.outputPage({
+        await window.sprintCoder.commands.outputPage({
           taskId: other.id,
           commandId: command.id,
           afterSeq: 0,
@@ -110,7 +110,7 @@ test.describe('command runner flow', () => {
       } catch {
         crossTaskRejected = true;
       }
-      await window.vibe.tasks.setArchived(other.id, true);
+      await window.sprintCoder.tasks.setArchived(other.id, true);
       return {
         text: output.items.map((item) => item.text).join(''),
         eof: output.eof,

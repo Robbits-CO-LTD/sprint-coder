@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'vibe-path-guard-'));
+  const root = await mkdtemp(join(tmpdir(), 'sprint-coder-path-guard-'));
   temporaryRoots.push(root);
   const workspace = join(root, 'workspace');
   const outside = join(root, 'outside');
@@ -220,7 +220,7 @@ describe('path guard', () => {
   });
 
   it('inherits a protected classification when the sensitive directory is the Workspace root', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'vibe-sensitive-root-'));
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-sensitive-root-'));
     temporaryRoots.push(root);
     const credentialRoot = join(root, '.ssh');
     await mkdir(credentialRoot);

@@ -1,12 +1,12 @@
 {
-  "name": "vibe-editor3",
+  "name": "sprint-coder",
   "private": true,
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "start": "npm run start --workspace @vibe/desktop",
+    "start": "npm run start --workspace @sprint-coder/desktop",
     "build:native-safe-fs": "node build-native-safe-fs.mjs",
     "build:native-safe-fs:test": "node build-native-safe-fs.mjs --test",
     "typecheck": "npm run typecheck --workspaces --if-present",

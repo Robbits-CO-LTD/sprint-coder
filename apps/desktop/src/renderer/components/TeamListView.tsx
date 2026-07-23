@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import type { TaskSummary, TeamMessageSummary } from '../types/vibe';
+import type { TaskSummary, TeamMessageSummary } from '../types/sprint-coder';
 
 export function TeamListView({ task }: { task: TaskSummary }) {
   const detail = useAppStore((state) => state.teamByTask[task.id]);

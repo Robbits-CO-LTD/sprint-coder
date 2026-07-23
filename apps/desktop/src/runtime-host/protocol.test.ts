@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ToolRegistry } from '@vibe/domain';
+import { ToolRegistry } from '@sprint-coder/domain';
 import {
   RUNTIME_PROTOCOL_VERSION,
   isMainToRuntimeEnvelope,

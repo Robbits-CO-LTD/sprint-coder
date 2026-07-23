@@ -1,4 +1,4 @@
-# vibe-editor3 実装計画
+# Sprint Coder 実装計画
 
 - 計画ID: VE3-PLAN-001
 - 作成日: 2026-07-20
@@ -41,7 +41,7 @@ Issue作成時は対象IDを行単位へ展開し、次の対応を維持する�
 ## 2. Repository構成案
 
 ```text
-vibe-editor3/
+sprint-coder/
 ├─ apps/desktop/
 │  ├─ src/main/             # Electron Main、services、IPC
 │  ├─ src/preload/          # narrow typed bridge

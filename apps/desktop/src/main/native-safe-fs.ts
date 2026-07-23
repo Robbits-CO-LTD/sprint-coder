@@ -156,7 +156,7 @@ const ASAR_UNPACKED_DIR_SEGMENT = `${sep}app.asar.unpacked${sep}`;
 export function resolveNativeSafeFsAddonLocation(dirname: string): NativeSafeFsAddonLocation {
   const devRelativePath = join(
     dirname,
-    '../../native-safe-fs/build/Release/vibe_native_safe_fs.node',
+    '../../native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
   );
   const loadedFromUnpacked = devRelativePath.includes(ASAR_DIR_SEGMENT);
   const addonPath = loadedFromUnpacked

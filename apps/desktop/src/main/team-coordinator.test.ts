@@ -10,17 +10,17 @@ import {
   type TeamWorkerRuntime,
   type WorkerRuntimeResult,
 } from './team-coordinator';
-import type { TeamEnvelope } from '@vibe/domain';
+import type { TeamEnvelope } from '@sprint-coder/domain';
 
 const cleanup: string[] = [];
-const runsWithElectronAbi = process.env.VIBE_ELECTRON_DB_TEST === '1';
+const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 
 afterEach(() => {
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 function createPersistence(): SqlitePersistenceClient {
-  const directory = mkdtempSync(join(tmpdir(), 'vibe-team-coordinator-'));
+  const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-coordinator-'));
   cleanup.push(directory);
   return new SqlitePersistenceClient(join(directory, 'test.sqlite3'));
 }
@@ -190,7 +190,7 @@ else
         {
           cwd: process.cwd(),
           encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', VIBE_ELECTRON_DB_TEST: '1' },
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
           timeout: 60_000,
         },
       );

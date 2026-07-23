@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { TurnStage } from '@vibe/contracts';
+import type { TurnStage } from '@sprint-coder/contracts';
 import type { RuntimeCanonicalEvent } from './protocol';
 
 const stages: TurnStage[] = ['understanding', 'planning', 'executing', 'synthesizing'];

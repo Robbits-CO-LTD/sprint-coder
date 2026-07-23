@@ -7,7 +7,7 @@ import { ChatSurface } from './components/ChatSurface/ChatSurface';
 import { TeamListView } from './components/TeamListView';
 
 export default function App() {
-  const vibeAvailable = useAppStore((s) => s.vibeAvailable);
+  const sprintCoderAvailable = useAppStore((s) => s.sprintCoderAvailable);
   const initialized = useAppStore((s) => s.initialized);
   const init = useAppStore((s) => s.init);
   const tasks = useAppStore((s) => s.tasks);
@@ -20,14 +20,14 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (initialized && !vibeAvailable) {
+  if (initialized && !sprintCoderAvailable) {
     return (
       <div className="app-shell app-shell--unavailable">
         <div className="unavailable-card" role="alert">
           <h1>Electron環境で起動してください</h1>
           <p>
             このUIはElectronアプリのRendererとして動作します。ブラウザから直接開いた場合、
-            <code>window.vibe</code>{' '}
+            <code>window.sprintCoder</code>{' '}
             が公開されないため、Taskの読み込みやメッセージ送信はできません。
           </p>
         </div>

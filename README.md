@@ -1,4 +1,4 @@
-# vibe-editor3
+# Sprint Coder
 
 Chatから始まり、必要になった瞬間だけ複数のAI Workerへ広がる、ローカルファーストのElectronデスクトップアプリ。
 
@@ -10,7 +10,7 @@ Chatから始まり、必要になった瞬間だけ複数のAI Workerへ広が�
 - [Codex CLI / Grok Build 参照アーキテクチャ分析](docs/REFERENCE_AGENT_ARCHITECTURE.md)
 - [Agent Intelligence詳細設計](tasks/designs/design-agent-intelligence-architecture-20260721.md)
 - [実装計画](tasks/IMPLEMENTATION_PLAN.md)
-- [設計レビュー記録](tasks/designs/design-vibe-editor3-foundation-20260720.md)
+- [設計レビュー記録](tasks/designs/design-sprint-coder-foundation-20260720.md)
 - [参照agent導入後のhardening review](tasks/designs/design-reference-agent-hardening-20260721.md)
 
 ## 現在の状態
@@ -19,4 +19,4 @@ Chatから始まり、必要になった瞬間だけ複数のAI Workerへ広が�
 
 ## Codex runtimeの手動確認
 
-実CLIの確認は、隔離したuser dataで `VIBE_USER_DATA_DIR=/tmp/vibe-runtime-smoke VIBE_RUNTIME_SMOKE=codex npm start` を実行し、Settings APIでCodexを選択して短いTurnを開始する。stageが順番に進み、応答がstreamして完了すること、実行中のSteerが`STEER_UNSUPPORTED`になること、CancelでCodexの子processが残らないことを確認する（`VIBE_RUNTIME_SMOKE`は手動試験の意図を示すmarkerであり、runtime選択自体はSettings APIに保存される）。
+実CLIの確認は、隔離したuser dataで `SPRINT_CODER_USER_DATA_DIR=/tmp/sprint-coder-runtime-smoke SPRINT_CODER_RUNTIME_SMOKE=codex npm start` を実行し、Settings APIでCodexを選択して短いTurnを開始する。stageが順番に進み、応答がstreamして完了すること、実行中のSteerが`STEER_UNSUPPORTED`になること、CancelでCodexの子processが残らないことを確認する（`SPRINT_CODER_RUNTIME_SMOKE`は手動試験の意図を示すmarkerであり、runtime選択自体はSettings APIに保存される）。

@@ -5,7 +5,7 @@ import {
   type ToolCatalogSnapshot,
   type ToolExecutionContext,
   type ExecutionSpec,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import { randomUUID } from 'node:crypto';
 import { ToolBroker, type ToolAuthorizer } from './tool-broker';
 import {
@@ -15,7 +15,7 @@ import {
   type CommandResult,
 } from './command-runner';
 import type { PersistenceClient } from './persistence';
-import type { TurnEvent } from '@vibe/contracts';
+import type { TurnEvent } from '@sprint-coder/contracts';
 
 export const MOCK_ECHO_TOOL = createToolDefinition({
   toolId: createToolId({ provider: 'builtin', namespace: 'mock', name: 'echo', version: '1' }),

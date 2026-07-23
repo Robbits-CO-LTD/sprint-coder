@@ -1,4 +1,4 @@
-import type { ApprovalSummary } from '../types/vibe';
+import type { ApprovalSummary } from '../types/sprint-coder';
 
 const DECISION_LABEL = {
   allow_once: '今回のみ許可しました',

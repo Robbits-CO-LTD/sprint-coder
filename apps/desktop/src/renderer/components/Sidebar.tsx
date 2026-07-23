@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { isSameDay } from '../lib/format';
-import type { TaskSummary } from '../types/vibe';
+import type { TaskSummary } from '../types/sprint-coder';
 
 function groupTasks(tasks: TaskSummary[], query: string) {
   const q = query.trim().toLowerCase();
@@ -42,8 +42,8 @@ export function Sidebar() {
 
   const canManage =
     typeof window !== 'undefined' &&
-    typeof window.vibe?.tasks?.setPinned === 'function' &&
-    typeof window.vibe?.tasks?.setArchived === 'function';
+    typeof window.sprintCoder?.tasks?.setPinned === 'function' &&
+    typeof window.sprintCoder?.tasks?.setArchived === 'function';
 
   const rowProps = {
     selectedTaskId,

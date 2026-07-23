@@ -72,7 +72,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'vibe-native-safe-fs-')));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sprint-coder-native-safe-fs-')));
   cleanup.push(root);
   const workspace = join(root, 'workspace');
   const locks = join(root, 'locks');
@@ -100,7 +100,7 @@ function fixtureBoundary(
 }
 
 function nativeSafeFsTestAddonPath(): string {
-  return join(nativeSafeFsAddonPath(), '..', 'vibe_native_safe_fs_test.node');
+  return join(nativeSafeFsAddonPath(), '..', 'sprint_coder_native_safe_fs_test.node');
 }
 
 type NativeTestControl = Readonly<{
@@ -248,7 +248,7 @@ async function stageNativeIntent(
 describe('NativeSafeFs authority boundary', () => {
   it('fails closed when the addon cannot be loaded', async () => {
     const boundary = loadNativeSafeFs({
-      addonPath: '/definitely/missing/vibe-native-safe-fs.node',
+      addonPath: '/definitely/missing/sprint-coder-native-safe-fs.node',
     });
     await expect(boundary.probe()).resolves.toMatchObject({ available: false });
     await expect(
@@ -264,7 +264,9 @@ describe('NativeSafeFs authority boundary', () => {
   });
 
   it('fails closed for malformed or corrupt addon artifacts', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'vibe-native-safe-fs-addon-')));
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'sprint-coder-native-safe-fs-addon-')),
+    );
     cleanup.push(root);
     const malformed = join(root, 'malformed.cjs');
     const corrupt = join(root, 'corrupt.node');
@@ -1339,21 +1341,21 @@ describe('NativeSafeFs authority boundary', () => {
 
 describe('resolveNativeSafeFsAddonLocation (packaged addon path resolution)', () => {
   it('leaves the dev-relative path unchanged when not running from inside app.asar', () => {
-    const dirname = '/Users/dev/vibe-editor3/apps/desktop/src/main';
+    const dirname = '/Users/dev/sprint-coder/apps/desktop/src/main';
     const location = resolveNativeSafeFsAddonLocation(dirname);
     expect(location).toEqual({
       addonPath:
-        '/Users/dev/vibe-editor3/apps/desktop/native-safe-fs/build/Release/vibe_native_safe_fs.node',
+        '/Users/dev/sprint-coder/apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
       loadedFromUnpacked: false,
     });
   });
 
   it('redirects into the app.asar.unpacked sibling when the bundle runs from inside app.asar', () => {
-    const dirname = '/Applications/vibe-editor3.app/Contents/Resources/app.asar/.vite/build';
+    const dirname = '/Applications/Sprint Coder.app/Contents/Resources/app.asar/.vite/build';
     const location = resolveNativeSafeFsAddonLocation(dirname);
     expect(location).toEqual({
       addonPath:
-        '/Applications/vibe-editor3.app/Contents/Resources/app.asar.unpacked/native-safe-fs/build/Release/vibe_native_safe_fs.node',
+        '/Applications/Sprint Coder.app/Contents/Resources/app.asar.unpacked/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
       loadedFromUnpacked: true,
     });
     expect(location.addonPath).not.toContain('/app.asar/');
@@ -1364,7 +1366,7 @@ describe('resolveNativeSafeFsAddonLocation (packaged addon path resolution)', ()
     const location = resolveNativeSafeFsAddonLocation(dirname);
     expect(location.loadedFromUnpacked).toBe(true);
     expect(location.addonPath).toBe(
-      '/opt/example/app.asar.unpacked/native-safe-fs/build/Release/vibe_native_safe_fs.node',
+      '/opt/example/app.asar.unpacked/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
     );
   });
 

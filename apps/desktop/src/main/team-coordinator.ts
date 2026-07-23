@@ -9,7 +9,7 @@ import {
   type TeamSendMessageInput,
   type WorkerCompletion,
   type WorkerSummary,
-} from '@vibe/contracts';
+} from '@sprint-coder/contracts';
 import {
   assertEnvelopeMatchesClaims,
   assertSpawnAuthority,
@@ -19,7 +19,7 @@ import {
   TEAM_DELIVERY_MAX_ATTEMPTS,
   TEAM_MESSAGE_RATE_LIMIT,
   type TeamEnvelope,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import { killProcessTree } from './process-tree';
 import type {
   AgentRecord,

@@ -3,7 +3,7 @@ import { lstat, open, readlink, realpath, stat, type FileHandle } from 'node:fs/
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
-import type { PathClassification, PermissionResource } from '@vibe/domain';
+import type { PathClassification, PermissionResource } from '@sprint-coder/domain';
 
 export type PathOperation = 'read' | 'write' | 'rename' | 'delete';
 export type FileIdentity = {
@@ -282,8 +282,8 @@ function classifyWorkspacePath(workspacePath: string, resolvedPath: string): Pat
   if (
     absoluteParts.includes('.git') ||
     absoluteParts.includes('.codex') ||
-    absoluteParts.includes('.vibe') ||
-    absoluteParts.includes('.vibe-team')
+    absoluteParts.includes('.sprint-coder') ||
+    absoluteParts.includes('.sprint-coder-team')
   )
     return 'app-private';
   if (
@@ -297,7 +297,11 @@ function classifyWorkspacePath(workspacePath: string, resolvedPath: string): Pat
     return 'credential';
   if (absoluteParts.includes('library') && absoluteParts.includes('application support'))
     return 'app-private';
-  if (parts.some((part) => part === '.git' || part === '.vibe' || part === '.vibe-team'))
+  if (
+    parts.some(
+      (part) => part === '.git' || part === '.sprint-coder' || part === '.sprint-coder-team',
+    )
+  )
     return 'app-private';
   if (/^(?:update|auto-update).*(?:key|pem)$/.test(name)) return 'update-key';
   if (/\.(?:p12|pfx)$/.test(name) || /^(?:signing|release).*(?:key|pem)$/.test(name))

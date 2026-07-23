@@ -2,7 +2,7 @@ import { useAppStore } from '../../store/appStore';
 import { SurfaceHeader } from './SurfaceHeader';
 import { Timeline } from './Timeline';
 import { Composer } from './Composer';
-import type { TaskSummary } from '../../types/vibe';
+import type { TaskSummary } from '../../types/sprint-coder';
 
 // ChatSurface: SurfaceHeader + Timeline + ContextBar + Composer (§4.2). Container layout and
 // viewport context are the only things that should ever differ between the normal Chat layout

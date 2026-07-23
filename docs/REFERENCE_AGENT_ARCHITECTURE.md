@@ -3,7 +3,7 @@
 - 文書ID: VE3-REF-001
 - 状態: Reviewed baseline / architecture・feasibility・security review反映済み
 - 調査日: 2026-07-21
-- 目的: 完成度の高いcoding agentから、vibe-editor3へ採用する設計原則を抽出する
+- 目的: 完成度の高いcoding agentから、Sprint Coderへ採用する設計原則を抽出する
 - 対象: Agent Runtime、protocol、tool、permission、session、Team、recovery
 
 ## 1. 調査元と再現性
@@ -20,9 +20,9 @@
 - `.reference-repos/codex`
 - `.reference-repos/grok-build`
 
-cloneは`.gitignore`対象とし、vibe-editor3の配布物、npm package、Git履歴へ含めない。設計パターンだけを抽出し、source codeのcopyを行わない。
+cloneは`.gitignore`対象とし、Sprint Coderの配布物、npm package、Git履歴へ含めない。設計パターンだけを抽出し、source codeのcopyを行わない。
 
-各判断の由来は次のラベルで区別する。**Source-derived**は参照repository/公式manualで確認した構造、**Adapted**はvibe-editor3向けの変更、**New proposal**は固有のhardeningを表す。
+各判断の由来は次のラベルで区別する。**Source-derived**は参照repository/公式manualで確認した構造、**Adapted**はSprint Coder向けの変更、**New proposal**は固有のhardeningを表す。
 
 ## 2. 調査対象
 
@@ -80,7 +80,7 @@ Session Store + Query Projection
 
 **Source-derived → Adapted**
 
-Codex app-server v2は長寿命のThread、1回のmodel executionであるTurn、Turn内のmessage/tool/approvalをItemとして分ける。vibe-editor3もこの3階層を正本にする。
+Codex app-server v2は長寿命のThread、1回のmodel executionであるTurn、Turn内のmessage/tool/approvalをItemとして分ける。Sprint Coderもこの3階層を正本にする。
 
 - Taskはproduct上のcontainer。
 - AgentThreadはruntimeとの会話session。
@@ -93,7 +93,7 @@ Codex app-server v2は長寿命のThread、1回のmodel executionであるTurn�
 
 **Source-derived → Adapted**
 
-Codex内部ではSubmissionにcorrelation IDを持たせ、OpとEventを分離している。vibe-editor3はこれを次の形で採用する。
+Codex内部ではSubmissionにcorrelation IDを持たせ、OpとEventを分離している。Sprint Coderはこれを次の形で採用する。
 
 - Command: clientまたはcoordinatorがactorへ送る意図。
 - Event: actorが確定した事実。
@@ -115,7 +115,7 @@ Codex app-serverの`thread/start`、`turn/start`のようなresource/method命�
 
 ### 4.4 Turn steeringのprecondition
 
-Codexのturn steeringはactive turn IDをpreconditionに使う。vibe-editor3でも生成中の追加指示は`expectedTurnId`必須とする。
+Codexのturn steeringはactive turn IDをpreconditionに使う。Sprint Coderでも生成中の追加指示は`expectedTurnId`必須とする。
 
 - 一致: active turnのinput queueへ追加。
 - 不一致: `TURN_PRECONDITION_FAILED`。
@@ -127,7 +127,7 @@ Codexのturn steeringはactive turn IDをpreconditionに使う。vibe-editor3で
 
 **Source-derived → Adapted**
 
-approval requestはthreadId、turnId、itemId、開始時刻、理由、command、cwd、environment、追加権限、選択可能decisionを持つ。vibe-editor3ではさらにimmutable ExecutionSpec digestを必須化する。
+approval requestはthreadId、turnId、itemId、開始時刻、理由、command、cwd、environment、追加権限、選択可能decisionを持つ。Sprint Coderではさらにimmutable ExecutionSpec digestを必須化する。
 
 承認は単なるbooleanではない。
 
@@ -153,7 +153,7 @@ Auto reviewはsandboxを緩めない。sandbox境界で止まったrequestだけ
 
 **Source-derived → Adapted**
 
-Codexのrepository ruleはmodel contextをincrementalに積み、unbounded itemを禁止している。vibe-editor3は以下を要件化する。
+Codexのrepository ruleはmodel contextをincrementalに積み、unbounded itemを禁止している。Sprint Coderは以下を要件化する。
 
 - context fragmentごとにtype、source、trust、token estimate、hard capを持つ。
 - 1 fragmentは10k token未満、1k token超はdiagnostic対象。
@@ -164,7 +164,7 @@ Codexのrepository ruleはmodel contextをincrementalに積み、unbounded item�
 
 **Source-derived → Adapted**
 
-CodexはrolloutとSQLite projectionを分ける。vibe-editor3はSQLite内event logをauthoritativeに保つが、同じ思想でwrite modelとread modelを分離する。
+CodexはrolloutとSQLite projectionを分ける。Sprint CoderはSQLite内event logをauthoritativeに保つが、同じ思想でwrite modelとread modelを分離する。
 
 - Turn/Item event log: 復旧と監査の正本。
 - Thread/Task projection: Sidebar、検索、recent sort用。
@@ -177,7 +177,7 @@ CodexはrolloutとSQLite projectionを分ける。vibe-editor3はSQLite内event 
 
 **Source-derived → Adapted**
 
-Grok BuildはSessionActorへtyped commandを送り、mutable session stateを一箇所で直列化している。vibe-editor3の各AgentThreadもactor mailboxを持つ。
+Grok BuildはSessionActorへtyped commandを送り、mutable session stateを一箇所で直列化している。Sprint Coderの各AgentThreadもactor mailboxを持つ。
 
 Actorが所有するもの:
 
@@ -195,7 +195,7 @@ ActorはDB/runtime/tool/approval I/Oをmailbox内でawaitしない。Effectを�
 
 ### 5.2 Server-authoritative input queue
 
-Grok Buildはprompt queueをserver側の正本にし、通常queueとcancel-and-sendを分けている。vibe-editor3ではComposer送信時に次を選べる。
+Grok Buildはprompt queueをserver側の正本にし、通常queueとcancel-and-sendを分けている。Sprint CoderではComposer送信時に次を選べる。
 
 - Queue: 現Turn完了後にFIFO実行。
 - Steer: 現Turnへ補足として注入。
@@ -207,7 +207,7 @@ UI上はsend button横の小menuとkeyboard shortcutで選択し、実際のqueu
 
 **Source-derived → Adapted**
 
-Grok Buildはuser messageをhistoryへappendしてflush barrierを通した後にinferenceを開始できる。vibe-editor3も次を不変条件にする。
+Grok Buildはuser messageをhistoryへappendしてflush barrierを通した後にinferenceを開始できる。Sprint Coderも次を不変条件にする。
 
 1. User message、TurnAccepted、dispatch outboxをtransaction commit。
 2. Rendererへaccepted通知。
@@ -217,7 +217,7 @@ commitに失敗したTurnはmodelへ送らない。restart時は`dispatchPending
 
 ### 5.4 Tool RegistryとToolKind
 
-Grok BuildのToolBridgeはclient-facing nameと意味上のToolKindを分け、built-in/MCPを同じregistryからdispatchする。vibe-editor3も次を採用する。
+Grok BuildのToolBridgeはclient-facing nameと意味上のToolKindを分け、built-in/MCPを同じregistryからdispatchする。Sprint Coderも次を採用する。
 
 - ToolId: provider/namespace/name/version。
 - ToolKind: fileRead、fileWrite、search、shell、network、backgroundTaskなどの閉じた分類。
@@ -228,7 +228,7 @@ ToolKindはpolicy/risk分類であり実装resolverではない。各Turnでimmu
 
 ### 5.5 Background task ownershipとwakeup
 
-Grok Buildはbackground command、monitor、scheduler、subagentをtaskとして追跡し、完了を次Turnへ通知する。vibe-editor3ではBackgroundActivityを共通domainにする。
+Grok Buildはbackground command、monitor、scheduler、subagentをtaskとして追跡し、完了を次Turnへ通知する。Sprint CoderではBackgroundActivityを共通domainにする。
 
 - ownerThreadId、ownerTurnId、workerId。
 - kind、state、startedAt、heartbeatAt。
@@ -240,7 +240,7 @@ Grok Buildはbackground command、monitor、scheduler、subagentをtaskとして
 
 ### 5.6 Checkpointとrewind
 
-Grok Buildはuser prompt境界でfilesystem、Git、hunk stateをcheckpointし、conversationとworkspaceを一緒にrewindする。CodexのThreadRollbackはfilesystemを戻さないため、vibe-editor3は両者を明確に分ける。
+Grok Buildはuser prompt境界でfilesystem、Git、hunk stateをcheckpointし、conversationとworkspaceを一緒にrewindする。CodexのThreadRollbackはfilesystemを戻さないため、Sprint Coderは両者を明確に分ける。
 
 - Conversation rewind: history/contextだけを戻す。
 - Workspace restore: filesystem/git snapshotだけを戻す。
@@ -250,7 +250,7 @@ checkpointはturn開始前のfirst-wins snapshotとする。atomic temp-write + 
 
 ### 5.7 Session forkとworktree isolation
 
-Grok Buildはsession forkをconversation copyとoptional Git worktreeに分ける。vibe-editor3のWorker isolationにもこれを採用する。
+Grok Buildはsession forkをconversation copyとoptional Git worktreeに分ける。Sprint CoderのWorker isolationにもこれを採用する。
 
 - Shared: 同じworkspace。read-only調査向け。
 - Worktree: Worker専用Git worktree。write taskのdefault候補。
@@ -262,13 +262,13 @@ Worktreeはchange isolationでありsecurity boundaryではない。write Worker
 
 ### 5.8 ACP/headlessの教訓
 
-Grok BuildはTUI、headless、ACPで同じsession runtimeを使う。vibe-editor3もElectron UIを唯一clientにしない。
+Grok BuildはTUI、headless、ACPで同じsession runtimeを使う。Sprint CoderもElectron UIを唯一clientにしない。
 
 MVPでは内部protocolだけを実装するが、RuntimeHostはstdio/MessagePort adapterを差し替え可能にする。Public Beta後にexternal automation APIを検討する。
 
 ### 5.9 Versioned event schema
 
-Grok Buildのevent schemaはversionを明示する。vibe-editor3の全durable eventは次を持つ。
+Grok Buildのevent schemaはversionを明示する。Sprint Coderの全durable eventは次を持つ。
 
 - schemaVersion。
 - eventId。
@@ -281,15 +281,15 @@ Grok Buildのevent schemaはversionを明示する。vibe-editor3の全durable e
 
 ### 6.1 Grok Buildのdefault sandbox off
 
-採用しない。vibe-editor3はworkspace-write相当をdefaultとし、networkはdefault denyにする。
+採用しない。Sprint Coderはworkspace-write相当をdefaultとし、networkはdefault denyにする。
 
 ### 6.2 Grok Buildのprefix allow rule
 
-単純prefixで`git *`をallowするとchained commandを誤許可し得るため採用しない。vibe-editor3はshell parse後の全segmentへ同じrule evaluationを適用し、parse不能commandはpromptまたはdenyへ倒す。
+単純prefixで`git *`をallowするとchained commandを誤許可し得るため採用しない。Sprint Coderはshell parse後の全segmentへ同じrule evaluationを適用し、parse不能commandはpromptまたはdenyへ倒す。
 
 ### 6.3 Parent plan modeを継承しないsubagent
 
-採用しない。Grok Buildのguideにはparentがplan modeでもwrite-capable subagentが編集可能な注意がある。vibe-editor3はparent capabilityをchildの上限とし、childが権限を拡大できない。
+採用しない。Grok Buildのguideにはparentがplan modeでもwrite-capable subagentが編集可能な注意がある。Sprint Coderはparent capabilityをchildの上限とし、childが権限を拡大できない。
 
 ### 6.4 Historyだけのrollback
 
@@ -301,9 +301,9 @@ Codex/Grokの全eventをそのままRendererへ渡さない。Runtime HostでCan
 
 ### 6.6 Runtime内tool execution
 
-Managed modeでは採用しない。providerが内部でShell/File toolを直接実行できる場合、vibe-editor3のTool Brokerを迂回するためread-onlyまたはunmanaged扱いに限定する。
+Managed modeでは採用しない。providerが内部でShell/File toolを直接実行できる場合、Sprint CoderのTool Brokerを迂回するためread-onlyまたはunmanaged扱いに限定する。
 
-## 7. vibe-editor3 Agent Kernel
+## 7. Sprint Coder Agent Kernel
 
 ```text
 Electron Renderer
@@ -524,7 +524,7 @@ external side effect、network write、published commit、database mutationはre
 6. Anti-stall: 同じgapが続けば同じpatchを繰り返さず、HOWを変えるかpauseする。
 7. Eval Flywheel: successだけでなくfalse completion、不要diff、repair回数、costを固定corpusで比較する。
 
-Codex由来の反復sampling、tool並列gate、typed patch、Turn diff、独立reviewと、Grok Build由来のAcceptance Contract、skeptic verifier、strategist、stall検知を組み合わせる。ただし3人のskepticは高risk Taskに限定し、通常はQuick / Standard / Verifiedのprofileでcostを制御する。公開sourceには製品レベルのbenchmark値がないため、同等性能を断言せず、vibe-editor3自身のregression corpusを品質の正本とする。
+Codex由来の反復sampling、tool並列gate、typed patch、Turn diff、独立reviewと、Grok Build由来のAcceptance Contract、skeptic verifier、strategist、stall検知を組み合わせる。ただし3人のskepticは高risk Taskに限定し、通常はQuick / Standard / Verifiedのprofileでcostを制御する。公開sourceには製品レベルのbenchmark値がないため、同等性能を断言せず、Sprint Coder自身のregression corpusを品質の正本とする。
 
 型、状態遷移、編集transaction、verification recipe、DB/API/UI、評価指標、段階導入は [`tasks/designs/design-agent-intelligence-architecture-20260721.md`](../tasks/designs/design-agent-intelligence-architecture-20260721.md) を正本とする。
 
@@ -532,4 +532,4 @@ Codex由来の反復sampling、tool並列gate、typed patch、Turn diff、独立
 
 Codex CLIからはprotocolの厳密さ、Thread/Turn/Item、sandboxとapproval reviewerの分離、context上限、rollout/projectionを採用する。Grok BuildからはSessionActor、authoritative prompt queue、persist-before-inference、tool registry、background wakeup、checkpoint/rewind、worktreeによる変更分離を採用する。
 
-vibe-editor3の差別化は、これらの堅牢なagent kernelをChatSurfaceとTeam Canvasで可視化することにある。Canvasはagent orchestrationの正本ではなく、Thread/Worker/Deliveryのprojectionとする。UIを閉じてもAgent Kernelの状態と因果関係は失われない。
+Sprint Coderの差別化は、これらの堅牢なagent kernelをChatSurfaceとTeam Canvasで可視化することにある。Canvasはagent orchestrationの正本ではなく、Thread/Worker/Deliveryのprojectionとする。UIを閉じてもAgent Kernelの状態と因果関係は失われない。

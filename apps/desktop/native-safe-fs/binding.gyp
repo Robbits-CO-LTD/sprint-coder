@@ -1,10 +1,10 @@
 {
   "variables": {
-    "vibe_test_hooks%": 0
+    "sprint_coder_test_hooks%": 0
   },
   "targets": [
     {
-      "target_name": "vibe_native_safe_fs",
+      "target_name": "sprint_coder_native_safe_fs",
       "sources": ["native_safe_fs.cc"],
       "defines": ["NAPI_VERSION=10"],
       "cflags_cc": ["-std=c++20", "-Wall", "-Wextra"],
@@ -21,14 +21,14 @@
       }
     },
     {
-      "target_name": "vibe_native_safe_fs_test",
+      "target_name": "sprint_coder_native_safe_fs_test",
       "type": "none",
       "conditions": [
-        ["vibe_test_hooks==1 and OS!='win'", {
+        ["sprint_coder_test_hooks==1 and OS!='win'", {
           "type": "loadable_module",
           "product_extension": "node",
           "sources": ["native_safe_fs.cc"],
-          "defines": ["NAPI_VERSION=10", "VIBE_NATIVE_SAFE_FS_TESTING=1"],
+          "defines": ["NAPI_VERSION=10", "SPRINT_CODER_NATIVE_SAFE_FS_TESTING=1"],
           "cflags_cc": ["-std=c++20", "-Wall", "-Wextra"],
           "xcode_settings": {
             "CLANG_CXX_LANGUAGE_STANDARD": "c++20",

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalSummary } from '../types/vibe';
+import type { ApprovalDecision, ApprovalSummary } from '../types/sprint-coder';
 
 export function ApprovalCard({
   approval,

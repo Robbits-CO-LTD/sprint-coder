@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 async function workspace(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'vibe-command-runner-'));
+  const root = await mkdtemp(join(tmpdir(), 'sprint-coder-command-runner-'));
   roots.push(root);
   return root;
 }

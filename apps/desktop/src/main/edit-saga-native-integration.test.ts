@@ -39,7 +39,7 @@ import {
   type MutationLeaseToken,
 } from './mutation-lease';
 
-const runsWithElectronAbi = process.env.VIBE_ELECTRON_DB_TEST === '1';
+const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 const cleanup: string[] = [];
 
 afterEach(async () => {
@@ -76,7 +76,9 @@ async function fileRevision(path: string): Promise<PreparedFileRevision> {
 }
 
 async function fixture(prefix: string) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), `vibe-edit-saga-native-${prefix}-`)));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), `sprint-coder-edit-saga-native-${prefix}-`)),
+  );
   cleanup.push(root);
   const workspace = join(root, 'workspace');
   const locks = join(root, 'locks');
@@ -531,7 +533,7 @@ if (runsWithElectronAbi) {
         {
           cwd: process.cwd(),
           encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', VIBE_ELECTRON_DB_TEST: '1' },
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
           timeout: 60_000,
         },
       );

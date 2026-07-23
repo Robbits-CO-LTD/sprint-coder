@@ -3,7 +3,7 @@ import type {
   ReasoningEffort,
   StepSnapshot,
   ToolCatalogSnapshot,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import {
   ContextCompiler,
   digestCanonical,

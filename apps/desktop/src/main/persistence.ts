@@ -26,7 +26,7 @@ import {
   type TurnEvent,
   type TurnSnapshot,
   type TurnStage,
-} from '@vibe/contracts';
+} from '@sprint-coder/contracts';
 import {
   capabilities,
   createSessionGrant,
@@ -80,7 +80,7 @@ import {
   type TeamMessageState,
   type TeamState,
   type WorkerState,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import {
   ContextLedger,
   defaultContextUsage,

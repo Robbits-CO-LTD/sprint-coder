@@ -1,4 +1,4 @@
-import type { AutoPermissionDecision } from '../types/vibe';
+import type { AutoPermissionDecision } from '../types/sprint-coder';
 
 const DECISION_LABEL = {
   allow: '自動許可',

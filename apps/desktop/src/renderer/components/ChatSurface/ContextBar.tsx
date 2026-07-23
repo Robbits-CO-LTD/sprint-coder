@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { WorkspaceChip } from '../WorkspaceChip';
 import { useAppStore } from '../../store/appStore';
-import type { ContextUsage } from '../../types/vibe';
-import type { AccessPreset } from '../../types/vibe';
+import type { ContextUsage } from '../../types/sprint-coder';
+import type { AccessPreset } from '../../types/sprint-coder';
 
 const SOURCE_LABEL: Record<ContextUsage['fragments'][number]['source'], string> = {
   system: 'システム',
@@ -52,7 +52,7 @@ function PermissionChip({ taskId }: { taskId: string }) {
   const [confirmingFull, setConfirmingFull] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const supported =
-    typeof window !== 'undefined' && typeof window.vibe?.permissions?.set === 'function';
+    typeof window !== 'undefined' && typeof window.sprintCoder?.permissions?.set === 'function';
 
   useEffect(() => {
     if (!open) return;

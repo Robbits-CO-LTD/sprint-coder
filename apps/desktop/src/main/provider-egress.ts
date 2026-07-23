@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
-import type { TaskSummary } from '@vibe/contracts';
-import type { PermissionEvaluation, PermissionRequest } from '@vibe/domain';
+import type { TaskSummary } from '@sprint-coder/contracts';
+import type { PermissionEvaluation, PermissionRequest } from '@sprint-coder/domain';
 import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
 import { PermissionBroker } from './permission-broker';
