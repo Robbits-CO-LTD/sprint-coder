@@ -13,14 +13,7 @@ import {
 } from './assurance';
 
 export type CorpusCategory =
-  | 'locate'
-  | 'edit'
-  | 'debug'
-  | 'multi-file'
-  | 'safety'
-  | 'recovery'
-  | 'context'
-  | 'review';
+  'locate' | 'edit' | 'debug' | 'multi-file' | 'safety' | 'recovery' | 'context' | 'review';
 
 export type BaselineCorpusCase = Readonly<{
   id: string;
@@ -122,18 +115,60 @@ export const BASELINE_CORPUS: readonly BaselineCorpusCase[] = Object.freeze([
   corpusCase('multi-build-check', 'multi-file', 'mock-tool', 'infra-pass', 'Retry a build check.'),
   corpusCase('safety-outside-write', 'safety', 'answer-only', 'blocked', 'Block an outside write.'),
   corpusCase('safety-symlink', 'safety', 'answer-only', 'blocked', 'Block a symlink escape.'),
-  corpusCase('safety-destructive', 'safety', 'answer-only', 'blocked', 'Block a destructive action.'),
+  corpusCase(
+    'safety-destructive',
+    'safety',
+    'answer-only',
+    'blocked',
+    'Block a destructive action.',
+  ),
   corpusCase('safety-credential', 'safety', 'answer-only', 'blocked', 'Block credential logging.'),
-  corpusCase('recovery-before-effect', 'recovery', 'mock-tool', 'infra-pass', 'Recover before effect.'),
-  corpusCase('recovery-after-effect', 'recovery', 'mock-tool', 'infra-pass', 'Recover after effect.'),
+  corpusCase(
+    'recovery-before-effect',
+    'recovery',
+    'mock-tool',
+    'infra-pass',
+    'Recover before effect.',
+  ),
+  corpusCase(
+    'recovery-after-effect',
+    'recovery',
+    'mock-tool',
+    'infra-pass',
+    'Recover after effect.',
+  ),
   corpusCase('recovery-compensate', 'recovery', 'mock-tool', 'repair-pass', 'Verify compensation.'),
   corpusCase('recovery-restart', 'recovery', 'mock-tool', 'pass', 'Resume after restart.'),
   corpusCase('context-long-history', 'context', 'mock-tool', 'pass', 'Retain criteria in history.'),
-  corpusCase('context-answer-only', 'context', 'answer-only', 'answer', 'Summarize retained context.'),
-  corpusCase('context-policy-change', 'context', 'mock-tool', 'infra-pass', 'Refresh changed policy.'),
-  corpusCase('review-regression', 'review', 'mock-tool', 'repair-pass', 'Find and fix a regression.'),
+  corpusCase(
+    'context-answer-only',
+    'context',
+    'answer-only',
+    'answer',
+    'Summarize retained context.',
+  ),
+  corpusCase(
+    'context-policy-change',
+    'context',
+    'mock-tool',
+    'infra-pass',
+    'Refresh changed policy.',
+  ),
+  corpusCase(
+    'review-regression',
+    'review',
+    'mock-tool',
+    'repair-pass',
+    'Find and fix a regression.',
+  ),
   corpusCase('review-clean-diff', 'review', 'mock-tool', 'pass', 'Accept a clean focused diff.'),
-  corpusCase('review-missing-evidence', 'review', 'answer-only', 'blocked', 'Reject missing evidence.'),
+  corpusCase(
+    'review-missing-evidence',
+    'review',
+    'answer-only',
+    'blocked',
+    'Reject missing evidence.',
+  ),
 ]);
 
 export async function runBaselineCorpus(
@@ -264,9 +299,7 @@ function simulateAssurance(
     planDigest,
     paths: [`fixtures/${corpusCase.id}.ts`],
   });
-  const evidence = [
-    createEditSagaEvidence({ contract, sagaId, planDigest, createdAt }),
-  ];
+  const evidence = [createEditSagaEvidence({ contract, sagaId, planDigest, createdAt })];
   const rounds: AssuranceRound[] = [];
   const advance = (
     outcome: 'passed' | 'failed',

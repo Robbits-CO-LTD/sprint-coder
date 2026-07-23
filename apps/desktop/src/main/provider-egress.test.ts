@@ -6,10 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PermissionBroker } from './permission-broker';
 import { SqlitePersistenceClient } from './persistence';
-import {
-  authorizeCodexProviderEgress,
-  dispatchAfterCodexProviderEgress,
-} from './provider-egress';
+import { authorizeCodexProviderEgress, dispatchAfterCodexProviderEgress } from './provider-egress';
 import type { PreparedContext } from './context-ledger';
 
 const cleanup: string[] = [];
@@ -22,109 +19,109 @@ afterEach(() => {
 
 if (runsWithElectronAbi)
   describe('Codex provider egress gate', () => {
-  it('allows and audits a clean non-local Task through the exact provider policy', () => {
-    const fixture = createFixture(false);
-    const decision = authorizeCodexProviderEgress({
-      broker: new PermissionBroker(fixture.persistence),
-      task: fixture.task,
-      turnId: 'turn-provider-allow',
-      prompt: 'clean prompt',
-      context,
-      now: '2026-07-23T00:00:00.000Z',
-    });
-
-    expect(decision).toMatchObject({
-      allowed: true,
-      evaluation: { decision: 'allow', reason: 'codex_provider_egress' },
-    });
-    expect(readAudit(fixture.path)).toEqual([
-      expect.objectContaining({ capability: 'provider.egress', decision: 'allow' }),
-      expect.objectContaining({
-        capability: 'provider.egress',
-        decision: 'allow',
-        reason: 'execution_revalidation_valid',
-      }),
-    ]);
-    fixture.persistence.close();
-  });
-
-  it.each([
-    { localOnly: true, prompt: 'clean prompt', reason: 'parent_ceiling' },
-    { localOnly: false, prompt: 'password=hunter2', reason: 'parent_ceiling' },
-  ])('denies before Runtime dispatch and records the reason: $reason', (testCase) => {
-    const fixture = createFixture(testCase.localOnly);
-    const decision = authorizeCodexProviderEgress({
-      broker: new PermissionBroker(fixture.persistence),
-      task: fixture.task,
-      turnId: 'turn-provider-deny',
-      prompt: testCase.prompt,
-      context,
-      now: '2026-07-23T00:00:00.000Z',
-    });
-
-    expect(decision).toMatchObject({
-      allowed: false,
-      evaluation: { decision: 'deny', reason: testCase.reason },
-    });
-    expect(readAudit(fixture.path)).toEqual([
-      expect.objectContaining({
-        capability: 'provider.egress',
-        decision: 'deny',
-        reason: testCase.reason,
-      }),
-    ]);
-    fixture.persistence.close();
-  });
-
-  it('never invokes the Runtime dispatch for a local-only Task', () => {
-    const fixture = createFixture(true);
-    let dispatches = 0;
-    const decision = dispatchAfterCodexProviderEgress(
-      {
+    it('allows and audits a clean non-local Task through the exact provider policy', () => {
+      const fixture = createFixture(false);
+      const decision = authorizeCodexProviderEgress({
         broker: new PermissionBroker(fixture.persistence),
         task: fixture.task,
-        turnId: 'turn-provider-no-dispatch',
-        prompt: 'must stay local',
-        context,
-        now: '2026-07-23T00:00:00.000Z',
-      },
-      () => {
-        dispatches += 1;
-      },
-    );
-    expect(decision.allowed).toBe(false);
-    expect(dispatches).toBe(0);
-    fixture.persistence.close();
-  });
-
-  it('honors a revoked provider.egress capability before Runtime dispatch', () => {
-    const fixture = createFixture(false);
-    fixture.persistence.revokePermissionCapability(
-      fixture.task.id,
-      'provider.egress',
-      '2026-07-23T00:00:00.000Z',
-    );
-    let dispatches = 0;
-    const decision = dispatchAfterCodexProviderEgress(
-      {
-        broker: new PermissionBroker(fixture.persistence),
-        task: fixture.task,
-        turnId: 'turn-provider-revoked',
+        turnId: 'turn-provider-allow',
         prompt: 'clean prompt',
         context,
-        now: '2026-07-23T00:00:01.000Z',
-      },
-      () => {
-        dispatches += 1;
-      },
-    );
-    expect(decision).toMatchObject({
-      allowed: false,
-      evaluation: { decision: 'deny', reason: 'capability_revoked' },
+        now: '2026-07-23T00:00:00.000Z',
+      });
+
+      expect(decision).toMatchObject({
+        allowed: true,
+        evaluation: { decision: 'allow', reason: 'codex_provider_egress' },
+      });
+      expect(readAudit(fixture.path)).toEqual([
+        expect.objectContaining({ capability: 'provider.egress', decision: 'allow' }),
+        expect.objectContaining({
+          capability: 'provider.egress',
+          decision: 'allow',
+          reason: 'execution_revalidation_valid',
+        }),
+      ]);
+      fixture.persistence.close();
     });
-    expect(dispatches).toBe(0);
-    fixture.persistence.close();
-  });
+
+    it.each([
+      { localOnly: true, prompt: 'clean prompt', reason: 'parent_ceiling' },
+      { localOnly: false, prompt: 'password=hunter2', reason: 'parent_ceiling' },
+    ])('denies before Runtime dispatch and records the reason: $reason', (testCase) => {
+      const fixture = createFixture(testCase.localOnly);
+      const decision = authorizeCodexProviderEgress({
+        broker: new PermissionBroker(fixture.persistence),
+        task: fixture.task,
+        turnId: 'turn-provider-deny',
+        prompt: testCase.prompt,
+        context,
+        now: '2026-07-23T00:00:00.000Z',
+      });
+
+      expect(decision).toMatchObject({
+        allowed: false,
+        evaluation: { decision: 'deny', reason: testCase.reason },
+      });
+      expect(readAudit(fixture.path)).toEqual([
+        expect.objectContaining({
+          capability: 'provider.egress',
+          decision: 'deny',
+          reason: testCase.reason,
+        }),
+      ]);
+      fixture.persistence.close();
+    });
+
+    it('never invokes the Runtime dispatch for a local-only Task', () => {
+      const fixture = createFixture(true);
+      let dispatches = 0;
+      const decision = dispatchAfterCodexProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'turn-provider-no-dispatch',
+          prompt: 'must stay local',
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+        },
+        () => {
+          dispatches += 1;
+        },
+      );
+      expect(decision.allowed).toBe(false);
+      expect(dispatches).toBe(0);
+      fixture.persistence.close();
+    });
+
+    it('honors a revoked provider.egress capability before Runtime dispatch', () => {
+      const fixture = createFixture(false);
+      fixture.persistence.revokePermissionCapability(
+        fixture.task.id,
+        'provider.egress',
+        '2026-07-23T00:00:00.000Z',
+      );
+      let dispatches = 0;
+      const decision = dispatchAfterCodexProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'turn-provider-revoked',
+          prompt: 'clean prompt',
+          context,
+          now: '2026-07-23T00:00:01.000Z',
+        },
+        () => {
+          dispatches += 1;
+        },
+      );
+      expect(decision).toMatchObject({
+        allowed: false,
+        evaluation: { decision: 'deny', reason: 'capability_revoked' },
+      });
+      expect(dispatches).toBe(0);
+      fixture.persistence.close();
+    });
   });
 else
   describe('Codex provider egress Electron ABI bridge', () => {

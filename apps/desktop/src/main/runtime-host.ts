@@ -66,9 +66,7 @@ export class RuntimeHostClient {
       preparedContext?.fragments ??
       this.prepareContext?.(taskId, turnId).fragments ??
       []
-    ).map(
-      toRuntimeContextFragment,
-    );
+    ).map(toRuntimeContextFragment);
     if (this.disposed) {
       this.onFailure(taskId, turnId, unavailableError());
       return;

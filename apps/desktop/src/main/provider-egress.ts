@@ -38,9 +38,7 @@ export function authorizeCodexProviderEgress(input: {
   ].join('\n');
   const secretScan = redactSecrets(content) === content ? ('clean' as const) : ('blocked' as const);
   const byteCount = Buffer.byteLength(content, 'utf8');
-  const provenanceTrust = input.context.fragments.some(
-    (fragment) => fragment.trust === 'assistant',
-  )
+  const provenanceTrust = input.context.fragments.some((fragment) => fragment.trust === 'assistant')
     ? ('untrusted' as const)
     : input.context.fragments.every((fragment) => fragment.source === 'system')
       ? ('system' as const)

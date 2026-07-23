@@ -671,9 +671,7 @@ if (runsWithElectronAbi)
           createdAt: '2026-07-23T00:00:05.000Z',
         }),
       ).toMatchObject({ decision: 'complete', repairRoundsUsed: 1 });
-      expect(
-        persistence.listAssuranceRounds(task.id, turn.turnId, 'cleanup-saga'),
-      ).toHaveLength(3);
+      expect(persistence.listAssuranceRounds(task.id, turn.turnId, 'cleanup-saga')).toHaveLength(3);
       expect(persistence.listEvidenceRecords(task.id, turn.turnId)).toEqual(
         expect.arrayContaining([
           expect.objectContaining({

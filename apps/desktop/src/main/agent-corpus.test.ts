@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  BASELINE_CORPUS,
-  runBaselineCorpus,
-  summarizeBaselineCorpus,
-} from './agent-corpus';
+import { BASELINE_CORPUS, runBaselineCorpus, summarizeBaselineCorpus } from './agent-corpus';
 
 describe('Standard Assurance baseline corpus', () => {
   it('runs the fixed 30 cases with all required categories and comparable metrics', async () => {
@@ -13,16 +9,7 @@ describe('Standard Assurance baseline corpus', () => {
 
     expect(BASELINE_CORPUS).toHaveLength(30);
     expect(categories).toEqual(
-      new Set([
-        'locate',
-        'edit',
-        'debug',
-        'multi-file',
-        'safety',
-        'recovery',
-        'context',
-        'review',
-      ]),
+      new Set(['locate', 'edit', 'debug', 'multi-file', 'safety', 'recovery', 'context', 'review']),
     );
     expect(first.configurationDigest).toBe(
       'ff20a0c26012967120d007942dfa61f87269cc924f4c7ccf3a3a9ceca57abb0f',

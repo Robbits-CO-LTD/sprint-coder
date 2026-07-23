@@ -24,14 +24,16 @@ function isNativeSafeFsAddonPackagePath(file: string): boolean {
 
 function shouldIgnoreFromPackage(file: string): boolean {
   if (!file) return false;
-  if (file.startsWith('/.vite')) return false;
+  if (file === '/.vite' || file.startsWith('/.vite/')) return false;
   if (isNativeSafeFsAddonPackagePath(file)) return false;
   return true;
 }
 
 const config: ForgeConfig = {
   packagerConfig: {
-    asar: { unpack: 'native-safe-fs/build/Release/vibe_native_safe_fs.node' },
+    // @electron/asar matches `unpack` against the full source filename with matchBase enabled.
+    // A relative path containing slashes therefore does not match; the exact basename does.
+    asar: { unpack: 'vibe_native_safe_fs.node' },
     ignore: shouldIgnoreFromPackage,
   },
   makers: [new MakerZIP({}, ['darwin', 'win32', 'linux'])],

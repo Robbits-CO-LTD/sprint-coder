@@ -97,9 +97,7 @@ describe('Standard Assurance contract and evidence', () => {
       planDigest: 'a'.repeat(64),
       createdAt,
     });
-    expect(
-      decideCompletion(contract, [{ ...evidence, subjectDigest: 'b'.repeat(64) }]),
-    ).toEqual({
+    expect(decideCompletion(contract, [{ ...evidence, subjectDigest: 'b'.repeat(64) }])).toEqual({
       allowed: false,
       openCriterionIds: ['edit-saga:saga-1', 'verification:saga-1'],
     });

@@ -1798,8 +1798,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
             this.insertAcceptanceContract(contract);
           }
         }
-        for (const saga of sagas)
-          if (saga.state === 'committed') this.recordEditSagaEvidence(saga);
+        for (const saga of sagas) if (saga.state === 'committed') this.recordEditSagaEvidence(saga);
       }
     })();
   }
@@ -3912,11 +3911,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .get(taskId, turnId) as { digest: string; snapshot_json: string } | undefined;
     if (row === undefined) throw new NotFoundError('Acceptance Contract not found');
     const contract = parseAcceptanceContract(JSON.parse(row.snapshot_json));
-    if (
-      contract.taskId !== taskId ||
-      contract.turnId !== turnId ||
-      contract.digest !== row.digest
-    )
+    if (contract.taskId !== taskId || contract.turnId !== turnId || contract.digest !== row.digest)
       throw new OperationConflictError('Acceptance Contract subject mismatch');
     return contract;
   }
@@ -3943,11 +3938,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     });
   }
 
-  listAssuranceRounds(
-    taskId: string,
-    turnId: string,
-    sagaId: string,
-  ): readonly AssuranceRound[] {
+  listAssuranceRounds(taskId: string, turnId: string, sagaId: string): readonly AssuranceRound[] {
     const saga = this.getEditSaga(sagaId);
     if (saga.taskId !== taskId || saga.turnId !== turnId)
       throw new OperationConflictError('Assurance round subject mismatch');

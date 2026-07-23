@@ -101,10 +101,7 @@ export function appendEditSagaCriterion(
   const existingVerification = current.criteria.find(
     (criterion) => criterion.id === verificationId,
   );
-  if (
-    existing?.subjectDigest !== undefined &&
-    existing.subjectDigest !== input.planDigest
-  )
+  if (existing?.subjectDigest !== undefined && existing.subjectDigest !== input.planDigest)
     throw new Error('Acceptance criterion id was reused with another subject');
   if (
     existingVerification?.subjectDigest !== undefined &&
@@ -309,8 +306,7 @@ export function parseAcceptanceContract(value: unknown): AcceptanceContract {
     throw new Error('Invalid Acceptance Contract');
   for (const criterion of contract.criteria) validateCriterion(criterion);
   if (
-    new Set(contract.criteria.map((criterion) => criterion.id)).size !==
-      contract.criteria.length ||
+    new Set(contract.criteria.map((criterion) => criterion.id)).size !== contract.criteria.length ||
     contract.nonGoals.some((item) => typeof item !== 'string' || item.length > 4_096) ||
     contract.allowedScope.some((item) => typeof item !== 'string' || item.length > 4_096) ||
     contract.digest !== digest(withoutContractDigest(contract))
@@ -372,9 +368,7 @@ export function acceptanceCriterionDigest(criterion: AcceptanceCriterion): strin
   return digest(criterion);
 }
 
-function sealContract(
-  facts: Omit<AcceptanceContract, 'digest'>,
-): AcceptanceContract {
+function sealContract(facts: Omit<AcceptanceContract, 'digest'>): AcceptanceContract {
   return deepFreeze({ ...facts, digest: digest(facts) });
 }
 
@@ -392,9 +386,7 @@ function validateCriterion(value: AcceptanceCriterion): void {
     throw new Error('Invalid Acceptance Criterion');
 }
 
-function withoutContractDigest(
-  contract: AcceptanceContract,
-): Omit<AcceptanceContract, 'digest'> {
+function withoutContractDigest(contract: AcceptanceContract): Omit<AcceptanceContract, 'digest'> {
   const { digest: _digest, ...facts } = contract;
   return facts;
 }
