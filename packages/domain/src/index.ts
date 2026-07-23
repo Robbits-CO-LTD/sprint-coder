@@ -115,3 +115,4 @@ export * from './tool-registry';
 export * from './execution-spec';
 export * from './background-activity';
 export * from './team';
+export * from './team-coordination';

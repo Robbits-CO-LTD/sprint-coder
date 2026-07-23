@@ -13,6 +13,7 @@ import type {
   PermissionSettings,
   RuntimeKind,
   TaskSummary,
+  TeamDetail,
   TurnDiff,
   TurnEvent,
   TurnStage,
@@ -108,6 +109,9 @@ type AppState = {
   turnDiffByTask: Record<string, TurnDiff | undefined>;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
+  teamByTask: Record<string, TeamDetail | null | undefined>;
+  teamViewOpen: boolean;
+  teamBusy: boolean;
 
   /** Runtime (Mock/Codex) selection surfaced by the Composer runtime chip (FR-SET-03).
    * Defaults to Mock/unavailable until `settings.getRuntime` resolves (or forever if the
@@ -132,6 +136,11 @@ type AppState = {
   setArchived(taskId: string, archived: boolean): Promise<void>;
   setGoal(taskId: string, goal: string): Promise<void>;
   selectWorkspace(taskId: string): Promise<void>;
+  toggleTeamView(taskId: string): Promise<void>;
+  hireTeamWorker(taskId: string, role: string, objective: string): Promise<void>;
+  sendTeamMessage(taskId: string, agentId: string, content: string): Promise<void>;
+  stopTeamWorker(taskId: string, agentId: string): Promise<void>;
+  stopAllTeamWorkers(taskId: string): Promise<void>;
   setDraft(taskId: string, text: string): void;
   startTurn(taskId: string, text: string): Promise<void>;
   queueMessage(taskId: string, text: string): Promise<void>;
@@ -143,6 +152,7 @@ type AppState = {
 };
 
 let currentUnsubscribe: (() => void) | null = null;
+let currentTeamUnsubscribe: (() => void) | null = null;
 let currentSubscribedTaskId: string | null = null;
 const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -534,6 +544,9 @@ export const useAppStore = create<AppState>((set, get) => {
     turnDiffByTask: {},
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
+    teamByTask: {},
+    teamViewOpen: false,
+    teamBusy: false,
     runtime: {
       kind: 'mock',
       codexAvailable: false,
@@ -684,6 +697,11 @@ export const useAppStore = create<AppState>((set, get) => {
         currentUnsubscribe = null;
         currentSubscribedTaskId = null;
       }
+      if (currentTeamUnsubscribe) {
+        currentTeamUnsubscribe();
+        currentTeamUnsubscribe = null;
+      }
+      set({ teamViewOpen: false });
       void restoreDraft(taskId, apply, get);
       void loadWorkspace(taskId, apply, get);
       void loadPermission(taskId, apply, get);
@@ -812,6 +830,18 @@ export const useAppStore = create<AppState>((set, get) => {
 
       if (get().selectedTaskId !== taskId) return;
       subscribeToTask(taskId, apply, get, afterSeq);
+      if (typeof vibe.teams?.get === 'function') {
+        const team = await vibe.teams.get(taskId).catch(() => null);
+        if (get().selectedTaskId === taskId)
+          set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: team } }));
+        if (typeof vibe.teams.subscribe === 'function')
+          currentTeamUnsubscribe = vibe.teams.subscribe(taskId, (event) => {
+            if (event.type === 'updated')
+              set((state) => ({
+                teamByTask: { ...state.teamByTask, [taskId]: event.detail },
+              }));
+          });
+      }
     },
 
     async createTask() {
@@ -875,6 +905,91 @@ export const useAppStore = create<AppState>((set, get) => {
         set((state) => ({ workspaceByTask: { ...state.workspaceByTask, [taskId]: workspace } }));
       } catch (err) {
         set({ error: describeError(err) });
+      }
+    },
+
+    async toggleTeamView(taskId: string) {
+      if (!window.vibe?.teams) return;
+      if (get().teamViewOpen) {
+        set({ teamViewOpen: false });
+        return;
+      }
+      set({ teamBusy: true, error: null });
+      try {
+        let detail = await window.vibe.teams.get(taskId);
+        if (detail === null) {
+          await window.vibe.teams.promote(taskId);
+          detail = await window.vibe.teams.get(taskId);
+        }
+        set((state) => ({
+          teamByTask: { ...state.teamByTask, [taskId]: detail },
+          teamViewOpen: true,
+        }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      } finally {
+        set({ teamBusy: false });
+      }
+    },
+
+    async hireTeamWorker(taskId: string, role: string, objective: string) {
+      if (!window.vibe?.teams || get().teamBusy) return;
+      set({ teamBusy: true, error: null });
+      try {
+        await window.vibe.teams.hireWorker({
+          taskId,
+          role,
+          objective,
+          contextInheritancePolicy: 'summary',
+          writeCapable: false,
+        });
+        const detail = await window.vibe.teams.get(taskId);
+        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      } finally {
+        set({ teamBusy: false });
+      }
+    },
+
+    async sendTeamMessage(taskId: string, agentId: string, content: string) {
+      if (!window.vibe?.teams || get().teamBusy) return;
+      set({ teamBusy: true, error: null });
+      try {
+        await window.vibe.teams.sendToWorker({ taskId, targetAgentId: agentId, content });
+        const detail = await window.vibe.teams.get(taskId);
+        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      } finally {
+        set({ teamBusy: false });
+      }
+    },
+
+    async stopTeamWorker(taskId: string, agentId: string) {
+      if (!window.vibe?.teams || get().teamBusy) return;
+      set({ teamBusy: true });
+      try {
+        await window.vibe.teams.stopWorker({ taskId, agentId });
+        const detail = await window.vibe.teams.get(taskId);
+        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      } finally {
+        set({ teamBusy: false });
+      }
+    },
+
+    async stopAllTeamWorkers(taskId: string) {
+      if (!window.vibe?.teams || get().teamBusy) return;
+      set({ teamBusy: true });
+      try {
+        const detail = await window.vibe.teams.stopAll(taskId);
+        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      } finally {
+        set({ teamBusy: false });
       }
     },
 

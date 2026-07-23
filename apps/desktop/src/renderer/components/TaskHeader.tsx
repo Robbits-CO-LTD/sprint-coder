@@ -6,6 +6,9 @@ import type { TaskSummary } from '../types/vibe';
 export function TaskHeader({ task }: { task: TaskSummary }) {
   const renameTask = useAppStore((s) => s.renameTask);
   const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
+  const toggleTeamView = useAppStore((s) => s.toggleTeamView);
+  const teamViewOpen = useAppStore((s) => s.teamViewOpen);
+  const teamBusy = useAppStore((s) => s.teamBusy);
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(task.title);
   const [syncedTitle, setSyncedTitle] = useState(task.title);
@@ -89,11 +92,13 @@ export function TaskHeader({ task }: { task: TaskSummary }) {
       <button
         type="button"
         className="team-btn"
-        disabled
-        title="Team機能は今回のスコープ外です"
-        aria-disabled="true"
+        data-testid="team-toggle"
+        disabled={teamBusy}
+        aria-pressed={teamViewOpen}
+        title={teamViewOpen ? 'Chatへ戻る' : 'Team Listを開く'}
+        onClick={() => void toggleTeamView(task.id)}
       >
-        ⬡ Team
+        {teamViewOpen ? '← Chat' : '⬡ Team'}
       </button>
       <button
         type="button"

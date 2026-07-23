@@ -1,7 +1,7 @@
 import { _electron as electron } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import type { ChildProcess } from 'node:child_process';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +29,7 @@ export const DESKTOP_ROOT = join(__dirname, '..', '..', 'apps', 'desktop');
 export const REPO_ROOT = join(__dirname, '..', '..');
 export const OUT_DIR = join(DESKTOP_ROOT, 'out');
 export const MAIN_BUILD_OUTPUT = join(DESKTOP_ROOT, '.vite', 'build', 'index.js');
+export const PRELOAD_BUILD_OUTPUT = join(DESKTOP_ROOT, '.vite', 'build', 'preload.js');
 export const DEV_SERVER_CANDIDATE_URLS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
@@ -186,6 +187,10 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
     return { alreadyRunning: true, proc: null };
   }
 
+  const previousMainMtime = existsSync(MAIN_BUILD_OUTPUT) ? statSync(MAIN_BUILD_OUTPUT).mtimeMs : 0;
+  const previousPreloadMtime = existsSync(PRELOAD_BUILD_OUTPUT)
+    ? statSync(PRELOAD_BUILD_OUTPUT).mtimeMs
+    : 0;
   const proc = spawn('npm', ['start'], {
     cwd: REPO_ROOT,
     detached: true, // its own process group, so we can signal the whole tree on teardown
@@ -196,7 +201,12 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
 
   try {
     await waitForCondition(
-      async () => (await isDevServerUp()) && existsSync(MAIN_BUILD_OUTPUT),
+      async () =>
+        (await isDevServerUp()) &&
+        existsSync(MAIN_BUILD_OUTPUT) &&
+        existsSync(PRELOAD_BUILD_OUTPUT) &&
+        statSync(MAIN_BUILD_OUTPUT).mtimeMs > previousMainMtime &&
+        statSync(PRELOAD_BUILD_OUTPUT).mtimeMs > previousPreloadMtime,
       timeoutMs,
     );
   } catch (err) {
@@ -204,6 +214,7 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
     throw new Error(
       `Dev server / main build did not become ready within ${timeoutMs}ms: ` +
         `${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
     );
   }
 
@@ -214,12 +225,51 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
  * instance (alreadyRunning: true) is left running untouched, per the E2E task's constraint. */
 export function stopDevServer(handle: DevServerHandle | null | undefined): void {
   if (!handle || handle.alreadyRunning || !handle.proc || handle.proc.pid === undefined) return;
+  const descendants =
+    process.platform === 'win32' ? [] : collectDescendantPids(handle.proc.pid).reverse();
   try {
     // `detached: true` put the spawned `npm start` in its own process group; signalling the
     // negative pid kills the whole tree (npm -> electron-forge start -> electron/vite/etc).
     process.kill(-handle.proc.pid, 'SIGTERM');
   } catch {
     // Already exited, or the process group is already gone — nothing further to do.
+  }
+  // Electron.app may move itself into another process group on macOS. Capture the exact
+  // descendant set before stopping npm, then signal only those owned processes as well so
+  // their single-instance lock cannot leak into the next E2E run.
+  for (const pid of descendants) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // The group signal normally wins the race; ESRCH here is expected.
+    }
+  }
+}
+
+function collectDescendantPids(rootPid: number): number[] {
+  try {
+    const output = execFileSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' });
+    const children = new Map<number, number[]>();
+    for (const line of output.split('\n')) {
+      const [pidText, parentText] = line.trim().split(/\s+/);
+      const pid = Number(pidText);
+      const parent = Number(parentText);
+      if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(parent)) continue;
+      const siblings = children.get(parent) ?? [];
+      siblings.push(pid);
+      children.set(parent, siblings);
+    }
+    const descendants: number[] = [];
+    const pending = [...(children.get(rootPid) ?? [])];
+    while (pending.length > 0) {
+      const pid = pending.pop();
+      if (pid === undefined) break;
+      descendants.push(pid);
+      pending.push(...(children.get(pid) ?? []));
+    }
+    return descendants;
+  } catch {
+    return [];
   }
 }
 

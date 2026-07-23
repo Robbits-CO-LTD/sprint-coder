@@ -37,7 +37,14 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
+  teamDetailSchema,
+  teamEventSchema,
+  teamHireWorkerInputSchema,
+  teamMessageSummarySchema,
+  teamSendMessageInputSchema,
   teamSummarySchema,
+  teamWorkerRefSchema,
+  workerSummarySchema,
   turnCancelInputSchema,
   turnEventSchema,
   turnQueueInputSchema,
@@ -80,6 +87,7 @@ import { executionSpecPathGuard } from './command-runner';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
 import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lease';
 import { dispatchAfterCodexProviderEgress } from './provider-egress';
+import { TeamCoordinator } from './team-coordinator';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -93,12 +101,21 @@ export class IpcRouter {
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly autoReviewer = AutoReviewer.createProduction();
+  private readonly teamCoordinator: TeamCoordinator;
+  private readonly teamSubscriptions = new Set<string>();
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
   ) {
+    this.teamCoordinator = new TeamCoordinator(persistence, undefined, (taskId, detail) => {
+      if (this.teamSubscriptions.has(taskId) && !this.window.isDestroyed())
+        this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
+          taskId,
+          event: teamEventSchema.parse({ type: 'updated', detail }),
+        });
+    });
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
       now: () => new Date().toISOString(),
@@ -387,6 +404,38 @@ export class IpcRouter {
           this.persistence.promoteTaskToTeam(input.taskId),
         ).value,
     );
+    this.handle(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), (input) =>
+      this.teamCoordinator.get(input.taskId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsHireWorker,
+      teamHireWorkerInputSchema,
+      workerSummarySchema,
+      (input) => this.teamCoordinator.hireWorker(input),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsSend,
+      teamSendMessageInputSchema,
+      teamMessageSummarySchema,
+      (input) => this.teamCoordinator.sendToWorker(input),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsStopWorker,
+      teamWorkerRefSchema,
+      workerSummarySchema,
+      (input) => this.teamCoordinator.stopWorker(input.taskId, input.agentId),
+    );
+    this.handleMutation(IPC_CHANNELS.teamsStopAll, taskIdPayloadSchema, teamDetailSchema, (input) =>
+      this.teamCoordinator.stopAll(input.taskId),
+    );
+    this.handle(IPC_CHANNELS.teamsSubscribe, taskIdPayloadSchema, z.undefined(), (input) => {
+      this.teamSubscriptions.add(input.taskId);
+      return undefined;
+    });
+    this.handle(IPC_CHANNELS.teamsUnsubscribe, taskIdPayloadSchema, z.undefined(), (input) => {
+      this.teamSubscriptions.delete(input.taskId);
+      return undefined;
+    });
 
     this.handle(IPC_CHANNELS.workspaceGet, taskIdPayloadSchema, workspaceSelectionSchema, (input) =>
       workspaceValue(this.persistence.getWorkspace(input.taskId)),
@@ -612,12 +661,14 @@ export class IpcRouter {
   }
 
   async initialize(): Promise<void> {
+    this.teamCoordinator.recoverOnStartup();
     await this.permissionBroker.drainPolicyEpochOutbox();
   }
 
   async dispose(): Promise<void> {
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
+    this.teamSubscriptions.clear();
     this.approvalCoordinator.dispose();
     await this.mockRuntime.dispose();
     this.codexRuntime.dispose();

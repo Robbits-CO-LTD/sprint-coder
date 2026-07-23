@@ -4078,7 +4078,43 @@ if (runsWithElectronAbi)
         { version: 25 },
         { version: 26 },
         { version: 27 },
+        { version: 28 },
       ]);
+      const migratedTables = new Set(
+        (
+          migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
+            name: string;
+          }[]
+        ).map((row) => row.name),
+      );
+      for (const table of [
+        'team_global_limits',
+        'team_budget_reservations',
+        'team_message_deliveries',
+        'team_delivery_events',
+        'worker_worktrees',
+      ])
+        expect(migratedTables.has(table)).toBe(true);
+      expect(
+        (
+          migrated.prepare('SELECT limits_json FROM team_global_limits WHERE id = 1').get() as {
+            limits_json: string;
+          }
+        ).limits_json,
+      ).toContain('spawnSlots');
+      expect(
+        migrated
+          .prepare('PRAGMA table_info(agents)')
+          .all()
+          .map((column) => (column as { name: string }).name),
+      ).toEqual(expect.arrayContaining(['write_capable', 'current_activity']));
+      expect(
+        (
+          migrated.prepare("SELECT write_capable FROM agents WHERE id = 'task-1:leader'").get() as {
+            write_capable: number;
+          }
+        ).write_capable,
+      ).toBe(0);
       const backfilledTeamIdentity = migrated
         .prepare(
           `SELECT tasks.primary_thread_id, agents.id AS leader_id

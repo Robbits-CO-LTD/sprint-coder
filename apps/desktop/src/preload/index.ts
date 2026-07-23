@@ -27,7 +27,14 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
+  teamDetailSchema,
+  teamEventSchema,
+  teamHireWorkerInputSchema,
+  teamMessageSummarySchema,
+  teamSendMessageInputSchema,
   teamSummarySchema,
+  teamWorkerRefSchema,
+  workerSummarySchema,
   turnCancelInputSchema,
   turnEventSchema,
   turnQueueInputSchema,
@@ -128,6 +135,33 @@ const api: VibeApi = {
   teams: {
     promote: (taskId) =>
       invoke(IPC_CHANNELS.teamsPromote, taskIdPayloadSchema, teamSummarySchema, { taskId }),
+    get: (taskId) =>
+      invoke(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), { taskId }),
+    hireWorker: (input) =>
+      invoke(IPC_CHANNELS.teamsHireWorker, teamHireWorkerInputSchema, workerSummarySchema, input),
+    sendToWorker: (input) =>
+      invoke(IPC_CHANNELS.teamsSend, teamSendMessageInputSchema, teamMessageSummarySchema, input),
+    stopWorker: (input) =>
+      invoke(IPC_CHANNELS.teamsStopWorker, teamWorkerRefSchema, workerSummarySchema, input),
+    stopAll: (taskId) =>
+      invoke(IPC_CHANNELS.teamsStopAll, taskIdPayloadSchema, teamDetailSchema, { taskId }),
+    subscribe: (taskId, listener) => {
+      const eventSchema = z.object({ taskId: z.string(), event: teamEventSchema }).strict();
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        const parsed = eventSchema.safeParse(raw);
+        if (parsed.success && parsed.data.taskId === taskId) listener(parsed.data.event);
+      };
+      ipcRenderer.on(IPC_CHANNELS.teamsEvent, handler);
+      void invoke(IPC_CHANNELS.teamsSubscribe, taskIdPayloadSchema, z.undefined(), {
+        taskId,
+      }).catch(() => ipcRenderer.removeListener(IPC_CHANNELS.teamsEvent, handler));
+      return () => {
+        ipcRenderer.removeListener(IPC_CHANNELS.teamsEvent, handler);
+        void invoke(IPC_CHANNELS.teamsUnsubscribe, taskIdPayloadSchema, z.undefined(), {
+          taskId,
+        }).catch(() => undefined);
+      };
+    },
   },
   workspace: {
     get: (taskId) =>

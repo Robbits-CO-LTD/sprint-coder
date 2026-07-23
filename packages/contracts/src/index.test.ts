@@ -7,10 +7,19 @@ import {
   publicErrorSchema,
   runtimeSettingsSchema,
   taskRenameInputSchema,
+  teamBudgetStatusSchema,
+  teamDetailSchema,
+  teamEventSchema,
+  teamHireWorkerInputSchema,
+  teamMessageSummarySchema,
+  teamSendMessageInputSchema,
   teamSummarySchema,
+  teamWorkerRefSchema,
   toolCatalogSnapshotSchema,
   turnEventSchema,
   turnSnapshotSchema,
+  workerCompletionSchema,
+  workerSummarySchema,
 } from './index';
 
 type Parser = { parse(value: unknown): unknown };
@@ -67,6 +76,165 @@ describe('public contracts', () => {
         updatedAt: '2026-07-23T00:00:00.000Z',
       }),
     ).toThrow();
+  });
+
+  const teamUsage = { costCents: 0, tokens: 0, timeMs: 0, toolCalls: 0 };
+  const worker = {
+    id: 'worker-1',
+    teamId: 'team-1',
+    threadId: 'thread-1',
+    taskId: 'task-1',
+    kind: 'worker',
+    role: 'implementer',
+    state: 'ready',
+    objective: 'Ship the feature',
+    writeCapable: true,
+    currentActivity: null,
+    usage: teamUsage,
+    createdAt: '2026-07-23T00:00:00.000Z',
+    updatedAt: '2026-07-23T00:00:00.000Z',
+  } as const;
+  const teamMessage = {
+    id: 'message-1',
+    teamId: 'team-1',
+    sourceAgentId: 'worker-1',
+    targetAgentId: 'leader-1',
+    sourceKind: 'worker',
+    targetKind: 'leader',
+    seq: 1,
+    state: 'delivered',
+    content: 'status update',
+    deliveryState: 'acked',
+    attempt: 1,
+    createdAt: '2026-07-23T00:00:00.000Z',
+    updatedAt: '2026-07-23T00:00:00.000Z',
+  } as const;
+  const team = {
+    id: 'team-1',
+    taskId: 'task-1',
+    state: 'active',
+    leaderAgentId: 'leader-1',
+    budget: {},
+    revision: 1,
+    createdAt: '2026-07-23T00:00:00.000Z',
+    updatedAt: '2026-07-23T00:00:00.000Z',
+  } as const;
+  const budget = {
+    scope: 'team',
+    kind: 'costCents',
+    cap: 1000,
+    committed: 100,
+    reserved: 0,
+  } as const;
+
+  it('validates worker summaries and rejects unknown worker states or extra fields', () => {
+    expect(workerSummarySchema.parse(worker)).toMatchObject({ id: 'worker-1', state: 'ready' });
+    expect(() => workerSummarySchema.parse({ ...worker, state: 'blocked' })).toThrow();
+    expect(() => workerSummarySchema.parse({ ...worker, unknown: true })).toThrow();
+  });
+
+  it('validates team message summaries including a nullable delivery state', () => {
+    expect(teamMessageSummarySchema.parse(teamMessage)).toMatchObject({ state: 'delivered' });
+    expect(
+      teamMessageSummarySchema.parse({ ...teamMessage, deliveryState: null }).deliveryState,
+    ).toBeNull();
+    expect(() =>
+      teamMessageSummarySchema.parse({ ...teamMessage, deliveryState: 'queued' }),
+    ).toThrow();
+    expect(() => teamMessageSummarySchema.parse({ ...teamMessage, unknown: true })).toThrow();
+  });
+
+  it('validates team budget status scopes and rejects negative amounts', () => {
+    expect(teamBudgetStatusSchema.parse(budget)).toMatchObject({ scope: 'team' });
+    expect(() => teamBudgetStatusSchema.parse({ ...budget, scope: 'worker-pool' })).toThrow();
+    expect(() => teamBudgetStatusSchema.parse({ ...budget, cap: -1 })).toThrow();
+  });
+
+  it('validates a team detail aggregate of workers, messages, and budgets', () => {
+    const detail = { team, workers: [worker], messages: [teamMessage], budgets: [budget] };
+    expect(teamDetailSchema.parse(detail)).toMatchObject({ team: { id: 'team-1' } });
+    expect(() => teamDetailSchema.parse({ ...detail, unknown: true })).toThrow();
+  });
+
+  it('validates worker completion boundaries for summary length, artifacts, and digests', () => {
+    const completion = {
+      status: 'succeeded',
+      summary: 'Implemented the feature end to end.',
+      artifacts: [{ kind: 'file', reference: 'src/index.ts', digest: 'a'.repeat(64) }],
+      verification: [{ name: 'unit tests', outcome: 'pass' }],
+      risks: [],
+    };
+    expect(workerCompletionSchema.parse(completion)).toMatchObject({ status: 'succeeded' });
+    expect(() => workerCompletionSchema.parse({ ...completion, summary: '' })).toThrow();
+    expect(() =>
+      workerCompletionSchema.parse({ ...completion, summary: 'x'.repeat(4_001) }),
+    ).toThrow();
+    expect(
+      workerCompletionSchema.parse({ ...completion, summary: 'x'.repeat(4_000) }).summary.length,
+    ).toBe(4_000);
+    expect(() =>
+      workerCompletionSchema.parse({
+        ...completion,
+        artifacts: [{ kind: 'file', reference: 'r', digest: 'not-a-digest' }],
+      }),
+    ).toThrow();
+    expect(() =>
+      workerCompletionSchema.parse({
+        ...completion,
+        artifacts: Array.from({ length: 21 }, () => ({ kind: 'note', reference: 'r' })),
+      }),
+    ).toThrow();
+    expect(
+      workerCompletionSchema.parse({
+        ...completion,
+        artifacts: Array.from({ length: 20 }, () => ({ kind: 'note', reference: 'r' })),
+      }).artifacts,
+    ).toHaveLength(20);
+    expect(() =>
+      workerCompletionSchema.parse({
+        ...completion,
+        verification: [{ name: 'x', outcome: 'inconclusive' }],
+      }),
+    ).toThrow();
+    expect(() => workerCompletionSchema.parse({ ...completion, unknown: true })).toThrow();
+  });
+
+  it('validates team hire-worker and send-message inputs and rejects out-of-range values', () => {
+    const hire = {
+      taskId: 'task-1',
+      role: 'reviewer',
+      objective: 'Review the diff for correctness.',
+      contextInheritancePolicy: 'summary',
+      writeCapable: false,
+    };
+    expect(teamHireWorkerInputSchema.parse(hire)).toMatchObject({ role: 'reviewer' });
+    expect(() => teamHireWorkerInputSchema.parse({ ...hire, role: 'x'.repeat(101) })).toThrow();
+    expect(() =>
+      teamHireWorkerInputSchema.parse({ ...hire, contextInheritancePolicy: 'everything' }),
+    ).toThrow();
+    expect(() => teamHireWorkerInputSchema.parse({ ...hire, unknown: true })).toThrow();
+
+    const send = { taskId: 'task-1', targetAgentId: 'worker-1', content: 'hello' };
+    expect(teamSendMessageInputSchema.parse(send)).toMatchObject({ targetAgentId: 'worker-1' });
+    expect(() => teamSendMessageInputSchema.parse({ ...send, content: '' })).toThrow();
+    expect(() =>
+      teamSendMessageInputSchema.parse({ ...send, content: 'x'.repeat(20_001) }),
+    ).toThrow();
+    expect(() => teamSendMessageInputSchema.parse({ ...send, unknown: true })).toThrow();
+  });
+
+  it('validates the team worker reference and rejects extra fields', () => {
+    const ref = { taskId: 'task-1', agentId: 'worker-1' };
+    expect(teamWorkerRefSchema.parse(ref)).toEqual(ref);
+    expect(() => teamWorkerRefSchema.parse({ ...ref, unknown: true })).toThrow();
+  });
+
+  it('validates the team event shape and rejects unknown event types', () => {
+    const detail = { team, workers: [worker], messages: [teamMessage], budgets: [budget] };
+    const event = { type: 'updated', detail };
+    expect(teamEventSchema.parse(event)).toMatchObject({ type: 'updated' });
+    expect(() => teamEventSchema.parse({ ...event, type: 'deleted' })).toThrow();
+    expect(() => teamEventSchema.parse({ ...event, unknown: true })).toThrow();
   });
 
   it('rejects unknown command fields', () => {

@@ -110,10 +110,16 @@ Wave 2(完了 2026-07-22):
   - Team / Worker / message delivery state machineをdomainへ追加。WorkerはAgent + AgentThread + TeamMembershipとして保存し、parent capability ceilingとcontext inheritance policyを記録
   - Leader↔Workerだけを許可し、Worker間直接messageをdomain/persistenceの両境界で拒否。message sequenceと全delivery transitionを永続化
   - 検証: typecheck/lint/format green、unit 508 pass + 8 platform skip、v1→v27 migration、Electron ABI Team SQLite統合test green
-- [ ] Slice 5.2 TeamCoordinator
-  - 非対象として維持: Worker runtime起動、budget reserve/settle、dispatch/ack retry、process tree、worktree
-- [ ] Slice 5.3 Team List View
-  - 非対象として維持: accessible Team projection、Worker操作UI、message timeline
+- [x] Slice 5.2 TeamCoordinator
+  - budget reservation/settle/release、hard cap、max depth=1、rate limit、delivery envelope/identity検証をdomain・migration v28・SQLiteへ実装
+  - Worker startをTask単位queueで直列化し、persist-before-dispatch、最大3回retry/ack/timeout、completion schema検証、Worker→Leader resultを実装
+  - process-tree停止、write-capable Worker用worktree作成/cleanup基盤、IPC/preload、startup paused/interrupted復元と未settle budget releaseを実装
+- [x] Slice 5.3 Team List View
+  - accessible Team List Viewへrole/status/current task/usage/stop/hire/stop-all/message timelineとsource/target focus移動を実装
+  - promote→3 Worker順次起動→依頼→Leader結果→stop-all、および再起動paused復元をE2E化
+- [x] Phase 5 acceptance gate
+  - typecheck/format green、lint error 0（既存warning 1）、unit 527 pass + 8 platform skip、E2E 9/9 pass
+  - Worker間直接message拒否、hard cap、max depth=1、rate limit、identity spoof、process tree停止、migration v1→v28を回帰テストで確認
 
 ---
 

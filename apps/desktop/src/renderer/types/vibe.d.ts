@@ -256,6 +256,64 @@ export type RuntimeKind = 'mock' | 'codex';
 export type CodexModelOption = { id: string; displayName: string; description: string };
 export type AccessPreset = 'ask' | 'auto' | 'full';
 export type PermissionSettings = { preset: AccessPreset; policyEpoch: number };
+export type TeamSummary = {
+  id: string;
+  taskId: string;
+  state: 'draft' | 'forming' | 'active' | 'paused' | 'winding_down' | 'completed' | 'failed';
+  leaderAgentId: string;
+  budget: Record<string, unknown>;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type TeamUsageTotals = {
+  costCents: number;
+  tokens: number;
+  timeMs: number;
+  toolCalls: number;
+};
+export type WorkerSummary = {
+  id: string;
+  teamId: string;
+  threadId: string;
+  taskId: string;
+  kind: 'leader' | 'worker';
+  role: string;
+  state: 'invited' | 'spawning' | 'ready' | 'busy' | 'waiting' | 'done' | 'failed' | 'stopped';
+  objective: string | null;
+  writeCapable: boolean;
+  currentActivity: string | null;
+  usage: TeamUsageTotals;
+  createdAt: string;
+  updatedAt: string;
+};
+export type TeamMessageSummary = {
+  id: string;
+  teamId: string;
+  sourceAgentId: string;
+  targetAgentId: string;
+  sourceKind: 'leader' | 'worker';
+  targetKind: 'leader' | 'worker';
+  seq: number;
+  state: 'created' | 'persisted' | 'dispatching' | 'delivered' | 'acknowledged';
+  content: string;
+  deliveryState: 'persisted' | 'dispatched' | 'acked' | 'timedOut' | 'failed' | null;
+  attempt: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type TeamDetail = {
+  team: TeamSummary;
+  workers: WorkerSummary[];
+  messages: TeamMessageSummary[];
+  budgets: {
+    scope: 'global' | 'team' | 'worker';
+    kind: 'costCents' | 'tokens' | 'timeMs' | 'toolCalls' | 'spawnSlots';
+    cap: number;
+    committed: number;
+    reserved: number;
+  }[];
+};
 
 export interface VibeApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
@@ -269,6 +327,28 @@ export interface VibeApi {
     setGoal(taskId: string, goal: string): Promise<TaskSummary>;
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
+  };
+  teams: {
+    promote(taskId: string): Promise<TeamSummary>;
+    get(taskId: string): Promise<TeamDetail | null>;
+    hireWorker(input: {
+      taskId: string;
+      role: string;
+      objective: string;
+      contextInheritancePolicy: 'none' | 'summary' | 'selected_items' | 'full_fork';
+      writeCapable: boolean;
+    }): Promise<WorkerSummary>;
+    sendToWorker(input: {
+      taskId: string;
+      targetAgentId: string;
+      content: string;
+    }): Promise<TeamMessageSummary>;
+    stopWorker(input: { taskId: string; agentId: string }): Promise<WorkerSummary>;
+    stopAll(taskId: string): Promise<TeamDetail>;
+    subscribe(
+      taskId: string,
+      listener: (event: { type: 'updated'; detail: TeamDetail }) => void,
+    ): () => void;
   };
   workspace: {
     get(taskId: string): Promise<{ path: string; name: string } | null>;

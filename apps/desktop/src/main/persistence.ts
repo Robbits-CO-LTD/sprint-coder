@@ -21,6 +21,8 @@ import {
   type QueuedInput,
   type RuntimeKind,
   type TaskSummary,
+  type TeamBudgetStatus,
+  type TeamUsageTotals,
   type TurnEvent,
   type TurnSnapshot,
   type TurnStage,
@@ -61,6 +63,18 @@ import {
   transitionTeam,
   transitionTeamMessage,
   transitionWorker,
+  DEFAULT_TEAM_BUDGET_LIMITS,
+  assertReservationWithinCap,
+  transitionBudgetReservation,
+  assertDeliveryRetryAllowed,
+  transitionTeamDelivery as transitionTeamDeliveryState,
+  teamDeliveryId,
+  TEAM_DELIVERY_MAX_ATTEMPTS,
+  budgetKinds,
+  type BudgetScope,
+  type BudgetKind,
+  type BudgetReservationState,
+  type TeamDeliveryState,
   type CapabilityCeiling,
   type ContextInheritancePolicy,
   type TeamMessageState,
@@ -223,6 +237,43 @@ type AgentRow = {
   objective: string | null;
   parent_capability_ceiling_json: string | null;
   context_inheritance_policy: ContextInheritancePolicy | null;
+  write_capable: number;
+  current_activity: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type TeamBudgetReservationRow = {
+  id: string;
+  team_id: string;
+  agent_id: string | null;
+  scope: BudgetScope;
+  kind: BudgetKind;
+  amount: number;
+  settled_amount: number | null;
+  state: BudgetReservationState;
+  purpose: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+type TeamDeliveryRow = {
+  message_id: string;
+  delivery_id: string;
+  state: TeamDeliveryState;
+  attempt: number;
+  last_error: string | null;
+  dispatched_at: string | null;
+  acked_at: string | null;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+type WorkerWorktreeRow = {
+  agent_id: string;
+  path: string;
+  base_head: string;
+  state: WorkerWorktreeState;
+  reason: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -479,6 +530,23 @@ type EventWithoutSeq = TurnEvent extends infer Event
     ? Omit<Event, 'seq'>
     : never
   : never;
+
+type WorkerWorktreeState = 'created' | 'active' | 'cleaned' | 'quarantined';
+
+const workerWorktreeTransitions: Readonly<
+  Record<WorkerWorktreeState, readonly WorkerWorktreeState[]>
+> = {
+  created: ['active', 'cleaned'],
+  active: ['cleaned', 'quarantined'],
+  cleaned: [],
+  quarantined: [],
+};
+
+const TEAM_GLOBAL_LIMITS_SEED = JSON.stringify(DEFAULT_TEAM_BUDGET_LIMITS.global);
+const TEAM_BUDGET_STRUCTURED_SEED = JSON.stringify({
+  team: DEFAULT_TEAM_BUDGET_LIMITS.team,
+  worker: DEFAULT_TEAM_BUDGET_LIMITS.worker,
+});
 
 const migrations = [
   {
@@ -1304,6 +1372,92 @@ const migrations = [
         FROM tasks;
     `,
   },
+  {
+    version: 28,
+    checksum: 'team-coordinator-v28-budget-delivery-worktree',
+    sql: `
+      CREATE TABLE team_global_limits (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        limits_json TEXT NOT NULL
+      );
+      INSERT INTO team_global_limits(id, limits_json) VALUES (1, '${TEAM_GLOBAL_LIMITS_SEED}');
+
+      CREATE TABLE team_budget_reservations (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+        scope TEXT NOT NULL CHECK (scope IN ('global', 'team', 'worker')),
+        kind TEXT NOT NULL CHECK (
+          kind IN ('costCents', 'tokens', 'timeMs', 'toolCalls', 'spawnSlots')
+        ),
+        amount INTEGER NOT NULL CHECK (amount > 0),
+        settled_amount INTEGER CHECK (settled_amount IS NULL OR settled_amount >= 0),
+        state TEXT NOT NULL CHECK (state IN ('reserved', 'settled', 'released')),
+        purpose TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        CHECK (
+          (scope = 'worker' AND agent_id IS NOT NULL) OR
+          (scope <> 'worker' AND agent_id IS NULL)
+        )
+      );
+      CREATE INDEX team_budget_reservations_team_idx
+        ON team_budget_reservations(team_id, state);
+      CREATE INDEX team_budget_reservations_scope_idx
+        ON team_budget_reservations(scope, kind, state);
+      CREATE INDEX team_budget_reservations_agent_idx
+        ON team_budget_reservations(agent_id, state);
+
+      CREATE TABLE team_message_deliveries (
+        message_id TEXT PRIMARY KEY REFERENCES team_messages(id) ON DELETE CASCADE,
+        delivery_id TEXT NOT NULL UNIQUE CHECK (length(delivery_id) = 64),
+        state TEXT NOT NULL CHECK (
+          state IN ('persisted', 'dispatched', 'acked', 'timedOut', 'failed')
+        ),
+        attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+        last_error TEXT,
+        dispatched_at TEXT,
+        acked_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1)
+      );
+
+      CREATE TABLE team_delivery_events (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL REFERENCES team_message_deliveries(message_id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        from_state TEXT CHECK (
+          from_state IS NULL OR
+          from_state IN ('persisted', 'dispatched', 'acked', 'timedOut', 'failed')
+        ),
+        to_state TEXT NOT NULL CHECK (
+          to_state IN ('persisted', 'dispatched', 'acked', 'timedOut', 'failed')
+        ),
+        attempt INTEGER NOT NULL CHECK (attempt >= 0),
+        error TEXT,
+        recorded_at TEXT NOT NULL,
+        UNIQUE(message_id, revision)
+      );
+
+      CREATE TABLE worker_worktrees (
+        agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        base_head TEXT NOT NULL CHECK (length(base_head) = 40),
+        state TEXT NOT NULL CHECK (state IN ('created', 'active', 'cleaned', 'quarantined')),
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      ALTER TABLE agents ADD COLUMN write_capable INTEGER NOT NULL DEFAULT 0
+        CHECK (write_capable IN (0, 1));
+      ALTER TABLE agents ADD COLUMN current_activity TEXT;
+
+      UPDATE teams SET budget_json = '${TEAM_BUDGET_STRUCTURED_SEED}' WHERE budget_json = '{}';
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -1446,6 +1600,43 @@ export type AgentRecord = Readonly<{
   objective: string | null;
   parentCapabilityCeiling: CapabilityCeiling | null;
   contextInheritancePolicy: ContextInheritancePolicy | null;
+  writeCapable: boolean;
+  currentActivity: string | null;
+  createdAt: string;
+  updatedAt: string;
+}>;
+export type TeamBudgetReservationRecord = Readonly<{
+  id: string;
+  teamId: string;
+  agentId: string | null;
+  scope: BudgetScope;
+  kind: BudgetKind;
+  amount: number;
+  settledAmount: number | null;
+  state: BudgetReservationState;
+  purpose: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}>;
+export type TeamDeliveryRecord = Readonly<{
+  messageId: string;
+  deliveryId: string;
+  state: TeamDeliveryState;
+  attempt: number;
+  lastError: string | null;
+  dispatchedAt: string | null;
+  ackedAt: string | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}>;
+export type WorkerWorktreeRecord = Readonly<{
+  agentId: string;
+  path: string;
+  baseHead: string;
+  state: WorkerWorktreeState;
+  reason: string | null;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -1465,6 +1656,7 @@ export type TeamSnapshot = Readonly<{
   team: TeamRecord;
   agents: readonly AgentRecord[];
   messages: readonly TeamMessageRecord[];
+  deliveries: readonly TeamDeliveryRecord[];
 }>;
 
 export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
@@ -1486,8 +1678,10 @@ export interface PersistenceClient {
     parentCapabilityCeiling: CapabilityCeiling;
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
+    writeCapable?: boolean;
   }): AgentRecord;
   transitionWorkerState(agentId: string, to: WorkerState): AgentRecord;
+  setWorkerCurrentActivity(agentId: string, activity: string | null, now: string): AgentRecord;
   createTeamMessage(input: {
     teamId: string;
     sourceAgentId: string;
@@ -1495,6 +1689,57 @@ export interface PersistenceClient {
     content: string;
   }): TeamMessageRecord;
   transitionTeamMessageState(messageId: string, to: TeamMessageState): TeamMessageRecord;
+  reserveTeamBudget(input: {
+    teamId: string;
+    entries: readonly {
+      scope: BudgetScope;
+      kind: BudgetKind;
+      amount: number;
+      agentId?: string;
+    }[];
+    purpose: string;
+    now: string;
+  }): TeamBudgetReservationRecord[];
+  settleTeamBudget(input: {
+    reservationIds: readonly string[];
+    actuals?: Readonly<Record<string, number>>;
+    now: string;
+  }): TeamBudgetReservationRecord[];
+  releaseTeamBudget(input: {
+    reservationIds: readonly string[];
+    now: string;
+  }): TeamBudgetReservationRecord[];
+  getTeamBudgetStatus(teamId: string): TeamBudgetStatus[];
+  getTeamUsageTotals(teamId: string): TeamUsageTotals;
+  getWorkerUsageTotals(agentId: string): TeamUsageTotals;
+  createTeamDelivery(input: { messageId: string; now: string }): TeamDeliveryRecord;
+  transitionTeamDelivery(input: {
+    messageId: string;
+    to: TeamDeliveryState;
+    now: string;
+    error?: string;
+  }): TeamDeliveryRecord;
+  getTeamDelivery(messageId: string): TeamDeliveryRecord | null;
+  countRecentTeamMessages(teamId: string, sinceIso: string): number;
+  recordWorkerWorktree(input: {
+    agentId: string;
+    path: string;
+    baseHead: string;
+    now: string;
+  }): WorkerWorktreeRecord;
+  transitionWorkerWorktree(input: {
+    agentId: string;
+    to: WorkerWorktreeState;
+    reason?: string;
+    now: string;
+  }): WorkerWorktreeRecord;
+  getWorkerWorktree(agentId: string): WorkerWorktreeRecord | null;
+  recoverTeamsOnStartup(now: string): {
+    teams: number;
+    workers: number;
+    threads: number;
+    deliveries: number;
+  };
   renameTask(taskId: string, title: string): TaskSummary;
   setPinned(taskId: string, pinned: boolean): TaskSummary;
   setArchived(taskId: string, archived: boolean): TaskSummary;
@@ -2107,9 +2352,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `INSERT INTO teams(
              id, task_id, state, leader_agent_id, budget_json, revision, created_at, updated_at
-           ) VALUES (?, ?, 'draft', ?, '{}', 0, ?, ?)`,
+           ) VALUES (?, ?, 'draft', ?, ?, 0, ?, ?)`,
         )
-        .run(teamId, taskId, leader.id, now, now);
+        .run(teamId, taskId, leader.id, TEAM_BUDGET_STRUCTURED_SEED, now, now);
       const assigned = this.db
         .prepare('UPDATE agents SET team_id = ?, updated_at = ? WHERE id = ? AND team_id IS NULL')
         .run(teamId, now, leader.id);
@@ -2149,7 +2394,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare('SELECT * FROM team_messages WHERE team_id = ? ORDER BY seq')
         .all(teamId) as TeamMessageRow[]
     ).map(toTeamMessage);
-    return { team, agents, messages };
+    const deliveries = (
+      this.db
+        .prepare(
+          `SELECT d.* FROM team_message_deliveries d
+           JOIN team_messages m ON m.id = d.message_id
+           WHERE m.team_id = ? ORDER BY m.seq`,
+        )
+        .all(teamId) as TeamDeliveryRow[]
+    ).map(toTeamDelivery);
+    return { team, agents, messages, deliveries };
   }
 
   transitionTeamState(teamId: string, to: TeamState): TeamRecord {
@@ -2174,6 +2428,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     parentCapabilityCeiling: CapabilityCeiling;
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
+    writeCapable?: boolean;
   }): AgentRecord {
     assertWorkerPersistenceInput(input);
     return this.db.transaction(() => {
@@ -2194,8 +2449,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `INSERT INTO agents(
              id, team_id, thread_id, task_id, kind, role, state, objective,
-             parent_capability_ceiling_json, context_inheritance_policy, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?)`,
+             parent_capability_ceiling_json, context_inheritance_policy,
+             write_capable, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           agentId,
@@ -2206,6 +2462,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           input.objective.trim(),
           JSON.stringify(input.parentCapabilityCeiling),
           input.contextInheritancePolicy,
+          input.writeCapable === true ? 1 : 0,
           now,
           now,
         );
@@ -2296,6 +2553,417 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(randomUUID(), messageId, nextRevision, current.state, to, now);
       return this.getTeamMessage(messageId);
+    })();
+  }
+
+  setWorkerCurrentActivity(agentId: string, activity: string | null, now: string): AgentRecord {
+    return this.db.transaction(() => {
+      this.getAgent(agentId);
+      const result = this.db
+        .prepare('UPDATE agents SET current_activity = ?, updated_at = ? WHERE id = ?')
+        .run(activity, now, agentId);
+      if (result.changes !== 1) throw new NotFoundError('Agent not found');
+      return this.getAgent(agentId);
+    })();
+  }
+
+  reserveTeamBudget(input: {
+    teamId: string;
+    entries: readonly {
+      scope: BudgetScope;
+      kind: BudgetKind;
+      amount: number;
+      agentId?: string;
+    }[];
+    purpose: string;
+    now: string;
+  }): TeamBudgetReservationRecord[] {
+    if (input.entries.length < 1) throw new Error('Budget reservation requires at least one entry');
+    if (input.purpose.trim().length < 1) throw new Error('Budget reservation requires a purpose');
+    return this.db.transaction(() => {
+      const team = this.getTeam(input.teamId);
+      const globalLimits = this.getGlobalLimits();
+      const created: TeamBudgetReservationRecord[] = [];
+      const insert = this.db.prepare(
+        `INSERT INTO team_budget_reservations(
+           id, team_id, agent_id, scope, kind, amount, settled_amount, state, purpose,
+           created_at, updated_at, revision
+         ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'reserved', ?, ?, ?, 1)`,
+      );
+      for (const entry of input.entries) {
+        const agentId = entry.scope === 'worker' ? (entry.agentId ?? null) : null;
+        const cap = this.budgetCap(team, globalLimits, entry.scope, entry.kind);
+        const totals = this.budgetTotals(entry.scope, entry.kind, team.id, agentId);
+        assertReservationWithinCap({
+          scope: entry.scope,
+          kind: entry.kind,
+          cap,
+          committed: totals.committed,
+          reserved: totals.reserved,
+          requested: entry.amount,
+        });
+        const id = randomUUID();
+        insert.run(
+          id,
+          team.id,
+          agentId,
+          entry.scope,
+          entry.kind,
+          entry.amount,
+          input.purpose,
+          input.now,
+          input.now,
+        );
+        created.push(this.getBudgetReservation(id));
+      }
+      return created;
+    })();
+  }
+
+  settleTeamBudget(input: {
+    reservationIds: readonly string[];
+    actuals?: Readonly<Record<string, number>>;
+    now: string;
+  }): TeamBudgetReservationRecord[] {
+    return this.db.transaction(() => {
+      const settled: TeamBudgetReservationRecord[] = [];
+      for (const id of input.reservationIds) {
+        const current = this.getBudgetReservation(id);
+        transitionBudgetReservation(current.state, 'settled');
+        const settledAmount = input.actuals?.[id] ?? current.amount;
+        if (!Number.isSafeInteger(settledAmount) || settledAmount < 0)
+          throw new Error('Invalid settled amount');
+        const result = this.db
+          .prepare(
+            `UPDATE team_budget_reservations
+             SET state = 'settled', settled_amount = ?, revision = revision + 1, updated_at = ?
+             WHERE id = ? AND state = 'reserved' AND revision = ?`,
+          )
+          .run(settledAmount, input.now, id, current.revision);
+        if (result.changes !== 1) throw new TeamConflictError();
+        settled.push(this.getBudgetReservation(id));
+      }
+      return settled;
+    })();
+  }
+
+  releaseTeamBudget(input: {
+    reservationIds: readonly string[];
+    now: string;
+  }): TeamBudgetReservationRecord[] {
+    return this.db.transaction(() => {
+      const released: TeamBudgetReservationRecord[] = [];
+      for (const id of input.reservationIds) {
+        const current = this.getBudgetReservation(id);
+        transitionBudgetReservation(current.state, 'released');
+        const result = this.db
+          .prepare(
+            `UPDATE team_budget_reservations
+             SET state = 'released', revision = revision + 1, updated_at = ?
+             WHERE id = ? AND state = 'reserved' AND revision = ?`,
+          )
+          .run(input.now, id, current.revision);
+        if (result.changes !== 1) throw new TeamConflictError();
+        released.push(this.getBudgetReservation(id));
+      }
+      return released;
+    })();
+  }
+
+  getTeamBudgetStatus(teamId: string): TeamBudgetStatus[] {
+    const team = this.getTeam(teamId);
+    const globalLimits = this.getGlobalLimits();
+    const statuses: TeamBudgetStatus[] = [];
+    for (const kind of budgetKinds) {
+      const totals = this.budgetTotals('global', kind, team.id, null);
+      statuses.push({
+        scope: 'global',
+        kind,
+        cap: this.budgetCap(team, globalLimits, 'global', kind),
+        committed: totals.committed,
+        reserved: totals.reserved,
+      });
+    }
+    for (const kind of budgetKinds) {
+      const totals = this.budgetTotals('team', kind, team.id, null);
+      statuses.push({
+        scope: 'team',
+        kind,
+        cap: this.budgetCap(team, globalLimits, 'team', kind),
+        committed: totals.committed,
+        reserved: totals.reserved,
+      });
+    }
+    const workers = this.db
+      .prepare(
+        `SELECT id FROM agents WHERE team_id = ? AND kind = 'worker' ORDER BY created_at, id`,
+      )
+      .all(team.id) as { id: string }[];
+    for (const worker of workers) {
+      for (const kind of budgetKinds) {
+        const totals = this.budgetTotals('worker', kind, team.id, worker.id);
+        statuses.push({
+          scope: 'worker',
+          kind,
+          cap: this.budgetCap(team, globalLimits, 'worker', kind),
+          committed: totals.committed,
+          reserved: totals.reserved,
+        });
+      }
+    }
+    return statuses;
+  }
+
+  getTeamUsageTotals(teamId: string): TeamUsageTotals {
+    this.getTeam(teamId);
+    return this.usageTotals('team_id', teamId);
+  }
+
+  getWorkerUsageTotals(agentId: string): TeamUsageTotals {
+    this.getAgent(agentId);
+    return this.usageTotals('agent_id', agentId);
+  }
+
+  createTeamDelivery(input: { messageId: string; now: string }): TeamDeliveryRecord {
+    return this.db.transaction(() => {
+      const message = this.getTeamMessage(input.messageId);
+      if (this.getTeamDelivery(message.id) !== null)
+        throw new Error('Delivery already exists for message');
+      const deliveryId = teamDeliveryId({
+        teamId: message.teamId,
+        messageId: message.id,
+        targetAgentId: message.targetAgentId,
+      });
+      this.db
+        .prepare(
+          `INSERT INTO team_message_deliveries(
+             message_id, delivery_id, state, attempt, last_error,
+             dispatched_at, acked_at, created_at, updated_at, revision
+           ) VALUES (?, ?, 'persisted', 0, NULL, NULL, NULL, ?, ?, 1)`,
+        )
+        .run(message.id, deliveryId, input.now, input.now);
+      this.insertDeliveryEvent(message.id, 1, null, 'persisted', 0, null, input.now);
+      return this.requireTeamDelivery(message.id);
+    })();
+  }
+
+  transitionTeamDelivery(input: {
+    messageId: string;
+    to: TeamDeliveryState;
+    now: string;
+    error?: string;
+  }): TeamDeliveryRecord {
+    return this.db.transaction(() => {
+      const current = this.requireTeamDelivery(input.messageId);
+      transitionTeamDeliveryState(current.state, input.to);
+      let attempt = current.attempt;
+      if (
+        input.to === 'dispatched' &&
+        (current.state === 'persisted' || current.state === 'timedOut')
+      ) {
+        if (current.state === 'timedOut')
+          assertDeliveryRetryAllowed({
+            attempt: current.attempt,
+            maxAttempts: TEAM_DELIVERY_MAX_ATTEMPTS,
+          });
+        attempt = current.attempt + 1;
+      }
+      const dispatchedAt = input.to === 'dispatched' ? input.now : current.dispatchedAt;
+      const ackedAt = input.to === 'acked' ? input.now : current.ackedAt;
+      const lastError =
+        input.to === 'failed' || input.to === 'timedOut'
+          ? (input.error ?? current.lastError)
+          : current.lastError;
+      const nextRevision = current.revision + 1;
+      const result = this.db
+        .prepare(
+          `UPDATE team_message_deliveries
+           SET state = ?, attempt = ?, last_error = ?, dispatched_at = ?, acked_at = ?,
+             revision = ?, updated_at = ?
+           WHERE message_id = ? AND state = ? AND revision = ?`,
+        )
+        .run(
+          input.to,
+          attempt,
+          lastError,
+          dispatchedAt,
+          ackedAt,
+          nextRevision,
+          input.now,
+          input.messageId,
+          current.state,
+          current.revision,
+        );
+      if (result.changes !== 1) throw new TeamConflictError();
+      this.insertDeliveryEvent(
+        input.messageId,
+        nextRevision,
+        current.state,
+        input.to,
+        attempt,
+        input.error ?? null,
+        input.now,
+      );
+      return this.requireTeamDelivery(input.messageId);
+    })();
+  }
+
+  getTeamDelivery(messageId: string): TeamDeliveryRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM team_message_deliveries WHERE message_id = ?')
+      .get(messageId) as TeamDeliveryRow | undefined;
+    return row === undefined ? null : toTeamDelivery(row);
+  }
+
+  countRecentTeamMessages(teamId: string, sinceIso: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM team_messages WHERE team_id = ? AND created_at >= ?`)
+      .get(teamId, sinceIso) as { n: number };
+    return row.n;
+  }
+
+  recordWorkerWorktree(input: {
+    agentId: string;
+    path: string;
+    baseHead: string;
+    now: string;
+  }): WorkerWorktreeRecord {
+    return this.db.transaction(() => {
+      this.getAgent(input.agentId);
+      this.db
+        .prepare(
+          `INSERT INTO worker_worktrees(
+             agent_id, path, base_head, state, reason, created_at, updated_at
+           ) VALUES (?, ?, ?, 'created', NULL, ?, ?)`,
+        )
+        .run(input.agentId, input.path, input.baseHead, input.now, input.now);
+      return this.requireWorkerWorktree(input.agentId);
+    })();
+  }
+
+  transitionWorkerWorktree(input: {
+    agentId: string;
+    to: WorkerWorktreeState;
+    reason?: string;
+    now: string;
+  }): WorkerWorktreeRecord {
+    return this.db.transaction(() => {
+      const current = this.requireWorkerWorktree(input.agentId);
+      if (!workerWorktreeTransitions[current.state].includes(input.to))
+        throw new Error(`Invalid worker worktree transition: ${current.state} -> ${input.to}`);
+      const reason = input.reason ?? current.reason;
+      const result = this.db
+        .prepare(
+          `UPDATE worker_worktrees SET state = ?, reason = ?, updated_at = ?
+           WHERE agent_id = ? AND state = ?`,
+        )
+        .run(input.to, reason, input.now, input.agentId, current.state);
+      if (result.changes !== 1) throw new TeamConflictError();
+      return this.requireWorkerWorktree(input.agentId);
+    })();
+  }
+
+  getWorkerWorktree(agentId: string): WorkerWorktreeRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM worker_worktrees WHERE agent_id = ?')
+      .get(agentId) as WorkerWorktreeRow | undefined;
+    return row === undefined ? null : toWorkerWorktree(row);
+  }
+
+  recoverTeamsOnStartup(now: string): {
+    teams: number;
+    workers: number;
+    threads: number;
+    deliveries: number;
+  } {
+    return this.db.transaction(() => {
+      let teams = 0;
+      const teamRows = this.db
+        .prepare(
+          `SELECT id, state, revision FROM teams
+           WHERE state IN ('active', 'forming', 'winding_down')`,
+        )
+        .all() as { id: string; state: TeamState; revision: number }[];
+      for (const team of teamRows) {
+        const to: TeamState = team.state === 'active' ? 'paused' : 'failed';
+        transitionTeam(team.state, to);
+        const result = this.db
+          .prepare(
+            `UPDATE teams SET state = ?, revision = revision + 1, updated_at = ?
+             WHERE id = ? AND state = ? AND revision = ?`,
+          )
+          .run(to, now, team.id, team.state, team.revision);
+        if (result.changes === 1) teams += 1;
+      }
+
+      let workers = 0;
+      const workerRows = this.db
+        .prepare(
+          `SELECT id, state FROM agents
+           WHERE kind = 'worker'
+             AND state IN ('invited', 'spawning', 'ready', 'busy', 'waiting')`,
+        )
+        .all() as { id: string; state: WorkerState }[];
+      for (const worker of workerRows) {
+        transitionWorker(worker.state, 'stopped');
+        const result = this.db
+          .prepare(`UPDATE agents SET state = 'stopped', updated_at = ? WHERE id = ? AND state = ?`)
+          .run(now, worker.id, worker.state);
+        if (result.changes === 1) workers += 1;
+      }
+
+      const threadResult = this.db
+        .prepare(
+          `UPDATE agent_threads SET state = 'interrupted', revision = revision + 1, updated_at = ?
+           WHERE state = 'active'`,
+        )
+        .run(now);
+      const threads = threadResult.changes;
+
+      let deliveries = 0;
+      const deliveryRows = this.db
+        .prepare(
+          `SELECT message_id, state, attempt, revision FROM team_message_deliveries
+           WHERE state = 'dispatched'`,
+        )
+        .all() as {
+        message_id: string;
+        state: TeamDeliveryState;
+        attempt: number;
+        revision: number;
+      }[];
+      for (const delivery of deliveryRows) {
+        transitionTeamDeliveryState(delivery.state, 'timedOut');
+        const nextRevision = delivery.revision + 1;
+        const result = this.db
+          .prepare(
+            `UPDATE team_message_deliveries
+             SET state = 'timedOut', revision = ?, updated_at = ?
+             WHERE message_id = ? AND state = 'dispatched' AND revision = ?`,
+          )
+          .run(nextRevision, now, delivery.message_id, delivery.revision);
+        if (result.changes === 1) {
+          this.insertDeliveryEvent(
+            delivery.message_id,
+            nextRevision,
+            'dispatched',
+            'timedOut',
+            delivery.attempt,
+            'startup recovery',
+            now,
+          );
+          deliveries += 1;
+        }
+      }
+
+      this.db
+        .prepare(
+          `UPDATE team_budget_reservations
+           SET state = 'released', revision = revision + 1, updated_at = ?
+           WHERE state = 'reserved'`,
+        )
+        .run(now);
+      return { teams, workers, threads, deliveries };
     })();
   }
 
@@ -5997,6 +6665,120 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toTeamMessage(row);
   }
 
+  private getBudgetReservation(id: string): TeamBudgetReservationRecord {
+    const row = this.db.prepare('SELECT * FROM team_budget_reservations WHERE id = ?').get(id) as
+      TeamBudgetReservationRow | undefined;
+    if (row === undefined) throw new NotFoundError('Budget reservation not found');
+    return toTeamBudgetReservation(row);
+  }
+
+  private requireTeamDelivery(messageId: string): TeamDeliveryRecord {
+    const delivery = this.getTeamDelivery(messageId);
+    if (delivery === null) throw new NotFoundError('Team delivery not found');
+    return delivery;
+  }
+
+  private requireWorkerWorktree(agentId: string): WorkerWorktreeRecord {
+    const worktree = this.getWorkerWorktree(agentId);
+    if (worktree === null) throw new NotFoundError('Worker worktree not found');
+    return worktree;
+  }
+
+  private getGlobalLimits(): Partial<Record<BudgetKind, number>> {
+    const row = this.db.prepare('SELECT limits_json FROM team_global_limits WHERE id = 1').get() as
+      { limits_json: string } | undefined;
+    if (row === undefined) return DEFAULT_TEAM_BUDGET_LIMITS.global;
+    return JSON.parse(row.limits_json) as Partial<Record<BudgetKind, number>>;
+  }
+
+  private budgetCap(
+    team: TeamRecord,
+    globalLimits: Partial<Record<BudgetKind, number>>,
+    scope: BudgetScope,
+    kind: BudgetKind,
+  ): number {
+    if (scope === 'global') {
+      const value = globalLimits[kind];
+      return typeof value === 'number' ? value : DEFAULT_TEAM_BUDGET_LIMITS.global[kind];
+    }
+    const budget = team.budget as Record<string, Partial<Record<BudgetKind, number>> | undefined>;
+    const value = budget[scope]?.[kind];
+    return typeof value === 'number' ? value : DEFAULT_TEAM_BUDGET_LIMITS[scope][kind];
+  }
+
+  private budgetTotals(
+    scope: BudgetScope,
+    kind: BudgetKind,
+    teamId: string,
+    agentId: string | null,
+  ): { committed: number; reserved: number } {
+    const selection = `SELECT
+         COALESCE(SUM(CASE WHEN state = 'settled'
+           THEN COALESCE(settled_amount, amount) ELSE 0 END), 0) AS committed,
+         COALESCE(SUM(CASE WHEN state = 'reserved' THEN amount ELSE 0 END), 0) AS reserved
+       FROM team_budget_reservations WHERE scope = ? AND kind = ?`;
+    let row: { committed: number; reserved: number };
+    if (scope === 'global') {
+      row = this.db.prepare(selection).get(scope, kind) as {
+        committed: number;
+        reserved: number;
+      };
+    } else if (scope === 'team') {
+      row = this.db.prepare(`${selection} AND team_id = ?`).get(scope, kind, teamId) as {
+        committed: number;
+        reserved: number;
+      };
+    } else {
+      row = this.db.prepare(`${selection} AND agent_id = ?`).get(scope, kind, agentId) as {
+        committed: number;
+        reserved: number;
+      };
+    }
+    return { committed: row.committed, reserved: row.reserved };
+  }
+
+  private usageTotals(column: 'team_id' | 'agent_id', value: string): TeamUsageTotals {
+    const rows = this.db
+      .prepare(
+        `SELECT kind, COALESCE(SUM(COALESCE(settled_amount, amount)), 0) AS total
+         FROM team_budget_reservations
+         WHERE ${column} = ? AND state = 'settled'
+           AND kind IN ('costCents', 'tokens', 'timeMs', 'toolCalls')
+         GROUP BY kind`,
+      )
+      .all(value) as { kind: BudgetKind; total: number }[];
+    const totals: TeamUsageTotals = { costCents: 0, tokens: 0, timeMs: 0, toolCalls: 0 };
+    const mutable = totals as {
+      costCents: number;
+      tokens: number;
+      timeMs: number;
+      toolCalls: number;
+    };
+    for (const row of rows) {
+      if (row.kind === 'spawnSlots') continue;
+      mutable[row.kind] = row.total;
+    }
+    return totals;
+  }
+
+  private insertDeliveryEvent(
+    messageId: string,
+    revision: number,
+    fromState: TeamDeliveryState | null,
+    toState: TeamDeliveryState,
+    attempt: number,
+    error: string | null,
+    recordedAt: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO team_delivery_events(
+           id, message_id, revision, from_state, to_state, attempt, error, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(randomUUID(), messageId, revision, fromState, toState, attempt, error, recordedAt);
+  }
+
   private assertTask(taskId: string): void {
     this.getTaskRow(taskId);
   }
@@ -6074,6 +6856,52 @@ function toAgent(row: AgentRow): AgentRecord {
         ? null
         : (JSON.parse(row.parent_capability_ceiling_json) as CapabilityCeiling),
     contextInheritancePolicy: row.context_inheritance_policy,
+    writeCapable: row.write_capable === 1,
+    currentActivity: row.current_activity,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toTeamBudgetReservation(row: TeamBudgetReservationRow): TeamBudgetReservationRecord {
+  return {
+    id: row.id,
+    teamId: row.team_id,
+    agentId: row.agent_id,
+    scope: row.scope,
+    kind: row.kind,
+    amount: row.amount,
+    settledAmount: row.settled_amount,
+    state: row.state,
+    purpose: row.purpose,
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toTeamDelivery(row: TeamDeliveryRow): TeamDeliveryRecord {
+  return {
+    messageId: row.message_id,
+    deliveryId: row.delivery_id,
+    state: row.state,
+    attempt: row.attempt,
+    lastError: row.last_error,
+    dispatchedAt: row.dispatched_at,
+    ackedAt: row.acked_at,
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toWorkerWorktree(row: WorkerWorktreeRow): WorkerWorktreeRecord {
+  return {
+    agentId: row.agent_id,
+    path: row.path,
+    baseHead: row.base_head,
+    state: row.state,
+    reason: row.reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

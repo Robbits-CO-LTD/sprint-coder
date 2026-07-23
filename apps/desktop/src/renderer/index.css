@@ -27,6 +27,153 @@
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+.team-list-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
+  background: var(--bg-primary);
+}
+
+.team-list-toolbar,
+.team-worker-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.team-list-toolbar h2,
+.team-list-toolbar p,
+.team-worker-card h3 {
+  margin: 0;
+}
+
+.team-hire-form,
+.team-worker-card,
+.team-message-timeline {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+}
+
+.team-hire-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.5fr) minmax(240px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.team-hire-form h3 {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.team-hire-form label,
+.team-message-form {
+  display: grid;
+  gap: 6px;
+}
+
+.team-hire-form input,
+.team-hire-form textarea,
+.team-message-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  font: inherit;
+}
+
+.team-worker-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.team-worker-card:focus,
+.team-list-toolbar:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.team-status {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.team-current-task {
+  color: var(--text-secondary);
+}
+
+.team-usage {
+  display: flex;
+  gap: 18px;
+}
+
+.team-usage div {
+  display: grid;
+  gap: 2px;
+}
+
+.team-usage dt {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.team-usage dd {
+  margin: 0;
+}
+
+.team-message-form {
+  margin-top: 14px;
+}
+
+.team-message-timeline ol {
+  display: grid;
+  gap: 12px;
+  padding-left: 22px;
+}
+
+.team-message-timeline li p {
+  margin: 6px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.team-message-timeline button {
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  background: transparent;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.danger-btn {
+  color: var(--danger, #d45a67);
+}
+
+@media (max-width: 760px) {
+  .team-list-view {
+    padding: 16px;
+  }
+
+  .team-hire-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 *,
 *::before,
 *::after {

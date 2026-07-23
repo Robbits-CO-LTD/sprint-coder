@@ -4,6 +4,7 @@ import { useAppStore } from './store/appStore';
 import { Sidebar } from './components/Sidebar';
 import { TaskHeader } from './components/TaskHeader';
 import { ChatSurface } from './components/ChatSurface/ChatSurface';
+import { TeamListView } from './components/TeamListView';
 
 export default function App() {
   const vibeAvailable = useAppStore((s) => s.vibeAvailable);
@@ -12,6 +13,7 @@ export default function App() {
   const tasks = useAppStore((s) => s.tasks);
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const createTask = useAppStore((s) => s.createTask);
+  const teamViewOpen = useAppStore((s) => s.teamViewOpen);
 
   useEffect(() => {
     void init();
@@ -42,7 +44,11 @@ export default function App() {
         {selectedTask ? (
           <>
             <TaskHeader task={selectedTask} />
-            <ChatSurface task={selectedTask} />
+            {teamViewOpen ? (
+              <TeamListView task={selectedTask} />
+            ) : (
+              <ChatSurface task={selectedTask} />
+            )}
           </>
         ) : (
           <div className="empty-state" style={{ margin: 'auto' }}>

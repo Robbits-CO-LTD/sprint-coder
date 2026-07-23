@@ -152,6 +152,165 @@ export const teamSummarySchema = z
   .strict();
 export type TeamSummary = z.infer<typeof teamSummarySchema>;
 
+export const workerStateSchema = z.enum([
+  'invited',
+  'spawning',
+  'ready',
+  'busy',
+  'waiting',
+  'done',
+  'failed',
+  'stopped',
+]);
+export const teamMessageStateSchema = z.enum([
+  'created',
+  'persisted',
+  'dispatching',
+  'delivered',
+  'acknowledged',
+]);
+export const teamDeliveryStateSchema = z.enum([
+  'persisted',
+  'dispatched',
+  'acked',
+  'timedOut',
+  'failed',
+]);
+export const contextInheritancePolicySchema = z.enum([
+  'none',
+  'summary',
+  'selected_items',
+  'full_fork',
+]);
+
+export const teamUsageTotalsSchema = z
+  .object({
+    costCents: z.number().int().min(0),
+    tokens: z.number().int().min(0),
+    timeMs: z.number().int().min(0),
+    toolCalls: z.number().int().min(0),
+  })
+  .strict();
+export type TeamUsageTotals = z.infer<typeof teamUsageTotalsSchema>;
+
+export const teamBudgetStatusSchema = z
+  .object({
+    scope: z.enum(['global', 'team', 'worker']),
+    kind: z.enum(['costCents', 'tokens', 'timeMs', 'toolCalls', 'spawnSlots']),
+    cap: z.number().int().min(0),
+    committed: z.number().int().min(0),
+    reserved: z.number().int().min(0),
+  })
+  .strict();
+export type TeamBudgetStatus = z.infer<typeof teamBudgetStatusSchema>;
+
+export const workerSummarySchema = z
+  .object({
+    id: idSchema,
+    teamId: idSchema,
+    threadId: idSchema,
+    taskId: idSchema,
+    kind: z.enum(['leader', 'worker']),
+    role: z.string(),
+    state: workerStateSchema,
+    objective: z.string().nullable(),
+    writeCapable: z.boolean(),
+    currentActivity: z.string().nullable(),
+    usage: teamUsageTotalsSchema,
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type WorkerSummary = z.infer<typeof workerSummarySchema>;
+
+export const teamMessageSummarySchema = z
+  .object({
+    id: idSchema,
+    teamId: idSchema,
+    sourceAgentId: idSchema,
+    targetAgentId: idSchema,
+    sourceKind: z.enum(['leader', 'worker']),
+    targetKind: z.enum(['leader', 'worker']),
+    seq: z.number().int().min(1),
+    state: teamMessageStateSchema,
+    content: z.string(),
+    deliveryState: teamDeliveryStateSchema.nullable(),
+    attempt: z.number().int().min(0),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type TeamMessageSummary = z.infer<typeof teamMessageSummarySchema>;
+
+export const teamDetailSchema = z
+  .object({
+    team: teamSummarySchema,
+    workers: z.array(workerSummarySchema),
+    messages: z.array(teamMessageSummarySchema),
+    budgets: z.array(teamBudgetStatusSchema),
+  })
+  .strict();
+export type TeamDetail = z.infer<typeof teamDetailSchema>;
+
+export const workerCompletionSchema = z
+  .object({
+    status: z.enum(['succeeded', 'failed', 'partial']),
+    summary: z.string().min(1).max(4_000),
+    artifacts: z
+      .array(
+        z
+          .object({
+            kind: z.enum(['file', 'patch', 'note']),
+            reference: z.string().min(1).max(1_024),
+            digest: digestSchema.optional(),
+          })
+          .strict(),
+      )
+      .max(20),
+    verification: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1).max(200),
+            outcome: z.enum(['pass', 'fail', 'skipped']),
+            detail: z.string().max(2_000).optional(),
+          })
+          .strict(),
+      )
+      .max(20),
+    risks: z.array(z.string().min(1).max(500)).max(20),
+  })
+  .strict();
+export type WorkerCompletion = z.infer<typeof workerCompletionSchema>;
+
+export const teamHireWorkerInputSchema = z
+  .object({
+    taskId: idSchema,
+    role: z.string().min(1).max(100),
+    objective: z.string().min(1).max(10_000),
+    contextInheritancePolicy: contextInheritancePolicySchema,
+    writeCapable: z.boolean(),
+  })
+  .strict();
+export type TeamHireWorkerInput = z.infer<typeof teamHireWorkerInputSchema>;
+
+export const teamSendMessageInputSchema = z
+  .object({
+    taskId: idSchema,
+    targetAgentId: idSchema,
+    content: z.string().min(1).max(20_000),
+  })
+  .strict();
+export type TeamSendMessageInput = z.infer<typeof teamSendMessageInputSchema>;
+
+export const teamWorkerRefSchema = z.object({ taskId: idSchema, agentId: idSchema }).strict();
+export type TeamWorkerRef = z.infer<typeof teamWorkerRefSchema>;
+
+export const teamEventSchema = z
+  .object({ type: z.literal('updated'), detail: teamDetailSchema })
+  .strict();
+export type TeamEvent = z.infer<typeof teamEventSchema>;
+
 export const chatMessageSchema = z
   .object({
     id: idSchema,
@@ -665,6 +824,12 @@ export interface VibeApi {
   };
   teams: {
     promote(taskId: string): Promise<TeamSummary>;
+    get(taskId: string): Promise<TeamDetail | null>;
+    hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary>;
+    sendToWorker(input: TeamSendMessageInput): Promise<TeamMessageSummary>;
+    stopWorker(input: TeamWorkerRef): Promise<WorkerSummary>;
+    stopAll(taskId: string): Promise<TeamDetail>;
+    subscribe(taskId: string, listener: (event: TeamEvent) => void): () => void;
   };
   workspace: {
     get(taskId: string): Promise<WorkspaceSelection>;
@@ -721,6 +886,14 @@ export const IPC_CHANNELS = {
   tasksGetDraft: 'vibe:tasks:get-draft',
   tasksSetDraft: 'vibe:tasks:set-draft',
   teamsPromote: 'vibe:teams:promote',
+  teamsGet: 'vibe:teams:get',
+  teamsHireWorker: 'vibe:teams:hire-worker',
+  teamsSend: 'vibe:teams:send',
+  teamsStopWorker: 'vibe:teams:stop-worker',
+  teamsStopAll: 'vibe:teams:stop-all',
+  teamsSubscribe: 'vibe:teams:subscribe',
+  teamsUnsubscribe: 'vibe:teams:unsubscribe',
+  teamsEvent: 'vibe:teams:event',
   workspaceGet: 'vibe:workspace:get',
   workspaceSelect: 'vibe:workspace:select',
   settingsGetRuntime: 'vibe:settings:get-runtime',
