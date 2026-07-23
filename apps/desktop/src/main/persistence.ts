@@ -1165,6 +1165,8 @@ export type BackgroundCompletionRecord = Readonly<{
   runtimeAckedAt: string | null;
 }>;
 
+export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
+
 export interface PersistenceClient {
   listTasks(): TaskSummary[];
   createTask(title?: string): TaskSummary;
@@ -1385,6 +1387,7 @@ export interface PersistenceClient {
     seed: NativeMutationIntentSeed,
     lease: MutationLeaseToken,
     now: string,
+    coordinator?: NativeMutationSagaCoordinator,
   ): NativeMutationIntentSnapshot;
   getNativeMutationIntent(id: string): NativeMutationIntentSnapshot;
   bindNativeMutationIntentRecovery(
@@ -1401,6 +1404,7 @@ export interface PersistenceClient {
     now: string,
     nativeSessionId: string,
     transition: NativeMutationIntentTransition,
+    coordinator?: NativeMutationSagaCoordinator,
   ): NativeMutationIntentSnapshot;
   listRecoverableNativeMutationIntents(): readonly NativeMutationIntentSnapshot[];
   listMessages(taskId: string): ChatMessage[];
@@ -3759,7 +3763,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     seed: NativeMutationIntentSeed,
     lease: MutationLeaseToken,
     now: string,
+    coordinator: NativeMutationSagaCoordinator = 'native-intent',
   ): NativeMutationIntentSnapshot {
+    validateNativeMutationSagaCoordinator(coordinator);
     validateMutationToken(lease);
     validateMutationTimestamp(now, 'Native mutation intent preparation time');
     const parsedSeed = parseNativeMutationIntentSeed(seed);
@@ -3819,6 +3825,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           saga,
           parsedSeed.ordinal,
           parsedSeed.direction,
+          coordinator,
         );
         if (!readyForNewIntent) throw new MutationLeaseStaleError();
         const snapshot = createNativeMutationIntentSnapshot(parsedSeed);
@@ -3944,7 +3951,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     now: string,
     nativeSessionId: string,
     transition: NativeMutationIntentTransition,
+    coordinator: NativeMutationSagaCoordinator = 'native-intent',
   ): NativeMutationIntentSnapshot {
+    validateNativeMutationSagaCoordinator(coordinator);
     validateMutationToken(lease);
     validateMutationTimestamp(now, 'Native mutation intent update time');
     validateNativeSessionId(nativeSessionId);
@@ -3966,14 +3975,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
         if (current.revision !== expectedRevision)
           throw new OperationConflictError('Stale Native mutation intent revision');
         const next = transitionNativeMutationIntent(current, transition, now);
-        if (next.state === 'effect_pending')
+        if (next.state === 'effect_pending' && coordinator === 'native-intent')
           this.markEditSagaStepEffectPending(
             current.sagaId,
             current.ordinal,
             current.direction,
             lease,
           );
-        if (next.state === 'effect_observed' && next.effectObservation !== null)
+        if (
+          next.state === 'effect_observed' &&
+          next.effectObservation !== null &&
+          coordinator === 'native-intent'
+        )
           this.markEditSagaStepEffectObserved(
             current.sagaId,
             current.ordinal,
@@ -5785,7 +5798,7 @@ function toNativeMutationRecoveryBinding(
   return binding;
 }
 
-function nativeMutationOperationDigest(operation: JournaledPatchOperation): string {
+export function nativeMutationOperationDigest(operation: JournaledPatchOperation): string {
   return createHash('sha256').update(JSON.stringify(operation)).digest('hex');
 }
 
@@ -5839,7 +5852,7 @@ function expectedNativeMutationArtifact(
       };
 }
 
-function expectedNativeMutationBinding(
+export function expectedNativeMutationBinding(
   operation: JournaledPatchOperation,
   direction: NativeMutationIntentSnapshot['direction'],
   workspacePath: string,
@@ -5945,6 +5958,7 @@ function nativeMutationStepIsNext(
   saga: EditSagaSnapshot,
   ordinal: number,
   direction: NativeMutationIntentSnapshot['direction'],
+  coordinator: NativeMutationSagaCoordinator,
 ): boolean {
   const index = ordinal - 1;
   const step = saga.steps[index];
@@ -5952,13 +5966,17 @@ function nativeMutationStepIsNext(
   if (direction === 'forward')
     return (
       (saga.state === 'prepared' || saga.state === 'applying') &&
-      step.state === 'pending' &&
+      (coordinator === 'edit-saga-executor'
+        ? step.state === 'effect_pending'
+        : step.state === 'pending') &&
       saga.steps.slice(0, index).every((candidate) => candidate.state === 'effect_observed') &&
       saga.steps.slice(index + 1).every((candidate) => candidate.state === 'pending')
     );
   return (
     (saga.state === 'applying' || saga.state === 'compensating') &&
-    step.state === 'effect_observed' &&
+    (coordinator === 'edit-saga-executor'
+      ? step.state === 'compensation_pending'
+      : step.state === 'effect_observed') &&
     saga.steps
       .slice(index + 1)
       .every((candidate) => candidate.state === 'pending' || candidate.state === 'restored') &&
@@ -5981,6 +5999,11 @@ function digestJson(value: unknown): string {
 
 function validateNativeSessionId(value: string): void {
   if (!/^[a-f0-9]{32}$/.test(value)) throw new MutationLeaseStaleError();
+}
+
+function validateNativeMutationSagaCoordinator(value: string): void {
+  if (value !== 'native-intent' && value !== 'edit-saga-executor')
+    throw new MutationLeaseStaleError();
 }
 
 function validateMutationLeaseInput(input: {

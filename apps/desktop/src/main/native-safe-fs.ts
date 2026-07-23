@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import {
   parseNativeMutationIntentSnapshot,
   type NativeMutationEffectObservation,
@@ -137,8 +137,40 @@ type RawAddon = Readonly<{
   closeSession(id: string): Promise<unknown>;
 }>;
 
+export type NativeSafeFsAddonLocation = Readonly<{
+  addonPath: string;
+  loadedFromUnpacked: boolean;
+}>;
+
+const ASAR_DIR_SEGMENT = `${sep}app.asar${sep}`;
+const ASAR_UNPACKED_DIR_SEGMENT = `${sep}app.asar.unpacked${sep}`;
+
+// Slice 4.7e: when the main process runs from a packaged build, `__dirname` resolves
+// inside the read-only `app.asar` archive. The compiled native addon cannot be dlopen'd
+// from inside an asar archive, so Electron Forge unpacks it alongside the archive under
+// `app.asar.unpacked` (see forge.config.ts `packagerConfig.asar.unpack`). This function
+// redirects the dev-relative path into that sibling directory whenever the caller's
+// `dirname` shows the process is actually running from inside `app.asar`. It is pure
+// string manipulation — no filesystem access, no Electron import — so it stays testable
+// without a packaged build and never becomes a second source of truth for packaging.
+export function resolveNativeSafeFsAddonLocation(dirname: string): NativeSafeFsAddonLocation {
+  const devRelativePath = join(
+    dirname,
+    '../../native-safe-fs/build/Release/vibe_native_safe_fs.node',
+  );
+  const loadedFromUnpacked = devRelativePath.includes(ASAR_DIR_SEGMENT);
+  const addonPath = loadedFromUnpacked
+    ? devRelativePath.split(ASAR_DIR_SEGMENT).join(ASAR_UNPACKED_DIR_SEGMENT)
+    : devRelativePath;
+  return Object.freeze({ addonPath, loadedFromUnpacked });
+}
+
+export function nativeSafeFsAddonLocation(): NativeSafeFsAddonLocation {
+  return resolveNativeSafeFsAddonLocation(__dirname);
+}
+
 export function nativeSafeFsAddonPath(): string {
-  return join(__dirname, '../../native-safe-fs/build/Release/vibe_native_safe_fs.node');
+  return nativeSafeFsAddonLocation().addonPath;
 }
 
 export function loadNativeSafeFs(

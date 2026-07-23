@@ -20,7 +20,12 @@ import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadNativeSafeFs, nativeSafeFsAddonPath } from './native-safe-fs';
+import {
+  loadNativeSafeFs,
+  nativeSafeFsAddonLocation,
+  nativeSafeFsAddonPath,
+  resolveNativeSafeFsAddonLocation,
+} from './native-safe-fs';
 import type {
   NativeSafeFs,
   NativeSafeFsError,
@@ -1329,5 +1334,43 @@ describe('NativeSafeFs authority boundary', () => {
       );
       expect(JSON.parse(result.stdout)).toMatchObject({ available: true, apiVersion: 1 });
     });
+  });
+});
+
+describe('resolveNativeSafeFsAddonLocation (packaged addon path resolution)', () => {
+  it('leaves the dev-relative path unchanged when not running from inside app.asar', () => {
+    const dirname = '/Users/dev/vibe-editor3/apps/desktop/src/main';
+    const location = resolveNativeSafeFsAddonLocation(dirname);
+    expect(location).toEqual({
+      addonPath:
+        '/Users/dev/vibe-editor3/apps/desktop/native-safe-fs/build/Release/vibe_native_safe_fs.node',
+      loadedFromUnpacked: false,
+    });
+  });
+
+  it('redirects into the app.asar.unpacked sibling when the bundle runs from inside app.asar', () => {
+    const dirname = '/Applications/vibe-editor3.app/Contents/Resources/app.asar/.vite/build';
+    const location = resolveNativeSafeFsAddonLocation(dirname);
+    expect(location).toEqual({
+      addonPath:
+        '/Applications/vibe-editor3.app/Contents/Resources/app.asar.unpacked/native-safe-fs/build/Release/vibe_native_safe_fs.node',
+      loadedFromUnpacked: true,
+    });
+    expect(location.addonPath).not.toContain('/app.asar/');
+  });
+
+  it('resolves the same packaged layout regardless of install location', () => {
+    const dirname = '/opt/example/app.asar/.vite/build';
+    const location = resolveNativeSafeFsAddonLocation(dirname);
+    expect(location.loadedFromUnpacked).toBe(true);
+    expect(location.addonPath).toBe(
+      '/opt/example/app.asar.unpacked/native-safe-fs/build/Release/vibe_native_safe_fs.node',
+    );
+  });
+
+  it('keeps nativeSafeFsAddonPath() and nativeSafeFsAddonLocation() consistent for the running module', () => {
+    const location = nativeSafeFsAddonLocation();
+    expect(location.addonPath).toBe(nativeSafeFsAddonPath());
+    expect(location.loadedFromUnpacked).toBe(false);
   });
 });

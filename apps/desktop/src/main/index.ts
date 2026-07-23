@@ -4,8 +4,16 @@ import { randomUUID } from 'node:crypto';
 import { extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
-import { loadNativeSafeFs, type NativeSafeFs } from './native-safe-fs';
-import { SqlitePersistenceClient } from './persistence';
+import { loadNativeSafeFs, nativeSafeFsAddonLocation, type NativeSafeFs } from './native-safe-fs';
+import { SqliteEditSagaLeaseGuard, SqlitePersistenceClient } from './persistence';
+import { EditSagaExecutor, PersistenceEditSagaStore } from './edit-saga';
+import { EditArtifactStore } from './edit-artifact-store';
+import { NativeSafeFsEditEffectBoundary } from './native-safe-fs-edit-boundary';
+import { MutationLeaseStaleError } from './mutation-lease';
+import {
+  evaluateNativeMutationPlatformGate,
+  type NativeMutationPackagedLoadEvidence,
+} from './native-mutation-platform-gate';
 
 const isDevelopment = !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
@@ -56,6 +64,7 @@ if (!hasLock) {
           nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
       );
       persistence.initializeMutationRecovery(randomUUID(), new Date().toISOString());
+      await wireEditSagaRecovery(persistence, nativeSafeFs);
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined
@@ -129,6 +138,69 @@ async function loadRenderer(window: BrowserWindow): Promise<void> {
     await window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
   } else {
     await window.loadURL('app://bundle/index.html');
+  }
+}
+
+async function wireEditSagaRecovery(
+  persistence: SqlitePersistenceClient,
+  nativeSafeFs: NativeSafeFs,
+): Promise<void> {
+  // Slice 4.7d/4.7e: connect the NativeSafeFs edit boundary to the Edit Saga executor and
+  // its restart recovery. The workspace mutation path stays fail-closed — no write
+  // ToolDefinition is published and the session resolver refuses to open a native
+  // mutation session — until the platform gate (native-mutation-platform-gate.ts)
+  // allows it, which requires darwin, a proven packaged+unpacked addon load, a true
+  // mutation probe capability, and persistence mutation authority all at once. This
+  // dormant wiring must never break startup.
+  try {
+    const artifacts = await EditArtifactStore.open({
+      rootPath: join(app.getPath('userData'), 'edit-artifacts'),
+      quotaBytes: 256 * 1024 * 1024,
+    });
+    const executor = new EditSagaExecutor(
+      new PersistenceEditSagaStore(persistence),
+      new NativeSafeFsEditEffectBoundary({
+        native: nativeSafeFs,
+        journal: persistence,
+        artifacts,
+        resolveSession: async () => {
+          throw new MutationLeaseStaleError();
+        },
+      }),
+      artifacts,
+      undefined,
+      new SqliteEditSagaLeaseGuard(persistence, randomUUID()),
+    );
+    const probe = await nativeSafeFs.probe();
+    const location = nativeSafeFsAddonLocation();
+    // Evidence only exists once the app is actually packaged AND the addon was actually
+    // loaded from the app.asar.unpacked sibling AND the probe confirms it is available.
+    // In every environment this codebase currently runs in (dev, CI, unit tests), at
+    // least one of these is false, so packagedLoadEvidence is null and the gate denies.
+    const packagedLoadEvidence: NativeMutationPackagedLoadEvidence | null =
+      app.isPackaged && location.loadedFromUnpacked && probe.available
+        ? { source: 'packaged-app', addonPath: location.addonPath, loadedFromUnpacked: true }
+        : null;
+    const gate = evaluateNativeMutationPlatformGate({
+      platform: process.platform,
+      packagedLoadEvidence,
+      probe: {
+        available: probe.available,
+        capabilities: { mutation: probe.capabilities.mutation },
+      },
+      persistenceAuthorityAvailable: persistence.isNativeMutationAuthorityAvailable(),
+    });
+    if (gate.allowed) {
+      await executor.reconcileAll();
+    } else {
+      console.log(
+        `Native mutation platform gate denied reconciliation: ${gate.reasons.join(', ')}`,
+      );
+    }
+  } catch (error) {
+    // Fail-closed dormant wiring: a recovery-wiring failure must neither enable
+    // mutation nor block the read-only application from starting.
+    console.error('Edit Saga recovery wiring did not initialize', error);
   }
 }
 
