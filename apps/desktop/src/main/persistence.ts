@@ -103,6 +103,16 @@ import {
   type NativeMutationIntentSnapshot,
   type NativeMutationIntentTransition,
 } from './native-mutation-intent';
+import {
+  appendEditSagaCriterion,
+  createEditSagaEvidence,
+  createInitialAcceptanceContract,
+  decideCompletion,
+  parseAcceptanceContract,
+  parseEvidenceRecord,
+  type AcceptanceContract,
+  type EvidenceRecord,
+} from './assurance';
 
 export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
   private readonly issued = new Map<string, MutationLeaseToken>();
@@ -1045,6 +1055,40 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 24,
+    checksum: 'standard-assurance-v24-contract-evidence',
+    sql: `
+      CREATE TABLE acceptance_contracts (
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        id TEXT NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        digest TEXT NOT NULL CHECK (length(digest) = 64),
+        snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(turn_id, revision),
+        UNIQUE(id, revision)
+      );
+      CREATE INDEX acceptance_contracts_task_idx
+        ON acceptance_contracts(task_id, turn_id, revision);
+
+      CREATE TABLE evidence_records (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        criterion_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('edit_saga_committed')),
+        subject_digest TEXT NOT NULL CHECK (length(subject_digest) = 64),
+        record_digest TEXT NOT NULL CHECK (length(record_digest) = 64),
+        snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(turn_id, criterion_id, kind, subject_digest)
+      );
+      CREATE INDEX evidence_records_turn_idx
+        ON evidence_records(turn_id, created_at, id);
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -1374,6 +1418,8 @@ export interface PersistenceClient {
   findEditSaga(taskId: string, turnId: string, operationId: string): EditSagaSnapshot | null;
   getEditSaga(id: string): EditSagaSnapshot;
   getTurnDiff(taskId: string, turnId: string): readonly TurnDiffEntry[];
+  getAcceptanceContract(taskId: string, turnId: string): AcceptanceContract;
+  listEvidenceRecords(taskId: string, turnId: string): readonly EvidenceRecord[];
   updateEditSaga(
     id: string,
     expectedRevision: number,
@@ -1491,6 +1537,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.backfillLegacyMutationScopes();
     this.backfillLegacyEditSagaBindings();
     this.backfillLegacyNativeEditSagaRevisions();
+    this.backfillAcceptanceContracts();
     this.interruptActiveCommands();
     this.contextLedger = new ContextLedger(this);
   }
@@ -1626,6 +1673,49 @@ export class SqlitePersistenceClient implements PersistenceClient {
           ),
         });
         update.run(JSON.stringify(raw), row.id);
+      }
+    })();
+  }
+
+  private backfillAcceptanceContracts(): void {
+    const turns = this.db
+      .prepare(
+        `SELECT turns.id, turns.task_id, turns.created_at, messages.content
+         FROM turns JOIN messages ON messages.id = turns.user_message_id
+         WHERE NOT EXISTS (
+           SELECT 1 FROM acceptance_contracts WHERE acceptance_contracts.turn_id = turns.id
+         )
+         ORDER BY turns.created_at, turns.id`,
+      )
+      .all() as { id: string; task_id: string; created_at: string; content: string }[];
+    this.db.transaction(() => {
+      for (const turn of turns) {
+        let contract = createInitialAcceptanceContract({
+          taskId: turn.task_id,
+          turnId: turn.id,
+          objective: turn.content,
+          createdAt: turn.created_at,
+        });
+        this.insertAcceptanceContract(contract);
+        const sagas = (
+          this.db
+            .prepare('SELECT * FROM edit_sagas WHERE turn_id = ? ORDER BY created_at, id')
+            .all(turn.id) as EditSagaRow[]
+        ).map(toEditSaga);
+        for (const saga of sagas) {
+          contract = appendEditSagaCriterion(contract, {
+            sagaId: saga.id,
+            planDigest: saga.planDigest,
+            paths: saga.steps.flatMap((step) =>
+              step.operation.destination === null
+                ? [step.operation.path]
+                : [step.operation.path, step.operation.destination],
+            ),
+          });
+          this.insertAcceptanceContract(contract);
+        }
+        for (const saga of sagas)
+          if (saga.state === 'committed') this.recordEditSagaEvidence(saga);
       }
     })();
   }
@@ -3650,6 +3740,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
           throw new OperationConflictError('Edit operation id was reused with another patch');
         return snapshot;
       }
+      const currentContract = this.getAcceptanceContract(request.taskId, request.turnId);
+      const nextContract = appendEditSagaCriterion(currentContract, {
+        sagaId: request.id,
+        planDigest: request.planDigest,
+        paths: request.operations.flatMap((operation) =>
+          operation.destination === null
+            ? [operation.path]
+            : [operation.path, operation.destination],
+        ),
+      });
+      if (nextContract !== currentContract) this.insertAcceptanceContract(nextContract);
       const snapshot = createEditSagaSnapshot(boundRequest);
       this.db
         .prepare(
@@ -3709,6 +3810,94 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return aggregateTurnDiff(sagas.map((saga) => saga.diff));
   }
 
+  getAcceptanceContract(taskId: string, turnId: string): AcceptanceContract {
+    const turn = this.getTurn(taskId, turnId);
+    if (turn.task_id !== taskId) throw new NotFoundError('Turn not found');
+    const row = this.db
+      .prepare(
+        `SELECT digest, snapshot_json FROM acceptance_contracts
+         WHERE task_id = ? AND turn_id = ? ORDER BY revision DESC LIMIT 1`,
+      )
+      .get(taskId, turnId) as { digest: string; snapshot_json: string } | undefined;
+    if (row === undefined) throw new NotFoundError('Acceptance Contract not found');
+    const contract = parseAcceptanceContract(JSON.parse(row.snapshot_json));
+    if (
+      contract.taskId !== taskId ||
+      contract.turnId !== turnId ||
+      contract.digest !== row.digest
+    )
+      throw new OperationConflictError('Acceptance Contract subject mismatch');
+    return contract;
+  }
+
+  listEvidenceRecords(taskId: string, turnId: string): readonly EvidenceRecord[] {
+    const turn = this.getTurn(taskId, turnId);
+    if (turn.task_id !== taskId) throw new NotFoundError('Turn not found');
+    return (
+      this.db
+        .prepare(
+          `SELECT record_digest, snapshot_json FROM evidence_records
+           WHERE task_id = ? AND turn_id = ? ORDER BY created_at, id`,
+        )
+        .all(taskId, turnId) as { record_digest: string; snapshot_json: string }[]
+    ).map((row) => {
+      const record = parseEvidenceRecord(JSON.parse(row.snapshot_json));
+      if (
+        record.taskId !== taskId ||
+        record.turnId !== turnId ||
+        record.recordDigest !== row.record_digest
+      )
+        throw new OperationConflictError('Evidence Record subject mismatch');
+      return record;
+    });
+  }
+
+  private insertAcceptanceContract(contract: AcceptanceContract): void {
+    this.db
+      .prepare(
+        `INSERT INTO acceptance_contracts(
+           turn_id, revision, id, task_id, digest, snapshot_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        contract.turnId,
+        contract.revision,
+        contract.id,
+        contract.taskId,
+        contract.digest,
+        JSON.stringify(contract),
+        contract.createdAt,
+      );
+  }
+
+  private recordEditSagaEvidence(saga: EditSagaSnapshot): void {
+    const contract = this.getAcceptanceContract(saga.taskId, saga.turnId);
+    const evidence = createEditSagaEvidence({
+      contract,
+      sagaId: saga.id,
+      planDigest: saga.planDigest,
+      createdAt: saga.updatedAt,
+    });
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO evidence_records(
+           id, task_id, turn_id, criterion_id, kind, subject_digest,
+           record_digest, snapshot_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        evidence.id,
+        evidence.taskId,
+        evidence.turnId,
+        evidence.criterionId,
+        evidence.kind,
+        evidence.subjectDigest,
+        evidence.recordDigest,
+        JSON.stringify(evidence),
+        evidence.createdAt,
+      );
+  }
+
   updateEditSaga(
     id: string,
     expectedRevision: number,
@@ -3734,6 +3923,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
           expectedRevision,
         );
       if (result.changes !== 1) throw new OperationConflictError('Stale Edit Saga revision');
+      if (current.state !== 'committed' && next.state === 'committed')
+        this.recordEditSagaEvidence(next);
       return next;
     })();
   }
@@ -4616,6 +4807,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`,
       )
       .run(turnId, taskId, userMessage.id, 'queued', runtimeKind, model, now, now);
+    this.insertAcceptanceContract(
+      createInitialAcceptanceContract({
+        taskId,
+        turnId,
+        objective: text,
+        createdAt: now,
+      }),
+    );
     this.attachBackgroundCompletionsInTransaction(taskId, turnId, now);
     const event = this.appendEvent({ type: 'turn.accepted', taskId, turnId, userMessage });
     this.db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(now, taskId);
@@ -4837,6 +5036,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
   ): TurnEvent {
     const turn = this.getTurn(taskId, turnId);
+    if (state === 'completed') {
+      const decision = decideCompletion(
+        this.getAcceptanceContract(taskId, turnId),
+        this.listEvidenceRecords(taskId, turnId),
+      );
+      if (!decision.allowed) throw new AcceptanceEvidenceMissingError(decision.openCriterionIds);
+    }
     this.cancelPendingApprovals(taskId, turnId, new Date().toISOString());
     transitionTurn(turn.state, state);
     this.updateTurn(turnId, state);
@@ -5176,6 +5382,11 @@ export class TurnActiveError extends Error {}
 export class SteerStaleError extends Error {}
 export class OperationConflictError extends Error {}
 export class OperationInProgressError extends Error {}
+export class AcceptanceEvidenceMissingError extends Error {
+  constructor(readonly openCriterionIds: readonly string[]) {
+    super(`Acceptance evidence is missing: ${openCriterionIds.join(', ')}`);
+  }
+}
 
 function toTask(row: TaskRow): TaskSummary {
   return taskSummarySchema.parse({

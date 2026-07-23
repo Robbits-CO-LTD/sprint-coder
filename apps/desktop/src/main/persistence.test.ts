@@ -16,6 +16,7 @@ import { ApprovalCoordinator } from './approval-coordinator';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { ToolBroker } from './tool-broker';
 import {
+  AcceptanceEvidenceMissingError,
   OperationConflictError,
   SqliteEditSagaLeaseGuard,
   SqlitePersistenceClient,
@@ -164,7 +165,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v23', () => {
+  describe('SqlitePersistenceClient v24', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -369,6 +370,50 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('persists the Acceptance Contract and refuses completion before edit evidence exists', async () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'edit with evidence');
+      expect(persistence.getAcceptanceContract(task.id, turn.turnId)).toMatchObject({
+        revision: 1,
+        taskKind: 'answer',
+        profile: 'quick',
+        criteria: [],
+      });
+
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest(
+          {
+            id: 'acceptance-saga',
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: 'acceptance-operation',
+            plan: persistedEditPlan(),
+            createdAt: '2026-07-23T00:00:00.000Z',
+          },
+          new PersistenceTestArtifacts(),
+        ),
+      );
+
+      expect(persistence.getAcceptanceContract(task.id, turn.turnId)).toMatchObject({
+        revision: 2,
+        taskKind: 'edit',
+        profile: 'standard',
+        criteria: [
+          {
+            id: `edit-saga:${saga.id}`,
+            evidenceKind: 'edit_saga_committed',
+            subjectDigest: saga.planDigest,
+          },
+        ],
+      });
+      expect(persistence.listEvidenceRecords(task.id, turn.turnId)).toEqual([]);
+      expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+        AcceptanceEvidenceMissingError,
+      );
+      persistence.close();
+    });
+
     it('rejects a persisted Edit plan whose sealed operation payload was modified', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -551,6 +596,18 @@ if (runsWithElectronAbi)
         state: 'committed',
         artifactCleanupPending: true,
       });
+      expect(persistence.listEvidenceRecords(task.id, turn.turnId)).toEqual([
+        expect.objectContaining({
+          criterionId: 'edit-saga:cleanup-saga',
+          kind: 'edit_saga_committed',
+          trust: 'main-observed',
+        }),
+      ]);
+      persistence.changeStage(task.id, turn.turnId, 'understanding');
+      persistence.changeStage(task.id, turn.turnId, 'planning');
+      persistence.changeStage(task.id, turn.turnId, 'executing');
+      persistence.changeStage(task.id, turn.turnId, 'synthesizing');
+      expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).not.toThrow();
       persistence.close();
 
       const reopenedPersistence = new SqlitePersistenceClient(path);
@@ -3939,6 +3996,7 @@ if (runsWithElectronAbi)
         { version: 21 },
         { version: 22 },
         { version: 23 },
+        { version: 24 },
       ]);
       expect(
         migrated
@@ -4017,7 +4075,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v23 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v24 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

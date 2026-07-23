@@ -15,6 +15,26 @@ class FakePersistence implements Pick<
   readonly steps: StepSnapshot[] = [];
   readonly stepTransitions = new Map<string, IntelligenceStepState[]>();
 
+  getAcceptanceContract(): ReturnType<PersistenceClient['getAcceptanceContract']> {
+    return {
+      version: 1,
+      id: 'contract',
+      taskId: 'task',
+      turnId: 'turn',
+      revision: 3,
+      objective: 'test',
+      taskKind: 'answer',
+      completionMode: 'response',
+      profile: 'quick',
+      criteria: [],
+      nonGoals: [],
+      allowedScope: [],
+      maxRepairRounds: 0,
+      digest: 'a'.repeat(64),
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+  }
+
   changeStage(taskId: string, turnId: string, stage: TurnStage): TurnEvent {
     this.state = stage;
     return this.record({ type: 'stage.changed', taskId, turnId, seq: ++this.seq, stage });
@@ -110,6 +130,7 @@ describe('MockRuntimeAdapter', () => {
     expect(persistence.content).toContain('同じ入力');
     expect(prepared).toEqual(['task:turn']);
     expect(persistence.steps).toHaveLength(2);
+    expect(persistence.steps.map((step) => step.contractRevision)).toEqual([3, 3]);
     expect(persistence.stepTransitions.get('step-1')).toContain('toolsCommitted');
     expect(persistence.stepTransitions.get('step-2')).not.toContain('dispatching');
     expect(published.at(-1)).toMatchObject({ type: 'turn.completed', state: 'completed' });

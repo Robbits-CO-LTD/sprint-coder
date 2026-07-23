@@ -30,6 +30,7 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
       PersistenceClient,
       | 'getWorkspace'
       | 'getPermissionPolicy'
+      | 'getAcceptanceContract'
       | 'createIntelligenceStep'
       | 'transitionIntelligenceStep'
       | 'listIntelligenceSteps'
@@ -144,6 +145,8 @@ export class MockRuntimeAdapter {
       const workspacePath = this.persistence.getWorkspace?.(taskId) ?? null;
       const policyEpoch = this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0;
       const workspaceId = workspacePath === null ? null : digestCanonical({ workspacePath });
+      const contractRevision =
+        this.persistence.getAcceptanceContract?.(taskId, turnId).revision ?? null;
       const toolContext = { taskId, turnId, workspaceId, policyEpoch } as const;
       const toolCatalogSnapshot = startMockTurnCatalog(this.toolBroker, toolContext);
       const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
@@ -155,7 +158,7 @@ export class MockRuntimeAdapter {
         effort: 'low',
         policyEpoch,
         workspaceRevision: `untracked:${digestCanonical({ workspacePath })}`,
-        contractRevision: null,
+        contractRevision,
         toolCatalogSnapshot,
         sample: createDeterministicMockSampler(input, buildReply(input)),
         executeTool: async (call) => {
