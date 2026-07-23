@@ -105,12 +105,17 @@ import {
 } from './native-mutation-intent';
 import {
   appendEditSagaCriterion,
+  advanceStandardAssurance,
   createEditSagaEvidence,
   createInitialAcceptanceContract,
+  createVerificationEvidence,
   decideCompletion,
   parseAcceptanceContract,
+  parseAssuranceRound,
   parseEvidenceRecord,
   type AcceptanceContract,
+  type AssuranceFailureClass,
+  type AssuranceRound,
   type EvidenceRecord,
 } from './assurance';
 
@@ -1089,6 +1094,49 @@ const migrations = [
         ON evidence_records(turn_id, created_at, id);
     `,
   },
+  {
+    version: 25,
+    checksum: 'standard-assurance-v25-bounded-rounds',
+    sql: `
+      DROP INDEX evidence_records_turn_idx;
+      ALTER TABLE evidence_records RENAME TO evidence_records_v24;
+      CREATE TABLE evidence_records (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        criterion_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('edit_saga_committed', 'verification_passed')),
+        subject_digest TEXT NOT NULL CHECK (length(subject_digest) = 64),
+        record_digest TEXT NOT NULL CHECK (length(record_digest) = 64),
+        snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(turn_id, criterion_id, kind, subject_digest)
+      );
+      INSERT INTO evidence_records
+        SELECT * FROM evidence_records_v24;
+      DROP TABLE evidence_records_v24;
+      CREATE INDEX evidence_records_turn_idx
+        ON evidence_records(turn_id, created_at, id);
+
+      CREATE TABLE assurance_rounds (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        saga_id TEXT NOT NULL REFERENCES edit_sagas(id) ON DELETE RESTRICT,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+        decision TEXT NOT NULL CHECK (
+          decision IN ('complete', 'repair', 'retry_verification', 'blocked')
+        ),
+        repair_rounds_used INTEGER NOT NULL CHECK (repair_rounds_used IN (0, 1)),
+        digest TEXT NOT NULL CHECK (length(digest) = 64),
+        snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(saga_id, ordinal)
+      );
+      CREATE INDEX assurance_rounds_turn_idx
+        ON assurance_rounds(turn_id, saga_id, ordinal);
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -1420,6 +1468,15 @@ export interface PersistenceClient {
   getTurnDiff(taskId: string, turnId: string): readonly TurnDiffEntry[];
   getAcceptanceContract(taskId: string, turnId: string): AcceptanceContract;
   listEvidenceRecords(taskId: string, turnId: string): readonly EvidenceRecord[];
+  listAssuranceRounds(taskId: string, turnId: string, sagaId: string): readonly AssuranceRound[];
+  recordAssuranceVerification(input: {
+    taskId: string;
+    turnId: string;
+    sagaId: string;
+    outcome: 'passed' | 'failed';
+    failureClass: AssuranceFailureClass | null;
+    createdAt: string;
+  }): AssuranceRound;
   updateEditSaga(
     id: string,
     expectedRevision: number,
@@ -1682,28 +1739,42 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare(
         `SELECT turns.id, turns.task_id, turns.created_at, messages.content
          FROM turns JOIN messages ON messages.id = turns.user_message_id
-         WHERE NOT EXISTS (
-           SELECT 1 FROM acceptance_contracts WHERE acceptance_contracts.turn_id = turns.id
-         )
          ORDER BY turns.created_at, turns.id`,
       )
       .all() as { id: string; task_id: string; created_at: string; content: string }[];
     this.db.transaction(() => {
       for (const turn of turns) {
-        let contract = createInitialAcceptanceContract({
-          taskId: turn.task_id,
-          turnId: turn.id,
-          objective: turn.content,
-          createdAt: turn.created_at,
-        });
-        this.insertAcceptanceContract(contract);
-        const sagas = (
-          this.db
-            .prepare('SELECT * FROM edit_sagas WHERE turn_id = ? ORDER BY created_at, id')
-            .all(turn.id) as EditSagaRow[]
-        ).map(toEditSaga);
+        const row = this.db
+          .prepare(
+            `SELECT 1 AS present FROM acceptance_contracts
+             WHERE turn_id = ? ORDER BY revision DESC LIMIT 1`,
+          )
+          .get(turn.id) as { present: 1 } | undefined;
+        let contract =
+          row === undefined
+            ? createInitialAcceptanceContract({
+                taskId: turn.task_id,
+                turnId: turn.id,
+                objective: turn.content,
+                createdAt: turn.created_at,
+              })
+            : this.getAcceptanceContract(turn.task_id, turn.id);
+        if (row === undefined) this.insertAcceptanceContract(contract);
+        const sagaRows = this.db
+          .prepare('SELECT * FROM edit_sagas WHERE turn_id = ? ORDER BY created_at, id')
+          .all(turn.id) as EditSagaRow[];
+        const contractIsCurrent = sagaRows.every((saga) =>
+          [`edit-saga:${saga.id}`, `verification:${saga.id}`].every((criterionId) =>
+            contract.criteria.some(
+              (criterion) =>
+                criterion.id === criterionId && criterion.subjectDigest === saga.plan_digest,
+            ),
+          ),
+        );
+        if (contractIsCurrent) continue;
+        const sagas = sagaRows.map(toEditSaga);
         for (const saga of sagas) {
-          contract = appendEditSagaCriterion(contract, {
+          const next = appendEditSagaCriterion(contract, {
             sagaId: saga.id,
             planDigest: saga.planDigest,
             paths: saga.steps.flatMap((step) =>
@@ -1712,7 +1783,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
                 : [step.operation.path, step.operation.destination],
             ),
           });
-          this.insertAcceptanceContract(contract);
+          if (next !== contract) {
+            contract = next;
+            this.insertAcceptanceContract(contract);
+          }
         }
         for (const saga of sagas)
           if (saga.state === 'committed') this.recordEditSagaEvidence(saga);
@@ -3852,6 +3926,88 @@ export class SqlitePersistenceClient implements PersistenceClient {
     });
   }
 
+  listAssuranceRounds(
+    taskId: string,
+    turnId: string,
+    sagaId: string,
+  ): readonly AssuranceRound[] {
+    const saga = this.getEditSaga(sagaId);
+    if (saga.taskId !== taskId || saga.turnId !== turnId)
+      throw new OperationConflictError('Assurance round subject mismatch');
+    return (
+      this.db
+        .prepare(
+          `SELECT digest, snapshot_json FROM assurance_rounds
+           WHERE task_id = ? AND turn_id = ? AND saga_id = ? ORDER BY ordinal`,
+        )
+        .all(taskId, turnId, sagaId) as { digest: string; snapshot_json: string }[]
+    ).map((row) => {
+      const round = parseAssuranceRound(JSON.parse(row.snapshot_json));
+      if (
+        round.taskId !== taskId ||
+        round.turnId !== turnId ||
+        round.sagaId !== sagaId ||
+        round.digest !== row.digest
+      )
+        throw new OperationConflictError('Assurance round subject mismatch');
+      return round;
+    });
+  }
+
+  recordAssuranceVerification(input: {
+    taskId: string;
+    turnId: string;
+    sagaId: string;
+    outcome: 'passed' | 'failed';
+    failureClass: AssuranceFailureClass | null;
+    createdAt: string;
+  }): AssuranceRound {
+    return this.db.transaction(() => {
+      const saga = this.getEditSaga(input.sagaId);
+      if (
+        saga.taskId !== input.taskId ||
+        saga.turnId !== input.turnId ||
+        saga.state !== 'committed'
+      )
+        throw new OperationConflictError('Only a committed Edit Saga can be verified');
+      const round = advanceStandardAssurance({
+        ...input,
+        previousRounds: this.listAssuranceRounds(input.taskId, input.turnId, input.sagaId),
+      });
+      this.db
+        .prepare(
+          `INSERT INTO assurance_rounds(
+             id, task_id, turn_id, saga_id, ordinal, decision,
+             repair_rounds_used, digest, snapshot_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          round.id,
+          round.taskId,
+          round.turnId,
+          round.sagaId,
+          round.ordinal,
+          round.decision,
+          round.repairRoundsUsed,
+          round.digest,
+          JSON.stringify(round),
+          round.createdAt,
+        );
+      if (round.decision === 'complete') {
+        const contract = this.getAcceptanceContract(input.taskId, input.turnId);
+        this.insertEvidence(
+          createVerificationEvidence({
+            contract,
+            sagaId: saga.id,
+            planDigest: saga.planDigest,
+            createdAt: input.createdAt,
+          }),
+        );
+      }
+      return round;
+    })();
+  }
+
   private insertAcceptanceContract(contract: AcceptanceContract): void {
     this.db
       .prepare(
@@ -3878,6 +4034,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
       planDigest: saga.planDigest,
       createdAt: saga.updatedAt,
     });
+    this.insertEvidence(evidence);
+  }
+
+  private insertEvidence(evidence: EvidenceRecord): void {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO evidence_records(

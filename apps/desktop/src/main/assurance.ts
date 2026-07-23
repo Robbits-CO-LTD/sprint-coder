@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 export type AssuranceProfile = 'quick' | 'standard';
-export type EvidenceKind = 'edit_saga_committed';
+export type EvidenceKind = 'edit_saga_committed' | 'verification_passed';
+export type AssuranceFailureClass = 'verification' | 'provider' | 'infrastructure';
+export type AssuranceDecision = 'complete' | 'repair' | 'retry_verification' | 'blocked';
 
 export type AcceptanceCriterion = Readonly<{
   id: string;
@@ -37,12 +39,27 @@ export type EvidenceRecord = Readonly<{
   criterionId: string;
   criterionDigest: string;
   kind: EvidenceKind;
-  producer: 'edit-saga';
+  producer: 'edit-saga' | 'assurance-controller';
   trust: 'main-observed';
   subjectDigest: string;
   contractRevision: number;
   createdAt: string;
   recordDigest: string;
+}>;
+
+export type AssuranceRound = Readonly<{
+  version: 1;
+  id: string;
+  taskId: string;
+  turnId: string;
+  sagaId: string;
+  ordinal: number;
+  outcome: 'passed' | 'failed';
+  failureClass: AssuranceFailureClass | null;
+  repairRoundsUsed: 0 | 1;
+  decision: AssuranceDecision;
+  createdAt: string;
+  digest: string;
 }>;
 
 export type CompletionDecision = Readonly<{
@@ -80,30 +97,125 @@ export function appendEditSagaCriterion(
 ): AcceptanceContract {
   const criterionId = `edit-saga:${input.sagaId}`;
   const existing = current.criteria.find((criterion) => criterion.id === criterionId);
-  if (existing !== undefined) {
-    if (existing.subjectDigest !== input.planDigest)
-      throw new Error('Acceptance criterion id was reused with another subject');
-    return current;
-  }
+  const verificationId = `verification:${input.sagaId}`;
+  const existingVerification = current.criteria.find(
+    (criterion) => criterion.id === verificationId,
+  );
+  if (
+    existing?.subjectDigest !== undefined &&
+    existing.subjectDigest !== input.planDigest
+  )
+    throw new Error('Acceptance criterion id was reused with another subject');
+  if (
+    existingVerification?.subjectDigest !== undefined &&
+    existingVerification.subjectDigest !== input.planDigest
+  )
+    throw new Error('Acceptance criterion id was reused with another subject');
+  if (existing !== undefined && existingVerification !== undefined) return current;
+  const additions: AcceptanceCriterion[] = [];
+  if (existing === undefined)
+    additions.push({
+      id: criterionId,
+      description: `Edit Saga ${input.sagaId} committed its sealed patch`,
+      gating: true,
+      evidenceKind: 'edit_saga_committed',
+      subjectDigest: input.planDigest,
+    });
+  if (existingVerification === undefined)
+    additions.push({
+      id: verificationId,
+      description: `Deterministic verification passed for Edit Saga ${input.sagaId}`,
+      gating: true,
+      evidenceKind: 'verification_passed',
+      subjectDigest: input.planDigest,
+    });
   return sealContract({
     ...withoutContractDigest(current),
     revision: current.revision + 1,
     taskKind: 'edit',
     completionMode: 'evidence',
     profile: 'standard',
-    criteria: [
-      ...current.criteria,
-      {
-        id: criterionId,
-        description: `Edit Saga ${input.sagaId} committed its sealed patch`,
-        gating: true,
-        evidenceKind: 'edit_saga_committed',
-        subjectDigest: input.planDigest,
-      },
-    ],
+    criteria: [...current.criteria, ...additions],
     allowedScope: [...new Set([...current.allowedScope, ...input.paths])].sort(),
     maxRepairRounds: 1,
   });
+}
+
+export function advanceStandardAssurance(input: {
+  taskId: string;
+  turnId: string;
+  sagaId: string;
+  previousRounds: readonly AssuranceRound[];
+  outcome: 'passed' | 'failed';
+  failureClass: AssuranceFailureClass | null;
+  createdAt: string;
+}): AssuranceRound {
+  const previous = input.previousRounds.at(-1);
+  if (previous?.decision === 'complete' || previous?.decision === 'blocked')
+    throw new Error('Assurance round is already terminal');
+  if (
+    (input.outcome === 'passed' && input.failureClass !== null) ||
+    (input.outcome === 'failed' && input.failureClass === null)
+  )
+    throw new Error('Assurance outcome and failure class disagree');
+  const repairRoundsUsed = input.previousRounds.reduce<0 | 1>(
+    (used, round) => Math.max(used, round.repairRoundsUsed) as 0 | 1,
+    0,
+  );
+  let decision: AssuranceDecision;
+  let nextRepairRounds = repairRoundsUsed;
+  if (input.outcome === 'passed') decision = 'complete';
+  else if (input.failureClass === 'provider' || input.failureClass === 'infrastructure')
+    decision = 'retry_verification';
+  else if (repairRoundsUsed === 0) {
+    decision = 'repair';
+    nextRepairRounds = 1;
+  } else decision = 'blocked';
+  return sealAssuranceRound({
+    version: 1,
+    id: randomUUID(),
+    taskId: input.taskId,
+    turnId: input.turnId,
+    sagaId: input.sagaId,
+    ordinal: input.previousRounds.length + 1,
+    outcome: input.outcome,
+    failureClass: input.failureClass,
+    repairRoundsUsed: nextRepairRounds,
+    decision,
+    createdAt: input.createdAt,
+  });
+}
+
+export function createVerificationEvidence(input: {
+  contract: AcceptanceContract;
+  sagaId: string;
+  planDigest: string;
+  createdAt: string;
+}): EvidenceRecord {
+  const criterion = input.contract.criteria.find(
+    (candidate) => candidate.id === `verification:${input.sagaId}`,
+  );
+  if (
+    criterion === undefined ||
+    criterion.evidenceKind !== 'verification_passed' ||
+    criterion.subjectDigest !== input.planDigest
+  )
+    throw new Error('Verified Edit Saga is not present in the Acceptance Contract');
+  const facts = {
+    version: 1 as const,
+    id: randomUUID(),
+    taskId: input.contract.taskId,
+    turnId: input.contract.turnId,
+    criterionId: criterion.id,
+    criterionDigest: acceptanceCriterionDigest(criterion),
+    kind: criterion.evidenceKind,
+    producer: 'assurance-controller' as const,
+    trust: 'main-observed' as const,
+    subjectDigest: input.planDigest,
+    contractRevision: input.contract.revision,
+    createdAt: input.createdAt,
+  };
+  return Object.freeze({ ...facts, recordDigest: digest(facts) });
 }
 
 export function createEditSagaEvidence(input: {
@@ -217,8 +329,10 @@ export function parseEvidenceRecord(value: unknown): EvidenceRecord {
     !isIdentifier(record.turnId) ||
     !isIdentifier(record.criterionId) ||
     !isDigest(record.criterionDigest) ||
-    record.kind !== 'edit_saga_committed' ||
-    record.producer !== 'edit-saga' ||
+    !['edit_saga_committed', 'verification_passed'].includes(record.kind) ||
+    !['edit-saga', 'assurance-controller'].includes(record.producer) ||
+    (record.kind === 'edit_saga_committed' && record.producer !== 'edit-saga') ||
+    (record.kind === 'verification_passed' && record.producer !== 'assurance-controller') ||
     record.trust !== 'main-observed' ||
     !isDigest(record.subjectDigest) ||
     !Number.isSafeInteger(record.contractRevision) ||
@@ -229,6 +343,29 @@ export function parseEvidenceRecord(value: unknown): EvidenceRecord {
   )
     throw new Error('Invalid Evidence Record');
   return Object.freeze(record);
+}
+
+export function parseAssuranceRound(value: unknown): AssuranceRound {
+  if (!isRecord(value)) throw new Error('Invalid Assurance Round');
+  const round = value as unknown as AssuranceRound;
+  if (
+    round.version !== 1 ||
+    !isIdentifier(round.id) ||
+    !isIdentifier(round.taskId) ||
+    !isIdentifier(round.turnId) ||
+    !isIdentifier(round.sagaId) ||
+    !Number.isSafeInteger(round.ordinal) ||
+    round.ordinal < 1 ||
+    !['passed', 'failed'].includes(round.outcome) ||
+    ![null, 'verification', 'provider', 'infrastructure'].includes(round.failureClass) ||
+    ![0, 1].includes(round.repairRoundsUsed) ||
+    !['complete', 'repair', 'retry_verification', 'blocked'].includes(round.decision) ||
+    !isIsoDate(round.createdAt) ||
+    !isDigest(round.digest) ||
+    round.digest !== digest(withoutRoundDigest(round))
+  )
+    throw new Error('Invalid Assurance Round');
+  return Object.freeze(round);
 }
 
 export function acceptanceCriterionDigest(criterion: AcceptanceCriterion): string {
@@ -249,7 +386,7 @@ function validateCriterion(value: AcceptanceCriterion): void {
     value.description.length < 1 ||
     value.description.length > 4_096 ||
     typeof value.gating !== 'boolean' ||
-    value.evidenceKind !== 'edit_saga_committed' ||
+    !['edit_saga_committed', 'verification_passed'].includes(value.evidenceKind) ||
     !isDigest(value.subjectDigest)
   )
     throw new Error('Invalid Acceptance Criterion');
@@ -264,6 +401,15 @@ function withoutContractDigest(
 
 function withoutRecordDigest(record: EvidenceRecord): Omit<EvidenceRecord, 'recordDigest'> {
   const { recordDigest: _digest, ...facts } = record;
+  return facts;
+}
+
+function sealAssuranceRound(facts: Omit<AssuranceRound, 'digest'>): AssuranceRound {
+  return Object.freeze({ ...facts, digest: digest(facts) });
+}
+
+function withoutRoundDigest(round: AssuranceRound): Omit<AssuranceRound, 'digest'> {
+  const { digest: _digest, ...facts } = round;
   return facts;
 }
 

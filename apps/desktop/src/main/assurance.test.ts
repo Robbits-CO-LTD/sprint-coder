@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  advanceStandardAssurance,
   appendEditSagaCriterion,
   createEditSagaEvidence,
   createInitialAcceptanceContract,
+  createVerificationEvidence,
   decideCompletion,
   parseAcceptanceContract,
   parseEvidenceRecord,
@@ -44,7 +46,7 @@ describe('Standard Assurance contract and evidence', () => {
     });
     expect(decideCompletion(contract, [])).toEqual({
       allowed: false,
-      openCriterionIds: ['edit-saga:saga-1'],
+      openCriterionIds: ['edit-saga:saga-1', 'verification:saga-1'],
     });
 
     const evidence = createEditSagaEvidence({
@@ -55,6 +57,16 @@ describe('Standard Assurance contract and evidence', () => {
     });
     expect(parseEvidenceRecord(JSON.parse(JSON.stringify(evidence)))).toEqual(evidence);
     expect(decideCompletion(contract, [evidence])).toEqual({
+      allowed: false,
+      openCriterionIds: ['verification:saga-1'],
+    });
+    const verification = createVerificationEvidence({
+      contract,
+      sagaId: 'saga-1',
+      planDigest: 'a'.repeat(64),
+      createdAt,
+    });
+    expect(decideCompletion(contract, [evidence, verification])).toEqual({
       allowed: true,
       openCriterionIds: [],
     });
@@ -89,7 +101,43 @@ describe('Standard Assurance contract and evidence', () => {
       decideCompletion(contract, [{ ...evidence, subjectDigest: 'b'.repeat(64) }]),
     ).toEqual({
       allowed: false,
-      openCriterionIds: ['edit-saga:saga-1'],
+      openCriterionIds: ['edit-saga:saga-1', 'verification:saga-1'],
     });
+  });
+
+  it('allows one repair while provider and infrastructure failures consume no repair budget', () => {
+    const infra = advanceStandardAssurance({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      sagaId: 'saga-1',
+      previousRounds: [],
+      outcome: 'failed',
+      failureClass: 'infrastructure',
+      createdAt,
+    });
+    expect(infra).toMatchObject({
+      decision: 'retry_verification',
+      repairRoundsUsed: 0,
+    });
+    const repair = advanceStandardAssurance({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      sagaId: 'saga-1',
+      previousRounds: [infra],
+      outcome: 'failed',
+      failureClass: 'verification',
+      createdAt,
+    });
+    expect(repair).toMatchObject({ decision: 'repair', repairRoundsUsed: 1 });
+    const blocked = advanceStandardAssurance({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      sagaId: 'saga-1',
+      previousRounds: [infra, repair],
+      outcome: 'failed',
+      failureClass: 'verification',
+      createdAt,
+    });
+    expect(blocked).toMatchObject({ decision: 'blocked', repairRoundsUsed: 1 });
   });
 });

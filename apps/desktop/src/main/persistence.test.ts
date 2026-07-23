@@ -165,7 +165,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v24', () => {
+  describe('SqlitePersistenceClient v25', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -371,7 +371,7 @@ if (runsWithElectronAbi)
     });
 
     it('persists the Acceptance Contract and refuses completion before edit evidence exists', async () => {
-      const { persistence } = createPersistence();
+      const { persistence, path } = createPersistence();
       const task = persistence.createTask();
       const turn = persistence.startTurn(task.id, 'edit with evidence');
       expect(persistence.getAcceptanceContract(task.id, turn.turnId)).toMatchObject({
@@ -399,19 +399,57 @@ if (runsWithElectronAbi)
         revision: 2,
         taskKind: 'edit',
         profile: 'standard',
-        criteria: [
-          {
+        criteria: expect.arrayContaining([
+          expect.objectContaining({
             id: `edit-saga:${saga.id}`,
             evidenceKind: 'edit_saga_committed',
             subjectDigest: saga.planDigest,
-          },
-        ],
+          }),
+          expect.objectContaining({
+            id: `verification:${saga.id}`,
+            evidenceKind: 'verification_passed',
+            subjectDigest: saga.planDigest,
+          }),
+        ]),
       });
       expect(persistence.listEvidenceRecords(task.id, turn.turnId)).toEqual([]);
       expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
         AcceptanceEvidenceMissingError,
       );
       persistence.close();
+
+      const legacy = new Database(path);
+      const row = legacy
+        .prepare(
+          'SELECT snapshot_json FROM acceptance_contracts WHERE turn_id = ? AND revision = 2',
+        )
+        .get(turn.turnId) as { snapshot_json: string };
+      const snapshot = JSON.parse(row.snapshot_json) as {
+        digest: string;
+        criteria: { id: string }[];
+        [key: string]: unknown;
+      };
+      const { digest: _digest, ...facts } = snapshot;
+      facts.criteria = snapshot.criteria.filter(
+        (criterion) => criterion.id !== `verification:${saga.id}`,
+      );
+      const digest = createHash('sha256').update(JSON.stringify(facts)).digest('hex');
+      legacy
+        .prepare(
+          `UPDATE acceptance_contracts SET digest = ?, snapshot_json = ?
+           WHERE turn_id = ? AND revision = 2`,
+        )
+        .run(digest, JSON.stringify({ ...facts, digest }), turn.turnId);
+      legacy.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getAcceptanceContract(task.id, turn.turnId)).toMatchObject({
+        revision: 3,
+        criteria: expect.arrayContaining([
+          expect.objectContaining({ id: `verification:${saga.id}` }),
+        ]),
+      });
+      reopened.close();
     });
 
     it('rejects a persisted Edit plan whose sealed operation payload was modified', async () => {
@@ -603,6 +641,48 @@ if (runsWithElectronAbi)
           trust: 'main-observed',
         }),
       ]);
+      expect(
+        persistence.recordAssuranceVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          sagaId: 'cleanup-saga',
+          outcome: 'failed',
+          failureClass: 'infrastructure',
+          createdAt: '2026-07-23T00:00:03.000Z',
+        }),
+      ).toMatchObject({ decision: 'retry_verification', repairRoundsUsed: 0 });
+      expect(
+        persistence.recordAssuranceVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          sagaId: 'cleanup-saga',
+          outcome: 'failed',
+          failureClass: 'verification',
+          createdAt: '2026-07-23T00:00:04.000Z',
+        }),
+      ).toMatchObject({ decision: 'repair', repairRoundsUsed: 1 });
+      expect(
+        persistence.recordAssuranceVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          sagaId: 'cleanup-saga',
+          outcome: 'passed',
+          failureClass: null,
+          createdAt: '2026-07-23T00:00:05.000Z',
+        }),
+      ).toMatchObject({ decision: 'complete', repairRoundsUsed: 1 });
+      expect(
+        persistence.listAssuranceRounds(task.id, turn.turnId, 'cleanup-saga'),
+      ).toHaveLength(3);
+      expect(persistence.listEvidenceRecords(task.id, turn.turnId)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            criterionId: 'verification:cleanup-saga',
+            kind: 'verification_passed',
+            producer: 'assurance-controller',
+          }),
+        ]),
+      );
       persistence.changeStage(task.id, turn.turnId, 'understanding');
       persistence.changeStage(task.id, turn.turnId, 'planning');
       persistence.changeStage(task.id, turn.turnId, 'executing');
@@ -3997,6 +4077,7 @@ if (runsWithElectronAbi)
         { version: 22 },
         { version: 23 },
         { version: 24 },
+        { version: 25 },
       ]);
       expect(
         migrated
@@ -4075,7 +4156,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v24 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v25 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),
