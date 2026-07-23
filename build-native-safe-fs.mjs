@@ -38,6 +38,7 @@ const buildEnvironment = { npm_config_loglevel: 'error' };
 for (const name of forwardedEnvironmentNames) {
   if (process.env[name] !== undefined) buildEnvironment[name] = process.env[name];
 }
+const buildTestAddon = process.argv.slice(2).includes('--test');
 
 const result = spawnSync(
   process.execPath,
@@ -49,6 +50,7 @@ const result = spawnSync(
     `--target=${electronVersion}`,
     '--dist-url=https://electronjs.org/headers',
     '--loglevel=error',
+    ...(buildTestAddon ? ['--vibe_test_hooks=1'] : []),
   ],
   { env: buildEnvironment, stdio: 'inherit' },
 );

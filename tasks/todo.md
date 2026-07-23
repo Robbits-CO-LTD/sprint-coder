@@ -91,6 +91,11 @@ Wave 2(完了 2026-07-22):
   - [x] S4b3b atomic effects/cleanup: add/delete/renameのkernel no-replace、updateのatomic exchange、全endpoint pre/post exact observation、session generation線形化、全parent fsync、journal temp/tombstone限定のexact/idempotent cleanupを実装。競合target、外部source/content改変、hardlink、raw malformed shapeをfail-closed化
   - [x] S4b3b gate: native addon Electron ABI rebuild、typecheck/test(464件、desktop 202 + contracts 14 + domain 248、Windows 1件skip)/lint/format/E2E 7本 green、`npm start`のmain/preload/runtime buildとElectron launchを確認。独立2系統レビュー CRITICAL 0 / HIGH 0
   - [ ] S4b4: deterministic parent/leaf race・fault/crash harness、Saga executor wiring、packaged `app.asar.unpacked`実ロードとplatform gate（完了まで`mutation:false`・write tool非公開）
+    - 内部分割(2026-07-23 スコープ固定): 4.7a Native操作+staging=済(S4b1-S4b3a) / 4.7b add-update-delete-rename=済(S4b3b) / 4.7c 競合検知+crash復旧=済(S3a/S3b/S4b2) / 4.7d Saga executor wiring=残 / 4.7e packaged実ロード+platform gate=残 / 4.7f 統合テスト+完了確認=残
+    - Later送り(記録): Windows/Linux write実証(ADR定義のCI必須、fail-closed維持で安全) / 3 OS CI実走・CI packaged smoke(remote未設定の環境依存) / 非決定論的外部rename raceの完全platform proof(post-observation+quarantine封じ込めで受け入れ条件充足、ADR「close or safely contain」準拠) / Verified profile(Phase 7) / restart-durable process・MCP(Public Beta)
+    - 4.7d wiring実装アンカー(2026-07-23調査済み): EditEffectBoundary(edit-saga.ts:153)のNativeSafeFs実装を新設(observeIntent/stageIntentArtifact/applyIntentEffect/cleanupIntentAuxiliary native-safe-fs.ts:224/251/285/325を接続、毎effect前assertSession)。production instantiation無し(new EditSagaExecutorはテストのみ)。intent遷移driverはupdateNativeMutationIntent(persistence.ts:3940)実装済み・未接続。write toolはToolDefinition未登録のまま維持(default-tools.tsに追加しない=4.7e gate通過まで非公開)。preflightはstructured-patch.ts:78実装済み
+    - 4.7e前提: ローカルpackagingはextract-zipハング(todo.md:18)で不能=CI依存の環境残件。platform gateはdarwin限定+packaged load evidence無しではmutation:false維持のfail-closed実装とする
+    - S4b4 harness差分(uncommitted)監査済み2026-07-23: 判定=採用。test専用addon分離・token認可barrier・production hooks混入なし・kernel直前再検証/cleanup再ハッシュはADR containment強化。コミットは実行権限復旧待ち
   - [ ] Turn全体baseline diff集約、Acceptance Contract/Evidence Ledger、Standard repair最大1、30-case corpus baseline
 - [ ] Phase 4 acceptance gate: provider.egress policy/監査、local-only拒否、30-case corpus、未解決High/Critical 0を最終確認
 

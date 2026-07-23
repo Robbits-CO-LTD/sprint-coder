@@ -6,7 +6,7 @@ import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
 const config: ForgeConfig = {
   packagerConfig: {
-    asar: { unpack: 'native-safe-fs/build/Release/*.node' },
+    asar: { unpack: 'native-safe-fs/build/Release/vibe_native_safe_fs.node' },
   },
   makers: [new MakerZIP({}, ['darwin', 'win32', 'linux'])],
   plugins: [

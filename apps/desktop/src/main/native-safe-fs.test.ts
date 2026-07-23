@@ -14,6 +14,7 @@ import {
 } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
@@ -91,6 +92,42 @@ function fixtureBoundary(
   addonPath = nativeSafeFsAddonPath(),
 ) {
   return loadNativeSafeFs({ addonPath, lockDirectoryPath: input.lockDirectoryPath });
+}
+
+function nativeSafeFsTestAddonPath(): string {
+  return join(nativeSafeFsAddonPath(), '..', 'vibe_native_safe_fs_test.node');
+}
+
+type NativeTestControl = Readonly<{
+  configureTestControl(token: string): void;
+  armTestControl(input: { token: string; point: string; failure: string }): void;
+  testControlState(token: string): {
+    armed: boolean;
+    reached: boolean;
+    hitCount: number;
+    point: string;
+  };
+  releaseTestControl(token: string): void;
+}>;
+
+let configuredNativeTestControl: { control: NativeTestControl; token: string } | null = null;
+
+function nativeTestControl(): { control: NativeTestControl; token: string } {
+  if (configuredNativeTestControl !== null) return configuredNativeTestControl;
+  const control = require(nativeSafeFsTestAddonPath()) as NativeTestControl;
+  const token = randomBytes(32).toString('hex');
+  control.configureTestControl(token);
+  configuredNativeTestControl = { control, token };
+  return configuredNativeTestControl;
+}
+
+async function waitForTestBarrier(control: NativeTestControl, token: string): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    if (control.testControlState(token).reached) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('NativeSafeFs test barrier was not reached');
 }
 
 type MutationTestBoundary = NativeSafeFs &
@@ -1040,6 +1077,242 @@ describe('NativeSafeFs authority boundary', () => {
       if (Buffer.isBuffer(stagedOrError)) expect(stagedOrError).toEqual(bytes);
       else expect(stagedOrError).toMatchObject({ code: 'ENOENT' });
     });
+
+    describe.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'deterministic native platform gate',
+      () => {
+        it('keeps test control out of the production addon', () => {
+          const production = require(nativeSafeFsAddonPath()) as Record<string, unknown>;
+          const testing = require(nativeSafeFsTestAddonPath()) as Record<string, unknown>;
+          expect(production).not.toHaveProperty('configureTestControl');
+          expect(production).not.toHaveProperty('armTestControl');
+          expect(production).not.toHaveProperty('releaseTestControl');
+          expect(testing).toHaveProperty('configureTestControl');
+        });
+
+        it('fails an unsupported atomic primitive before mutation and preserves the staged artifact', async () => {
+          const input = await fixture();
+          const bytes = Buffer.from('managed artifact\n');
+          const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+          const session = await boundary.openSession({ ...input, fence: '901' });
+          let intent = nativeIntent({
+            session,
+            kind: 'add',
+            sourceSegments: ['unsupported.txt'],
+            expectedSource: { state: 'absent' },
+            artifactBytes: bytes,
+          });
+          intent = await stageNativeIntent(boundary, session, intent, bytes);
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          const { control, token } = nativeTestControl();
+          control.armTestControl({
+            token,
+            point: 'effect.before_kernel_call',
+            failure: 'ENOSYS',
+          });
+
+          const applying = boundary.applyIntentEffect(session, intent);
+          await waitForTestBarrier(control, token);
+          control.releaseTestControl(token);
+          await expect(applying).rejects.toMatchObject({ code: 'UNSUPPORTED_PLATFORM' });
+          await expect(readFile(join(input.workspace, 'unsupported.txt'))).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          await expect(readFile(join(input.workspace, intent.temp!.leafName))).resolves.toEqual(
+            bytes,
+          );
+          await boundary.closeSession(session);
+        });
+
+        it('never reports success when directory durability fails after an atomic effect', async () => {
+          const input = await fixture();
+          const bytes = Buffer.from('durability unknown\n');
+          const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+          const session = await boundary.openSession({ ...input, fence: '902' });
+          let intent = nativeIntent({
+            session,
+            kind: 'add',
+            sourceSegments: ['fsync-fault.txt'],
+            expectedSource: { state: 'absent' },
+            artifactBytes: bytes,
+          });
+          intent = await stageNativeIntent(boundary, session, intent, bytes);
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          const { control, token } = nativeTestControl();
+          control.armTestControl({
+            token,
+            point: 'effect.before_fsync.source',
+            failure: 'EIO',
+          });
+
+          const applying = boundary.applyIntentEffect(session, intent);
+          await waitForTestBarrier(control, token);
+          control.releaseTestControl(token);
+          await expect(applying).rejects.toMatchObject({ code: 'NATIVE_FAILURE' });
+          await expect(readFile(join(input.workspace, 'fsync-fault.txt'))).resolves.toEqual(bytes);
+          await expect(
+            readFile(join(input.workspace, intent.temp!.leafName)),
+          ).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          await boundary.closeSession(session);
+        });
+
+        it('invalidates before the authority lock without executing the armed effect', async () => {
+          const input = await fixture();
+          const bytes = Buffer.from('must not publish\n');
+          const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+          const session = await boundary.openSession({ ...input, fence: '903' });
+          let intent = nativeIntent({
+            session,
+            kind: 'add',
+            sourceSegments: ['revoked.txt'],
+            expectedSource: { state: 'absent' },
+            artifactBytes: bytes,
+          });
+          intent = await stageNativeIntent(boundary, session, intent, bytes);
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          const { control, token } = nativeTestControl();
+          control.armTestControl({
+            token,
+            point: 'effect.before_authority_lock',
+            failure: '',
+          });
+
+          const applying = boundary.applyIntentEffect(session, intent);
+          await waitForTestBarrier(control, token);
+          boundary.invalidateWorkspace(input.workspaceKey, '904');
+          control.releaseTestControl(token);
+          await expect(applying).rejects.toMatchObject({ code: 'STALE_SESSION' });
+          await expect(readFile(join(input.workspace, 'revoked.txt'))).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          await expect(readFile(join(input.workspace, intent.temp!.leafName))).resolves.toEqual(
+            bytes,
+          );
+        });
+
+        it('revalidates a staged leaf after the last deterministic race barrier', async () => {
+          const input = await fixture();
+          const bytes = Buffer.from('sealed managed bytes\n');
+          const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+          const session = await boundary.openSession({ ...input, fence: '906' });
+          let intent = nativeIntent({
+            session,
+            kind: 'add',
+            sourceSegments: ['leaf-race.txt'],
+            expectedSource: { state: 'absent' },
+            artifactBytes: bytes,
+          });
+          intent = await stageNativeIntent(boundary, session, intent, bytes);
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          const tempPath = join(input.workspace, intent.temp!.leafName);
+          const retainedPath = join(input.workspace, 'retained-managed-artifact');
+          const { control, token } = nativeTestControl();
+          control.armTestControl({
+            token,
+            point: 'effect.before_kernel_call',
+            failure: '',
+          });
+
+          const applying = boundary.applyIntentEffect(session, intent);
+          await waitForTestBarrier(control, token);
+          await rename(tempPath, retainedPath);
+          await writeFile(tempPath, 'forged replacement\n', { mode: 0o600 });
+          control.releaseTestControl(token);
+          await expect(applying).rejects.toMatchObject({ code: 'UNSAFE_PATH' });
+          await expect(readFile(join(input.workspace, 'leaf-race.txt'))).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          await expect(readFile(retainedPath)).resolves.toEqual(bytes);
+          await expect(readFile(tempPath, 'utf8')).resolves.toBe('forged replacement\n');
+          await boundary.closeSession(session);
+        });
+
+        it('revalidates a moved parent and never mutates through a detached directory fd', async () => {
+          const input = await fixture();
+          await mkdir(join(input.workspace, 'nested'));
+          const bytes = Buffer.from('must remain in selected workspace\n');
+          const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+          const session = await boundary.openSession({ ...input, fence: '907' });
+          let intent = nativeIntent({
+            session,
+            kind: 'add',
+            sourceSegments: ['nested', 'parent-race.txt'],
+            expectedSource: { state: 'absent' },
+            artifactBytes: bytes,
+          });
+          intent = await stageNativeIntent(boundary, session, intent, bytes);
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          const detachedParent = join(input.root, 'detached-parent');
+          const { control, token } = nativeTestControl();
+          control.armTestControl({
+            token,
+            point: 'effect.before_kernel_call',
+            failure: '',
+          });
+
+          const applying = boundary.applyIntentEffect(session, intent);
+          await waitForTestBarrier(control, token);
+          await rename(join(input.workspace, 'nested'), detachedParent);
+          await mkdir(join(input.workspace, 'nested'));
+          control.releaseTestControl(token);
+          await expect(applying).rejects.toMatchObject({ code: 'UNSAFE_PATH' });
+          await expect(readFile(join(detachedParent, 'parent-race.txt'))).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          await expect(readFile(join(detachedParent, intent.temp!.leafName))).resolves.toEqual(
+            bytes,
+          );
+          await expect(
+            readFile(join(input.workspace, 'nested', 'parent-race.txt')),
+          ).rejects.toMatchObject({ code: 'ENOENT' });
+          await boundary.closeSession(session);
+        });
+
+        it('rehashes cleanup after a deterministic in-place mutation and preserves the auxiliary', async () => {
+          const input = await fixture();
+          const sourcePath = join(input.workspace, 'cleanup-race.txt');
+          await writeFile(sourcePath, 'preimage\n', { mode: 0o600 });
+          const expectedSource = await revision(sourcePath);
+          const bytes = Buffer.from('postimage\n');
+          const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+          const session = await boundary.openSession({ ...input, fence: '905' });
+          let intent = nativeIntent({
+            session,
+            kind: 'update',
+            sourceSegments: ['cleanup-race.txt'],
+            expectedSource,
+            artifactBytes: bytes,
+          });
+          intent = await stageNativeIntent(boundary, session, intent, bytes);
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          const effect = await boundary.applyIntentEffect(session, intent);
+          intent = transitionNativeMutationIntent(intent, {
+            state: 'effect_observed',
+            effectObservation: effect,
+          });
+          intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+          const auxiliaryPath = join(input.workspace, intent.temp!.leafName);
+          const { control, token } = nativeTestControl();
+          control.armTestControl({
+            token,
+            point: 'cleanup.before_unlink',
+            failure: '',
+          });
+
+          const cleaning = boundary.cleanupIntentAuxiliary(session, intent);
+          await waitForTestBarrier(control, token);
+          await appendFile(auxiliaryPath, 'external mutation\n');
+          control.releaseTestControl(token);
+          await expect(cleaning).rejects.toMatchObject({ code: 'UNSAFE_PATH' });
+          await expect(readFile(auxiliaryPath, 'utf8')).resolves.toBe(
+            'preimage\nexternal mutation\n',
+          );
+          await boundary.closeSession(session);
+        });
+      },
+    );
 
     it('loads the addon in the Electron runtime ABI', async () => {
       const electronExecutable = require('electron') as string;

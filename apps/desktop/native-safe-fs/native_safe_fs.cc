@@ -25,6 +25,10 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+#include <chrono>
+#include <condition_variable>
+#endif
 
 namespace {
 
@@ -56,6 +60,57 @@ struct GlobalState {
 };
 
 GlobalState state;
+
+#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+struct TestControlState {
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::string token;
+  std::string point;
+  pid_t owner_pid = 0;
+  int injected_errno = 0;
+  uint32_t hit_count = 0;
+  bool armed = false;
+  bool reached = false;
+  bool released = false;
+};
+
+TestControlState test_control;
+
+bool IsAllowedTestPoint(const std::string& point) {
+  static const std::unordered_set<std::string> allowed = {
+      "effect.after_pre_observe",      "effect.after_parent_verify",
+      "effect.before_authority_lock",  "effect.before_kernel_call",
+      "effect.after_kernel_call",      "effect.before_fsync.source",
+      "effect.before_fsync.destination", "effect.before_fsync.auxiliary",
+      "effect.after_fsync",            "effect.before_complete",
+      "cleanup.after_pre_observe",     "cleanup.after_parent_verify",
+      "cleanup.before_authority_lock", "cleanup.before_unlink",
+      "cleanup.after_unlink",          "cleanup.before_parent_fsync",
+      "cleanup.after_parent_fsync",    "cleanup.before_complete",
+  };
+  return allowed.contains(point);
+}
+
+bool HitTestControl(const char* point, int* injected_errno = nullptr) {
+  std::unique_lock<std::mutex> guard(test_control.mutex);
+  if (!test_control.armed || test_control.owner_pid != getpid() ||
+      test_control.point != point)
+    return false;
+  test_control.reached = true;
+  ++test_control.hit_count;
+  test_control.changed.notify_all();
+  const bool released = test_control.changed.wait_for(
+      guard, std::chrono::seconds(5), [] { return test_control.released; });
+  const int planned_errno = released ? test_control.injected_errno : ETIMEDOUT;
+  test_control.armed = false;
+  test_control.released = false;
+  if (injected_errno != nullptr) *injected_errno = planned_errno;
+  return planned_errno != 0;
+}
+#else
+bool HitTestControl(const char*, int* = nullptr) { return false; }
+#endif
 
 void CloseFd(int* fd) {
   if (*fd >= 0) {
@@ -308,6 +363,133 @@ napi_value ThrowFailure(napi_env env, const std::string& code, const std::string
   napi_throw(env, MakeError(env, NativeFailure{code, message}));
   return nullptr;
 }
+
+#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+bool ReadTestToken(napi_env env, napi_value value, std::string* token) {
+  napi_valuetype type;
+  if (napi_typeof(env, value, &type) != napi_ok || type != napi_string) return false;
+  size_t length = 0;
+  if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok || length != 64)
+    return false;
+  std::array<char, 65> buffer{};
+  if (napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &length) != napi_ok)
+    return false;
+  token->assign(buffer.data(), length);
+  return IsLowerHex(*token, 64);
+}
+
+bool AuthorizedTestToken(const std::string& token) {
+  if (test_control.owner_pid != getpid() || token.size() != test_control.token.size())
+    return false;
+  unsigned char difference = 0;
+  for (size_t index = 0; index < token.size(); ++index)
+    difference |= static_cast<unsigned char>(token[index] ^ test_control.token[index]);
+  return difference == 0;
+}
+
+napi_value ConfigureTestControl(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string token;
+  if (argc != 1 || !ReadTestToken(env, argv[0], &token))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs test token");
+  std::lock_guard<std::mutex> guard(test_control.mutex);
+  if (!test_control.token.empty() && test_control.owner_pid == getpid())
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs test control is already configured");
+  test_control.token = std::move(token);
+  test_control.owner_pid = getpid();
+  test_control.point.clear();
+  test_control.injected_errno = 0;
+  test_control.hit_count = 0;
+  test_control.armed = false;
+  test_control.reached = false;
+  test_control.released = false;
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
+
+int TestErrno(const std::string& value) {
+  if (value == "EIO") return EIO;
+  if (value == "ENOSPC") return ENOSPC;
+  if (value == "ENOSYS") return ENOSYS;
+  if (value == "EOPNOTSUPP") return EOPNOTSUPP;
+  if (value == "EXDEV") return EXDEV;
+  if (value == "EINVAL") return EINVAL;
+  return -1;
+}
+
+napi_value ArmTestControl(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  std::string token;
+  std::string point;
+  std::string failure;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object ||
+      !ReadString(env, argv[0], "token", &token) ||
+      !ReadString(env, argv[0], "point", &point) ||
+      !ReadString(env, argv[0], "failure", &failure) || !IsAllowedTestPoint(point))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs test plan");
+  const int injected_errno = failure.empty() ? 0 : TestErrno(failure);
+  if (injected_errno < 0)
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs injected failure");
+  std::lock_guard<std::mutex> guard(test_control.mutex);
+  if (!AuthorizedTestToken(token) || test_control.armed)
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs test control is unavailable");
+  test_control.point = std::move(point);
+  test_control.injected_errno = injected_errno;
+  test_control.reached = false;
+  test_control.released = false;
+  test_control.armed = true;
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
+
+napi_value TestControlState(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string token;
+  if (argc != 1 || !ReadTestToken(env, argv[0], &token))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs test token");
+  std::lock_guard<std::mutex> guard(test_control.mutex);
+  if (!AuthorizedTestToken(token))
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs test control is unavailable");
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_value boolean;
+  napi_get_boolean(env, test_control.armed, &boolean);
+  napi_set_named_property(env, result, "armed", boolean);
+  napi_get_boolean(env, test_control.reached, &boolean);
+  napi_set_named_property(env, result, "reached", boolean);
+  napi_value hits;
+  napi_create_uint32(env, test_control.hit_count, &hits);
+  napi_set_named_property(env, result, "hitCount", hits);
+  napi_set_named_property(env, result, "point", MakeString(env, test_control.point));
+  return result;
+}
+
+napi_value ReleaseTestControl(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string token;
+  if (argc != 1 || !ReadTestToken(env, argv[0], &token))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs test token");
+  std::lock_guard<std::mutex> guard(test_control.mutex);
+  if (!AuthorizedTestToken(token) || !test_control.armed || !test_control.reached)
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs test barrier was not reached");
+  test_control.released = true;
+  test_control.changed.notify_all();
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
+#endif
 
 bool SplitAbsolutePath(const std::string& path, std::vector<std::string>* components) {
   if (path.empty() || path[0] != '/' || path.find('\0') != std::string::npos) return false;
@@ -1595,6 +1777,30 @@ NativeFailure AtomicMutationFailure(const char* operation) {
   return {"NATIVE_FAILURE", ErrnoMessage(operation)};
 }
 
+bool SameDirectoryIdentity(int first_fd, int second_fd) {
+  if (first_fd < 0 || second_fd < 0) return false;
+  struct stat first {};
+  struct stat second {};
+  return fstat(first_fd, &first) == 0 && fstat(second_fd, &second) == 0 &&
+         first.st_dev == second.st_dev && first.st_ino == second.st_ino;
+}
+
+bool FsyncMutationParent(int fd, const char* role, NativeFailure* failure) {
+  if (fd < 0) return true;
+  const std::string point = std::string("effect.before_fsync.") + role;
+  int injected_errno = 0;
+  if (HitTestControl(point.c_str(), &injected_errno)) {
+    errno = injected_errno;
+    if (failure->code.empty())
+      *failure = {"NATIVE_FAILURE", ErrnoMessage("fsync mutation parent")};
+    return false;
+  }
+  if (fsync(fd) == 0) return true;
+  if (failure->code.empty())
+    *failure = {"NATIVE_FAILURE", ErrnoMessage("fsync mutation parent")};
+  return false;
+}
+
 struct EffectWork {
   napi_async_work work = nullptr;
   napi_deferred deferred = nullptr;
@@ -1676,6 +1882,7 @@ void ExecuteEffect(napi_env, void* data) {
     context->failure = {"UNSAFE_PATH", "NativeSafeFs effect precondition changed"};
     return;
   }
+  HitTestControl("effect.after_pre_observe");
 
   int source_parent_fd = OpenRelativeParent(context->root_fd, context->source, &context->failure);
   if (source_parent_fd < 0) return;
@@ -1711,6 +1918,36 @@ void ExecuteEffect(napi_env, void* data) {
     CloseFd(&auxiliary_parent_fd);
     return;
   }
+  HitTestControl("effect.after_parent_verify");
+  HitTestControl("effect.before_authority_lock");
+  int injected_kernel_errno = 0;
+  HitTestControl("effect.before_kernel_call", &injected_kernel_errno);
+  RevisionObservation final_source;
+  RevisionObservation final_destination;
+  RevisionObservation final_auxiliary;
+  if (!ObserveSnapshot(
+          context->root_fd, context->workspace_path, context->source,
+          context->has_destination ? &context->destination : nullptr,
+          context->has_auxiliary ? &context->auxiliary : nullptr, &final_source,
+          &final_destination, &final_auxiliary, &context->failure) ||
+      !ObservationMatches(final_source, context->expected_source) ||
+      !ObservationMatches(final_destination, context->expected_destination) ||
+      !ObservationMatches(final_auxiliary, context->expected_auxiliary) ||
+      !VerifyRelativeParentNamespace(context->root_fd, context->source, source_parent_fd,
+                                     &context->failure) ||
+      (context->has_destination &&
+       !VerifyRelativeParentNamespace(context->root_fd, context->destination,
+                                      destination_parent_fd, &context->failure)) ||
+      (context->has_auxiliary &&
+       !VerifyRelativeParentNamespace(context->root_fd, context->auxiliary, auxiliary_parent_fd,
+                                      &context->failure))) {
+    if (context->failure.code.empty())
+      context->failure = {"UNSAFE_PATH", "NativeSafeFs effect changed before kernel call"};
+    CloseFd(&source_parent_fd);
+    CloseFd(&destination_parent_fd);
+    CloseFd(&auxiliary_parent_fd);
+    return;
+  }
 
   int mutation_result = -1;
   {
@@ -1720,20 +1957,26 @@ void ExecuteEffect(napi_env, void* data) {
         session->second.workspace_key != context->workspace_key ||
         state.invalidation_versions[context->workspace_key] != context->invalidation_version) {
       context->failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before effect"};
-    } else if (context->kind == "add") {
-      mutation_result = AtomicMoveNoReplace(auxiliary_parent_fd, context->auxiliary.back().c_str(),
-                                            source_parent_fd, context->source.back().c_str());
-    } else if (context->kind == "update") {
-      mutation_result = AtomicExchange(source_parent_fd, context->source.back().c_str(),
-                                       auxiliary_parent_fd, context->auxiliary.back().c_str());
-    } else if (context->kind == "delete") {
-      mutation_result = AtomicMoveNoReplace(source_parent_fd, context->source.back().c_str(),
-                                            auxiliary_parent_fd,
-                                            context->auxiliary.back().c_str());
     } else {
-      mutation_result = AtomicMoveNoReplace(source_parent_fd, context->source.back().c_str(),
-                                            destination_parent_fd,
-                                            context->destination.back().c_str());
+      if (injected_kernel_errno != 0) {
+        errno = injected_kernel_errno;
+      } else if (context->kind == "add") {
+        mutation_result = AtomicMoveNoReplace(
+            auxiliary_parent_fd, context->auxiliary.back().c_str(), source_parent_fd,
+            context->source.back().c_str());
+      } else if (context->kind == "update") {
+        mutation_result = AtomicExchange(source_parent_fd, context->source.back().c_str(),
+                                         auxiliary_parent_fd,
+                                         context->auxiliary.back().c_str());
+      } else if (context->kind == "delete") {
+        mutation_result = AtomicMoveNoReplace(
+            source_parent_fd, context->source.back().c_str(), auxiliary_parent_fd,
+            context->auxiliary.back().c_str());
+      } else {
+        mutation_result = AtomicMoveNoReplace(
+            source_parent_fd, context->source.back().c_str(), destination_parent_fd,
+            context->destination.back().c_str());
+      }
     }
   }
   if (!context->failure.code.empty()) {
@@ -1749,14 +1992,17 @@ void ExecuteEffect(napi_env, void* data) {
     CloseFd(&auxiliary_parent_fd);
     return;
   }
+  HitTestControl("effect.after_kernel_call");
 
-  if (fsync(source_parent_fd) != 0 ||
-      (destination_parent_fd >= 0 && destination_parent_fd != source_parent_fd &&
-       fsync(destination_parent_fd) != 0) ||
-      (auxiliary_parent_fd >= 0 && auxiliary_parent_fd != source_parent_fd &&
-       auxiliary_parent_fd != destination_parent_fd && fsync(auxiliary_parent_fd) != 0)) {
-    context->failure = {"NATIVE_FAILURE", ErrnoMessage("fsync mutation parent")};
-  }
+  FsyncMutationParent(source_parent_fd, "source", &context->failure);
+  if (destination_parent_fd >= 0 &&
+      !SameDirectoryIdentity(destination_parent_fd, source_parent_fd))
+    FsyncMutationParent(destination_parent_fd, "destination", &context->failure);
+  if (auxiliary_parent_fd >= 0 &&
+      !SameDirectoryIdentity(auxiliary_parent_fd, source_parent_fd) &&
+      !SameDirectoryIdentity(auxiliary_parent_fd, destination_parent_fd))
+    FsyncMutationParent(auxiliary_parent_fd, "auxiliary", &context->failure);
+  HitTestControl("effect.after_fsync");
   CloseFd(&source_parent_fd);
   CloseFd(&destination_parent_fd);
   CloseFd(&auxiliary_parent_fd);
@@ -1773,6 +2019,7 @@ void ExecuteEffect(napi_env, void* data) {
     context->failure = {"NATIVE_FAILURE", "NativeSafeFs effect topology is indeterminate"};
     return;
   }
+  HitTestControl("effect.before_complete");
   context->success = true;
 }
 
@@ -1884,6 +2131,7 @@ void ExecuteCleanup(napi_env, void* data) {
     context->failure = {"UNSAFE_PATH", "NativeSafeFs cleanup identity changed"};
     return;
   }
+  HitTestControl("cleanup.after_pre_observe");
   int parent_fd =
       OpenRelativeParent(context->root_fd, context->auxiliary, &context->failure);
   if (parent_fd < 0) return;
@@ -1891,6 +2139,21 @@ void ExecuteCleanup(napi_env, void* data) {
                                      &context->failure) ||
       !VerifyDirectoryNamespace(context->workspace_path, context->root_fd, &context->failure,
                                 "UNSAFE_PATH")) {
+    CloseFd(&parent_fd);
+    return;
+  }
+  HitTestControl("cleanup.after_parent_verify");
+  HitTestControl("cleanup.before_authority_lock");
+  HitTestControl("cleanup.before_unlink");
+  RevisionObservation final_observation;
+  if (!ObserveSnapshot(context->root_fd, context->workspace_path, context->auxiliary, nullptr,
+                       nullptr, &final_observation, &ignored_destination,
+                       &ignored_auxiliary, &context->failure) ||
+      !ObservationMatches(final_observation, context->expected_auxiliary) ||
+      !VerifyRelativeParentNamespace(context->root_fd, context->auxiliary, parent_fd,
+                                     &context->failure)) {
+    if (context->failure.code.empty())
+      context->failure = {"UNSAFE_PATH", "NativeSafeFs cleanup target changed before unlink"};
     CloseFd(&parent_fd);
     return;
   }
@@ -1916,8 +2179,16 @@ void ExecuteCleanup(napi_env, void* data) {
   }
   if (context->failure.code.empty() && unlink_result != 0)
     context->failure = {"NATIVE_FAILURE", ErrnoMessage("unlink mutation auxiliary")};
-  if (context->failure.code.empty() && fsync(parent_fd) != 0)
-    context->failure = {"NATIVE_FAILURE", ErrnoMessage("fsync cleanup parent")};
+  if (context->failure.code.empty()) HitTestControl("cleanup.after_unlink");
+  if (context->failure.code.empty()) {
+    int injected_errno = 0;
+    const bool injected =
+        HitTestControl("cleanup.before_parent_fsync", &injected_errno);
+    if (injected) errno = injected_errno;
+    if (injected || fsync(parent_fd) != 0)
+      context->failure = {"NATIVE_FAILURE", ErrnoMessage("fsync cleanup parent")};
+  }
+  HitTestControl("cleanup.after_parent_fsync");
   CloseFd(&parent_fd);
   if (!context->failure.code.empty()) return;
   RevisionObservation after;
@@ -1929,6 +2200,7 @@ void ExecuteCleanup(napi_env, void* data) {
     context->failure = {"NATIVE_FAILURE", "NativeSafeFs cleanup did not become absent"};
     return;
   }
+  HitTestControl("cleanup.before_complete");
   context->success = true;
 }
 
@@ -2021,6 +2293,14 @@ napi_value Probe(napi_env env, napi_callback_info) {
 }
 
 void Cleanup(void*) {
+#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+  {
+    std::lock_guard<std::mutex> test_guard(test_control.mutex);
+    test_control.released = true;
+    test_control.armed = false;
+    test_control.changed.notify_all();
+  }
+#endif
   std::lock_guard<std::mutex> guard(state.mutex);
   for (auto& [id, session] : state.sessions) {
     (void)id;
@@ -2048,6 +2328,20 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"closeSession", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
+#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+  napi_property_descriptor test_properties[] = {
+      {"configureTestControl", nullptr, ConfigureTestControl, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"armTestControl", nullptr, ArmTestControl, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
+      {"testControlState", nullptr, TestControlState, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
+      {"releaseTestControl", nullptr, ReleaseTestControl, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
+  };
+  napi_define_properties(env, exports, sizeof(test_properties) / sizeof(test_properties[0]),
+                         test_properties);
+#endif
   napi_add_env_cleanup_hook(env, Cleanup, nullptr);
   return exports;
 }
