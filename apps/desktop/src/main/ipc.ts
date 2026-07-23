@@ -78,6 +78,7 @@ import type { ExecutionSpec } from '@vibe/domain';
 import { executionSpecPathGuard } from './command-runner';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
 import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lease';
+import { dispatchAfterCodexProviderEgress } from './provider-egress';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -318,7 +319,7 @@ export class IpcRouter {
       taskSummarySchema,
       (_input, _event, envelope) =>
         this.runMutation(_event, envelope, '', IPC_CHANNELS.tasksCreate, () =>
-          this.persistence.createTask(_input.title),
+          this.persistence.createTask(_input.title, _input.localOnly),
         ).value,
     );
     this.handle(
@@ -868,14 +869,35 @@ export class IpcRouter {
       const workspacePath = this.persistence.getWorkspace(taskId);
       const workspaceId =
         workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
-      this.codexRuntime.start(
-        taskId,
-        started.turnId,
-        started.text,
-        workspacePath,
-        started.model,
-        createEmptyToolCatalogSnapshot('codex', workspaceId),
+      const context = this.prepareContext(taskId, started.turnId);
+      const egress = dispatchAfterCodexProviderEgress(
+        {
+          broker: this.permissionBroker,
+          task: this.persistence.getTask(taskId),
+          turnId: started.turnId,
+          prompt: started.text,
+          context,
+          now: new Date().toISOString(),
+        },
+        () =>
+          this.codexRuntime.start(
+            taskId,
+            started.turnId,
+            started.text,
+            workspacePath,
+            started.model,
+            createEmptyToolCatalogSnapshot('codex', workspaceId),
+            context,
+          ),
       );
+      if (!egress.allowed) {
+        this.handleCodexFailure(taskId, started.turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage: 'Providerへの送信がpolicyで拒否されました。',
+          retryable: false,
+        });
+        return;
+      }
     }
   }
 

@@ -14,6 +14,7 @@ export type TaskSummary = {
   archived: boolean;
   goal: string | null;
   workspacePath: string | null;
+  localOnly: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -260,7 +261,7 @@ export interface VibeApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
   tasks: {
     list(): Promise<TaskSummary[]>;
-    create(input?: { title?: string }): Promise<TaskSummary>;
+    create(input?: { title?: string; localOnly?: boolean }): Promise<TaskSummary>;
     messages(taskId: string): Promise<ChatMessage[]>;
     rename(taskId: string, title: string): Promise<TaskSummary>;
     setPinned(taskId: string, pinned: boolean): Promise<TaskSummary>;

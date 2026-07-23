@@ -122,6 +122,7 @@ export const taskSummarySchema = z
     archived: z.boolean(),
     goal: z.string().nullable(),
     workspacePath: z.string().nullable(),
+    localOnly: z.boolean(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })
@@ -587,7 +588,10 @@ export const commandResultSchema = <T extends z.ZodType>(value: T) =>
 
 export const emptyPayloadSchema = z.object({}).strict();
 export const taskCreateInputSchema = z
-  .object({ title: z.string().trim().min(1).max(200).optional() })
+  .object({
+    title: z.string().trim().min(1).max(200).optional(),
+    localOnly: z.boolean().optional(),
+  })
   .strict();
 export const taskIdPayloadSchema = z.object({ taskId: idSchema }).strict();
 export const taskRenameInputSchema = z
@@ -627,7 +631,7 @@ export interface VibeApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
   tasks: {
     list(): Promise<TaskSummary[]>;
-    create(input?: { title?: string }): Promise<TaskSummary>;
+    create(input?: { title?: string; localOnly?: boolean }): Promise<TaskSummary>;
     messages(taskId: string): Promise<ChatMessage[]>;
     rename(taskId: string, title: string): Promise<TaskSummary>;
     setPinned(taskId: string, pinned: boolean): Promise<TaskSummary>;

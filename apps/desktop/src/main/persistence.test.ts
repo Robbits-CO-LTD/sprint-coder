@@ -165,7 +165,7 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
 }
 
 if (runsWithElectronAbi)
-  describe('SqlitePersistenceClient v25', () => {
+  describe('SqlitePersistenceClient v26', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {
       const { persistence } = createPersistence();
       let calls = 0;
@@ -4078,6 +4078,7 @@ if (runsWithElectronAbi)
         { version: 23 },
         { version: 24 },
         { version: 25 },
+        { version: 26 },
       ]);
       expect(
         migrated
@@ -4156,7 +4157,7 @@ if (runsWithElectronAbi)
     });
   });
 else
-  describe('SqlitePersistenceClient v25 Electron ABI bridge', () => {
+  describe('SqlitePersistenceClient v26 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
         join(process.cwd(), '../../node_modules/.bin/electron'),

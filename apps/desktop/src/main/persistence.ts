@@ -182,6 +182,7 @@ type TaskRow = {
   archived: number;
   goal: string | null;
   workspace_path: string | null;
+  local_only: number;
   mutation_scope_key: string | null;
   mutation_root_identity_digest: string | null;
   draft: string;
@@ -1137,6 +1138,14 @@ const migrations = [
         ON assurance_rounds(turn_id, saga_id, ordinal);
     `,
   },
+  {
+    version: 26,
+    checksum: 'provider-egress-v26-local-only-task',
+    sql: `
+      ALTER TABLE tasks ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0
+        CHECK (local_only IN (0, 1));
+    `,
+  },
 ];
 
 export type ApprovalRequestInput = {
@@ -1263,7 +1272,8 @@ export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executo
 
 export interface PersistenceClient {
   listTasks(): TaskSummary[];
-  createTask(title?: string): TaskSummary;
+  getTask(taskId: string): TaskSummary;
+  createTask(title?: string, localOnly?: boolean): TaskSummary;
   renameTask(taskId: string, title: string): TaskSummary;
   setPinned(taskId: string, pinned: boolean): TaskSummary;
   setArchived(taskId: string, archived: boolean): TaskSummary;
@@ -1802,7 +1812,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ).map(toTask);
   }
 
-  createTask(title = '新しいタスク'): TaskSummary {
+  getTask(taskId: string): TaskSummary {
+    return toTask(this.getTaskRow(taskId));
+  }
+
+  createTask(title = '新しいタスク', localOnly = false): TaskSummary {
     const now = new Date().toISOString();
     const task = taskSummarySchema.parse({
       id: randomUUID(),
@@ -1811,14 +1825,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
       archived: false,
       goal: null,
       workspacePath: null,
+      localOnly,
       createdAt: now,
       updatedAt: now,
     });
     this.db
       .prepare(
-        "INSERT INTO tasks(id, title, pinned, archived, goal, workspace_path, draft, created_at, updated_at) VALUES (?, ?, 0, 0, NULL, NULL, '', ?, ?)",
+        `INSERT INTO tasks(
+           id, title, pinned, archived, goal, workspace_path, local_only, draft, created_at, updated_at
+         ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', ?, ?)`,
       )
-      .run(task.id, task.title, now, now);
+      .run(task.id, task.title, localOnly ? 1 : 0, now, now);
     return task;
   }
 
@@ -5556,6 +5573,7 @@ function toTask(row: TaskRow): TaskSummary {
     archived: row.archived === 1,
     goal: row.goal,
     workspacePath: row.workspace_path,
+    localOnly: row.local_only === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });

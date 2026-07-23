@@ -60,8 +60,13 @@ export class RuntimeHostClient {
     workspacePath: string | null,
     model: string,
     toolCatalogSnapshot: ToolCatalogSnapshot,
+    preparedContext?: PreparedContext,
   ): void {
-    const contextFragments = (this.prepareContext?.(taskId, turnId).fragments ?? []).map(
+    const contextFragments = (
+      preparedContext?.fragments ??
+      this.prepareContext?.(taskId, turnId).fragments ??
+      []
+    ).map(
       toRuntimeContextFragment,
     );
     if (this.disposed) {
