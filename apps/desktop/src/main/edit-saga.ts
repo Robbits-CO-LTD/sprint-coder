@@ -61,6 +61,16 @@ export type TurnDiffEntry = Readonly<{
   actualHash: string | null;
 }>;
 
+type TurnDiffLineage = {
+  order: number;
+  baselinePath: string | null;
+  baselineHash: string | null;
+  currentPath: string | null;
+  currentHash: string | null;
+  status: TurnDiffEntry['status'];
+  actualHash: string | null;
+};
+
 export type JournaledPatchOperation = Readonly<{
   kind: PreparedPatchOperation['kind'];
   path: string;
@@ -905,6 +915,106 @@ function buildDiff(saga: EditSagaSnapshot): readonly TurnDiffEntry[] {
       }),
     ),
   );
+}
+
+export function aggregateTurnDiff(
+  diffs: readonly (readonly TurnDiffEntry[])[],
+): readonly TurnDiffEntry[] {
+  const currentByPath = new Map<string, TurnDiffLineage>();
+  const deletedByPath = new Map<string, TurnDiffLineage>();
+  const lineages: TurnDiffLineage[] = [];
+  let order = 0;
+
+  const existing = (path: string, preHash: string | null): TurnDiffLineage => {
+    const found = currentByPath.get(path);
+    if (found !== undefined) return found;
+    const created: TurnDiffLineage = {
+      order: order++,
+      baselinePath: path,
+      baselineHash: preHash,
+      currentPath: path,
+      currentHash: preHash,
+      status: 'applied',
+      actualHash: preHash,
+    };
+    lineages.push(created);
+    currentByPath.set(path, created);
+    return created;
+  };
+
+  for (const diff of diffs) {
+    for (const entry of diff) {
+      const lineage =
+        entry.kind === 'add'
+          ? (deletedByPath.get(entry.path) ??
+            (() => {
+              const created: TurnDiffLineage = {
+                order: order++,
+                baselinePath: null,
+                baselineHash: null,
+                currentPath: entry.path,
+                currentHash: null,
+                status: 'applied',
+                actualHash: null,
+              };
+              lineages.push(created);
+              currentByPath.set(entry.path, created);
+              return created;
+            })())
+          : existing(entry.path, entry.preHash);
+
+      if (lineage.currentPath !== null) currentByPath.delete(lineage.currentPath);
+      deletedByPath.delete(entry.path);
+      lineage.status =
+        lineage.status === 'external_drift' || entry.status === 'external_drift'
+          ? 'external_drift'
+          : 'applied';
+      lineage.actualHash = entry.actualHash;
+
+      if (entry.kind === 'delete') {
+        lineage.currentPath = null;
+        lineage.currentHash = null;
+        deletedByPath.set(entry.path, lineage);
+      } else {
+        lineage.currentPath = entry.kind === 'rename' ? entry.destination : entry.path;
+        lineage.currentHash = entry.postHash;
+        if (lineage.currentPath === null) throw new Error('Rename diff is missing destination');
+        currentByPath.set(lineage.currentPath, lineage);
+      }
+    }
+  }
+
+  const result: TurnDiffEntry[] = [];
+  for (const lineage of lineages.sort((left, right) => left.order - right.order)) {
+    if (
+      lineage.baselinePath === lineage.currentPath &&
+      lineage.baselineHash === lineage.currentHash &&
+      lineage.status === 'applied'
+    )
+      continue;
+    const kind: TurnDiffEntry['kind'] =
+      lineage.baselinePath === null
+        ? 'add'
+        : lineage.currentPath === null
+          ? 'delete'
+          : lineage.baselinePath === lineage.currentPath
+            ? 'update'
+            : 'rename';
+    result.push(
+      Object.freeze({
+        ordinal: result.length + 1,
+        kind,
+        path: lineage.baselinePath ?? lineage.currentPath!,
+        destination: kind === 'rename' ? lineage.currentPath : null,
+        preHash: lineage.baselineHash,
+        postHash: lineage.currentHash,
+        provenance: 'agent_edit',
+        status: lineage.status,
+        actualHash: lineage.actualHash,
+      }),
+    );
+  }
+  return Object.freeze(result);
 }
 
 function buildResidualDiff(

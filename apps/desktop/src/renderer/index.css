@@ -1387,6 +1387,65 @@ button {
   border: 0;
 }
 
+.turn-diff-card {
+  margin: 8px 0 16px 48px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+}
+
+.turn-diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.turn-diff-card ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.turn-diff-card li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.turn-diff-card code {
+  overflow: hidden;
+  color: var(--text-primary);
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-diff-kind,
+.turn-diff-drift {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--bg-surface);
+}
+
+.turn-diff-kind-add {
+  color: var(--state-success);
+}
+
+.turn-diff-kind-delete,
+.turn-diff-drift {
+  color: var(--state-danger);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

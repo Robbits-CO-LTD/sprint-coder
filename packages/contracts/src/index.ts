@@ -167,6 +167,29 @@ export const contextUsageSchema = z
   .strict();
 export type ContextUsage = z.infer<typeof contextUsageSchema>;
 
+export const turnDiffEntrySchema = z
+  .object({
+    ordinal: z.number().int().positive(),
+    kind: z.enum(['add', 'update', 'delete', 'rename']),
+    path: z.string().min(1).max(4_096),
+    destination: z.string().min(1).max(4_096).nullable(),
+    preHash: digestSchema.nullable(),
+    postHash: digestSchema.nullable(),
+    provenance: z.literal('agent_edit'),
+    status: z.enum(['applied', 'external_drift']),
+    actualHash: digestSchema.nullable(),
+  })
+  .strict();
+export type TurnDiffEntry = z.infer<typeof turnDiffEntrySchema>;
+
+export const turnDiffSchema = z
+  .object({
+    turnId: idSchema,
+    entries: z.array(turnDiffEntrySchema),
+  })
+  .strict();
+export type TurnDiff = z.infer<typeof turnDiffSchema>;
+
 export const approvalDecisionSchema = z.enum(['allow_once', 'allow_task', 'deny']);
 export type ApprovalDecision = z.infer<typeof approvalDecisionSchema>;
 export const approvalStateSchema = z.enum(['pending', 'resolved', 'canceled', 'stale', 'expired']);
@@ -410,6 +433,7 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       ...turnEventBase,
       state: z.enum(['completed', 'canceled', 'failed', 'interrupted']),
       message: chatMessageSchema.optional(),
+      diff: z.array(turnDiffEntrySchema),
     })
     .strict(),
   z
@@ -447,6 +471,7 @@ export const turnSnapshotSchema = z
     queued: z.array(queuedInputSchema),
     contextUsage: contextUsageSchema,
     pendingApprovals: z.array(approvalSummarySchema).default([]),
+    latestTurnDiff: turnDiffSchema.nullable().default(null),
   })
   .strict();
 export type TurnSnapshot = z.infer<typeof turnSnapshotSchema>;

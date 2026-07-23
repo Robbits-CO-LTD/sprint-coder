@@ -38,7 +38,14 @@ class FakePersistence implements Pick<
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
   ): TurnEvent {
     this.state = state === 'completed' || state === 'canceled' ? state : 'canceled';
-    return this.record({ type: 'turn.completed', taskId, turnId, seq: ++this.seq, state });
+    return this.record({
+      type: 'turn.completed',
+      taskId,
+      turnId,
+      seq: ++this.seq,
+      state,
+      diff: [],
+    });
   }
 
   createIntelligenceStep(input: {

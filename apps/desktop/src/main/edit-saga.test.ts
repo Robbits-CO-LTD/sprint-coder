@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
+  aggregateTurnDiff,
   EditSagaCrashError,
   EditSagaExecutor,
   InMemoryEditSagaStore,
@@ -12,6 +13,7 @@ import {
   type EditSagaStep,
   type OperationObservation,
   type RevisionObservation,
+  type TurnDiffEntry,
 } from './edit-saga';
 import {
   createEditArtifactReference,
@@ -494,7 +496,70 @@ describe('EditSagaExecutor', () => {
       contentHash: hash('A0'),
     });
   });
+
+  it('aggregates repeated edits and rename chains from the Turn baseline', () => {
+    const aggregated = aggregateTurnDiff([
+      [diffEntry('update', 'a.txt', hash('A0'), hash('A1'))],
+      [
+        diffEntry('rename', 'a.txt', hash('A1'), hash('A1'), 'b.txt'),
+        diffEntry('update', 'b.txt', hash('A1'), hash('A2')),
+      ],
+    ]);
+
+    expect(aggregated).toEqual([
+      expect.objectContaining({
+        ordinal: 1,
+        kind: 'rename',
+        path: 'a.txt',
+        destination: 'b.txt',
+        preHash: hash('A0'),
+        postHash: hash('A2'),
+      }),
+    ]);
+  });
+
+  it('collapses add-delete to no diff and delete-add to an update', () => {
+    expect(
+      aggregateTurnDiff([
+        [diffEntry('add', 'new.txt', null, hash('NEW'))],
+        [diffEntry('delete', 'new.txt', hash('NEW'), null)],
+      ]),
+    ).toEqual([]);
+    expect(
+      aggregateTurnDiff([
+        [diffEntry('delete', 'existing.txt', hash('OLD'), null)],
+        [diffEntry('add', 'existing.txt', null, hash('NEW'))],
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        kind: 'update',
+        path: 'existing.txt',
+        preHash: hash('OLD'),
+        postHash: hash('NEW'),
+      }),
+    ]);
+  });
 });
+
+function diffEntry(
+  kind: TurnDiffEntry['kind'],
+  path: string,
+  preHash: string | null,
+  postHash: string | null,
+  destination: string | null = null,
+): TurnDiffEntry {
+  return {
+    ordinal: 1,
+    kind,
+    path,
+    destination,
+    preHash,
+    postHash,
+    provenance: 'agent_edit',
+    status: 'applied',
+    actualHash: postHash,
+  };
+}
 
 function request() {
   return {

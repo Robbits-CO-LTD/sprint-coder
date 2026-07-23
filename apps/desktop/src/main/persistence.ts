@@ -81,6 +81,7 @@ import {
   type MutationQuarantine,
 } from './mutation-lease';
 import {
+  aggregateTurnDiff,
   createEditSagaSnapshot,
   journaledPatchDigest,
   parseEditSagaSnapshot,
@@ -90,6 +91,7 @@ import {
   type EditSagaSnapshot,
   type JournaledPatchOperation,
   type OperationObservation,
+  type TurnDiffEntry,
 } from './edit-saga';
 import {
   createNativeMutationIntentSnapshot,
@@ -1371,6 +1373,7 @@ export interface PersistenceClient {
   prepareEditSaga(request: EditSagaCreateRequest): EditSagaSnapshot;
   findEditSaga(taskId: string, turnId: string, operationId: string): EditSagaSnapshot | null;
   getEditSaga(id: string): EditSagaSnapshot;
+  getTurnDiff(taskId: string, turnId: string): readonly TurnDiffEntry[];
   updateEditSaga(
     id: string,
     expectedRevision: number,
@@ -3691,6 +3694,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toEditSaga(row);
   }
 
+  getTurnDiff(taskId: string, turnId: string): readonly TurnDiffEntry[] {
+    const turn = this.getTurn(taskId, turnId);
+    if (turn.task_id !== taskId) throw new NotFoundError('Turn not found');
+    const sagas = (
+      this.db
+        .prepare(
+          `SELECT * FROM edit_sagas
+           WHERE task_id = ? AND turn_id = ?
+           ORDER BY created_at, id`,
+        )
+        .all(taskId, turnId) as EditSagaRow[]
+    ).map(toEditSaga);
+    return aggregateTurnDiff(sagas.map((saga) => saga.diff));
+  }
+
   updateEditSaga(
     id: string,
     expectedRevision: number,
@@ -4361,12 +4379,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
       usageRow === undefined
         ? defaultContextUsage()
         : extractContextUsage(turnEventSchema.parse(JSON.parse(usageRow.payload_json)));
+    const latestCompletedTurn = this.db
+      .prepare(
+        `SELECT id FROM turns
+         WHERE task_id = ? AND state IN ('completed', 'canceled', 'failed', 'interrupted')
+         ORDER BY created_at DESC, id DESC LIMIT 1`,
+      )
+      .get(taskId) as { id: string } | undefined;
     return turnSnapshotSchema.parse({
       lastSeq,
       activeTurn,
       queued: this.listQueued(taskId),
       contextUsage,
       pendingApprovals: this.listPendingApprovals(taskId).map(toApprovalSummary),
+      latestTurnDiff:
+        latestCompletedTurn === undefined
+          ? null
+          : {
+              turnId: latestCompletedTurn.id,
+              entries: this.getTurnDiff(taskId, latestCompletedTurn.id),
+            },
     });
   }
 
@@ -4814,10 +4846,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ? undefined
         : (this.db.prepare('SELECT * FROM messages WHERE id = ?').get(turn.assistant_message_id) as
             MessageRow | undefined);
+    const diff = this.getTurnDiff(taskId, turnId);
     return this.appendEvent(
       row === undefined
-        ? { type: 'turn.completed', taskId, turnId, state }
-        : { type: 'turn.completed', taskId, turnId, state, message: toMessage(row) },
+        ? { type: 'turn.completed', taskId, turnId, state, diff: [...diff] }
+        : {
+            type: 'turn.completed',
+            taskId,
+            turnId,
+            state,
+            message: toMessage(row),
+            diff: [...diff],
+          },
     );
   }
 

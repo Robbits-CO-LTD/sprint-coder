@@ -7,6 +7,7 @@ import { ApprovalCard } from '../ApprovalCard';
 import { CommandCard } from '../CommandCard';
 import { ApprovalAuditRow } from '../ApprovalAuditRow';
 import { AutoDecisionAuditRow } from '../AutoDecisionAuditRow';
+import { TurnDiffCard } from '../TurnDiffCard';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
 const NO_MESSAGES: ChatMessage[] = [];
@@ -23,6 +24,7 @@ export function Timeline({ taskId }: { taskId: string }) {
   const commands = useAppStore((s) => s.commandsByTask[taskId]) ?? NO_COMMANDS;
   const approvalHistory = useAppStore((s) => s.approvalHistoryByTask[taskId]) ?? NO_APPROVALS;
   const autoDecisions = useAppStore((s) => s.autoDecisionsByTask[taskId]) ?? NO_AUTO_DECISIONS;
+  const turnDiff = useAppStore((s) => s.turnDiffByTask[taskId]);
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
   const resolveApproval = useAppStore((s) => s.resolveApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -38,6 +40,7 @@ export function Timeline({ taskId }: { taskId: string }) {
     approvalHistory,
     autoDecisions,
     commands,
+    turnDiff,
     turn?.stage,
     turn?.streamingContent,
     turn?.status,
@@ -95,6 +98,7 @@ export function Timeline({ taskId }: { taskId: string }) {
               {commandCards.map((card) => (
                 <CommandCard key={card.command.id} taskId={taskId} card={card} />
               ))}
+              {turnDiff?.turnId === message.turnId && <TurnDiffCard diff={turnDiff} />}
             </div>
           );
         })}

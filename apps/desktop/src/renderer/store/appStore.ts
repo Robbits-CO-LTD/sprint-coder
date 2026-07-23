@@ -13,6 +13,7 @@ import type {
   PermissionSettings,
   RuntimeKind,
   TaskSummary,
+  TurnDiff,
   TurnEvent,
   TurnStage,
 } from '../types/vibe';
@@ -104,6 +105,7 @@ type AppState = {
   approvalHistoryByTask: Record<string, ApprovalSummary[]>;
   autoDecisionsByTask: Record<string, AutoPermissionDecision[]>;
   commandsByTask: Record<string, CommandCardState[]>;
+  turnDiffByTask: Record<string, TurnDiff | undefined>;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
 
@@ -478,6 +480,10 @@ function handleTurnEvent(
         return {
           messagesByTask: { ...state.messagesByTask, [taskId]: nextMessages },
           turnByTask: { ...state.turnByTask, [taskId]: { ...turn, status: ev.state } },
+          turnDiffByTask: {
+            ...state.turnDiffByTask,
+            [taskId]: { turnId: ev.turnId, entries: ev.diff },
+          },
           stageAnnouncement: finalStateLabel(ev.state),
         };
       });
@@ -525,6 +531,7 @@ export const useAppStore = create<AppState>((set, get) => {
     approvalHistoryByTask: {},
     autoDecisionsByTask: {},
     commandsByTask: {},
+    turnDiffByTask: {},
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     runtime: {
@@ -795,6 +802,10 @@ export const useAppStore = create<AppState>((set, get) => {
           approvalsByTask: {
             ...state.approvalsByTask,
             [taskId]: snapshot.pendingApprovals ?? [],
+          },
+          turnDiffByTask: {
+            ...state.turnDiffByTask,
+            [taskId]: snapshot.latestTurnDiff ?? undefined,
           },
         }));
       }

@@ -136,6 +136,20 @@ export type ContextUsage = {
   }[];
 };
 
+export type TurnDiffEntry = {
+  ordinal: number;
+  kind: 'add' | 'update' | 'delete' | 'rename';
+  path: string;
+  destination: string | null;
+  preHash: string | null;
+  postHash: string | null;
+  provenance: 'agent_edit';
+  status: 'applied' | 'external_drift';
+  actualHash: string | null;
+};
+
+export type TurnDiff = { turnId: string; entries: TurnDiffEntry[] };
+
 export type TurnEvent =
   | { type: 'turn.accepted'; taskId: string; turnId: string; seq: number; userMessage: ChatMessage }
   | { type: 'stage.changed'; taskId: string; turnId: string; seq: number; stage: TurnStage }
@@ -154,6 +168,7 @@ export type TurnEvent =
       seq: number;
       state: 'completed' | 'canceled' | 'failed' | 'interrupted';
       message?: ChatMessage;
+      diff: TurnDiffEntry[];
     }
   | {
       type: 'approval.requested' | 'approval.canceled' | 'approval.stale' | 'approval.expired';
@@ -229,6 +244,7 @@ export type TurnSnapshot = {
   /** Absent until the backend implements context-usage tracking (graceful degrade). */
   contextUsage?: ContextUsage;
   pendingApprovals: ApprovalSummary[];
+  latestTurnDiff: TurnDiff | null;
 };
 
 /** err.code values the IPC layer may attach to a rejected VibeApi promise. */
