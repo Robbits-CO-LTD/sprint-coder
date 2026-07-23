@@ -95,10 +95,10 @@ export function TaskHeader({ task }: { task: TaskSummary }) {
         data-testid="team-toggle"
         disabled={teamBusy}
         aria-pressed={teamViewOpen}
-        title={teamViewOpen ? 'Chatへ戻る' : 'Team Listを開く'}
+        title="Team Canvasを開く"
         onClick={() => void toggleTeamView(task.id)}
       >
-        {teamViewOpen ? '← Chat' : '⬡ Team'}
+        ⬡ Team
       </button>
       <button
         type="button"

@@ -4,7 +4,7 @@ import { useAppStore } from './store/appStore';
 import { Sidebar } from './components/Sidebar';
 import { TaskHeader } from './components/TaskHeader';
 import { ChatSurface } from './components/ChatSurface/ChatSurface';
-import { TeamListView } from './components/TeamListView';
+import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 
 export default function App() {
   const sprintCoderAvailable = useAppStore((s) => s.sprintCoderAvailable);
@@ -36,19 +36,20 @@ export default function App() {
   }
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
+  // Team mode promotes the chat into the spatial Canvas (demo/index.html `.team-mode`). Sidebar
+  // and the main chat column stay mounted (so their CSS fade-out transitions play) but the main
+  // column's ChatSurface is swapped for an inert placeholder — the same ChatSurface instance is
+  // instead rendered inside the Canvas world as the Leader node, so it is never double-mounted.
+  const inTeamMode = teamViewOpen && selectedTask !== null;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${inTeamMode ? ' team-mode' : ''}`}>
       <Sidebar />
       <div className="main">
         {selectedTask ? (
           <>
             <TaskHeader task={selectedTask} />
-            {teamViewOpen ? (
-              <TeamListView task={selectedTask} />
-            ) : (
-              <ChatSurface task={selectedTask} />
-            )}
+            {inTeamMode ? <div className="surface-placeholder" /> : <ChatSurface task={selectedTask} />}
           </>
         ) : (
           <div className="empty-state" style={{ margin: 'auto' }}>
@@ -67,6 +68,7 @@ export default function App() {
           </div>
         )}
       </div>
+      {inTeamMode && selectedTask && <TeamCanvas task={selectedTask} />}
     </div>
   );
 }

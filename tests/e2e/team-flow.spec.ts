@@ -33,6 +33,10 @@ test.describe('Phase 5 Team flow', () => {
       await expect(page.getByTestId('team-worker')).toHaveCount(
         role === '実装' ? 1 : role === 'レビュー' ? 2 : 3,
       );
+      // The Canvas camera briefly flies to the newly spawned Worker card before settling back
+      // to a view that fits everything; force it back to a known-good, fully-reachable layout
+      // before the next hire/interaction so nothing is left off-screen mid-flight.
+      await page.getByTestId('team-canvas-fit').click();
     }
 
     const cards = page.getByTestId('team-worker');
@@ -43,7 +47,7 @@ test.describe('Phase 5 Team flow', () => {
       await expect(card.locator('.team-status')).toHaveText('done');
     }
 
-    await expect(page.locator('.team-message-timeline li')).toHaveCount(6);
+    await expect(page.locator('[data-testid="team-worker"] .w-line')).toHaveCount(6);
     await page.getByTestId('team-stop-all').click();
     await expect(page.getByText('completed · Worker 3/3')).toBeVisible();
   });
