@@ -195,8 +195,12 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
 export const TEAM_SCENARIO_TRIGGER = 'チームテスト';
 const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 
+// Natural team intent (「チームで進めて」「teamでお願い」…) auto-routes the turn into the team
+// orchestration path — the user should not need to know the fixture keyword or press ⬡ Team.
+const TEAM_INTENT = /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)/i;
+
 export function isTeamScenarioInput(input: string): boolean {
-  return input.includes(TEAM_SCENARIO_TRIGGER);
+  return TEAM_INTENT.test(input);
 }
 
 type ToolCallResult = { callId: string; arguments: unknown; result: unknown };

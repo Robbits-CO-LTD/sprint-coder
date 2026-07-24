@@ -99,6 +99,7 @@ import {
 } from './provider-egress';
 import { TeamCoordinator } from './team-coordinator';
 import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
+import { isTeamScenarioInput } from './team-tools';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -1024,7 +1025,11 @@ export class IpcRouter {
 
   private startSelectedRuntime(started: StartedTurn): void {
     const taskId = started.event.taskId;
-    const kind = started.runtimeKind;
+    let kind = started.runtimeKind;
+    // Team intent always runs the leader orchestration (hire→dispatch→reports→synthesis): the
+    // production adapters are no-tools, so a real-runtime leader cannot drive a team yet — the
+    // deterministic leader orchestrates while Workers execute on the real runtime.
+    if (kind !== 'mock' && isTeamScenarioInput(started.text)) kind = 'mock';
     this.turnRuntimes.set(started.turnId, kind);
     if (kind === 'mock') {
       this.mockRuntime.start(taskId, started.turnId, started.text);

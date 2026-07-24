@@ -855,9 +855,18 @@ export const useAppStore = create<AppState>((set, get) => {
         if (typeof sprintCoder.teams.subscribe === 'function')
           currentTeamUnsubscribe = sprintCoder.teams.subscribe(taskId, (event) => {
             if (event.type === 'updated')
-              set((state) => ({
-                teamByTask: { ...state.teamByTask, [taskId]: event.detail },
-              }));
+              set((state) => {
+                // First team appearance for the selected task (leader-driven auto-promotion)
+                // pulls the user into the canvas; later updates never fight a manual close.
+                const firstAppearance =
+                  state.teamByTask[taskId] == null &&
+                  state.selectedTaskId === taskId &&
+                  !state.teamViewOpen;
+                return {
+                  teamByTask: { ...state.teamByTask, [taskId]: event.detail },
+                  ...(firstAppearance ? { teamViewOpen: true } : {}),
+                };
+              });
           });
       }
     },

@@ -118,4 +118,22 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
       removeUserDataDir(restartDir);
     }
   });
+
+  test('natural team intent auto-promotes and auto-opens the canvas', async () => {
+    const dir = createUserDataDir('phase-5-team-intent');
+    let intentApp: ElectronApplication | null = null;
+    try {
+      intentApp = await launchApp(dir);
+      const page = await firstWindow(intentApp);
+      await page.getByTestId('sidebar-new-task-button').click();
+      // No ⬡ Team click: saying 「チームで…」 must promote, open the canvas, and hire on its own.
+      await page.getByTestId('composer-textarea').fill('チームでこの仕事を進めてください');
+      await page.getByTestId('composer-send-button').click();
+      await expect(page.getByTestId('team-list')).toBeVisible({ timeout: 20_000 });
+      await expect(page.getByTestId('team-worker')).toHaveCount(3, { timeout: 20_000 });
+    } finally {
+      await closeApp(intentApp);
+      removeUserDataDir(dir);
+    }
+  });
 });
