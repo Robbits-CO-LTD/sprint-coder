@@ -2,7 +2,6 @@ import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, 
 import type { KeyboardEvent as ReactKeyboardEvent, Ref, RefObject } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { WorkerNode } from './WorkerNode';
-import { HireNode } from './HireNode';
 import { useCamera } from './useCamera';
 import type { CamState, Rect } from './useCamera';
 import { sendCable } from './cables';
@@ -25,7 +24,7 @@ const WORKER_SLOTS: readonly Rect[] = [
 ];
 const MAX_WORKERS = WORKER_SLOTS.length;
 // Fixed card footprint (Slice 6.3 item 1) — every WORKER_SLOTS entry uses this same w/h, so a new
-// Worker's or the hire ghost's placement can be collision-checked before it has ever mounted.
+// Worker's placement can be collision-checked before it has ever mounted.
 const WORKER_SIZE = { w: 480, h: 260 };
 const PLACEMENT_MARGIN = 40;
 
@@ -94,8 +93,6 @@ export function TeamCanvas({
 }) {
   const detail = useAppStore((s) => s.teamByTask[task.id]);
   const teamBusy = useAppStore((s) => s.teamBusy);
-  const hireTeamWorker = useAppStore((s) => s.hireTeamWorker);
-  const sendTeamMessage = useAppStore((s) => s.sendTeamMessage);
   const stopTeamWorker = useAppStore((s) => s.stopTeamWorker);
   const stopAllTeamWorkers = useAppStore((s) => s.stopAllTeamWorkers);
 
@@ -123,13 +120,13 @@ export function TeamCanvas({
     isSystemOwned,
   } = useCamera(handleCameraSettle);
 
-  const hireRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const workerElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
-  // Collision-aware placement (Slice 6.3 item 1): positions handed out to a Worker/hire node
-  // before it has actually mounted (or before its DOM rect otherwise reflects it), so a second
-  // rapid placement decision doesn't pick the same spot. Cleared for a Worker id the moment that
-  // Worker actually mounts — from then on its real DOM rect (via `workerElsRef`) is authoritative.
+  // Collision-aware placement (Slice 6.3 item 1): positions handed out to a new Worker before it
+  // has actually mounted (or before its DOM rect otherwise reflects it), so a second rapid
+  // placement decision (the Leader hires several Workers back-to-back) doesn't pick the same
+  // spot. Cleared for a Worker id the moment that Worker actually mounts — from then on its real
+  // DOM rect (via `workerElsRef`) is authoritative.
   const reservedPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   // Re-entering Team mode remounts this component from scratch, so `seenWorkerIdsRef` would
   // otherwise start empty — treating every pre-existing Worker as a brand-new spawn on re-entry
@@ -161,6 +158,21 @@ export function TeamCanvas({
   );
   const transientCableEventIdRef = useRef(0);
   const [cableAnnouncement, setCableAnnouncement] = useState('');
+  // Textual canvas event (Slice 6.4 item 6, extended to hires per FR-TEAM-03): always mirrored to
+  // the aria-live announcer (every motion mode — screen reader users get an announcement
+  // regardless of animation); the small transient bottom-center overlay is otherwise
+  // reduced-motion-only for CABLE events (in full motion, the cable animation itself is the
+  // visible artifact) — callers that have no animation standing in for them (a Worker hire) pass
+  // `visual: true` unconditionally instead.
+  const announceCableEvent = useCallback((text: string, visual: boolean) => {
+    setCableAnnouncement(text);
+    if (!visual) return;
+    const id = (transientCableEventIdRef.current += 1);
+    setTransientCableEvents((prev) => [...prev, { id, text }]);
+    setTimeout(() => {
+      setTransientCableEvents((prev) => prev.filter((event) => event.id !== id));
+    }, 3000);
+  }, []);
 
   // --- Canvas view persistence (Slice 6.1, FR-CAN-02) ---
   //
@@ -187,10 +199,6 @@ export function TeamCanvas({
     originY: number;
   } | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  // Hire ghost's collision-aware position (Slice 6.3 item 1) — recomputed via effect below
-  // whenever it might now overlap something (a new Worker spawning, an existing one being
-  // dragged); `null` (not yet computed, or hidden) falls back to the plain default slot.
-  const [hirePosition, setHirePosition] = useState<{ x: number; y: number } | null>(null);
 
   const workers = useMemo(
     () =>
@@ -202,36 +210,30 @@ export function TeamCanvas({
     [detail],
   );
   const workerCount = workers.length;
-  const hireVisible =
-    !!detail &&
-    workerCount < MAX_WORKERS &&
-    detail.team.state !== 'completed' &&
-    detail.team.state !== 'failed';
+  // Empty-team guidance (FR-TEAM-03/06): the Leader hires on its own once it decides a Task
+  // needs a Team — there is nothing for the user to do here but ask the Leader for something, so
+  // this hint only shows while there is genuinely nothing else to look at yet.
+  const showEmptyTeamHint = !!detail && workerCount === 0;
 
   const collectRects = useCallback((): Rect[] => {
     const rects: Rect[] = [LEADER_RECT];
     workerElsRef.current.forEach((el) => rects.push(worldRectOf(el)));
-    if (hireRef.current) rects.push(worldRectOf(hireRef.current));
     return rects;
   }, [worldRectOf]);
 
-  // Rects to avoid when placing a NEW Worker or the hire ghost (Slice 6.3 item 1): the Leader,
-  // every currently-mounted Worker at its CURRENT (possibly dragged/persisted) position, the hire
-  // node itself (unless it's the thing being placed), and any position already handed out to a
-  // not-yet-mounted Worker (`reservedPositionsRef`) — covers two placements decided back-to-back
-  // in the same commit before either has actually landed in `workerElsRef`.
-  const collectPlacementRects = useCallback(
-    (options?: { includeHire?: boolean }): Rect[] => {
-      const rects: Rect[] = [LEADER_RECT];
-      workerElsRef.current.forEach((el) => rects.push(worldRectOf(el)));
-      reservedPositionsRef.current.forEach((pos) =>
-        rects.push({ x: pos.x, y: pos.y, w: WORKER_SIZE.w, h: WORKER_SIZE.h }),
-      );
-      if (options?.includeHire !== false && hireRef.current) rects.push(worldRectOf(hireRef.current));
-      return rects;
-    },
-    [worldRectOf],
-  );
+  // Rects to avoid when placing a NEW Worker (Slice 6.3 item 1): the Leader, every currently-
+  // mounted Worker at its CURRENT (possibly dragged/persisted) position, and any position already
+  // handed out to a not-yet-mounted Worker (`reservedPositionsRef`) — covers several placements
+  // decided back-to-back (the Leader hires up to 3 Workers within a single Turn) before any of
+  // them has actually landed in `workerElsRef`.
+  const collectPlacementRects = useCallback((): Rect[] => {
+    const rects: Rect[] = [LEADER_RECT];
+    workerElsRef.current.forEach((el) => rects.push(worldRectOf(el)));
+    reservedPositionsRef.current.forEach((pos) =>
+      rects.push({ x: pos.x, y: pos.y, w: WORKER_SIZE.w, h: WORKER_SIZE.h }),
+    );
+    return rects;
+  }, [worldRectOf]);
 
   const scheduleFit = useCallback(() => {
     if (fitTimeoutRef.current) clearTimeout(fitTimeoutRef.current);
@@ -241,30 +243,6 @@ export function TeamCanvas({
       void animateCamTo(camToFit(collectRects()), isReduced() ? 0 : 600);
     }, 900);
   }, [animateCamTo, camToFit, collectRects, isReduced, isSystemOwned]);
-
-  // Hire ghost placement (Slice 6.3 item 1): recomputed from imperative touchpoints — a Worker
-  // mounting (`handleWorkerRef` below) or finishing a drag (the node-drag pointer handlers
-  // further down), plus once on the saved-view restore — rather than a plain `useEffect`, since
-  // the computation needs DOM rects (only readable outside render) and directly setState-ing from
-  // an effect body trips react-hooks/set-state-in-effect. Every one of those call sites is a ref
-  // callback/event handler/post-await continuation, none of which are "an effect body" for that
-  // rule.
-  const recomputeHirePosition = useCallback(() => {
-    if (!hireVisible) return;
-    const defaultPos = slotFor(workerCount);
-    const occupied = collectPlacementRects({ includeHire: false });
-    const resolved = findFreePosition(defaultPos, WORKER_SIZE, occupied, PLACEMENT_MARGIN);
-    setHirePosition((prev) =>
-      prev && prev.x === resolved.x && prev.y === resolved.y ? prev : resolved,
-    );
-  }, [hireVisible, workerCount, collectPlacementRects]);
-  // Stable indirection (same technique as `handleSettleRef` above) so the one-shot getCanvasView
-  // load effect below can call the LATEST `recomputeHirePosition` without depending on its
-  // (frequently-changing, since it closes over `hireVisible`/`workerCount`) identity.
-  const recomputeHirePositionRef = useRef(() => {});
-  useEffect(() => {
-    recomputeHirePositionRef.current = recomputeHirePosition;
-  }, [recomputeHirePosition]);
 
   // Ref callback invoked by React at commit time (never during render) when a Worker card
   // mounts/unmounts. Kept as a single stable function — the per-worker id is bound via a small
@@ -278,27 +256,19 @@ export function TeamCanvas({
       }
       if (seenWorkerIdsRef.current.has(workerId)) {
         workerElsRef.current.set(workerId, el);
-        recomputeHirePosition(); // covers the initial mount of a Team with pre-existing Workers
         return;
       }
       seenWorkerIdsRef.current.add(workerId);
       // Collision-aware placement (Slice 6.3 item 1): only for a genuinely first-time spawn — a
       // Worker restored with a saved/dragged position already in `nodePositions` keeps it as-is.
       // Computed and reserved BEFORE this Worker is added to `workerElsRef`, so it never collides
-      // with its own (not-yet-placed) rect, then cleared once it mounts below.
-      //
-      // Excludes the hire ghost (`includeHire: false`): a hire is designed to hand its exact slot
-      // over to the new Worker (that's why hiring never itself animates a jump), and at the
-      // instant this ref callback fires the ghost's DOM rect is still ONE RENDER STALE — still
-      // sitting at the slot this very Worker is claiming — so including it here would treat that
-      // intentional handoff as a false collision and needlessly bounce the new Worker to a
-      // fallback. Both the ghost's own placement (`recomputeHirePosition`) and this one solve the
-      // identical "avoid every real Worker" problem independently and deterministically, so they
-      // always agree without needing to reference each other's rect.
+      // with its own (not-yet-placed) rect, then cleared once it mounts below. The Leader can hire
+      // up to 3 Workers back-to-back within one Turn, so several placements may be decided before
+      // any of them has actually landed in `workerElsRef` — `reservedPositionsRef` covers that.
       if (!nodePositionsRef.current[workerId]) {
         const index = workers.findIndex((w) => w.id === workerId);
         const defaultPos = slotFor(Math.max(0, index));
-        const occupied = collectPlacementRects({ includeHire: false });
+        const occupied = collectPlacementRects();
         const resolved = findFreePosition(defaultPos, WORKER_SIZE, occupied, PLACEMENT_MARGIN);
         reservedPositionsRef.current.set(workerId, resolved);
         setNodePositions((prev) => ({ ...prev, [workerId]: resolved }));
@@ -315,7 +285,12 @@ export function TeamCanvas({
         void animateCamTo(camToFocus(worldRectOf(el), 0.7), isReduced() ? 0 : 480);
       }, 120);
       scheduleFit();
-      recomputeHirePosition(); // the ghost may need to shift out of this new Worker's way
+      // Hiring visibility (FR-TEAM-03): the spawn animation above is complemented — not
+      // replaced — by a terse transient event line, shown in EVERY motion mode (unlike the cable
+      // events below, which are reduced-motion-only substitutes for their own animation) since
+      // there is no other animation standing in for it under full motion.
+      const role = workers.find((w) => w.id === workerId)?.role ?? workerId;
+      announceCableEvent(`Leaderが ${role} を雇用しました`, true);
     },
     [
       animateCamTo,
@@ -326,17 +301,16 @@ export function TeamCanvas({
       isSystemOwned,
       workers,
       collectPlacementRects,
-      recomputeHirePosition,
+      announceCableEvent,
     ],
   );
 
   // Initial camera: mirrors the mock's promoteToTeam choreography (demo/index.html lines
   // 929-961) — seed the camera so the Leader node first renders exactly where the chat surface
-  // used to sit, then fly to a settled view that includes the Leader plus whatever is
-  // immediately actionable (existing Workers / the hire ghost node).
+  // used to sit, then fly to a settled view that includes the Leader plus any existing Workers.
   //
   // Runs in `useLayoutEffect` (synchronous, before paint) rather than `useEffect`+rAF: by commit
-  // time all child refs (Leader/Worker/hire nodes) are already attached, so rects are accurate
+  // time all child refs (Leader/Worker nodes) are already attached, so rects are accurate
   // immediately, and seeding the camera here means the very first paint already shows the seed
   // position — no flash of the identity transform.
   //
@@ -402,7 +376,6 @@ export function TeamCanvas({
         if (saved) {
           canvasViewRevisionRef.current = saved.revision;
           setNodePositions((prev) => ({ ...saved.nodePositions, ...prev }));
-          recomputeHirePositionRef.current(); // restored positions may newly overlap the ghost's slot
           const restored: CamState = {
             x: saved.camera.x,
             y: saved.camera.y,
@@ -425,7 +398,7 @@ export function TeamCanvas({
     // Effectively a one-shot per mount: `task.id` is stable for this component's lifetime, and
     // `animateCamTo`/`isReduced`/`draggingRef`/`isSystemOwned` are all stable identities from
     // useCamera (memoized with empty/stable deps), so none of these ever actually change and
-    // re-trigger a refetch. `recomputeHirePositionRef` is a ref, not a reactive dependency.
+    // re-trigger a refetch.
   }, [task.id, animateCamTo, isReduced, draggingRef, isSystemOwned]);
 
   // Exit choreography state: whether the canvas should be playing its fade-out (docs §4.6 run
@@ -548,7 +521,7 @@ export function TeamCanvas({
       if (!head) return;
       const card = head.closest<HTMLElement>('.worker');
       const agentId = card?.dataset.agentId;
-      if (!card || !agentId || card.classList.contains('worker--hire')) return;
+      if (!card || !agentId) return;
       const index = workers.findIndex((w) => w.id === agentId);
       const current = nodePositionsRef.current[agentId] ?? slotFor(Math.max(0, index));
       nodeDraggingRef.current = {
@@ -582,7 +555,6 @@ export function TeamCanvas({
       draggingRef.current = false;
       workerElsRef.current.get(drag.agentId)?.classList.remove('dragging');
       scheduleSave();
-      recomputeHirePosition(); // the drag may have newly overlapped (or freed up) the ghost's slot
     }
 
     canvas.addEventListener('pointerdown', onPointerDown);
@@ -595,7 +567,7 @@ export function TeamCanvas({
       canvas.removeEventListener('pointerup', onPointerEnd);
       canvas.removeEventListener('pointercancel', onPointerEnd);
     };
-  }, [canvasRef, camRef, draggingRef, workers, scheduleSave, claimUserOwnership, recomputeHirePosition]);
+  }, [canvasRef, camRef, draggingRef, workers, scheduleSave, claimUserOwnership]);
 
   // Live message-by-id lookup (Slice 6.4 item 4), kept fresh on EVERY store update regardless of
   // whether anything is currently enqueued — a cable holding on a pre-ack message needs to see an
@@ -614,20 +586,6 @@ export function TeamCanvas({
     for (const worker of workers) map.set(worker.id, worker.role);
     return map;
   }, [workers]);
-
-  // Textual cable event (Slice 6.4 item 6): always mirrored to the aria-live announcer (every
-  // motion mode — screen reader users get an announcement regardless of animation); the small
-  // transient bottom-center overlay is reduced-motion only (in full motion, the cable animation
-  // itself is the visible artifact).
-  const announceCableEvent = useCallback((text: string, visual: boolean) => {
-    setCableAnnouncement(text);
-    if (!visual) return;
-    const id = (transientCableEventIdRef.current += 1);
-    setTransientCableEvents((prev) => [...prev, { id, text }]);
-    setTimeout(() => {
-      setTransientCableEvents((prev) => prev.filter((event) => event.id !== id));
-    }, 3000);
-  }, []);
 
   const pumpCables = useCallback(() => {
     if (cablePlayingRef.current) return;
@@ -732,14 +690,13 @@ export function TeamCanvas({
     const ids: string[] = [];
     if (leaderAgentId) ids.push(leaderAgentId);
     for (const worker of workers) ids.push(worker.id);
-    if (hireVisible) ids.push('hire');
     return ids;
-  }, [leaderAgentId, workers, hireVisible]);
+  }, [leaderAgentId, workers]);
 
-  // Drop a selection that no longer refers to a navigable node (e.g. the hire slot disappearing
-  // once the Worker cap is reached while it was selected). Render-time adjustment (not an effect
-  // — react-hooks/set-state-in-effect convention, see TaskHeader/GoalChip) — bails out after the
-  // one corrective re-render since `nodeIds` no longer contains the stale id.
+  // Drop a selection that no longer refers to a navigable node (e.g. a Worker being stopped and
+  // removed while selected). Render-time adjustment (not an effect — react-hooks/
+  // set-state-in-effect convention, see TaskHeader/GoalChip) — bails out after the one corrective
+  // re-render since `nodeIds` no longer contains the stale id.
   if (selectedNodeId !== null && !nodeIds.includes(selectedNodeId)) {
     setSelectedNodeId(null);
   }
@@ -757,7 +714,6 @@ export function TeamCanvas({
   const rectForNode = useCallback(
     (nodeId: string): Rect => {
       if (nodeId === leaderAgentId) return LEADER_RECT;
-      if (nodeId === 'hire') return hireRef.current ? worldRectOf(hireRef.current) : LEADER_RECT;
       const el = workerElsRef.current.get(nodeId);
       return el ? worldRectOf(el) : LEADER_RECT;
     },
@@ -767,27 +723,23 @@ export function TeamCanvas({
   const describeNode = useCallback(
     (nodeId: string): string => {
       if (nodeId === leaderAgentId) return 'Leader';
-      if (nodeId === 'hire') return 'Workerを雇用';
       const worker = workers.find((w) => w.id === nodeId);
       return worker ? `${worker.role} (${worker.state})` : nodeId;
     },
     [leaderAgentId, workers],
   );
 
-  // Moves DOM focus *into* the selected node's primary input (Enter's second effect, alongside
-  // the camera focus below) — composer textarea for the Leader/a Worker, the hire form's first
-  // field for the ghost node.
+  // Moves DOM focus *into* the selected node's primary interactive element (Enter's second
+  // effect, alongside the camera focus below) — the composer textarea for the Leader, the 停止
+  // button for a Worker (its only remaining interactive element now that it's an observation
+  // card — see WorkerNode.tsx).
   const focusIntoNode = useCallback(
     (nodeId: string) => {
       if (nodeId === leaderAgentId) {
         leaderRef.current?.querySelector<HTMLElement>('.composer-input')?.focus();
         return;
       }
-      if (nodeId === 'hire') {
-        hireRef.current?.querySelector<HTMLElement>('input, textarea')?.focus();
-        return;
-      }
-      workerElsRef.current.get(nodeId)?.querySelector<HTMLElement>('textarea')?.focus();
+      workerElsRef.current.get(nodeId)?.querySelector<HTMLElement>('.w-stop-btn')?.focus();
     },
     [leaderAgentId, leaderRef],
   );
@@ -820,8 +772,8 @@ export function TeamCanvas({
   const handleCanvasKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLElement>) => {
       if (e.key === 'Escape') {
-        // Works even when a descendant (e.g. a Worker's 依頼 textarea) currently has focus —
-        // Escape always returns keyboard focus to the canvas root itself.
+        // Works even when a descendant (e.g. the Leader's composer textarea) currently has
+        // focus — Escape always returns keyboard focus to the canvas root itself.
         e.preventDefault();
         canvasRef.current?.focus();
         return;
@@ -881,7 +833,6 @@ export function TeamCanvas({
         selectionText ? `. ${selectionText}` : ''
       }`
     : '';
-  const hireSlot = hirePosition ?? slotFor(workerCount);
 
   return (
     <section
@@ -915,21 +866,23 @@ export function TeamCanvas({
                     messages={detail.messages}
                     teamBusy={teamBusy}
                     selected={selectedNodeId === worker.id}
-                    onSend={(content) => void sendTeamMessage(task.id, worker.id, content)}
                     onStop={() => void stopTeamWorker(task.id, worker.id)}
                     ref={(el) => handleWorkerRef(worker.id, el)}
                   />
                 );
               })}
-              {hireVisible && (
-                <HireNode
-                  x={hireSlot.x}
-                  y={hireSlot.y}
-                  teamBusy={teamBusy}
-                  selected={selectedNodeId === 'hire'}
-                  onHire={(role, objective) => void hireTeamWorker(task.id, role, objective)}
-                  ref={hireRef}
-                />
+              {/* Empty-team guidance (FR-TEAM-03/06): there is no hire form anymore — the Leader
+                  hires on its own once it decides the Task needs help, so this is the only thing
+                  to say while there is nothing yet to look at. */}
+              {showEmptyTeamHint && (
+                <div
+                  className="team-empty-hint"
+                  style={{ left: 0, top: LEADER_RECT.h + 24, width: LEADER_RECT.w }}
+                >
+                  <span className="sys-notice">
+                    Leaderに依頼すると、必要に応じてWorkerを雇用します
+                  </span>
+                </div>
               )}
             </div>
           </div>
@@ -956,10 +909,12 @@ export function TeamCanvas({
           />
         </>
       )}
-      {/* Reduced-motion textual event overlay (Slice 6.4 item 6) — bottom-center, auto-dismissed
-          after ~3s by `announceCableEvent`. The same text is always mirrored to the aria-live
-          announcer below regardless of motion mode, so this overlay is purely visual/redundant
-          for screen readers (`aria-hidden`). */}
+      {/* Transient textual event overlay — bottom-center, auto-dismissed after ~3s by
+          `announceCableEvent`. Reduced-motion-only for cable dispatch/report events (Slice 6.4
+          item 6), but always shown for a Worker hire (FR-TEAM-03) since no other animation stands
+          in for it there. The same text is always mirrored to the aria-live announcer below
+          regardless of motion mode, so this overlay is purely visual/redundant for screen readers
+          (`aria-hidden`). */}
       {transientCableEvents.length > 0 && (
         <div className="team-cable-events" aria-hidden="true">
           {transientCableEvents.map((event) => (

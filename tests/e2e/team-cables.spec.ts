@@ -5,15 +5,41 @@ import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir 
 // Phase 6 Slice 6.4 acceptance (docs §9 "Slice 6.4" + Acceptance): cables only appear on an actual
 // Team message (never on hire), connect the right source/target pair, glow only once acked, never
 // auto-move the camera, and substitute a static highlight + textual event under reduced motion.
+//
+// The Leader hires and dispatches Workers on its own during its Turn (FR-TEAM-06/13) — there is no
+// manual hire form or per-worker send button anymore (see TeamCanvas.tsx/WorkerNode.tsx). These
+// tests are about the Canvas's own cable-drawing rules, which don't care who calls hireWorker/
+// sendToWorker — so setup here calls TeamCoordinator directly through the same IPC the Leader's
+// team_hire_worker/team_send_to_worker tools invoke (main/team-tools.ts), rather than driving a
+// full autonomous チームテスト Turn end-to-end for every scenario. team-flow.spec.ts already covers
+// the full autonomous hire+dispatch+report+synthesize path driven purely from the chat composer.
 
 async function currentTaskId(page: Page): Promise<string> {
   return page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
 }
 
 async function hireWorker(page: Page, role: string, objective: string): Promise<void> {
-  await page.getByLabel('役割').fill(role);
-  await page.getByLabel('目的').fill(objective);
-  await page.getByTestId('team-hire').click();
+  const taskId = await currentTaskId(page);
+  await page.evaluate(
+    async ({ id, role, objective }) =>
+      window.sprintCoder!.teams.hireWorker({
+        taskId: id,
+        role,
+        objective,
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      }),
+    { id: taskId, role, objective },
+  );
+}
+
+async function sendToWorker(page: Page, workerAgentId: string, content: string): Promise<void> {
+  const taskId = await currentTaskId(page);
+  await page.evaluate(
+    async ({ id, target, content }) =>
+      window.sprintCoder!.teams.sendToWorker({ taskId: id, targetAgentId: target, content }),
+    { id: taskId, target: workerAgentId, content },
+  );
 }
 
 async function readWorldTransform(page: Page): Promise<string> {
@@ -64,8 +90,8 @@ test.describe('Phase 6 Slice 6.4: Communication cable', () => {
       );
 
       const card = page.getByTestId('team-worker').first();
-      await card.getByLabel('依頼').fill('cable pair test');
-      await card.getByRole('button', { name: 'Leaderから送信' }).click();
+      if (!workerAgentId) throw new Error('worker-agent-id not found');
+      await sendToWorker(page, workerAgentId, 'cable pair test');
 
       const cable = page.locator('.cable-path').first();
       await cable.waitFor({ state: 'attached', timeout: 2_000 });
@@ -100,10 +126,11 @@ test.describe('Phase 6 Slice 6.4: Communication cable', () => {
       await expect(page.getByTestId('team-worker')).toHaveCount(2);
 
       const cards = page.getByTestId('team-worker');
-      await cards.nth(0).getByLabel('依頼').fill('worker one');
-      await cards.nth(0).getByRole('button', { name: 'Leaderから送信' }).click();
-      await cards.nth(1).getByLabel('依頼').fill('worker two');
-      await cards.nth(1).getByRole('button', { name: 'Leaderから送信' }).click();
+      const firstAgentId = await cards.nth(0).getAttribute('data-agent-id');
+      const secondAgentId = await cards.nth(1).getAttribute('data-agent-id');
+      if (!firstAgentId || !secondAgentId) throw new Error('worker-agent-id not found');
+      await sendToWorker(page, firstAgentId, 'worker one');
+      await sendToWorker(page, secondAgentId, 'worker two');
 
       // Sequential pump (Slice 6.4 item 5a): both eventually glow, proving neither cable was
       // dropped even though they were queued back-to-back.
@@ -197,8 +224,9 @@ test.describe('Phase 6 Slice 6.4: Communication cable', () => {
       await page.waitForTimeout(700);
 
       const card = page.getByTestId('team-worker').first();
-      await card.getByLabel('依頼').fill('pan during cable');
-      await card.getByRole('button', { name: 'Leaderから送信' }).click();
+      const agentId = await card.getAttribute('data-agent-id');
+      if (!agentId) throw new Error('worker-agent-id not found');
+      void sendToWorker(page, agentId, 'pan during cable').catch(() => undefined);
 
       // Immediately drag-pan while the cable is (most likely) mid-flight — bottom-left corner,
       // clear of the top header overlay, bottom-right controls, and the Leader/Worker cluster
@@ -234,8 +262,9 @@ test.describe('Phase 6 Slice 6.4: Communication cable', () => {
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
 
       const card = page.getByTestId('team-worker').first();
-      await card.getByLabel('依頼').fill('reduced motion test');
-      await card.getByRole('button', { name: 'Leaderから送信' }).click();
+      const agentId = await card.getAttribute('data-agent-id');
+      if (!agentId) throw new Error('worker-agent-id not found');
+      await sendToWorker(page, agentId, 'reduced motion test');
 
       // No path/packets at all under reduced motion.
       await expect(page.locator('.cable-path')).toHaveCount(0);

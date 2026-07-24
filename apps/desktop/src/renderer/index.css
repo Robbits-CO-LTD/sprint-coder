@@ -478,9 +478,9 @@ button {
   background: linear-gradient(135deg, rgba(227, 154, 98, 0.9), rgba(213, 168, 91, 0.8));
   color: #1b1a17;
 }
-/* Global (demo/index.html lines 169-171): shared by the Leader's SurfaceHeader *and* Worker/
-   hire cards' `.w-head` (WorkerNode/HireNode use the identical role-line/role-name/role-sub
-   markup) — must not be scoped under `.surface-header` or Worker cards render unstyled. */
+/* Global (demo/index.html lines 169-171): shared by the Leader's SurfaceHeader *and* Worker
+   cards' `.w-head` (WorkerNode uses the identical role-line/role-name/role-sub markup) — must not
+   be scoped under `.surface-header` or Worker cards render unstyled. */
 .role-line {
   display: flex;
   flex-direction: column;
@@ -496,8 +496,8 @@ button {
   font-size: 11px;
   color: var(--text-secondary);
 }
-/* Worker/hire heads are a single fixed row (mock: role-name + role-sub share one baseline row
-   with the status pill) — keep the objective from wrapping the head to two lines. */
+/* Worker heads are a single fixed row (mock: role-name + role-sub share one baseline row with
+   the status pill) — keep the objective from wrapping the head to two lines. */
 .w-head .role-sub {
   white-space: nowrap;
   overflow: hidden;
@@ -1607,6 +1607,14 @@ button {
   align-items: center;
   justify-content: center;
 }
+/* Empty-team guidance (FR-TEAM-03/06): sits just below the Leader node in world space while no
+   Worker exists yet — non-interactive, matches `.sys-notice`'s pill styling. */
+.team-empty-hint {
+  position: absolute;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
 .team-world {
   position: absolute;
   left: 0;
@@ -1678,8 +1686,8 @@ button {
 /* Canvas controls (bottom-right). `pointer-events: none` on the container + `auto` back on the
    actual controls (buttons/hint) — this is a flex column sized to its widest child, and the
    keyboard-shortcut hint (Slice 6.1) is long enough to noticeably widen the box; without this,
-   the box's own "empty" area would sit on top of and intercept clicks meant for whatever Worker/
-   hire card happens to be laid out underneath it (a real collision, not hypothetical — see the
+   the box's own "empty" area would sit on top of and intercept clicks meant for whatever Worker
+   card happens to be laid out underneath it (a real collision, not hypothetical — see the
    Slice 6.1 task notes). */
 .team-canvas-controls {
   position: absolute;
@@ -1825,11 +1833,6 @@ button {
     filter: blur(0);
   }
 }
-.worker--hire {
-  border-style: dashed;
-  box-shadow: none;
-  background: rgba(255, 244, 224, 0.02);
-}
 .w-head {
   display: flex;
   align-items: center;
@@ -1959,75 +1962,15 @@ button {
   }
 }
 
-/* Per-worker composer: functional addition, not present in the static demo. Styled to blend
-   with the card (border-top + small textarea/button). */
-.w-compose {
-  padding: 10px 15px 12px;
-  border-top: 1px solid var(--border-subtle);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.w-compose textarea {
-  width: 100%;
-  box-sizing: border-box;
-  resize: none;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 6px 9px;
-  font: inherit;
-  font-size: 12.5px;
-  color: var(--text-primary);
-}
-.w-compose textarea:disabled {
-  opacity: 0.5;
-}
-.w-compose .cc-btn {
-  align-self: flex-end;
-}
-
-/* Hire ghost node form */
-.hire-form {
-  padding: 12px 15px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.hire-form label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.hire-form input,
-.hire-form textarea {
-  font: inherit;
-  font-size: 12.5px;
-  color: var(--text-primary);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 6px 9px;
-  resize: none;
-  box-sizing: border-box;
-}
-.hire-form button {
-  align-self: flex-end;
-}
-
 /* ---------- Canvas LOD (Slice 6.1, FR-CAN-04) ---------- */
 /* `[data-lod]` is written by useCamera's applyCam() only when the step actually changes (see
    useCamera.ts's LOD1_MAX_SCALE/LOD2_MAX_SCALE) — pure CSS from here. lod1 hides the Worker
-   body/composer but keeps the head (role, status dot+label, objective sub-line); lod2
-   additionally hides the objective sub-line and enlarges role-name/status so 状態・役割・進捗
-   stay legible per FR-CAN-04. Transitions are covered by the global reduced-motion override
-   below (instant, no animation). */
+   body (message lines/spinner) but keeps the head (role, status dot+label, objective sub-line);
+   lod2 additionally hides the objective sub-line and enlarges role-name/status so
+   状態・役割・進捗 stay legible per FR-CAN-04. Transitions are covered by the global
+   reduced-motion override below (instant, no animation). */
 .team-canvas[data-lod='1'] .worker .w-body,
-.team-canvas[data-lod='1'] .worker .w-compose,
-.team-canvas[data-lod='2'] .worker .w-body,
-.team-canvas[data-lod='2'] .worker .w-compose {
+.team-canvas[data-lod='2'] .worker .w-body {
   opacity: 0;
   min-height: 0;
   max-height: 0;
@@ -2198,12 +2141,6 @@ button {
   flex-direction: column;
   gap: 6px;
 }
-.tlv-hire-form {
-  border: 1px dashed var(--border-subtle);
-  border-radius: 12px;
-  background: rgba(255, 244, 224, 0.02);
-}
-.tlv-hire-form h3,
 .tlv-timeline h3 {
   margin: 0 0 4px;
   font-size: 13px;

@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { Ref } from 'react';
 import type { TeamMessageSummary, WorkerSummary } from '../../types/sprint-coder';
 
@@ -23,8 +22,10 @@ function summarize(content: string): string {
 }
 
 // A single Worker card on the Team Canvas (demo/index.html lines 346-388, `.worker`/`.w-head`/
-// `.w-body`). Anatomy matches the mock; the per-worker composer at the bottom is a functional
-// addition (not in the static demo) needed to actually message a live Worker.
+// `.w-body`). The Leader hires and dispatches Workers on its own during its Turn (FR-TEAM-06/13,
+// team-tools.ts) — this card is purely an OBSERVATION surface: role/objective/status/stop plus the
+// Leaderから/報告 message lines and a busy spinner. There is no per-worker composer; the user never
+// addresses a Worker directly, only the Leader.
 export function WorkerNode({
   worker,
   x,
@@ -32,7 +33,6 @@ export function WorkerNode({
   messages,
   teamBusy,
   selected = false,
-  onSend,
   onStop,
   ref,
 }: {
@@ -44,12 +44,9 @@ export function WorkerNode({
   /** Keyboard-navigation selection ring (Slice 6.1 canvas keyboard nav) — a plain visual/aria
    * prop; the selection index itself lives in TeamCanvas. */
   selected?: boolean;
-  onSend: (content: string) => void;
   onStop: () => void;
   ref?: Ref<HTMLDivElement>;
 }) {
-  const [draft, setDraft] = useState('');
-  const canSend = (worker.state === 'ready' || worker.state === 'waiting') && !teamBusy;
   const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
   const dotClass = statusDotClass(worker.state);
 
@@ -108,30 +105,6 @@ export function WorkerNode({
           </div>
         )}
       </div>
-      <form
-        className="w-compose"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const trimmed = draft.trim();
-          if (!trimmed || !canSend) return;
-          onSend(trimmed);
-          setDraft('');
-        }}
-      >
-        <label className="visually-hidden" htmlFor={`team-message-${worker.id}`}>
-          依頼
-        </label>
-        <textarea
-          id={`team-message-${worker.id}`}
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          disabled={!canSend}
-          rows={2}
-        />
-        <button type="submit" className="cc-btn" disabled={!canSend || !draft.trim()}>
-          Leaderから送信
-        </button>
-      </form>
     </div>
   );
 }

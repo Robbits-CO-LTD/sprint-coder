@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
@@ -11,8 +10,12 @@ const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stop
 // Reintroduces the pre-Canvas list (see `git show 5d6238d -- .../TeamListView.tsx` for the deleted
 // original) as a cleaner, presentational rewrite. Canvas and List are mutually exclusive (App only
 // ever mounts one at a time per the renderer-only view preference), so this intentionally reuses
-// the Canvas's testids/labels (`team-worker`, `team-hire`, `team-stop-all`, 依頼/役割/目的, …) —
-// there is never a collision, and e2e specs can keep one selector for either mode.
+// the Canvas's testids/labels (`team-worker`, `team-stop-all`, …) — there is never a collision,
+// and e2e specs can keep one selector for either mode.
+//
+// The Leader hires and dispatches Workers on its own during its Turn (FR-TEAM-06/13,
+// team-tools.ts) — there is no hire form or per-worker send form here either; this stays an
+// observation surface, exactly like the Canvas's Worker cards.
 export function TeamListView({
   task,
   onBack,
@@ -27,14 +30,8 @@ export function TeamListView({
 }) {
   const detail = useAppStore((state) => state.teamByTask[task.id]);
   const teamBusy = useAppStore((state) => state.teamBusy);
-  const hireTeamWorker = useAppStore((state) => state.hireTeamWorker);
-  const sendTeamMessage = useAppStore((state) => state.sendTeamMessage);
   const stopTeamWorker = useAppStore((state) => state.stopTeamWorker);
   const stopAllTeamWorkers = useAppStore((state) => state.stopAllTeamWorkers);
-
-  const [role, setRole] = useState('');
-  const [objective, setObjective] = useState('');
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
 
   if (!detail) {
     return (
@@ -50,11 +47,6 @@ export function TeamListView({
   }
 
   const workers = detail.workers.filter((w) => w.kind === 'worker');
-  const hireVisible =
-    workers.length < MAX_WORKERS &&
-    detail.team.state !== 'completed' &&
-    detail.team.state !== 'failed';
-  const canSubmitHire = !teamBusy && role.trim() !== '' && objective.trim() !== '';
 
   return (
     <section
@@ -102,7 +94,6 @@ export function TeamListView({
       <div className="tlv-body">
         <ul className="tlv-workers" aria-label="Worker一覧">
           {workers.map((worker) => {
-            const canSend = (worker.state === 'ready' || worker.state === 'waiting') && !teamBusy;
             const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
             const relevant = detail.messages
               .filter((m) => m.targetAgentId === worker.id || m.sourceAgentId === worker.id)
@@ -167,73 +158,13 @@ export function TeamListView({
                     })}
                   </ul>
                 )}
-                <form
-                  className="w-compose"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    const content = drafts[worker.id]?.trim();
-                    if (!content) return;
-                    void sendTeamMessage(task.id, worker.id, content).then(() =>
-                      setDrafts((current) => ({ ...current, [worker.id]: '' })),
-                    );
-                  }}
-                >
-                  <label htmlFor={`team-message-${worker.id}`}>依頼</label>
-                  <textarea
-                    id={`team-message-${worker.id}`}
-                    value={drafts[worker.id] ?? ''}
-                    onChange={(event) =>
-                      setDrafts((current) => ({ ...current, [worker.id]: event.target.value }))
-                    }
-                    disabled={!canSend}
-                    rows={2}
-                  />
-                  <button
-                    type="submit"
-                    className="cc-btn"
-                    disabled={!canSend || !(drafts[worker.id]?.trim())}
-                  >
-                    Leaderから送信
-                  </button>
-                </form>
               </li>
             );
           })}
-          {workers.length === 0 && <li className="tlv-empty">まだWorkerがいません。</li>}
+          {workers.length === 0 && (
+            <li className="tlv-empty">Leaderに依頼すると、必要に応じてWorkerを雇用します</li>
+          )}
         </ul>
-
-        {hireVisible && (
-          <form
-            className="hire-form tlv-hire-form"
-            aria-label="Workerを追加"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (!canSubmitHire) return;
-              void hireTeamWorker(task.id, role.trim(), objective.trim()).then(() => {
-                setRole('');
-                setObjective('');
-              });
-            }}
-          >
-            <h3>Workerを追加</h3>
-            <label>
-              役割
-              <input value={role} onChange={(event) => setRole(event.target.value)} maxLength={100} />
-            </label>
-            <label>
-              目的
-              <textarea
-                value={objective}
-                onChange={(event) => setObjective(event.target.value)}
-                maxLength={10_000}
-                rows={2}
-              />
-            </label>
-            <button type="submit" data-testid="team-hire" className="cc-btn" disabled={!canSubmitHire}>
-              Workerを起動
-            </button>
-          </form>
-        )}
 
         <div className="tlv-timeline">
           <h3>Message timeline</h3>

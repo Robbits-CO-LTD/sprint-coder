@@ -138,8 +138,12 @@ type AppState = {
   setGoal(taskId: string, goal: string): Promise<void>;
   selectWorkspace(taskId: string): Promise<void>;
   toggleTeamView(taskId: string): Promise<void>;
-  hireTeamWorker(taskId: string, role: string, objective: string): Promise<void>;
-  sendTeamMessage(taskId: string, agentId: string, content: string): Promise<void>;
+  // No hireTeamWorker/sendTeamMessage actions here: the Leader hires and dispatches Workers on
+  // its own during its Turn (FR-TEAM-06/13, main/team-tools.ts) — the user only ever converses
+  // with the Leader through the normal Turn actions below. `window.sprintCoder.teams.hireWorker`/
+  // `sendToWorker` IPC still exist (main/ipc.ts keeps them wired), they're just never called from
+  // the renderer anymore. `stopTeamWorker`/`stopAllTeamWorkers` stay: FR-TEAM-13 keeps stop as a
+  // user override.
   stopTeamWorker(taskId: string, agentId: string): Promise<void>;
   stopAllTeamWorkers(taskId: string): Promise<void>;
   setDraft(taskId: string, text: string): void;
@@ -939,40 +943,6 @@ export const useAppStore = create<AppState>((set, get) => {
           teamByTask: { ...state.teamByTask, [taskId]: detail },
           teamViewOpen: true,
         }));
-      } catch (err) {
-        set({ error: describeError(err) });
-      } finally {
-        set({ teamBusy: false });
-      }
-    },
-
-    async hireTeamWorker(taskId: string, role: string, objective: string) {
-      if (!window.sprintCoder?.teams || get().teamBusy) return;
-      set({ teamBusy: true, error: null });
-      try {
-        await window.sprintCoder.teams.hireWorker({
-          taskId,
-          role,
-          objective,
-          contextInheritancePolicy: 'summary',
-          writeCapable: false,
-        });
-        const detail = await window.sprintCoder.teams.get(taskId);
-        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
-      } catch (err) {
-        set({ error: describeError(err) });
-      } finally {
-        set({ teamBusy: false });
-      }
-    },
-
-    async sendTeamMessage(taskId: string, agentId: string, content: string) {
-      if (!window.sprintCoder?.teams || get().teamBusy) return;
-      set({ teamBusy: true, error: null });
-      try {
-        await window.sprintCoder.teams.sendToWorker({ taskId, targetAgentId: agentId, content });
-        const detail = await window.sprintCoder.teams.get(taskId);
-        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
       } catch (err) {
         set({ error: describeError(err) });
       } finally {

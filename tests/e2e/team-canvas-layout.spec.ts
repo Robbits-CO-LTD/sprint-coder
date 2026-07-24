@@ -3,6 +3,43 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
 // Phase 6 Slice 6.1: Canvas base (layout persistence, LOD, list fallback).
+//
+// The Leader hires and dispatches Workers on its own during its Turn (FR-TEAM-06/13) — there is no
+// manual hire form or per-worker send form anywhere anymore (see TeamCanvas.tsx/WorkerNode.tsx/
+// TeamListView.tsx). None of these tests are actually about hiring itself (they cover layout
+// persistence, LOD, camera ownership, placement, keyboard nav), so setup here calls
+// TeamCoordinator directly through the same IPC the Leader's team_hire_worker/team_send_to_worker
+// tools invoke (main/team-tools.ts) rather than driving a full autonomous チームテスト Turn for
+// every test. team-flow.spec.ts covers the full autonomous path driven purely from the chat
+// composer.
+
+async function currentTaskId(page: Page): Promise<string> {
+  return page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
+}
+
+async function hireWorker(page: Page, role: string, objective: string): Promise<void> {
+  const taskId = await currentTaskId(page);
+  await page.evaluate(
+    async ({ id, role, objective }) =>
+      window.sprintCoder!.teams.hireWorker({
+        taskId: id,
+        role,
+        objective,
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      }),
+    { id: taskId, role, objective },
+  );
+}
+
+async function sendToWorker(page: Page, workerAgentId: string, content: string): Promise<void> {
+  const taskId = await currentTaskId(page);
+  await page.evaluate(
+    async ({ id, target, content }) =>
+      window.sprintCoder!.teams.sendToWorker({ taskId: id, targetAgentId: target, content }),
+    { id: taskId, target: workerAgentId, content },
+  );
+}
 
 type WorldPosition = { left: string; top: string };
 
@@ -49,9 +86,7 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       await page.getByTestId('team-toggle').click();
       await expect(page.getByTestId('team-list')).toBeVisible();
 
-      await page.getByLabel('役割').fill('実装');
-      await page.getByLabel('目的').fill('機能を実装する');
-      await page.getByTestId('team-hire').click();
+      await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
       await page.getByTestId('team-canvas-fit').click();
       await page.waitForTimeout(700); // let the fit settle before reading a baseline position
@@ -127,7 +162,7 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
     }
   });
 
-  test('List表示 fallback hires and messages a Worker, and Canvas表示 shows it back', async () => {
+  test('List表示 reflects a hired and dispatched Worker exactly like Canvas表示 does', async () => {
     const userDataDir = createUserDataDir('canvas-list-fallback');
     let app: ElectronApplication | null = null;
     try {
@@ -141,15 +176,21 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       await expect(page.getByTestId('team-view-toggle')).toHaveText('Canvas表示');
       // Chat stays visible alongside the List panel (list mode = chat layout + a team panel).
       await expect(page.getByTestId('composer-textarea')).toBeVisible();
+      // No hire form here either (List is an accessible projection of the same state, not a
+      // separate feature) — the empty-team guidance shows instead.
+      await expect(page.getByTestId('team-hire')).toHaveCount(0);
+      await expect(page.getByText('Leaderに依頼すると、必要に応じてWorkerを雇用します')).toBeVisible();
 
-      await page.getByLabel('役割').fill('実装');
-      await page.getByLabel('目的').fill('機能を実装する');
-      await page.getByTestId('team-hire').click();
+      await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
 
       const card = page.getByTestId('team-worker').first();
-      await card.getByLabel('依頼').fill('List表示からの依頼');
-      await card.getByRole('button', { name: 'Leaderから送信' }).click();
+      // TeamListView's card carries the agent id in `id="team-agent-<id>"`, not a data-agent-id
+      // attribute (that's WorkerNode/Canvas-only) — strip the prefix.
+      const cardId = await card.getAttribute('id');
+      const agentId = cardId?.replace('team-agent-', '');
+      if (!agentId) throw new Error('worker-agent-id not found');
+      await sendToWorker(page, agentId, 'List表示からの依頼');
       await expect(card.locator('.team-status')).toHaveText('done');
 
       await page.getByTestId('team-view-toggle').click();
@@ -178,13 +219,18 @@ test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
       await page.waitForTimeout(700);
       await expect(page.locator('.team-canvas')).toHaveAttribute('data-camera-owner', 'system');
 
+      // Pan from the bottom-left corner (clear of the Leader card and the empty-team hint just
+      // below it, both centered — see TeamCanvas.tsx's `showEmptyTeamHint`/camToFocus with 0
+      // Workers) rather than the viewport center: with 0 Workers there is no hire ghost widening
+      // the initial fit anymore (FR-TEAM-06/13), so the settled view now focuses tightly on just
+      // the Leader and its center is the Leader card itself, not empty background.
       const canvasBox = await page.locator('.team-canvas').boundingBox();
       if (!canvasBox) throw new Error('team-canvas not found');
-      const startX = canvasBox.x + canvasBox.width / 2;
-      const startY = canvasBox.y + canvasBox.height / 2;
+      const startX = canvasBox.x + 30;
+      const startY = canvasBox.y + canvasBox.height - 30;
       await page.mouse.move(startX, startY);
       await page.mouse.down();
-      await page.mouse.move(startX + 120, startY + 80, { steps: 8 });
+      await page.mouse.move(startX + 120, startY - 80, { steps: 8 });
       await page.mouse.up();
       await expect(page.locator('.team-canvas')).toHaveAttribute('data-camera-owner', 'user');
 
@@ -206,9 +252,7 @@ test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
       await page.getByTestId('sidebar-new-task-button').click();
       await page.getByTestId('team-toggle').click();
 
-      await page.getByLabel('役割').fill('実装');
-      await page.getByLabel('目的').fill('機能を実装する');
-      await page.getByTestId('team-hire').click();
+      await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
       await page.getByTestId('team-canvas-fit').click();
       await page.waitForTimeout(700);
@@ -240,15 +284,13 @@ test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
       expect(Math.abs(parseFloat(afterDrag.left) - targetWorldPos.x)).toBeLessThan(20);
       expect(Math.abs(parseFloat(afterDrag.top) - targetWorldPos.y)).toBeLessThan(20);
 
-      // Re-fit: the drag itself only moves the Worker in world space, but the hire ghost may now
-      // have relocated to avoid it (`recomputeHirePosition`), potentially outside the camera view
-      // that was fit for the pre-drag layout — bring everything back into view before hiring.
+      // Re-fit: the drag itself only moves the Worker in world space, and the camera view that
+      // was fit for the pre-drag layout may no longer include everything — bring it back into
+      // view before hiring the second Worker.
       await page.getByTestId('team-canvas-fit').click();
       await page.waitForTimeout(700);
 
-      await page.getByLabel('役割').fill('レビュー');
-      await page.getByLabel('目的').fill('変更をレビューする');
-      await page.getByTestId('team-hire').click();
+      await hireWorker(page, 'レビュー', '変更をレビューする');
       await expect(page.getByTestId('team-worker')).toHaveCount(2);
       await page.waitForTimeout(300);
 
@@ -299,19 +341,20 @@ test.describe('Canvas keyboard navigation', () => {
       const leaderNode = page.locator('.surface--node');
 
       // --- Manual pan claims 'user' ownership, and keyboard 'f' hands it back to 'system'. ---
-      // Done now, before any Worker exists and before Enter camera-focuses a single node — only
-      // the Leader + hire ghost are on screen, so the canvas center is empty background, not a
-      // node (`.worker`/`.surface--node` pointerdowns are excluded from panning, see useCamera.ts).
+      // Done now, before any Worker exists and before Enter camera-focuses a single node. Pan
+      // from the bottom-left corner rather than the viewport center: with 0 Workers there is no
+      // hire ghost widening the initial fit anymore (FR-TEAM-06/13), so the settled view focuses
+      // tightly on just the Leader and its center is the Leader card itself (`.surface--node`
+      // pointerdowns are excluded from panning, see useCamera.ts) — the corner, clear of both the
+      // Leader and the empty-team hint just below it, is reliably empty background instead.
       await expect(canvas).toHaveAttribute('data-camera-owner', 'system');
       const canvasBox = await canvas.boundingBox();
       if (!canvasBox) throw new Error('team-canvas not found');
-      await page.mouse.move(canvasBox.x + canvasBox.width / 2, canvasBox.y + canvasBox.height / 2);
+      const panStartX = canvasBox.x + 30;
+      const panStartY = canvasBox.y + canvasBox.height - 30;
+      await page.mouse.move(panStartX, panStartY);
       await page.mouse.down();
-      await page.mouse.move(
-        canvasBox.x + canvasBox.width / 2 + 60,
-        canvasBox.y + canvasBox.height / 2 + 40,
-        { steps: 8 },
-      );
+      await page.mouse.move(panStartX + 60, panStartY - 40, { steps: 8 });
       await page.mouse.up();
       await expect(canvas).toHaveAttribute('data-camera-owner', 'user');
 
@@ -321,20 +364,19 @@ test.describe('Canvas keyboard navigation', () => {
       await expect(canvas).toHaveAttribute('data-camera-owner', 'system');
 
       // --- Hire a Worker, then exercise Arrow/Tab selection + Enter/Escape. ---
-      await page.getByLabel('役割').fill('実装');
-      await page.getByLabel('目的').fill('機能を実装する');
-      await page.getByTestId('team-hire').click();
+      await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
       await page.getByTestId('team-canvas-fit').click();
       await page.waitForTimeout(700); // let the fit settle before reading a baseline
 
       const workerNode = page.getByTestId('team-worker');
-      const hireNode = page.locator('.worker--hire');
 
       await canvas.focus();
       await expect(canvas).toBeFocused();
 
-      // nodeIds order is [Leader, Worker, hire ghost] — ArrowRight walks forward through it.
+      // nodeIds order is [Leader, Worker] — there is no hire node anymore (FR-TEAM-06/13: the
+      // Leader hires on its own), so keyboard selection cycles only the Leader and Workers.
+      // ArrowRight walks forward through it.
       await canvas.press('ArrowRight');
       await expect(leaderNode).toHaveClass(/node-selected/);
       await expect(workerNode).not.toHaveClass(/node-selected/);
@@ -343,22 +385,26 @@ test.describe('Canvas keyboard navigation', () => {
       await expect(workerNode).toHaveClass(/node-selected/);
       await expect(leaderNode).not.toHaveClass(/node-selected/);
 
-      // Tab (no shift) is equivalent to ArrowRight — moves selection to the hire ghost next.
+      // Tab (no shift) is equivalent to ArrowRight — with only 2 nodes, this wraps back onto the
+      // Leader.
       await canvas.press('Tab');
-      await expect(hireNode).toHaveClass(/node-selected/);
+      await expect(leaderNode).toHaveClass(/node-selected/);
       await expect(workerNode).not.toHaveClass(/node-selected/);
 
       // Shift+Tab walks backward — back onto the Worker.
       await canvas.press('Shift+Tab');
       await expect(workerNode).toHaveClass(/node-selected/);
 
-      // Enter: focuses the selected Worker's first focusable (its message textarea) and hands
+      // Enter: focuses the selected Worker's primary interactive element (its 停止 button — the
+      // only one left now that the card is an observation surface, see WorkerNode.tsx) and hands
       // camera ownership to 'system' via the explicit view command.
       await canvas.press('Enter');
       const focusedInsideWorker = await page.evaluate(() => {
         const active = document.activeElement;
         return (
-          active?.tagName === 'TEXTAREA' && active.closest('[data-testid="team-worker"]') !== null
+          active !== null &&
+          active.classList.contains('w-stop-btn') &&
+          active.closest('[data-testid="team-worker"]') !== null
         );
       });
       expect(focusedInsideWorker).toBe(true);
