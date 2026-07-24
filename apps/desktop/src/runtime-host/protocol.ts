@@ -20,6 +20,17 @@ export type RuntimeContextFragment = Readonly<{
   content: string;
 }>;
 
+/** Additive, optional per-turn addendum: when present, the Claude adapter wires the real Leader
+ * up to team-mcp-bridge.ts (via an ephemeral MCP stdio server) instead of running the plain
+ * no-tools profile. `socketPath`/`token` name the bridge connection; `guidance` is appended to the
+ * turn's system prompt (see LEADER_MCP_SYSTEM_PROMPT in team-tools.ts). Ignored entirely by the
+ * Codex adapter. */
+export type RuntimeTeamMcpOption = Readonly<{
+  socketPath: string;
+  token: string;
+  guidance: string;
+}>;
+
 type EnvelopeBase = {
   protocolVersion: typeof RUNTIME_PROTOCOL_VERSION;
   runtimeInstanceId: string;
@@ -43,6 +54,7 @@ export type MainToRuntimeEnvelope =
       model: string;
       contextFragments: RuntimeContextFragment[];
       toolCatalogSnapshot: ToolCatalogSnapshot;
+      teamMcp?: RuntimeTeamMcpOption;
     })
   | (EnvelopeBase & { type: 'cancel' });
 
@@ -80,7 +92,23 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     'contextFragments' in value &&
     isRuntimeContextFragments(value.contextFragments) &&
     'toolCatalogSnapshot' in value &&
-    isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot)
+    isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot) &&
+    (!('teamMcp' in value) || value.teamMcp === undefined || isRuntimeTeamMcpOption(value.teamMcp))
+  );
+}
+
+function isRuntimeTeamMcpOption(value: unknown): value is RuntimeTeamMcpOption {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record['socketPath'] === 'string' &&
+    record['socketPath'].length > 0 &&
+    record['socketPath'].length <= 1024 &&
+    typeof record['token'] === 'string' &&
+    record['token'].length >= 16 &&
+    record['token'].length <= 256 &&
+    typeof record['guidance'] === 'string' &&
+    record['guidance'].length <= 20_000
   );
 }
 

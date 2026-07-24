@@ -149,6 +149,64 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('hasBusyWorkers reflects an in-flight dispatch and clears once it settles', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask();
+      let releaseExecute: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        releaseExecute = resolve;
+      });
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          await gate;
+          return {
+            claims: {
+              deliveryId: input.envelope.deliveryId,
+              sourceAgentId: input.envelope.sourceAgentId,
+              targetAgentId: input.envelope.targetAgentId,
+            },
+            completion: {
+              status: 'succeeded',
+              summary: 'done',
+              artifacts: [],
+              verification: [],
+              risks: [],
+            },
+          };
+        },
+        async stop() {
+          /* not exercised in this test */
+        },
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'worker',
+        objective: 'work',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      expect(coordinator.hasBusyWorkers(task.id)).toBe(false);
+
+      const dispatch = coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'go',
+      });
+      // Give sendToWorker's synchronous prefix (queued via the Task mailbox) a tick to actually
+      // transition the Worker to 'busy' before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(coordinator.hasBusyWorkers(task.id)).toBe(true);
+
+      releaseExecute?.();
+      await dispatch;
+      expect(coordinator.hasBusyWorkers(task.id)).toBe(false);
+      persistence.close();
+    });
+
     it('stops every owned Worker through the runtime and completes the Team', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask();

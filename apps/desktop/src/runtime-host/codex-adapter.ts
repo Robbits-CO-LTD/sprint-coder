@@ -6,7 +6,11 @@ import { createInterface } from 'node:readline';
 import type { PublicError } from '@sprint-coder/contracts';
 import type { CodexModelOption } from '@sprint-coder/contracts';
 import { ApprovalRequestedError, CodexJsonlNormalizer } from './codex-normalizer';
-import type { RuntimeCanonicalEvent, RuntimeContextFragment } from './protocol';
+import type {
+  RuntimeCanonicalEvent,
+  RuntimeContextFragment,
+  RuntimeTeamMcpOption,
+} from './protocol';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -72,6 +76,10 @@ export class CodexRuntimeAdapter {
     emit: EmitEvent,
     fail: EmitError,
     exited: (code: number, canceled: boolean) => void,
+    // Codex has no MCP-based Leader profile (Leader MCP is Claude-only for now); accepted only so
+    // this adapter's `start` keeps the same call signature as ClaudeRuntimeAdapter's for
+    // index.ts's shared dispatch, and always ignored.
+    _teamMcp?: RuntimeTeamMcpOption,
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));

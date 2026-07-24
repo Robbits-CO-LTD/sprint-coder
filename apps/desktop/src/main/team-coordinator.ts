@@ -336,6 +336,17 @@ export class TeamCoordinator {
     return this.persistence.recoverTeamsOnStartup(this.isoNow());
   }
 
+  /** True while at least one Worker is mid-dispatch (sendToWorker sets 'busy' before running the
+   * Worker runtime and clears it in both the success and failure paths). Used by
+   * team_wait_reports' long-poll (team-tools.ts) to decide whether it is still worth waiting for
+   * more reports or whether every dispatched Worker has already settled. */
+  hasBusyWorkers(taskId: string): boolean {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) return false;
+    const snapshot = this.persistence.getTeamSnapshot(team.id);
+    return snapshot.agents.some(({ kind, state }) => kind === 'worker' && state === 'busy');
+  }
+
   private async dispatchWithRetry(
     teamId: string,
     leader: AgentRecord,

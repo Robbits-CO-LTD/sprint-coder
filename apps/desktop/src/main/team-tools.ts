@@ -7,10 +7,11 @@
 // Real Codex/Claude runtimes stay no-tools for now (see runtime-host.ts): these definitions are
 // only ever registered on the mock/intelligence-loop ToolBroker (createDefaultToolBroker's
 // optional `team` bundle), never on RuntimeHostClient's path.
+import { z } from 'zod';
+import { contextInheritancePolicySchema } from '@sprint-coder/contracts';
 import {
   createToolDefinition,
   createToolId,
-  type ContextInheritancePolicy,
   type JsonValue,
   type ToolDefinition,
 } from '@sprint-coder/domain';
@@ -72,7 +73,12 @@ export const TEAM_SEND_TO_WORKER_TOOL = teamToolDefinition(
   ['workerId', 'content'],
 );
 
-export const TEAM_WAIT_REPORTS_TOOL = teamToolDefinition('team_wait_reports', 'wait-reports', {}, []);
+export const TEAM_WAIT_REPORTS_TOOL = teamToolDefinition(
+  'team_wait_reports',
+  'wait-reports',
+  {},
+  [],
+);
 
 export const TEAM_STOP_WORKER_TOOL = teamToolDefinition(
   'team_stop_worker',
@@ -96,10 +102,6 @@ function teamToolError(error: unknown): { ok: false; error: string; message: str
   };
 }
 
-/** Registers the Leader team tool implementations on an existing mock ToolBroker. Every
- * implementation only ever calls TeamCoordinator methods — it never touches persistence
- * directly and never accepts source/target identity from the tool input, so a tool call can't
- * spoof an envelope's source/target (the coordinator resolves the Leader/Worker itself). */
 // Hiring cadence: a burst of instantaneous hires reads as fake ("the leader isn't actually
 // deciding anything"). Each hire pauses briefly so the spawn choreography paces like a leader
 // working through its plan. Overridable for tests (SPRINT_CODER_TEAM_PACING_MS=0).
@@ -109,21 +111,113 @@ const pacing = (): Promise<void> =>
     ? Promise.resolve()
     : new Promise((resolve) => setTimeout(resolve, HIRE_PACING_MS));
 
-export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinator): void {
-  broker.registerImplementation({
-    toolId: TEAM_HIRE_WORKER_TOOL.toolId,
-    implementationKind: 'built-in',
-    execute: async (input, context) => {
+export type TeamToolName =
+  'team_hire_worker' | 'team_send_to_worker' | 'team_wait_reports' | 'team_stop_worker';
+
+export function isTeamToolName(value: unknown): value is TeamToolName {
+  return (
+    value === 'team_hire_worker' ||
+    value === 'team_send_to_worker' ||
+    value === 'team_wait_reports' ||
+    value === 'team_stop_worker'
+  );
+}
+
+// Wire-level argument shapes for every team tool. These are deliberately re-validated here (in
+// addition to whatever gate a caller sits behind) because executeTeamTool is invoked from two
+// places with very different trust boundaries: the mock ToolBroker (which already validates the
+// call against the pinned ToolDefinition schema before dispatch) and the MCP bridge (where the
+// arguments come straight off the wire from a CLI subprocess with no upstream schema gate at
+// all). `.strict()` rejects any extra property — including an attacker- or model-supplied
+// `sourceAgentId`/`taskId` — so identity can never be smuggled in through tool arguments; the
+// taskId always comes from the caller's own registration/context, never from `args`.
+const hireArgsSchema = z
+  .object({
+    role: z.string().min(1).max(100),
+    objective: z.string().min(1).max(10_000),
+    contextInheritancePolicy: contextInheritancePolicySchema.optional(),
+    writeCapable: z.boolean().optional(),
+  })
+  .strict();
+const sendArgsSchema = z
+  .object({ workerId: z.string().min(1).max(128), content: z.string().min(1).max(20_000) })
+  .strict();
+const waitArgsSchema = z.object({}).strict();
+const stopArgsSchema = z.object({ workerId: z.string().min(1).max(128) }).strict();
+
+export type TeamWaitReportsCursor = Readonly<{
+  read(): number;
+  advance(seq: number): void;
+}>;
+
+export type ExecuteTeamToolOptions = Readonly<{
+  /** Long-poll team_wait_reports instead of returning immediately (real Leader over MCP). The
+   * mock ToolBroker path always omits this (or passes false) to keep its synchronous,
+   * replay-since-cursor semantics exactly as tested. */
+  longPoll?: boolean;
+  /** Where to read/advance the "already surfaced to this caller" report watermark. Callers own
+   * the storage: the mock path keys it off the ToolBroker's per-Turn context object (a WeakMap),
+   * the MCP bridge keys it off the registered turnId. */
+  waitReportsCursor?: TeamWaitReportsCursor;
+  longPollTimeoutMs?: number;
+  longPollIntervalMs?: number;
+}>;
+
+const DEFAULT_LONG_POLL_TIMEOUT_MS = 60_000;
+const DEFAULT_LONG_POLL_INTERVAL_MS = 500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function reportPayload(report: { sourceAgentId: string; seq: number; content: string }) {
+  return { workerId: report.sourceAgentId, seq: report.seq, content: report.content };
+}
+
+async function executeWaitReports(
+  coordinator: TeamCoordinator,
+  taskId: string,
+  options: ExecuteTeamToolOptions,
+): Promise<unknown> {
+  const cursor = options.waitReportsCursor;
+  const after = cursor?.read() ?? 0;
+  const longPoll = options.longPoll ?? false;
+  const timeoutMs = options.longPollTimeoutMs ?? DEFAULT_LONG_POLL_TIMEOUT_MS;
+  const intervalMs = options.longPollIntervalMs ?? DEFAULT_LONG_POLL_INTERVAL_MS;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const reports = coordinator.listWorkerReports(taskId, after);
+    if (reports.length > 0) {
+      cursor?.advance(Math.max(after, ...reports.map((report) => report.seq)));
+      return { ok: true, reports: reports.map(reportPayload) };
+    }
+    if (!longPoll || !coordinator.hasBusyWorkers(taskId) || Date.now() >= deadline)
+      return { ok: true, reports: [] };
+    await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+  }
+}
+
+/** The single execution path for every team tool call, shared by BOTH the mock ToolBroker
+ * registration below and the MCP bridge (team-mcp-bridge.ts) that services the real Claude
+ * Leader's tool calls. `taskId` always comes from the caller's own trusted binding (ToolBroker's
+ * ToolExecutionContext, or the bridge's per-turn registration) — it is never read from `args` —
+ * so a tool call can never spoof which Task/Team it targets, let alone the source/target agent
+ * identity inside it (TeamCoordinator resolves the Leader/Worker itself). */
+export async function executeTeamTool(
+  coordinator: TeamCoordinator,
+  taskId: string,
+  toolName: string,
+  args: unknown,
+  options: ExecuteTeamToolOptions = {},
+): Promise<unknown> {
+  if (!isTeamToolName(toolName)) throw new Error(`Unknown team tool: ${toolName}`);
+  switch (toolName) {
+    case 'team_hire_worker': {
+      const request = hireArgsSchema.parse(args);
       await pacing();
-      const request = input as {
-        role: string;
-        objective: string;
-        contextInheritancePolicy?: ContextInheritancePolicy;
-        writeCapable?: boolean;
-      };
       try {
         const worker = await coordinator.hireWorker({
-          taskId: context.taskId,
+          taskId,
           role: request.role,
           objective: request.objective,
           contextInheritancePolicy: request.contextInheritancePolicy ?? 'summary',
@@ -133,17 +227,12 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
       } catch (error) {
         return teamToolError(error);
       }
-    },
-  });
-
-  broker.registerImplementation({
-    toolId: TEAM_SEND_TO_WORKER_TOOL.toolId,
-    implementationKind: 'built-in',
-    execute: async (input, context) => {
-      const request = input as { workerId: string; content: string };
+    }
+    case 'team_send_to_worker': {
+      const request = sendArgsSchema.parse(args);
       try {
         const message = await coordinator.sendToWorker({
-          taskId: context.taskId,
+          taskId,
           targetAgentId: request.workerId,
           content: request.content,
         });
@@ -157,46 +246,75 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
       } catch (error) {
         return teamToolError(error);
       }
-    },
+    }
+    case 'team_wait_reports': {
+      waitArgsSchema.parse(args);
+      return executeWaitReports(coordinator, taskId, options);
+    }
+    case 'team_stop_worker': {
+      const request = stopArgsSchema.parse(args);
+      try {
+        const worker = await coordinator.stopWorker(taskId, request.workerId);
+        return { ok: true, workerId: worker.id, state: worker.state };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
+  }
+}
+
+/** Registers the Leader team tool implementations on an existing mock ToolBroker. Every
+ * implementation only ever calls executeTeamTool/TeamCoordinator — it never touches persistence
+ * directly and never accepts source/target identity from the tool input, so a tool call can't
+ * spoof an envelope's source/target (the coordinator resolves the Leader/Worker itself). */
+export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinator): void {
+  broker.registerImplementation({
+    toolId: TEAM_HIRE_WORKER_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_hire_worker', input),
+  });
+
+  broker.registerImplementation({
+    toolId: TEAM_SEND_TO_WORKER_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_send_to_worker', input),
   });
 
   // Per-Turn read cursor: `context` is the exact same frozen object for every dispatch within one
   // Turn (see ToolBroker.startTurn), so keying a WeakMap by it scopes "already surfaced reports"
   // without new persistence state — the same technique default-tools.ts uses for command ids.
+  // longPoll stays false here (the default), preserving the exact synchronous,
+  // replay-since-cursor behavior the existing tests pin.
   const reportCursors = new WeakMap<object, number>();
   broker.registerImplementation({
     toolId: TEAM_WAIT_REPORTS_TOOL.toolId,
     implementationKind: 'built-in',
-    execute: (_input, context) => {
-      const after = reportCursors.get(context) ?? 0;
-      const reports = coordinator.listWorkerReports(context.taskId, after);
-      if (reports.length > 0)
-        reportCursors.set(context, Math.max(after, ...reports.map((report) => report.seq)));
-      return {
-        ok: true,
-        reports: reports.map((report) => ({
-          workerId: report.sourceAgentId,
-          seq: report.seq,
-          content: report.content,
-        })),
-      };
-    },
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_wait_reports', input, {
+        waitReportsCursor: {
+          read: () => reportCursors.get(context) ?? 0,
+          advance: (seq) => reportCursors.set(context, seq),
+        },
+      }),
   });
 
   broker.registerImplementation({
     toolId: TEAM_STOP_WORKER_TOOL.toolId,
     implementationKind: 'built-in',
-    execute: async (input, context) => {
-      const request = input as { workerId: string };
-      try {
-        const worker = await coordinator.stopWorker(context.taskId, request.workerId);
-        return { ok: true, workerId: worker.id, state: worker.state };
-      } catch (error) {
-        return teamToolError(error);
-      }
-    },
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_stop_worker', input),
   });
 }
+
+// --- Leader MCP guidance ----------------------------------------------------------------------
+//
+// Appended to the real Claude Leader's system prompt (via --append-system-prompt) only when
+// SPRINT_CODER_LEADER_MCP=1 routes the turn through the MCP bridge instead of the deterministic
+// mock scenario. Concise and in Japanese to match the rest of the in-app leader/worker copy.
+export const LEADER_MCP_SYSTEM_PROMPT =
+  'あなたはこのタスクのチームLeaderです。team_hire_workerで、ユーザーの依頼内容から役割と目的を自分で判断してWorkerを雇用してください（最大3人。タスクに本当に必要な人数だけでよく、少ない人数でも構いません）。次にteam_send_to_workerで各Workerへ具体的な作業を依頼し、team_wait_reportsで報告を待ってください（届いていなければ再度呼び出してよく、最大60秒待機します）。全員分の報告が揃ったら、それらの内容を統合した最終回答をユーザー向けに日本語で作成してください。';
 
 // --- Deterministic mock team scenario -------------------------------------------------------
 //
@@ -216,7 +334,9 @@ export function isTeamScenarioInput(input: string): boolean {
 type ToolCallResult = { callId: string; arguments: unknown; result: unknown };
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function parseJson(content: string | undefined): unknown {
@@ -241,7 +361,11 @@ function callResults(
       (item): item is Extract<ToolTranscriptItem, { type: 'tool-result' }> =>
         item.type === 'tool-result' && item.callId === call.callId,
     );
-    return { callId: call.callId, arguments: call.arguments, result: parseJson(resultItem?.content) };
+    return {
+      callId: call.callId,
+      arguments: call.arguments,
+      result: parseJson(resultItem?.content),
+    };
   });
 }
 
@@ -301,7 +425,8 @@ export function createTeamScenarioSampler(input: string): ModelSampler {
     for (const { arguments: args, result } of hires) {
       const workerId = asRecord(result)?.workerId;
       const role = asRecord(args)?.role;
-      if (typeof workerId === 'string' && typeof role === 'string') roleByWorkerId.set(workerId, role);
+      if (typeof workerId === 'string' && typeof role === 'string')
+        roleByWorkerId.set(workerId, role);
     }
     const latestWait = waits.at(-1);
     const reports = Array.isArray(asRecord(latestWait?.result)?.reports)
