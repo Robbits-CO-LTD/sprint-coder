@@ -8,12 +8,15 @@ export function HireNode({
   x,
   y,
   teamBusy,
+  selected = false,
   onHire,
   ref,
 }: {
   x: number;
   y: number;
   teamBusy: boolean;
+  /** Keyboard-navigation selection ring (Slice 6.1 canvas keyboard nav). */
+  selected?: boolean;
   onHire: (role: string, objective: string) => void;
   ref?: Ref<HTMLDivElement>;
 }) {
@@ -22,7 +25,12 @@ export function HireNode({
   const canSubmit = !teamBusy && role.trim() !== '' && objective.trim() !== '';
 
   return (
-    <div ref={ref} className="worker worker--hire" style={{ left: x, top: y }}>
+    <div
+      ref={ref}
+      className={`worker worker--hire${selected ? ' node-selected' : ''}`}
+      aria-label="Workerを雇用"
+      style={{ left: x, top: y }}
+    >
       <div className="w-head">
         <div className="w-avatar" aria-hidden="true">
           +

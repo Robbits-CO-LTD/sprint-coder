@@ -1458,7 +1458,65 @@ const migrations = [
       UPDATE teams SET budget_json = '${TEAM_BUDGET_STRUCTURED_SEED}' WHERE budget_json = '{}';
     `,
   },
+  {
+    version: 29,
+    checksum: 'canvas-views-v29-camera-node-layout',
+    sql: `
+      CREATE TABLE canvas_views (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        camera_x REAL NOT NULL,
+        camera_y REAL NOT NULL,
+        camera_scale REAL NOT NULL CHECK (camera_scale > 0),
+        node_positions_json TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
+
+// Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
+// Bounds mirror packages/contracts's canvasCameraSchema/canvasNodePositionSchema (kept as literal
+// duplicates here, not imports, since main must reject bad data even if a caller bypasses the IPC
+// schema — e.g. direct PersistenceClient use in tests).
+export const CANVAS_MIN_SCALE = 0.18;
+export const CANVAS_MAX_SCALE = 1.6;
+export const CANVAS_WORLD_BOUND = 20_000;
+
+export type CanvasCameraRecord = { x: number; y: number; scale: number };
+export type CanvasViewRecord = {
+  taskId: string;
+  camera: CanvasCameraRecord;
+  nodePositions: Record<string, { x: number; y: number }>;
+  revision: number;
+  updatedAt: string;
+};
+
+function assertCanvasCoordinate(value: number, label: string): void {
+  if (!Number.isFinite(value) || Math.abs(value) > CANVAS_WORLD_BOUND)
+    throw new InvalidCanvasViewError(`${label} is out of the allowed world range`);
+}
+
+export function validateCanvasCamera(camera: CanvasCameraRecord): void {
+  assertCanvasCoordinate(camera.x, 'camera.x');
+  assertCanvasCoordinate(camera.y, 'camera.y');
+  if (
+    !Number.isFinite(camera.scale) ||
+    camera.scale < CANVAS_MIN_SCALE ||
+    camera.scale > CANVAS_MAX_SCALE
+  )
+    throw new InvalidCanvasViewError('camera.scale is out of the allowed zoom range');
+}
+
+export function validateCanvasNodePositions(
+  positions: Readonly<Record<string, { x: number; y: number }>>,
+): void {
+  for (const [agentId, position] of Object.entries(positions)) {
+    assertCanvasCoordinate(position.x, `nodePositions.${agentId}.x`);
+    assertCanvasCoordinate(position.y, `nodePositions.${agentId}.y`);
+  }
+}
 
 export type ApprovalRequestInput = {
   id: string;
@@ -1746,6 +1804,13 @@ export interface PersistenceClient {
   setGoal(taskId: string, goal: string): TaskSummary;
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
+  getCanvasView(taskId: string): CanvasViewRecord | null;
+  saveCanvasView(input: {
+    taskId: string;
+    camera: CanvasCameraRecord;
+    nodePositions: Readonly<Record<string, { x: number; y: number }>>;
+    revision: number;
+  }): CanvasViewRecord;
   getWorkspace(taskId: string): string | null;
   setWorkspace(taskId: string, path: string): void;
   setWorkspaceBinding(
@@ -3011,6 +3076,111 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('UPDATE tasks SET draft = ?, updated_at = ? WHERE id = ?')
       .run(draft, new Date().toISOString(), taskId);
     if (result.changes !== 1) throw new NotFoundError('Task not found');
+  }
+
+  getCanvasView(taskId: string): CanvasViewRecord | null {
+    this.getTaskRow(taskId); // throws NotFoundError for an unknown Task
+    const row = this.db
+      .prepare(
+        `SELECT camera_x, camera_y, camera_scale, node_positions_json, revision, updated_at
+         FROM canvas_views WHERE task_id = ?`,
+      )
+      .get(taskId) as
+      | {
+          camera_x: number;
+          camera_y: number;
+          camera_scale: number;
+          node_positions_json: string;
+          revision: number;
+          updated_at: string;
+        }
+      | undefined;
+    if (row === undefined) return null;
+    // Drop node positions for agents that no longer exist for this Task (e.g. a Worker that was
+    // stopped and never rehired under the same id — ids are never reused) — a stale entry would
+    // otherwise persist forever without ever mapping back onto a visible node.
+    const allowedAgentIds = new Set(
+      (this.db.prepare('SELECT id FROM agents WHERE task_id = ?').all(taskId) as { id: string }[]).map(
+        (agent) => agent.id,
+      ),
+    );
+    const rawPositions = JSON.parse(row.node_positions_json) as Record<
+      string,
+      { x: number; y: number }
+    >;
+    const nodePositions: Record<string, { x: number; y: number }> = {};
+    for (const [agentId, position] of Object.entries(rawPositions)) {
+      if (allowedAgentIds.has(agentId)) nodePositions[agentId] = position;
+    }
+    return {
+      taskId,
+      camera: { x: row.camera_x, y: row.camera_y, scale: row.camera_scale },
+      nodePositions,
+      revision: row.revision,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  saveCanvasView(input: {
+    taskId: string;
+    camera: CanvasCameraRecord;
+    nodePositions: Readonly<Record<string, { x: number; y: number }>>;
+    revision: number;
+  }): CanvasViewRecord {
+    validateCanvasCamera(input.camera);
+    validateCanvasNodePositions(input.nodePositions);
+    return this.db.transaction(() => {
+      this.getTaskRow(input.taskId); // throws NotFoundError for an unknown Task
+      const now = new Date().toISOString();
+      const current = this.db
+        .prepare('SELECT revision FROM canvas_views WHERE task_id = ?')
+        .get(input.taskId) as { revision: number } | undefined;
+      const nodePositionsJson = JSON.stringify(input.nodePositions);
+      if (current === undefined) {
+        // Optimistic concurrency: creating a fresh row is only valid if the caller believed there
+        // was nothing saved yet (revision 0).
+        if (input.revision !== 0) throw new CanvasViewConflictError();
+        this.db
+          .prepare(
+            `INSERT INTO canvas_views(
+               task_id, camera_x, camera_y, camera_scale, node_positions_json, revision,
+               created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+          )
+          .run(
+            input.taskId,
+            input.camera.x,
+            input.camera.y,
+            input.camera.scale,
+            nodePositionsJson,
+            now,
+            now,
+          );
+      } else {
+        if (current.revision !== input.revision) throw new CanvasViewConflictError();
+        this.db
+          .prepare(
+            `UPDATE canvas_views
+             SET camera_x = ?, camera_y = ?, camera_scale = ?, node_positions_json = ?,
+                 revision = revision + 1, updated_at = ?
+             WHERE task_id = ? AND revision = ?`,
+          )
+          .run(
+            input.camera.x,
+            input.camera.y,
+            input.camera.scale,
+            nodePositionsJson,
+            now,
+            input.taskId,
+            input.revision,
+          );
+      }
+      // Re-read rather than hand-assembling the result: keeps the unknown-agent-id filtering
+      // (getCanvasView) as the single source of truth for what a caller ever sees.
+      const saved = this.getCanvasView(input.taskId);
+      if (saved === null) throw new Error('Canvas view vanished within its own write transaction');
+      return saved;
+    })();
   }
 
   getWorkspace(taskId: string): string | null {
@@ -6808,6 +6978,8 @@ export class SteerStaleError extends Error {}
 export class OperationConflictError extends Error {}
 export class OperationInProgressError extends Error {}
 export class TeamConflictError extends Error {}
+export class InvalidCanvasViewError extends Error {}
+export class CanvasViewConflictError extends Error {}
 export class AcceptanceEvidenceMissingError extends Error {
   constructor(readonly openCriterionIds: readonly string[]) {
     super(`Acceptance evidence is missing: ${openCriterionIds.join(', ')}`);

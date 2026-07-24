@@ -17,11 +17,16 @@ import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { ToolBroker } from './tool-broker';
 import {
   AcceptanceEvidenceMissingError,
+  CanvasViewConflictError,
+  InvalidCanvasViewError,
+  NotFoundError,
   OperationConflictError,
   SqliteEditSagaLeaseGuard,
   SqlitePersistenceClient,
   SteerStaleError,
   TurnActiveError,
+  validateCanvasCamera,
+  validateCanvasNodePositions,
 } from './persistence';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
 import {
@@ -4079,6 +4084,7 @@ if (runsWithElectronAbi)
         { version: 26 },
         { version: 27 },
         { version: 28 },
+        { version: 29 },
       ]);
       const migratedTables = new Set(
         (
@@ -4093,6 +4099,7 @@ if (runsWithElectronAbi)
         'team_message_deliveries',
         'team_delivery_events',
         'worker_worktrees',
+        'canvas_views',
       ])
         expect(migratedTables.has(table)).toBe(true);
       expect(
@@ -4201,6 +4208,160 @@ if (runsWithElectronAbi)
         'runtime_call_id',
       ]);
       migrated.close();
+    });
+
+    describe('canvas view persistence (Slice 6.1)', () => {
+      it('validates camera bounds', () => {
+        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 1 })).not.toThrow();
+        expect(() => validateCanvasCamera({ x: Number.NaN, y: 0, scale: 1 })).toThrow(
+          InvalidCanvasViewError,
+        );
+        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 0.1 })).toThrow(
+          InvalidCanvasViewError,
+        );
+        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 2 })).toThrow(
+          InvalidCanvasViewError,
+        );
+        expect(() => validateCanvasCamera({ x: 100_000, y: 0, scale: 1 })).toThrow(
+          InvalidCanvasViewError,
+        );
+      });
+
+      it('validates node position bounds', () => {
+        expect(() => validateCanvasNodePositions({ a: { x: 10, y: -20 } })).not.toThrow();
+        expect(() =>
+          validateCanvasNodePositions({ a: { x: Number.POSITIVE_INFINITY, y: 0 } }),
+        ).toThrow(InvalidCanvasViewError);
+        expect(() => validateCanvasNodePositions({ a: { x: 0, y: 100_000 } })).toThrow(
+          InvalidCanvasViewError,
+        );
+      });
+
+      it('creates then updates a canvas view, bumping revision each save', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        expect(persistence.getCanvasView(task.id)).toBeNull();
+
+        const created = persistence.saveCanvasView({
+          taskId: task.id,
+          camera: { x: 10, y: 20, scale: 0.8 },
+          nodePositions: {},
+          revision: 0,
+        });
+        expect(created.revision).toBe(1);
+        expect(created.camera).toEqual({ x: 10, y: 20, scale: 0.8 });
+
+        const updated = persistence.saveCanvasView({
+          taskId: task.id,
+          camera: { x: 30, y: 40, scale: 1.1 },
+          nodePositions: {},
+          revision: created.revision,
+        });
+        expect(updated.revision).toBe(2);
+        expect(persistence.getCanvasView(task.id)).toMatchObject({
+          camera: { x: 30, y: 40, scale: 1.1 },
+          revision: 2,
+        });
+        persistence.close();
+      });
+
+      it('rejects a save with a stale expected revision', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        persistence.saveCanvasView({
+          taskId: task.id,
+          camera: { x: 0, y: 0, scale: 1 },
+          nodePositions: {},
+          revision: 0,
+        });
+        // A second "create" (revision 0) is now stale — a row already exists at revision 1.
+        expect(() =>
+          persistence.saveCanvasView({
+            taskId: task.id,
+            camera: { x: 1, y: 1, scale: 1 },
+            nodePositions: {},
+            revision: 0,
+          }),
+        ).toThrow(CanvasViewConflictError);
+        // A stale revision on an existing row is rejected the same way.
+        persistence.saveCanvasView({
+          taskId: task.id,
+          camera: { x: 5, y: 5, scale: 1 },
+          nodePositions: {},
+          revision: 1,
+        });
+        expect(() =>
+          persistence.saveCanvasView({
+            taskId: task.id,
+            camera: { x: 9, y: 9, scale: 1 },
+            nodePositions: {},
+            revision: 1, // now stale — current revision is 2
+          }),
+        ).toThrow(CanvasViewConflictError);
+        expect(persistence.getCanvasView(task.id)?.revision).toBe(2);
+        persistence.close();
+      });
+
+      it('drops node positions for agent ids that no longer exist for the Task on load', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const leader = persistence.getTaskLeader(task.id);
+        persistence.saveCanvasView({
+          taskId: task.id,
+          camera: { x: 0, y: 0, scale: 1 },
+          nodePositions: {
+            [leader.id]: { x: 11, y: 22 },
+            'agent-that-no-longer-exists': { x: 99, y: 99 },
+          },
+          revision: 0,
+        });
+        expect(persistence.getCanvasView(task.id)?.nodePositions).toEqual({
+          [leader.id]: { x: 11, y: 22 },
+        });
+        persistence.close();
+      });
+
+      it('rejects invalid camera/positions and unknown Tasks', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        expect(() =>
+          persistence.saveCanvasView({
+            taskId: task.id,
+            camera: { x: 0, y: 0, scale: 5 },
+            nodePositions: {},
+            revision: 0,
+          }),
+        ).toThrow(InvalidCanvasViewError);
+        expect(() =>
+          persistence.saveCanvasView({
+            taskId: 'missing-task',
+            camera: { x: 0, y: 0, scale: 1 },
+            nodePositions: {},
+            revision: 0,
+          }),
+        ).toThrow(NotFoundError);
+        expect(() => persistence.getCanvasView('missing-task')).toThrow(NotFoundError);
+        persistence.close();
+      });
+
+      it('persists the canvas view across a restart', () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        persistence.saveCanvasView({
+          taskId: task.id,
+          camera: { x: 3, y: 4, scale: 0.9 },
+          nodePositions: {},
+          revision: 0,
+        });
+        persistence.close();
+
+        const reopened = new SqlitePersistenceClient(path);
+        expect(reopened.getCanvasView(task.id)).toMatchObject({
+          camera: { x: 3, y: 4, scale: 0.9 },
+          revision: 1,
+        });
+        reopened.close();
+      });
     });
   });
 else

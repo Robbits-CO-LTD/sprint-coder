@@ -311,6 +311,54 @@ export const teamEventSchema = z
   .strict();
 export type TeamEvent = z.infer<typeof teamEventSchema>;
 
+// Canvas view persistence (Slice 6.1, FR-CAN-02): per-Task camera + Worker node layout, saved with
+// an optimistic-concurrency revision. Bounds mirror useCamera.ts's MIN_SCALE/MAX_SCALE and a
+// generous world-coordinate range — wide enough for any reachable pan/drag, narrow enough to
+// reject garbage.
+const canvasWorldCoordinateSchema = z.number().finite().min(-20_000).max(20_000);
+export const canvasCameraSchema = z
+  .object({
+    x: canvasWorldCoordinateSchema,
+    y: canvasWorldCoordinateSchema,
+    scale: z.number().finite().min(0.18).max(1.6),
+  })
+  .strict();
+export type CanvasCamera = z.infer<typeof canvasCameraSchema>;
+
+export const canvasNodePositionSchema = z
+  .object({ x: canvasWorldCoordinateSchema, y: canvasWorldCoordinateSchema })
+  .strict();
+export type CanvasNodePosition = z.infer<typeof canvasNodePositionSchema>;
+
+export const canvasNodePositionsSchema = z.record(idSchema, canvasNodePositionSchema);
+
+export const canvasViewSchema = z
+  .object({
+    taskId: idSchema,
+    camera: canvasCameraSchema,
+    nodePositions: canvasNodePositionsSchema,
+    revision: z.number().int().nonnegative(),
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type CanvasView = z.infer<typeof canvasViewSchema>;
+
+export const canvasViewSaveInputSchema = z
+  .object({
+    taskId: idSchema,
+    camera: canvasCameraSchema,
+    nodePositions: canvasNodePositionsSchema,
+    // Expected current revision (optimistic concurrency): 0 means "no saved view yet".
+    revision: z.number().int().nonnegative(),
+  })
+  .strict();
+export type CanvasViewSaveInput = z.infer<typeof canvasViewSaveInputSchema>;
+
+export const canvasViewSaveResultSchema = z
+  .object({ revision: z.number().int().nonnegative() })
+  .strict();
+export type CanvasViewSaveResult = z.infer<typeof canvasViewSaveResultSchema>;
+
 export const chatMessageSchema = z
   .object({
     id: idSchema,
@@ -830,6 +878,8 @@ export interface SprintCoderApi {
     stopWorker(input: TeamWorkerRef): Promise<WorkerSummary>;
     stopAll(taskId: string): Promise<TeamDetail>;
     subscribe(taskId: string, listener: (event: TeamEvent) => void): () => void;
+    getCanvasView(taskId: string): Promise<CanvasView | null>;
+    saveCanvasView(input: CanvasViewSaveInput): Promise<CanvasViewSaveResult>;
   };
   workspace: {
     get(taskId: string): Promise<WorkspaceSelection>;
@@ -894,6 +944,8 @@ export const IPC_CHANNELS = {
   teamsSubscribe: 'sprint-coder:teams:subscribe',
   teamsUnsubscribe: 'sprint-coder:teams:unsubscribe',
   teamsEvent: 'sprint-coder:teams:event',
+  teamsGetCanvasView: 'sprint-coder:teams:get-canvas-view',
+  teamsSaveCanvasView: 'sprint-coder:teams:save-canvas-view',
   workspaceGet: 'sprint-coder:workspace:get',
   workspaceSelect: 'sprint-coder:workspace:select',
   settingsGetRuntime: 'sprint-coder:settings:get-runtime',

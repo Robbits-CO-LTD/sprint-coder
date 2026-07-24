@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { Ref, RefObject } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, Ref, RefObject } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { WorkerNode } from './WorkerNode';
 import { HireNode } from './HireNode';
@@ -71,6 +71,7 @@ export function TeamCanvas({
   leaderRef,
   leaderAnchorRef,
   onRequestExit,
+  onSwitchToListView,
   ref,
 }: {
   task: TaskSummary;
@@ -80,6 +81,9 @@ export function TeamCanvas({
    * directly — the store toggle itself is delayed until after the exit animation settles, see
    * App.tsx's `requestExitTeam`. */
   onRequestExit: () => void;
+  /** Switches the renderer-only Team view preference to 'list' (Slice 6.1 list fallback). Canvas
+   * itself doesn't own that preference — App does — this is just the header toggle button. */
+  onSwitchToListView: () => void;
   ref?: Ref<TeamCanvasHandle>;
 }) {
   const detail = useAppStore((s) => s.teamByTask[task.id]);
@@ -88,6 +92,13 @@ export function TeamCanvas({
   const sendTeamMessage = useAppStore((s) => s.sendTeamMessage);
   const stopTeamWorker = useAppStore((s) => s.stopTeamWorker);
   const stopAllTeamWorkers = useAppStore((s) => s.stopAllTeamWorkers);
+
+  // Stable indirection into the (not-yet-defined-at-this-point) autosave scheduler, so it can be
+  // passed into useCamera() before `scheduleSave` itself exists — see the `useEffect` near
+  // `scheduleSave`'s definition below that keeps this ref current. useCamera mirrors whatever
+  // function this points to into its own ref (also via an effect), so identity churn here is free.
+  const handleSettleRef = useRef<() => void>(() => {});
+  const handleCameraSettle = useCallback(() => handleSettleRef.current(), []);
 
   const {
     canvasRef,
@@ -101,7 +112,7 @@ export function TeamCanvas({
     camToFit,
     camToFocus,
     worldRectOf,
-  } = useCamera();
+  } = useCamera(handleCameraSettle);
 
   const hireRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -124,6 +135,32 @@ export function TeamCanvas({
   const cableCancelledRef = useRef(false);
   const lastEnqueuedSeqRef = useRef(0);
   const seqInitializedRef = useRef(false);
+
+  // --- Canvas view persistence (Slice 6.1, FR-CAN-02) ---
+  //
+  // Node positions live in React state (they drive WorkerNode's `style.left/top`, so they must be
+  // render-visible) but everything about *saving* them is imperative — a ref mirror avoids stale
+  // closures inside the debounce timeout, and the actual IPC calls never go through zustand (the
+  // task's "keep it out of render state" guidance): this component talks to
+  // `window.sprintCoder.teams.getCanvasView/saveCanvasView` directly.
+  const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
+  const nodePositionsRef = useRef(nodePositions);
+  useEffect(() => {
+    nodePositionsRef.current = nodePositions;
+  }, [nodePositions]);
+  const canvasViewRevisionRef = useRef(0);
+  const canvasViewLoadedRef = useRef(false);
+  const savedCameraRef = useRef<CamState | null>(null);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nodeDraggingRef = useRef<{
+    agentId: string;
+    pointerId: number;
+    originClientX: number;
+    originClientY: number;
+    originX: number;
+    originY: number;
+  } | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const workers = useMemo(
     () =>
@@ -205,10 +242,16 @@ export function TeamCanvas({
     if (draggingRef.current) return;
     initialCameraSetRef.current = true;
     const rects = collectRects();
-    const target = rects.length > 1 ? camToFit(rects) : camToFocus(LEADER_RECT, 0.8);
+    const defaultTarget = rects.length > 1 ? camToFit(rects) : camToFocus(LEADER_RECT, 0.8);
+    // If a saved canvas view (Slice 6.1) already resolved before this ran, settle there instead of
+    // the default fit/focus — see the getCanvasView load effect below, which redirects the camera
+    // itself if this effect already ran first (the far more common ordering, since IPC is async).
+    const target = savedCameraRef.current ?? defaultTarget;
+    // `silent: true` on every call in this effect: this is mount choreography (seed position,
+    // restored/default settle), not a user-driven change worth persisting — see scheduleSave.
     if (isReduced()) {
       // Reduced motion: jump straight to the settled view — no seed-then-fly choreography.
-      void animateCamTo(target, 0);
+      void animateCamTo(target, 0, { silent: true });
       return;
     }
     // Seed (mock lines 936-951): the mock measures the real chat surface's bounding rect via
@@ -216,7 +259,7 @@ export function TeamCanvas({
     // painted yet either, so use the mock's own fallback constants directly (seedCamState).
     camRef.current = seedCamState();
     applyCam();
-    void animateCamTo(target, 560);
+    void animateCamTo(target, 560, { silent: true });
   }, [
     hasDetail,
     draggingRef,
@@ -228,6 +271,49 @@ export function TeamCanvas({
     camRef,
     applyCam,
   ]);
+
+  // Load the saved canvas view (Slice 6.1) once per mount. Node positions merge in immediately
+  // (new Worker cards not present in the saved map simply keep their default slot — "fixed slots
+  // are defaults for NEW workers only"); the camera redirects to the saved position, silently, on
+  // top of whatever the effect above already started flying to — IPC is async, so in practice this
+  // almost always resolves partway through that flight rather than strictly before or after it.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const client = window.sprintCoder?.teams;
+      if (!client?.getCanvasView) {
+        canvasViewLoadedRef.current = true;
+        return;
+      }
+      try {
+        const saved = await client.getCanvasView(task.id);
+        if (cancelled) return;
+        if (saved) {
+          canvasViewRevisionRef.current = saved.revision;
+          setNodePositions((prev) => ({ ...saved.nodePositions, ...prev }));
+          const restored: CamState = {
+            x: saved.camera.x,
+            y: saved.camera.y,
+            s: saved.camera.scale,
+          };
+          savedCameraRef.current = restored;
+          if (initialCameraSetRef.current && !draggingRef.current) {
+            void animateCamTo(restored, isReduced() ? 0 : 420, { silent: true });
+          }
+        }
+      } catch {
+        // Best-effort restore only — fall back to the default fit/focus already in flight.
+      } finally {
+        if (!cancelled) canvasViewLoadedRef.current = true;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Effectively a one-shot per mount: `task.id` is stable for this component's lifetime, and
+    // `animateCamTo`/`isReduced`/`draggingRef` are all stable identities from useCamera (memoized
+    // with empty/stable deps), so none of these ever actually change and re-trigger a refetch.
+  }, [task.id, animateCamTo, isReduced, draggingRef]);
 
   // Exit choreography state: whether the canvas should be playing its fade-out (docs §4.6 run
   // backwards — see playExitAnimation below). A plain local boolean, not a prop, because the
@@ -242,7 +328,9 @@ export function TeamCanvas({
       async playExitAnimation() {
         cancelCamAnim();
         const reduced = isReduced();
-        await animateCamTo(seedCamState(), reduced ? 0 : 560);
+        // Silent: this flies to the seed rect purely as a visual trick for the exit choreography —
+        // persisting it as "the" canvas view would overwrite the user's real last-viewed camera.
+        await animateCamTo(seedCamState(), reduced ? 0 : 560, { silent: true });
         setExitingFade(true);
         if (!reduced) await sleep(220); // matches `.team-canvas.exiting`'s teamCanvasOut duration
       },
@@ -250,11 +338,148 @@ export function TeamCanvas({
         setExitingFade(false);
         const rects = collectRects();
         const target = rects.length > 1 ? camToFit(rects) : camToFocus(LEADER_RECT, 0.8);
-        void animateCamTo(target, isReduced() ? 0 : 400);
+        void animateCamTo(target, isReduced() ? 0 : 400, { silent: true });
       },
     }),
     [cancelCamAnim, animateCamTo, isReduced, collectRects, camToFit, camToFocus],
   );
+
+  // --- Canvas view autosave (Slice 6.1) ---
+  const performSave = useCallback(async () => {
+    const client = window.sprintCoder?.teams;
+    if (!client?.saveCanvasView) return;
+    const payload = {
+      taskId: task.id,
+      camera: { x: camRef.current.x, y: camRef.current.y, scale: camRef.current.s },
+      nodePositions: nodePositionsRef.current,
+    };
+    try {
+      const result = await client.saveCanvasView({ ...payload, revision: canvasViewRevisionRef.current });
+      canvasViewRevisionRef.current = result.revision;
+    } catch {
+      // Optimistic-concurrency conflict (or the first save racing a slow initial load): re-read
+      // the authoritative revision and overwrite with the current local state. This is a
+      // single-window app, so there is no other writer to lose data to — this is a deliberate
+      // simplification, not a general CRDT-style merge (documented per the Slice 6.1 task notes).
+      try {
+        const fresh = await client.getCanvasView(task.id);
+        canvasViewRevisionRef.current = fresh?.revision ?? 0;
+        const retried = await client.saveCanvasView({
+          ...payload,
+          revision: canvasViewRevisionRef.current,
+        });
+        canvasViewRevisionRef.current = retried.revision;
+      } catch {
+        // Best-effort autosave only — never surface this to the user or interrupt interaction.
+      }
+    }
+  }, [task.id, camRef]);
+
+  const scheduleSave = useCallback(() => {
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    // A local named function (not the outer `scheduleSave` identifier) so the retry below is a
+    // plain closure recursion, not a hook referencing its own reactive binding.
+    const attempt = (delayMs: number) => {
+      saveTimeoutRef.current = setTimeout(() => {
+        saveTimeoutRef.current = null;
+        if (draggingRef.current) return; // mid pan/drag — not settled yet
+        if (!canvasViewLoadedRef.current) {
+          // The initial getCanvasView load hasn't landed yet — saving now risks a stale revision
+          // guess AND clobbering the not-yet-applied saved node positions with today's defaults.
+          // Re-arm rather than drop the request; the load is a single fast local IPC round-trip
+          // so this resolves within a poll or two in practice.
+          attempt(200);
+          return;
+        }
+        void performSave();
+      }, delayMs);
+    };
+    attempt(800);
+  }, [performSave, draggingRef]);
+
+  // Keep the ref useCamera's `onSettle` actually calls pointed at the latest `scheduleSave` —
+  // mirrored via effect (not written during render) per react-hooks/refs.
+  useEffect(() => {
+    handleSettleRef.current = scheduleSave;
+  }, [scheduleSave]);
+
+  // Flush a pending debounced save immediately on unmount (best-effort; fire-and-forget). Doesn't
+  // special-case the Team-exit FLIP: `playExitAnimation`'s own camera fly is marked `silent`, so
+  // it never itself schedules a save, and in practice any save armed by a real user action before
+  // clicking "back" has already fired well before the ~780ms exit choreography finishes.
+  useEffect(
+    () => () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+        void performSave();
+      }
+    },
+    [performSave],
+  );
+
+  // --- Worker node drag (Slice 6.1): reposition a Worker card by dragging its `.w-head`. ---
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    function onPointerDown(e: PointerEvent) {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement;
+      // Buttons inside the head (停止) keep their normal click behaviour instead of starting a
+      // drag. Camera panning is already a no-op anywhere inside `.worker` (see useCamera's own
+      // pointerdown guard), so there is nothing to disambiguate against there.
+      if (target.closest('button, textarea, input, a, select')) return;
+      const head = target.closest('.w-head');
+      if (!head) return;
+      const card = head.closest<HTMLElement>('.worker');
+      const agentId = card?.dataset.agentId;
+      if (!card || !agentId || card.classList.contains('worker--hire')) return;
+      const index = workers.findIndex((w) => w.id === agentId);
+      const current = nodePositionsRef.current[agentId] ?? slotFor(Math.max(0, index));
+      nodeDraggingRef.current = {
+        agentId,
+        pointerId: e.pointerId,
+        originClientX: e.clientX,
+        originClientY: e.clientY,
+        originX: current.x,
+        originY: current.y,
+      };
+      draggingRef.current = true; // reuse the camera's flag: pauses auto-follow/scheduleFit too
+      card.classList.add('dragging');
+      card.setPointerCapture(e.pointerId);
+    }
+    function onPointerMove(e: PointerEvent) {
+      const drag = nodeDraggingRef.current;
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      const scale = camRef.current.s || 1;
+      const dx = (e.clientX - drag.originClientX) / scale;
+      const dy = (e.clientY - drag.originClientY) / scale;
+      setNodePositions((prev) => ({
+        ...prev,
+        [drag.agentId]: { x: drag.originX + dx, y: drag.originY + dy },
+      }));
+    }
+    function onPointerEnd(e: PointerEvent) {
+      const drag = nodeDraggingRef.current;
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      nodeDraggingRef.current = null;
+      draggingRef.current = false;
+      workerElsRef.current.get(drag.agentId)?.classList.remove('dragging');
+      scheduleSave();
+    }
+
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('pointerup', onPointerEnd);
+    canvas.addEventListener('pointercancel', onPointerEnd);
+    return () => {
+      canvas.removeEventListener('pointerdown', onPointerDown);
+      canvas.removeEventListener('pointermove', onPointerMove);
+      canvas.removeEventListener('pointerup', onPointerEnd);
+      canvas.removeEventListener('pointercancel', onPointerEnd);
+    };
+  }, [canvasRef, camRef, draggingRef, workers, scheduleSave]);
 
   const pumpCables = useCallback(() => {
     if (cablePlayingRef.current) return;
@@ -325,11 +550,148 @@ export function TeamCanvas({
     [],
   );
 
+  // --- Canvas keyboard navigation (Slice 6.1) ---
+  const leaderAgentId = detail?.team.leaderAgentId;
+  const nodeIds = useMemo(() => {
+    const ids: string[] = [];
+    if (leaderAgentId) ids.push(leaderAgentId);
+    for (const worker of workers) ids.push(worker.id);
+    if (hireVisible) ids.push('hire');
+    return ids;
+  }, [leaderAgentId, workers, hireVisible]);
+
+  // Drop a selection that no longer refers to a navigable node (e.g. the hire slot disappearing
+  // once the Worker cap is reached while it was selected). Render-time adjustment (not an effect
+  // — react-hooks/set-state-in-effect convention, see TaskHeader/GoalChip) — bails out after the
+  // one corrective re-render since `nodeIds` no longer contains the stale id.
+  if (selectedNodeId !== null && !nodeIds.includes(selectedNodeId)) {
+    setSelectedNodeId(null);
+  }
+
+  // Selection ring + aria-label on the Leader node: it's the portaled ChatSurface instance, not a
+  // node this component renders itself, so this is imperative (matches cables.ts's `.glow` toggle
+  // style) rather than a prop.
+  useEffect(() => {
+    const leaderEl = leaderRef.current;
+    if (!leaderEl || !detail) return;
+    leaderEl.classList.toggle('node-selected', selectedNodeId === detail.team.leaderAgentId);
+    leaderEl.setAttribute('aria-label', `Leader · ${detail.team.state}`);
+  }, [selectedNodeId, detail, leaderRef]);
+
+  const rectForNode = useCallback(
+    (nodeId: string): Rect => {
+      if (nodeId === leaderAgentId) return LEADER_RECT;
+      if (nodeId === 'hire') return hireRef.current ? worldRectOf(hireRef.current) : LEADER_RECT;
+      const el = workerElsRef.current.get(nodeId);
+      return el ? worldRectOf(el) : LEADER_RECT;
+    },
+    [leaderAgentId, worldRectOf],
+  );
+
+  const describeNode = useCallback(
+    (nodeId: string): string => {
+      if (nodeId === leaderAgentId) return 'Leader';
+      if (nodeId === 'hire') return 'Workerを雇用';
+      const worker = workers.find((w) => w.id === nodeId);
+      return worker ? `${worker.role} (${worker.state})` : nodeId;
+    },
+    [leaderAgentId, workers],
+  );
+
+  // Moves DOM focus *into* the selected node's primary input (Enter's second effect, alongside
+  // the camera focus below) — composer textarea for the Leader/a Worker, the hire form's first
+  // field for the ghost node.
+  const focusIntoNode = useCallback(
+    (nodeId: string) => {
+      if (nodeId === leaderAgentId) {
+        leaderRef.current?.querySelector<HTMLElement>('.composer-input')?.focus();
+        return;
+      }
+      if (nodeId === 'hire') {
+        hireRef.current?.querySelector<HTMLElement>('input, textarea')?.focus();
+        return;
+      }
+      workerElsRef.current.get(nodeId)?.querySelector<HTMLElement>('textarea')?.focus();
+    },
+    [leaderAgentId, leaderRef],
+  );
+
+  const moveSelection = useCallback(
+    (direction: 1 | -1) => {
+      if (nodeIds.length === 0) return;
+      const currentIndex = selectedNodeId ? nodeIds.indexOf(selectedNodeId) : -1;
+      const nextIndex = (currentIndex + direction + nodeIds.length) % nodeIds.length;
+      setSelectedNodeId(nodeIds[nextIndex] ?? null);
+    },
+    [nodeIds, selectedNodeId],
+  );
+
+  const activateSelection = useCallback(() => {
+    if (!selectedNodeId) return;
+    void animateCamTo(camToFocus(rectForNode(selectedNodeId), 0.7), isReduced() ? 0 : 480);
+    focusIntoNode(selectedNodeId);
+  }, [selectedNodeId, animateCamTo, camToFocus, rectForNode, isReduced, focusIntoNode]);
+
+  const handleCanvasKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLElement>) => {
+      if (e.key === 'Escape') {
+        // Works even when a descendant (e.g. a Worker's 依頼 textarea) currently has focus —
+        // Escape always returns keyboard focus to the canvas root itself.
+        e.preventDefault();
+        canvasRef.current?.focus();
+        return;
+      }
+      // Every other shortcut only fires when the canvas root itself is the event target — i.e.
+      // not while typing in a node's textarea/input, which would otherwise see its own "l"/"f"
+      // keystrokes hijacked.
+      if (e.target !== e.currentTarget) return;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || (e.key === 'Tab' && !e.shiftKey)) {
+        e.preventDefault();
+        moveSelection(1);
+        return;
+      }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey)) {
+        e.preventDefault();
+        moveSelection(-1);
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        activateSelection();
+        return;
+      }
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        void animateCamTo(camToFit(collectRects()), isReduced() ? 0 : 500);
+        return;
+      }
+      if (e.key === 'l' || e.key === 'L') {
+        e.preventDefault();
+        if (leaderAgentId) setSelectedNodeId(leaderAgentId);
+        void animateCamTo(camToFocus(LEADER_RECT, 0.8), isReduced() ? 0 : 500);
+      }
+    },
+    [
+      canvasRef,
+      moveSelection,
+      activateSelection,
+      animateCamTo,
+      camToFit,
+      camToFocus,
+      collectRects,
+      isReduced,
+      leaderAgentId,
+    ],
+  );
+
   // Deliberately worded differently from the visible `.team-status-chip` text below: Playwright's
   // getByText() is a substring match, so an aria-live region carrying the *exact same* string
   // would make `getByText('<state> · Worker N/3')` resolve to two elements (chip + live region).
+  const selectionText = selectedNodeId ? `選択: ${describeNode(selectedNodeId)}` : '';
   const liveText = detail
-    ? `Team status: ${detail.team.state}, workers ${workerCount} of ${MAX_WORKERS}`
+    ? `Team status: ${detail.team.state}, workers ${workerCount} of ${MAX_WORKERS}${
+        selectionText ? `. ${selectionText}` : ''
+      }`
     : '';
   const hireSlot = slotFor(workerCount);
 
@@ -339,6 +701,8 @@ export function TeamCanvas({
       ref={canvasRef}
       data-testid="team-list"
       aria-label="Team canvas"
+      tabIndex={0}
+      onKeyDown={handleCanvasKeyDown}
     >
       {!detail ? (
         <div className="team-canvas-notice">
@@ -353,15 +717,16 @@ export function TeamCanvas({
                   this anchor only reserves the slot; see App.tsx's morph orchestration. */}
               <div className="leader-anchor" ref={leaderAnchorRef} />
               {workers.map((worker, index) => {
-                const slot = slotFor(index);
+                const pos = nodePositions[worker.id] ?? slotFor(index);
                 return (
                   <WorkerNode
                     key={worker.id}
                     worker={worker}
-                    x={slot.x}
-                    y={slot.y}
+                    x={pos.x}
+                    y={pos.y}
                     messages={detail.messages}
                     teamBusy={teamBusy}
+                    selected={selectedNodeId === worker.id}
                     onSend={(content) => void sendTeamMessage(task.id, worker.id, content)}
                     onStop={() => void stopTeamWorker(task.id, worker.id)}
                     ref={(el) => handleWorkerRef(worker.id, el)}
@@ -373,6 +738,7 @@ export function TeamCanvas({
                   x={hireSlot.x}
                   y={hireSlot.y}
                   teamBusy={teamBusy}
+                  selected={selectedNodeId === 'hire'}
                   onHire={(role, objective) => void hireTeamWorker(task.id, role, objective)}
                   ref={hireRef}
                 />
@@ -387,6 +753,7 @@ export function TeamCanvas({
             teamBusy={teamBusy}
             onBack={onRequestExit}
             onStopAll={() => void stopAllTeamWorkers(task.id)}
+            onSwitchToListView={onSwitchToListView}
           />
 
           <CanvasControlsOverlay
@@ -411,6 +778,7 @@ function TeamHeaderOverlay({
   teamBusy,
   onBack,
   onStopAll,
+  onSwitchToListView,
 }: {
   task: TaskSummary;
   detail: TeamDetail;
@@ -418,6 +786,7 @@ function TeamHeaderOverlay({
   teamBusy: boolean;
   onBack: () => void;
   onStopAll: () => void;
+  onSwitchToListView: () => void;
 }) {
   return (
     <div className="team-header-overlay">
@@ -427,6 +796,15 @@ function TeamHeaderOverlay({
       <span className="team-title">{task.title}</span>
       <span className="team-badge">Team · {workerCount} workers</span>
       <span className="team-status-chip">{`${detail.team.state} · Worker ${workerCount}/${MAX_WORKERS}`}</span>
+      <button
+        type="button"
+        className="team-view-toggle-btn"
+        data-testid="team-view-toggle"
+        onClick={onSwitchToListView}
+        title="Team List Viewに切り替え"
+      >
+        List表示
+      </button>
       <button
         type="button"
         className="team-stop-all-btn"
@@ -462,7 +840,10 @@ function CanvasControlsOverlay({
           Leaderへ
         </button>
       </div>
-      <div className="cc-hint">ドラッグで移動 · ホイール/ピンチでズーム</div>
+      <div className="cc-hint">
+        ドラッグで移動 · ホイール/ピンチでズーム · ↑↓←→/Tabで選択 · Enterで開く · F: フィット ·
+        L: Leaderへ · Esc: 選択解除
+      </div>
     </div>
   );
 }

@@ -1627,7 +1627,12 @@ button {
   fill: var(--accent-primary);
 }
 
-/* Canvas controls (bottom-right) */
+/* Canvas controls (bottom-right). `pointer-events: none` on the container + `auto` back on the
+   actual controls (buttons/hint) — this is a flex column sized to its widest child, and the
+   keyboard-shortcut hint (Slice 6.1) is long enough to noticeably widen the box; without this,
+   the box's own "empty" area would sit on top of and intercept clicks meant for whatever Worker/
+   hire card happens to be laid out underneath it (a real collision, not hypothetical — see the
+   Slice 6.1 task notes). */
 .team-canvas-controls {
   position: absolute;
   right: 18px;
@@ -1637,10 +1642,13 @@ button {
   flex-direction: column;
   gap: 8px;
   align-items: flex-end;
+  max-width: min(360px, calc(100% - 36px));
+  pointer-events: none;
 }
 .cc-row {
   display: flex;
   gap: 8px;
+  pointer-events: auto;
 }
 .cc-btn {
   background: var(--bg-elevated);
@@ -1665,6 +1673,8 @@ button {
   background: rgba(18, 17, 15, 0.7);
   padding: 4px 10px;
   border-radius: 8px;
+  text-align: right;
+  pointer-events: auto;
 }
 
 /* Team header overlay (replaces the Task header while in Team mode) */
@@ -1955,6 +1965,226 @@ button {
 }
 .hire-form button {
   align-self: flex-end;
+}
+
+/* ---------- Canvas LOD (Slice 6.1, FR-CAN-04) ---------- */
+/* `[data-lod]` is written by useCamera's applyCam() only when the step actually changes (see
+   useCamera.ts's LOD1_MAX_SCALE/LOD2_MAX_SCALE) — pure CSS from here. lod1 hides the Worker
+   body/composer but keeps the head (role, status dot+label, objective sub-line); lod2
+   additionally hides the objective sub-line and enlarges role-name/status so 状態・役割・進捗
+   stay legible per FR-CAN-04. Transitions are covered by the global reduced-motion override
+   below (instant, no animation). */
+.team-canvas[data-lod='1'] .worker .w-body,
+.team-canvas[data-lod='1'] .worker .w-compose,
+.team-canvas[data-lod='2'] .worker .w-body,
+.team-canvas[data-lod='2'] .worker .w-compose {
+  opacity: 0;
+  min-height: 0;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--t-quick) var(--ease-ui),
+    max-height var(--t-quick) var(--ease-ui);
+}
+.team-canvas[data-lod='2'] .worker .role-sub {
+  opacity: 0;
+  max-height: 0;
+  overflow: hidden;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+.team-canvas[data-lod='2'] .worker .role-name {
+  font-size: 15px;
+  font-weight: 700;
+}
+.team-canvas[data-lod='2'] .worker .w-status {
+  font-size: 13px;
+}
+.team-canvas[data-lod='2'] .worker .w-status .dot {
+  width: 9px;
+  height: 9px;
+}
+/* Leader timeline dimmed/simplified at both steps — header (SurfaceHeader) stays untouched. */
+.team-canvas[data-lod='1'] .surface--node .timeline,
+.team-canvas[data-lod='2'] .surface--node .timeline {
+  opacity: 0.4;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+.team-canvas[data-lod='2'] .surface--node .composer-zone {
+  opacity: 0.65;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+
+/* ---------- Canvas keyboard-navigation selection ring (Slice 6.1) ---------- */
+.worker.node-selected,
+.surface--node.node-selected {
+  outline: 2px solid var(--accent-cool);
+  outline-offset: 3px;
+}
+
+/* Worker node drag (Slice 6.1): a small lift while `.w-head` is being dragged. */
+.worker.dragging {
+  cursor: grabbing;
+  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.5);
+}
+.worker .w-head {
+  cursor: grab;
+}
+
+.team-view-toggle-btn {
+  font-size: 12px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  padding: 5px 12px;
+  border-radius: 8px;
+  flex: none;
+}
+.team-view-toggle-btn:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 244, 224, 0.2);
+}
+
+/* ---------- Team List View (Slice 6.1 item 4: accessible list fallback) ---------- */
+/* Docked panel alongside the normal Chat layout (`.main`) — App only ever mounts this alongside
+   Chat-in-'main' layout, never in place of it (see App.tsx's `teamListActive`/`surfaceMode`). */
+.team-list-view {
+  width: 460px;
+  flex: none;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.tlv-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  height: 52px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.tlv-header .team-title {
+  flex: 1;
+  min-width: 0;
+}
+.tlv-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.tlv-workers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.tlv-worker {
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tlv-worker-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tlv-worker-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tlv-objective,
+.tlv-activity {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.tlv-usage {
+  display: flex;
+  gap: 16px;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+.tlv-usage div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tlv-usage dt {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.tlv-usage dd {
+  margin: 0;
+  color: var(--text-primary);
+}
+.tlv-recent {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tlv-hire-form {
+  border: 1px dashed var(--border-subtle);
+  border-radius: 12px;
+  background: rgba(255, 244, 224, 0.02);
+}
+.tlv-hire-form h3,
+.tlv-timeline h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.tlv-timeline ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tlv-timeline li {
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 8px;
+  font-size: 12.5px;
+}
+.tlv-timeline li button {
+  color: var(--accent-cool);
+  font-size: 12px;
+  text-decoration: underline;
+}
+.tlv-timeline p {
+  margin: 4px 0;
+  color: var(--text-secondary);
+}
+.tlv-timeline small {
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+.tlv-empty {
+  color: var(--text-secondary);
+  font-size: 12.5px;
 }
 
 @media (prefers-reduced-motion: reduce) {

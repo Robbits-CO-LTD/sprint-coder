@@ -31,6 +31,7 @@ export function WorkerNode({
   y,
   messages,
   teamBusy,
+  selected = false,
   onSend,
   onStop,
   ref,
@@ -40,6 +41,9 @@ export function WorkerNode({
   y: number;
   messages: TeamMessageSummary[];
   teamBusy: boolean;
+  /** Keyboard-navigation selection ring (Slice 6.1 canvas keyboard nav) — a plain visual/aria
+   * prop; the selection index itself lives in TeamCanvas. */
+  selected?: boolean;
   onSend: (content: string) => void;
   onStop: () => void;
   ref?: Ref<HTMLDivElement>;
@@ -57,12 +61,18 @@ export function WorkerNode({
   return (
     <div
       ref={ref}
-      className="worker"
+      className={`worker${selected ? ' node-selected' : ''}`}
       id={`team-agent-${worker.id}`}
       data-testid="team-worker"
+      data-agent-id={worker.id}
       tabIndex={-1}
+      aria-label={`Worker ${worker.role} · ${worker.state}`}
       style={{ left: x, top: y }}
     >
+      {/* Drag handle (Slice 6.1 layout persistence): TeamCanvas attaches a pointerdown listener
+          scoped to `.w-head` (excluding buttons) to reposition this card in world coordinates.
+          Camera panning already ignores anything inside `.worker` (see useCamera's pointerdown
+          guard), so there is no pan/drag conflict to resolve here. */}
       <div className="w-head">
         <div className="w-avatar" aria-hidden="true">
           {worker.role.slice(0, 1) || '?'}

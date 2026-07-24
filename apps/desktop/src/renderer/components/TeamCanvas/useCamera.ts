@@ -8,21 +8,45 @@ import { useCallback, useEffect, useRef } from 'react';
 export type Rect = { x: number; y: number; w: number; h: number };
 export type CamState = { x: number; y: number; s: number };
 
-const MIN_SCALE = 0.18;
-const MAX_SCALE = 1.6;
+export const MIN_SCALE = 0.18;
+export const MAX_SCALE = 1.6;
 const DOT_GRID_PX = 26;
 
-export function useCamera() {
+// LOD thresholds (FR-CAN-04): two steps as camera scale shrinks. Chosen so lod1 kicks in once
+// Worker cards are small enough that body text stops being comfortably readable, and lod2 once
+// even the head's sub-line would be illegible — comment mirrors the values in index.css's
+// `[data-lod]` rules, which are the actual visual effect; this hook only owns the threshold math
+// and the data-attribute write.
+export const LOD1_MAX_SCALE = 0.55;
+export const LOD2_MAX_SCALE = 0.32;
+
+// How long after the last wheel tick a zoom is considered "settled" (used to fire onSettle for
+// debounced canvas-view autosave — see TeamCanvas's scheduleSave). Wheel events have no native
+// "end" signal, unlike pointerup for a pan drag, so this is a plain quiet-period debounce.
+const WHEEL_SETTLE_MS = 260;
+
+export function useCamera(onSettle?: () => void) {
   const canvasRef = useRef<HTMLElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
   const camRef = useRef<CamState>({ x: 0, y: 0, s: 1 });
   const animRef = useRef<number | null>(null);
   const draggingRef = useRef(false);
   const reducedRef = useRef(false);
+  const lodRef = useRef<'0' | '1' | '2'>('0');
+  const wheelSettleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onSettleRef = useRef(onSettle);
 
   useEffect(() => {
     reducedRef.current = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }, []);
+
+  // Mirror the latest `onSettle` into a ref inside an effect (not read/written during render
+  // itself, per react-hooks/refs) so the pointer/wheel/animateCamTo callbacks below — which are
+  // created once and closed over this ref, not over `onSettle` directly — always invoke whatever
+  // the caller's most recent callback identity is.
+  useEffect(() => {
+    onSettleRef.current = onSettle;
+  });
 
   const isReduced = useCallback(() => reducedRef.current, []);
 
@@ -34,6 +58,14 @@ export function useCamera() {
     world.style.transform = `translate(${x}px, ${y}px) scale(${s})`;
     canvas.style.backgroundPosition = `${x}px ${y}px`;
     canvas.style.backgroundSize = `${DOT_GRID_PX * s}px ${DOT_GRID_PX * s}px`;
+    // Toggle the LOD data-attribute only when the step actually changes — CSS (`[data-lod]` rules
+    // in index.css) does the rest, so this never causes per-frame layout churn beyond one DOM
+    // write at the moment a threshold is crossed.
+    const nextLod = s < LOD2_MAX_SCALE ? '2' : s < LOD1_MAX_SCALE ? '1' : '0';
+    if (lodRef.current !== nextLod) {
+      lodRef.current = nextLod;
+      canvas.dataset.lod = nextLod;
+    }
   }, []);
 
   const cancelCamAnim = useCallback(() => {
@@ -44,11 +76,12 @@ export function useCamera() {
   }, []);
 
   const animateCamTo = useCallback(
-    (target: CamState, dur = 560): Promise<void> => {
+    (target: CamState, dur = 560, opts?: { silent?: boolean }): Promise<void> => {
       cancelCamAnim();
       if (reducedRef.current) {
         camRef.current = { ...target };
         applyCam();
+        if (!opts?.silent) onSettleRef.current?.();
         return Promise.resolve();
       }
       const from = { ...camRef.current };
@@ -68,6 +101,7 @@ export function useCamera() {
             animRef.current = requestAnimationFrame(step);
           } else {
             animRef.current = null;
+            if (!opts?.silent) onSettleRef.current?.();
             resolve();
           }
         };
@@ -148,8 +182,11 @@ export function useCamera() {
       applyCam();
     }
     function onPointerUp() {
+      const wasDragging = dragging !== null;
       dragging = null;
       draggingRef.current = false;
+      // Pan end: notify only if a pan actually happened (not every stray pointerup on the canvas).
+      if (wasDragging) onSettleRef.current?.();
     }
     function onWheel(e: WheelEvent) {
       e.preventDefault();
@@ -167,6 +204,12 @@ export function useCamera() {
         camRef.current = { ...current, x: current.x - e.deltaX };
       }
       applyCam();
+      // Zoom "end" via quiet-period debounce (wheel has no native end event, unlike pointerup).
+      if (wheelSettleTimeoutRef.current) clearTimeout(wheelSettleTimeoutRef.current);
+      wheelSettleTimeoutRef.current = setTimeout(() => {
+        wheelSettleTimeoutRef.current = null;
+        onSettleRef.current?.();
+      }, WHEEL_SETTLE_MS);
     }
 
     canvas.addEventListener('pointerdown', onPointerDown);
@@ -178,6 +221,7 @@ export function useCamera() {
       canvas.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('wheel', onWheel);
+      if (wheelSettleTimeoutRef.current) clearTimeout(wheelSettleTimeoutRef.current);
     };
   }, [applyCam, cancelCamAnim]);
 

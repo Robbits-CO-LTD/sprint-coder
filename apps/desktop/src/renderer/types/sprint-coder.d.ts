@@ -315,6 +315,23 @@ export type TeamDetail = {
   }[];
 };
 
+export type CanvasCamera = { x: number; y: number; scale: number };
+export type CanvasNodePosition = { x: number; y: number };
+export type CanvasView = {
+  taskId: string;
+  camera: CanvasCamera;
+  nodePositions: Record<string, CanvasNodePosition>;
+  revision: number;
+  updatedAt: string;
+};
+export type CanvasViewSaveInput = {
+  taskId: string;
+  camera: CanvasCamera;
+  nodePositions: Record<string, CanvasNodePosition>;
+  revision: number;
+};
+export type CanvasViewSaveResult = { revision: number };
+
 export interface SprintCoderApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
   tasks: {
@@ -349,6 +366,8 @@ export interface SprintCoderApi {
       taskId: string,
       listener: (event: { type: 'updated'; detail: TeamDetail }) => void,
     ): () => void;
+    getCanvasView(taskId: string): Promise<CanvasView | null>;
+    saveCanvasView(input: CanvasViewSaveInput): Promise<CanvasViewSaveResult>;
   };
   workspace: {
     get(taskId: string): Promise<{ path: string; name: string } | null>;

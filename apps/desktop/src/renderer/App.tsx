@@ -7,6 +7,21 @@ import { SurfaceLayer, captureSurfaceState } from './components/ChatSurface/Surf
 import type { CapturedSurfaceState } from './components/ChatSurface/SurfaceLayer';
 import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
+import { TeamListView } from './components/TeamListView';
+
+// Team view preference (Slice 6.1 item 4, List fallback): renderer-only, not part of the
+// persisted Task/Team domain — a per-install UI preference, so localStorage is the right home for
+// it rather than the store/DB. Canvas is the default per the task's constraints.
+type TeamViewPreference = 'canvas' | 'list';
+const TEAM_VIEW_PREFERENCE_KEY = 'sprint-coder:team-view-preference';
+
+function readStoredTeamViewPreference(): TeamViewPreference {
+  try {
+    return window.localStorage.getItem(TEAM_VIEW_PREFERENCE_KEY) === 'list' ? 'list' : 'canvas';
+  } catch {
+    return 'canvas';
+  }
+}
 
 export default function App() {
   const sprintCoderAvailable = useAppStore((s) => s.sprintCoderAvailable);
@@ -53,22 +68,42 @@ export default function App() {
   const exitTokenRef = useRef(0);
   const [surfaceMode, setSurfaceMode] = useState<'main' | 'node'>('main');
   const [exiting, setExiting] = useState(false);
+  const [teamViewPreference, setTeamViewPreferenceState] = useState<TeamViewPreference>(
+    readStoredTeamViewPreference,
+  );
+
+  const setTeamViewPreference = useCallback((preference: TeamViewPreference) => {
+    setTeamViewPreferenceState(preference);
+    try {
+      window.localStorage.setItem(TEAM_VIEW_PREFERENCE_KEY, preference);
+    } catch {
+      // Best-effort only — a failed write just means the preference resets to 'canvas' next launch.
+    }
+  }, []);
+
+  const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
+  // List mode (Slice 6.1 item 4) is a plain "chat layout + a team panel" — it never touches
+  // `surfaceMode`/the Canvas FLIP, so only 'canvas' preference ever drives the morph below.
+  const teamCanvasActive = teamViewOpen && teamViewPreference === 'canvas' && selectedTask !== null;
+  // `!exiting` guards against a narrow edge case: the Canvas's own "List表示" toggle button is
+  // reachable during the ~220ms fade tail of a Canvas exit, and flipping the preference there
+  // must not make this component and TeamCanvas (still finishing its own exit) render at once.
+  const teamListActive =
+    teamViewOpen && teamViewPreference === 'list' && !exiting && selectedTask !== null;
 
   // Render-time sync (not an effect — react-hooks/set-state-in-effect convention, see
-  // TaskHeader/GoalChip): keep `surfaceMode` following the store's `teamViewOpen`, except during
+  // TaskHeader/GoalChip): keep `surfaceMode` following `teamCanvasActive`, except during
   // the tail of `requestExitTeam`, which explicitly forces 'main' one commit *before* the store
   // itself flips — `exiting` suppresses the resync during that narrow window so the override
   // sticks instead of being immediately flipped back to 'node'.
-  if (teamViewOpen && surfaceMode !== 'node' && !exiting) {
+  if (teamCanvasActive && surfaceMode !== 'node' && !exiting) {
     setSurfaceMode('node');
   }
-  if (!teamViewOpen && surfaceMode !== 'main' && !exiting) {
+  if (!teamCanvasActive && surfaceMode !== 'main' && !exiting) {
     setSurfaceMode('main');
   }
 
-  const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
-  const teamActive = teamViewOpen && selectedTask !== null;
-  const showTeamCanvas = (teamActive || exiting) && selectedTask !== null;
+  const showTeamCanvas = (teamCanvasActive || exiting) && selectedTask !== null;
 
   const requestEnterTeam = useCallback(() => {
     if (exiting) {
@@ -111,6 +146,22 @@ export default function App() {
     })();
   }, [selectedTask, exiting, toggleTeamView]);
 
+  // List mode's "← Chatに戻る" (TeamListView's onBack): no camera, no FLIP, so exiting is a plain
+  // store toggle — unlike requestExitTeam above, which only applies to the Canvas choreography.
+  const requestExitTeamList = useCallback(() => {
+    if (!selectedTask) return;
+    void toggleTeamView(selectedTask.id);
+  }, [selectedTask, toggleTeamView]);
+
+  const switchToListView = useCallback(
+    () => setTeamViewPreference('list'),
+    [setTeamViewPreference],
+  );
+  const switchToCanvasView = useCallback(
+    () => setTeamViewPreference('canvas'),
+    [setTeamViewPreference],
+  );
+
   if (initialized && !sprintCoderAvailable) {
     return (
       <div className="app-shell app-shell--unavailable">
@@ -127,7 +178,7 @@ export default function App() {
   }
 
   return (
-    <div className={`app-shell${teamActive || exiting ? ' team-mode' : ''}`}>
+    <div className={`app-shell${teamCanvasActive || exiting ? ' team-mode' : ''}`}>
       <Sidebar />
       <div className="main">
         {selectedTask ? (
@@ -135,7 +186,9 @@ export default function App() {
             <TaskHeader task={selectedTask} onToggleTeam={requestEnterTeam} />
             {/* SurfaceLayer portals the shared ChatSurface instance in here when `surfaceMode`
                 is 'main' — this anchor only reserves the slot, see the morph orchestration
-                above and SurfaceLayer.tsx. */}
+                above and SurfaceLayer.tsx. This is also where the Chat lives in List mode: List
+                view (below) is only ever an additional panel alongside the normal Chat layout,
+                never a replacement for it — see the `teamListActive` decision above. */}
             <div className="surface-anchor" ref={mainAnchorRef} />
           </>
         ) : (
@@ -162,6 +215,14 @@ export default function App() {
           leaderRef={leaderRef}
           leaderAnchorRef={leaderAnchorRef}
           onRequestExit={requestExitTeam}
+          onSwitchToListView={switchToListView}
+        />
+      )}
+      {teamListActive && selectedTask && (
+        <TeamListView
+          task={selectedTask}
+          onBack={requestExitTeamList}
+          onSwitchToCanvasView={switchToCanvasView}
         />
       )}
       {selectedTask && (

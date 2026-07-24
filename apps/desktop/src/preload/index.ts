@@ -6,6 +6,9 @@ import {
   approvalResolveInputSchema,
   approvalSummarySchema,
   autoPermissionDecisionSchema,
+  canvasViewSchema,
+  canvasViewSaveInputSchema,
+  canvasViewSaveResultSchema,
   chatMessageSchema,
   commandSummarySchema,
   commandOutputPageInputSchema,
@@ -162,6 +165,17 @@ const api: SprintCoderApi = {
         }).catch(() => undefined);
       };
     },
+    getCanvasView: (taskId) =>
+      invoke(IPC_CHANNELS.teamsGetCanvasView, taskIdPayloadSchema, canvasViewSchema.nullable(), {
+        taskId,
+      }),
+    saveCanvasView: (input) =>
+      invoke(
+        IPC_CHANNELS.teamsSaveCanvasView,
+        canvasViewSaveInputSchema,
+        canvasViewSaveResultSchema,
+        input,
+      ),
   },
   workspace: {
     get: (taskId) =>

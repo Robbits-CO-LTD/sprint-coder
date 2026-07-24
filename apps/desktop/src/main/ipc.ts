@@ -17,6 +17,9 @@ import {
   approvalResolveInputSchema,
   approvalSummarySchema,
   autoPermissionDecisionSchema,
+  canvasViewSchema,
+  canvasViewSaveInputSchema,
+  canvasViewSaveResultSchema,
   chatMessageSchema,
   commandSummarySchema,
   commandOutputPageInputSchema,
@@ -69,6 +72,8 @@ import { createEmptyToolCatalogSnapshot } from './default-tools';
 import type { PersistenceClient, QueueTransition, StartedTurn } from './persistence';
 import { toApprovalAuditSummary, toApprovalSummary } from './persistence';
 import {
+  CanvasViewConflictError,
+  InvalidCanvasViewError,
   NotFoundError,
   OperationConflictError,
   OperationInProgressError,
@@ -436,6 +441,22 @@ export class IpcRouter {
       this.teamSubscriptions.delete(input.taskId);
       return undefined;
     });
+    this.handle(
+      IPC_CHANNELS.teamsGetCanvasView,
+      taskIdPayloadSchema,
+      canvasViewSchema.nullable(),
+      (input) => this.persistence.getCanvasView(input.taskId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsSaveCanvasView,
+      canvasViewSaveInputSchema,
+      canvasViewSaveResultSchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.teamsSaveCanvasView, () => {
+          const saved = this.persistence.saveCanvasView(input);
+          return { revision: saved.revision };
+        }).value,
+    );
 
     this.handle(IPC_CHANNELS.workspaceGet, taskIdPayloadSchema, workspaceSelectionSchema, (input) =>
       workspaceValue(this.persistence.getWorkspace(input.taskId)),
@@ -1207,6 +1228,18 @@ function toPublicError(error: unknown): PublicError {
       code: 'OPERATION_IN_PROGRESS',
       userMessage: '同じ操作を処理中です。',
       retryable: true,
+    };
+  if (error instanceof CanvasViewConflictError)
+    return {
+      code: 'OPERATION_CONFLICT',
+      userMessage: 'Canvasの配置が別の操作で更新されました。最新状態を読み直してください。',
+      retryable: true,
+    };
+  if (error instanceof InvalidCanvasViewError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: 'Canvasの配置に不正な値が含まれています。',
+      retryable: false,
     };
   if (error instanceof SecurityError)
     return { code: 'FORBIDDEN', userMessage: 'この操作は許可されていません。', retryable: false };
