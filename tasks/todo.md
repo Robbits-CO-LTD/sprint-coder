@@ -182,3 +182,10 @@ Wave 2(完了 2026-07-22):
   4. focus占有率65–75%は定数で強制(0.70/0.75)、数値アサートは無し
   5. packaged Electronの起動不能はこの開発環境固有(E2Eは全てSPRINT_CODER_E2E_MODE=dev)。CI環境での要再確認はChat Alphaゲートから継続
 - 発見・修正された注目バグ: StrictModeのcleanup-only effectがcable描画を全滅させていた潜在バグ(c305195で修正)、team mode中の不可視chrome残留フォーカス(34c0f32でinert化)
+
+## 追記(2026-07-24 Fable): Team操作モデル修正 + Claude runtime + SVGアイコン
+
+- `c0f1acc` Claude Code CLI (v2.1.218) headlessを第2 production runtimeとして追加(ADR: adr-production-runtime-claude-cli-20260724.md、migration v30でruntime_kind CHECK再構築、per-runtime model永続化、egress gate拡張、実CLIスモーク済み)
+- `1b4515f` renderer全域の絵文字装飾をインラインSVGアイコン(Lucide ISCパスデータ、依存追加なし)へ置換
+- `ccd50f2`+`afdce6d` **Team操作モデルの是正**: ユーザー手動の雇用フォーム/依頼欄を撤去し、FR-TEAM-06/13どおりLeaderのtool use(`team_hire_worker`/`team_send_to_worker`/`team_wait_reports`)が雇用・指示・報告統合を駆動する形へ。Mockランタイムに決定論的チームシナリオ(trigger:「チームテスト」またはTeam存在時)。Workerカードは観測+停止のみ。e2eはLeader主導フローで全acceptance再機械化(15/15)
+- 検証: typecheck/lint/unit(301+23+276)/全e2e(既知flake 1件のみ除外)グリーン
