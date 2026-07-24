@@ -27,6 +27,13 @@
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+/* Inline SVG icon set (see components/icons.tsx). Nudged down 1px so the stroke's optical
+   center lines up with adjacent text baselines, same convention everywhere it's used. */
+.icon {
+  flex: none;
+  vertical-align: -2px;
+}
+
 *,
 *::before,
 *::after {
@@ -358,6 +365,9 @@ button {
   text-overflow: ellipsis;
 }
 .goal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   color: var(--text-secondary);
   padding: 3px 10px;
@@ -581,6 +591,9 @@ button {
   margin-top: 6px;
 }
 .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12.5px;
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
@@ -1729,6 +1742,8 @@ button {
   display: flex;
   align-items: center;
   gap: 7px;
+  flex: none;
+  white-space: nowrap;
   font-size: 13px;
   color: var(--text-secondary);
   padding: 6px 12px;
@@ -2070,6 +2085,9 @@ button {
 }
 
 .team-view-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);

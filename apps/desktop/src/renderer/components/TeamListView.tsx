@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useAppStore } from '../store/appStore';
+import { ArrowLeft, LayoutGrid } from './icons';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
 
 const MAX_WORKERS = 3;
@@ -69,7 +70,7 @@ export function TeamListView({
         aria-label={`Leader · ${detail.team.state}`}
       >
         <button type="button" className="team-back-btn" data-testid="team-back" onClick={onBack}>
-          ← Chatに戻る
+          <ArrowLeft size={14} /> Chatに戻る
         </button>
         <h2 id="team-list-title" className="team-title">
           {task.title}
@@ -82,7 +83,7 @@ export function TeamListView({
           onClick={onSwitchToCanvasView}
           title="Team Canvasに切り替え"
         >
-          Canvas表示
+          <LayoutGrid size={14} /> Canvas表示
         </button>
         <button
           type="button"

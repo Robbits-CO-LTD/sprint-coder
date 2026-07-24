@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { WorkspaceChip } from './WorkspaceChip';
+import { Hexagon, MoreHorizontal, Target } from './icons';
 import type { TaskSummary } from '../types/sprint-coder';
 
 export function TaskHeader({
@@ -107,7 +108,7 @@ export function TaskHeader({
         title="Team Canvasを開く"
         onClick={onToggleTeam}
       >
-        ⬡ Team
+        <Hexagon size={14} /> Team
       </button>
       <button
         type="button"
@@ -115,8 +116,9 @@ export function TaskHeader({
         disabled
         title="今回のスコープ外です"
         aria-disabled="true"
+        aria-label="その他の操作"
       >
-        ⋯
+        <MoreHorizontal size={16} />
       </button>
     </header>
   );
@@ -162,7 +164,7 @@ function GoalChip({ task }: { task: TaskSummary }) {
   if (!supported) {
     return (
       <span className="goal-chip" title="Goal編集は今回のバックエンドでは未対応です">
-        🎯 Goal: {task.goal ?? '未設定'}
+        <Target size={13} /> Goal: {task.goal ?? '未設定'}
       </span>
     );
   }
@@ -197,7 +199,7 @@ function GoalChip({ task }: { task: TaskSummary }) {
       onClick={() => setEditing(true)}
       title="クリックしてGoalを編集"
     >
-      🎯 Goal: {task.goal ?? '未設定'}
+      <Target size={13} /> Goal: {task.goal ?? '未設定'}
     </button>
   );
 }

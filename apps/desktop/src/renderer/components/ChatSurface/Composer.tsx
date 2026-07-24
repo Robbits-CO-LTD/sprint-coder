@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
+import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square } from '../icons';
 import type { QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
 const STEER_UNSUPPORTED_HINT =
@@ -21,10 +22,10 @@ const MODE_HINT: Record<SendMode, string> = {
   stopAndSend: '実行中のTurnを停止し、直ちにこのメッセージで開始します',
 };
 
-const MODE_ICON: Record<SendMode, string> = {
-  queue: '➕',
-  steer: '⇄',
-  stopAndSend: '⏹',
+const MODE_ICON: Record<SendMode, typeof Plus> = {
+  queue: Plus,
+  steer: ArrowRightLeft,
+  stopAndSend: Square,
 };
 
 export function Composer({ taskId }: { taskId: string }) {
@@ -144,7 +145,7 @@ export function Composer({ taskId }: { taskId: string }) {
               title="添付は今回のスコープ外です"
               aria-label="添付"
             >
-              📎
+              <Paperclip size={15} />
             </button>
             {turnActive && hasAnyActiveModeCapability && (
               <div className="send-mode-group" role="group" aria-label="実行中の送信方法">
@@ -182,7 +183,14 @@ export function Composer({ taskId }: { taskId: string }) {
               aria-label={turnActive ? `${MODE_LABEL[sendMode]}で送信` : '送信'}
               title={turnActive ? MODE_HINT[sendMode] : '送信'}
             >
-              {turnActive ? MODE_ICON[sendMode] : '↑'}
+              {turnActive ? (
+                (() => {
+                  const ModeIcon = MODE_ICON[sendMode];
+                  return <ModeIcon size={15} />;
+                })()
+              ) : (
+                <ArrowUp size={15} />
+              )}
             </button>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { TriangleAlert } from './icons';
 import type { ApprovalDecision, ApprovalSummary } from '../types/sprint-coder';
 
 export function ApprovalCard({
@@ -28,8 +29,8 @@ export function ApprovalCard({
       tabIndex={-1}
     >
       <div className="approval-card__head">
-        <span className="approval-card__icon" aria-hidden="true">
-          !
+        <span className="approval-card__icon">
+          <TriangleAlert size={16} />
         </span>
         <div>
           <strong>実行の承認が必要です</strong>

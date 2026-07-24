@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Ref } from 'react';
+import { Plus } from '../icons';
 
 // Ghost "hire" node: same card anatomy as a Worker (dashed border instead of solid, see
 // `.worker--hire` in index.css) sitting at the next free slot, letting the user spawn a new
@@ -32,8 +33,8 @@ export function HireNode({
       style={{ left: x, top: y }}
     >
       <div className="w-head">
-        <div className="w-avatar" aria-hidden="true">
-          +
+        <div className="w-avatar">
+          <Plus size={14} />
         </div>
         <div className="role-line">
           <span className="role-name">Workerを雇用</span>

@@ -7,6 +7,7 @@ import { useCamera } from './useCamera';
 import type { CamState, Rect } from './useCamera';
 import { sendCable } from './cables';
 import { findFreePosition } from './placement';
+import { ArrowLeft, List } from '../icons';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
 // Team Canvas: the spatial "promoted chat" experience from demo/index.html (§Team mode,
@@ -998,7 +999,7 @@ function TeamHeaderOverlay({
   return (
     <div className="team-header-overlay">
       <button type="button" className="team-back-btn" data-testid="team-back" onClick={onBack}>
-        ← Chatに戻る
+        <ArrowLeft size={14} /> Chatに戻る
       </button>
       <span className="team-title">{task.title}</span>
       <span className="team-badge">Team · {workerCount} workers</span>
@@ -1010,7 +1011,7 @@ function TeamHeaderOverlay({
         onClick={onSwitchToListView}
         title="Team List Viewに切り替え"
       >
-        List表示
+        <List size={14} /> List表示
       </button>
       <button
         type="button"

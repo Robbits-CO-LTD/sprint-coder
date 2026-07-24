@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { isSameDay } from '../lib/format';
+import { Archive, ArchiveRestore, Pin, PinOff, Plus, Search, Settings } from './icons';
 import type { TaskSummary } from '../types/sprint-coder';
 
 function groupTasks(tasks: TaskSummary[], query: string) {
@@ -61,10 +62,10 @@ export function Sidebar({ inert }: { inert?: boolean } = {}) {
         data-testid="sidebar-new-task-button"
         onClick={() => void createTask()}
       >
-        ＋ 新しいTask
+        <Plus size={15} /> 新しいTask
       </button>
       <div className="sb-search">
-        <span aria-hidden="true">🔍</span>
+        <Search size={14} />
         <input
           type="search"
           value={query}
@@ -97,7 +98,7 @@ export function Sidebar({ inert }: { inert?: boolean } = {}) {
         )}
       </div>
       <button type="button" className="sb-footer">
-        <span aria-hidden="true">⚙</span> 設定
+        <Settings size={15} /> 設定
       </button>
     </nav>
   );
@@ -146,8 +147,8 @@ function TaskRow({
         title={task.title}
       >
         {task.pinned && (
-          <span className="pin" aria-hidden="true">
-            📌
+          <span className="pin">
+            <Pin size={12} />
           </span>
         )}
         {task.title || '無題のTask'}
@@ -164,7 +165,7 @@ function TaskRow({
             title={task.pinned ? 'ピン留めを解除' : 'ピン留め'}
             aria-label={task.pinned ? 'ピン留めを解除' : 'ピン留め'}
           >
-            {task.pinned ? '📌' : '📍'}
+            {task.pinned ? <PinOff size={13} /> : <Pin size={13} />}
           </button>
           <button
             type="button"
@@ -176,7 +177,7 @@ function TaskRow({
             title={task.archived ? 'アーカイブを解除' : 'アーカイブ'}
             aria-label={task.archived ? 'アーカイブを解除' : 'アーカイブ'}
           >
-            {task.archived ? '⤴' : '🗄'}
+            {task.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
           </button>
         </span>
       )}

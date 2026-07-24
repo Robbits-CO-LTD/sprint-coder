@@ -8,6 +8,7 @@ import type { CapturedSurfaceState } from './components/ChatSurface/SurfaceLayer
 import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
+import { Plus } from './components/icons';
 
 // Team view preference (Slice 6.1 item 4, List fallback): renderer-only, not part of the
 // persisted Task/Team domain — a per-install UI preference, so localStorage is the right home for
@@ -209,7 +210,7 @@ export default function App() {
                 data-testid="empty-state-create-task-button"
                 onClick={() => void createTask()}
               >
-                ＋ 新しいTaskを作成
+                <Plus size={14} /> 新しいTaskを作成
               </button>
             </div>
           </div>

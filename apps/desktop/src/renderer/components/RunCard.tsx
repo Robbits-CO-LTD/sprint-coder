@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { STAGE_LABEL, STAGE_ORDER, type TurnRuntimeState } from '../store/appStore';
 import { formatElapsed } from '../lib/format';
+import { Check, Circle, Dot } from './icons';
 
 const TITLE_BY_STATUS: Record<TurnRuntimeState['status'], string> = {
   running: '実行中',
@@ -58,8 +59,14 @@ export function RunCard({ turn, onStop }: { turn: TurnRuntimeState; onStop: () =
             const state = i < currentIndex ? 'done' : i === currentIndex ? 'current' : '';
             return (
               <div key={stage} className={`stage-row ${state}`}>
-                <span className="s-icon" aria-hidden="true">
-                  {i < currentIndex ? '✓' : i === currentIndex ? '●' : '○'}
+                <span className="s-icon">
+                  {i < currentIndex ? (
+                    <Check size={13} />
+                  ) : i === currentIndex ? (
+                    <Dot size={13} />
+                  ) : (
+                    <Circle size={13} />
+                  )}
                 </span>
                 <span>{STAGE_LABEL[stage]}</span>
               </div>
