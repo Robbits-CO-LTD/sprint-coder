@@ -3,10 +3,17 @@ import { useAppStore } from '../store/appStore';
 import { WorkspaceChip } from './WorkspaceChip';
 import type { TaskSummary } from '../types/sprint-coder';
 
-export function TaskHeader({ task }: { task: TaskSummary }) {
+export function TaskHeader({
+  task,
+  onToggleTeam,
+}: {
+  task: TaskSummary;
+  /** Enters Team mode via App's morph orchestration (SurfaceLayer/TeamCanvas, Slice 6.2) instead
+   * of flipping the store directly — see App.tsx's `requestEnterTeam`. */
+  onToggleTeam: () => void;
+}) {
   const renameTask = useAppStore((s) => s.renameTask);
   const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
-  const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const teamViewOpen = useAppStore((s) => s.teamViewOpen);
   const teamBusy = useAppStore((s) => s.teamBusy);
   const [editing, setEditing] = useState(false);
@@ -96,7 +103,7 @@ export function TaskHeader({ task }: { task: TaskSummary }) {
         disabled={teamBusy}
         aria-pressed={teamViewOpen}
         title="Team Canvasを開く"
-        onClick={() => void toggleTeamView(task.id)}
+        onClick={onToggleTeam}
       >
         ⬡ Team
       </button>

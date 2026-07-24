@@ -340,9 +340,15 @@ button {
   opacity: 0;
   pointer-events: none;
 }
-.surface-placeholder {
-  flex: 1;
-  min-height: 0;
+/* SurfaceLayer anchors/host (Slice 6.2, ADR-002): transparent wrappers so re-parenting the
+   persistent ChatSurface host between the Chat column and the Team Canvas Leader slot is a pure
+   DOM-tree move with zero visual side effects — their children participate directly in whichever
+   real layout context (`.main`'s flex column, or `.team-world-nodes`' absolute positioning)
+   surrounds them, exactly as ChatSurface itself did before SurfaceLayer existed. */
+.surface-anchor,
+.leader-anchor,
+.surface-host {
+  display: contents;
 }
 .task-title {
   font-weight: 600;
@@ -1563,6 +1569,22 @@ button {
   }
   to {
     opacity: 1;
+  }
+}
+/* Reverse FLIP exit (Slice 6.2, docs §4.6 run backwards): played once the camera has already
+   flown back to the seed rect (see TeamCanvas's `playExitAnimation`), so this is the mirror of
+   `teamCanvasIn` — same 220ms, opposite direction. `forwards` holds opacity 0 until the component
+   unmounts (App only removes it from the tree after the host has been moved back to the main
+   anchor, see App.tsx's `requestExitTeam`). */
+.team-canvas.exiting {
+  animation: teamCanvasOut 220ms var(--ease-ui) forwards;
+}
+@keyframes teamCanvasOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
   }
 }
 .team-canvas-notice {

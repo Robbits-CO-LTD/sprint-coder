@@ -1,17 +1,19 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { Ref, RefObject } from 'react';
 import { useAppStore } from '../../store/appStore';
-import { ChatSurface } from '../ChatSurface/ChatSurface';
 import { WorkerNode } from './WorkerNode';
 import { HireNode } from './HireNode';
 import { useCamera } from './useCamera';
-import type { Rect } from './useCamera';
+import type { CamState, Rect } from './useCamera';
 import { sendCable } from './cables';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
 // Team Canvas: the spatial "promoted chat" experience from demo/index.html (§Team mode,
-// lines 104-145 / 346-405 / 756-961). The Leader node is a real ChatSurface (variant="node");
-// Worker nodes sit at fixed world slots; an SVG layer draws animated cables between them when
-// Team messages flow. Camera state lives in refs (useCamera) so pan/zoom stays smooth.
+// lines 104-145 / 346-405 / 756-961). The Leader node is the app-root SurfaceLayer's ChatSurface
+// instance (variant="node"), re-parented into `leaderAnchorRef` by App — see SurfaceLayer.tsx and
+// App.tsx's morph orchestration; this component only owns the anchor slot, camera, Worker nodes,
+// and the cable overlay between them. Camera state lives in refs (useCamera) so pan/zoom stays
+// smooth.
 
 const LEADER_RECT: Rect = { x: 0, y: 0, w: 720, h: 620 };
 const WORKER_SLOTS: readonly Rect[] = [
@@ -27,10 +29,61 @@ function slotFor(index: number): { x: number; y: number } {
   return slot ? { x: slot.x, y: slot.y } : { x: 0, y: 0 };
 }
 
-export function TeamCanvas({ task }: { task: TaskSummary }) {
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// The seed camera state (docs §4.6 step 3 / demo/index.html lines 936-951): positions the world
+// so the fixed-size Leader node lands exactly where the normal chat column used to be —
+// sidebar width 264 / header height 52, the mock's own fallback constants (the real chat
+// surface's rect isn't reliably measurable at this point; see the enter effect below). Shared by
+// the entering seed-then-fly AND the exiting reverse-fly (`playExitAnimation`), since the latter
+// is the former run backwards to the same physical rect.
+function seedCamState(): CamState {
+  const rectA = {
+    left: 264,
+    top: 52,
+    width: Math.max(720, window.innerWidth - 264),
+    height: Math.max(480, window.innerHeight - 52),
+  };
+  return { x: rectA.left, y: rectA.top, s: rectA.width / 720 };
+}
+
+// Imperative surface exposed to App's morph orchestration (requestExitTeam/requestEnterTeam) —
+// the camera lives inside this component's `useCamera()` instance, so the reverse FLIP has to be
+// triggered from here rather than re-derived at the App level.
+export interface TeamCanvasHandle {
+  /** Stop whatever camera animation is in flight (enter-fly or exit-fly) immediately, wherever
+   * it currently is. Used when the two directions interrupt each other mid-flight. */
+  cancelCameraAnimation(): void;
+  /** Reverse FLIP (docs §4.6 run backwards): fly the camera from its current position back to
+   * the seed rect (the Leader node visually "expands back" to where the chat column was), then
+   * fade the whole canvas out. Resolves once both finish; instant under reduced motion. */
+  playExitAnimation(): Promise<void>;
+  /** Re-settle the camera to a normal in-Team-mode view and clear the fade-out. Used when an
+   * in-flight exit is cancelled (Team re-requested mid-exit) so the canvas doesn't stay parked
+   * at the exit's seed position or faded out. */
+  resettle(): void;
+}
+
+export function TeamCanvas({
+  task,
+  leaderRef,
+  leaderAnchorRef,
+  onRequestExit,
+  ref,
+}: {
+  task: TaskSummary;
+  leaderRef: RefObject<HTMLDivElement | null>;
+  leaderAnchorRef: RefObject<HTMLDivElement | null>;
+  /** Requests the reverse-FLIP exit (App's morph orchestration) instead of flipping the store
+   * directly — the store toggle itself is delayed until after the exit animation settles, see
+   * App.tsx's `requestExitTeam`. */
+  onRequestExit: () => void;
+  ref?: Ref<TeamCanvasHandle>;
+}) {
   const detail = useAppStore((s) => s.teamByTask[task.id]);
   const teamBusy = useAppStore((s) => s.teamBusy);
-  const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const hireTeamWorker = useAppStore((s) => s.hireTeamWorker);
   const sendTeamMessage = useAppStore((s) => s.sendTeamMessage);
   const stopTeamWorker = useAppStore((s) => s.stopTeamWorker);
@@ -43,13 +96,13 @@ export function TeamCanvas({ task }: { task: TaskSummary }) {
     draggingRef,
     isReduced,
     applyCam,
+    cancelCamAnim,
     animateCamTo,
     camToFit,
     camToFocus,
     worldRectOf,
   } = useCamera();
 
-  const leaderRef = useRef<HTMLDivElement>(null);
   const hireRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const workerElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -159,15 +212,9 @@ export function TeamCanvas({ task }: { task: TaskSummary }) {
       return;
     }
     // Seed (mock lines 936-951): the mock measures the real chat surface's bounding rect via
-    // FLIP, but ours is already gone by mount time (replaced by `.surface-placeholder`), so use
-    // the mock's own fallback constants directly — sidebar width 264, header height 52.
-    const rectA = {
-      left: 264,
-      top: 52,
-      width: Math.max(720, window.innerWidth - 264),
-      height: Math.max(480, window.innerHeight - 52),
-    };
-    camRef.current = { x: rectA.left, y: rectA.top, s: rectA.width / 720 };
+    // FLIP, but by the time this effect runs the anchor move (SurfaceLayer) hasn't necessarily
+    // painted yet either, so use the mock's own fallback constants directly (seedCamState).
+    camRef.current = seedCamState();
     applyCam();
     void animateCamTo(target, 560);
   }, [
@@ -181,6 +228,33 @@ export function TeamCanvas({ task }: { task: TaskSummary }) {
     camRef,
     applyCam,
   ]);
+
+  // Exit choreography state: whether the canvas should be playing its fade-out (docs §4.6 run
+  // backwards — see playExitAnimation below). A plain local boolean, not a prop, because the
+  // fade must start only *after* the reverse camera fly settles, which this component alone
+  // knows the timing of.
+  const [exitingFade, setExitingFade] = useState(false);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      cancelCameraAnimation: cancelCamAnim,
+      async playExitAnimation() {
+        cancelCamAnim();
+        const reduced = isReduced();
+        await animateCamTo(seedCamState(), reduced ? 0 : 560);
+        setExitingFade(true);
+        if (!reduced) await sleep(220); // matches `.team-canvas.exiting`'s teamCanvasOut duration
+      },
+      resettle() {
+        setExitingFade(false);
+        const rects = collectRects();
+        const target = rects.length > 1 ? camToFit(rects) : camToFocus(LEADER_RECT, 0.8);
+        void animateCamTo(target, isReduced() ? 0 : 400);
+      },
+    }),
+    [cancelCamAnim, animateCamTo, isReduced, collectRects, camToFit, camToFocus],
+  );
 
   const pumpCables = useCallback(() => {
     if (cablePlayingRef.current) return;
@@ -210,7 +284,7 @@ export function TeamCanvas({ task }: { task: TaskSummary }) {
       }
       cablePlayingRef.current = false;
     })();
-  }, [worldRectOf, isReduced]);
+  }, [worldRectOf, isReduced, leaderRef]);
 
   // Cable animations: enqueue newly observed Team messages (oldest to newest) onto a persistent
   // queue and (re)start the pump if it's idle. Messages already present when the canvas first
@@ -261,7 +335,7 @@ export function TeamCanvas({ task }: { task: TaskSummary }) {
 
   return (
     <section
-      className="team-canvas"
+      className={`team-canvas${exitingFade ? ' exiting' : ''}`}
       ref={canvasRef}
       data-testid="team-list"
       aria-label="Team canvas"
@@ -275,12 +349,9 @@ export function TeamCanvas({ task }: { task: TaskSummary }) {
           <div className="team-world" ref={worldRef}>
             <svg className="team-cables" ref={svgRef} viewBox="0 0 7000 6000" />
             <div className="team-world-nodes">
-              <ChatSurface
-                task={task}
-                variant="node"
-                id={`team-agent-${detail.team.leaderAgentId}`}
-                ref={leaderRef}
-              />
+              {/* SurfaceLayer (owned by App) portals the shared ChatSurface instance in here —
+                  this anchor only reserves the slot; see App.tsx's morph orchestration. */}
+              <div className="leader-anchor" ref={leaderAnchorRef} />
               {workers.map((worker, index) => {
                 const slot = slotFor(index);
                 return (
@@ -314,7 +385,7 @@ export function TeamCanvas({ task }: { task: TaskSummary }) {
             detail={detail}
             workerCount={workerCount}
             teamBusy={teamBusy}
-            onBack={() => void toggleTeamView(task.id)}
+            onBack={onRequestExit}
             onStopAll={() => void stopAllTeamWorkers(task.id)}
           />
 
