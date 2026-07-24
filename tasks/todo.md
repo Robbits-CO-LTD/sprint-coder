@@ -247,3 +247,8 @@ Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: 
 ## 追記(2026-07-24 Fable): AI察知によるチーム化
 - SPRINT_CODER_LEADER_MCP=1時、team toolsをClaudeの全ターンに常時提供へ変更。キーワード(「チームで」)やボタンなしでも、Leaderが依頼内容から必要性を察知して雇用→自動昇格→Canvas自動遷移。ガイダンスに「本当に有益な時だけ・単純な依頼は直接回答」の抑制を明記
 - 実機実証: キーワードなしの並行検討依頼で「数学検討担当」を自己判断で雇用、Canvas自動遷移まで確認(12.7秒)。Mock経路e2eは無変更(3/3)
+
+## 追記(2026-07-24 Fable): Leader MCPの厳密検証
+- 恒久opt-inスモーク tests/e2e/leader-mcp-smoke.spec.ts を追加(SPRINT_CODER_LEADER_MCP=1で実CLI実行)
+- 実測合格: (1) MCP経由の機械的証明 — Leaderが自己判断で2人雇用(数学検討担当/実装検討担当、固定トリオと不一致)+ペアノ公理からブール代数まで論じる非定型報告=Mock経路では不可能な出力 (2) ⬡ Teamを押さずにCanvas自動遷移(送信前は非表示をアサート) (3) 抑制 — 単純質問「1+1は?」ではチーム未作成(team null)を確認
+- follow-up記録: leader-MCPターン後のアプリquitが90秒超かかることがある(runtime-host子プロセス回収待ちの疑い)。スモークはclose 20秒+SIGKILLの保険付き
