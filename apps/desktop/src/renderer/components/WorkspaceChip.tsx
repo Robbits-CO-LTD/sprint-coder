@@ -1,4 +1,5 @@
 import { useAppStore } from '../store/appStore';
+import { Folder } from './icons';
 
 // Shared workspace chip logic for TaskHeader (§4.1) and ContextBar (§4.2): unselected shows
 // "Workspace未選択", selected shows the folder name with the full path in the title, and
@@ -14,7 +15,7 @@ export function WorkspaceChip({
   const workspace = useAppStore((s) => s.workspaceByTask[taskId]);
   const selectWorkspace = useAppStore((s) => s.selectWorkspace);
   const supported =
-    typeof window !== 'undefined' && typeof window.vibe?.workspace?.select === 'function';
+    typeof window !== 'undefined' && typeof window.sprintCoder?.workspace?.select === 'function';
 
   const label = workspace ? workspace.name : 'Workspace未選択';
   const dot =
@@ -32,7 +33,7 @@ export function WorkspaceChip({
         title={workspace ? workspace.path : 'Workspace選択は今回のバックエンドでは未対応です'}
       >
         {dot}
-        📁 {label}
+        <Folder size={13} /> {label}
       </span>
     );
   }
@@ -45,7 +46,7 @@ export function WorkspaceChip({
       onClick={() => void selectWorkspace(taskId)}
     >
       {dot}
-      📁 {label}
+      <Folder size={13} /> {label}
     </button>
   );
 }

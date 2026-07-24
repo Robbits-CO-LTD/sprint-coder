@@ -6,7 +6,7 @@ import {
   type ToolRegistry,
   type ToolCatalogEntry,
   toolValueMatchesSchema,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 
 export type ToolDispatchRequest = {
   taskId: string;

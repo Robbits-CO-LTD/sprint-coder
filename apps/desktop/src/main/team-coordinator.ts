@@ -9,7 +9,7 @@ import {
   type TeamSendMessageInput,
   type WorkerCompletion,
   type WorkerSummary,
-} from '@vibe/contracts';
+} from '@sprint-coder/contracts';
 import {
   assertEnvelopeMatchesClaims,
   assertSpawnAuthority,
@@ -19,7 +19,7 @@ import {
   TEAM_DELIVERY_MAX_ATTEMPTS,
   TEAM_MESSAGE_RATE_LIMIT,
   type TeamEnvelope,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import { killProcessTree } from './process-tree';
 import type {
   AgentRecord,
@@ -128,6 +128,21 @@ export class TeamCoordinator {
   get(taskId: string): TeamDetail | null {
     const team = this.persistence.getTeamByTask(taskId);
     return team === null ? null : this.detail(team.id);
+  }
+
+  /** Read-only replay for the team_wait_reports Leader tool: sendToWorker already persists the
+   * Worker→Leader report synchronously (see persistWorkerResult below), so this just filters
+   * messages targeting the Leader by seq watermark — it never mutates Team/Worker state. */
+  listWorkerReports(taskId: string, afterSeq: number): readonly TeamMessageSummary[] {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) return [];
+    const snapshot = this.persistence.getTeamSnapshot(team.id);
+    const leader = snapshot.agents.find(({ kind }) => kind === 'leader');
+    if (leader === undefined) return [];
+    return snapshot.messages
+      .filter((message) => message.targetAgentId === leader.id && message.seq > afterSeq)
+      .sort((left, right) => left.seq - right.seq)
+      .map((message) => this.messageSummaryFromSnapshot(snapshot, message.id));
   }
 
   async hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary> {

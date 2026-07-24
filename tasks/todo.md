@@ -94,7 +94,7 @@ Wave 2(完了 2026-07-22):
     - 内部分割(2026-07-23 スコープ固定): 4.7a Native操作+staging=済(S4b1-S4b3a) / 4.7b add-update-delete-rename=済(S4b3b) / 4.7c 競合検知+crash復旧=済(S3a/S3b/S4b2) / 4.7d Saga executor wiring=済 / 4.7e packaged実ロード+platform gate=済 / 4.7f 統合テスト+完了確認=済
     - Later送り(記録): Windows/Linux write実証(ADR定義のCI必須、fail-closed維持で安全) / 3 OS CI実走・CI packaged smoke(remote未設定の環境依存) / 非決定論的外部rename raceの完全platform proof(post-observation+quarantine封じ込めで受け入れ条件充足、ADR「close or safely contain」準拠) / Verified profile(Phase 7) / restart-durable process・MCP(Public Beta)
     - 4.7d: NativeSafeFsEditEffectBoundaryをproduction EditSagaExecutor/restart recoveryへ接続。intent journal遷移、lease/session再検証、補償を実Native統合テストで確認。write ToolDefinitionは未登録
-    - 4.7e: Node 24でdarwin arm64 packageを生成し、`app.asar.unpacked/native-safe-fs/build/Release/vibe_native_safe_fs.node`を実ロード。probeは`available:true`かつ`mutation:false`で、platform gateは安全側へ閉じる。Node 26 Electron Packagerの停止はNode 24で回避
+    - 4.7e: Node 24でdarwin arm64 packageを生成し、`app.asar.unpacked/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node`を実ロード。probeは`available:true`かつ`mutation:false`で、platform gateは安全側へ閉じる。Node 26 Electron Packagerの停止はNode 24で回避
     - S4b4 harness: test専用addon分離・token認可barrier・kernel直前再検証・cleanup再ハッシュを採用し、コミット`2b4de59`
   - [x] Turn全体baseline diff集約、Acceptance Contract/Evidence Ledger、Standard repair最大1、30-case corpus baseline
     - Turn diff `3e109f8`、contract/evidence `e2f8402`、bounded repair `842e6f4`、30-case baseline `9898250`
@@ -132,7 +132,7 @@ Wave 2(完了 2026-07-22):
 ## 契約(Fableが確定)
 
 - repo構成: 計画書§2どおり(apps/desktop, packages/contracts, packages/domain, npm workspaces)
-- preload公開API `window.vibe`: tasks.list/create/messages/rename, turns.start/cancel/subscribe(型は各起動プロンプトに記載)
+- preload公開API `window.sprintCoder`: tasks.list/create/messages/rename, turns.start/cancel/subscribe(型は各起動プロンプトに記載)
 - Turn stage: understanding→planning→executing→synthesizing(FR-RUN-02のサブセット)
 - 永続化: Main直置きSQLite(ADR-Phase0比較は保留、暫定採用と記録)
 - Runtime: deterministic MockRuntimeAdapterのみ(Phase 3.2)。production adapterは次ラウンド
@@ -164,6 +164,61 @@ Wave 2(完了 2026-07-22):
 - 検証: npm install成功 / typecheck 3 workspace成功 / test 104件全PASS / Electron実起動でRenderer window生成・DB(WAL)作成をmacOS実機確認
 - 追加の起動系バグ2件をFableが特定・修正(commit済み):
   6. index.htmlがsrc/renderer配下にありVite rootの`/`が404 → apps/desktop直下へ移動(白画面の原因)
-  7. main/preload両entryがindex.tsで`.vite/build/index.js`を上書き合戦 → preload出力名を明示分離(window.vibe未公開の原因)
+  7. main/preload両entryがindex.tsで`.vite/build/index.js`を上書き合戦 → preload出力名を明示分離(window.sprintCoder未公開の原因)
 - 2026-07-22 ユーザー実機確認: golden path #1(Task作成→hello送信→Run Card→mock streaming応答)成功のスクリーンショットを受領。Chat Alpha骨格ラウンド完了
 - 未了(次ラウンド送り): operations ledger(冪等性、Slice 1.2)、Forge起動時のnative自動rebuild恒久化(workspace hoisting対策)、npm audit 24件(critical 1)、E2E(Playwright Electron、Phase 0 spike対象)、Team/Canvas(Phase 5-6)
+
+## Phase 6ゲート判定(2026-07-24 Fable)
+
+**判定: 通過**(Team Canvasとcinematic motion。実装はSonnetサブエージェント4スライス+レビュー2回+ゲート修正1回、Fableが監督・独立検証)
+
+- コミット列: `5d6238d`(Canvas再構築・視覚正本demo/index.html準拠)→ `f060995`(6.2 SurfaceLayer同一instance morph)→ `0006894`(6.1 canvas_views永続化 migration v29・node drag・LOD・keyboard nav・List fallback)→ `c305195`(6.3+6.4 collision placement・CameraDirector ownership・delivery同期cable・reduced motion textual event)→ `34c0f32`(ゲート修正: 入力サイズ上限・team mode中chromeのinert化・TeamCanvasのtask key化)
+- 機械検証: unit 277+276+23、team系E2E 15本(morph連続性: mount count不変・draft/scroll/選択範囲、layout永続化+再起動復元、LOD、List⇔Canvas、camera ownership遷移、collision placement、cable: 雇用時無し/正しいpair/ack因果/offscreen無追従/pan中安全、keyboard nav、reduced motion代替+aria-live)
+- 設計逸脱の記録: React Flow不採用 → 設計書既定fallback(custom DOM world)を正式採用(ADR: adr-team-canvas-custom-dom-world-20260724.md)
+- 既知の限界(非ブロッキング、follow-up):
+  1. IME変換中のmorphは変換状態を維持できない(DOM移動のプラットフォーム制約。コード内に文書化)
+  2. mid-stream morphの無欠落は手動確認のみ(自動テスト未整備)
+  3. quit時にcanvas view autosaveの直近~1秒が失われうる(既存draft autosaveと同型の設計限界)
+  4. focus占有率65–75%は定数で強制(0.70/0.75)、数値アサートは無し
+  5. packaged Electronの起動不能はこの開発環境固有(E2Eは全てSPRINT_CODER_E2E_MODE=dev)。CI環境での要再確認はChat Alphaゲートから継続
+- 発見・修正された注目バグ: StrictModeのcleanup-only effectがcable描画を全滅させていた潜在バグ(c305195で修正)、team mode中の不可視chrome残留フォーカス(34c0f32でinert化)
+
+## 追記(2026-07-24 Fable): Team操作モデル修正 + Claude runtime + SVGアイコン
+
+- `c0f1acc` Claude Code CLI (v2.1.218) headlessを第2 production runtimeとして追加(ADR: adr-production-runtime-claude-cli-20260724.md、migration v30でruntime_kind CHECK再構築、per-runtime model永続化、egress gate拡張、実CLIスモーク済み)
+- `1b4515f` renderer全域の絵文字装飾をインラインSVGアイコン(Lucide ISCパスデータ、依存追加なし)へ置換
+- `ccd50f2`+`afdce6d` **Team操作モデルの是正**: ユーザー手動の雇用フォーム/依頼欄を撤去し、FR-TEAM-06/13どおりLeaderのtool use(`team_hire_worker`/`team_send_to_worker`/`team_wait_reports`)が雇用・指示・報告統合を駆動する形へ。Mockランタイムに決定論的チームシナリオ(trigger:「チームテスト」またはTeam存在時)。Workerカードは観測+停止のみ。e2eはLeader主導フローで全acceptance再機械化(15/15)
+- 検証: typecheck/lint/unit(301+23+276)/全e2e(既知flake 1件のみ除外)グリーン
+
+## Phase 7ゲート判定(2026-07-24 Fable)
+
+**判定: Team MVP blocking subset 全8項目通過**(コミット列: `8e77eaf` security → `b32b964` a11y → `779ebb2` reliability/perf。実装はSonnet子分2+Fable直接実装、レビュー・検証はFable)
+
+blocking subset証跡:
+1. crash recovery/interrupted・paused復元 — golden-path-1-restart-restore + team-flow restart e2e(既存)
+2. process tree停止・orphan検出 — process group ADR + cancel e2e + Codex/Claude実CLIスモークでcancel後orphan 0を機械証明
+3. sandbox/Broker bypass拒否/workspace外fs/無許可outbound/egress deny(macOS実証) — codex実CLIへの敵対的workspace外書込指示が拒否されることを実機証明、no-toolsプロファイル・egress事前denyをテスト化
+4. IPC/path traversal/Markdown・ANSI・URL/secret redaction adversarial — IPC全41ch×プロトタイプ汚染等300ケース、Markdown画像exfil修正、redaction取りこぼし(AWS/.env等)修正、path-guard未型付き例外修正
+5. keyboard-only golden path/List View同等/contrast/reduced motion — a11y e2e 11本+contrast機械検証29ペア+200% zoom(List overlayレスポンシブ化を実装)+docs/A11Y_AUDIT.md
+6. DB migration/backup・restore/1万event projection — legacy v1→v30チェーン(既存)+破損検知→backup復元→fresh start実装・テスト、1万event再開+projection実測4ms(予算500ms)
+7. Composer p95/stream batching/10 Worker LOD — perf-budgets.spec実測: 起動396ms(予算2000)、入力p95 14.2ms(予算16)、10Worker×200msg pan 60.1fps(予算50)、LOD切替確認。NFR-PERF-05 batchingは実装済み(command-runner 100ms/64KB)
+8. Phase 4.7 corpus baseline — assurance.test.ts + PHASE_4_7_CORPUS_BASELINE.md(suiteでグリーン維持)
+
+Public Beta送り(計画が明示的に許容する繰り延べ、未実施として記録):
+- 10.1: Conversation rewind/branch切替、crash storm circuit breaker、idempotency fuzz、Workspace restore/Safe rewind saga/emergency checkpoint(計画自体がPublic Beta candidate/feature flag指定)、Verified profile
+- 10.2: startup遅延化・Timeline virtualization等の最適化(全予算を現状実測でクリアしているため不要と判断)
+- 10.3: VoiceOver人手実施(台本はA11Y_AUDIT.mdに整備済み)、NVDA(Windows実機なし=Phase 8 beta gateの対象OS実機E2Eで実施)
+- 10.4: session partitioning(SECURITY_CHECKLIST.md open item)
+- 既知環境フレーク: command-runner-flow focusテスト(変更前ベースラインから再現する環境起因)
+
+Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: signing/update/beta gate)のみ。
+
+## 追記(2026-07-24 Fable): Team実実行(モック脱却 第1弾)
+
+- Worker実実行を実装: `main/team-worker-runtime.ts`(RuntimeHostTeamWorkerRuntime)。Leaderが指示したWorkerタスクを実Claude/Codex CLIのephemeralターン(read-only/no-tools、UtilityProcess境界経由、egress gate通過)で実行し、実際の生成結果を報告として返す。probe失敗・egress拒否時は決定論シミュレータへフォールバック
+- opt-in: `SPRINT_CODER_REAL_WORKERS=1 npm start`(既定はテスト決定性とコスト保護のためシミュレータ)。README記載
+- 実機実証: 「チームテスト:1+1の答え」で調査/実装/レビュー3Workerが実Claudeで観点別報告を返すことをsmokeで確認(14秒)。この過程でclaude adapterの`--permission-mode plan`がplanメカニクスを回答に混入させる品質バグを発見し除去(ADR修正記録あり)。あわせて`npm run typecheck --workspaces`が失敗後も続行するためexit codeで検証すべきという運用教訓を得た(以後の検証はexit code確認)
+- 次マイルストーン(未実装・記録): Leader自身の実tool use化 — アプリがMCPサーバとしてteam toolsを実Claude Leaderに提供する方式。現状はLeader=Mockシナリオ+Worker=実AIのハイブリッド
+
+## 追記(2026-07-24 Fable): 雇用ペーシング
+- 一括瞬間雇用は「Leaderが動的採用している」体験を壊すため、雇用ごとに1.2秒のペーシングを導入(SPRINT_CODER_TEAM_PACING_MS で調整可)。真の動的採用(実Claude Leaderが依頼内容から役割を決める=MCP化)は引き続き次マイルストーン

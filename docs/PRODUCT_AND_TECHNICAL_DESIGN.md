@@ -1,4 +1,4 @@
-# vibe-editor3 プロダクト・詳細設計書
+# Sprint Coder プロダクト・詳細設計書
 
 - 文書ID: VE3-DESIGN-001
 - 状態: Reviewed design baseline
@@ -9,7 +9,7 @@
 
 ## 1. 目的とプロダクト原則
 
-vibe-editor3は、ユーザーが一人のAIと自然に会話を始め、仕事が大きくなったときだけ同じ会話をTeam Leaderへ昇格できるデスクトップアプリである。
+Sprint Coderは、ユーザーが一人のAIと自然に会話を始め、仕事が大きくなったときだけ同じ会話をTeam Leaderへ昇格できるデスクトップアプリである。
 
 中心体験は「ChatからTeamへの連続性」である。Team機能を開いた瞬間に別画面へ切り替えず、会話中のChatSurfaceが同一性を保ったまま縮小・移動し、無限Canvas上のLeaderになる。Workerも簡易カードではなく、同じChatSurfaceを持つ。
 
@@ -332,7 +332,7 @@ Main Process
 
 ### 7.2 Preload
 
-`window.vibe`へ用途別APIを公開する。例: `tasks.list()`、`threads.start()`、`turns.subscribe()`、`approvals.resolve()`。任意channel名を指定できるAPI、Node object、Electron event objectを公開しない。unsubscribe関数を必ず返す。
+`window.sprintCoder`へ用途別APIを公開する。例: `tasks.list()`、`threads.start()`、`turns.subscribe()`、`approvals.resolve()`。任意channel名を指定できるAPI、Node object、Electron event objectを公開しない。unsubscribe関数を必ず返す。
 
 ### 7.3 Main
 
@@ -912,4 +912,4 @@ Codex CLIからはThread/Turn/Item、command/event protocol、resource/method AP
 
 Grok BuildからはSessionActor、server-authoritative prompt queue、persist-before-inference、tool registry、background wakeup、checkpoint/rewind、worktreeによる変更分離、ACP/headless共通coreの考え方を採用する。
 
-一方、default sandbox off、単純prefix allow、parent capabilityを越えるsubagent、provider内蔵toolのBroker迂回は採用しない。両repositoryはApache-2.0だが、vibe-editor3ではsource copyではなくarchitecture patternだけを独自実装する。
+一方、default sandbox off、単純prefix allow、parent capabilityを越えるsubagent、provider内蔵toolのBroker迂回は採用しない。両repositoryはApache-2.0だが、Sprint Coderではsource copyではなくarchitecture patternだけを独自実装する。

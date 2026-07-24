@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ToolRegistry } from '@vibe/domain';
+import { ToolRegistry } from '@sprint-coder/domain';
 import {
   RUNTIME_PROTOCOL_VERSION,
   isMainToRuntimeEnvelope,
@@ -99,6 +99,26 @@ describe('Runtime Host protocol', () => {
         ],
       }),
     ).toBe(false);
+  });
+
+  it('validates the additive Claude hello fields alongside the existing Codex ones', () => {
+    const hello = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: '',
+      turnId: '',
+      seq: 1,
+      operationId: 'probe',
+      type: 'hello',
+      codexAvailable: false,
+      codexModels: [],
+      claudeAvailable: true,
+      claudeVersion: '2.1.218',
+      claudeModels: [{ id: 'auto', displayName: 'Auto', description: '' }],
+    };
+    expect(isRuntimeToMainEnvelope(hello)).toBe(true);
+    expect(isRuntimeToMainEnvelope({ ...hello, claudeAvailable: 'yes' })).toBe(false);
+    expect(isRuntimeToMainEnvelope({ ...hello, claudeModels: undefined })).toBe(false);
   });
 
   it('accepts only bounded unique context acknowledgements', () => {

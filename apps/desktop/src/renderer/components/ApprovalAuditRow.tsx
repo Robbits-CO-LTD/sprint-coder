@@ -1,4 +1,5 @@
-import type { ApprovalSummary } from '../types/vibe';
+import { Check, X } from './icons';
+import type { ApprovalSummary } from '../types/sprint-coder';
 
 const DECISION_LABEL = {
   allow_once: '今回のみ許可しました',
@@ -14,7 +15,7 @@ export function ApprovalAuditRow({ approval }: { approval: ApprovalSummary }) {
       data-testid="approval-audit-row"
       role="status"
     >
-      <span aria-hidden="true">{approval.decision === 'deny' ? '×' : '✓'}</span>
+      <span>{approval.decision === 'deny' ? <X size={13} /> : <Check size={13} />}</span>
       <span>{DECISION_LABEL[approval.decision]}</span>
       <span className="approval-audit__scope">
         {approval.capability} · {approval.risk}

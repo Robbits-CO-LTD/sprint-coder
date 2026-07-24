@@ -13,7 +13,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const workspace = await mkdtemp(join(tmpdir(), 'vibe-patch-'));
+  const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-patch-'));
   roots.push(workspace);
   await mkdir(join(workspace, 'src'));
   await writeFile(join(workspace, 'src', 'a.txt'), 'alpha beta gamma\n');

@@ -5,7 +5,11 @@ import { stat, realpath } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { delimiter, isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
-import { createExecutionSpec, validateExecutionSpec, type ExecutionSpec } from '@vibe/domain';
+import {
+  createExecutionSpec,
+  validateExecutionSpec,
+  type ExecutionSpec,
+} from '@sprint-coder/domain';
 import {
   createPathGuard,
   pathGuardIdentityDigest,

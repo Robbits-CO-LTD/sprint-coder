@@ -1,12 +1,11 @@
 import { Buffer } from 'node:buffer';
-import type { TaskSummary } from '@vibe/contracts';
-import type { PermissionEvaluation, PermissionRequest } from '@vibe/domain';
+import type { TaskSummary } from '@sprint-coder/contracts';
+import type { PermissionEvaluation, PermissionRequest } from '@sprint-coder/domain';
 import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
-import { PermissionBroker } from './permission-broker';
+import type { PermissionBroker } from './permission-broker';
 import { redactSecrets } from './secret-redactor';
 
-const PROVIDER_ID = 'openai-codex';
 const PROVIDER_TRUST = 'trusted-remote' as const;
 const DATA_RESIDENCY = 'unspecified';
 
@@ -15,8 +14,17 @@ export type ProviderEgressDecision = Readonly<{
   evaluation: PermissionEvaluation;
 }>;
 
+export type ProviderEgressInput = {
+  broker: PermissionBroker;
+  task: TaskSummary;
+  turnId: string;
+  prompt: string;
+  context: PreparedContext;
+  now: string;
+};
+
 export function dispatchAfterCodexProviderEgress(
-  input: Parameters<typeof authorizeCodexProviderEgress>[0],
+  input: ProviderEgressInput,
   dispatch: () => void,
 ): ProviderEgressDecision {
   const decision = authorizeCodexProviderEgress(input);
@@ -24,14 +32,37 @@ export function dispatchAfterCodexProviderEgress(
   return decision;
 }
 
-export function authorizeCodexProviderEgress(input: {
-  broker: PermissionBroker;
-  task: TaskSummary;
-  turnId: string;
-  prompt: string;
-  context: PreparedContext;
-  now: string;
-}): ProviderEgressDecision {
+export function authorizeCodexProviderEgress(input: ProviderEgressInput): ProviderEgressDecision {
+  return authorizeProviderEgress(input, 'openai-codex', 'codex', 'codex_provider_egress');
+}
+
+// Additive twin for the Claude CLI runtime (Slice 3.4): same gate shape and same generic
+// 'provider.egress' capability, distinguished only by providerId/subjectId/audit reason so
+// existing Codex audit trails and Capability policy grants are unaffected.
+export function dispatchAfterClaudeProviderEgress(
+  input: ProviderEgressInput,
+  dispatch: () => void,
+): ProviderEgressDecision {
+  const decision = authorizeClaudeProviderEgress(input);
+  if (decision.allowed) dispatch();
+  return decision;
+}
+
+export function authorizeClaudeProviderEgress(input: ProviderEgressInput): ProviderEgressDecision {
+  return authorizeProviderEgress(
+    input,
+    'anthropic-claude-code',
+    'claude',
+    'claude_provider_egress',
+  );
+}
+
+function authorizeProviderEgress(
+  input: ProviderEgressInput,
+  providerId: string,
+  subjectRuntime: string,
+  auditReason: string,
+): ProviderEgressDecision {
   const content = [
     input.prompt,
     ...input.context.fragments.map((fragment) => fragment.content),
@@ -51,7 +82,7 @@ export function authorizeCodexProviderEgress(input: {
     .join('+');
   const resource = {
     kind: 'provider' as const,
-    providerId: PROVIDER_ID,
+    providerId,
     fragmentKind,
     byteCount,
     providerTrust: PROVIDER_TRUST,
@@ -61,7 +92,7 @@ export function authorizeCodexProviderEgress(input: {
     localOnlyTask: input.task.localOnly,
   };
   const executionSpecDigest = digestCanonical({
-    providerId: PROVIDER_ID,
+    providerId,
     turnId: input.turnId,
     promptDigest: digestCanonical(input.prompt),
     context: input.context.fragments.map((fragment) => ({
@@ -71,7 +102,7 @@ export function authorizeCodexProviderEgress(input: {
   });
   const requestBase = {
     taskId: input.task.id,
-    subjectId: `runtime:codex:${input.turnId}`,
+    subjectId: `runtime:${subjectRuntime}:${input.turnId}`,
     capability: 'provider.egress' as const,
     resource,
     operation: 'egress' as const,
@@ -86,7 +117,7 @@ export function authorizeCodexProviderEgress(input: {
   };
   const resourceSet = {
     kind: 'provider-egress' as const,
-    providerIds: [PROVIDER_ID],
+    providerIds: [providerId],
     fragmentKinds: [fragmentKind],
     maxBytes: byteCount,
     allowedProviderTrust: [PROVIDER_TRUST],
@@ -120,7 +151,7 @@ export function authorizeCodexProviderEgress(input: {
         capability: 'provider.egress' as const,
         resourceSet,
         operations: ['egress' as const],
-        auditReason: 'codex_provider_egress',
+        auditReason,
       },
     ],
   };

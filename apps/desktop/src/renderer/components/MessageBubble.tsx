@@ -1,4 +1,4 @@
-import type { ChatMessage } from '../types/vibe';
+import type { ChatMessage } from '../types/sprint-coder';
 import { Markdown } from './Markdown';
 
 type Props = {

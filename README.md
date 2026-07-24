@@ -1,4 +1,4 @@
-# vibe-editor3
+# Sprint Coder
 
 Chatから始まり、必要になった瞬間だけ複数のAI Workerへ広がる、ローカルファーストのElectronデスクトップアプリ。
 
@@ -10,7 +10,7 @@ Chatから始まり、必要になった瞬間だけ複数のAI Workerへ広が�
 - [Codex CLI / Grok Build 参照アーキテクチャ分析](docs/REFERENCE_AGENT_ARCHITECTURE.md)
 - [Agent Intelligence詳細設計](tasks/designs/design-agent-intelligence-architecture-20260721.md)
 - [実装計画](tasks/IMPLEMENTATION_PLAN.md)
-- [設計レビュー記録](tasks/designs/design-vibe-editor3-foundation-20260720.md)
+- [設計レビュー記録](tasks/designs/design-sprint-coder-foundation-20260720.md)
 - [参照agent導入後のhardening review](tasks/designs/design-reference-agent-hardening-20260721.md)
 
 ## 現在の状態
@@ -19,4 +19,18 @@ Chatから始まり、必要になった瞬間だけ複数のAI Workerへ広が�
 
 ## Codex runtimeの手動確認
 
-実CLIの確認は、隔離したuser dataで `VIBE_USER_DATA_DIR=/tmp/vibe-runtime-smoke VIBE_RUNTIME_SMOKE=codex npm start` を実行し、Settings APIでCodexを選択して短いTurnを開始する。stageが順番に進み、応答がstreamして完了すること、実行中のSteerが`STEER_UNSUPPORTED`になること、CancelでCodexの子processが残らないことを確認する（`VIBE_RUNTIME_SMOKE`は手動試験の意図を示すmarkerであり、runtime選択自体はSettings APIに保存される）。
+実CLIの確認は、隔離したuser dataで `SPRINT_CODER_USER_DATA_DIR=/tmp/sprint-coder-runtime-smoke SPRINT_CODER_RUNTIME_SMOKE=codex npm start` を実行し、Settings APIでCodexを選択して短いTurnを開始する。stageが順番に進み、応答がstreamして完了すること、実行中のSteerが`STEER_UNSUPPORTED`になること、CancelでCodexの子processが残らないことを確認する（`SPRINT_CODER_RUNTIME_SMOKE`は手動試験の意図を示すmarkerであり、runtime選択自体はSettings APIに保存される）。
+
+## Claude runtimeの手動確認
+
+実CLIの確認は、隔離したuser dataで `SPRINT_CODER_USER_DATA_DIR=/tmp/sprint-coder-claude-runtime-smoke SPRINT_CODER_RUNTIME_SMOKE=claude npm start` を実行し、Settings APIでClaude Codeを選択して短いTurnを開始する。stageが順番に進み、応答がstreamして完了すること、実行中のSteerが`STEER_UNSUPPORTED`になること、CancelでClaudeの子processが残らないことを確認する（`SPRINT_CODER_RUNTIME_SMOKE`は手動試験の意図を示すmarkerであり、runtime選択自体はSettings APIに保存される）。Claudeはローカルの`claude` CLI自身の認証（OAuth/keychain）を使い、アプリはAPIキーを一切扱わない。
+
+## Team Workerの実実行(実AI)
+
+WorkerをローカルのClaude Code CLIで実際に実行するには、opt-inマーカーを付けて起動する:
+
+```
+SPRINT_CODER_REAL_WORKERS=1 npm start
+```
+
+Mock Runtimeのまま「⬡ Team」で昇格し、Leaderに「チームテスト:〇〇」と依頼すると、Leader(Mockシナリオ)が雇用・指示した各Workerが実Claude(read-only/no-toolsプロファイル、`auto`モデル)で作業し、実際の生成結果を報告として返す。CLI未導入・probe失敗・egress拒否時は決定論シミュレータへ自動フォールバックする。Runtime設定でClaude/Codexを選択している場合、Workerはその選択に従う(Leaderの実tool useによる雇用はMCP経由の実装が次マイルストーン)。

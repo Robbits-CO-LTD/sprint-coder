@@ -30,7 +30,7 @@ Implement a minimal asynchronous raw Node-API addon behind a Main-only `NativeSa
 
 ## Incremental implementation status
 
-S4b3a implements only the non-publishing observation and journal-bound staging subset. `observeIntent` pins every requested endpoint before reading, computes identity/SHA-256/size/mode/nlink in native code, then revalidates every leaf and the selected workspace namespace before returning. `stageIntentArtifact` accepts only a parsed immutable intent in `aux_pending`, copies the Buffer before queueing async work, restricts the raw leaf to `.vibe-temp-<128-bit lowercase hex>`, creates it with `O_EXCL | O_NOFOLLOW` and initial `0600`, seals mode/hash/size, and fsyncs both file and parent directory.
+S4b3a implements only the non-publishing observation and journal-bound staging subset. `observeIntent` pins every requested endpoint before reading, computes identity/SHA-256/size/mode/nlink in native code, then revalidates every leaf and the selected workspace namespace before returning. `stageIntentArtifact` accepts only a parsed immutable intent in `aux_pending`, copies the Buffer before queueing async work, restricts the raw leaf to `.sprint-coder-temp-<128-bit lowercase hex>`, creates it with `O_EXCL | O_NOFOLLOW` and initial `0600`, seals mode/hash/size, and fsyncs both file and parent directory.
 
 The worker duplicates the session root fd under the authority mutex. Read/hash/write/fsync run outside that mutex; staging reacquires it only for the live generation check plus the `openat(O_EXCL)` linearization point. Main rechecks the issued session after native completion, so an invalidation race cannot publish success. A fully synced auxiliary may remain for journal recovery when revocation wins after creation.
 

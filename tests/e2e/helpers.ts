@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /**
- * vibe-editor3 Electron E2E launch helpers.
+ * sprint-coder Electron E2E launch helpers.
  *
  * `npm start` on its own is a dev-server launch and was never meant to be driven directly by
  * E2E — but in this environment `electron-forge package` cannot produce a usable build at all
@@ -21,7 +21,7 @@ import { join } from 'node:path';
  *    apps/desktop, reusing whatever `npm start` (dev server + main/preload dev build) is
  *    reachable. This is the fallback this environment relies on today.
  *
- * Mode selection: `VIBE_E2E_MODE=packaged|dev` forces a mode; otherwise `packaged` is used if
+ * Mode selection: `SPRINT_CODER_E2E_MODE=packaged|dev` forces a mode; otherwise `packaged` is used if
  * apps/desktop/out/** already contains a usable build, else `dev`.
  */
 
@@ -101,9 +101,9 @@ export function isPackagedAvailable(): boolean {
   }
 }
 
-/** `VIBE_E2E_MODE` forces a mode; otherwise prefer "packaged" when it's actually usable. */
+/** `SPRINT_CODER_E2E_MODE` forces a mode; otherwise prefer "packaged" when it's actually usable. */
 export function resolveE2EMode(): E2EMode {
-  const forced = process.env['VIBE_E2E_MODE'];
+  const forced = process.env['SPRINT_CODER_E2E_MODE'];
   if (forced === 'packaged' || forced === 'dev') return forced;
   return isPackagedAvailable() ? 'packaged' : 'dev';
 }
@@ -124,7 +124,7 @@ export function resolveDevElectronBinary(): string {
 /** Creates a fresh, uniquely-named userData directory for a single test. */
 export function createUserDataDir(label: string): string {
   const safeLabel = label.replace(/[^a-zA-Z0-9_-]+/g, '-');
-  return mkdtempSync(join(tmpdir(), `vibe-e2e-${safeLabel}-`));
+  return mkdtempSync(join(tmpdir(), `sprint-coder-e2e-${safeLabel}-`));
 }
 
 export function removeUserDataDir(dir: string | null | undefined): void {
@@ -274,7 +274,7 @@ function collectDescendantPids(rootPid: number): number[] {
 }
 
 /**
- * Launches vibe-editor3 with an isolated VIBE_USER_DATA_DIR (own SQLite file + own
+ * Launches sprint-coder with an isolated SPRINT_CODER_USER_DATA_DIR (own SQLite file + own
  * single-instance lock), so tests never collide with a developer's running instance or with
  * each other. Mode defaults to resolveE2EMode() (see module doc comment).
  */
@@ -282,7 +282,7 @@ export async function launchApp(
   userDataDir: string,
   mode: E2EMode = resolveE2EMode(),
 ): Promise<ElectronApplication> {
-  const env = { ...process.env, VIBE_USER_DATA_DIR: userDataDir };
+  const env = { ...process.env, SPRINT_CODER_USER_DATA_DIR: userDataDir };
 
   if (mode === 'packaged') {
     return electron.launch({ executablePath: findPackagedExecutable(), env });

@@ -7,8 +7,8 @@ import {
   type PublicError,
   type CodexModelOption,
   type TurnStage,
-} from '@vibe/contracts';
-import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@vibe/domain';
+} from '@sprint-coder/contracts';
+import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
 
 export const RUNTIME_PROTOCOL_VERSION = 4;
 
@@ -52,6 +52,14 @@ export type RuntimeToMainEnvelope =
       codexAvailable: boolean;
       codexVersion?: string;
       codexModels: CodexModelOption[];
+      // Additive fields for the Claude CLI runtime (Slice 3.4). A given Runtime Host process
+      // only ever hosts one adapter kind, so exactly one provider's fields are meaningful per
+      // process; the other provider's boolean/array still round-trip validation with its
+      // always-supplied default (false/[]) rather than being made structurally optional, which
+      // keeps existing `codexAvailable`/`codexModels` consumers unchanged.
+      claudeAvailable: boolean;
+      claudeVersion?: string;
+      claudeModels: CodexModelOption[];
     })
   | (EnvelopeBase & { type: 'started'; acceptedContextFragmentIds: string[] })
   | (EnvelopeBase & { type: 'event'; event: RuntimeCanonicalEvent })
@@ -135,7 +143,14 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       'codexModels' in value &&
       Array.isArray(value.codexModels) &&
       value.codexModels.length <= 32 &&
-      value.codexModels.every((model) => codexModelOptionSchema.safeParse(model).success)
+      value.codexModels.every((model) => codexModelOptionSchema.safeParse(model).success) &&
+      'claudeAvailable' in value &&
+      typeof value.claudeAvailable === 'boolean' &&
+      (!('claudeVersion' in value) || typeof value.claudeVersion === 'string') &&
+      'claudeModels' in value &&
+      Array.isArray(value.claudeModels) &&
+      value.claudeModels.length <= 32 &&
+      value.claudeModels.every((model) => codexModelOptionSchema.safeParse(model).success)
     );
   if (value.type === 'started')
     return (

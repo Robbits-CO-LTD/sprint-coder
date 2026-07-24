@@ -5,7 +5,7 @@ import {
   type AutoReviewerInput,
   type AutoReviewerModel,
 } from './auto-reviewer';
-import type { PermissionRequest } from '@vibe/domain';
+import type { PermissionRequest } from '@sprint-coder/domain';
 
 const requestBase: Omit<PermissionRequest, 'reviewerInputDigest'> = {
   taskId: 'task-1',

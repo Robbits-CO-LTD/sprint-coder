@@ -9,7 +9,7 @@
 
 ### 1.1 背景
 
-既存のvibe-editor3設計は、Thread/Turn/Item、Actor、Tool Broker、permission、recoveryを固めた。一方、coding agentの価値は「安全に動く」だけでは足りない。大規模repositoryから正しい変更点を探し、競合せず編集し、実コードを検証し、未達なら自律的に修正し続ける能力が必要である。
+既存のSprint Coder設計は、Thread/Turn/Item、Actor、Tool Broker、permission、recoveryを固めた。一方、coding agentの価値は「安全に動く」だけでは足りない。大規模repositoryから正しい変更点を探し、競合せず編集し、実コードを検証し、未達なら自律的に修正し続ける能力が必要である。
 
 Codex CLIとGrok Buildの固定sourceを追うと、品質は巨大な単一promptではなく、model loop、context compilation、typed tool、差分追跡、役割分離、検証、停滞検知、評価fixtureの組合せで作られている。
 
@@ -24,7 +24,7 @@ Codex CLIとGrok Buildの固定sourceを追うと、品質は巨大な単一prom
 ### 1.3 スコープ
 
 - 対象: model sampling loop、context、repository探索、編集、検証、長時間Task、memory、evaluation。
-- 対象: Codex/Grok由来の構造をvibe-editor3へadaptする判断。
+- 対象: Codex/Grok由来の構造をSprint Coderへadaptする判断。
 - 対象外: 独自foundation modelの学習、RLHF、provider内部reasoning、cloud fleet運用。
 - 対象外: Team Canvasのmotion詳細。Canvasは本設計の状態を表示するprojectionとして扱う。
 
@@ -238,7 +238,7 @@ file read結果へ`FileRevisionToken { identity, contentHash, mtimeHint, size }`
 - Anchored range edit: large fileの局所変更とconcurrent drift検出に使用。
 - Whole-file write: new/generated small fileだけ。既存large fileではapprovalまたは拒否。
 
-Grokのhashline方式は有用だが、短いline hashだけをsecurity/correctness boundaryにしない。vibe-editor3はfile content hashをprimary revision、line anchorをergonomic locatorとして組み合わせる。
+Grokのhashline方式は有用だが、短いline hashだけをsecurity/correctness boundaryにしない。Sprint Coderはfile content hashをprimary revision、line anchorをergonomic locatorとして組み合わせる。
 
 ### 7.3 Apply algorithm
 
@@ -473,7 +473,7 @@ Explorer/Implementerは同一Thread内のStepRole、独立Verifierだけが別Ag
 | `packages/contracts/src/agent/` | 新規 | 高 | Step/evidence/protocol schema |
 | `tests/agent-corpus/` | 新規 | 高 | regression cases/runner |
 
-現時点のvibe-editor3は設計文書のみでGit repositoryも未初期化のため、`git log -5`による実装file現状検証はN/A。参照sourceは固定commitでclone済みで、本文のpathとsymbol実在を確認した。
+現時点のSprint Coderは設計文書のみでGit repositoryも未初期化のため、`git log -5`による実装file現状検証はN/A。参照sourceは固定commitでclone済みで、本文のpathとsymbol実在を確認した。
 
 ## 付録A: 採用しないもの
 

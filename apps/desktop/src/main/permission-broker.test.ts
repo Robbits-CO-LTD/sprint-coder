@@ -8,7 +8,7 @@ import {
   type PermissionEvaluation,
   type PermissionRequest,
   type Capability,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import { PermissionBroker } from './permission-broker';
 import type { PermissionPolicyRecord } from './persistence';
 import {
@@ -28,7 +28,7 @@ let request: PermissionRequest & {
 let ceiling: CapabilityCeiling;
 
 beforeAll(async () => {
-  testRoot = await mkdtemp(join(tmpdir(), 'vibe-main-permission-'));
+  testRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-main-permission-'));
   selectedWorkspacePath = join(testRoot, 'workspace');
   await mkdir(join(selectedWorkspacePath, 'src'), { recursive: true });
   await writeFile(join(selectedWorkspacePath, 'src', 'app.ts'), 'safe');

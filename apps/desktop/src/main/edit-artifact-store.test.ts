@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 async function fixture(quotaBytes = 1024) {
-  const root = await mkdtemp(join(tmpdir(), 'vibe-edit-artifact-'));
+  const root = await mkdtemp(join(tmpdir(), 'sprint-coder-edit-artifact-'));
   roots.push(root);
   const store = await EditArtifactStore.open({ rootPath: root, quotaBytes });
   return { root, store };

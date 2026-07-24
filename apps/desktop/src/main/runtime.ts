@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { TurnEvent, TurnStage } from '@vibe/contracts';
+import type { TurnEvent, TurnStage } from '@sprint-coder/contracts';
 import type { PersistenceClient } from './persistence';
 import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
@@ -10,6 +10,8 @@ import {
 } from './intelligence-loop';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { ToolAuthorizationDeniedError, type ToolAuthorizer } from './tool-broker';
+import type { TeamCoordinator } from './team-coordinator';
+import { createTeamScenarioSampler, isTeamScenarioInput } from './team-tools';
 
 type Publish = (event: TurnEvent) => void;
 type Serialize = <T>(taskId: string, action: () => T) => Promise<T>;
@@ -41,6 +43,7 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
       | 'appendCommandOutputBatch'
       | 'completeCommand'
       | 'getCommand'
+      | 'getTeamByTask'
     >
   >;
 
@@ -59,6 +62,10 @@ export class MockRuntimeAdapter {
     private readonly prepareContext?: PrepareContext,
     authorizer?: ToolAuthorizer,
     private readonly contextAccepted?: ContextAccepted,
+    // Leader team tools (Slice 5.2): only wired when the caller supplies a TeamCoordinator (see
+    // IpcRouter) — real Codex/Claude adapters never construct MockRuntimeAdapter, so this stays
+    // isolated to the mock/intelligence-loop path.
+    private readonly teamCoordinator?: TeamCoordinator,
   ) {
     this.toolBroker = createDefaultToolBroker(
       (taskId) => this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0,
@@ -77,6 +84,7 @@ export class MockRuntimeAdapter {
         >,
         publish: this.publish,
       },
+      this.teamCoordinator === undefined ? undefined : { coordinator: this.teamCoordinator },
     );
   }
 
@@ -150,6 +158,12 @@ export class MockRuntimeAdapter {
       const toolContext = { taskId, turnId, workspaceId, policyEpoch } as const;
       const toolCatalogSnapshot = startMockTurnCatalog(this.toolBroker, toolContext);
       const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
+      // Team mode is active when a Team already exists for this Task (created via teams.promote
+      // or a prior hire) or the input carries the fixture trigger — only meaningful when a
+      // TeamCoordinator was actually wired in, since otherwise the team_* tools aren't registered.
+      const teamScenarioActive =
+        this.teamCoordinator !== undefined &&
+        ((this.persistence.getTeamByTask?.(taskId) ?? null) !== null || isTeamScenarioInput(input));
       const loop = await runIntelligenceLoop({
         taskId,
         turnId,
@@ -160,7 +174,9 @@ export class MockRuntimeAdapter {
         workspaceRevision: `untracked:${digestCanonical({ workspacePath })}`,
         contractRevision,
         toolCatalogSnapshot,
-        sample: createDeterministicMockSampler(input, buildReply(input)),
+        sample: teamScenarioActive
+          ? createTeamScenarioSampler(input)
+          : createDeterministicMockSampler(input, buildReply(input)),
         executeTool: async (call) => {
           let result: unknown;
           try {

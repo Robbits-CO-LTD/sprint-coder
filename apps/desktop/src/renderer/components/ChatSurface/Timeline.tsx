@@ -1,5 +1,9 @@
 import { useEffect, useRef } from 'react';
-import type { ApprovalSummary, AutoPermissionDecision, ChatMessage } from '../../types/vibe';
+import type {
+  ApprovalSummary,
+  AutoPermissionDecision,
+  ChatMessage,
+} from '../../types/sprint-coder';
 import { useAppStore } from '../../store/appStore';
 import { MessageBubble } from '../MessageBubble';
 import { RunCard } from '../RunCard';

@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'vibe-file-revision-'));
+  const root = await mkdtemp(join(tmpdir(), 'sprint-coder-file-revision-'));
   roots.push(root);
   const workspace = join(root, 'workspace');
   const outside = join(root, 'outside');

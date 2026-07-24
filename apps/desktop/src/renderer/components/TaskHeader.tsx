@@ -1,12 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { WorkspaceChip } from './WorkspaceChip';
-import type { TaskSummary } from '../types/vibe';
+import { Hexagon, MoreHorizontal, Target } from './icons';
+import type { TaskSummary } from '../types/sprint-coder';
 
-export function TaskHeader({ task }: { task: TaskSummary }) {
+export function TaskHeader({
+  task,
+  onToggleTeam,
+  inert,
+}: {
+  task: TaskSummary;
+  /** Enters Team mode via App's morph orchestration (SurfaceLayer/TeamCanvas, Slice 6.2) instead
+   * of flipping the store directly — see App.tsx's `requestEnterTeam`. */
+  onToggleTeam: () => void;
+  inert?: boolean;
+}) {
   const renameTask = useAppStore((s) => s.renameTask);
   const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
-  const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const teamViewOpen = useAppStore((s) => s.teamViewOpen);
   const teamBusy = useAppStore((s) => s.teamBusy);
   const [editing, setEditing] = useState(false);
@@ -44,7 +54,7 @@ export function TaskHeader({ task }: { task: TaskSummary }) {
   }
 
   return (
-    <header className="task-header">
+    <header className="task-header" inert={inert}>
       {editing ? (
         <input
           ref={inputRef}
@@ -95,10 +105,10 @@ export function TaskHeader({ task }: { task: TaskSummary }) {
         data-testid="team-toggle"
         disabled={teamBusy}
         aria-pressed={teamViewOpen}
-        title={teamViewOpen ? 'Chatへ戻る' : 'Team Listを開く'}
-        onClick={() => void toggleTeamView(task.id)}
+        title="Team Canvasを開く"
+        onClick={onToggleTeam}
       >
-        {teamViewOpen ? '← Chat' : '⬡ Team'}
+        <Hexagon size={14} /> Team
       </button>
       <button
         type="button"
@@ -106,8 +116,9 @@ export function TaskHeader({ task }: { task: TaskSummary }) {
         disabled
         title="今回のスコープ外です"
         aria-disabled="true"
+        aria-label="その他の操作"
       >
-        ⋯
+        <MoreHorizontal size={16} />
       </button>
     </header>
   );
@@ -122,7 +133,7 @@ function GoalChip({ task }: { task: TaskSummary }) {
   const [syncedGoal, setSyncedGoal] = useState(task.goal ?? '');
   const inputRef = useRef<HTMLInputElement>(null);
   const supported =
-    typeof window !== 'undefined' && typeof window.vibe?.tasks?.setGoal === 'function';
+    typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
 
   // Render-time adjustment instead of an effect, per react-hooks/set-state-in-effect.
   if (!editing && (task.goal ?? '') !== syncedGoal) {
@@ -153,7 +164,7 @@ function GoalChip({ task }: { task: TaskSummary }) {
   if (!supported) {
     return (
       <span className="goal-chip" title="Goal編集は今回のバックエンドでは未対応です">
-        🎯 Goal: {task.goal ?? '未設定'}
+        <Target size={13} /> Goal: {task.goal ?? '未設定'}
       </span>
     );
   }
@@ -188,7 +199,7 @@ function GoalChip({ task }: { task: TaskSummary }) {
       onClick={() => setEditing(true)}
       title="クリックしてGoalを編集"
     >
-      🎯 Goal: {task.goal ?? '未設定'}
+      <Target size={13} /> Goal: {task.goal ?? '未設定'}
     </button>
   );
 }

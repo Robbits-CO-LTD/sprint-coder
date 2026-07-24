@@ -60,7 +60,7 @@ function packageIfStale(): void {
     return;
   }
 
-  console.log('[e2e globalSetup] Packaging vibe-editor3 (electron-forge package)...');
+  console.log('[e2e globalSetup] Packaging sprint-coder (electron-forge package)...');
   execSync('npx electron-forge package', {
     cwd: DESKTOP_ROOT,
     stdio: 'inherit',
@@ -72,7 +72,7 @@ function packageIfStale(): void {
       `electron-forge package reported success but ${OUT_DIR} was not created. This has been ` +
         "confirmed to be an environment/toolchain bug (@electron/packager's zip extraction of " +
         'the Electron binary hangs deterministically on the electron.icns entry, independent ' +
-        'of Node version) rather than an application bug. Use VIBE_E2E_MODE=dev to run E2E ' +
+        'of Node version) rather than an application bug. Use SPRINT_CODER_E2E_MODE=dev to run E2E ' +
         'against `npm start` instead.',
     );
   }

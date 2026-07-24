@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
@@ -26,7 +26,7 @@ import {
   type TurnEvent,
   type TurnSnapshot,
   type TurnStage,
-} from '@vibe/contracts';
+} from '@sprint-coder/contracts';
 import {
   capabilities,
   createSessionGrant,
@@ -80,7 +80,7 @@ import {
   type TeamMessageState,
   type TeamState,
   type WorkerState,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import {
   ContextLedger,
   defaultContextUsage,
@@ -1458,7 +1458,123 @@ const migrations = [
       UPDATE teams SET budget_json = '${TEAM_BUDGET_STRUCTURED_SEED}' WHERE budget_json = '{}';
     `,
   },
+  {
+    version: 29,
+    checksum: 'canvas-views-v29-camera-node-layout',
+    sql: `
+      CREATE TABLE canvas_views (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        camera_x REAL NOT NULL,
+        camera_y REAL NOT NULL,
+        camera_scale REAL NOT NULL CHECK (camera_scale > 0),
+        node_positions_json TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `,
+  },
+  {
+    version: 30,
+    checksum: 'runtime-v30-claude-kind-support',
+    // Widens the `runtime_kind` CHECK on `turns` and `agent_threads` to allow 'claude' (Slice
+    // 3.4). SQLite cannot ALTER a CHECK constraint in place, so both tables are rebuilt under a
+    // new name, repopulated, and the original dropped and replaced via RENAME (never the other
+    // way around: renaming the *original* table away first would make SQLite rewrite every
+    // other table's REFERENCES clause to point at the transient name, so a plain DROP+RENAME of
+    // the *new* table into the original name is the only order that leaves every foreign key —
+    // turn_events/background_completions/edit_sagas/agent_threads.active_turn_id -> turns, and
+    // tasks.primary_thread_id/team_workers.thread_id -> agent_threads — correctly resolved).
+    // Requires requiresForeignKeysOff (see runMigrations): with FK enforcement on, SQLite runs
+    // an implicit cascading DELETE before a DROP TABLE of a table other rows still reference.
+    sql: `
+      CREATE TABLE turns_v30 (
+        id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        user_message_id TEXT NOT NULL REFERENCES messages(id), assistant_message_id TEXT REFERENCES messages(id),
+        state TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        runtime_kind TEXT NOT NULL DEFAULT 'mock' CHECK (runtime_kind IN ('mock', 'codex', 'claude')),
+        model TEXT NOT NULL DEFAULT 'auto'
+      );
+      INSERT INTO turns_v30 (
+        id, task_id, user_message_id, assistant_message_id, state, seq, created_at, updated_at, runtime_kind, model
+      )
+        SELECT id, task_id, user_message_id, assistant_message_id, state, seq, created_at, updated_at, runtime_kind, model
+        FROM turns;
+      DROP TABLE turns;
+      ALTER TABLE turns_v30 RENAME TO turns;
+      CREATE INDEX turns_task_state_idx ON turns(task_id, state);
+
+      CREATE TABLE agent_threads_v30 (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('mock', 'codex', 'claude')),
+        state TEXT NOT NULL CHECK (state IN ('idle', 'active', 'paused', 'interrupted', 'completed')),
+        active_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO agent_threads_v30 (id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at)
+        SELECT id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
+        FROM agent_threads;
+      DROP TABLE agent_threads;
+      ALTER TABLE agent_threads_v30 RENAME TO agent_threads;
+      CREATE INDEX agent_threads_task_idx ON agent_threads(task_id, created_at, id);
+    `,
+    requiresForeignKeysOff: true,
+  },
 ];
+
+// Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
+// Bounds mirror packages/contracts's canvasCameraSchema/canvasNodePositionSchema (kept as literal
+// duplicates here, not imports, since main must reject bad data even if a caller bypasses the IPC
+// schema — e.g. direct PersistenceClient use in tests).
+export const CANVAS_MIN_SCALE = 0.18;
+export const CANVAS_MAX_SCALE = 1.6;
+export const CANVAS_WORLD_BOUND = 20_000;
+// Domain max is leader + 3 workers; headroom is left for future node kinds (kept in sync with
+// packages/contracts's canvasNodePositionsSchema).
+export const CANVAS_NODE_POSITIONS_MAX_ENTRIES = 32;
+// Defends against a pathological serialized payload independent of the entry-count cap above.
+export const CANVAS_VIEW_MAX_SERIALIZED_BYTES = 16 * 1024;
+
+export type CanvasCameraRecord = { x: number; y: number; scale: number };
+export type CanvasViewRecord = {
+  taskId: string;
+  camera: CanvasCameraRecord;
+  nodePositions: Record<string, { x: number; y: number }>;
+  revision: number;
+  updatedAt: string;
+};
+
+function assertCanvasCoordinate(value: number, label: string): void {
+  if (!Number.isFinite(value) || Math.abs(value) > CANVAS_WORLD_BOUND)
+    throw new InvalidCanvasViewError(`${label} is out of the allowed world range`);
+}
+
+export function validateCanvasCamera(camera: CanvasCameraRecord): void {
+  assertCanvasCoordinate(camera.x, 'camera.x');
+  assertCanvasCoordinate(camera.y, 'camera.y');
+  if (
+    !Number.isFinite(camera.scale) ||
+    camera.scale < CANVAS_MIN_SCALE ||
+    camera.scale > CANVAS_MAX_SCALE
+  )
+    throw new InvalidCanvasViewError('camera.scale is out of the allowed zoom range');
+}
+
+export function validateCanvasNodePositions(
+  positions: Readonly<Record<string, { x: number; y: number }>>,
+): void {
+  if (Object.keys(positions).length > CANVAS_NODE_POSITIONS_MAX_ENTRIES)
+    throw new InvalidCanvasViewError(
+      `nodePositions cannot have more than ${CANVAS_NODE_POSITIONS_MAX_ENTRIES} entries`,
+    );
+  for (const [agentId, position] of Object.entries(positions)) {
+    assertCanvasCoordinate(position.x, `nodePositions.${agentId}.x`);
+    assertCanvasCoordinate(position.y, `nodePositions.${agentId}.y`);
+  }
+}
 
 export type ApprovalRequestInput = {
   id: string;
@@ -1746,6 +1862,13 @@ export interface PersistenceClient {
   setGoal(taskId: string, goal: string): TaskSummary;
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
+  getCanvasView(taskId: string): CanvasViewRecord | null;
+  saveCanvasView(input: {
+    taskId: string;
+    camera: CanvasCameraRecord;
+    nodePositions: Readonly<Record<string, { x: number; y: number }>>;
+    revision: number;
+  }): CanvasViewRecord;
   getWorkspace(taskId: string): string | null;
   setWorkspace(taskId: string, path: string): void;
   setWorkspaceBinding(
@@ -2042,10 +2165,72 @@ export interface PersistenceClient {
   close(): void;
 }
 
+// 'mock' has no model concept and is bucketed with Codex's key so pre-Claude installs keep
+// reading/writing the exact same 'runtime.codex.model' row they always have.
+function modelSettingsKey(kind: RuntimeKind): string {
+  return kind === 'claude' ? 'runtime.claude.model' : 'runtime.codex.model';
+}
+
+/** Outcome of the corruption probe that runs before the database is opened for real. */
+export type DatabaseRecoveryReport = {
+  corruptionDetected: boolean;
+  restoredFromBackup: boolean;
+  freshStart: boolean;
+  corruptFileMovedTo: string | null;
+};
+
+// Probe the database file before real use: a corrupt or non-database file is moved aside and,
+// when a pre-migration backup exists, the backup is restored in its place (blocking-subset item
+// "backup/restore"). Stale -wal/-shm files from the corrupt database must never be replayed
+// against the restored copy, so they are removed together with the corrupt file.
+function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport {
+  const report: DatabaseRecoveryReport = {
+    corruptionDetected: false,
+    restoredFromBackup: false,
+    freshStart: false,
+    corruptFileMovedTo: null,
+  };
+  if (!existsSync(databasePath)) return report;
+  const probe = (): boolean => {
+    let handle: Database.Database | null = null;
+    try {
+      handle = new Database(databasePath, { fileMustExist: true });
+      const rows = handle.pragma('quick_check') as { quick_check?: string }[] | string[];
+      const first = rows[0];
+      const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
+      return verdict === 'ok';
+    } catch {
+      return false;
+    } finally {
+      handle?.close();
+    }
+  };
+  if (probe()) return report;
+  report.corruptionDetected = true;
+  const movedTo = `${databasePath}.corrupt-${Date.now()}`;
+  renameSync(databasePath, movedTo);
+  report.corruptFileMovedTo = movedTo;
+  for (const suffix of ['-wal', '-shm'])
+    rmSync(`${databasePath}${suffix}`, { force: true });
+  const backupPath = `${databasePath}.pre-migration.bak`;
+  if (existsSync(backupPath)) {
+    copyFileSync(backupPath, databasePath);
+    if (probe()) {
+      report.restoredFromBackup = true;
+      return report;
+    }
+    // The backup itself is unusable — fall through to a fresh database.
+    rmSync(databasePath, { force: true });
+  }
+  report.freshStart = true;
+  return report;
+}
+
 export class SqlitePersistenceClient implements PersistenceClient {
   private readonly db: Database.Database;
   private readonly contextLedger: ContextLedger;
   private nativeMutationAuthorityDisabled = false;
+  readonly recoveryReport: DatabaseRecoveryReport;
 
   constructor(
     databasePath: string,
@@ -2062,6 +2247,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ) => void = () => undefined,
   ) {
     mkdirSync(dirname(databasePath), { recursive: true });
+    this.recoveryReport = recoverDatabaseIfCorrupt(databasePath);
     this.db = new Database(databasePath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
@@ -2095,12 +2281,35 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (checksum !== undefined && checksum !== migration.checksum)
         throw new Error('Migration checksum mismatch');
       if (checksum !== undefined) continue;
-      this.db.transaction(() => {
-        this.db.exec(migration.sql);
-        this.db
-          .prepare('INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)')
-          .run(migration.version, migration.checksum, new Date().toISOString());
-      })();
+      const applyMigration = (): void => {
+        this.db.transaction(() => {
+          this.db.exec(migration.sql);
+          this.db
+            .prepare(
+              'INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)',
+            )
+            .run(migration.version, migration.checksum, new Date().toISOString());
+        })();
+      };
+      // SQLite cannot change a CHECK constraint via ALTER TABLE, so widening one requires
+      // recreating the table (see migration v30). That rebuild must run with FK enforcement off
+      // (PRAGMA foreign_keys is a no-op inside an active transaction, so it must be toggled
+      // outside applyMigration's transaction) or dropping a table other rows still reference
+      // would cascade-delete them. foreign_key_check afterward guards against a migration
+      // silently leaving the database inconsistent.
+      if ('requiresForeignKeysOff' in migration && migration.requiresForeignKeysOff === true) {
+        this.db.pragma('foreign_keys = OFF');
+        try {
+          applyMigration();
+          const danglingForeignKeys = this.db.pragma('foreign_key_check');
+          if (Array.isArray(danglingForeignKeys) && danglingForeignKeys.length > 0)
+            throw new Error(`Migration ${migration.version} left dangling foreign keys`);
+        } finally {
+          this.db.pragma('foreign_keys = ON');
+        }
+      } else {
+        applyMigration();
+      }
     }
   }
 
@@ -3013,6 +3222,115 @@ export class SqlitePersistenceClient implements PersistenceClient {
     if (result.changes !== 1) throw new NotFoundError('Task not found');
   }
 
+  getCanvasView(taskId: string): CanvasViewRecord | null {
+    this.getTaskRow(taskId); // throws NotFoundError for an unknown Task
+    const row = this.db
+      .prepare(
+        `SELECT camera_x, camera_y, camera_scale, node_positions_json, revision, updated_at
+         FROM canvas_views WHERE task_id = ?`,
+      )
+      .get(taskId) as
+      | {
+          camera_x: number;
+          camera_y: number;
+          camera_scale: number;
+          node_positions_json: string;
+          revision: number;
+          updated_at: string;
+        }
+      | undefined;
+    if (row === undefined) return null;
+    // Drop node positions for agents that no longer exist for this Task (e.g. a Worker that was
+    // stopped and never rehired under the same id — ids are never reused) — a stale entry would
+    // otherwise persist forever without ever mapping back onto a visible node.
+    const allowedAgentIds = new Set(
+      (
+        this.db.prepare('SELECT id FROM agents WHERE task_id = ?').all(taskId) as { id: string }[]
+      ).map((agent) => agent.id),
+    );
+    const rawPositions = JSON.parse(row.node_positions_json) as Record<
+      string,
+      { x: number; y: number }
+    >;
+    const nodePositions: Record<string, { x: number; y: number }> = {};
+    for (const [agentId, position] of Object.entries(rawPositions)) {
+      if (allowedAgentIds.has(agentId)) nodePositions[agentId] = position;
+    }
+    return {
+      taskId,
+      camera: { x: row.camera_x, y: row.camera_y, scale: row.camera_scale },
+      nodePositions,
+      revision: row.revision,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  saveCanvasView(input: {
+    taskId: string;
+    camera: CanvasCameraRecord;
+    nodePositions: Readonly<Record<string, { x: number; y: number }>>;
+    revision: number;
+  }): CanvasViewRecord {
+    validateCanvasCamera(input.camera);
+    validateCanvasNodePositions(input.nodePositions);
+    const nodePositionsJson = JSON.stringify(input.nodePositions);
+    if (Buffer.byteLength(nodePositionsJson, 'utf8') > CANVAS_VIEW_MAX_SERIALIZED_BYTES)
+      throw new InvalidCanvasViewError(
+        `nodePositions serialized payload exceeds ${CANVAS_VIEW_MAX_SERIALIZED_BYTES} bytes`,
+      );
+    return this.db.transaction(() => {
+      this.getTaskRow(input.taskId); // throws NotFoundError for an unknown Task
+      const now = new Date().toISOString();
+      const current = this.db
+        .prepare('SELECT revision FROM canvas_views WHERE task_id = ?')
+        .get(input.taskId) as { revision: number } | undefined;
+      if (current === undefined) {
+        // Optimistic concurrency: creating a fresh row is only valid if the caller believed there
+        // was nothing saved yet (revision 0).
+        if (input.revision !== 0) throw new CanvasViewConflictError();
+        this.db
+          .prepare(
+            `INSERT INTO canvas_views(
+               task_id, camera_x, camera_y, camera_scale, node_positions_json, revision,
+               created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+          )
+          .run(
+            input.taskId,
+            input.camera.x,
+            input.camera.y,
+            input.camera.scale,
+            nodePositionsJson,
+            now,
+            now,
+          );
+      } else {
+        if (current.revision !== input.revision) throw new CanvasViewConflictError();
+        this.db
+          .prepare(
+            `UPDATE canvas_views
+             SET camera_x = ?, camera_y = ?, camera_scale = ?, node_positions_json = ?,
+                 revision = revision + 1, updated_at = ?
+             WHERE task_id = ? AND revision = ?`,
+          )
+          .run(
+            input.camera.x,
+            input.camera.y,
+            input.camera.scale,
+            nodePositionsJson,
+            now,
+            input.taskId,
+            input.revision,
+          );
+      }
+      // Re-read rather than hand-assembling the result: keeps the unknown-agent-id filtering
+      // (getCanvasView) as the single source of truth for what a caller ever sees.
+      const saved = this.getCanvasView(input.taskId);
+      if (saved === null) throw new Error('Canvas view vanished within its own write transaction');
+      return saved;
+    })();
+  }
+
   getWorkspace(taskId: string): string | null {
     return this.getTaskRow(taskId).workspace_path;
   }
@@ -3082,7 +3400,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
   getRuntime(): RuntimeKind {
     const row = this.db.prepare("SELECT value FROM settings WHERE key = 'runtime.kind'").get() as
       { value: string } | undefined;
-    return row?.value === 'codex' ? 'codex' : 'mock';
+    if (row?.value === 'codex') return 'codex';
+    if (row?.value === 'claude') return 'claude';
+    return 'mock';
   }
 
   setRuntime(kind: RuntimeKind): void {
@@ -3094,20 +3414,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(kind, new Date().toISOString());
   }
 
+  // The selected model is scoped per Runtime kind (its settings key), so switching between
+  // Codex and Claude does not clobber the other's remembered preference. 'mock' has no model
+  // concept and shares Codex's key, matching pre-Claude behavior exactly.
   getModel(): string {
     const row = this.db
-      .prepare("SELECT value FROM settings WHERE key = 'runtime.codex.model'")
-      .get() as { value: string } | undefined;
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(modelSettingsKey(this.getRuntime())) as { value: string } | undefined;
     return row?.value ?? 'auto';
   }
 
   setModel(model: string): void {
     this.db
       .prepare(
-        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.codex.model', ?, ?)
+        `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
-      .run(model, new Date().toISOString());
+      .run(modelSettingsKey(this.getRuntime()), model, new Date().toISOString());
   }
 
   getBackgroundEpochs(taskId: string): BackgroundEpochs {
@@ -6808,6 +7131,8 @@ export class SteerStaleError extends Error {}
 export class OperationConflictError extends Error {}
 export class OperationInProgressError extends Error {}
 export class TeamConflictError extends Error {}
+export class InvalidCanvasViewError extends Error {}
+export class CanvasViewConflictError extends Error {}
 export class AcceptanceEvidenceMissingError extends Error {
   constructor(readonly openCriterionIds: readonly string[]) {
     super(`Acceptance evidence is missing: ${openCriterionIds.join(', ')}`);

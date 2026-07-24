@@ -1,4 +1,5 @@
 import { CodexRuntimeAdapter, probeCodex } from './codex-adapter';
+import { ClaudeRuntimeAdapter, probeClaude } from './claude-adapter';
 import {
   RUNTIME_PROTOCOL_VERSION,
   isMainToRuntimeEnvelope,
@@ -6,8 +7,12 @@ import {
 } from './protocol';
 import { requireParentPort } from './parent-port';
 
+// A single Runtime Host UtilityProcess hosts exactly one adapter kind, selected at spawn time by
+// Main (see RuntimeHostClient) via --runtime-kind. Defaults to 'codex' so any pre-existing spawn
+// call site that omits the flag keeps its original behavior.
+const runtimeKind = readRuntimeKind();
 const runtimeInstanceId = readRuntimeInstanceId();
-const adapter = new CodexRuntimeAdapter();
+const adapter = runtimeKind === 'claude' ? new ClaudeRuntimeAdapter() : new CodexRuntimeAdapter();
 const sequences = new Map<string, number>();
 const parentPort = requireParentPort(process);
 
@@ -35,12 +40,24 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
   }
 });
 
-void probeCodex().then((probe) =>
+void (runtimeKind === 'claude' ? probeClaude() : probeCodex()).then((probe) =>
   send('', '', 'probe', {
     type: 'hello',
-    codexAvailable: probe.available,
-    codexModels: probe.models,
-    ...(probe.version === undefined ? {} : { codexVersion: probe.version }),
+    ...(runtimeKind === 'claude'
+      ? {
+          codexAvailable: false,
+          codexModels: [],
+          claudeAvailable: probe.available,
+          claudeModels: probe.models,
+          ...(probe.version === undefined ? {} : { claudeVersion: probe.version }),
+        }
+      : {
+          codexAvailable: probe.available,
+          codexModels: probe.models,
+          ...(probe.version === undefined ? {} : { codexVersion: probe.version }),
+          claudeAvailable: false,
+          claudeModels: [],
+        }),
   }),
 );
 
@@ -53,7 +70,13 @@ function send(
   payload:
     | Pick<
         Extract<RuntimeToMainEnvelope, { type: 'hello' }>,
-        'type' | 'codexAvailable' | 'codexVersion' | 'codexModels'
+        | 'type'
+        | 'codexAvailable'
+        | 'codexVersion'
+        | 'codexModels'
+        | 'claudeAvailable'
+        | 'claudeVersion'
+        | 'claudeModels'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'event' }>, 'type' | 'event'>
     | Pick<
@@ -81,4 +104,10 @@ function readRuntimeInstanceId(): string {
   const value = index < 0 ? undefined : process.argv[index + 1];
   if (value === undefined || value.length === 0) throw new Error('Missing runtime instance id');
   return value;
+}
+
+function readRuntimeKind(): 'codex' | 'claude' {
+  const index = process.argv.indexOf('--runtime-kind');
+  const value = index < 0 ? undefined : process.argv[index + 1];
+  return value === 'claude' ? 'claude' : 'codex';
 }

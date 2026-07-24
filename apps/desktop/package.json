@@ -1,5 +1,6 @@
 {
-  "name": "@vibe/desktop",
+  "name": "@sprint-coder/desktop",
+  "productName": "Sprint Coder",
   "version": "0.1.0",
   "private": true,
   "main": ".vite/build/index.js",
@@ -9,8 +10,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@vibe/contracts": "*",
-    "@vibe/domain": "*",
+    "@sprint-coder/contracts": "*",
+    "@sprint-coder/domain": "*",
     "better-sqlite3": "^12.2.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1"

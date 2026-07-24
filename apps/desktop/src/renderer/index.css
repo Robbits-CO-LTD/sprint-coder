@@ -1,4 +1,4 @@
-/* vibe-editor3 renderer — Chat Alpha
+/* Sprint Coder renderer — Chat Alpha
    Visual baseline: demo/index.html (§13 UI system). Chat layout only; Team/Canvas out of scope. */
 
 :root {
@@ -27,151 +27,11 @@
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-.team-list-view {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 24px;
-  background: var(--bg-primary);
-}
-
-.team-list-toolbar,
-.team-worker-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.team-list-toolbar h2,
-.team-list-toolbar p,
-.team-worker-card h3 {
-  margin: 0;
-}
-
-.team-hire-form,
-.team-worker-card,
-.team-message-timeline {
-  margin-top: 18px;
-  padding: 16px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
-  background: var(--bg-elevated);
-}
-
-.team-hire-form {
-  display: grid;
-  grid-template-columns: minmax(140px, 0.5fr) minmax(240px, 1fr) auto;
-  align-items: end;
-  gap: 12px;
-}
-
-.team-hire-form h3 {
-  grid-column: 1 / -1;
-  margin: 0;
-}
-
-.team-hire-form label,
-.team-message-form {
-  display: grid;
-  gap: 6px;
-}
-
-.team-hire-form input,
-.team-hire-form textarea,
-.team-message-form textarea {
-  width: 100%;
-  box-sizing: border-box;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 8px 10px;
-  color: var(--text-primary);
-  background: var(--bg-primary);
-  font: inherit;
-}
-
-.team-worker-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 14px;
-}
-
-.team-worker-card:focus,
-.team-list-toolbar:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
-}
-
-.team-status {
-  display: inline-block;
-  margin-top: 4px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--bg-primary);
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.team-current-task {
-  color: var(--text-secondary);
-}
-
-.team-usage {
-  display: flex;
-  gap: 18px;
-}
-
-.team-usage div {
-  display: grid;
-  gap: 2px;
-}
-
-.team-usage dt {
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-
-.team-usage dd {
-  margin: 0;
-}
-
-.team-message-form {
-  margin-top: 14px;
-}
-
-.team-message-timeline ol {
-  display: grid;
-  gap: 12px;
-  padding-left: 22px;
-}
-
-.team-message-timeline li p {
-  margin: 6px 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.team-message-timeline button {
-  border: 0;
-  padding: 0;
-  color: var(--accent);
-  background: transparent;
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.danger-btn {
-  color: var(--danger, #d45a67);
-}
-
-@media (max-width: 760px) {
-  .team-list-view {
-    padding: 16px;
-  }
-
-  .team-hire-form {
-    grid-template-columns: 1fr;
-  }
+/* Inline SVG icon set (see components/icons.tsx). Nudged down 1px so the stroke's optical
+   center lines up with adjacent text baselines, same convention everywhere it's used. */
+.icon {
+  flex: none;
+  vertical-align: -2px;
 }
 
 *,
@@ -246,6 +106,7 @@ button {
 .app-shell {
   display: flex;
   height: 100%;
+  position: relative;
 }
 
 .app-shell--unavailable {
@@ -286,6 +147,15 @@ button {
   flex-direction: column;
   padding: 14px 10px;
   gap: 4px;
+  transition:
+    transform var(--t-standard) var(--ease-ui),
+    opacity var(--t-standard) var(--ease-ui);
+}
+/* Team mode: sidebar slides out and fades (demo/index.html lines 46-49). */
+.app-shell.team-mode .sidebar {
+  transform: translateX(-40px);
+  opacity: 0;
+  pointer-events: none;
 }
 
 .sb-new {
@@ -466,6 +336,26 @@ button {
   gap: 12px;
   padding: 0 20px;
   border-bottom: 1px solid var(--border-subtle);
+  transition:
+    transform var(--t-standard) var(--ease-ui),
+    opacity var(--t-standard) var(--ease-ui);
+}
+/* Team mode: task header fades up out of view (demo/index.html lines 75-77) while the Leader
+   node's own header (SurfaceHeader, variant="node") takes over inside the Canvas. */
+.app-shell.team-mode .task-header {
+  transform: translateY(-16px);
+  opacity: 0;
+  pointer-events: none;
+}
+/* SurfaceLayer anchors/host (Slice 6.2, ADR-002): transparent wrappers so re-parenting the
+   persistent ChatSurface host between the Chat column and the Team Canvas Leader slot is a pure
+   DOM-tree move with zero visual side effects — their children participate directly in whichever
+   real layout context (`.main`'s flex column, or `.team-world-nodes`' absolute positioning)
+   surrounds them, exactly as ChatSurface itself did before SurfaceLayer existed. */
+.surface-anchor,
+.leader-anchor,
+.surface-host {
+  display: contents;
 }
 .task-title {
   font-weight: 600;
@@ -475,6 +365,9 @@ button {
   text-overflow: ellipsis;
 }
 .goal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   color: var(--text-secondary);
   padding: 3px 10px;
@@ -522,6 +415,26 @@ button {
   color: var(--text-primary);
   border-color: rgba(120, 169, 194, 0.5);
 }
+/* Post-first-turn nudge toward Team mode (demo/index.html lines 91-100). Not currently wired to
+   a trigger in the real app; ported so a future "hint after first turn" affordance is a
+   class-toggle away. */
+.team-btn.hinted {
+  color: var(--accent-cool);
+  border-color: rgba(120, 169, 194, 0.55);
+  box-shadow: 0 0 0 0 rgba(120, 169, 194, 0.35);
+  animation: hintPulse 2.2s var(--ease-ui) infinite;
+}
+@keyframes hintPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(120, 169, 194, 0.3);
+  }
+  60% {
+    box-shadow: 0 0 0 9px rgba(120, 169, 194, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(120, 169, 194, 0);
+  }
+}
 .icon-btn {
   width: 30px;
   height: 30px;
@@ -546,11 +459,12 @@ button {
 }
 
 .surface-header {
-  display: none; /* shown only in the future Canvas/Team node presentation */
+  display: none; /* shown only in the Canvas/Team Leader node presentation, see .surface--node */
   align-items: center;
   gap: 10px;
   padding: 12px 18px;
   border-bottom: 1px solid var(--border-subtle);
+  position: relative;
 }
 .surface-header .avatar {
   width: 28px;
@@ -564,18 +478,65 @@ button {
   background: linear-gradient(135deg, rgba(227, 154, 98, 0.9), rgba(213, 168, 91, 0.8));
   color: #1b1a17;
 }
-.surface-header .role-line {
+/* Global (demo/index.html lines 169-171): shared by the Leader's SurfaceHeader *and* Worker
+   cards' `.w-head` (WorkerNode uses the identical role-line/role-name/role-sub markup) — must not
+   be scoped under `.surface-header` or Worker cards render unstyled. */
+.role-line {
   display: flex;
   flex-direction: column;
+  flex: 1;
   line-height: 1.3;
+  min-width: 0;
 }
-.surface-header .role-name {
+.role-name {
   font-size: 13px;
   font-weight: 600;
 }
-.surface-header .role-sub {
+.role-sub {
   font-size: 11px;
   color: var(--text-secondary);
+}
+/* Worker heads are a single fixed row (mock: role-name + role-sub share one baseline row with
+   the status pill) — keep the objective from wrapping the head to two lines. */
+.w-head .role-sub {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.leader-chip {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-primary);
+  border: 1px solid rgba(227, 154, 98, 0.45);
+  padding: 2px 10px;
+  border-radius: 99px;
+}
+
+/* Leader node presentation (demo/index.html lines 147-163): the same ChatSurface, rendered as a
+   fixed-size floating card inside the Team Canvas world instead of filling the main column. */
+.surface--node {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 720px;
+  height: 620px;
+  flex: none;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.surface--node .surface-header {
+  display: flex;
+}
+.surface--node .timeline {
+  padding: 20px 20px 10px;
+}
+.surface--node .composer-zone {
+  padding: 6px 16px 14px;
+  background: var(--bg-surface);
 }
 
 .timeline-scroll {
@@ -630,6 +591,9 @@ button {
   margin-top: 6px;
 }
 .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12.5px;
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
@@ -1290,7 +1254,10 @@ button {
 }
 .composer-input::placeholder {
   color: var(--text-secondary);
-  opacity: 0.7;
+  /* 0.7 measured 3.88:1 on --bg-elevated (fails WCAG AA 4.5:1 for real text — see
+     apps/desktop/src/renderer/lib/contrast.test.ts). 0.85 clears it at ~5.04:1 while keeping the
+     placeholder visually dimmer than committed text. */
+  opacity: 0.85;
 }
 .composer-row {
   display: flex;
@@ -1591,6 +1558,648 @@ button {
 .turn-diff-kind-delete,
 .turn-diff-drift {
   color: var(--state-danger);
+}
+
+/* ---------- Team Canvas (demo/index.html §Team mode) ---------- */
+.team-canvas {
+  position: absolute;
+  inset: 0;
+  /* `clip` (not `hidden`): focusing an offscreen descendant (e.g. tabbing/focusing a Worker's
+     依頼 textarea, or Playwright's focus-before-fill) makes the browser programmatically scroll
+     the nearest scrollable ancestor into view. `hidden` is still scrollable via scrollTop/Left,
+     which would shift the whole world AND the header/controls overlays; `clip` forbids
+     programmatic scrolling entirely while still clipping overflow the same way. */
+  overflow: clip;
+  background: radial-gradient(rgba(255, 244, 224, 0.075) 1px, transparent 1.4px);
+  background-size: 26px 26px;
+  background-color: var(--bg-canvas);
+  /* Entry fade (demo/index.html line 107: `#canvasLayer` transitions opacity 220ms on
+     `.team-mode`). This component only ever mounts when entering Team mode (App.tsx renders it
+     conditionally, never toggles a class on an already-mounted instance), so an unconditional
+     mount animation is equivalent to — and simpler than — a class-toggle transition. */
+  animation: teamCanvasIn 220ms var(--ease-ui);
+}
+@keyframes teamCanvasIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+/* Reverse FLIP exit (Slice 6.2, docs §4.6 run backwards): played once the camera has already
+   flown back to the seed rect (see TeamCanvas's `playExitAnimation`), so this is the mirror of
+   `teamCanvasIn` — same 220ms, opposite direction. `forwards` holds opacity 0 until the component
+   unmounts (App only removes it from the tree after the host has been moved back to the main
+   anchor, see App.tsx's `requestExitTeam`). */
+.team-canvas.exiting {
+  animation: teamCanvasOut 220ms var(--ease-ui) forwards;
+}
+@keyframes teamCanvasOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.team-canvas-notice {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Empty-team guidance (FR-TEAM-03/06): sits just below the Leader node in world space while no
+   Worker exists yet — non-interactive, matches `.sys-notice`'s pill styling. */
+.team-empty-hint {
+  position: absolute;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.team-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.team-world-nodes {
+  position: relative;
+}
+.team-cables {
+  position: absolute;
+  left: -2000px;
+  top: -2000px;
+  width: 7000px;
+  height: 6000px;
+  overflow: visible;
+  pointer-events: none;
+}
+.cable-path {
+  fill: none;
+  stroke: var(--accent-cool);
+  stroke-width: 1.6;
+  opacity: 0.85;
+}
+.cable-path.afterglow {
+  transition: opacity 500ms var(--ease-ui);
+  opacity: 0;
+}
+.packet {
+  fill: var(--accent-primary);
+}
+/* Danger flash (Slice 6.4 item 4): delivery timed out/failed before ack — no glow, just a brief
+   danger-colored flash on the cable itself before the normal `.afterglow` fade removes it. */
+.cable-path.cable-danger {
+  stroke: var(--state-danger);
+  animation: cableDangerFlash 130ms ease-in-out 2;
+}
+@keyframes cableDangerFlash {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Reduced-motion textual cable event (Slice 6.4 item 6): bottom-center overlay, auto-dismissed by
+   TeamCanvas after ~3s. Visual-only substitute for the cable animation itself — the same text is
+   always mirrored to an aria-live region (`data-testid="team-cable-announcer"`) in every motion
+   mode, so this overlay is `aria-hidden`. */
+.team-cable-events {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+.team-cable-event {
+  white-space: nowrap;
+}
+
+/* Canvas controls (bottom-right). `pointer-events: none` on the container + `auto` back on the
+   actual controls (buttons/hint) — this is a flex column sized to its widest child, and the
+   keyboard-shortcut hint (Slice 6.1) is long enough to noticeably widen the box; without this,
+   the box's own "empty" area would sit on top of and intercept clicks meant for whatever Worker
+   card happens to be laid out underneath it (a real collision, not hypothetical — see the
+   Slice 6.1 task notes). */
+.team-canvas-controls {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  max-width: min(360px, calc(100% - 36px));
+  pointer-events: none;
+}
+.cc-row {
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+}
+.cc-btn {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.cc-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: rgba(255, 244, 224, 0.2);
+}
+.cc-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.cc-hint {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  opacity: 0.75;
+  background: rgba(18, 17, 15, 0.7);
+  padding: 4px 10px;
+  border-radius: 8px;
+  text-align: right;
+  pointer-events: auto;
+}
+
+/* Team header overlay (replaces the Task header while in Team mode) */
+.team-header-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 52px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+}
+.team-back-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+.team-back-btn:hover {
+  color: var(--text-primary);
+}
+.team-title {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.team-badge {
+  font-size: 11px;
+  color: var(--accent-cool);
+  border: 1px solid rgba(120, 169, 194, 0.4);
+  padding: 2px 9px;
+  border-radius: 99px;
+  flex: none;
+}
+.team-status-chip {
+  font-size: 11px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  padding: 2px 9px;
+  border-radius: 99px;
+  flex: none;
+}
+.team-stop-all-btn {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  padding: 5px 12px;
+  border-radius: 8px;
+  flex: none;
+}
+.team-stop-all-btn:hover:not(:disabled) {
+  color: var(--state-danger);
+  border-color: rgba(217, 120, 107, 0.5);
+}
+.team-stop-all-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Worker nodes (demo/index.html lines 346-388) */
+.worker {
+  position: absolute;
+  width: 480px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  /* Default opacity 1 (not 0): only a genuinely *new* spawn gets the `.spawn` class (see
+     TeamCanvas's baseline-seeding), and that animation's own `from{opacity:0}` keyframe covers
+     the fade-in. Defaulting the base class to 0 would leave every already-existing Worker card
+     invisible on re-entry into Team mode, since baseline cards never receive `.spawn`. */
+  opacity: 1;
+}
+.worker.spawn {
+  animation: workerIn var(--t-spatial) var(--ease-spatial) forwards;
+}
+@keyframes workerIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.94);
+    filter: blur(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+.w-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 15px;
+  border-bottom: 1px solid var(--border-subtle);
+  position: relative;
+}
+.w-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1b1a17;
+  flex: none;
+  background: linear-gradient(135deg, rgba(120, 169, 194, 0.9), rgba(121, 181, 138, 0.75));
+}
+.w-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  flex: none;
+}
+.w-status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+.w-status.ready .dot {
+  background: var(--state-success);
+}
+.w-status.busy .dot {
+  background: var(--accent-primary);
+  animation: runPulse 1.4s infinite;
+}
+.w-status.done .dot {
+  background: var(--state-success);
+}
+/* Receiving-node glow when a cable arrives (demo/index.html lines 371-376). Shared by Worker
+   heads (`.w-head`) and the Leader's own header (`.surface-header`). */
+.w-head.glow::after,
+.surface-header.glow::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  box-shadow: inset 0 0 0 1.5px rgba(120, 169, 194, 0.7);
+  animation: glowFade 700ms var(--ease-ui) forwards;
+  pointer-events: none;
+}
+@keyframes glowFade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.w-stop-btn {
+  font-size: 11px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  padding: 2px 9px;
+  border-radius: 8px;
+  margin-left: 8px;
+  flex: none;
+}
+.w-stop-btn:hover:not(:disabled) {
+  color: var(--state-danger);
+  border-color: rgba(217, 120, 107, 0.5);
+}
+.w-stop-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.w-body {
+  padding: 12px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-height: 96px;
+}
+.w-line {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  animation: msgIn var(--t-quick) var(--ease-ui);
+}
+.w-line.msg-in {
+  color: var(--text-primary);
+}
+.w-line .tag {
+  font-size: 10.5px;
+  color: var(--accent-cool);
+  margin-right: 7px;
+  border: 1px solid rgba(120, 169, 194, 0.35);
+  padding: 1px 7px;
+  border-radius: 99px;
+}
+.w-line .tag.out {
+  color: var(--accent-primary);
+  border-color: rgba(227, 154, 98, 0.4);
+}
+.w-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.w-run .spinner {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid rgba(227, 154, 98, 0.3);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- Canvas LOD (Slice 6.1, FR-CAN-04) ---------- */
+/* `[data-lod]` is written by useCamera's applyCam() only when the step actually changes (see
+   useCamera.ts's LOD1_MAX_SCALE/LOD2_MAX_SCALE) — pure CSS from here. lod1 hides the Worker
+   body (message lines/spinner) but keeps the head (role, status dot+label, objective sub-line);
+   lod2 additionally hides the objective sub-line and enlarges role-name/status so
+   状態・役割・進捗 stay legible per FR-CAN-04. Transitions are covered by the global
+   reduced-motion override below (instant, no animation). */
+.team-canvas[data-lod='1'] .worker .w-body,
+.team-canvas[data-lod='2'] .worker .w-body {
+  opacity: 0;
+  min-height: 0;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--t-quick) var(--ease-ui),
+    max-height var(--t-quick) var(--ease-ui);
+}
+.team-canvas[data-lod='2'] .worker .role-sub {
+  opacity: 0;
+  max-height: 0;
+  overflow: hidden;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+.team-canvas[data-lod='2'] .worker .role-name {
+  font-size: 15px;
+  font-weight: 700;
+}
+.team-canvas[data-lod='2'] .worker .w-status {
+  font-size: 13px;
+}
+.team-canvas[data-lod='2'] .worker .w-status .dot {
+  width: 9px;
+  height: 9px;
+}
+/* Leader timeline dimmed/simplified at both steps — header (SurfaceHeader) stays untouched. */
+.team-canvas[data-lod='1'] .surface--node .timeline,
+.team-canvas[data-lod='2'] .surface--node .timeline {
+  opacity: 0.4;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+.team-canvas[data-lod='2'] .surface--node .composer-zone {
+  opacity: 0.65;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+
+/* ---------- Canvas keyboard-navigation selection ring (Slice 6.1) ---------- */
+.worker.node-selected,
+.surface--node.node-selected {
+  outline: 2px solid var(--accent-cool);
+  outline-offset: 3px;
+}
+
+/* Worker node drag (Slice 6.1): a small lift while `.w-head` is being dragged. */
+.worker.dragging {
+  cursor: grabbing;
+  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.5);
+}
+.worker .w-head {
+  cursor: grab;
+}
+
+.team-view-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  padding: 5px 12px;
+  border-radius: 8px;
+  flex: none;
+}
+.team-view-toggle-btn:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 244, 224, 0.2);
+}
+
+/* ---------- Team List View (Slice 6.1 item 4: accessible list fallback) ---------- */
+/* Docked panel alongside the normal Chat layout (`.main`) — App only ever mounts this alongside
+   Chat-in-'main' layout, never in place of it (see App.tsx's `teamListActive`/`surfaceMode`). */
+.team-list-view {
+  width: 460px;
+  flex: none;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* Narrow effective viewports (e.g. 200% zoom, NFR-A11Y): the docked panel cannot fit beside
+   the chat column, so it overlays the right edge instead of forcing horizontal overflow. */
+@media (max-width: 900px) {
+  .team-list-view {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(460px, 100%);
+    z-index: 7;
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+    overflow-x: clip;
+  }
+  .tlv-header {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 52px;
+    padding: 8px 16px;
+  }
+}
+.tlv-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  height: 52px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.tlv-header .team-title {
+  flex: 1;
+  min-width: 0;
+}
+.tlv-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.tlv-workers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.tlv-worker {
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tlv-worker-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tlv-worker-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tlv-objective,
+.tlv-activity {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.tlv-usage {
+  display: flex;
+  gap: 16px;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+.tlv-usage div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tlv-usage dt {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.tlv-usage dd {
+  margin: 0;
+  color: var(--text-primary);
+}
+.tlv-recent {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tlv-timeline h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.tlv-timeline ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tlv-timeline li {
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 8px;
+  font-size: 12.5px;
+}
+.tlv-timeline li button {
+  color: var(--accent-cool);
+  font-size: 12px;
+  text-decoration: underline;
+}
+.tlv-timeline p {
+  margin: 4px 0;
+  color: var(--text-secondary);
+}
+.tlv-timeline small {
+  color: var(--text-secondary);
+  /* 0.75 measured only 4.53:1 on --bg-surface — technically over WCAG AA 4.5:1 but too close for
+     rounding/anti-aliasing safety (see contrast.test.ts). 0.85 gives ~5.44:1 headroom. */
+  opacity: 0.85;
+}
+.tlv-empty {
+  color: var(--text-secondary);
+  font-size: 12.5px;
 }
 
 @media (prefers-reduced-motion: reduce) {

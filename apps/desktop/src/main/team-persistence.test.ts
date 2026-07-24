@@ -6,14 +6,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { SqlitePersistenceClient } from './persistence';
 
 const cleanup: string[] = [];
-const runsWithElectronAbi = process.env.VIBE_ELECTRON_DB_TEST === '1';
+const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 
 afterEach(() => {
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 function createPersistence(): { persistence: SqlitePersistenceClient; path: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'vibe-team-persistence-'));
+  const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-persistence-'));
   cleanup.push(directory);
   const path = join(directory, 'test.sqlite3');
   return { persistence: new SqlitePersistenceClient(path), path };
@@ -162,7 +162,7 @@ else
         {
           cwd: process.cwd(),
           encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', VIBE_ELECTRON_DB_TEST: '1' },
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
           timeout: 30_000,
         },
       );

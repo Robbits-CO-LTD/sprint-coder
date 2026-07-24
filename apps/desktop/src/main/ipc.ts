@@ -17,6 +17,9 @@ import {
   approvalResolveInputSchema,
   approvalSummarySchema,
   autoPermissionDecisionSchema,
+  canvasViewSchema,
+  canvasViewSaveInputSchema,
+  canvasViewSaveResultSchema,
   chatMessageSchema,
   commandSummarySchema,
   commandOutputPageInputSchema,
@@ -62,13 +65,15 @@ import {
   type PublicError,
   type RuntimeKind,
   type TurnEvent,
-} from '@vibe/contracts';
+} from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
 import type { PersistenceClient, QueueTransition, StartedTurn } from './persistence';
 import { toApprovalAuditSummary, toApprovalSummary } from './persistence';
 import {
+  CanvasViewConflictError,
+  InvalidCanvasViewError,
   NotFoundError,
   OperationConflictError,
   OperationInProgressError,
@@ -81,13 +86,20 @@ import { PermissionBroker } from './permission-broker';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
-import { permissionRequestFingerprint, type Capability } from '@vibe/domain';
-import type { ExecutionSpec } from '@vibe/domain';
+import { permissionRequestFingerprint, type Capability } from '@sprint-coder/domain';
+import type { ExecutionSpec } from '@sprint-coder/domain';
 import { executionSpecPathGuard } from './command-runner';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
 import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lease';
-import { dispatchAfterCodexProviderEgress } from './provider-egress';
+import {
+  authorizeClaudeProviderEgress,
+  authorizeCodexProviderEgress,
+  dispatchAfterCodexProviderEgress,
+  dispatchAfterClaudeProviderEgress,
+} from './provider-egress';
 import { TeamCoordinator } from './team-coordinator';
+import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
+import { isTeamScenarioInput } from './team-tools';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -97,6 +109,8 @@ export class IpcRouter {
   private readonly mailbox = new TaskMailbox();
   private readonly mockRuntime: MockRuntimeAdapter;
   private readonly codexRuntime: RuntimeHostClient;
+  private readonly teamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
+  private readonly claudeRuntime: RuntimeHostClient;
   private readonly turnRuntimes = new Map<string, RuntimeKind>();
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
@@ -109,13 +123,50 @@ export class IpcRouter {
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
   ) {
-    this.teamCoordinator = new TeamCoordinator(persistence, undefined, (taskId, detail) => {
+    this.teamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
+      // Real worker execution is opt-in (costs provider usage and breaks determinism): the mock
+      // runtime borrows Claude only under SPRINT_CODER_REAL_WORKERS=1. Probe failures inside the
+      // worker runtime still fall back to the deterministic simulator.
+      selectRuntime: () =>
+        chooseWorkerRuntime(
+          this.persistence.getRuntime(),
+          this.persistence.getModel(),
+          process.env['SPRINT_CODER_REAL_WORKERS'] === '1',
+        ),
+      workspaceFor: (taskId) => this.persistence.getWorkspace(taskId),
+      catalogFor: (kind, workspacePath) =>
+        createEmptyToolCatalogSnapshot(
+          kind,
+          workspacePath === null ? null : digestCanonical({ workspacePath }),
+        ),
+      authorizeEgress: (kind, taskId, turnId, prompt) => {
+        const authorize =
+          kind === 'claude' ? authorizeClaudeProviderEgress : authorizeCodexProviderEgress;
+        return authorize({
+          broker: this.permissionBroker,
+          task: this.persistence.getTask(taskId),
+          turnId,
+          prompt,
+          context: { fragments: [], usageEvents: [], compacted: false },
+          now: new Date().toISOString(),
+        }).allowed;
+      },
+    });
+    this.teamCoordinator = new TeamCoordinator(
+      persistence,
+      this.teamWorkerRuntime,
+      (taskId, detail) => {
       if (this.teamSubscriptions.has(taskId) && !this.window.isDestroyed())
         this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
           taskId,
           event: teamEventSchema.parse({ type: 'updated', detail }),
         });
-    });
+      },
+      undefined,
+      // Real worker turns run a full provider CLI invocation; the deterministic 10s default is
+      // far too tight for that.
+      180_000,
+    );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
       now: () => new Date().toISOString(),
@@ -150,12 +201,25 @@ export class IpcRouter {
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
       (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
+      // Wires the Leader team tools (team_hire_worker/team_send_to_worker/team_wait_reports/
+      // team_stop_worker) into the mock intelligence loop — see team-tools.ts.
+      this.teamCoordinator,
     );
     this.codexRuntime = new RuntimeHostClient(
-      (taskId, turnId, runtimeEvent) => this.handleCodexEvent(taskId, turnId, runtimeEvent),
-      (taskId, turnId, error) => this.handleCodexFailure(taskId, turnId, error),
+      (taskId, turnId, runtimeEvent) =>
+        this.handleRuntimeEvent('codex', taskId, turnId, runtimeEvent),
+      (taskId, turnId, error) => this.handleRuntimeFailure('codex', taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
+      'codex',
+    );
+    this.claudeRuntime = new RuntimeHostClient(
+      (taskId, turnId, runtimeEvent) =>
+        this.handleRuntimeEvent('claude', taskId, turnId, runtimeEvent),
+      (taskId, turnId, error) => this.handleRuntimeFailure('claude', taskId, turnId, error),
+      (taskId, turnId) => this.prepareContext(taskId, turnId),
+      (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
+      'claude',
     );
   }
 
@@ -169,14 +233,22 @@ export class IpcRouter {
       emptyPayloadSchema,
       runtimeSettingsSchema,
       async () => {
-        const capability = await this.codexRuntime.probe();
+        const [codexCapability, claudeCapability] = await Promise.all([
+          this.codexRuntime.probe(),
+          this.claudeRuntime.probe(),
+        ]);
+        const kind = this.persistence.getRuntime();
+        const activeCapability = kind === 'claude' ? claudeCapability : codexCapability;
         const storedModel = this.persistence.getModel();
-        const model = capability.models.some(({ id }) => id === storedModel) ? storedModel : 'auto';
+        const model = activeCapability.models.some(({ id }) => id === storedModel)
+          ? storedModel
+          : 'auto';
         return {
-          kind: this.persistence.getRuntime(),
-          codexAvailable: capability.available,
+          kind,
+          codexAvailable: codexCapability.available,
+          claudeAvailable: claudeCapability.available,
           model,
-          models: capability.models,
+          models: activeCapability.models,
         };
       },
     );
@@ -185,9 +257,9 @@ export class IpcRouter {
       runtimeSetInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
-        if (input.kind === 'codex') {
-          const capability = await this.codexRuntime.probe();
-          if (!capability.available) throw new RuntimeUnavailableError();
+        if (input.kind === 'codex' || input.kind === 'claude') {
+          const capability = await this.runtimeFor(input.kind).probe();
+          if (!capability.available) throw new RuntimeUnavailableError(input.kind);
         }
         return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetRuntime, () =>
           this.persistence.setRuntime(input.kind),
@@ -199,9 +271,15 @@ export class IpcRouter {
       runtimeModelSetInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
-        const capability = await this.codexRuntime.probe();
-        if (!capability.available) throw new RuntimeUnavailableError();
-        if (!capability.models.some(({ id }) => id === input.model)) throw new InvalidModelError();
+        // Model membership is validated against the currently *active* Runtime kind's own
+        // capability list — Codex and Claude have disjoint model spaces (Main-side scoping per
+        // the ADR), so a Codex model id can never leak into a Claude turn or vice versa.
+        const kind = this.persistence.getRuntime();
+        const runtimeKind = kind === 'claude' ? 'claude' : 'codex';
+        const capability = await this.runtimeFor(runtimeKind).probe();
+        if (!capability.available) throw new RuntimeUnavailableError(runtimeKind);
+        if (!capability.models.some(({ id }) => id === input.model))
+          throw new InvalidModelError(runtimeKind);
         return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () =>
           this.persistence.setModel(input.model),
         ).value;
@@ -407,6 +485,11 @@ export class IpcRouter {
     this.handle(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), (input) =>
       this.teamCoordinator.get(input.taskId),
     );
+    // hireWorker/sendToWorker IPC handlers remain wired for the current UI, but the primary path
+    // is now the Leader's own tool use during its Turn (team_hire_worker/team_send_to_worker in
+    // team-tools.ts, going through this same TeamCoordinator) per FR-TEAM-06/13 — the user
+    // converses with the Leader, the Leader drives the Team. These handlers stay until the
+    // renderer is reworked to stop calling them directly.
     this.handleMutation(
       IPC_CHANNELS.teamsHireWorker,
       teamHireWorkerInputSchema,
@@ -436,6 +519,22 @@ export class IpcRouter {
       this.teamSubscriptions.delete(input.taskId);
       return undefined;
     });
+    this.handle(
+      IPC_CHANNELS.teamsGetCanvasView,
+      taskIdPayloadSchema,
+      canvasViewSchema.nullable(),
+      (input) => this.persistence.getCanvasView(input.taskId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsSaveCanvasView,
+      canvasViewSaveInputSchema,
+      canvasViewSaveResultSchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.teamsSaveCanvasView, () => {
+          const saved = this.persistence.saveCanvasView(input);
+          return { revision: saved.revision };
+        }).value,
+    );
 
     this.handle(IPC_CHANNELS.workspaceGet, taskIdPayloadSchema, workspaceSelectionSchema, (input) =>
       workspaceValue(this.persistence.getWorkspace(input.taskId)),
@@ -541,7 +640,8 @@ export class IpcRouter {
       turnSteerInputSchema,
       z.undefined(),
       (input, event, envelope) => {
-        if (this.turnRuntimes.get(input.expectedTurnId) === 'codex')
+        const activeRuntimeKind = this.turnRuntimes.get(input.expectedTurnId);
+        if (activeRuntimeKind === 'codex' || activeRuntimeKind === 'claude')
           throw new SteerUnsupportedError();
         const result = this.runMutation(
           event,
@@ -672,6 +772,8 @@ export class IpcRouter {
     this.approvalCoordinator.dispose();
     await this.mockRuntime.dispose();
     this.codexRuntime.dispose();
+    this.teamWorkerRuntime.dispose();
+    this.claudeRuntime.dispose();
   }
 
   private handle<TInput, TOutput>(
@@ -923,43 +1025,49 @@ export class IpcRouter {
 
   private startSelectedRuntime(started: StartedTurn): void {
     const taskId = started.event.taskId;
-    const kind = started.runtimeKind;
+    let kind = started.runtimeKind;
+    // Team intent always runs the leader orchestration (hire→dispatch→reports→synthesis): the
+    // production adapters are no-tools, so a real-runtime leader cannot drive a team yet — the
+    // deterministic leader orchestrates while Workers execute on the real runtime.
+    if (kind !== 'mock' && isTeamScenarioInput(started.text)) kind = 'mock';
     this.turnRuntimes.set(started.turnId, kind);
     if (kind === 'mock') {
       this.mockRuntime.start(taskId, started.turnId, started.text);
-    } else {
-      const workspacePath = this.persistence.getWorkspace(taskId);
-      const workspaceId =
-        workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
-      const context = this.prepareContext(taskId, started.turnId);
-      const egress = dispatchAfterCodexProviderEgress(
-        {
-          broker: this.permissionBroker,
-          task: this.persistence.getTask(taskId),
-          turnId: started.turnId,
-          prompt: started.text,
+      return;
+    }
+    const workspacePath = this.persistence.getWorkspace(taskId);
+    const workspaceId =
+      workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
+    const context = this.prepareContext(taskId, started.turnId);
+    const dispatchEgress =
+      kind === 'claude' ? dispatchAfterClaudeProviderEgress : dispatchAfterCodexProviderEgress;
+    const egress = dispatchEgress(
+      {
+        broker: this.permissionBroker,
+        task: this.persistence.getTask(taskId),
+        turnId: started.turnId,
+        prompt: started.text,
+        context,
+        now: new Date().toISOString(),
+      },
+      () =>
+        this.runtimeFor(kind).start(
+          taskId,
+          started.turnId,
+          started.text,
+          workspacePath,
+          started.model,
+          createEmptyToolCatalogSnapshot(kind, workspaceId),
           context,
-          now: new Date().toISOString(),
-        },
-        () =>
-          this.codexRuntime.start(
-            taskId,
-            started.turnId,
-            started.text,
-            workspacePath,
-            started.model,
-            createEmptyToolCatalogSnapshot('codex', workspaceId),
-            context,
-          ),
-      );
-      if (!egress.allowed) {
-        this.handleCodexFailure(taskId, started.turnId, {
-          code: 'RUNTIME_FAILED',
-          userMessage: 'Providerへの送信がpolicyで拒否されました。',
-          retryable: false,
-        });
-        return;
-      }
+        ),
+    );
+    if (!egress.allowed) {
+      this.handleRuntimeFailure(kind, taskId, started.turnId, {
+        code: 'RUNTIME_FAILED',
+        userMessage: 'Providerへの送信がpolicyで拒否されました。',
+        retryable: false,
+      });
+      return;
     }
   }
 
@@ -992,21 +1100,26 @@ export class IpcRouter {
       this.publish(event);
   }
 
+  private runtimeFor(kind: 'codex' | 'claude'): RuntimeHostClient {
+    return kind === 'claude' ? this.claudeRuntime : this.codexRuntime;
+  }
+
   private async cancelRuntime(taskId: string, turnId: string): Promise<void> {
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
-    if (kind === 'codex') this.codexRuntime.cancel(taskId, turnId);
+    if (kind === 'codex' || kind === 'claude') this.runtimeFor(kind).cancel(taskId, turnId);
     else await this.mockRuntime.cancel(turnId);
   }
 
-  private handleCodexEvent(
+  private handleRuntimeEvent(
+    kind: 'codex' | 'claude',
     taskId: string,
     turnId: string,
     runtimeEvent: RuntimeCanonicalEvent,
   ): void {
     void this.mailbox
       .run(taskId, () => {
-        if (this.turnRuntimes.get(turnId) !== 'codex') return;
+        if (this.turnRuntimes.get(turnId) !== kind) return;
         if (runtimeEvent.type === 'stage')
           this.publish(this.persistence.changeStage(taskId, turnId, runtimeEvent.stage));
         else if (runtimeEvent.type === 'delta')
@@ -1020,23 +1133,36 @@ export class IpcRouter {
           );
         else this.finishAndAdvance(taskId, turnId, 'completed');
       })
-      .catch(() => this.handleCodexFailure(taskId, turnId, runtimeProtocolError()));
+      .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
   }
 
-  private handleCodexFailure(taskId: string, turnId: string, _error: PublicError): void {
+  private handleRuntimeFailure(
+    kind: 'codex' | 'claude',
+    taskId: string,
+    turnId: string,
+    _error: PublicError,
+  ): void {
     void this.mailbox.run(taskId, () => {
-      if (this.turnRuntimes.get(turnId) !== 'codex') return;
+      if (this.turnRuntimes.get(turnId) !== kind) return;
       this.finishAndAdvance(taskId, turnId, 'failed');
     });
   }
 
   private validateSender(event: InvokeEvent): void {
     const frame = event.senderFrame;
-    if (event.sender.id !== this.window.webContents.id || frame === null || frame !== frame.top)
-      throw new SecurityError();
-    const url = new URL(frame.url);
-    const origin = url.protocol === 'app:' ? `${url.protocol}//${url.host}` : url.origin;
-    if (origin !== this.trustedRendererOrigin || (url.protocol === 'app:' && url.host !== 'bundle'))
+    if (
+      !isTrustedIpcSender(
+        {
+          senderId: event.sender.id,
+          isMainFrame: frame !== null && frame === frame.top,
+          frameUrl: frame === null ? null : frame.url,
+        },
+        {
+          expectedSenderId: this.window.webContents.id,
+          trustedRendererOrigin: this.trustedRendererOrigin,
+        },
+      )
+    )
       throw new SecurityError();
   }
 
@@ -1078,9 +1204,55 @@ export class TaskMailbox {
   }
 }
 
+// Pure, dependency-free sender/frame authenticity check (NFR-SEC-03): the invoking WebContents
+// must be this window's own top-level frame, and that frame's own URL/origin must exactly match
+// the one trusted origin the window was created with — never a substring match, never a child
+// iframe (a compromised/embedded third-party frame cannot forge the top window's identity), and
+// the `app://` custom protocol is further pinned to host `bundle` (the only page this app ever
+// serves at that scheme). Extracted as a pure function so it is unit-testable without spinning up
+// a real BrowserWindow/WebContents.
+export type IpcSenderCandidate = Readonly<{
+  senderId: number;
+  isMainFrame: boolean;
+  frameUrl: string | null;
+}>;
+export type TrustedIpcSender = Readonly<{
+  expectedSenderId: number;
+  trustedRendererOrigin: string;
+}>;
+
+export function isTrustedIpcSender(
+  candidate: IpcSenderCandidate,
+  expected: TrustedIpcSender,
+): boolean {
+  if (
+    candidate.senderId !== expected.expectedSenderId ||
+    !candidate.isMainFrame ||
+    candidate.frameUrl === null
+  )
+    return false;
+  let url: URL;
+  try {
+    url = new URL(candidate.frameUrl);
+  } catch {
+    return false;
+  }
+  const origin = url.protocol === 'app:' ? `${url.protocol}//${url.host}` : url.origin;
+  if (origin !== expected.trustedRendererOrigin) return false;
+  return url.protocol !== 'app:' || url.host === 'bundle';
+}
+
 class SecurityError extends Error {}
-class RuntimeUnavailableError extends Error {}
-class InvalidModelError extends Error {}
+class RuntimeUnavailableError extends Error {
+  constructor(readonly kind: 'codex' | 'claude' = 'codex') {
+    super();
+  }
+}
+class InvalidModelError extends Error {
+  constructor(readonly kind: 'codex' | 'claude' = 'codex') {
+    super();
+  }
+}
 class StalePermissionPolicyError extends Error {}
 class FullAccessConfirmationDeclinedError extends Error {}
 class SteerUnsupportedError extends Error {}
@@ -1169,19 +1341,25 @@ function toPublicError(error: unknown): PublicError {
   if (error instanceof SteerUnsupportedError)
     return {
       code: 'STEER_UNSUPPORTED',
-      userMessage: 'Codex runtimeは実行中の追加指示に対応していません。',
+      userMessage: '選択中のruntimeは実行中の追加指示に対応していません。',
       retryable: false,
     };
   if (error instanceof RuntimeUnavailableError)
     return {
       code: 'RUNTIME_UNAVAILABLE',
-      userMessage: 'Codex CLIが利用できないため、このruntimeを選択できません。',
+      userMessage:
+        error.kind === 'claude'
+          ? 'Claude CLIが利用できないため、このruntimeを選択できません。'
+          : 'Codex CLIが利用できないため、このruntimeを選択できません。',
       retryable: false,
     };
   if (error instanceof InvalidModelError)
     return {
       code: 'INVALID_REQUEST',
-      userMessage: '選択したモデルは現在のCodex CLIで利用できません。',
+      userMessage:
+        error.kind === 'claude'
+          ? '選択したモデルは現在のClaude CLIで利用できません。'
+          : '選択したモデルは現在のCodex CLIで利用できません。',
       retryable: false,
     };
   if (error instanceof StalePermissionPolicyError)
@@ -1207,6 +1385,18 @@ function toPublicError(error: unknown): PublicError {
       code: 'OPERATION_IN_PROGRESS',
       userMessage: '同じ操作を処理中です。',
       retryable: true,
+    };
+  if (error instanceof CanvasViewConflictError)
+    return {
+      code: 'OPERATION_CONFLICT',
+      userMessage: 'Canvasの配置が別の操作で更新されました。最新状態を読み直してください。',
+      retryable: true,
+    };
+  if (error instanceof InvalidCanvasViewError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: 'Canvasの配置に不正な値が含まれています。',
+      retryable: false,
     };
   if (error instanceof SecurityError)
     return { code: 'FORBIDDEN', userMessage: 'この操作は許可されていません。', retryable: false };

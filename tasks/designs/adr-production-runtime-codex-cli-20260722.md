@@ -6,7 +6,7 @@
 
 ## Context
 
-vibe-editor3 needs a first production runtime behind the Runtime Host boundary in §11. The Phase-4-and-earlier profile must be non-interactive, read-only, isolated from Main, and capable of emitting machine-readable streaming events.
+Sprint Coder needs a first production runtime behind the Runtime Host boundary in §11. The Phase-4-and-earlier profile must be non-interactive, read-only, isolated from Main, and capable of emitting machine-readable streaming events.
 
 ## Decision
 

@@ -17,7 +17,7 @@ import type {
   TurnDiff,
   TurnEvent,
   TurnStage,
-} from '../types/vibe';
+} from '../types/sprint-coder';
 import {
   appendCommandOutput,
   projectCommandTail,
@@ -41,6 +41,7 @@ export type WorkspaceInfo = { path: string; name: string };
 export type RuntimeState = {
   kind: RuntimeKind;
   codexAvailable: boolean;
+  claudeAvailable: boolean;
   model: string;
   models: CodexModelOption[];
 };
@@ -82,7 +83,7 @@ function finalStateLabel(status: TurnStatus): string {
 }
 
 type AppState = {
-  vibeAvailable: boolean;
+  sprintCoderAvailable: boolean;
   initialized: boolean;
   loadingTasks: boolean;
   loadingMessages: boolean;
@@ -137,8 +138,12 @@ type AppState = {
   setGoal(taskId: string, goal: string): Promise<void>;
   selectWorkspace(taskId: string): Promise<void>;
   toggleTeamView(taskId: string): Promise<void>;
-  hireTeamWorker(taskId: string, role: string, objective: string): Promise<void>;
-  sendTeamMessage(taskId: string, agentId: string, content: string): Promise<void>;
+  // No hireTeamWorker/sendTeamMessage actions here: the Leader hires and dispatches Workers on
+  // its own during its Turn (FR-TEAM-06/13, main/team-tools.ts) — the user only ever converses
+  // with the Leader through the normal Turn actions below. `window.sprintCoder.teams.hireWorker`/
+  // `sendToWorker` IPC still exist (main/ipc.ts keeps them wired), they're just never called from
+  // the renderer anymore. `stopTeamWorker`/`stopAllTeamWorkers` stay: FR-TEAM-13 keeps stop as a
+  // user override.
   stopTeamWorker(taskId: string, agentId: string): Promise<void>;
   stopAllTeamWorkers(taskId: string): Promise<void>;
   setDraft(taskId: string, text: string): void;
@@ -157,14 +162,14 @@ let currentSubscribedTaskId: string | null = null;
 const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function persistDraftDebounced(taskId: string, text: string) {
-  if (!window.vibe || typeof window.vibe.tasks.setDraft !== 'function') return;
+  if (!window.sprintCoder || typeof window.sprintCoder.tasks.setDraft !== 'function') return;
   const existing = draftSaveTimers.get(taskId);
   if (existing !== undefined) clearTimeout(existing);
   draftSaveTimers.set(
     taskId,
     setTimeout(() => {
       draftSaveTimers.delete(taskId);
-      void window.vibe?.tasks.setDraft(taskId, text).catch(() => undefined);
+      void window.sprintCoder?.tasks.setDraft(taskId, text).catch(() => undefined);
     }, 400),
   );
 }
@@ -176,10 +181,10 @@ async function restoreDraft(
   apply: (fn: (state: AppState) => Partial<AppState>) => void,
   get: () => AppState,
 ) {
-  if (!window.vibe || typeof window.vibe.tasks.getDraft !== 'function') return;
+  if (!window.sprintCoder || typeof window.sprintCoder.tasks.getDraft !== 'function') return;
   if (get().draftByTask[taskId] !== undefined) return;
   try {
-    const draft = await window.vibe.tasks.getDraft(taskId);
+    const draft = await window.sprintCoder.tasks.getDraft(taskId);
     if (get().selectedTaskId === taskId && get().draftByTask[taskId] === undefined) {
       apply((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: draft } }));
     }
@@ -196,10 +201,10 @@ async function loadWorkspace(
   apply: (fn: (state: AppState) => Partial<AppState>) => void,
   get: () => AppState,
 ) {
-  if (!window.vibe) return;
-  if (typeof window.vibe.workspace?.get === 'function') {
+  if (!window.sprintCoder) return;
+  if (typeof window.sprintCoder.workspace?.get === 'function') {
     try {
-      const workspace = await window.vibe.workspace.get(taskId);
+      const workspace = await window.sprintCoder.workspace.get(taskId);
       if (get().selectedTaskId !== taskId) return;
       apply((state) => ({ workspaceByTask: { ...state.workspaceByTask, [taskId]: workspace } }));
       return;
@@ -224,9 +229,9 @@ async function loadPermission(
   apply: (fn: (state: AppState) => Partial<AppState>) => void,
   get: () => AppState,
 ) {
-  if (!window.vibe || typeof window.vibe.permissions?.get !== 'function') return;
+  if (!window.sprintCoder || typeof window.sprintCoder.permissions?.get !== 'function') return;
   try {
-    const permission = await window.vibe.permissions.get(taskId);
+    const permission = await window.sprintCoder.permissions.get(taskId);
     if (get().selectedTaskId !== taskId) return;
     apply((state) => ({
       permissionByTask: { ...state.permissionByTask, [taskId]: permission },
@@ -247,7 +252,7 @@ function subscribeToTask(
     currentUnsubscribe = null;
   }
   currentSubscribedTaskId = taskId;
-  if (!window.vibe) return;
+  if (!window.sprintCoder) return;
   const listener = (ev: TurnEvent) => {
     // Ignore stray events if the user has since switched tasks and this callback
     // has not been torn down yet (defensive; unsubscribe should prevent this).
@@ -262,8 +267,8 @@ function subscribeToTask(
   };
   currentUnsubscribe =
     afterSeq !== undefined
-      ? window.vibe.turns.subscribe(taskId, listener, { afterSeq })
-      : window.vibe.turns.subscribe(taskId, listener);
+      ? window.sprintCoder.turns.subscribe(taskId, listener, { afterSeq })
+      : window.sprintCoder.turns.subscribe(taskId, listener);
 }
 
 function upsertCommand(
@@ -520,7 +525,7 @@ export const useAppStore = create<AppState>((set, get) => {
   const apply = (fn: (state: AppState) => Partial<AppState>) => set(fn);
 
   return {
-    vibeAvailable: typeof window !== 'undefined' && !!window.vibe,
+    sprintCoderAvailable: typeof window !== 'undefined' && !!window.sprintCoder,
     initialized: false,
     loadingTasks: false,
     loadingMessages: false,
@@ -550,6 +555,7 @@ export const useAppStore = create<AppState>((set, get) => {
     runtime: {
       kind: 'mock',
       codexAvailable: false,
+      claudeAvailable: false,
       model: 'auto',
       models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
     },
@@ -557,14 +563,14 @@ export const useAppStore = create<AppState>((set, get) => {
     toast: null,
 
     async init() {
-      if (!window.vibe) {
-        set({ vibeAvailable: false, initialized: true });
+      if (!window.sprintCoder) {
+        set({ sprintCoderAvailable: false, initialized: true });
         return;
       }
-      set({ vibeAvailable: true, loadingTasks: true, error: null });
+      set({ sprintCoderAvailable: true, loadingTasks: true, error: null });
       void get().loadRuntime();
       try {
-        const tasks = await window.vibe.tasks.list();
+        const tasks = await window.sprintCoder.tasks.list();
         set({ tasks, loadingTasks: false, initialized: true });
         const firstSelectable = tasks.find((t) => !t.archived) ?? tasks[0];
         if (firstSelectable) {
@@ -576,9 +582,10 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async loadRuntime() {
-      if (!window.vibe || typeof window.vibe.settings?.getRuntime !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.settings?.getRuntime !== 'function')
+        return;
       try {
-        const runtime = await window.vibe.settings.getRuntime();
+        const runtime = await window.sprintCoder.settings.getRuntime();
         set({ runtime });
       } catch {
         // Non-fatal: keep the last-known (or default) runtime state.
@@ -586,18 +593,23 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async setRuntime(kind: RuntimeKind) {
-      if (!window.vibe || typeof window.vibe.settings?.setRuntime !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.settings?.setRuntime !== 'function')
+        return;
       const previous = get().runtime;
       if (previous.kind === kind) return;
       set({ runtime: { ...previous, kind } });
       try {
-        await window.vibe.settings.setRuntime(kind);
+        await window.sprintCoder.settings.setRuntime(kind);
         await get().loadRuntime();
       } catch (err) {
         set({ runtime: previous });
         const code = errorCode(err);
         if (code === 'RUNTIME_UNAVAILABLE') {
-          get().showToast('Codex CLIが見つからないため切り替えできません');
+          get().showToast(
+            kind === 'claude'
+              ? 'Claude CLIが見つからないため切り替えできません'
+              : 'Codex CLIが見つからないため切り替えできません',
+          );
         } else {
           set({ error: describeError(err) });
         }
@@ -605,12 +617,13 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async setModel(model: string) {
-      if (!window.vibe || typeof window.vibe.settings?.setModel !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.settings?.setModel !== 'function')
+        return;
       const previous = get().runtime;
       if (previous.model === model || !previous.models.some(({ id }) => id === model)) return;
       set({ runtime: { ...previous, model } });
       try {
-        await window.vibe.settings.setModel(model);
+        await window.sprintCoder.settings.setModel(model);
         await get().loadRuntime();
       } catch (err) {
         set({ runtime: previous });
@@ -619,7 +632,7 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async setAccessPreset(taskId: string, preset: AccessPreset) {
-      if (!window.vibe || typeof window.vibe.permissions?.set !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.permissions?.set !== 'function') return;
       const previous = get().permissionByTask[taskId] ?? { preset: 'ask', policyEpoch: 0 };
       if (previous.preset === preset) return;
       set((state) => ({
@@ -629,7 +642,11 @@ export const useAppStore = create<AppState>((set, get) => {
         },
       }));
       try {
-        const permission = await window.vibe.permissions.set(taskId, preset, previous.policyEpoch);
+        const permission = await window.sprintCoder.permissions.set(
+          taskId,
+          preset,
+          previous.policyEpoch,
+        );
         set((state) => ({
           permissionByTask:
             state.permissionByTask[taskId]?.preset === preset &&
@@ -640,7 +657,7 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (err) {
         let restored = previous;
         try {
-          restored = await window.vibe.permissions.get(taskId);
+          restored = await window.sprintCoder.permissions.get(taskId);
         } catch {
           // Keep the last confirmed local value when refresh is unavailable.
         }
@@ -656,14 +673,15 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision) {
-      if (!window.vibe || typeof window.vibe.approvals?.resolve !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.approvals?.resolve !== 'function')
+        return;
       const approval = (get().approvalsByTask[taskId] ?? []).find(({ id }) => id === approvalId);
       if (approval === undefined || get().resolvingApprovalIds[approvalId]) return;
       set((state) => ({
         resolvingApprovalIds: { ...state.resolvingApprovalIds, [approvalId]: true },
       }));
       try {
-        const resolved = await window.vibe.approvals.resolve({
+        const resolved = await window.sprintCoder.approvals.resolve({
           taskId,
           approvalId,
           decision,
@@ -706,28 +724,28 @@ export const useAppStore = create<AppState>((set, get) => {
       void loadWorkspace(taskId, apply, get);
       void loadPermission(taskId, apply, get);
 
-      if (!window.vibe) {
+      if (!window.sprintCoder) {
         set({ loadingMessages: false });
         return;
       }
-      const vibe = window.vibe;
+      const sprintCoder = window.sprintCoder;
 
       const [messagesResult, snapshot, commandsResult, approvalHistoryResult, autoDecisionsResult] =
         await Promise.all([
-          vibe.tasks
+          sprintCoder.tasks
             .messages(taskId)
             .then((v) => ({ ok: true as const, v }))
             .catch((err: unknown) => ({ ok: false as const, err })),
-          typeof vibe.turns.snapshot === 'function'
-            ? vibe.turns.snapshot(taskId).catch(() => null)
+          typeof sprintCoder.turns.snapshot === 'function'
+            ? sprintCoder.turns.snapshot(taskId).catch(() => null)
             : Promise.resolve(null),
-          typeof vibe.commands?.list === 'function'
-            ? vibe.commands
+          typeof sprintCoder.commands?.list === 'function'
+            ? sprintCoder.commands
                 .list(taskId)
                 .then(async (commands) => {
                   const cards = await Promise.all(
                     commands.map(async (command): Promise<CommandCardState> => {
-                      const output = await vibe.commands
+                      const output = await sprintCoder.commands
                         .outputTail({ taskId, commandId: command.id, maxBytes: 131_072 })
                         .catch(() => ({ items: [] as CommandOutputRecord[] }));
                       return { command, tail: projectCommandTail(output.items) };
@@ -737,14 +755,14 @@ export const useAppStore = create<AppState>((set, get) => {
                 })
                 .catch((err: unknown) => ({ ok: false as const, err }))
             : Promise.resolve({ ok: true as const, cards: [] as CommandCardState[] }),
-          typeof vibe.approvals?.listRecent === 'function'
-            ? vibe.approvals
+          typeof sprintCoder.approvals?.listRecent === 'function'
+            ? sprintCoder.approvals
                 .listRecent(taskId)
                 .then((approvals) => ({ ok: true as const, approvals }))
                 .catch((err: unknown) => ({ ok: false as const, err }))
             : Promise.resolve({ ok: true as const, approvals: [] as ApprovalSummary[] }),
-          typeof vibe.permissions?.listAutoDecisions === 'function'
-            ? vibe.permissions
+          typeof sprintCoder.permissions?.listAutoDecisions === 'function'
+            ? sprintCoder.permissions
                 .listAutoDecisions(taskId)
                 .then((decisions) => ({ ok: true as const, decisions }))
                 .catch((err: unknown) => ({ ok: false as const, err }))
@@ -830,25 +848,34 @@ export const useAppStore = create<AppState>((set, get) => {
 
       if (get().selectedTaskId !== taskId) return;
       subscribeToTask(taskId, apply, get, afterSeq);
-      if (typeof vibe.teams?.get === 'function') {
-        const team = await vibe.teams.get(taskId).catch(() => null);
+      if (typeof sprintCoder.teams?.get === 'function') {
+        const team = await sprintCoder.teams.get(taskId).catch(() => null);
         if (get().selectedTaskId === taskId)
           set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: team } }));
-        if (typeof vibe.teams.subscribe === 'function')
-          currentTeamUnsubscribe = vibe.teams.subscribe(taskId, (event) => {
+        if (typeof sprintCoder.teams.subscribe === 'function')
+          currentTeamUnsubscribe = sprintCoder.teams.subscribe(taskId, (event) => {
             if (event.type === 'updated')
-              set((state) => ({
-                teamByTask: { ...state.teamByTask, [taskId]: event.detail },
-              }));
+              set((state) => {
+                // First team appearance for the selected task (leader-driven auto-promotion)
+                // pulls the user into the canvas; later updates never fight a manual close.
+                const firstAppearance =
+                  state.teamByTask[taskId] == null &&
+                  state.selectedTaskId === taskId &&
+                  !state.teamViewOpen;
+                return {
+                  teamByTask: { ...state.teamByTask, [taskId]: event.detail },
+                  ...(firstAppearance ? { teamViewOpen: true } : {}),
+                };
+              });
           });
       }
     },
 
     async createTask() {
-      if (!window.vibe) return;
+      if (!window.sprintCoder) return;
       set({ error: null });
       try {
-        const task = await window.vibe.tasks.create();
+        const task = await window.sprintCoder.tasks.create();
         set((state) => ({ tasks: [task, ...state.tasks] }));
         await get().selectTask(task.id);
       } catch (err) {
@@ -857,11 +884,11 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async renameTask(taskId: string, title: string) {
-      if (!window.vibe) return;
+      if (!window.sprintCoder) return;
       const trimmed = title.trim();
       if (!trimmed) return;
       try {
-        const updated = await window.vibe.tasks.rename(taskId, trimmed);
+        const updated = await window.sprintCoder.tasks.rename(taskId, trimmed);
         set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
       } catch (err) {
         set({ error: describeError(err) });
@@ -869,9 +896,9 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async setPinned(taskId: string, pinned: boolean) {
-      if (!window.vibe || typeof window.vibe.tasks.setPinned !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.tasks.setPinned !== 'function') return;
       try {
-        const updated = await window.vibe.tasks.setPinned(taskId, pinned);
+        const updated = await window.sprintCoder.tasks.setPinned(taskId, pinned);
         set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
       } catch (err) {
         set({ error: describeError(err) });
@@ -879,9 +906,9 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async setArchived(taskId: string, archived: boolean) {
-      if (!window.vibe || typeof window.vibe.tasks.setArchived !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.tasks.setArchived !== 'function') return;
       try {
-        const updated = await window.vibe.tasks.setArchived(taskId, archived);
+        const updated = await window.sprintCoder.tasks.setArchived(taskId, archived);
         set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
       } catch (err) {
         set({ error: describeError(err) });
@@ -889,9 +916,9 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async setGoal(taskId: string, goal: string) {
-      if (!window.vibe || typeof window.vibe.tasks.setGoal !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.tasks.setGoal !== 'function') return;
       try {
-        const updated = await window.vibe.tasks.setGoal(taskId, goal);
+        const updated = await window.sprintCoder.tasks.setGoal(taskId, goal);
         set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
       } catch (err) {
         set({ error: describeError(err) });
@@ -899,9 +926,9 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async selectWorkspace(taskId: string) {
-      if (!window.vibe || typeof window.vibe.workspace?.select !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.workspace?.select !== 'function') return;
       try {
-        const workspace = await window.vibe.workspace.select(taskId);
+        const workspace = await window.sprintCoder.workspace.select(taskId);
         set((state) => ({ workspaceByTask: { ...state.workspaceByTask, [taskId]: workspace } }));
       } catch (err) {
         set({ error: describeError(err) });
@@ -909,17 +936,17 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async toggleTeamView(taskId: string) {
-      if (!window.vibe?.teams) return;
+      if (!window.sprintCoder?.teams) return;
       if (get().teamViewOpen) {
         set({ teamViewOpen: false });
         return;
       }
       set({ teamBusy: true, error: null });
       try {
-        let detail = await window.vibe.teams.get(taskId);
+        let detail = await window.sprintCoder.teams.get(taskId);
         if (detail === null) {
-          await window.vibe.teams.promote(taskId);
-          detail = await window.vibe.teams.get(taskId);
+          await window.sprintCoder.teams.promote(taskId);
+          detail = await window.sprintCoder.teams.get(taskId);
         }
         set((state) => ({
           teamByTask: { ...state.teamByTask, [taskId]: detail },
@@ -932,46 +959,12 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async hireTeamWorker(taskId: string, role: string, objective: string) {
-      if (!window.vibe?.teams || get().teamBusy) return;
-      set({ teamBusy: true, error: null });
-      try {
-        await window.vibe.teams.hireWorker({
-          taskId,
-          role,
-          objective,
-          contextInheritancePolicy: 'summary',
-          writeCapable: false,
-        });
-        const detail = await window.vibe.teams.get(taskId);
-        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
-      } catch (err) {
-        set({ error: describeError(err) });
-      } finally {
-        set({ teamBusy: false });
-      }
-    },
-
-    async sendTeamMessage(taskId: string, agentId: string, content: string) {
-      if (!window.vibe?.teams || get().teamBusy) return;
-      set({ teamBusy: true, error: null });
-      try {
-        await window.vibe.teams.sendToWorker({ taskId, targetAgentId: agentId, content });
-        const detail = await window.vibe.teams.get(taskId);
-        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
-      } catch (err) {
-        set({ error: describeError(err) });
-      } finally {
-        set({ teamBusy: false });
-      }
-    },
-
     async stopTeamWorker(taskId: string, agentId: string) {
-      if (!window.vibe?.teams || get().teamBusy) return;
+      if (!window.sprintCoder?.teams || get().teamBusy) return;
       set({ teamBusy: true });
       try {
-        await window.vibe.teams.stopWorker({ taskId, agentId });
-        const detail = await window.vibe.teams.get(taskId);
+        await window.sprintCoder.teams.stopWorker({ taskId, agentId });
+        const detail = await window.sprintCoder.teams.get(taskId);
         set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
       } catch (err) {
         set({ error: describeError(err) });
@@ -981,10 +974,10 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async stopAllTeamWorkers(taskId: string) {
-      if (!window.vibe?.teams || get().teamBusy) return;
+      if (!window.sprintCoder?.teams || get().teamBusy) return;
       set({ teamBusy: true });
       try {
-        const detail = await window.vibe.teams.stopAll(taskId);
+        const detail = await window.sprintCoder.teams.stopAll(taskId);
         set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
       } catch (err) {
         set({ error: describeError(err) });
@@ -1000,7 +993,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async startTurn(taskId: string, text: string) {
       const trimmed = text.trim();
-      if (!trimmed || !window.vibe) return;
+      if (!trimmed || !window.sprintCoder) return;
       const turn = get().turnByTask[taskId];
       if (turn && (turn.status === 'running' || turn.status === 'canceling')) return;
 
@@ -1025,7 +1018,7 @@ export const useAppStore = create<AppState>((set, get) => {
       persistDraftDebounced(taskId, '');
 
       try {
-        await window.vibe.turns.start({ taskId, text: trimmed });
+        await window.sprintCoder.turns.start({ taskId, text: trimmed });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
       } catch (err) {
         const code = errorCode(err);
@@ -1049,11 +1042,12 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async queueMessage(taskId: string, text: string) {
       const trimmed = text.trim();
-      if (!trimmed || !window.vibe || typeof window.vibe.turns.queue !== 'function') return;
+      if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.queue !== 'function')
+        return;
       set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
       persistDraftDebounced(taskId, '');
       try {
-        await window.vibe.turns.queue({ taskId, text: trimmed });
+        await window.sprintCoder.turns.queue({ taskId, text: trimmed });
         // queue.changed (delivered via subscription) reconciles the compact queued list.
       } catch (err) {
         set((state) => ({
@@ -1065,11 +1059,12 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async steerMessage(taskId: string, text: string, expectedTurnId: string) {
       const trimmed = text.trim();
-      if (!trimmed || !window.vibe || typeof window.vibe.turns.steer !== 'function') return;
+      if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.steer !== 'function')
+        return;
       set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
       persistDraftDebounced(taskId, '');
       try {
-        await window.vibe.turns.steer({ taskId, text: trimmed, expectedTurnId });
+        await window.sprintCoder.turns.steer({ taskId, text: trimmed, expectedTurnId });
       } catch (err) {
         const code = errorCode(err);
         set((state) => ({
@@ -1083,7 +1078,7 @@ export const useAppStore = create<AppState>((set, get) => {
           get().showToast('Turnが切り替わったため送信し直してください');
         } else if (code === 'STEER_UNSUPPORTED') {
           get().showToast(
-            'Codex runtimeでは実行中の追加指示に対応していません。キュー追加を使ってください',
+            '選択中のruntimeでは実行中の追加指示に対応していません。キュー追加を使ってください',
           );
         }
       }
@@ -1091,11 +1086,16 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async stopAndSend(taskId: string, text: string) {
       const trimmed = text.trim();
-      if (!trimmed || !window.vibe || typeof window.vibe.turns.stopAndSend !== 'function') return;
+      if (
+        !trimmed ||
+        !window.sprintCoder ||
+        typeof window.sprintCoder.turns.stopAndSend !== 'function'
+      )
+        return;
       set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
       persistDraftDebounced(taskId, '');
       try {
-        await window.vibe.turns.stopAndSend({ taskId, text: trimmed });
+        await window.sprintCoder.turns.stopAndSend({ taskId, text: trimmed });
       } catch (err) {
         set((state) => ({
           draftByTask: { ...state.draftByTask, [taskId]: trimmed },
@@ -1106,12 +1106,12 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async cancelActiveTurn(taskId: string) {
       const turn = get().turnByTask[taskId];
-      if (!turn || turn.status !== 'running' || !window.vibe) return;
+      if (!turn || turn.status !== 'running' || !window.sprintCoder) return;
       set((state) => ({
         turnByTask: { ...state.turnByTask, [taskId]: { ...turn, status: 'canceling' } },
       }));
       try {
-        await window.vibe.turns.cancel({ taskId, turnId: turn.turnId });
+        await window.sprintCoder.turns.cancel({ taskId, turnId: turn.turnId });
         // turn.completed(state:'canceled') will arrive via subscription and finalize.
       } catch (err) {
         set({ error: describeError(err) });

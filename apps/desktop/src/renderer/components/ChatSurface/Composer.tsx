@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
-import type { QueuedInput, RuntimeKind } from '../../types/vibe';
+import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square } from '../icons';
+import type { QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
 const STEER_UNSUPPORTED_HINT =
-  'Codex runtimeでは実行中の追加指示に対応していません。キュー追加を使ってください';
+  '選択中のruntimeでは実行中の追加指示に対応していません。キュー追加を使ってください';
 
 type SendMode = 'queue' | 'steer' | 'stopAndSend';
 
@@ -21,10 +22,10 @@ const MODE_HINT: Record<SendMode, string> = {
   stopAndSend: '実行中のTurnを停止し、直ちにこのメッセージで開始します',
 };
 
-const MODE_ICON: Record<SendMode, string> = {
-  queue: '➕',
-  steer: '⇄',
-  stopAndSend: '⏹',
+const MODE_ICON: Record<SendMode, typeof Plus> = {
+  queue: Plus,
+  steer: ArrowRightLeft,
+  stopAndSend: Square,
 };
 
 export function Composer({ taskId }: { taskId: string }) {
@@ -46,13 +47,14 @@ export function Composer({ taskId }: { taskId: string }) {
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
-  const canQueue = typeof window.vibe?.turns?.queue === 'function';
-  const canSteer = typeof window.vibe?.turns?.steer === 'function';
-  const canStopAndSend = typeof window.vibe?.turns?.stopAndSend === 'function';
+  const canQueue = typeof window.sprintCoder?.turns?.queue === 'function';
+  const canSteer = typeof window.sprintCoder?.turns?.steer === 'function';
+  const canStopAndSend = typeof window.sprintCoder?.turns?.stopAndSend === 'function';
   const hasAnyActiveModeCapability = canQueue || canSteer || canStopAndSend;
-  // Codex runtime does not support mid-turn steering (STEER_UNSUPPORTED) — the Steer segment
-  // stays visible but disabled so the user understands why, per FR-SET-03.
-  const steerBlockedByRuntime = runtime.kind === 'codex';
+  // Codex and Claude runtimes are headless single-shot invocations and do not support mid-turn
+  // steering (STEER_UNSUPPORTED) — the Steer segment stays visible but disabled so the user
+  // understands why, per FR-SET-03.
+  const steerBlockedByRuntime = runtime.kind === 'codex' || runtime.kind === 'claude';
 
   // Reset the mode selector back to the default once the turn finishes (render-time adjustment
   // instead of an effect, per react-hooks/set-state-in-effect).
@@ -60,7 +62,7 @@ export function Composer({ taskId }: { taskId: string }) {
     setWasTurnActive(turnActive);
     if (!turnActive) setSendMode('queue');
   }
-  // Likewise, fall back off Steer if the runtime switches to Codex while it's selected.
+  // Likewise, fall back off Steer if the runtime switches to Codex or Claude while it's selected.
   if (sendMode === 'steer' && steerBlockedByRuntime) {
     setSendMode('queue');
   }
@@ -71,6 +73,21 @@ export function Composer({ taskId }: { taskId: string }) {
     node.style.height = 'auto';
     node.style.height = `${Math.min(node.scrollHeight, 140)}px`;
   }, [draft]);
+
+  // Focus restoration after send (a11y fix, Phase 7 / NFR-A11Y-02): the textarea is
+  // `disabled={sending}` for the brief window between `startTurn` firing and the `turn.accepted`
+  // event reconciling it back to `false` (see appStore.ts). Disabling a focused element drops
+  // keyboard focus to `document.body` — the same defocus-on-disable/inert class of bug fixed
+  // elsewhere for the Team morph (TeamCanvas.tsx/TeamListView.tsx/App.tsx) — so every keyboard-only
+  // message send was silently losing focus for that window. Only re-focus if it actually landed on
+  // `<body>`, so a deliberate click elsewhere during that brief gap isn't overridden.
+  const wasSendingRef = useRef(sending);
+  useEffect(() => {
+    if (wasSendingRef.current && !sending && document.activeElement === document.body) {
+      textareaRef.current?.focus({ preventScroll: true });
+    }
+    wasSendingRef.current = sending;
+  }, [sending]);
 
   const activeModeCapable =
     sendMode === 'queue'
@@ -143,7 +160,7 @@ export function Composer({ taskId }: { taskId: string }) {
               title="添付は今回のスコープ外です"
               aria-label="添付"
             >
-              📎
+              <Paperclip size={15} />
             </button>
             {turnActive && hasAnyActiveModeCapability && (
               <div className="send-mode-group" role="group" aria-label="実行中の送信方法">
@@ -181,7 +198,14 @@ export function Composer({ taskId }: { taskId: string }) {
               aria-label={turnActive ? `${MODE_LABEL[sendMode]}で送信` : '送信'}
               title={turnActive ? MODE_HINT[sendMode] : '送信'}
             >
-              {turnActive ? MODE_ICON[sendMode] : '↑'}
+              {turnActive ? (
+                (() => {
+                  const ModeIcon = MODE_ICON[sendMode];
+                  return <ModeIcon size={15} />;
+                })()
+              ) : (
+                <ArrowUp size={15} />
+              )}
             </button>
           </div>
         </div>
@@ -198,18 +222,25 @@ export function Composer({ taskId }: { taskId: string }) {
 const RUNTIME_LABEL: Record<RuntimeKind, string> = {
   mock: 'Mock Runtime',
   codex: 'Codex',
+  claude: 'Claude Code',
 };
 
 const RUNTIME_DESC: Record<RuntimeKind, string> = {
   mock: '決定論的ローカル応答',
   codex: 'ローカルのCodex CLIで実応答',
+  claude: 'ローカルのClaude Code CLIで実応答',
+};
+
+const RUNTIME_CLI_MISSING_HINT: Record<'codex' | 'claude', string> = {
+  codex: 'Codex CLIが見つかりません',
+  claude: 'Claude CLIが見つかりません',
 };
 
 // Runtime selector chip (FR-SET-03). Falls back to the legacy dummy "GPT-6.2 mini" chip when
-// the backend hasn't wired the `settings` API yet — graceful degrade per the vibe.d.ts contract.
+// the backend hasn't wired the `settings` API yet — graceful degrade per the sprint-coder.d.ts contract.
 function RuntimeChip() {
   const runtimeSupported =
-    typeof window !== 'undefined' && typeof window.vibe?.settings?.getRuntime === 'function';
+    typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.getRuntime === 'function';
   const runtime = useAppStore((s) => s.runtime);
   const setRuntime = useAppStore((s) => s.setRuntime);
   const [open, setOpen] = useState(false);
@@ -234,6 +265,7 @@ function RuntimeChip() {
 
   function choose(kind: RuntimeKind) {
     if (kind === 'codex' && !runtime.codexAvailable) return;
+    if (kind === 'claude' && !runtime.claudeAvailable) return;
     setOpen(false);
     if (kind !== runtime.kind) void setRuntime(kind);
   }
@@ -262,8 +294,10 @@ function RuntimeChip() {
       </button>
       {open && (
         <div className="runtime-menu" role="menu" aria-label="Runtime選択">
-          {(['mock', 'codex'] as RuntimeKind[]).map((kind) => {
-            const disabled = kind === 'codex' && !runtime.codexAvailable;
+          {(['mock', 'codex', 'claude'] as RuntimeKind[]).map((kind) => {
+            const disabled =
+              (kind === 'codex' && !runtime.codexAvailable) ||
+              (kind === 'claude' && !runtime.claudeAvailable);
             return (
               <button
                 data-testid={`runtime-option-${kind}`}
@@ -273,7 +307,11 @@ function RuntimeChip() {
                 aria-checked={runtime.kind === kind}
                 className={`runtime-menu-item${runtime.kind === kind ? ' active' : ''}`}
                 disabled={disabled}
-                title={disabled ? 'Codex CLIが見つかりません' : undefined}
+                title={
+                  disabled && (kind === 'codex' || kind === 'claude')
+                    ? RUNTIME_CLI_MISSING_HINT[kind]
+                    : undefined
+                }
                 onClick={() => choose(kind)}
               >
                 <span className="runtime-menu-title">{RUNTIME_LABEL[kind]}</span>
@@ -293,8 +331,11 @@ function ModelChip() {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const supported =
-    typeof window !== 'undefined' && typeof window.vibe?.settings?.setModel === 'function';
-  const enabled = supported && runtime.kind === 'codex' && runtime.codexAvailable;
+    typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.setModel === 'function';
+  const enabled =
+    supported &&
+    ((runtime.kind === 'codex' && runtime.codexAvailable) ||
+      (runtime.kind === 'claude' && runtime.claudeAvailable));
   const selected = runtime.models.find(({ id }) => id === runtime.model) ?? {
     id: runtime.model,
     displayName: runtime.model,
@@ -334,7 +375,7 @@ function ModelChip() {
         aria-expanded={open}
         disabled={!enabled}
         onClick={() => setOpen((value) => !value)}
-        title={enabled ? 'Modelを選択' : 'Codex Runtime選択時にモデルを変更できます'}
+        title={enabled ? 'Modelを選択' : 'Codex/Claude Runtime選択時にモデルを変更できます'}
       >
         {selected.displayName}
       </button>

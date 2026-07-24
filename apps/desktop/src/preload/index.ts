@@ -6,6 +6,9 @@ import {
   approvalResolveInputSchema,
   approvalSummarySchema,
   autoPermissionDecisionSchema,
+  canvasViewSchema,
+  canvasViewSaveInputSchema,
+  canvasViewSaveResultSchema,
   chatMessageSchema,
   commandSummarySchema,
   commandOutputPageInputSchema,
@@ -48,8 +51,8 @@ import {
   workspaceSelectionSchema,
   type CommandEnvelope,
   type CommandResult,
-  type VibeApi,
-} from '@vibe/contracts';
+  type SprintCoderApi,
+} from '@sprint-coder/contracts';
 
 async function invoke<TInput, TOutput>(
   channel: string,
@@ -103,7 +106,7 @@ function getTaskId(value: unknown): string | undefined {
     : undefined;
 }
 
-const api: VibeApi = {
+const api: SprintCoderApi = {
   app: { getInfo: () => invoke(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, {}) },
   tasks: {
     list: () => invoke(IPC_CHANNELS.tasksList, emptyPayloadSchema, z.array(taskSummarySchema), {}),
@@ -162,6 +165,17 @@ const api: VibeApi = {
         }).catch(() => undefined);
       };
     },
+    getCanvasView: (taskId) =>
+      invoke(IPC_CHANNELS.teamsGetCanvasView, taskIdPayloadSchema, canvasViewSchema.nullable(), {
+        taskId,
+      }),
+    saveCanvasView: (input) =>
+      invoke(
+        IPC_CHANNELS.teamsSaveCanvasView,
+        canvasViewSaveInputSchema,
+        canvasViewSaveResultSchema,
+        input,
+      ),
   },
   workspace: {
     get: (taskId) =>
@@ -312,4 +326,4 @@ function isPortResponse(value: unknown, requestId: string, taskId: string): bool
   );
 }
 
-contextBridge.exposeInMainWorld('vibe', api);
+contextBridge.exposeInMainWorld('sprintCoder', api);

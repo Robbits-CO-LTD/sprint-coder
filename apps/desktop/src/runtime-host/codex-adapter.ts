@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import type { PublicError } from '@vibe/contracts';
-import type { CodexModelOption } from '@vibe/contracts';
+import type { PublicError } from '@sprint-coder/contracts';
+import type { CodexModelOption } from '@sprint-coder/contracts';
 import { ApprovalRequestedError, CodexJsonlNormalizer } from './codex-normalizer';
 import type { RuntimeCanonicalEvent, RuntimeContextFragment } from './protocol';
 
@@ -78,7 +78,8 @@ export class CodexRuntimeAdapter {
       return;
     }
     let temporaryDirectory: string | null = null;
-    const cwd = workspacePath ?? (temporaryDirectory = mkdtempSync(join(tmpdir(), 'vibe-codex-')));
+    const cwd =
+      workspacePath ?? (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-')));
     const normalizer = new CodexJsonlNormalizer();
     const child = spawn('codex', buildCodexArgs(model), {
       cwd,

@@ -3,7 +3,7 @@ import { lstat, open, readlink, realpath, stat, type FileHandle } from 'node:fs/
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
-import type { PathClassification, PermissionResource } from '@vibe/domain';
+import type { PathClassification, PermissionResource } from '@sprint-coder/domain';
 
 export type PathOperation = 'read' | 'write' | 'rename' | 'delete';
 export type FileIdentity = {
@@ -282,8 +282,8 @@ function classifyWorkspacePath(workspacePath: string, resolvedPath: string): Pat
   if (
     absoluteParts.includes('.git') ||
     absoluteParts.includes('.codex') ||
-    absoluteParts.includes('.vibe') ||
-    absoluteParts.includes('.vibe-team')
+    absoluteParts.includes('.sprint-coder') ||
+    absoluteParts.includes('.sprint-coder-team')
   )
     return 'app-private';
   if (
@@ -297,7 +297,11 @@ function classifyWorkspacePath(workspacePath: string, resolvedPath: string): Pat
     return 'credential';
   if (absoluteParts.includes('library') && absoluteParts.includes('application support'))
     return 'app-private';
-  if (parts.some((part) => part === '.git' || part === '.vibe' || part === '.vibe-team'))
+  if (
+    parts.some(
+      (part) => part === '.git' || part === '.sprint-coder' || part === '.sprint-coder-team',
+    )
+  )
     return 'app-private';
   if (/^(?:update|auto-update).*(?:key|pem)$/.test(name)) return 'update-key';
   if (/\.(?:p12|pfx)$/.test(name) || /^(?:signing|release).*(?:key|pem)$/.test(name))
@@ -332,9 +336,19 @@ function isAtOrBelow(root: string, candidate: string): boolean {
   );
 }
 
+// Conservative, portable bounds (POSIX NAME_MAX=255, a total well below any platform's
+// PATH_MAX/MAX_PATH). Rejecting up front turns what would otherwise be a raw uncaught
+// ENAMETOOLONG from a later fs call into a typed, fail-closed PathGuardError.
+const MAX_PATH_SEGMENT_LENGTH = 255;
+const MAX_TOTAL_PATH_LENGTH = 4_096;
+
 function validateInput(targetPath: string): void {
   if (targetPath.length === 0 || targetPath.includes('\0'))
     throw new PathGuardError('INVALID_PATH', 'Invalid target path');
+  if (targetPath.length > MAX_TOTAL_PATH_LENGTH)
+    throw new PathGuardError('INVALID_PATH', 'Target path exceeds the maximum supported length');
+  if (targetPath.split(/[\\/]+/).some((segment) => segment.length > MAX_PATH_SEGMENT_LENGTH))
+    throw new PathGuardError('INVALID_PATH', 'Target path has a segment that is too long');
 }
 
 function hasTraversalSegment(targetPath: string): boolean {
@@ -466,6 +480,12 @@ function isNotFound(error: unknown): boolean {
     typeof error === 'object' &&
     error !== null &&
     'code' in error &&
-    (error.code === 'ENOENT' || error.code === 'ENOTDIR' || error.code === 'ELOOP')
+    // ENAMETOOLONG is defense in depth: validateInput's length bound should reject these
+    // before any fs call, but a late/platform-specific case must still fail closed as a typed
+    // PathGuardError instead of an uncaught raw Error.
+    (error.code === 'ENOENT' ||
+      error.code === 'ENOTDIR' ||
+      error.code === 'ELOOP' ||
+      error.code === 'ENAMETOOLONG')
   );
 }

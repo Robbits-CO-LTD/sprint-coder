@@ -16,6 +16,7 @@ import {
 } from './native-mutation-platform-gate';
 
 const isDevelopment = !app.isPackaged;
+app.setName('Sprint Coder');
 let mainWindow: BrowserWindow | null = null;
 let persistence: SqlitePersistenceClient | null = null;
 let nativeSafeFs: NativeSafeFs | null = null;
@@ -31,7 +32,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 app.enableSandbox();
 
-const userDataOverride = process.env['VIBE_USER_DATA_DIR'];
+const userDataOverride = process.env['SPRINT_CODER_USER_DATA_DIR'];
 if (userDataOverride !== undefined && userDataOverride.length > 0) {
   // E2E and diagnostics isolate their state (and the single-instance lock) per directory.
   app.setPath('userData', resolve(userDataOverride));
@@ -58,7 +59,7 @@ if (!hasLock) {
         lockDirectoryPath: join(app.getPath('userData'), 'native-safe-fs-locks'),
       });
       persistence = new SqlitePersistenceClient(
-        join(app.getPath('userData'), 'vibe-editor3.sqlite3'),
+        join(app.getPath('userData'), 'sprint-coder.sqlite3'),
         (binding) => nativeSafeFs!.assertSession(binding),
         (workspaceKey, minimumFence) =>
           nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
@@ -78,7 +79,7 @@ if (!hasLock) {
     .catch((error: unknown) => {
       // Fatal initialization failure must be visible, never silently swallowed (Slice 1.1).
       dialog.showErrorBox(
-        'vibe-editor3 の起動に失敗しました',
+        'Sprint Coder の起動に失敗しました',
         error instanceof Error ? `${error.message}\n\n${error.stack ?? ''}` : String(error),
       );
       app.exit(1);

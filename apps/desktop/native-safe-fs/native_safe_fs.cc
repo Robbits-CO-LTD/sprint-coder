@@ -25,7 +25,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
 #include <chrono>
 #include <condition_variable>
 #endif
@@ -61,7 +61,7 @@ struct GlobalState {
 
 GlobalState state;
 
-#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
 struct TestControlState {
   std::mutex mutex;
   std::condition_variable changed;
@@ -364,7 +364,7 @@ napi_value ThrowFailure(napi_env env, const std::string& code, const std::string
   return nullptr;
 }
 
-#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
 bool ReadTestToken(napi_env env, napi_value value, std::string* token) {
   napi_valuetype type;
   if (napi_typeof(env, value, &type) != napi_ok || type != napi_string) return false;
@@ -1653,8 +1653,8 @@ napi_value StageIntentArtifact(napi_env env, napi_callback_info info) {
   if (!ReadJournalBinding(env, argv[0], &context->session_id, &context->failure) ||
       !ReadSegments(env, argv[0], "parentSegments", false, true, &parent) ||
       !ReadString(env, argv[0], "leafName", &leaf) || !ValidSegment(leaf) ||
-      !leaf.starts_with(".vibe-temp-") || leaf.size() != 43 ||
-      !IsLowerHex(leaf.substr(11), 32) ||
+      !leaf.starts_with(".sprint-coder-temp-") || leaf.size() != 51 ||
+      !IsLowerHex(leaf.substr(19), 32) ||
       !ReadString(env, argv[0], "expectedContentHash", &context->expected_hash) ||
       !ReadUint32(env, argv[0], "expectedSize", &context->expected_size) ||
       !ReadUint32(env, argv[0], "expectedMode", &context->expected_mode) ||
@@ -1831,15 +1831,15 @@ bool EffectShapeIsValid(const EffectWork& context) {
   if (context.kind == "add")
     return !source_present && destination_absent && !context.has_destination &&
            context.has_auxiliary && context.expected_auxiliary.present &&
-           IsAuxiliaryLeaf(context.auxiliary.back(), ".vibe-temp-");
+           IsAuxiliaryLeaf(context.auxiliary.back(), ".sprint-coder-temp-");
   if (context.kind == "update")
     return source_present && destination_absent && !context.has_destination &&
            context.has_auxiliary && context.expected_auxiliary.present &&
-           IsAuxiliaryLeaf(context.auxiliary.back(), ".vibe-temp-");
+           IsAuxiliaryLeaf(context.auxiliary.back(), ".sprint-coder-temp-");
   if (context.kind == "delete")
     return source_present && destination_absent && !context.has_destination &&
            context.has_auxiliary && !context.expected_auxiliary.present &&
-           IsAuxiliaryLeaf(context.auxiliary.back(), ".vibe-tomb-");
+           IsAuxiliaryLeaf(context.auxiliary.back(), ".sprint-coder-tomb-");
   if (context.kind == "rename")
     return source_present && destination_absent && context.has_destination &&
            !context.has_auxiliary && !context.expected_auxiliary.present;
@@ -2229,8 +2229,8 @@ napi_value CleanupIntentAuxiliary(napi_env env, napi_callback_info info) {
   if (!ReadJournalBinding(env, argv[0], &context->session_id, &context->failure) ||
       !ReadSegments(env, argv[0], "auxiliarySegments", false, false, &context->auxiliary) ||
       !ReadExpectation(env, argv[0], "expectedAuxiliary", &context->expected_auxiliary) ||
-      (!IsAuxiliaryLeaf(context->auxiliary.back(), ".vibe-temp-") &&
-       !IsAuxiliaryLeaf(context->auxiliary.back(), ".vibe-tomb-"))) {
+      (!IsAuxiliaryLeaf(context->auxiliary.back(), ".sprint-coder-temp-") &&
+       !IsAuxiliaryLeaf(context->auxiliary.back(), ".sprint-coder-tomb-"))) {
     NativeFailure failure = context->failure.code.empty()
                                 ? NativeFailure{"INVALID_INPUT", "Invalid cleanup auxiliary"}
                                 : context->failure;
@@ -2293,7 +2293,7 @@ napi_value Probe(napi_env env, napi_callback_info) {
 }
 
 void Cleanup(void*) {
-#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
   {
     std::lock_guard<std::mutex> test_guard(test_control.mutex);
     test_control.released = true;
@@ -2328,7 +2328,7 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"closeSession", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
-#if defined(VIBE_NATIVE_SAFE_FS_TESTING)
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
   napi_property_descriptor test_properties[] = {
       {"configureTestControl", nullptr, ConfigureTestControl, nullptr, nullptr, nullptr,
        napi_default, nullptr},

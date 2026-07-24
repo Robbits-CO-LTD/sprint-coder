@@ -9,7 +9,7 @@ import {
   type PermissionPolicy,
   type PermissionRequest,
   type PermissionOperation,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import type { PermissionPolicyRecord, PersistenceClient } from './persistence';
 import {
   pathGuardIdentityDigest,

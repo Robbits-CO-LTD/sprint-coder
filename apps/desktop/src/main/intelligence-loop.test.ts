@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { IntelligenceStepState, ReasoningEffort, StepSnapshot } from '@vibe/domain';
+import type { IntelligenceStepState, ReasoningEffort, StepSnapshot } from '@sprint-coder/domain';
 import {
   createDeterministicMockSampler,
   deterministicMockToolExecutor,

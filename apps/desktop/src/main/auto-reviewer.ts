@@ -6,7 +6,7 @@ import {
   type ToolKind,
   type ToolRisk,
   type ToolSideEffect,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 
 const MODEL_NAME = 'builtin-deterministic-risk-v1';
 const TEMPLATE_VERSION = '1';

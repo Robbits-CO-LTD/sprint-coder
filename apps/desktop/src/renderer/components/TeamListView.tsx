@@ -1,180 +1,220 @@
-import { useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store/appStore';
-import type { TaskSummary, TeamMessageSummary } from '../types/vibe';
+import { ArrowLeft, LayoutGrid } from './icons';
+import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
 
-export function TeamListView({ task }: { task: TaskSummary }) {
+const MAX_WORKERS = 3;
+const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
+
+// Team List View (Slice 6.1 item 4): an accessible ALTERNATE projection of the exact same store
+// selectors/actions the Canvas uses (see TeamCanvas.tsx) — not a simplified or read-only variant.
+// Reintroduces the pre-Canvas list (see `git show 5d6238d -- .../TeamListView.tsx` for the deleted
+// original) as a cleaner, presentational rewrite. Canvas and List are mutually exclusive (App only
+// ever mounts one at a time per the renderer-only view preference), so this intentionally reuses
+// the Canvas's testids/labels (`team-worker`, `team-stop-all`, …) — there is never a collision,
+// and e2e specs can keep one selector for either mode.
+//
+// The Leader hires and dispatches Workers on its own during its Turn (FR-TEAM-06/13,
+// team-tools.ts) — there is no hire form or per-worker send form here either; this stays an
+// observation surface, exactly like the Canvas's Worker cards.
+export function TeamListView({
+  task,
+  onBack,
+  onSwitchToCanvasView,
+}: {
+  task: TaskSummary;
+  /** Exits Team mode entirely (mirrors TeamCanvas's "← Chatに戻る"). List mode never plays the
+   * Canvas's camera FLIP — there's no camera here — so this is a direct store toggle. */
+  onBack: () => void;
+  /** Switches the renderer-only Team view preference back to 'canvas'. */
+  onSwitchToCanvasView: () => void;
+}) {
   const detail = useAppStore((state) => state.teamByTask[task.id]);
-  const busy = useAppStore((state) => state.teamBusy);
-  const hire = useAppStore((state) => state.hireTeamWorker);
-  const send = useAppStore((state) => state.sendTeamMessage);
-  const stop = useAppStore((state) => state.stopTeamWorker);
-  const stopAll = useAppStore((state) => state.stopAllTeamWorkers);
-  const [role, setRole] = useState('');
-  const [objective, setObjective] = useState('');
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const teamBusy = useAppStore((state) => state.teamBusy);
+  const stopTeamWorker = useAppStore((state) => state.stopTeamWorker);
+  const stopAllTeamWorkers = useAppStore((state) => state.stopAllTeamWorkers);
+  const sectionRef = useRef<HTMLElement>(null);
 
-  if (!detail)
+  // Mount-time focus (a11y fix, Phase 7 / NFR-A11Y-02), mirroring TeamCanvas's own mount-focus
+  // fix: switching from Canvas to List view (the "List表示" button, itself INSIDE TeamCanvas)
+  // unmounts TeamCanvas in the very same commit this component mounts. Without this, the browser
+  // drops focus to `document.body` the instant that button's own DOM node is removed — moving
+  // focus onto this view's root the moment it exists keeps keyboard focus somewhere sensible.
+  useEffect(() => {
+    sectionRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  if (!detail) {
     return (
-      <section className="team-list-view" aria-labelledby="team-list-title">
+      <section
+        ref={sectionRef}
+        className="team-list-view"
+        data-testid="team-list"
+        aria-label="Team list"
+        aria-labelledby="team-list-title"
+        tabIndex={-1}
+      >
         <h2 id="team-list-title">Teamを準備しています</h2>
       </section>
     );
+  }
 
-  const workers = detail.workers.filter(({ kind }) => kind === 'worker');
-  const agents = new Map(detail.workers.map((worker) => [worker.id, worker]));
+  const workers = detail.workers.filter((w) => w.kind === 'worker');
 
   return (
-    <section className="team-list-view" aria-labelledby="team-list-title" data-testid="team-list">
-      <div
-        className="team-list-toolbar"
+    <section
+      ref={sectionRef}
+      className="team-list-view"
+      data-testid="team-list"
+      aria-label="Team list"
+      aria-labelledby="team-list-title"
+      tabIndex={-1}
+    >
+      <header
+        className="tlv-header"
         id={`team-agent-${detail.team.leaderAgentId}`}
         tabIndex={-1}
+        aria-label={`Leader · ${detail.team.state}`}
       >
-        <div>
-          <h2 id="team-list-title">Team List</h2>
-          <p aria-live="polite">
-            {detail.team.state} · Worker {workers.length}/3
-          </p>
-        </div>
+        <button type="button" className="team-back-btn" data-testid="team-back" onClick={onBack}>
+          <ArrowLeft size={14} /> Chatに戻る
+        </button>
+        <h2 id="team-list-title" className="team-title">
+          {task.title}
+        </h2>
+        <span className="team-status-chip">{`${detail.team.state} · Worker ${workers.length}/${MAX_WORKERS}`}</span>
         <button
           type="button"
-          className="danger-btn"
-          disabled={busy || workers.length === 0 || detail.team.state === 'completed'}
-          onClick={() => void stopAll(task.id)}
+          className="team-view-toggle-btn"
+          data-testid="team-view-toggle"
+          onClick={onSwitchToCanvasView}
+          title="Team Canvasに切り替え"
+        >
+          <LayoutGrid size={14} /> Canvas表示
+        </button>
+        <button
+          type="button"
+          className="team-stop-all-btn"
           data-testid="team-stop-all"
+          disabled={teamBusy || workers.length === 0 || detail.team.state === 'completed'}
+          onClick={() => void stopAllTeamWorkers(task.id)}
         >
           すべて停止
         </button>
+      </header>
+      <div aria-live="polite" className="visually-hidden">
+        {`Team status: ${detail.team.state}, workers ${workers.length} of ${MAX_WORKERS}`}
       </div>
 
-      <form
-        className="team-hire-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!role.trim() || !objective.trim()) return;
-          void hire(task.id, role.trim(), objective.trim()).then(() => {
-            setRole('');
-            setObjective('');
-          });
-        }}
-      >
-        <h3>Workerを追加</h3>
-        <label>
-          役割
-          <input value={role} onChange={(event) => setRole(event.target.value)} maxLength={100} />
-        </label>
-        <label>
-          目的
-          <textarea
-            value={objective}
-            onChange={(event) => setObjective(event.target.value)}
-            maxLength={10_000}
-            rows={2}
-          />
-        </label>
-        <button type="submit" disabled={busy || workers.length >= 3} data-testid="team-hire">
-          Workerを起動
-        </button>
-      </form>
-
-      <div className="team-worker-list" aria-label="Worker一覧">
-        {workers.map((worker) => {
-          const canSend = worker.state === 'ready' || worker.state === 'waiting';
-          return (
-            <article
-              className="team-worker-card"
-              data-testid="team-worker"
-              id={`team-agent-${worker.id}`}
-              tabIndex={-1}
-              key={worker.id}
-            >
-              <div className="team-worker-heading">
-                <div>
-                  <h3>{worker.role}</h3>
-                  <span className={`team-status team-status--${worker.state}`}>{worker.state}</span>
-                </div>
-                <button
-                  type="button"
-                  disabled={busy || ['done', 'failed', 'stopped'].includes(worker.state)}
-                  onClick={() => void stop(task.id, worker.id)}
-                >
-                  停止
-                </button>
-              </div>
-              <p>{worker.objective}</p>
-              <p className="team-current-task">
-                現在: {worker.currentActivity ?? (worker.state === 'done' ? '完了' : '待機')}
-              </p>
-              <dl className="team-usage">
-                <div>
-                  <dt>Tokens</dt>
-                  <dd>{worker.usage.tokens}</dd>
-                </div>
-                <div>
-                  <dt>時間</dt>
-                  <dd>{worker.usage.timeMs}ms</dd>
-                </div>
-                <div>
-                  <dt>Tools</dt>
-                  <dd>{worker.usage.toolCalls}</dd>
-                </div>
-              </dl>
-              <form
-                className="team-message-form"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const content = drafts[worker.id]?.trim();
-                  if (!content) return;
-                  void send(task.id, worker.id, content).then(() =>
-                    setDrafts((current) => ({ ...current, [worker.id]: '' })),
-                  );
-                }}
+      <div className="tlv-body">
+        <ul className="tlv-workers" aria-label="Worker一覧">
+          {workers.map((worker) => {
+            const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
+            const relevant = detail.messages
+              .filter((m) => m.targetAgentId === worker.id || m.sourceAgentId === worker.id)
+              .sort((a, b) => a.seq - b.seq)
+              .slice(-4);
+            return (
+              <li
+                key={worker.id}
+                className="tlv-worker"
+                data-testid="team-worker"
+                id={`team-agent-${worker.id}`}
+                tabIndex={-1}
+                aria-label={`Worker ${worker.role} · ${worker.state}`}
               >
-                <label htmlFor={`team-message-${worker.id}`}>依頼</label>
-                <textarea
-                  id={`team-message-${worker.id}`}
-                  value={drafts[worker.id] ?? ''}
-                  onChange={(event) =>
-                    setDrafts((current) => ({ ...current, [worker.id]: event.target.value }))
-                  }
-                  disabled={!canSend || busy}
-                  rows={2}
-                />
-                <button type="submit" disabled={!canSend || busy}>
-                  Leaderから送信
-                </button>
-              </form>
-            </article>
-          );
-        })}
-      </div>
-
-      <div className="team-message-timeline">
-        <h3>Message timeline</h3>
-        {detail.messages.length === 0 ? (
-          <p>まだ通信はありません。</p>
-        ) : (
-          <ol>
-            {detail.messages.map((message) => (
-              <li key={message.id}>
-                <button type="button" onClick={() => focusAgent(message.sourceAgentId)}>
-                  {agentLabel(message.sourceAgentId, message.sourceKind, agents)}
-                </button>
-                <span aria-hidden="true"> → </span>
-                <button type="button" onClick={() => focusAgent(message.targetAgentId)}>
-                  {agentLabel(message.targetAgentId, message.targetKind, agents)}
-                </button>
-                <p>{messageText(message)}</p>
-                <small>
-                  {message.deliveryState ?? message.state} · attempt {message.attempt}
-                </small>
+                <div className="tlv-worker-heading">
+                  <div>
+                    <span className="role-name">{worker.role}</span>
+                    <span className={`w-status team-status ${statusDotClass(worker.state)}`}>
+                      <span className="dot" aria-hidden="true" />
+                      {worker.state}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="w-stop-btn"
+                    disabled={!canStop}
+                    onClick={() => void stopTeamWorker(task.id, worker.id)}
+                  >
+                    停止
+                  </button>
+                </div>
+                <p className="tlv-objective">{worker.objective}</p>
+                <p className="tlv-activity">
+                  現在: {worker.currentActivity ?? (worker.state === 'done' ? '完了' : '待機')}
+                </p>
+                <dl className="tlv-usage">
+                  <div>
+                    <dt>Tokens</dt>
+                    <dd>{worker.usage.tokens}</dd>
+                  </div>
+                  <div>
+                    <dt>時間</dt>
+                    <dd>{worker.usage.timeMs}ms</dd>
+                  </div>
+                  <div>
+                    <dt>Tools</dt>
+                    <dd>{worker.usage.toolCalls}</dd>
+                  </div>
+                </dl>
+                {relevant.length > 0 && (
+                  <ul className="tlv-recent" aria-label={`${worker.role}との最近のやり取り`}>
+                    {relevant.map((m) => {
+                      const incoming = m.targetAgentId === worker.id;
+                      return (
+                        <li key={m.id} className={`w-line${incoming ? ' msg-in' : ''}`}>
+                          <span className={`tag${incoming ? '' : ' out'}`}>
+                            {incoming ? 'Leaderから' : '報告'}
+                          </span>
+                          {incoming ? m.content : summarize(m.content)}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
               </li>
-            ))}
-          </ol>
-        )}
+            );
+          })}
+          {workers.length === 0 && (
+            <li className="tlv-empty">Leaderに依頼すると、必要に応じてWorkerを雇用します</li>
+          )}
+        </ul>
+
+        <div className="tlv-timeline">
+          <h3>Message timeline</h3>
+          {detail.messages.length === 0 ? (
+            <p className="tlv-empty">まだ通信はありません。</p>
+          ) : (
+            <ol>
+              {detail.messages.map((message) => (
+                <li key={message.id}>
+                  <button type="button" onClick={() => focusAgent(message.sourceAgentId)}>
+                    {agentLabel(message.sourceAgentId, message.sourceKind, detail.team, workers)}
+                  </button>
+                  <span aria-hidden="true"> → </span>
+                  <button type="button" onClick={() => focusAgent(message.targetAgentId)}>
+                    {agentLabel(message.targetAgentId, message.targetKind, detail.team, workers)}
+                  </button>
+                  <p>{messageText(message)}</p>
+                  <small>
+                    {message.deliveryState ?? message.state} · attempt {message.attempt}
+                  </small>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
       </div>
     </section>
   );
+}
+
+function statusDotClass(state: WorkerSummary['state']): string {
+  if (state === 'ready' || state === 'waiting') return 'ready';
+  if (state === 'busy' || state === 'spawning' || state === 'invited') return 'busy';
+  if (state === 'done') return 'done';
+  return '';
 }
 
 function focusAgent(agentId: string): void {
@@ -184,17 +224,25 @@ function focusAgent(agentId: string): void {
 function agentLabel(
   agentId: string,
   kind: 'leader' | 'worker',
-  agents: Map<string, { role: string }>,
+  team: { leaderAgentId: string },
+  workers: readonly { id: string; role: string }[],
 ): string {
-  return kind === 'leader' ? 'Leader' : (agents.get(agentId)?.role ?? 'Worker');
+  if (kind === 'leader' || agentId === team.leaderAgentId) return 'Leader';
+  return workers.find((w) => w.id === agentId)?.role ?? 'Worker';
+}
+
+// Worker report messages are structured envelopes; unwrap `{summary}` when present (mirrors
+// WorkerNode.tsx's identical helper).
+function summarize(content: string): string {
+  try {
+    const parsed = JSON.parse(content) as { summary?: unknown };
+    return typeof parsed.summary === 'string' ? parsed.summary : content;
+  } catch {
+    return content;
+  }
 }
 
 function messageText(message: TeamMessageSummary): string {
   if (message.sourceKind !== 'worker') return message.content;
-  try {
-    const parsed = JSON.parse(message.content) as { summary?: unknown };
-    return typeof parsed.summary === 'string' ? parsed.summary : message.content;
-  } catch {
-    return message.content;
-  }
+  return summarize(message.content);
 }

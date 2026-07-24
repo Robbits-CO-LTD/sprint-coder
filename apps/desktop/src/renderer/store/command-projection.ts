@@ -1,4 +1,4 @@
-import type { CommandOutputRecord } from '../types/vibe';
+import type { CommandOutputRecord } from '../types/sprint-coder';
 
 export type CommandTailLine = Readonly<{
   stream: 'stdout' | 'stderr';

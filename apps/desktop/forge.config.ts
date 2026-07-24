@@ -33,7 +33,7 @@ const config: ForgeConfig = {
   packagerConfig: {
     // @electron/asar matches `unpack` against the full source filename with matchBase enabled.
     // A relative path containing slashes therefore does not match; the exact basename does.
-    asar: { unpack: 'vibe_native_safe_fs.node' },
+    asar: { unpack: 'sprint_coder_native_safe_fs.node' },
     ignore: shouldIgnoreFromPackage,
   },
   makers: [new MakerZIP({}, ['darwin', 'win32', 'linux'])],

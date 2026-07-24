@@ -4,7 +4,7 @@ import {
   createToolDefinition,
   createToolId,
   type ToolExecutionContext,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import { ToolBroker, type ToolAuthorizer } from './tool-broker';
 
 const inputSchema = {

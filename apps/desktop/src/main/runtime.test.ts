@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { TurnEvent, TurnStage } from '@vibe/contracts';
-import type { IntelligenceStepState, ReasoningEffort, StepSnapshot } from '@vibe/domain';
+import type { TurnEvent, TurnStage } from '@sprint-coder/contracts';
+import type { IntelligenceStepState, ReasoningEffort, StepSnapshot } from '@sprint-coder/domain';
 import type { PersistenceClient } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
 

@@ -10,7 +10,7 @@ import {
   executionSpecDigest,
   type Capability,
   type ToolExecutionContext,
-} from '@vibe/domain';
+} from '@sprint-coder/domain';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import { ToolBroker, type ToolAuthorizationRequest } from './tool-broker';
 
@@ -302,7 +302,7 @@ describe('ApprovalCoordinator', () => {
     registry.register(definition);
     const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-1' })
       .entries[0]!;
-    const workspacePath = await mkdtemp(join(tmpdir(), 'vibe-approval-command-'));
+    const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-approval-command-'));
     try {
       const { prepareExecutionSpec } = await import('./command-runner');
       const spec = await prepareExecutionSpec({

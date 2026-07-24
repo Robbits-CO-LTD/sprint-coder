@@ -311,6 +311,60 @@ export const teamEventSchema = z
   .strict();
 export type TeamEvent = z.infer<typeof teamEventSchema>;
 
+// Canvas view persistence (Slice 6.1, FR-CAN-02): per-Task camera + Worker node layout, saved with
+// an optimistic-concurrency revision. Bounds mirror useCamera.ts's MIN_SCALE/MAX_SCALE and a
+// generous world-coordinate range — wide enough for any reachable pan/drag, narrow enough to
+// reject garbage.
+const canvasWorldCoordinateSchema = z.number().finite().min(-20_000).max(20_000);
+export const canvasCameraSchema = z
+  .object({
+    x: canvasWorldCoordinateSchema,
+    y: canvasWorldCoordinateSchema,
+    scale: z.number().finite().min(0.18).max(1.6),
+  })
+  .strict();
+export type CanvasCamera = z.infer<typeof canvasCameraSchema>;
+
+export const canvasNodePositionSchema = z
+  .object({ x: canvasWorldCoordinateSchema, y: canvasWorldCoordinateSchema })
+  .strict();
+export type CanvasNodePosition = z.infer<typeof canvasNodePositionSchema>;
+
+// Domain max is leader + 3 workers, but headroom is left for future node kinds.
+export const CANVAS_NODE_POSITIONS_MAX_ENTRIES = 32;
+export const canvasNodePositionsSchema = z
+  .record(idSchema, canvasNodePositionSchema)
+  .refine((record) => Object.keys(record).length <= CANVAS_NODE_POSITIONS_MAX_ENTRIES, {
+    message: `nodePositions cannot have more than ${CANVAS_NODE_POSITIONS_MAX_ENTRIES} entries`,
+  });
+
+export const canvasViewSchema = z
+  .object({
+    taskId: idSchema,
+    camera: canvasCameraSchema,
+    nodePositions: canvasNodePositionsSchema,
+    revision: z.number().int().nonnegative(),
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type CanvasView = z.infer<typeof canvasViewSchema>;
+
+export const canvasViewSaveInputSchema = z
+  .object({
+    taskId: idSchema,
+    camera: canvasCameraSchema,
+    nodePositions: canvasNodePositionsSchema,
+    // Expected current revision (optimistic concurrency): 0 means "no saved view yet".
+    revision: z.number().int().nonnegative(),
+  })
+  .strict();
+export type CanvasViewSaveInput = z.infer<typeof canvasViewSaveInputSchema>;
+
+export const canvasViewSaveResultSchema = z
+  .object({ revision: z.number().int().nonnegative() })
+  .strict();
+export type CanvasViewSaveResult = z.infer<typeof canvasViewSaveResultSchema>;
+
 export const chatMessageSchema = z
   .object({
     id: idSchema,
@@ -693,8 +747,10 @@ export const publicErrorSchema = z
   .strict();
 export type PublicError = z.infer<typeof publicErrorSchema>;
 
-export const runtimeKindSchema = z.enum(['mock', 'codex']);
+export const runtimeKindSchema = z.enum(['mock', 'codex', 'claude']);
 export type RuntimeKind = z.infer<typeof runtimeKindSchema>;
+// Model id/option shape is provider-agnostic (Codex slugs and Claude aliases/full ids both fit
+// this format) and is kept under its original "codex" name for additive, non-breaking evolution.
 export const codexModelIdSchema = z
   .string()
   .min(1)
@@ -712,6 +768,10 @@ export const runtimeSettingsSchema = z
   .object({
     kind: runtimeKindSchema,
     codexAvailable: z.boolean(),
+    // Additive parallel availability field for the Claude CLI runtime (Slice 3.4). Existing
+    // `codexAvailable` consumers are unaffected; `models`/`model` reflect the currently selected
+    // Runtime kind's own capability list (Codex's or Claude's), per the Main-side probe.
+    claudeAvailable: z.boolean(),
     model: codexModelIdSchema,
     models: z.array(codexModelOptionSchema).max(32),
   })
@@ -809,7 +869,7 @@ export const appInfoSchema = z.object({ version: z.string(), platform: z.string(
 export const turnStartResultSchema = z.object({ turnId: idSchema }).strict();
 export const voidResultSchema = z.undefined();
 
-export interface VibeApi {
+export interface SprintCoderApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
   tasks: {
     list(): Promise<TaskSummary[]>;
@@ -830,6 +890,8 @@ export interface VibeApi {
     stopWorker(input: TeamWorkerRef): Promise<WorkerSummary>;
     stopAll(taskId: string): Promise<TeamDetail>;
     subscribe(taskId: string, listener: (event: TeamEvent) => void): () => void;
+    getCanvasView(taskId: string): Promise<CanvasView | null>;
+    saveCanvasView(input: CanvasViewSaveInput): Promise<CanvasViewSaveResult>;
   };
   workspace: {
     get(taskId: string): Promise<WorkspaceSelection>;
@@ -837,7 +899,7 @@ export interface VibeApi {
   };
   settings: {
     getRuntime(): Promise<RuntimeSettings>;
-    setRuntime(kind: 'mock' | 'codex'): Promise<void>;
+    setRuntime(kind: RuntimeKind): Promise<void>;
     setModel(model: string): Promise<void>;
   };
   permissions: {
@@ -875,45 +937,47 @@ export interface VibeApi {
 }
 
 export const IPC_CHANNELS = {
-  appGetInfo: 'vibe:app:get-info',
-  tasksList: 'vibe:tasks:list',
-  tasksCreate: 'vibe:tasks:create',
-  tasksMessages: 'vibe:tasks:messages',
-  tasksRename: 'vibe:tasks:rename',
-  tasksSetPinned: 'vibe:tasks:set-pinned',
-  tasksSetArchived: 'vibe:tasks:set-archived',
-  tasksSetGoal: 'vibe:tasks:set-goal',
-  tasksGetDraft: 'vibe:tasks:get-draft',
-  tasksSetDraft: 'vibe:tasks:set-draft',
-  teamsPromote: 'vibe:teams:promote',
-  teamsGet: 'vibe:teams:get',
-  teamsHireWorker: 'vibe:teams:hire-worker',
-  teamsSend: 'vibe:teams:send',
-  teamsStopWorker: 'vibe:teams:stop-worker',
-  teamsStopAll: 'vibe:teams:stop-all',
-  teamsSubscribe: 'vibe:teams:subscribe',
-  teamsUnsubscribe: 'vibe:teams:unsubscribe',
-  teamsEvent: 'vibe:teams:event',
-  workspaceGet: 'vibe:workspace:get',
-  workspaceSelect: 'vibe:workspace:select',
-  settingsGetRuntime: 'vibe:settings:get-runtime',
-  settingsSetRuntime: 'vibe:settings:set-runtime',
-  settingsSetModel: 'vibe:settings:set-model',
-  permissionsGet: 'vibe:permissions:get',
-  permissionsSet: 'vibe:permissions:set',
-  permissionsListAutoDecisions: 'vibe:permissions:list-auto-decisions',
-  approvalsListPending: 'vibe:approvals:list-pending',
-  approvalsListRecent: 'vibe:approvals:list-recent',
-  approvalsResolve: 'vibe:approvals:resolve',
-  commandsList: 'vibe:commands:list',
-  commandsOutputPage: 'vibe:commands:output-page',
-  commandsOutputTail: 'vibe:commands:output-tail',
-  turnsStart: 'vibe:turns:start',
-  turnsQueue: 'vibe:turns:queue',
-  turnsSteer: 'vibe:turns:steer',
-  turnsStopAndSend: 'vibe:turns:stop-and-send',
-  turnsCancel: 'vibe:turns:cancel',
-  turnsSnapshot: 'vibe:turns:snapshot',
-  turnsSubscribe: 'vibe:turns:subscribe',
-  turnsPort: 'vibe:turns:port',
+  appGetInfo: 'sprint-coder:app:get-info',
+  tasksList: 'sprint-coder:tasks:list',
+  tasksCreate: 'sprint-coder:tasks:create',
+  tasksMessages: 'sprint-coder:tasks:messages',
+  tasksRename: 'sprint-coder:tasks:rename',
+  tasksSetPinned: 'sprint-coder:tasks:set-pinned',
+  tasksSetArchived: 'sprint-coder:tasks:set-archived',
+  tasksSetGoal: 'sprint-coder:tasks:set-goal',
+  tasksGetDraft: 'sprint-coder:tasks:get-draft',
+  tasksSetDraft: 'sprint-coder:tasks:set-draft',
+  teamsPromote: 'sprint-coder:teams:promote',
+  teamsGet: 'sprint-coder:teams:get',
+  teamsHireWorker: 'sprint-coder:teams:hire-worker',
+  teamsSend: 'sprint-coder:teams:send',
+  teamsStopWorker: 'sprint-coder:teams:stop-worker',
+  teamsStopAll: 'sprint-coder:teams:stop-all',
+  teamsSubscribe: 'sprint-coder:teams:subscribe',
+  teamsUnsubscribe: 'sprint-coder:teams:unsubscribe',
+  teamsEvent: 'sprint-coder:teams:event',
+  teamsGetCanvasView: 'sprint-coder:teams:get-canvas-view',
+  teamsSaveCanvasView: 'sprint-coder:teams:save-canvas-view',
+  workspaceGet: 'sprint-coder:workspace:get',
+  workspaceSelect: 'sprint-coder:workspace:select',
+  settingsGetRuntime: 'sprint-coder:settings:get-runtime',
+  settingsSetRuntime: 'sprint-coder:settings:set-runtime',
+  settingsSetModel: 'sprint-coder:settings:set-model',
+  permissionsGet: 'sprint-coder:permissions:get',
+  permissionsSet: 'sprint-coder:permissions:set',
+  permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',
+  approvalsListPending: 'sprint-coder:approvals:list-pending',
+  approvalsListRecent: 'sprint-coder:approvals:list-recent',
+  approvalsResolve: 'sprint-coder:approvals:resolve',
+  commandsList: 'sprint-coder:commands:list',
+  commandsOutputPage: 'sprint-coder:commands:output-page',
+  commandsOutputTail: 'sprint-coder:commands:output-tail',
+  turnsStart: 'sprint-coder:turns:start',
+  turnsQueue: 'sprint-coder:turns:queue',
+  turnsSteer: 'sprint-coder:turns:steer',
+  turnsStopAndSend: 'sprint-coder:turns:stop-and-send',
+  turnsCancel: 'sprint-coder:turns:cancel',
+  turnsSnapshot: 'sprint-coder:turns:snapshot',
+  turnsSubscribe: 'sprint-coder:turns:subscribe',
+  turnsPort: 'sprint-coder:turns:port',
 } as const;

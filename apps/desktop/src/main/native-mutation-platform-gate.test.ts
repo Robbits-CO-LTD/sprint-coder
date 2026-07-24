@@ -8,7 +8,7 @@ import type {
 const validEvidence: NativeMutationPackagedLoadEvidence = Object.freeze({
   source: 'packaged-app',
   addonPath:
-    '/Applications/vibe-editor3.app/Contents/Resources/app.asar.unpacked/native-safe-fs/build/Release/vibe_native_safe_fs.node',
+    '/Applications/Sprint Coder.app/Contents/Resources/app.asar.unpacked/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
   loadedFromUnpacked: true,
 });
 
