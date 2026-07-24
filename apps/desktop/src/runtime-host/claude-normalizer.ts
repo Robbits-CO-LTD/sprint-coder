@@ -11,10 +11,22 @@ export class ClaudeOutputError extends Error {}
 // normalizer treats an unexpected approval request as a fatal profile violation.
 export class ClaudeCapabilityViolationError extends Error {}
 
+// What the CLI's own session-init report is allowed to show. Defaults to the plain no-tools/
+// no-MCP profile every non-team turn uses; the Leader MCP profile (buildClaudeArgs' teamMcp
+// branch) is the one case that legitimately reports a non-empty tool/MCP surface, so it supplies
+// the exact fully-qualified tool names it expects instead.
+export type ClaudeExpectedCapabilities =
+  | Readonly<{ kind: 'none' }>
+  | Readonly<{ kind: 'team-mcp'; serverName: string; toolNames: readonly string[] }>;
+
+const NO_CAPABILITIES: ClaudeExpectedCapabilities = { kind: 'none' };
+
 export class ClaudeJsonlNormalizer {
   private stageIndex = -1;
   private readonly messageId = randomUUID();
   private completed = false;
+
+  constructor(private readonly expected: ClaudeExpectedCapabilities = NO_CAPABILITIES) {}
 
   push(line: string): RuntimeCanonicalEvent[] {
     let value: unknown;
@@ -28,7 +40,7 @@ export class ClaudeJsonlNormalizer {
 
     const type = value['type'];
     if (type === 'system' && readString(value, 'subtype') === 'init') {
-      assertReadOnlyCapabilities(value);
+      assertExpectedCapabilities(value, this.expected);
       return this.advanceTo('understanding');
     }
     if (type === 'stream_event') return this.pushStreamEvent(value);
@@ -72,18 +84,41 @@ export class ClaudeJsonlNormalizer {
   }
 }
 
-// Verifies the CLI's own session-init report matches the immutable no-tools/no-MCP profile
-// (buildClaudeArgs' --tools "" --strict-mcp-config). A non-empty list here would mean the fixed
-// argv was bypassed or the CLI version changed behavior — fail the Turn rather than proceed.
-function assertReadOnlyCapabilities(value: Record<string, unknown>): void {
+// Verifies the CLI's own session-init report matches the expected capability surface
+// (buildClaudeArgs' --tools "" --strict-mcp-config, plus --mcp-config/--allowedTools for the
+// Leader MCP profile). Any mismatch here would mean the fixed argv was bypassed, the CLI version
+// changed behavior, or (team-mcp) some other MCP server than the one we configured connected —
+// fail the Turn rather than proceed.
+function assertExpectedCapabilities(
+  value: Record<string, unknown>,
+  expected: ClaudeExpectedCapabilities,
+): void {
   const tools = value['tools'];
   const mcpServers = value['mcp_servers'];
-  if (
-    (Array.isArray(tools) && tools.length > 0) ||
-    (Array.isArray(mcpServers) && mcpServers.length > 0)
-  )
+  if (expected.kind === 'none') {
+    if (
+      (Array.isArray(tools) && tools.length > 0) ||
+      (Array.isArray(mcpServers) && mcpServers.length > 0)
+    )
+      throw new ClaudeCapabilityViolationError(
+        'Claude session reported unexpected tool or MCP capability',
+      );
+    return;
+  }
+  const reportedTools = new Set(Array.isArray(tools) ? tools : []);
+  const expectedTools = new Set(expected.toolNames);
+  const toolsMatch =
+    reportedTools.size === expectedTools.size &&
+    [...expectedTools].every((name) => reportedTools.has(name));
+  const serversMatch =
+    Array.isArray(mcpServers) &&
+    mcpServers.length === 1 &&
+    isRecord(mcpServers[0]) &&
+    mcpServers[0]['name'] === expected.serverName &&
+    mcpServers[0]['status'] === 'connected';
+  if (!toolsMatch || !serversMatch)
     throw new ClaudeCapabilityViolationError(
-      'Claude session reported unexpected tool or MCP capability',
+      'Claude session reported unexpected tool or MCP capability for the team MCP profile',
     );
 }
 

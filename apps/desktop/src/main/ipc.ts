@@ -99,7 +99,9 @@ import {
 } from './provider-egress';
 import { TeamCoordinator } from './team-coordinator';
 import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
-import { isTeamScenarioInput } from './team-tools';
+import { isTeamScenarioInput, LEADER_MCP_SYSTEM_PROMPT } from './team-tools';
+import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
+import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -117,6 +119,7 @@ export class IpcRouter {
   private readonly autoReviewer = AutoReviewer.createProduction();
   private readonly teamCoordinator: TeamCoordinator;
   private readonly teamSubscriptions = new Set<string>();
+  private readonly teamMcpBridge: TeamMcpBridge;
 
   constructor(
     private readonly window: BrowserWindow,
@@ -156,16 +159,25 @@ export class IpcRouter {
       persistence,
       this.teamWorkerRuntime,
       (taskId, detail) => {
-      if (this.teamSubscriptions.has(taskId) && !this.window.isDestroyed())
-        this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
-          taskId,
-          event: teamEventSchema.parse({ type: 'updated', detail }),
-        });
+        if (this.teamSubscriptions.has(taskId) && !this.window.isDestroyed())
+          this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
+            taskId,
+            event: teamEventSchema.parse({ type: 'updated', detail }),
+          });
       },
       undefined,
       // Real worker turns run a full provider CLI invocation; the deterministic 10s default is
       // far too tight for that.
       180_000,
+    );
+    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): the socket the real Claude Leader's MCP server
+    // connects back through to reach this same TeamCoordinator. Starting it here (rather than
+    // lazily on first team turn) means `initialize()` can await it once at app startup; a failed
+    // start degrades to `socketPath === null`, which startSelectedRuntime treats as "fall back to
+    // the mock leader path" rather than a hard failure.
+    this.teamMcpBridge = new TeamMcpBridge(
+      this.teamCoordinator,
+      defaultSocketPathFactory(app.getPath('userData')),
     );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
@@ -763,6 +775,7 @@ export class IpcRouter {
   async initialize(): Promise<void> {
     this.teamCoordinator.recoverOnStartup();
     await this.permissionBroker.drainPolicyEpochOutbox();
+    if (process.env['SPRINT_CODER_LEADER_MCP'] === '1') await this.teamMcpBridge.ensureStarted();
   }
 
   async dispose(): Promise<void> {
@@ -774,6 +787,7 @@ export class IpcRouter {
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
     this.claudeRuntime.dispose();
+    await this.teamMcpBridge.dispose();
   }
 
   private handle<TInput, TOutput>(
@@ -852,6 +866,7 @@ export class IpcRouter {
 
   private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {
     this.turnRuntimes.delete(turnId);
+    this.teamMcpBridge.unregister(turnId);
     this.publish(this.persistence.completeTurn(taskId, turnId, state));
     this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
     this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
@@ -1026,10 +1041,28 @@ export class IpcRouter {
   private startSelectedRuntime(started: StartedTurn): void {
     const taskId = started.event.taskId;
     let kind = started.runtimeKind;
-    // Team intent always runs the leader orchestration (hire→dispatch→reports→synthesis): the
-    // production adapters are no-tools, so a real-runtime leader cannot drive a team yet — the
-    // deterministic leader orchestrates while Workers execute on the real runtime.
-    if (kind !== 'mock' && isTeamScenarioInput(started.text)) kind = 'mock';
+    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Claude Leader drives team_* tools itself over
+    // the MCP bridge instead of the deterministic mock scenario. Gated to Claude only (Codex has
+    // no MCP profile yet) and to turns that are actually team-shaped, so every other turn's
+    // behavior — including Claude turns with no team intent — is completely unchanged.
+    const wantsLeaderMcp =
+      process.env['SPRINT_CODER_LEADER_MCP'] === '1' &&
+      kind === 'claude' &&
+      (isTeamScenarioInput(started.text) || this.persistence.getTeamByTask(taskId) !== null);
+    let teamMcp: RuntimeTeamMcpOption | undefined;
+    if (wantsLeaderMcp) {
+      teamMcp = this.registerLeaderMcp(started.turnId, taskId);
+      // Bridge failed to start on this platform (e.g. socket bind failure): degrade to the same
+      // deterministic mock leader every other Claude/Codex team turn already uses, rather than
+      // silently running a real Claude turn with no team tools available at all.
+      if (teamMcp === undefined) kind = 'mock';
+    } else if (kind !== 'mock' && isTeamScenarioInput(started.text)) {
+      // Team intent without Leader MCP always runs the leader orchestration
+      // (hire→dispatch→reports→synthesis): the production adapters are no-tools by default, so a
+      // real-runtime leader cannot drive a team — the deterministic leader orchestrates while
+      // Workers execute on the real runtime.
+      kind = 'mock';
+    }
     this.turnRuntimes.set(started.turnId, kind);
     if (kind === 'mock') {
       this.mockRuntime.start(taskId, started.turnId, started.text);
@@ -1059,9 +1092,11 @@ export class IpcRouter {
           started.model,
           createEmptyToolCatalogSnapshot(kind, workspaceId),
           context,
+          teamMcp,
         ),
     );
     if (!egress.allowed) {
+      this.teamMcpBridge.unregister(started.turnId);
       this.handleRuntimeFailure(kind, taskId, started.turnId, {
         code: 'RUNTIME_FAILED',
         userMessage: 'Providerへの送信がpolicyで拒否されました。',
@@ -1069,6 +1104,17 @@ export class IpcRouter {
       });
       return;
     }
+  }
+
+  /** Starts the bridge's socket if needed and mints a fresh bearer token bound to this one turn.
+   * Returns undefined when the bridge is unavailable (never blocks the turn on it — see the
+   * fallback in startSelectedRuntime). */
+  private registerLeaderMcp(turnId: string, taskId: string): RuntimeTeamMcpOption | undefined {
+    const socketPath = this.teamMcpBridge.socketPath;
+    if (socketPath === null) return undefined;
+    const token = TeamMcpBridge.generateToken();
+    this.teamMcpBridge.register(turnId, { taskId, token });
+    return { socketPath, token, guidance: LEADER_MCP_SYSTEM_PROMPT };
   }
 
   private prepareContext(taskId: string, turnId: string): PreparedContext {
@@ -1107,6 +1153,7 @@ export class IpcRouter {
   private async cancelRuntime(taskId: string, turnId: string): Promise<void> {
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
+    this.teamMcpBridge.unregister(turnId);
     if (kind === 'codex' || kind === 'claude') this.runtimeFor(kind).cancel(taskId, turnId);
     else await this.mockRuntime.cancel(turnId);
   }

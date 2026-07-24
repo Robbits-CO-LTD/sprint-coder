@@ -1,0 +1,187 @@
+import { createConnection } from 'node:net';
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
+import type { TeamCoordinator } from './team-coordinator';
+
+function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordinator {
+  return {
+    hireWorker: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
+    sendToWorker: vi.fn(async () => {
+      throw new Error('not used in this test');
+    }),
+    listWorkerReports: vi.fn(() => []),
+    hasBusyWorkers: vi.fn(() => false),
+    stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
+    ...overrides,
+  } as unknown as TeamCoordinator;
+}
+
+const bridges: TeamMcpBridge[] = [];
+afterEach(async () => {
+  for (const bridge of bridges.splice(0)) await bridge.dispose();
+});
+
+function testSocketPath(): () => string {
+  const path = join(tmpdir(), `sc-team-bridge-test-${randomBytes(6).toString('hex')}.sock`);
+  return () => path;
+}
+
+/** Sends one line and collects every line the server writes back before the socket closes (or a
+ * short grace period elapses with no more data), then closes the connection. */
+function roundTrip(
+  socketPath: string,
+  payload: unknown,
+): Promise<{ lines: string[]; closed: boolean }> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let buffer = '';
+    const lines: string[] = [];
+    let closed = false;
+    const finish = () => {
+      clearTimeout(graceTimer);
+      resolve({ lines, closed });
+    };
+    const graceTimer = setTimeout(() => {
+      socket.destroy();
+      finish();
+    }, 300);
+    socket.once('connect', () => socket.write(`${JSON.stringify(payload)}\n`));
+    socket.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      let index: number;
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        lines.push(buffer.slice(0, index));
+        buffer = buffer.slice(index + 1);
+      }
+    });
+    socket.once('close', () => {
+      closed = true;
+      finish();
+    });
+    socket.once('error', reject);
+  });
+}
+
+describe('defaultSocketPathFactory', () => {
+  it('only returns candidates whose byte length fits the platform sun_path limit', () => {
+    const factory = defaultSocketPathFactory('/some/long/looking/app-user-data/directory/path');
+    const path = factory();
+    expect(Buffer.byteLength(path, 'utf8')).toBeLessThanOrEqual(100);
+  });
+
+  it('generates a fresh path on every call', () => {
+    const factory = defaultSocketPathFactory('/tmp');
+    expect(factory()).not.toBe(factory());
+  });
+});
+
+describe('TeamMcpBridge', () => {
+  it('forwards a call authenticated with the registered token to executeTeamTool', async () => {
+    // team_stop_worker (not team_hire_worker) deliberately: executeTeamTool's hire branch pauses
+    // for HIRE_PACING_MS (production-default 1200ms, a deliberate anti-"instant burst" cadence —
+    // see team-tools.ts) before resolving, which would make this a slow, timing-fragile test for
+    // a property team-tools-execute.test.ts already covers directly. Auth/forwarding is
+    // tool-agnostic, so any tool proves the same thing here.
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    expect(socketPath).not.toBeNull();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-1', { taskId: 'task-1', token });
+
+    const { lines, closed } = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_stop_worker',
+      args: { workerId: 'worker-1' },
+    });
+    expect(closed).toBe(false);
+    expect(lines).toHaveLength(1);
+    const response = JSON.parse(lines[0] as string) as { ok: boolean; result: { workerId: string } };
+    expect(response.ok).toBe(true);
+    expect(response.result.workerId).toBe('worker-1');
+    expect(coordinator.stopWorker).toHaveBeenCalledWith('task-1', 'worker-1');
+  });
+
+  it('closes the connection without responding to an unknown token', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    bridge.register('turn-1', { taskId: 'task-1', token: TeamMcpBridge.generateToken() });
+
+    const { lines, closed } = await roundTrip(socketPath as string, {
+      token: 'attacker-guessed-token-that-is-wrong',
+      tool: 'team_hire_worker',
+      args: { role: 'x', objective: 'y' },
+    });
+    expect(lines).toHaveLength(0);
+    expect(closed).toBe(true);
+    expect(coordinator.hireWorker).not.toHaveBeenCalled();
+  });
+
+  it('rejects a token whose length differs from any registered token (no timingSafeEqual crash)', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    bridge.register('turn-1', { taskId: 'task-1', token: TeamMcpBridge.generateToken() });
+
+    const { lines, closed } = await roundTrip(socketPath as string, {
+      token: 'short',
+      tool: 'team_hire_worker',
+      args: {},
+    });
+    expect(lines).toHaveLength(0);
+    expect(closed).toBe(true);
+  });
+
+  it('rejects calls for a turn that was already unregistered', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-1', { taskId: 'task-1', token });
+    bridge.unregister('turn-1');
+
+    const { lines, closed } = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_hire_worker',
+      args: { role: 'x', objective: 'y' },
+    });
+    expect(lines).toHaveLength(0);
+    expect(closed).toBe(true);
+    expect(coordinator.hireWorker).not.toHaveBeenCalled();
+  });
+
+  it('reports a coordinator/tool error as {ok:false} rather than crashing the connection', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-1', { taskId: 'task-1', token });
+
+    const { lines, closed } = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_not_a_real_tool',
+      args: {},
+    });
+    expect(closed).toBe(false);
+    const response = JSON.parse(lines[0] as string) as { ok: false; error: string };
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain('Unknown team tool');
+  });
+
+  it('ensureStarted is idempotent and returns the same socket across calls', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
+    bridges.push(bridge);
+    const first = await bridge.ensureStarted();
+    const second = await bridge.ensureStarted();
+    expect(first).toBe(second);
+  });
+});

@@ -222,3 +222,24 @@ Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: 
 
 ## 追記(2026-07-24 Fable): 雇用ペーシング
 - 一括瞬間雇用は「Leaderが動的採用している」体験を壊すため、雇用ごとに1.2秒のペーシングを導入(SPRINT_CODER_TEAM_PACING_MS で調整可)。真の動的採用(実Claude Leaderが依頼内容から役割を決める=MCP化)は引き続き次マイルストーン
+
+## 追記(2026-07-24 Fable): LeaderのMCP化(実Claude LeaderがteamツールをMCP経由で駆動)
+
+- 実装: `SPRINT_CODER_LEADER_MCP=1`かつruntime=claudeかつteam意図(または既存Team)の場合、Turnをmockへ強制せず実Claude CLIへ`--mcp-config`/`--allowedTools mcp__team__*`を渡して直接team_hire_worker/team_send_to_worker/team_wait_reports/team_stop_workerをtool useさせる。env未設定時は既存のmockリルート挙動を完全維持
+  - `main/team-tools.ts`: 4ツールの実行ロジックを`executeTeamTool(coordinator, taskId, toolName, args, options)`へ集約。mock ToolBroker登録とMCPブリッジの両方がこの1本の経路を共有。`.strict()` zodスキーマでtaskId/送信元IDのなりすましを実行前に拒否。team_wait_reportsはlongPollオプション付き(既定false=mock互換の即時replay、true=最大60秒ロングポール、`TeamCoordinator.hasBusyWorkers`で全Worker settled検知)
+  - `main/team-mcp-bridge.ts`(新規): userData配下ではなく`/tmp`優先のunix socket(sun_path 104byte制限を厳守)でturnId→{taskId,token}を登録管理。行区切りJSON、`timingSafeEqual`による定数時間トークン比較、不正トークンは応答せず即close
+  - `runtime-host/team-mcp-server-source.ts`(新規): 依存ゼロの自己完結CJS文字列。newline区切りJSON-RPC 2.0でinitialize/notifications initialized/tools list/tools callを実装し、tools callはunix socket経由でbridgeへ転送するのみ(TeamCoordinatorを直接知らない)
+  - `runtime-host/claude-adapter.ts`: teamMcp指定時のみ一時mcp-config.json+スクリプトファイルを書き出し、`--mcp-config --allowedTools mcp__team__* --append-system-prompt <guidance>`を追加。Turn終了時に一時ディレクトリごと削除
+  - `runtime-host/protocol.ts`/`main/runtime-host.ts`/`runtime-host/index.ts`: start envelopeへ追加的optional `teamMcp:{socketPath,token,guidance}`を追加(Codexアダプタは無視)
+  - `main/ipc.ts`: `startSelectedRuntime`でgate判定、bridge登録/token発行、Turn完了・失敗・キャンセルの全経路で`unregister`を実行。bridge起動失敗時はmockへ安全側フォールバック
+- **重要な設計変更(実機検証で確定、当初計画からの逸脱)**: `--safe-mode`はMCPサーバ読み込みそのものを無効化する(CLIの`--help`にも明記、実機でも確認: `--safe-mode`付きだと`--mcp-config`で渡したサーバがconnectされず`mcp_servers:[]`のまま)。そのためteamMcp指定時のみ`--safe-mode`を外し、代わりに`--setting-sources ""`(user/project/localのsettings source全読み込み停止→hooks/CLAUDE.md/plugins/カスタムコマンドが読み込まれないことを実機確認: `plugins:[]`、CLAUDE.md由来の指示が存在しないことをprobeで確認)と`--disable-slash-commands`(`slash_commands:[]`を実機確認)を追加して同等の分離を実現。`--tools ""`(built-in tool空)と`--strict-mcp-config`(指定した1サーバのみ)は維持。`claude-normalizer.ts`の`assertReadOnlyCapabilities`もteamMcp時は「tools/mcp_serversが空であること」ではなく「期待した1サーバ+4ツール名と完全一致すること」を検証するよう拡張(`ClaudeExpectedCapabilities`)
+- ハンドシェイク検証: インストール済みClaude CLI(v2.1.218)へ実際にプローブ用MCPサーバを繋いで確認。newline区切りJSON-RPC(Content-Length枠なし)、`initialize`はクライアントの`protocolVersion`をそのまま返せば通る、`tools/call`の`params`に`_meta.claudecode/toolUseId`等が付与される(無視して問題なし)、フルクオリファイド名は`mcp__<serverName>__<toolName>`
+- 検証: typecheck(3 workspace) exit 0 / lint exit 0 / test(desktop 701 + contracts 23 + domain 276 = 1000件、Electron ABI内含む) exit 0。format:checkは既存14ファイルの整形崩れ(本マイルストーン範囲外、着手前から存在)のみ残存でexit 1 — 新規/変更ファイルは全てprettier適用済み
+  - 新規unit test: bridge認証(不正token即close、token長不一致、unregister後拒否)、executeTeamToolのルーティング/バリデーション/なりすまし拒否、MCPサーバスクリプトのJSON-RPCハンドシェイク(initialize/tools list/tools call/未知method)、team_wait_reportsロングポール(即時報告・busy解消待ち・timeout)
+  - 既存e2e(`SPRINT_CODER_E2E_MODE=dev`、環境変数なし): team-flow/team-cables/team-canvas-layout 14/14 green(mockパス無変更を確認)
+- **実smoke(1回限定、削除済み一時spec)**: `SPRINT_CODER_LEADER_MCP=1 SPRINT_CODER_REAL_WORKERS=1`・runtime=Claude Codeで「チームで『1+1の答え』を必要最小の人数で検討して、結論を教えてください」を送信。結果: 実Leaderが**自律的に**「計算担当」という(固定シナリオの調査/実装/レビューとは異なる)役割で1名だけを雇用(必要最小人数の判断も自律)→team_send_to_workerで依頼→実Worker(実Claude CLI)が「報告結論: 1+1=2」を返却→team_wait_reportsで受信→Leader最終回答「必要最小の1人（計算担当）で検討しました。結論: 1 + 1 = 2」を合成。Turn完了まで14秒。UI上でWorkerカード(計算担当・done)とLeaderの最終回答を実機確認
+- 既知の限界/次点:
+  1. Codexランタイムは対象外(MCP転送するstdio機構が確認できていない/ADR記載どおりClaude専用)。Codexでteam意図の場合は従来どおりmockリルート
+  2. teamMcp時の`--setting-sources ""`はhooks/CLAUDE.md/plugins/カスタムコマンド/slash commandsを無効化するが、Claude CLI組み込みの標準ツール自体は`--tools ""`で別途無効化しているため二重の安全設計。ただし`--safe-mode`が保証していた項目の完全な一対一対応ではなく、CLIの`--help`記載+実機プローブでの経験的一致であり、将来のCLIバージョンアップで挙動が変わる可能性は残る(normalizerの`ClaudeExpectedCapabilities`検証がfail-closedの防波堤)
+  3. team_wait_reportsのロングポールは固定500msポーリング(コールバック/イベント駆動ではない)。60秒×Workerの往復回数分のブリッジ往復が発生するが、実測では実用上問題なし
+  4. Leader MCPソケットは複数Turn/複数Taskで1つのbridge・1つのsocketを使い回す設計(turnId×tokenで多重化)。同一プロセス内で同時に複数のteam Turnが走る場合の負荷は未検証

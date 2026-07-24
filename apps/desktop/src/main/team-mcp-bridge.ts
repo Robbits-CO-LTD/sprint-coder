@@ -1,0 +1,203 @@
+// Main-side bridge between the ephemeral MCP stdio server (runtime-host/team-mcp-server-source.ts,
+// spawned inside the real Claude CLI's own process tree) and TeamCoordinator. The MCP server never
+// talks to persistence/TeamCoordinator directly — it only ever knows a unix socket path and a
+// per-turn bearer token; this class is the sole thing that maps a validated token back to the
+// (taskId, turnId) it was issued for, so a tool call arriving over the wire can never spoof which
+// Task/Team it targets (see executeTeamTool in team-tools.ts, which this forwards into).
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { chmodSync, existsSync, unlinkSync } from 'node:fs';
+import { createServer, type Server, type Socket } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { executeTeamTool } from './team-tools';
+import type { TeamCoordinator } from './team-coordinator';
+
+// macOS's sockaddr_un.sun_path is 104 bytes (Linux allows 108); staying comfortably under that
+// keeps bind() from failing on long app-data paths (a real, previously-hit failure mode on this
+// project — see tasks/todo.md). `/tmp` is short and stable across platforms, so it is always
+// tried first; `os.tmpdir()` and the caller-provided (userData-derived) directory are fallbacks
+// for sandboxes where `/tmp` is not writable.
+const MAX_SUN_PATH_BYTES = 100;
+
+export function defaultSocketPathFactory(preferredDirectory: string): () => string {
+  return () => {
+    const id = randomBytes(8).toString('hex');
+    const candidates = [
+      join('/tmp', `sc-team-${id}.sock`),
+      join(tmpdir(), `sc-team-${id}.sock`),
+      join(preferredDirectory, `sc-team-${id}.sock`),
+    ];
+    const chosen = candidates.find((path) => Buffer.byteLength(path, 'utf8') <= MAX_SUN_PATH_BYTES);
+    if (chosen === undefined)
+      throw new Error('No socket path candidate fits the platform sun_path length limit');
+    return chosen;
+  };
+}
+
+export type TeamMcpRegistration = Readonly<{ taskId: string; token: string }>;
+
+type Registered = TeamMcpRegistration & { waitCursor: number };
+
+export class TeamMcpBridge {
+  private readonly registrations = new Map<string, Registered>();
+  private server: Server | null = null;
+  private socketPathValue: string | null = null;
+  private startPromise: Promise<string> | null = null;
+
+  constructor(
+    private readonly coordinator: TeamCoordinator,
+    private readonly socketPathFactory: () => string,
+  ) {}
+
+  get socketPath(): string | null {
+    return this.socketPathValue;
+  }
+
+  /** Idempotent: safe to call once at app startup and reuse the same listening socket for every
+   * subsequent Leader turn that opts into the MCP path. */
+  async ensureStarted(): Promise<string | null> {
+    if (this.socketPathValue !== null) return this.socketPathValue;
+    if (this.startPromise !== null) return this.startPromise;
+    this.startPromise = this.start().catch((error: unknown) => {
+      this.startPromise = null;
+      // A bridge that fails to start is a soft failure: callers (ipc.ts) treat a null socketPath
+      // as "fall back to the mock leader path" rather than crashing turn dispatch.
+      console.error('[team-mcp-bridge] failed to start', error);
+      return null as unknown as string;
+    });
+    return this.startPromise;
+  }
+
+  private start(): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const path = this.socketPathFactory();
+      if (existsSync(path)) {
+        try {
+          unlinkSync(path);
+        } catch {
+          // best effort: a stale socket file from a previous crashed run
+        }
+      }
+      const server = createServer((socket) => this.handleConnection(socket));
+      server.once('error', (error) => reject(error as Error));
+      server.listen(path, () => {
+        try {
+          chmodSync(path, 0o600);
+        } catch {
+          // best effort on platforms without POSIX file modes
+        }
+        this.server = server;
+        this.socketPathValue = path;
+        resolve(path);
+      });
+    });
+  }
+
+  /** Binds a fresh, random bearer token to (taskId, turnId) for the duration of one Leader turn.
+   * Call this before starting the Claude runtime for that turn, and always pair it with
+   * `unregister` on completion/failure/cancel — an un-unregistered turn keeps its token live. */
+  register(turnId: string, registration: TeamMcpRegistration): void {
+    this.registrations.set(turnId, { ...registration, waitCursor: 0 });
+  }
+
+  unregister(turnId: string): void {
+    this.registrations.delete(turnId);
+  }
+
+  static generateToken(): string {
+    return randomBytes(32).toString('hex');
+  }
+
+  private handleConnection(socket: Socket): void {
+    let buffer = '';
+    socket.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      let index: number;
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, index);
+        buffer = buffer.slice(index + 1);
+        if (line.trim() !== '') void this.handleLine(socket, line);
+      }
+    });
+    socket.on('error', () => socket.destroy());
+  }
+
+  private async handleLine(socket: Socket, line: string): Promise<void> {
+    let request: { token?: unknown; tool?: unknown; args?: unknown };
+    try {
+      request = JSON.parse(line) as typeof request;
+    } catch {
+      socket.destroy();
+      return;
+    }
+    const found = this.findByToken(request.token);
+    if (found === undefined) {
+      // Unknown/forged token: close without responding rather than confirming or denying which
+      // part of the request was wrong (fail-closed, no oracle).
+      socket.destroy();
+      return;
+    }
+    if (typeof request.tool !== 'string') {
+      socket.write(`${JSON.stringify({ ok: false, error: 'invalid_tool' })}\n`);
+      return;
+    }
+    const [turnId, registration] = found;
+    try {
+      const result = await executeTeamTool(
+        this.coordinator,
+        registration.taskId,
+        request.tool,
+        request.args,
+        {
+          longPoll: request.tool === 'team_wait_reports',
+          waitReportsCursor: {
+            read: () => registration.waitCursor,
+            advance: (seq) => {
+              registration.waitCursor = seq;
+            },
+          },
+        },
+      );
+      socket.write(`${JSON.stringify({ ok: true, result })}\n`);
+    } catch (error) {
+      socket.write(
+        `${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`,
+      );
+    }
+    void turnId;
+  }
+
+  /** Constant-time token compare: every registered token is compared with `timingSafeEqual`
+   * (never a plain `===`/string compare), so a wrong guess cannot be distinguished by timing from
+   * a right one for any single candidate. Buffer-length mismatches are checked before calling
+   * `timingSafeEqual` (which throws on mismatched lengths) rather than treated as a fast-reject —
+   * they still fall through to the same "unknown token" close as every other rejection. */
+  private findByToken(token: unknown): [string, Registered] | undefined {
+    if (typeof token !== 'string') return undefined;
+    const candidate = Buffer.from(token, 'utf8');
+    for (const [turnId, registration] of this.registrations) {
+      const expected = Buffer.from(registration.token, 'utf8');
+      if (expected.length === candidate.length && timingSafeEqual(expected, candidate))
+        return [turnId, registration];
+    }
+    return undefined;
+  }
+
+  async dispose(): Promise<void> {
+    this.registrations.clear();
+    this.startPromise = null;
+    const server = this.server;
+    this.server = null;
+    const socketPath = this.socketPathValue;
+    this.socketPathValue = null;
+    if (server === null) return;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (socketPath !== null) {
+      try {
+        unlinkSync(socketPath);
+      } catch {
+        // already gone
+      }
+    }
+  }
+}

@@ -1,12 +1,21 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError } from '@sprint-coder/contracts';
 import type { CodexModelOption } from '@sprint-coder/contracts';
-import { ClaudeCapabilityViolationError, ClaudeJsonlNormalizer } from './claude-normalizer';
-import type { RuntimeCanonicalEvent, RuntimeContextFragment } from './protocol';
+import {
+  ClaudeCapabilityViolationError,
+  ClaudeJsonlNormalizer,
+  type ClaudeExpectedCapabilities,
+} from './claude-normalizer';
+import type {
+  RuntimeCanonicalEvent,
+  RuntimeContextFragment,
+  RuntimeTeamMcpOption,
+} from './protocol';
+import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -82,6 +91,7 @@ export class ClaudeRuntimeAdapter {
     emit: EmitEvent,
     fail: EmitError,
     exited: (code: number, canceled: boolean) => void,
+    teamMcp?: RuntimeTeamMcpOption,
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
@@ -90,8 +100,37 @@ export class ClaudeRuntimeAdapter {
     let temporaryDirectory: string | null = null;
     const cwd =
       workspacePath ?? (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-')));
-    const normalizer = new ClaudeJsonlNormalizer();
-    const child = spawn('claude', buildClaudeArgs(model), {
+    let teamMcpDirectory: string | null = null;
+    let teamMcpArgs: { configPath: string; guidance: string } | undefined;
+    if (teamMcp !== undefined) {
+      teamMcpDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-mcp-'));
+      const scriptPath = join(teamMcpDirectory, 'team-mcp-server.cjs');
+      const configPath = join(teamMcpDirectory, 'mcp-config.json');
+      writeFileSync(scriptPath, TEAM_MCP_SERVER_SOURCE, { mode: 0o600 });
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          mcpServers: {
+            team: {
+              type: 'stdio',
+              command: process.execPath,
+              args: [scriptPath],
+              env: {
+                ELECTRON_RUN_AS_NODE: '1',
+                TEAM_BRIDGE_SOCKET: teamMcp.socketPath,
+                TEAM_BRIDGE_TOKEN: teamMcp.token,
+              },
+            },
+          },
+        }),
+        { mode: 0o600 },
+      );
+      teamMcpArgs = { configPath, guidance: teamMcp.guidance };
+    }
+    const normalizer = new ClaudeJsonlNormalizer(
+      teamMcp === undefined ? undefined : teamMcpExpectedCapabilities(),
+    );
+    const child = spawn('claude', buildClaudeArgs(model, teamMcpArgs), {
       cwd,
       env: minimalEnvironment(),
       detached: process.platform !== 'win32',
@@ -99,6 +138,7 @@ export class ClaudeRuntimeAdapter {
     });
     const cleanup = (): void => {
       if (temporaryDirectory !== null) rmSync(temporaryDirectory, { recursive: true, force: true });
+      if (teamMcpDirectory !== null) rmSync(teamMcpDirectory, { recursive: true, force: true });
     };
     const control: ActiveProcess = { child, canceled: false, cleanup };
     this.active.set(turnId, control);
@@ -179,6 +219,27 @@ export class ClaudeRuntimeAdapter {
   }
 }
 
+// Kept as a small local constant rather than importing team-tools.ts's tool name list: the
+// Runtime Host boundary is deliberately self-contained (see the ADR's rationale for duplicating
+// terminateProcessTree/signalTree instead of sharing a cross-file utility), and the MCP server
+// under `mcpServers.team` always fully-qualifies its 4 tool names as `mcp__team__<name>` per the
+// MCP naming convention — verified directly against the installed CLI.
+const TEAM_MCP_SERVER_NAME = 'team';
+const TEAM_MCP_TOOL_NAMES = [
+  'team_hire_worker',
+  'team_send_to_worker',
+  'team_wait_reports',
+  'team_stop_worker',
+] as const;
+
+function teamMcpExpectedCapabilities(): ClaudeExpectedCapabilities {
+  return {
+    kind: 'team-mcp',
+    serverName: TEAM_MCP_SERVER_NAME,
+    toolNames: TEAM_MCP_TOOL_NAMES.map((name) => `mcp__${TEAM_MCP_SERVER_NAME}__${name}`),
+  };
+}
+
 export function buildClaudePrompt(
   input: string,
   contextFragments: readonly RuntimeContextFragment[],
@@ -205,7 +266,24 @@ export function buildClaudePrompt(
 // `--ignore-user-config --ignore-rules` do; `--no-session-persistence` keeps the turn ephemeral.
 // Plan mode is deliberately NOT used: with `--tools ""` no tool exists anyway, and plan mode
 // makes the model narrate planning mechanics (ExitPlanMode, plan files) into its answers.
-export function buildClaudeArgs(model: string): string[] {
+//
+// `teamMcp` (Leader MCP milestone, see the ADR amendment) is the one case where `--safe-mode`
+// cannot be used: verified directly against the installed CLI, `--safe-mode` disables MCP server
+// loading entirely (its own `--help` text lists "MCP servers" among what it turns off), which
+// would make the Leader's team_* tools permanently unreachable. `--setting-sources ""` +
+// `--disable-slash-commands` are the verified substitute — empirically confirmed (real `claude`
+// process, no mocking) to reproduce every other property `--safe-mode` provides for this profile:
+// no CLAUDE.md auto-discovery (`system/init`'s effective context did not include a project/user
+// CLAUDE.md marker used as a probe), no plugins (`"plugins":[]`), no hooks/custom commands
+// (loaded only from the user/project/local settings sources this flag empties), and no slash
+// commands (`"slash_commands":[]`) — while `--mcp-config`'s explicit server (not a "setting
+// source") still connects and `--tools ""` still empties the built-in tool set exactly as
+// without `--safe-mode`. `--strict-mcp-config` then pins the MCP surface to exactly that one
+// server, and `--allowedTools mcp__team__*` further pins it to exactly the 4 team tools.
+export function buildClaudeArgs(
+  model: string,
+  teamMcp?: { configPath: string; guidance: string },
+): string[] {
   return [
     '-p',
     '--output-format',
@@ -215,8 +293,20 @@ export function buildClaudeArgs(model: string): string[] {
     '--tools',
     '',
     '--strict-mcp-config',
-    '--safe-mode',
+    ...(teamMcp === undefined
+      ? ['--safe-mode']
+      : ['--setting-sources', '', '--disable-slash-commands']),
     '--no-session-persistence',
+    ...(teamMcp === undefined
+      ? []
+      : [
+          '--mcp-config',
+          teamMcp.configPath,
+          '--allowedTools',
+          'mcp__team__*',
+          '--append-system-prompt',
+          teamMcp.guidance,
+        ]),
     ...(model === 'auto' ? [] : ['--model', model]),
   ];
 }

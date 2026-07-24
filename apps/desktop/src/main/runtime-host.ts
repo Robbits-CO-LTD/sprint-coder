@@ -10,6 +10,7 @@ import {
   type MainToRuntimeEnvelope,
   type RuntimeCanonicalEvent,
   type RuntimeContextFragment,
+  type RuntimeTeamMcpOption,
 } from '../runtime-host/protocol';
 
 type ActiveTurn = {
@@ -62,6 +63,7 @@ export class RuntimeHostClient {
     model: string,
     toolCatalogSnapshot: ToolCatalogSnapshot,
     preparedContext?: PreparedContext,
+    teamMcp?: RuntimeTeamMcpOption,
   ): void {
     const contextFragments = (
       preparedContext?.fragments ??
@@ -92,6 +94,7 @@ export class RuntimeHostClient {
       model,
       contextFragments,
       toolCatalogSnapshot,
+      ...(teamMcp === undefined ? {} : { teamMcp }),
     });
   }
 
