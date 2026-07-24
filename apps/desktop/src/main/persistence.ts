@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
@@ -2171,10 +2171,66 @@ function modelSettingsKey(kind: RuntimeKind): string {
   return kind === 'claude' ? 'runtime.claude.model' : 'runtime.codex.model';
 }
 
+/** Outcome of the corruption probe that runs before the database is opened for real. */
+export type DatabaseRecoveryReport = {
+  corruptionDetected: boolean;
+  restoredFromBackup: boolean;
+  freshStart: boolean;
+  corruptFileMovedTo: string | null;
+};
+
+// Probe the database file before real use: a corrupt or non-database file is moved aside and,
+// when a pre-migration backup exists, the backup is restored in its place (blocking-subset item
+// "backup/restore"). Stale -wal/-shm files from the corrupt database must never be replayed
+// against the restored copy, so they are removed together with the corrupt file.
+function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport {
+  const report: DatabaseRecoveryReport = {
+    corruptionDetected: false,
+    restoredFromBackup: false,
+    freshStart: false,
+    corruptFileMovedTo: null,
+  };
+  if (!existsSync(databasePath)) return report;
+  const probe = (): boolean => {
+    let handle: Database.Database | null = null;
+    try {
+      handle = new Database(databasePath, { fileMustExist: true });
+      const rows = handle.pragma('quick_check') as { quick_check?: string }[] | string[];
+      const first = rows[0];
+      const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
+      return verdict === 'ok';
+    } catch {
+      return false;
+    } finally {
+      handle?.close();
+    }
+  };
+  if (probe()) return report;
+  report.corruptionDetected = true;
+  const movedTo = `${databasePath}.corrupt-${Date.now()}`;
+  renameSync(databasePath, movedTo);
+  report.corruptFileMovedTo = movedTo;
+  for (const suffix of ['-wal', '-shm'])
+    rmSync(`${databasePath}${suffix}`, { force: true });
+  const backupPath = `${databasePath}.pre-migration.bak`;
+  if (existsSync(backupPath)) {
+    copyFileSync(backupPath, databasePath);
+    if (probe()) {
+      report.restoredFromBackup = true;
+      return report;
+    }
+    // The backup itself is unusable — fall through to a fresh database.
+    rmSync(databasePath, { force: true });
+  }
+  report.freshStart = true;
+  return report;
+}
+
 export class SqlitePersistenceClient implements PersistenceClient {
   private readonly db: Database.Database;
   private readonly contextLedger: ContextLedger;
   private nativeMutationAuthorityDisabled = false;
+  readonly recoveryReport: DatabaseRecoveryReport;
 
   constructor(
     databasePath: string,
@@ -2191,6 +2247,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ) => void = () => undefined,
   ) {
     mkdirSync(dirname(databasePath), { recursive: true });
+    this.recoveryReport = recoverDatabaseIfCorrupt(databasePath);
     this.db = new Database(databasePath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
