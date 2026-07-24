@@ -189,3 +189,26 @@ Wave 2(完了 2026-07-22):
 - `1b4515f` renderer全域の絵文字装飾をインラインSVGアイコン(Lucide ISCパスデータ、依存追加なし)へ置換
 - `ccd50f2`+`afdce6d` **Team操作モデルの是正**: ユーザー手動の雇用フォーム/依頼欄を撤去し、FR-TEAM-06/13どおりLeaderのtool use(`team_hire_worker`/`team_send_to_worker`/`team_wait_reports`)が雇用・指示・報告統合を駆動する形へ。Mockランタイムに決定論的チームシナリオ(trigger:「チームテスト」またはTeam存在時)。Workerカードは観測+停止のみ。e2eはLeader主導フローで全acceptance再機械化(15/15)
 - 検証: typecheck/lint/unit(301+23+276)/全e2e(既知flake 1件のみ除外)グリーン
+
+## Phase 7ゲート判定(2026-07-24 Fable)
+
+**判定: Team MVP blocking subset 全8項目通過**(コミット列: `8e77eaf` security → `b32b964` a11y → `779ebb2` reliability/perf。実装はSonnet子分2+Fable直接実装、レビュー・検証はFable)
+
+blocking subset証跡:
+1. crash recovery/interrupted・paused復元 — golden-path-1-restart-restore + team-flow restart e2e(既存)
+2. process tree停止・orphan検出 — process group ADR + cancel e2e + Codex/Claude実CLIスモークでcancel後orphan 0を機械証明
+3. sandbox/Broker bypass拒否/workspace外fs/無許可outbound/egress deny(macOS実証) — codex実CLIへの敵対的workspace外書込指示が拒否されることを実機証明、no-toolsプロファイル・egress事前denyをテスト化
+4. IPC/path traversal/Markdown・ANSI・URL/secret redaction adversarial — IPC全41ch×プロトタイプ汚染等300ケース、Markdown画像exfil修正、redaction取りこぼし(AWS/.env等)修正、path-guard未型付き例外修正
+5. keyboard-only golden path/List View同等/contrast/reduced motion — a11y e2e 11本+contrast機械検証29ペア+200% zoom(List overlayレスポンシブ化を実装)+docs/A11Y_AUDIT.md
+6. DB migration/backup・restore/1万event projection — legacy v1→v30チェーン(既存)+破損検知→backup復元→fresh start実装・テスト、1万event再開+projection実測4ms(予算500ms)
+7. Composer p95/stream batching/10 Worker LOD — perf-budgets.spec実測: 起動396ms(予算2000)、入力p95 14.2ms(予算16)、10Worker×200msg pan 60.1fps(予算50)、LOD切替確認。NFR-PERF-05 batchingは実装済み(command-runner 100ms/64KB)
+8. Phase 4.7 corpus baseline — assurance.test.ts + PHASE_4_7_CORPUS_BASELINE.md(suiteでグリーン維持)
+
+Public Beta送り(計画が明示的に許容する繰り延べ、未実施として記録):
+- 10.1: Conversation rewind/branch切替、crash storm circuit breaker、idempotency fuzz、Workspace restore/Safe rewind saga/emergency checkpoint(計画自体がPublic Beta candidate/feature flag指定)、Verified profile
+- 10.2: startup遅延化・Timeline virtualization等の最適化(全予算を現状実測でクリアしているため不要と判断)
+- 10.3: VoiceOver人手実施(台本はA11Y_AUDIT.mdに整備済み)、NVDA(Windows実機なし=Phase 8 beta gateの対象OS実機E2Eで実施)
+- 10.4: session partitioning(SECURITY_CHECKLIST.md open item)
+- 既知環境フレーク: command-runner-flow focusテスト(変更前ベースラインから再現する環境起因)
+
+Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: signing/update/beta gate)のみ。
