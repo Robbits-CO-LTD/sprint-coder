@@ -314,4 +314,150 @@ describe('path guard', () => {
     expect(direct.workspaceKey).toMatch(/^[a-f0-9]{64}$/);
     expect(direct.rootIdentityDigest).toMatch(/^[a-f0-9]{64}$/);
   });
+
+  // Adversarial fixtures (Phase 7 hardening, IMPLEMENTATION_PLAN §10.4): percent-encoded
+  // traversal, backslash traversal, NUL bytes, overlong paths, and exact workspace-root
+  // boundary cases that a naive prefix check (rather than node:path `relative()`) would get
+  // wrong.
+  describe('adversarial path fixtures', () => {
+    it('treats a percent-encoded ".." as a literal, non-existent filename rather than decoding it', async () => {
+      const { workspace } = await fixture();
+
+      // canonicalizeResourcePath never URL-decodes a path; "%2e%2e%2f" is just a filename that
+      // does not exist, not a traversal. It must fail as PATH_NOT_FOUND, never resolve outside
+      // the Workspace.
+      await expect(
+        canonicalizeResourcePath({
+          workspacePath: workspace,
+          targetPath: '%2e%2e%2fsrc%2fsafe.txt',
+          operation: 'read',
+        }),
+      ).rejects.toMatchObject({ code: 'PATH_NOT_FOUND' } satisfies Partial<PathGuardError>);
+    });
+
+    it('rejects a decoded-looking ".." segment placed literally after percent-encoding is stripped upstream', async () => {
+      const { workspace } = await fixture();
+
+      // Defense in depth: even if some upstream layer were to decode "%2e%2e" into "..", the
+      // resulting relative traversal is still caught by the ordinary traversal check.
+      await expect(
+        canonicalizeResourcePath({
+          workspacePath: workspace,
+          targetPath: '../outside/secret.txt',
+          operation: 'read',
+        }),
+      ).rejects.toMatchObject({ code: 'RELATIVE_TRAVERSAL' } satisfies Partial<PathGuardError>);
+    });
+
+    it('rejects backslash-delimited traversal even on a platform where backslash is not a separator', async () => {
+      const { workspace } = await fixture();
+
+      await expect(
+        canonicalizeResourcePath({
+          workspacePath: workspace,
+          targetPath: 'src\\..\\..\\outside\\secret.txt',
+          operation: 'read',
+        }),
+      ).rejects.toMatchObject({ code: 'RELATIVE_TRAVERSAL' } satisfies Partial<PathGuardError>);
+    });
+
+    it('rejects a mixed slash/backslash traversal segment', async () => {
+      const { workspace } = await fixture();
+
+      await expect(
+        canonicalizeResourcePath({
+          workspacePath: workspace,
+          targetPath: 'src/..\\../outside/secret.txt',
+          operation: 'read',
+        }),
+      ).rejects.toMatchObject({ code: 'RELATIVE_TRAVERSAL' } satisfies Partial<PathGuardError>);
+    });
+
+    it('rejects a NUL byte embedded in the target path', async () => {
+      const { workspace } = await fixture();
+
+      await expect(
+        canonicalizeResourcePath({
+          workspacePath: workspace,
+          targetPath: 'src/safe.txt\0.png',
+          operation: 'read',
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_PATH' } satisfies Partial<PathGuardError>);
+    });
+
+    it('rejects an empty target path', async () => {
+      const { workspace } = await fixture();
+
+      await expect(
+        canonicalizeResourcePath({ workspacePath: workspace, targetPath: '', operation: 'read' }),
+      ).rejects.toMatchObject({ code: 'INVALID_PATH' } satisfies Partial<PathGuardError>);
+    });
+
+    it('rejects a path with a single segment far longer than any real filesystem allows, as a typed error rather than an uncaught ENAMETOOLONG', async () => {
+      const { workspace } = await fixture();
+      const overlongSegment = 'a'.repeat(300);
+
+      await expect(
+        canonicalizeResourcePath({
+          workspacePath: workspace,
+          targetPath: `src/${overlongSegment}`,
+          operation: 'read',
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_PATH' } satisfies Partial<PathGuardError>);
+    });
+
+    it('rejects a total path far longer than any real filesystem PATH_MAX', async () => {
+      const { workspace } = await fixture();
+      const manySegments = Array.from({ length: 2_000 }, () => 'seg').join('/');
+
+      await expect(
+        canonicalizeResourcePath({
+          workspacePath: workspace,
+          targetPath: manySegments,
+          operation: 'read',
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_PATH' } satisfies Partial<PathGuardError>);
+    });
+
+    it('rejects an absolute sibling directory that merely shares the Workspace path as a text prefix', async () => {
+      const { root, workspace } = await fixture();
+      // A naive `candidate.startsWith(workspacePath)` check would be fooled by this: the
+      // sibling directory's absolute path literally starts with the workspace's own path
+      // string, but it is not the same directory and must not be treated as contained.
+      const siblingWithSharedPrefix = `${workspace}-sibling`;
+      await mkdir(siblingWithSharedPrefix);
+      await writeFile(join(siblingWithSharedPrefix, 'secret.txt'), 'secret');
+
+      await expect(
+        canonicalizeResourcePath({
+          workspacePath: workspace,
+          targetPath: join(siblingWithSharedPrefix, 'secret.txt'),
+          operation: 'read',
+        }),
+      ).rejects.toMatchObject({ code: 'PATH_ESCAPE' } satisfies Partial<PathGuardError>);
+      await rm(siblingWithSharedPrefix, { recursive: true, force: true });
+      void root;
+    });
+
+    it('allows the exact Workspace root itself as a target (the zero-length relative boundary)', async () => {
+      const { workspace } = await fixture();
+
+      const identity = await canonicalizeResourcePath({
+        workspacePath: workspace,
+        targetPath: workspace,
+        operation: 'read',
+      });
+
+      expect(identity.resolvedPath).toBe(await realpath(workspace));
+      expect(identity.targetIdentity).toMatchObject({ kind: 'directory' });
+    });
+
+    it('rejects the Workspace parent directory itself, exactly at the boundary', async () => {
+      const { root, workspace } = await fixture();
+
+      await expect(
+        canonicalizeResourcePath({ workspacePath: workspace, targetPath: root, operation: 'read' }),
+      ).rejects.toMatchObject({ code: 'PATH_ESCAPE' } satisfies Partial<PathGuardError>);
+    });
+  });
 });

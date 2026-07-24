@@ -94,6 +94,30 @@ if (runsWithElectronAbi)
       fixture.persistence.close();
     });
 
+    it('never invokes the Runtime dispatch when the prompt fails the secret scan (adversarial gate proof)', () => {
+      // Deliverable 5c (Phase 7 hardening): a dirty prompt is denied *before* any dispatch call,
+      // not merely reported as denied after the fact — proven by asserting the dispatch callback
+      // itself is never invoked, not just the returned decision shape.
+      const fixture = createFixture(false);
+      let dispatches = 0;
+      const decision = dispatchAfterCodexProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'turn-provider-secret-scan',
+          prompt: 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+        },
+        () => {
+          dispatches += 1;
+        },
+      );
+      expect(decision.allowed).toBe(false);
+      expect(dispatches).toBe(0);
+      fixture.persistence.close();
+    });
+
     it('honors a revoked provider.egress capability before Runtime dispatch', () => {
       const fixture = createFixture(false);
       fixture.persistence.revokePermissionCapability(

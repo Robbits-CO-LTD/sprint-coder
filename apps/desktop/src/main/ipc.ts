@@ -1103,11 +1103,19 @@ export class IpcRouter {
 
   private validateSender(event: InvokeEvent): void {
     const frame = event.senderFrame;
-    if (event.sender.id !== this.window.webContents.id || frame === null || frame !== frame.top)
-      throw new SecurityError();
-    const url = new URL(frame.url);
-    const origin = url.protocol === 'app:' ? `${url.protocol}//${url.host}` : url.origin;
-    if (origin !== this.trustedRendererOrigin || (url.protocol === 'app:' && url.host !== 'bundle'))
+    if (
+      !isTrustedIpcSender(
+        {
+          senderId: event.sender.id,
+          isMainFrame: frame !== null && frame === frame.top,
+          frameUrl: frame === null ? null : frame.url,
+        },
+        {
+          expectedSenderId: this.window.webContents.id,
+          trustedRendererOrigin: this.trustedRendererOrigin,
+        },
+      )
+    )
       throw new SecurityError();
   }
 
@@ -1147,6 +1155,44 @@ export class TaskMailbox {
       if (this.tails.get(taskId) === tail) this.tails.delete(taskId);
     }
   }
+}
+
+// Pure, dependency-free sender/frame authenticity check (NFR-SEC-03): the invoking WebContents
+// must be this window's own top-level frame, and that frame's own URL/origin must exactly match
+// the one trusted origin the window was created with — never a substring match, never a child
+// iframe (a compromised/embedded third-party frame cannot forge the top window's identity), and
+// the `app://` custom protocol is further pinned to host `bundle` (the only page this app ever
+// serves at that scheme). Extracted as a pure function so it is unit-testable without spinning up
+// a real BrowserWindow/WebContents.
+export type IpcSenderCandidate = Readonly<{
+  senderId: number;
+  isMainFrame: boolean;
+  frameUrl: string | null;
+}>;
+export type TrustedIpcSender = Readonly<{
+  expectedSenderId: number;
+  trustedRendererOrigin: string;
+}>;
+
+export function isTrustedIpcSender(
+  candidate: IpcSenderCandidate,
+  expected: TrustedIpcSender,
+): boolean {
+  if (
+    candidate.senderId !== expected.expectedSenderId ||
+    !candidate.isMainFrame ||
+    candidate.frameUrl === null
+  )
+    return false;
+  let url: URL;
+  try {
+    url = new URL(candidate.frameUrl);
+  } catch {
+    return false;
+  }
+  const origin = url.protocol === 'app:' ? `${url.protocol}//${url.host}` : url.origin;
+  if (origin !== expected.trustedRendererOrigin) return false;
+  return url.protocol !== 'app:' || url.host === 'bundle';
 }
 
 class SecurityError extends Error {}
