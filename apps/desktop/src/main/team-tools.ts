@@ -100,11 +100,21 @@ function teamToolError(error: unknown): { ok: false; error: string; message: str
  * implementation only ever calls TeamCoordinator methods — it never touches persistence
  * directly and never accepts source/target identity from the tool input, so a tool call can't
  * spoof an envelope's source/target (the coordinator resolves the Leader/Worker itself). */
+// Hiring cadence: a burst of instantaneous hires reads as fake ("the leader isn't actually
+// deciding anything"). Each hire pauses briefly so the spawn choreography paces like a leader
+// working through its plan. Overridable for tests (SPRINT_CODER_TEAM_PACING_MS=0).
+const HIRE_PACING_MS = Number(process.env['SPRINT_CODER_TEAM_PACING_MS'] ?? 1200);
+const pacing = (): Promise<void> =>
+  HIRE_PACING_MS <= 0
+    ? Promise.resolve()
+    : new Promise((resolve) => setTimeout(resolve, HIRE_PACING_MS));
+
 export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinator): void {
   broker.registerImplementation({
     toolId: TEAM_HIRE_WORKER_TOOL.toolId,
     implementationKind: 'built-in',
     execute: async (input, context) => {
+      await pacing();
       const request = input as {
         role: string;
         objective: string;

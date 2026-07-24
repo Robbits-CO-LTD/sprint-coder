@@ -219,3 +219,6 @@ Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: 
 - opt-in: `SPRINT_CODER_REAL_WORKERS=1 npm start`(既定はテスト決定性とコスト保護のためシミュレータ)。README記載
 - 実機実証: 「チームテスト:1+1の答え」で調査/実装/レビュー3Workerが実Claudeで観点別報告を返すことをsmokeで確認(14秒)。この過程でclaude adapterの`--permission-mode plan`がplanメカニクスを回答に混入させる品質バグを発見し除去(ADR修正記録あり)。あわせて`npm run typecheck --workspaces`が失敗後も続行するためexit codeで検証すべきという運用教訓を得た(以後の検証はexit code確認)
 - 次マイルストーン(未実装・記録): Leader自身の実tool use化 — アプリがMCPサーバとしてteam toolsを実Claude Leaderに提供する方式。現状はLeader=Mockシナリオ+Worker=実AIのハイブリッド
+
+## 追記(2026-07-24 Fable): 雇用ペーシング
+- 一括瞬間雇用は「Leaderが動的採用している」体験を壊すため、雇用ごとに1.2秒のペーシングを導入(SPRINT_CODER_TEAM_PACING_MS で調整可)。真の動的採用(実Claude Leaderが依頼内容から役割を決める=MCP化)は引き続き次マイルストーン
