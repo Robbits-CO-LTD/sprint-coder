@@ -279,3 +279,98 @@ test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
     }
   });
 });
+
+// Gate-review fix (test gap): canvas keyboard navigation (Arrow/Tab select, Enter opens + camera-
+// focuses, Escape returns focus to the canvas root, 'f' fits view). Robust to layout — no pixel
+// assertions, only classes/attributes.
+test.describe('Canvas keyboard navigation', () => {
+  test('Arrow/Tab select nodes, Enter opens + camera-focuses, Escape returns focus, F fits', async () => {
+    const userDataDir = createUserDataDir('canvas-keyboard-nav');
+    let app: ElectronApplication | null = null;
+    try {
+      app = await launchApp(userDataDir);
+      const page: Page = await firstWindow(app);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await page.getByTestId('team-toggle').click();
+      await expect(page.getByTestId('team-list')).toBeVisible();
+      await page.waitForTimeout(700); // let the system seed-then-fly settle first
+
+      const canvas = page.locator('.team-canvas');
+      const leaderNode = page.locator('.surface--node');
+
+      // --- Manual pan claims 'user' ownership, and keyboard 'f' hands it back to 'system'. ---
+      // Done now, before any Worker exists and before Enter camera-focuses a single node — only
+      // the Leader + hire ghost are on screen, so the canvas center is empty background, not a
+      // node (`.worker`/`.surface--node` pointerdowns are excluded from panning, see useCamera.ts).
+      await expect(canvas).toHaveAttribute('data-camera-owner', 'system');
+      const canvasBox = await canvas.boundingBox();
+      if (!canvasBox) throw new Error('team-canvas not found');
+      await page.mouse.move(canvasBox.x + canvasBox.width / 2, canvasBox.y + canvasBox.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(
+        canvasBox.x + canvasBox.width / 2 + 60,
+        canvasBox.y + canvasBox.height / 2 + 40,
+        { steps: 8 },
+      );
+      await page.mouse.up();
+      await expect(canvas).toHaveAttribute('data-camera-owner', 'user');
+
+      await canvas.focus();
+      await expect(canvas).toBeFocused();
+      await canvas.press('f');
+      await expect(canvas).toHaveAttribute('data-camera-owner', 'system');
+
+      // --- Hire a Worker, then exercise Arrow/Tab selection + Enter/Escape. ---
+      await page.getByLabel('役割').fill('実装');
+      await page.getByLabel('目的').fill('機能を実装する');
+      await page.getByTestId('team-hire').click();
+      await expect(page.getByTestId('team-worker')).toHaveCount(1);
+      await page.getByTestId('team-canvas-fit').click();
+      await page.waitForTimeout(700); // let the fit settle before reading a baseline
+
+      const workerNode = page.getByTestId('team-worker');
+      const hireNode = page.locator('.worker--hire');
+
+      await canvas.focus();
+      await expect(canvas).toBeFocused();
+
+      // nodeIds order is [Leader, Worker, hire ghost] — ArrowRight walks forward through it.
+      await canvas.press('ArrowRight');
+      await expect(leaderNode).toHaveClass(/node-selected/);
+      await expect(workerNode).not.toHaveClass(/node-selected/);
+
+      await canvas.press('ArrowRight');
+      await expect(workerNode).toHaveClass(/node-selected/);
+      await expect(leaderNode).not.toHaveClass(/node-selected/);
+
+      // Tab (no shift) is equivalent to ArrowRight — moves selection to the hire ghost next.
+      await canvas.press('Tab');
+      await expect(hireNode).toHaveClass(/node-selected/);
+      await expect(workerNode).not.toHaveClass(/node-selected/);
+
+      // Shift+Tab walks backward — back onto the Worker.
+      await canvas.press('Shift+Tab');
+      await expect(workerNode).toHaveClass(/node-selected/);
+
+      // Enter: focuses the selected Worker's first focusable (its message textarea) and hands
+      // camera ownership to 'system' via the explicit view command.
+      await canvas.press('Enter');
+      const focusedInsideWorker = await page.evaluate(() => {
+        const active = document.activeElement;
+        return (
+          active?.tagName === 'TEXTAREA' && active.closest('[data-testid="team-worker"]') !== null
+        );
+      });
+      expect(focusedInsideWorker).toBe(true);
+      await expect(canvas).toHaveAttribute('data-camera-owner', 'system');
+
+      // Escape returns keyboard focus to the canvas root even though a descendant (the textarea)
+      // currently holds it.
+      await page.keyboard.press('Escape');
+      await expect(canvas).toBeFocused();
+    } finally {
+      await closeApp(app);
+      removeUserDataDir(userDataDir);
+    }
+  });
+});

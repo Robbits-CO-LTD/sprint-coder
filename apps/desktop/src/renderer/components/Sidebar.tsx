@@ -24,7 +24,7 @@ function groupTasks(tasks: TaskSummary[], query: string) {
   };
 }
 
-export function Sidebar() {
+export function Sidebar({ inert }: { inert?: boolean } = {}) {
   const tasks = useAppStore((s) => s.tasks);
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const selectTask = useAppStore((s) => s.selectTask);
@@ -54,7 +54,7 @@ export function Sidebar() {
   };
 
   return (
-    <nav className="sidebar" aria-label="Task履歴">
+    <nav className="sidebar" aria-label="Task履歴" inert={inert}>
       <button
         type="button"
         className="sb-new"

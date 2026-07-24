@@ -177,13 +177,20 @@ export default function App() {
     );
   }
 
+  // Hidden chrome focusability (gate-review fix): the Canvas presentation (or its exit tail)
+  // already makes the Sidebar/TaskHeader invisible and unclickable via `.team-mode` (opacity 0 +
+  // pointer-events none, see index.css) — `inert` closes the remaining gap for keyboard/AT users,
+  // who could otherwise still Tab into chrome that looks gone. List mode never sets this class, so
+  // the sidebar/header stay fully interactive there.
+  const chromeInert = teamCanvasActive || exiting;
+
   return (
-    <div className={`app-shell${teamCanvasActive || exiting ? ' team-mode' : ''}`}>
-      <Sidebar />
+    <div className={`app-shell${chromeInert ? ' team-mode' : ''}`}>
+      <Sidebar inert={chromeInert} />
       <div className="main">
         {selectedTask ? (
           <>
-            <TaskHeader task={selectedTask} onToggleTeam={requestEnterTeam} />
+            <TaskHeader task={selectedTask} onToggleTeam={requestEnterTeam} inert={chromeInert} />
             {/* SurfaceLayer portals the shared ChatSurface instance in here when `surfaceMode`
                 is 'main' — this anchor only reserves the slot, see the morph orchestration
                 above and SurfaceLayer.tsx. This is also where the Chat lives in List mode: List
@@ -210,6 +217,7 @@ export default function App() {
       </div>
       {showTeamCanvas && selectedTask && (
         <TeamCanvas
+          key={selectedTask.id}
           ref={teamCanvasHandleRef}
           task={selectedTask}
           leaderRef={leaderRef}

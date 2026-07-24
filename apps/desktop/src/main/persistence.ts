@@ -1483,6 +1483,11 @@ const migrations = [
 export const CANVAS_MIN_SCALE = 0.18;
 export const CANVAS_MAX_SCALE = 1.6;
 export const CANVAS_WORLD_BOUND = 20_000;
+// Domain max is leader + 3 workers; headroom is left for future node kinds (kept in sync with
+// packages/contracts's canvasNodePositionsSchema).
+export const CANVAS_NODE_POSITIONS_MAX_ENTRIES = 32;
+// Defends against a pathological serialized payload independent of the entry-count cap above.
+export const CANVAS_VIEW_MAX_SERIALIZED_BYTES = 16 * 1024;
 
 export type CanvasCameraRecord = { x: number; y: number; scale: number };
 export type CanvasViewRecord = {
@@ -1512,6 +1517,10 @@ export function validateCanvasCamera(camera: CanvasCameraRecord): void {
 export function validateCanvasNodePositions(
   positions: Readonly<Record<string, { x: number; y: number }>>,
 ): void {
+  if (Object.keys(positions).length > CANVAS_NODE_POSITIONS_MAX_ENTRIES)
+    throw new InvalidCanvasViewError(
+      `nodePositions cannot have more than ${CANVAS_NODE_POSITIONS_MAX_ENTRIES} entries`,
+    );
   for (const [agentId, position] of Object.entries(positions)) {
     assertCanvasCoordinate(position.x, `nodePositions.${agentId}.x`);
     assertCanvasCoordinate(position.y, `nodePositions.${agentId}.y`);
@@ -3129,13 +3138,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }): CanvasViewRecord {
     validateCanvasCamera(input.camera);
     validateCanvasNodePositions(input.nodePositions);
+    const nodePositionsJson = JSON.stringify(input.nodePositions);
+    if (Buffer.byteLength(nodePositionsJson, 'utf8') > CANVAS_VIEW_MAX_SERIALIZED_BYTES)
+      throw new InvalidCanvasViewError(
+        `nodePositions serialized payload exceeds ${CANVAS_VIEW_MAX_SERIALIZED_BYTES} bytes`,
+      );
     return this.db.transaction(() => {
       this.getTaskRow(input.taskId); // throws NotFoundError for an unknown Task
       const now = new Date().toISOString();
       const current = this.db
         .prepare('SELECT revision FROM canvas_views WHERE task_id = ?')
         .get(input.taskId) as { revision: number } | undefined;
-      const nodePositionsJson = JSON.stringify(input.nodePositions);
       if (current === undefined) {
         // Optimistic concurrency: creating a fresh row is only valid if the caller believed there
         // was nothing saved yet (revision 0).

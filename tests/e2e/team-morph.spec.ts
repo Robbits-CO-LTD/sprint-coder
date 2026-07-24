@@ -84,6 +84,16 @@ test.describe('Phase 6 Slice 6.2: Chat <-> Leader morph', () => {
     const draftText = 'Team切替後も残るはずのdraftテキスト (Slice 6.2)';
     await textarea.fill(draftText);
 
+    // Pin a non-trivial (non-collapsed) selection range — SurfaceLayer's capture/restore
+    // (captureSurfaceState/restoreSurfaceState) must carry this across the morph, not just the
+    // draft text itself.
+    await textarea.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(3, 9));
+    const selectionBefore = await textarea.evaluate((el: HTMLTextAreaElement) => ({
+      start: el.selectionStart,
+      end: el.selectionEnd,
+    }));
+    expect(selectionBefore).toEqual({ start: 3, end: 9 });
+
     await timelineScroll.evaluate((el) => {
       el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 4);
     });
@@ -92,18 +102,29 @@ test.describe('Phase 6 Slice 6.2: Chat <-> Leader morph', () => {
 
     const mountsBefore = await page.evaluate(() => window.__sprintCoderChatSurfaceMounts ?? 0);
 
-    // --- (a) enter Team mode: draft survives in the node-variant composer, no extra mount. ---
+    // --- (a) enter Team mode: draft + selection survive in the node-variant composer, no extra
+    // mount. ---
     await page.getByTestId('team-toggle').click();
     await expect(page.getByTestId('team-list')).toBeVisible();
     await expect(textarea).toHaveValue(draftText);
+    const selectionInTeam = await textarea.evaluate((el: HTMLTextAreaElement) => ({
+      start: el.selectionStart,
+      end: el.selectionEnd,
+    }));
+    expect(selectionInTeam).toEqual(selectionBefore);
     const mountsInTeam = await page.evaluate(() => window.__sprintCoderChatSurfaceMounts ?? 0);
     expect(mountsInTeam).toBe(mountsBefore);
 
-    // --- (b) exit Team mode: draft + scroll survive, still no extra mount. ---
+    // --- (b) exit Team mode: draft + scroll + selection survive, still no extra mount. ---
     await page.getByTestId('team-back').click();
     await expect(page.getByTestId('team-list')).not.toBeVisible();
     await expect(page.locator('.app-shell')).not.toHaveClass(/team-mode/);
     await expect(textarea).toHaveValue(draftText);
+    const selectionAfterReturn = await textarea.evaluate((el: HTMLTextAreaElement) => ({
+      start: el.selectionStart,
+      end: el.selectionEnd,
+    }));
+    expect(selectionAfterReturn).toEqual(selectionBefore);
     await waitForTimelineQuiet(page); // let any late Timeline update land before the final read
     const scrollAfterReturn = await timelineScroll.evaluate((el) => el.scrollTop);
     expect(scrollAfterReturn).toBe(scrollBefore);

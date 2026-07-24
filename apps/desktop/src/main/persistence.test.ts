@@ -4237,6 +4237,18 @@ if (runsWithElectronAbi)
         );
       });
 
+      it('caps node positions at 32 entries', () => {
+        const fourEntries: Record<string, { x: number; y: number }> = {};
+        for (let i = 0; i < 4; i++) fourEntries[`agent-${i}`] = { x: i, y: i };
+        expect(() => validateCanvasNodePositions(fourEntries)).not.toThrow();
+
+        const thirtyThreeEntries: Record<string, { x: number; y: number }> = {};
+        for (let i = 0; i < 33; i++) thirtyThreeEntries[`agent-${i}`] = { x: i, y: i };
+        expect(() => validateCanvasNodePositions(thirtyThreeEntries)).toThrow(
+          InvalidCanvasViewError,
+        );
+      });
+
       it('creates then updates a canvas view, bumping revision each save', () => {
         const { persistence } = createPersistence();
         const task = persistence.createTask();
@@ -4341,6 +4353,39 @@ if (runsWithElectronAbi)
           }),
         ).toThrow(NotFoundError);
         expect(() => persistence.getCanvasView('missing-task')).toThrow(NotFoundError);
+        persistence.close();
+      });
+
+      it('rejects a save with more than 32 node position entries', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const tooMany: Record<string, { x: number; y: number }> = {};
+        for (let i = 0; i < 33; i++) tooMany[`agent-${i}`] = { x: i, y: i };
+        expect(() =>
+          persistence.saveCanvasView({
+            taskId: task.id,
+            camera: { x: 0, y: 0, scale: 1 },
+            nodePositions: tooMany,
+            revision: 0,
+          }),
+        ).toThrow(InvalidCanvasViewError);
+        persistence.close();
+      });
+
+      it('rejects a save whose serialized node positions exceed the size cap', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        // Stay under the entry-count cap; blow the byte cap via long agent ids instead.
+        const bloated: Record<string, { x: number; y: number }> = {};
+        for (let i = 0; i < 4; i++) bloated[`agent-${i}-${'x'.repeat(5_000)}`] = { x: i, y: i };
+        expect(() =>
+          persistence.saveCanvasView({
+            taskId: task.id,
+            camera: { x: 0, y: 0, scale: 1 },
+            nodePositions: bloated,
+            revision: 0,
+          }),
+        ).toThrow(InvalidCanvasViewError);
         persistence.close();
       });
 

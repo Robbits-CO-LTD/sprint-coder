@@ -330,7 +330,13 @@ export const canvasNodePositionSchema = z
   .strict();
 export type CanvasNodePosition = z.infer<typeof canvasNodePositionSchema>;
 
-export const canvasNodePositionsSchema = z.record(idSchema, canvasNodePositionSchema);
+// Domain max is leader + 3 workers, but headroom is left for future node kinds.
+export const CANVAS_NODE_POSITIONS_MAX_ENTRIES = 32;
+export const canvasNodePositionsSchema = z
+  .record(idSchema, canvasNodePositionSchema)
+  .refine((record) => Object.keys(record).length <= CANVAS_NODE_POSITIONS_MAX_ENTRIES, {
+    message: `nodePositions cannot have more than ${CANVAS_NODE_POSITIONS_MAX_ENTRIES} entries`,
+  });
 
 export const canvasViewSchema = z
   .object({

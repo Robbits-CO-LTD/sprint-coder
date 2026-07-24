@@ -6,11 +6,13 @@ import type { TaskSummary } from '../types/sprint-coder';
 export function TaskHeader({
   task,
   onToggleTeam,
+  inert,
 }: {
   task: TaskSummary;
   /** Enters Team mode via App's morph orchestration (SurfaceLayer/TeamCanvas, Slice 6.2) instead
    * of flipping the store directly — see App.tsx's `requestEnterTeam`. */
   onToggleTeam: () => void;
+  inert?: boolean;
 }) {
   const renameTask = useAppStore((s) => s.renameTask);
   const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
@@ -51,7 +53,7 @@ export function TaskHeader({
   }
 
   return (
-    <header className="task-header">
+    <header className="task-header" inert={inert}>
       {editing ? (
         <input
           ref={inputRef}
