@@ -25,6 +25,10 @@ export class ClaudeJsonlNormalizer {
   private stageIndex = -1;
   private readonly messageId = randomUUID();
   private completed = false;
+  // Captured from the session-init report's own `model` field (e.g. "claude-sonnet-5") — the
+  // concrete model id the CLI actually resolved for this turn's `auto`/alias selection. Surfaced
+  // on the terminal `completed` event so Main can show it in the UI (see the ADR amendment).
+  private resolvedModel: string | undefined;
 
   constructor(private readonly expected: ClaudeExpectedCapabilities = NO_CAPABILITIES) {}
 
@@ -41,6 +45,8 @@ export class ClaudeJsonlNormalizer {
     const type = value['type'];
     if (type === 'system' && readString(value, 'subtype') === 'init') {
       assertExpectedCapabilities(value, this.expected);
+      const model = readString(value, 'model');
+      if (model !== null) this.resolvedModel = model;
       return this.advanceTo('understanding');
     }
     if (type === 'stream_event') return this.pushStreamEvent(value);
@@ -69,7 +75,12 @@ export class ClaudeJsonlNormalizer {
       throw new ClaudeOutputError(readString(value, 'result') ?? 'Claude reported a failed turn');
     if (this.completed) return [];
     this.completed = true;
-    return [...this.advanceTo('synthesizing'), { type: 'completed' }];
+    return [
+      ...this.advanceTo('synthesizing'),
+      this.resolvedModel === undefined
+        ? { type: 'completed' }
+        : { type: 'completed', resolvedModel: this.resolvedModel },
+    ];
   }
 
   private advanceTo(target: TurnStage): RuntimeCanonicalEvent[] {

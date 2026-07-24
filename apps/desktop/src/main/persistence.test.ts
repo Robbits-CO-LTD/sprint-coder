@@ -302,6 +302,26 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('defaults to medium and persists the selected Claude effort across restart', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getEffort()).toBe('medium');
+      persistence.setEffort('high');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getEffort()).toBe('high');
+      reopened.close();
+    });
+
+    it('keeps the Claude effort setting independent of the active Runtime kind (unlike model)', () => {
+      const { persistence } = createPersistence();
+      persistence.setEffort('xhigh');
+      persistence.setRuntime('codex');
+      expect(persistence.getEffort()).toBe('xhigh');
+      persistence.setRuntime('claude');
+      expect(persistence.getEffort()).toBe('xhigh');
+    });
+
     it('pins the selected runtime and model when a Turn is accepted', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();

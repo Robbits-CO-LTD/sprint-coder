@@ -14,6 +14,7 @@ import {
   type AutoPermissionDecision,
   type ApprovalState,
   type ApprovalSummary,
+  type ClaudeEffort,
   type CommandState,
   type CommandSummary,
   type CommandOutputPage,
@@ -1899,6 +1900,8 @@ export interface PersistenceClient {
   setRuntime(kind: RuntimeKind): void;
   getModel(): string;
   setModel(model: string): void;
+  getEffort(): ClaudeEffort;
+  setEffort(effort: ClaudeEffort): void;
   getPermissionPolicy(taskId: string): PermissionPolicyRecord;
   setAccessPreset(
     taskId: string,
@@ -2169,6 +2172,11 @@ export interface PersistenceClient {
 // reading/writing the exact same 'runtime.codex.model' row they always have.
 function modelSettingsKey(kind: RuntimeKind): string {
   return kind === 'claude' ? 'runtime.claude.model' : 'runtime.codex.model';
+}
+
+const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+function isClaudeEffort(value: string | undefined): value is ClaudeEffort {
+  return value !== undefined && (CLAUDE_EFFORT_VALUES as readonly string[]).includes(value);
 }
 
 /** Outcome of the corruption probe that runs before the database is opened for real. */
@@ -3431,6 +3439,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(modelSettingsKey(this.getRuntime()), model, new Date().toISOString());
+  }
+
+  // Claude-only reasoning effort (see the ADR amendment). Unlike `model`, this is a single global
+  // key ('runtime.claude.effort') rather than scoped per active Runtime kind: it only ever takes
+  // effect on a Claude turn regardless of which Runtime is currently selected, and the Composer's
+  // effort selector is disabled unless Claude is active.
+  getEffort(): ClaudeEffort {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'runtime.claude.effort'")
+      .get() as { value: string } | undefined;
+    return isClaudeEffort(row?.value) ? row.value : 'medium';
+  }
+
+  setEffort(effort: ClaudeEffort): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.claude.effort', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(effort, new Date().toISOString());
   }
 
   getBackgroundEpochs(taskId: string): BackgroundEpochs {

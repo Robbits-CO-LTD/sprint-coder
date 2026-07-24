@@ -84,6 +84,55 @@ already-validated display entries for the active kind.
 
 `--permission-mode plan` was removed after real-team smoke testing: with `--tools ""` it added no enforcement, and plan mode made the model narrate planning mechanics (ExitPlanMode, plan files under ~/.claude/plans) into user-visible answers and Worker reports. The read-only/no-tools guarantee rests on `--tools ""` + `--strict-mcp-config` + `--safe-mode`, which are all still verified by the adapter tests and the codex/claude smoke suites.
 
+## Amendment 2 (2026-07-25): model clarity + effort control
+
+User complaints: the curated model list's bare labels ("Sonnet"/"Opus"/"Haiku") don't say what
+concrete model actually runs, and the Composer's "effort: medium" chip was static decoration from
+the design mock with no way to change it. Both were re-verified empirically on the installed CLI
+(2.1.218) before changing any UI.
+
+**Model clarity.** `claude --help`'s own `--model` doc already names the effective default alias
+family (`--model <model> Provide an alias for the latest model (e.g. 'fable', 'opus', or
+'sonnet') or a model's full name`). Real probe turns (`claude -p "1" --model <alias>
+--output-format json`) confirmed each curated alias's resolved id via the result's
+`modelUsage`/`canonicalModel` field: `sonnet` → `claude-sonnet-5`, `opus` → `claude-opus-4-8`,
+`haiku` → `claude-haiku-4-5-20251001` (`canonicalModel: claude-haiku-4-5`), and the `auto`
+sentinel (no `--model` flag at all) also resolves to `claude-sonnet-5` on this installation.
+`CLAUDE_MODELS` in `claude-adapter.ts` now spells out each concrete id in its displayName/
+description instead of a bare label. A `fable` alias also resolves (to `claude-fable-5`) but was
+deliberately left out of the curated list — it isn't part of `--help`'s own example set and adding
+it is a curation call beyond "clarify the existing labels."
+
+Additionally, the stream-json `system/init` event carries the resolved `model` field per turn
+(confirmed both via the recorded `runtime-host/fixtures/claude-normal.jsonl` fixture and a live
+probe). `ClaudeJsonlNormalizer` now captures it and surfaces it on the canonical protocol's
+`completed` event (`resolvedModel?: string`, additive/optional — Codex's normalizer never sets
+it). `IpcRouter` folds it into the `turn.completed` `TurnEvent` (also additive/optional, not
+persisted to the turns table — a live-only surface), and the renderer shows it in the model chip's
+tooltip after a Claude turn completes ("Modelを選択（直近のTurnで実際に使用: claude-sonnet-5）").
+
+**Effort control.** `claude --help` documents `--effort <level>  Effort level for the current
+session (low, medium, high, xhigh, max)`, and a probe with an invalid value (`--effort bogus`)
+printed a non-fatal warning naming the same 5 valid values and fell back to the CLI's default —
+confirming the exact enum without guessing. A real differential probe (`--model opus`, prompt
+`"1"`, otherwise identical invocation) proved the flag actually changes CLI behavior: `--effort
+low` produced zero `thinking_tokens` events, while `--effort max` produced a growing extended-
+thinking budget (`system/thinking_tokens` events, 50 → 165 estimated tokens) before the same
+`claude-opus-4-8` model answered — i.e. effort is honored, not merely accepted and ignored.
+
+Effort is therefore implemented as a real, persisted, Claude-only control, mirroring the existing
+model mechanism: `claudeEffortSchema` (contracts), `runtime.claude.effort` settings key
+(persistence — a single global key, not scoped per Runtime kind like `model`, since effort only
+ever applies to a Claude turn), `settingsSetEffort` IPC channel/mutation, an `effort?: string`
+field on the Runtime Host protocol's `start` envelope (Codex's adapter accepts and ignores it, for
+call-signature parity — RUNTIME_PROTOCOL_VERSION bumped 4→5 for both this and the `completed`
+event's `resolvedModel` addition), and `buildClaudeArgs` appending `--effort <level>` verbatim.
+The Composer's effort chip (`data-testid="effort-selector"`) is a real interactive menu (low/
+medium/high/xhigh/max) when Claude is the active, available Runtime, and a disabled static display
+otherwise (mock/Codex/Claude-unavailable) — mirroring `ModelChip`'s enable/disable pattern.
+Team Workers (`team-worker-runtime.ts`) do not currently thread this setting through; they pick
+their own model per hire and are out of scope for this pass.
+
 ## Consequences
 
 - Claude is selectable in Settings only after a successful startup probe (`claude --version` +

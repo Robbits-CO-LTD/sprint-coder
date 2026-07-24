@@ -80,6 +80,10 @@ export class CodexRuntimeAdapter {
     // this adapter's `start` keeps the same call signature as ClaudeRuntimeAdapter's for
     // index.ts's shared dispatch, and always ignored.
     _teamMcp?: RuntimeTeamMcpOption,
+    // Codex has no `--effort`-equivalent flag on this CLI version (verified: absent from `codex
+    // --help`); accepted only for call-signature parity with ClaudeRuntimeAdapter.start, always
+    // ignored.
+    _effort?: string,
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));

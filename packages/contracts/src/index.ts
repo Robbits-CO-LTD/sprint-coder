@@ -671,6 +671,14 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       state: z.enum(['completed', 'canceled', 'failed', 'interrupted']),
       message: chatMessageSchema.optional(),
       diff: z.array(turnDiffEntrySchema),
+      // Additive, optional: the concrete model id the Claude CLI actually resolved for this turn
+      // (from the stream-json `system/init` event's `model` field, captured by
+      // ClaudeJsonlNormalizer and threaded through the canonical protocol's `completed` event —
+      // see runtime-host/protocol.ts). Absent for Codex/mock turns and whenever the Claude CLI's
+      // init event didn't carry a model string. Not persisted to the turns table — this is a
+      // live, in-memory-only surface (IpcRouter.finishAndAdvance) for the Composer's model chip
+      // tooltip, not a historical record.
+      resolvedModel: z.string().min(1).max(128).optional(),
     })
     .strict(),
   z
@@ -764,6 +772,15 @@ export const codexModelOptionSchema = z
   })
   .strict();
 export type CodexModelOption = z.infer<typeof codexModelOptionSchema>;
+// Claude-only reasoning effort levels. Verified empirically against the installed CLI (2.1.218):
+// `claude --help` lists "--effort <level>  Effort level for the current session (low, medium,
+// high, xhigh, max)", and a probe with an invalid value (`--effort bogus`) prints "Unknown
+// --effort value 'bogus' — ignoring it and using the default effort. Valid values: low, medium,
+// high, xhigh, max." confirming this exact enum. Codex has no equivalent flag on this CLI
+// version, so — unlike `codexModelIdSchema` (deliberately provider-agnostic) — this schema is
+// Claude-specific.
+export const claudeEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+export type ClaudeEffort = z.infer<typeof claudeEffortSchema>;
 export const runtimeSettingsSchema = z
   .object({
     kind: runtimeKindSchema,
@@ -774,11 +791,17 @@ export const runtimeSettingsSchema = z
     claudeAvailable: z.boolean(),
     model: codexModelIdSchema,
     models: z.array(codexModelOptionSchema).max(32),
+    // Additive field for the Claude effort control. Persisted under the single
+    // 'runtime.claude.effort' settings key regardless of which Runtime kind is currently active
+    // (unlike `model`, which is scoped per-kind) — it only takes effect on Claude turns, and the
+    // Composer's effort selector is only enabled while Claude is the active Runtime.
+    effort: claudeEffortSchema,
   })
   .strict();
 export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;
 export const runtimeSetInputSchema = z.object({ kind: runtimeKindSchema }).strict();
 export const runtimeModelSetInputSchema = z.object({ model: codexModelIdSchema }).strict();
+export const runtimeEffortSetInputSchema = z.object({ effort: claudeEffortSchema }).strict();
 
 export const accessPresetSchema = z.enum(['ask', 'auto', 'full']);
 export type AccessPreset = z.infer<typeof accessPresetSchema>;
@@ -901,6 +924,7 @@ export interface SprintCoderApi {
     getRuntime(): Promise<RuntimeSettings>;
     setRuntime(kind: RuntimeKind): Promise<void>;
     setModel(model: string): Promise<void>;
+    setEffort(effort: ClaudeEffort): Promise<void>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
@@ -963,6 +987,7 @@ export const IPC_CHANNELS = {
   settingsGetRuntime: 'sprint-coder:settings:get-runtime',
   settingsSetRuntime: 'sprint-coder:settings:set-runtime',
   settingsSetModel: 'sprint-coder:settings:set-model',
+  settingsSetEffort: 'sprint-coder:settings:set-effort',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

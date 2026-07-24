@@ -35,6 +35,19 @@ describe('Claude runtime probe', () => {
     expect(buildClaudeArgs('auto')).not.toContain('--model');
   });
 
+  it('passes --effort when an effort level is given, verified valid values from the installed CLI', () => {
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+      const args = buildClaudeArgs('auto', undefined, effort);
+      expect(args.at(-2)).toBe('--effort');
+      expect(args.at(-1)).toBe(effort);
+    }
+  });
+
+  it('never adds --effort when no effort is given (Codex/mock and pre-effort call sites unaffected)', () => {
+    expect(buildClaudeArgs('auto')).not.toContain('--effort');
+    expect(buildClaudeArgs('opus')).not.toContain('--effort');
+  });
+
   it('always keeps the no-tools and no-MCP flags present regardless of model', () => {
     for (const model of ['auto', 'sonnet', 'opus', 'haiku', 'claude-sonnet-5']) {
       const args = buildClaudeArgs(model);

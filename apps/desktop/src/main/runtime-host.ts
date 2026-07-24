@@ -64,6 +64,8 @@ export class RuntimeHostClient {
     toolCatalogSnapshot: ToolCatalogSnapshot,
     preparedContext?: PreparedContext,
     teamMcp?: RuntimeTeamMcpOption,
+    // Claude-only reasoning effort (see the ADR amendment); ignored by the Codex adapter.
+    effort?: string,
   ): void {
     const contextFragments = (
       preparedContext?.fragments ??
@@ -95,6 +97,7 @@ export class RuntimeHostClient {
       contextFragments,
       toolCatalogSnapshot,
       ...(teamMcp === undefined ? {} : { teamMcp }),
+      ...(effort === undefined ? {} : { effort }),
     });
   }
 

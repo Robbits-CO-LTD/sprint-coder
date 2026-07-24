@@ -31,6 +31,7 @@ import {
   permissionSettingsSchema,
   runtimeSetInputSchema,
   runtimeModelSetInputSchema,
+  runtimeEffortSetInputSchema,
   runtimeSettingsSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
@@ -114,6 +115,11 @@ export class IpcRouter {
   private readonly teamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
   private readonly turnRuntimes = new Map<string, RuntimeKind>();
+  // The concrete model id the Claude CLI actually resolved for a turn (captured from the
+  // stream-json `system/init` event by ClaudeJsonlNormalizer), keyed by turnId until
+  // finishAndAdvance folds it into the outgoing `turn.completed` event. Not persisted — see the
+  // `resolvedModel` doc comment on turnEventSchema.
+  private readonly resolvedModelByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly autoReviewer = AutoReviewer.createProduction();
@@ -261,6 +267,7 @@ export class IpcRouter {
           claudeAvailable: claudeCapability.available,
           model,
           models: activeCapability.models,
+          effort: this.persistence.getEffort(),
         };
       },
     );
@@ -296,6 +303,20 @@ export class IpcRouter {
           this.persistence.setModel(input.model),
         ).value;
       },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetEffort,
+      runtimeEffortSetInputSchema,
+      z.undefined(),
+      async (input, event, envelope) =>
+        // Unlike setModel, no Runtime-kind capability check: `claudeEffortSchema` (enforced by
+        // runtimeEffortSetInputSchema itself, a fixed 5-value enum verified against the installed
+        // CLI's --help) is the only validation needed, and the setting is a single global key
+        // that only takes effect on Claude turns regardless of which Runtime is currently active
+        // — the Composer's effort selector is what gates *visibility*, not this handler.
+        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetEffort, () =>
+          this.persistence.setEffort(input.effort),
+        ).value,
     );
     this.handle(
       IPC_CHANNELS.permissionsGet,
@@ -867,7 +888,14 @@ export class IpcRouter {
   private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {
     this.turnRuntimes.delete(turnId);
     this.teamMcpBridge.unregister(turnId);
-    this.publish(this.persistence.completeTurn(taskId, turnId, state));
+    const event = this.persistence.completeTurn(taskId, turnId, state);
+    const resolvedModel = this.resolvedModelByTurn.get(turnId);
+    this.resolvedModelByTurn.delete(turnId);
+    this.publish(
+      event.type === 'turn.completed' && resolvedModel !== undefined
+        ? { ...event, resolvedModel }
+        : event,
+    );
     this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
     this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
   }
@@ -1092,6 +1120,9 @@ export class IpcRouter {
           createEmptyToolCatalogSnapshot(kind, workspaceId),
           context,
           teamMcp,
+          // Claude-only reasoning effort: read live (not captured on StartedTurn) since it isn't
+          // persisted per-turn, unlike model — see persistence.ts's getEffort doc comment.
+          kind === 'claude' ? this.persistence.getEffort() : undefined,
         ),
     );
     if (!egress.allowed) {
@@ -1177,7 +1208,11 @@ export class IpcRouter {
               runtimeEvent.delta,
             ),
           );
-        else this.finishAndAdvance(taskId, turnId, 'completed');
+        else {
+          if (runtimeEvent.resolvedModel !== undefined)
+            this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
+          this.finishAndAdvance(taskId, turnId, 'completed');
+        }
       })
       .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
   }

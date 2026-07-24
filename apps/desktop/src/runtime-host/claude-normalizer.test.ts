@@ -36,6 +36,9 @@ describe('ClaudeJsonlNormalizer', () => {
     ).toBe(1);
     expect(JSON.stringify(events)).not.toContain('input_tokens');
     expect(JSON.stringify(events)).not.toContain('session_id');
+    // The fixture's system/init event carries "model":"claude-sonnet-5" — captured and surfaced
+    // on the terminal completed event (see the ADR amendment).
+    expect(events.at(-1)).toEqual({ type: 'completed', resolvedModel: 'claude-sonnet-5' });
   });
 
   it('maps a Claude result failure (is_error) to a thrown output error, not a silent completion', () => {
