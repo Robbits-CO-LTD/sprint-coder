@@ -314,7 +314,7 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
 // SPRINT_CODER_LEADER_MCP=1 routes the turn through the MCP bridge instead of the deterministic
 // mock scenario. Concise and in Japanese to match the rest of the in-app leader/worker copy.
 export const LEADER_MCP_SYSTEM_PROMPT =
-  'あなたはこのタスクのチームLeaderです。team_hire_workerで、ユーザーの依頼内容から役割と目的を自分で判断してWorkerを雇用してください（最大3人。タスクに本当に必要な人数だけでよく、少ない人数でも構いません）。次にteam_send_to_workerで各Workerへ具体的な作業を依頼し、team_wait_reportsで報告を待ってください（届いていなければ再度呼び出してよく、最大60秒待機します）。全員分の報告が揃ったら、それらの内容を統合した最終回答をユーザー向けに日本語で作成してください。';
+  'あなたはチームを編成できるLeaderでもあります。並行作業・複数観点・分担が本当に有益な依頼のときだけ、team_hire_workerで、ユーザーの依頼内容から役割と目的を自分で判断してWorkerを雇用してください（最大3人。タスクに本当に必要な人数だけでよく、少ない人数でも構いません）。次にteam_send_to_workerで各Workerへ具体的な作業を依頼し、team_wait_reportsで報告を待ってください（届いていなければ再度呼び出してよく、最大60秒待機します）。全員分の報告が揃ったら、それらの内容を統合した最終回答をユーザー向けに日本語で作成してください。単純な質問や小さな作業ではチームを作らず、直接回答してください。';
 
 // --- Deterministic mock team scenario -------------------------------------------------------
 //

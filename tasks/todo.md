@@ -243,3 +243,7 @@ Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: 
   2. teamMcp時の`--setting-sources ""`はhooks/CLAUDE.md/plugins/カスタムコマンド/slash commandsを無効化するが、Claude CLI組み込みの標準ツール自体は`--tools ""`で別途無効化しているため二重の安全設計。ただし`--safe-mode`が保証していた項目の完全な一対一対応ではなく、CLIの`--help`記載+実機プローブでの経験的一致であり、将来のCLIバージョンアップで挙動が変わる可能性は残る(normalizerの`ClaudeExpectedCapabilities`検証がfail-closedの防波堤)
   3. team_wait_reportsのロングポールは固定500msポーリング(コールバック/イベント駆動ではない)。60秒×Workerの往復回数分のブリッジ往復が発生するが、実測では実用上問題なし
   4. Leader MCPソケットは複数Turn/複数Taskで1つのbridge・1つのsocketを使い回す設計(turnId×tokenで多重化)。同一プロセス内で同時に複数のteam Turnが走る場合の負荷は未検証
+
+## 追記(2026-07-24 Fable): AI察知によるチーム化
+- SPRINT_CODER_LEADER_MCP=1時、team toolsをClaudeの全ターンに常時提供へ変更。キーワード(「チームで」)やボタンなしでも、Leaderが依頼内容から必要性を察知して雇用→自動昇格→Canvas自動遷移。ガイダンスに「本当に有益な時だけ・単純な依頼は直接回答」の抑制を明記
+- 実機実証: キーワードなしの並行検討依頼で「数学検討担当」を自己判断で雇用、Canvas自動遷移まで確認(12.7秒)。Mock経路e2eは無変更(3/3)
