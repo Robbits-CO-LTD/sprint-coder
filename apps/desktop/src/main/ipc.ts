@@ -91,7 +91,10 @@ import type { ExecutionSpec } from '@sprint-coder/domain';
 import { executionSpecPathGuard } from './command-runner';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
 import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lease';
-import { dispatchAfterCodexProviderEgress } from './provider-egress';
+import {
+  dispatchAfterCodexProviderEgress,
+  dispatchAfterClaudeProviderEgress,
+} from './provider-egress';
 import { TeamCoordinator } from './team-coordinator';
 
 type InvokeEvent = IpcMainInvokeEvent;
@@ -102,6 +105,7 @@ export class IpcRouter {
   private readonly mailbox = new TaskMailbox();
   private readonly mockRuntime: MockRuntimeAdapter;
   private readonly codexRuntime: RuntimeHostClient;
+  private readonly claudeRuntime: RuntimeHostClient;
   private readonly turnRuntimes = new Map<string, RuntimeKind>();
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
@@ -157,10 +161,20 @@ export class IpcRouter {
       (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
     );
     this.codexRuntime = new RuntimeHostClient(
-      (taskId, turnId, runtimeEvent) => this.handleCodexEvent(taskId, turnId, runtimeEvent),
-      (taskId, turnId, error) => this.handleCodexFailure(taskId, turnId, error),
+      (taskId, turnId, runtimeEvent) =>
+        this.handleRuntimeEvent('codex', taskId, turnId, runtimeEvent),
+      (taskId, turnId, error) => this.handleRuntimeFailure('codex', taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
+      'codex',
+    );
+    this.claudeRuntime = new RuntimeHostClient(
+      (taskId, turnId, runtimeEvent) =>
+        this.handleRuntimeEvent('claude', taskId, turnId, runtimeEvent),
+      (taskId, turnId, error) => this.handleRuntimeFailure('claude', taskId, turnId, error),
+      (taskId, turnId) => this.prepareContext(taskId, turnId),
+      (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
+      'claude',
     );
   }
 
@@ -174,14 +188,22 @@ export class IpcRouter {
       emptyPayloadSchema,
       runtimeSettingsSchema,
       async () => {
-        const capability = await this.codexRuntime.probe();
+        const [codexCapability, claudeCapability] = await Promise.all([
+          this.codexRuntime.probe(),
+          this.claudeRuntime.probe(),
+        ]);
+        const kind = this.persistence.getRuntime();
+        const activeCapability = kind === 'claude' ? claudeCapability : codexCapability;
         const storedModel = this.persistence.getModel();
-        const model = capability.models.some(({ id }) => id === storedModel) ? storedModel : 'auto';
+        const model = activeCapability.models.some(({ id }) => id === storedModel)
+          ? storedModel
+          : 'auto';
         return {
-          kind: this.persistence.getRuntime(),
-          codexAvailable: capability.available,
+          kind,
+          codexAvailable: codexCapability.available,
+          claudeAvailable: claudeCapability.available,
           model,
-          models: capability.models,
+          models: activeCapability.models,
         };
       },
     );
@@ -190,9 +212,9 @@ export class IpcRouter {
       runtimeSetInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
-        if (input.kind === 'codex') {
-          const capability = await this.codexRuntime.probe();
-          if (!capability.available) throw new RuntimeUnavailableError();
+        if (input.kind === 'codex' || input.kind === 'claude') {
+          const capability = await this.runtimeFor(input.kind).probe();
+          if (!capability.available) throw new RuntimeUnavailableError(input.kind);
         }
         return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetRuntime, () =>
           this.persistence.setRuntime(input.kind),
@@ -204,9 +226,15 @@ export class IpcRouter {
       runtimeModelSetInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
-        const capability = await this.codexRuntime.probe();
-        if (!capability.available) throw new RuntimeUnavailableError();
-        if (!capability.models.some(({ id }) => id === input.model)) throw new InvalidModelError();
+        // Model membership is validated against the currently *active* Runtime kind's own
+        // capability list — Codex and Claude have disjoint model spaces (Main-side scoping per
+        // the ADR), so a Codex model id can never leak into a Claude turn or vice versa.
+        const kind = this.persistence.getRuntime();
+        const runtimeKind = kind === 'claude' ? 'claude' : 'codex';
+        const capability = await this.runtimeFor(runtimeKind).probe();
+        if (!capability.available) throw new RuntimeUnavailableError(runtimeKind);
+        if (!capability.models.some(({ id }) => id === input.model))
+          throw new InvalidModelError(runtimeKind);
         return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () =>
           this.persistence.setModel(input.model),
         ).value;
@@ -562,7 +590,8 @@ export class IpcRouter {
       turnSteerInputSchema,
       z.undefined(),
       (input, event, envelope) => {
-        if (this.turnRuntimes.get(input.expectedTurnId) === 'codex')
+        const activeRuntimeKind = this.turnRuntimes.get(input.expectedTurnId);
+        if (activeRuntimeKind === 'codex' || activeRuntimeKind === 'claude')
           throw new SteerUnsupportedError();
         const result = this.runMutation(
           event,
@@ -693,6 +722,7 @@ export class IpcRouter {
     this.approvalCoordinator.dispose();
     await this.mockRuntime.dispose();
     this.codexRuntime.dispose();
+    this.claudeRuntime.dispose();
   }
 
   private handle<TInput, TOutput>(
@@ -948,39 +978,41 @@ export class IpcRouter {
     this.turnRuntimes.set(started.turnId, kind);
     if (kind === 'mock') {
       this.mockRuntime.start(taskId, started.turnId, started.text);
-    } else {
-      const workspacePath = this.persistence.getWorkspace(taskId);
-      const workspaceId =
-        workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
-      const context = this.prepareContext(taskId, started.turnId);
-      const egress = dispatchAfterCodexProviderEgress(
-        {
-          broker: this.permissionBroker,
-          task: this.persistence.getTask(taskId),
-          turnId: started.turnId,
-          prompt: started.text,
+      return;
+    }
+    const workspacePath = this.persistence.getWorkspace(taskId);
+    const workspaceId =
+      workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
+    const context = this.prepareContext(taskId, started.turnId);
+    const dispatchEgress =
+      kind === 'claude' ? dispatchAfterClaudeProviderEgress : dispatchAfterCodexProviderEgress;
+    const egress = dispatchEgress(
+      {
+        broker: this.permissionBroker,
+        task: this.persistence.getTask(taskId),
+        turnId: started.turnId,
+        prompt: started.text,
+        context,
+        now: new Date().toISOString(),
+      },
+      () =>
+        this.runtimeFor(kind).start(
+          taskId,
+          started.turnId,
+          started.text,
+          workspacePath,
+          started.model,
+          createEmptyToolCatalogSnapshot(kind, workspaceId),
           context,
-          now: new Date().toISOString(),
-        },
-        () =>
-          this.codexRuntime.start(
-            taskId,
-            started.turnId,
-            started.text,
-            workspacePath,
-            started.model,
-            createEmptyToolCatalogSnapshot('codex', workspaceId),
-            context,
-          ),
-      );
-      if (!egress.allowed) {
-        this.handleCodexFailure(taskId, started.turnId, {
-          code: 'RUNTIME_FAILED',
-          userMessage: 'Providerへの送信がpolicyで拒否されました。',
-          retryable: false,
-        });
-        return;
-      }
+        ),
+    );
+    if (!egress.allowed) {
+      this.handleRuntimeFailure(kind, taskId, started.turnId, {
+        code: 'RUNTIME_FAILED',
+        userMessage: 'Providerへの送信がpolicyで拒否されました。',
+        retryable: false,
+      });
+      return;
     }
   }
 
@@ -1013,21 +1045,26 @@ export class IpcRouter {
       this.publish(event);
   }
 
+  private runtimeFor(kind: 'codex' | 'claude'): RuntimeHostClient {
+    return kind === 'claude' ? this.claudeRuntime : this.codexRuntime;
+  }
+
   private async cancelRuntime(taskId: string, turnId: string): Promise<void> {
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
-    if (kind === 'codex') this.codexRuntime.cancel(taskId, turnId);
+    if (kind === 'codex' || kind === 'claude') this.runtimeFor(kind).cancel(taskId, turnId);
     else await this.mockRuntime.cancel(turnId);
   }
 
-  private handleCodexEvent(
+  private handleRuntimeEvent(
+    kind: 'codex' | 'claude',
     taskId: string,
     turnId: string,
     runtimeEvent: RuntimeCanonicalEvent,
   ): void {
     void this.mailbox
       .run(taskId, () => {
-        if (this.turnRuntimes.get(turnId) !== 'codex') return;
+        if (this.turnRuntimes.get(turnId) !== kind) return;
         if (runtimeEvent.type === 'stage')
           this.publish(this.persistence.changeStage(taskId, turnId, runtimeEvent.stage));
         else if (runtimeEvent.type === 'delta')
@@ -1041,12 +1078,17 @@ export class IpcRouter {
           );
         else this.finishAndAdvance(taskId, turnId, 'completed');
       })
-      .catch(() => this.handleCodexFailure(taskId, turnId, runtimeProtocolError()));
+      .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
   }
 
-  private handleCodexFailure(taskId: string, turnId: string, _error: PublicError): void {
+  private handleRuntimeFailure(
+    kind: 'codex' | 'claude',
+    taskId: string,
+    turnId: string,
+    _error: PublicError,
+  ): void {
     void this.mailbox.run(taskId, () => {
-      if (this.turnRuntimes.get(turnId) !== 'codex') return;
+      if (this.turnRuntimes.get(turnId) !== kind) return;
       this.finishAndAdvance(taskId, turnId, 'failed');
     });
   }
@@ -1100,8 +1142,16 @@ export class TaskMailbox {
 }
 
 class SecurityError extends Error {}
-class RuntimeUnavailableError extends Error {}
-class InvalidModelError extends Error {}
+class RuntimeUnavailableError extends Error {
+  constructor(readonly kind: 'codex' | 'claude' = 'codex') {
+    super();
+  }
+}
+class InvalidModelError extends Error {
+  constructor(readonly kind: 'codex' | 'claude' = 'codex') {
+    super();
+  }
+}
 class StalePermissionPolicyError extends Error {}
 class FullAccessConfirmationDeclinedError extends Error {}
 class SteerUnsupportedError extends Error {}
@@ -1190,19 +1240,25 @@ function toPublicError(error: unknown): PublicError {
   if (error instanceof SteerUnsupportedError)
     return {
       code: 'STEER_UNSUPPORTED',
-      userMessage: 'Codex runtimeは実行中の追加指示に対応していません。',
+      userMessage: '選択中のruntimeは実行中の追加指示に対応していません。',
       retryable: false,
     };
   if (error instanceof RuntimeUnavailableError)
     return {
       code: 'RUNTIME_UNAVAILABLE',
-      userMessage: 'Codex CLIが利用できないため、このruntimeを選択できません。',
+      userMessage:
+        error.kind === 'claude'
+          ? 'Claude CLIが利用できないため、このruntimeを選択できません。'
+          : 'Codex CLIが利用できないため、このruntimeを選択できません。',
       retryable: false,
     };
   if (error instanceof InvalidModelError)
     return {
       code: 'INVALID_REQUEST',
-      userMessage: '選択したモデルは現在のCodex CLIで利用できません。',
+      userMessage:
+        error.kind === 'claude'
+          ? '選択したモデルは現在のClaude CLIで利用できません。'
+          : '選択したモデルは現在のCodex CLIで利用できません。',
       retryable: false,
     };
   if (error instanceof StalePermissionPolicyError)

@@ -252,7 +252,7 @@ export type TurnSnapshot = {
 export type SprintCoderErrorCode =
   'TURN_ACTIVE' | 'STEER_STALE' | 'RUNTIME_UNAVAILABLE' | 'STEER_UNSUPPORTED' | string;
 
-export type RuntimeKind = 'mock' | 'codex';
+export type RuntimeKind = 'mock' | 'codex' | 'claude';
 export type CodexModelOption = { id: string; displayName: string; description: string };
 export type AccessPreset = 'ask' | 'auto' | 'full';
 export type PermissionSettings = { preset: AccessPreset; policyEpoch: number };
@@ -392,6 +392,7 @@ export interface SprintCoderApi {
     getRuntime(): Promise<{
       kind: RuntimeKind;
       codexAvailable: boolean;
+      claudeAvailable: boolean;
       model: string;
       models: CodexModelOption[];
     }>;

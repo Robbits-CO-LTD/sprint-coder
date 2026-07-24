@@ -4085,6 +4085,7 @@ if (runsWithElectronAbi)
         { version: 27 },
         { version: 28 },
         { version: 29 },
+        { version: 30 },
       ]);
       const migratedTables = new Set(
         (

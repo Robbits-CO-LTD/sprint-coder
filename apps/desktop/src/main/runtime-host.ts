@@ -44,6 +44,7 @@ export class RuntimeHostClient {
     private readonly onFailure: FailureHandler,
     private readonly prepareContext?: PrepareContext,
     private readonly onContextAccepted?: ContextAccepted,
+    private readonly kind: 'codex' | 'claude' = 'codex',
   ) {
     this.launch();
   }
@@ -68,12 +69,12 @@ export class RuntimeHostClient {
       []
     ).map(toRuntimeContextFragment);
     if (this.disposed) {
-      this.onFailure(taskId, turnId, unavailableError());
+      this.onFailure(taskId, turnId, this.unavailableError());
       return;
     }
     if (this.process === null) this.launch();
     if (this.process === null) {
-      this.onFailure(taskId, turnId, unavailableError());
+      this.onFailure(taskId, turnId, this.unavailableError());
       return;
     }
     const operationId = randomUUID();
@@ -127,8 +128,14 @@ export class RuntimeHostClient {
     try {
       child = utilityProcess.fork(
         join(__dirname, 'runtime-host.js'),
-        ['--runtime-instance-id', instanceId],
-        { serviceName: 'Sprint Coder Runtime Host', stdio: 'ignore' },
+        ['--runtime-instance-id', instanceId, '--runtime-kind', this.kind],
+        {
+          serviceName:
+            this.kind === 'claude'
+              ? 'Sprint Coder Runtime Host (Claude)'
+              : 'Sprint Coder Runtime Host',
+          stdio: 'ignore',
+        },
       );
     } catch {
       this.resolveProbe?.({ available: false, models: [] });
@@ -155,7 +162,11 @@ export class RuntimeHostClient {
     )
       return;
     if (raw.type === 'hello') {
-      this.resolveProbe?.({ available: raw.codexAvailable, models: raw.codexModels });
+      this.resolveProbe?.(
+        this.kind === 'claude'
+          ? { available: raw.claudeAvailable, models: raw.claudeModels }
+          : { available: raw.codexAvailable, models: raw.codexModels },
+      );
       this.resolveProbe = null;
       return;
     }
@@ -198,7 +209,10 @@ export class RuntimeHostClient {
       this.active.delete(raw.turnId);
       this.onFailure(raw.taskId, raw.turnId, {
         code: 'RUNTIME_FAILED',
-        userMessage: 'Codex runtimeが異常終了しました。',
+        userMessage:
+          this.kind === 'claude'
+            ? 'Claude runtimeが異常終了しました。'
+            : 'Codex runtimeが異常終了しました。',
         retryable: true,
       });
     }
@@ -241,6 +255,17 @@ export class RuntimeHostClient {
       operationId,
     };
   }
+
+  private unavailableError(): PublicError {
+    return {
+      code: 'RUNTIME_UNAVAILABLE',
+      userMessage:
+        this.kind === 'claude'
+          ? 'Claude runtimeを利用できません。'
+          : 'Codex runtimeを利用できません。',
+      retryable: false,
+    };
+  }
 }
 
 function toRuntimeContextFragment(
@@ -263,12 +288,4 @@ function toRuntimeContextFragment(
 
 function sameIds(expected: readonly string[], actual: readonly string[]): boolean {
   return expected.length === actual.length && expected.every((id, index) => id === actual[index]);
-}
-
-function unavailableError(): PublicError {
-  return {
-    code: 'RUNTIME_UNAVAILABLE',
-    userMessage: 'Codex runtimeを利用できません。',
-    retryable: false,
-  };
 }

@@ -747,8 +747,10 @@ export const publicErrorSchema = z
   .strict();
 export type PublicError = z.infer<typeof publicErrorSchema>;
 
-export const runtimeKindSchema = z.enum(['mock', 'codex']);
+export const runtimeKindSchema = z.enum(['mock', 'codex', 'claude']);
 export type RuntimeKind = z.infer<typeof runtimeKindSchema>;
+// Model id/option shape is provider-agnostic (Codex slugs and Claude aliases/full ids both fit
+// this format) and is kept under its original "codex" name for additive, non-breaking evolution.
 export const codexModelIdSchema = z
   .string()
   .min(1)
@@ -766,6 +768,10 @@ export const runtimeSettingsSchema = z
   .object({
     kind: runtimeKindSchema,
     codexAvailable: z.boolean(),
+    // Additive parallel availability field for the Claude CLI runtime (Slice 3.4). Existing
+    // `codexAvailable` consumers are unaffected; `models`/`model` reflect the currently selected
+    // Runtime kind's own capability list (Codex's or Claude's), per the Main-side probe.
+    claudeAvailable: z.boolean(),
     model: codexModelIdSchema,
     models: z.array(codexModelOptionSchema).max(32),
   })
@@ -893,7 +899,7 @@ export interface SprintCoderApi {
   };
   settings: {
     getRuntime(): Promise<RuntimeSettings>;
-    setRuntime(kind: 'mock' | 'codex'): Promise<void>;
+    setRuntime(kind: RuntimeKind): Promise<void>;
     setModel(model: string): Promise<void>;
   };
   permissions: {

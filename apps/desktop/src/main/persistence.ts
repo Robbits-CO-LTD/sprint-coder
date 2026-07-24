@@ -1474,6 +1474,55 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 30,
+    checksum: 'runtime-v30-claude-kind-support',
+    // Widens the `runtime_kind` CHECK on `turns` and `agent_threads` to allow 'claude' (Slice
+    // 3.4). SQLite cannot ALTER a CHECK constraint in place, so both tables are rebuilt under a
+    // new name, repopulated, and the original dropped and replaced via RENAME (never the other
+    // way around: renaming the *original* table away first would make SQLite rewrite every
+    // other table's REFERENCES clause to point at the transient name, so a plain DROP+RENAME of
+    // the *new* table into the original name is the only order that leaves every foreign key —
+    // turn_events/background_completions/edit_sagas/agent_threads.active_turn_id -> turns, and
+    // tasks.primary_thread_id/team_workers.thread_id -> agent_threads — correctly resolved).
+    // Requires requiresForeignKeysOff (see runMigrations): with FK enforcement on, SQLite runs
+    // an implicit cascading DELETE before a DROP TABLE of a table other rows still reference.
+    sql: `
+      CREATE TABLE turns_v30 (
+        id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        user_message_id TEXT NOT NULL REFERENCES messages(id), assistant_message_id TEXT REFERENCES messages(id),
+        state TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        runtime_kind TEXT NOT NULL DEFAULT 'mock' CHECK (runtime_kind IN ('mock', 'codex', 'claude')),
+        model TEXT NOT NULL DEFAULT 'auto'
+      );
+      INSERT INTO turns_v30 (
+        id, task_id, user_message_id, assistant_message_id, state, seq, created_at, updated_at, runtime_kind, model
+      )
+        SELECT id, task_id, user_message_id, assistant_message_id, state, seq, created_at, updated_at, runtime_kind, model
+        FROM turns;
+      DROP TABLE turns;
+      ALTER TABLE turns_v30 RENAME TO turns;
+      CREATE INDEX turns_task_state_idx ON turns(task_id, state);
+
+      CREATE TABLE agent_threads_v30 (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('mock', 'codex', 'claude')),
+        state TEXT NOT NULL CHECK (state IN ('idle', 'active', 'paused', 'interrupted', 'completed')),
+        active_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO agent_threads_v30 (id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at)
+        SELECT id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
+        FROM agent_threads;
+      DROP TABLE agent_threads;
+      ALTER TABLE agent_threads_v30 RENAME TO agent_threads;
+      CREATE INDEX agent_threads_task_idx ON agent_threads(task_id, created_at, id);
+    `,
+    requiresForeignKeysOff: true,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2116,6 +2165,12 @@ export interface PersistenceClient {
   close(): void;
 }
 
+// 'mock' has no model concept and is bucketed with Codex's key so pre-Claude installs keep
+// reading/writing the exact same 'runtime.codex.model' row they always have.
+function modelSettingsKey(kind: RuntimeKind): string {
+  return kind === 'claude' ? 'runtime.claude.model' : 'runtime.codex.model';
+}
+
 export class SqlitePersistenceClient implements PersistenceClient {
   private readonly db: Database.Database;
   private readonly contextLedger: ContextLedger;
@@ -2169,12 +2224,35 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (checksum !== undefined && checksum !== migration.checksum)
         throw new Error('Migration checksum mismatch');
       if (checksum !== undefined) continue;
-      this.db.transaction(() => {
-        this.db.exec(migration.sql);
-        this.db
-          .prepare('INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)')
-          .run(migration.version, migration.checksum, new Date().toISOString());
-      })();
+      const applyMigration = (): void => {
+        this.db.transaction(() => {
+          this.db.exec(migration.sql);
+          this.db
+            .prepare(
+              'INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)',
+            )
+            .run(migration.version, migration.checksum, new Date().toISOString());
+        })();
+      };
+      // SQLite cannot change a CHECK constraint via ALTER TABLE, so widening one requires
+      // recreating the table (see migration v30). That rebuild must run with FK enforcement off
+      // (PRAGMA foreign_keys is a no-op inside an active transaction, so it must be toggled
+      // outside applyMigration's transaction) or dropping a table other rows still reference
+      // would cascade-delete them. foreign_key_check afterward guards against a migration
+      // silently leaving the database inconsistent.
+      if ('requiresForeignKeysOff' in migration && migration.requiresForeignKeysOff === true) {
+        this.db.pragma('foreign_keys = OFF');
+        try {
+          applyMigration();
+          const danglingForeignKeys = this.db.pragma('foreign_key_check');
+          if (Array.isArray(danglingForeignKeys) && danglingForeignKeys.length > 0)
+            throw new Error(`Migration ${migration.version} left dangling foreign keys`);
+        } finally {
+          this.db.pragma('foreign_keys = ON');
+        }
+      } else {
+        applyMigration();
+      }
     }
   }
 
@@ -3109,9 +3187,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     // stopped and never rehired under the same id — ids are never reused) — a stale entry would
     // otherwise persist forever without ever mapping back onto a visible node.
     const allowedAgentIds = new Set(
-      (this.db.prepare('SELECT id FROM agents WHERE task_id = ?').all(taskId) as { id: string }[]).map(
-        (agent) => agent.id,
-      ),
+      (
+        this.db.prepare('SELECT id FROM agents WHERE task_id = ?').all(taskId) as { id: string }[]
+      ).map((agent) => agent.id),
     );
     const rawPositions = JSON.parse(row.node_positions_json) as Record<
       string,
@@ -3265,7 +3343,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
   getRuntime(): RuntimeKind {
     const row = this.db.prepare("SELECT value FROM settings WHERE key = 'runtime.kind'").get() as
       { value: string } | undefined;
-    return row?.value === 'codex' ? 'codex' : 'mock';
+    if (row?.value === 'codex') return 'codex';
+    if (row?.value === 'claude') return 'claude';
+    return 'mock';
   }
 
   setRuntime(kind: RuntimeKind): void {
@@ -3277,20 +3357,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(kind, new Date().toISOString());
   }
 
+  // The selected model is scoped per Runtime kind (its settings key), so switching between
+  // Codex and Claude does not clobber the other's remembered preference. 'mock' has no model
+  // concept and shares Codex's key, matching pre-Claude behavior exactly.
   getModel(): string {
     const row = this.db
-      .prepare("SELECT value FROM settings WHERE key = 'runtime.codex.model'")
-      .get() as { value: string } | undefined;
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(modelSettingsKey(this.getRuntime())) as { value: string } | undefined;
     return row?.value ?? 'auto';
   }
 
   setModel(model: string): void {
     this.db
       .prepare(
-        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.codex.model', ?, ?)
+        `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
-      .run(model, new Date().toISOString());
+      .run(modelSettingsKey(this.getRuntime()), model, new Date().toISOString());
   }
 
   getBackgroundEpochs(taskId: string): BackgroundEpochs {

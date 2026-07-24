@@ -5,7 +5,7 @@ import { ContextBar } from './ContextBar';
 import type { QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
 const STEER_UNSUPPORTED_HINT =
-  'Codex runtimeでは実行中の追加指示に対応していません。キュー追加を使ってください';
+  '選択中のruntimeでは実行中の追加指示に対応していません。キュー追加を使ってください';
 
 type SendMode = 'queue' | 'steer' | 'stopAndSend';
 
@@ -50,9 +50,10 @@ export function Composer({ taskId }: { taskId: string }) {
   const canSteer = typeof window.sprintCoder?.turns?.steer === 'function';
   const canStopAndSend = typeof window.sprintCoder?.turns?.stopAndSend === 'function';
   const hasAnyActiveModeCapability = canQueue || canSteer || canStopAndSend;
-  // Codex runtime does not support mid-turn steering (STEER_UNSUPPORTED) — the Steer segment
-  // stays visible but disabled so the user understands why, per FR-SET-03.
-  const steerBlockedByRuntime = runtime.kind === 'codex';
+  // Codex and Claude runtimes are headless single-shot invocations and do not support mid-turn
+  // steering (STEER_UNSUPPORTED) — the Steer segment stays visible but disabled so the user
+  // understands why, per FR-SET-03.
+  const steerBlockedByRuntime = runtime.kind === 'codex' || runtime.kind === 'claude';
 
   // Reset the mode selector back to the default once the turn finishes (render-time adjustment
   // instead of an effect, per react-hooks/set-state-in-effect).
@@ -60,7 +61,7 @@ export function Composer({ taskId }: { taskId: string }) {
     setWasTurnActive(turnActive);
     if (!turnActive) setSendMode('queue');
   }
-  // Likewise, fall back off Steer if the runtime switches to Codex while it's selected.
+  // Likewise, fall back off Steer if the runtime switches to Codex or Claude while it's selected.
   if (sendMode === 'steer' && steerBlockedByRuntime) {
     setSendMode('queue');
   }
@@ -198,11 +199,18 @@ export function Composer({ taskId }: { taskId: string }) {
 const RUNTIME_LABEL: Record<RuntimeKind, string> = {
   mock: 'Mock Runtime',
   codex: 'Codex',
+  claude: 'Claude Code',
 };
 
 const RUNTIME_DESC: Record<RuntimeKind, string> = {
   mock: '決定論的ローカル応答',
   codex: 'ローカルのCodex CLIで実応答',
+  claude: 'ローカルのClaude Code CLIで実応答',
+};
+
+const RUNTIME_CLI_MISSING_HINT: Record<'codex' | 'claude', string> = {
+  codex: 'Codex CLIが見つかりません',
+  claude: 'Claude CLIが見つかりません',
 };
 
 // Runtime selector chip (FR-SET-03). Falls back to the legacy dummy "GPT-6.2 mini" chip when
@@ -234,6 +242,7 @@ function RuntimeChip() {
 
   function choose(kind: RuntimeKind) {
     if (kind === 'codex' && !runtime.codexAvailable) return;
+    if (kind === 'claude' && !runtime.claudeAvailable) return;
     setOpen(false);
     if (kind !== runtime.kind) void setRuntime(kind);
   }
@@ -262,8 +271,10 @@ function RuntimeChip() {
       </button>
       {open && (
         <div className="runtime-menu" role="menu" aria-label="Runtime選択">
-          {(['mock', 'codex'] as RuntimeKind[]).map((kind) => {
-            const disabled = kind === 'codex' && !runtime.codexAvailable;
+          {(['mock', 'codex', 'claude'] as RuntimeKind[]).map((kind) => {
+            const disabled =
+              (kind === 'codex' && !runtime.codexAvailable) ||
+              (kind === 'claude' && !runtime.claudeAvailable);
             return (
               <button
                 data-testid={`runtime-option-${kind}`}
@@ -273,7 +284,11 @@ function RuntimeChip() {
                 aria-checked={runtime.kind === kind}
                 className={`runtime-menu-item${runtime.kind === kind ? ' active' : ''}`}
                 disabled={disabled}
-                title={disabled ? 'Codex CLIが見つかりません' : undefined}
+                title={
+                  disabled && (kind === 'codex' || kind === 'claude')
+                    ? RUNTIME_CLI_MISSING_HINT[kind]
+                    : undefined
+                }
                 onClick={() => choose(kind)}
               >
                 <span className="runtime-menu-title">{RUNTIME_LABEL[kind]}</span>
@@ -294,7 +309,10 @@ function ModelChip() {
   const wrapRef = useRef<HTMLDivElement>(null);
   const supported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.setModel === 'function';
-  const enabled = supported && runtime.kind === 'codex' && runtime.codexAvailable;
+  const enabled =
+    supported &&
+    ((runtime.kind === 'codex' && runtime.codexAvailable) ||
+      (runtime.kind === 'claude' && runtime.claudeAvailable));
   const selected = runtime.models.find(({ id }) => id === runtime.model) ?? {
     id: runtime.model,
     displayName: runtime.model,
@@ -334,7 +352,7 @@ function ModelChip() {
         aria-expanded={open}
         disabled={!enabled}
         onClick={() => setOpen((value) => !value)}
-        title={enabled ? 'Modelを選択' : 'Codex Runtime選択時にモデルを変更できます'}
+        title={enabled ? 'Modelを選択' : 'Codex/Claude Runtime選択時にモデルを変更できます'}
       >
         {selected.displayName}
       </button>

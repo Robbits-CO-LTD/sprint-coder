@@ -41,6 +41,7 @@ export type WorkspaceInfo = { path: string; name: string };
 export type RuntimeState = {
   kind: RuntimeKind;
   codexAvailable: boolean;
+  claudeAvailable: boolean;
   model: string;
   models: CodexModelOption[];
 };
@@ -550,6 +551,7 @@ export const useAppStore = create<AppState>((set, get) => {
     runtime: {
       kind: 'mock',
       codexAvailable: false,
+      claudeAvailable: false,
       model: 'auto',
       models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
     },
@@ -599,7 +601,11 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ runtime: previous });
         const code = errorCode(err);
         if (code === 'RUNTIME_UNAVAILABLE') {
-          get().showToast('Codex CLIが見つからないため切り替えできません');
+          get().showToast(
+            kind === 'claude'
+              ? 'Claude CLIが見つからないため切り替えできません'
+              : 'Codex CLIが見つからないため切り替えできません',
+          );
         } else {
           set({ error: describeError(err) });
         }
@@ -1093,7 +1099,7 @@ export const useAppStore = create<AppState>((set, get) => {
           get().showToast('Turnが切り替わったため送信し直してください');
         } else if (code === 'STEER_UNSUPPORTED') {
           get().showToast(
-            'Codex runtimeでは実行中の追加指示に対応していません。キュー追加を使ってください',
+            '選択中のruntimeでは実行中の追加指示に対応していません。キュー追加を使ってください',
           );
         }
       }
