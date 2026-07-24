@@ -212,3 +212,10 @@ Public Beta送り(計画が明示的に許容する繰り延べ、未実施と�
 - 既知環境フレーク: command-runner-flow focusテスト(変更前ベースラインから再現する環境起因)
 
 Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: signing/update/beta gate)のみ。
+
+## 追記(2026-07-24 Fable): Team実実行(モック脱却 第1弾)
+
+- Worker実実行を実装: `main/team-worker-runtime.ts`(RuntimeHostTeamWorkerRuntime)。Leaderが指示したWorkerタスクを実Claude/Codex CLIのephemeralターン(read-only/no-tools、UtilityProcess境界経由、egress gate通過)で実行し、実際の生成結果を報告として返す。probe失敗・egress拒否時は決定論シミュレータへフォールバック
+- opt-in: `SPRINT_CODER_REAL_WORKERS=1 npm start`(既定はテスト決定性とコスト保護のためシミュレータ)。README記載
+- 実機実証: 「チームテスト:1+1の答え」で調査/実装/レビュー3Workerが実Claudeで観点別報告を返すことをsmokeで確認(14秒)。この過程でclaude adapterの`--permission-mode plan`がplanメカニクスを回答に混入させる品質バグを発見し除去(ADR修正記録あり)。あわせて`npm run typecheck --workspaces`が失敗後も続行するためexit codeで検証すべきという運用教訓を得た(以後の検証はexit code確認)
+- 次マイルストーン(未実装・記録): Leader自身の実tool use化 — アプリがMCPサーバとしてteam toolsを実Claude Leaderに提供する方式。現状はLeader=Mockシナリオ+Worker=実AIのハイブリッド

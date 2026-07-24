@@ -92,10 +92,13 @@ import { executionSpecPathGuard } from './command-runner';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
 import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lease';
 import {
+  authorizeClaudeProviderEgress,
+  authorizeCodexProviderEgress,
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
 } from './provider-egress';
 import { TeamCoordinator } from './team-coordinator';
+import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -105,6 +108,7 @@ export class IpcRouter {
   private readonly mailbox = new TaskMailbox();
   private readonly mockRuntime: MockRuntimeAdapter;
   private readonly codexRuntime: RuntimeHostClient;
+  private readonly teamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
   private readonly turnRuntimes = new Map<string, RuntimeKind>();
   private readonly permissionBroker: PermissionBroker;
@@ -118,13 +122,50 @@ export class IpcRouter {
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
   ) {
-    this.teamCoordinator = new TeamCoordinator(persistence, undefined, (taskId, detail) => {
+    this.teamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
+      // Real worker execution is opt-in (costs provider usage and breaks determinism): the mock
+      // runtime borrows Claude only under SPRINT_CODER_REAL_WORKERS=1. Probe failures inside the
+      // worker runtime still fall back to the deterministic simulator.
+      selectRuntime: () =>
+        chooseWorkerRuntime(
+          this.persistence.getRuntime(),
+          this.persistence.getModel(),
+          process.env['SPRINT_CODER_REAL_WORKERS'] === '1',
+        ),
+      workspaceFor: (taskId) => this.persistence.getWorkspace(taskId),
+      catalogFor: (kind, workspacePath) =>
+        createEmptyToolCatalogSnapshot(
+          kind,
+          workspacePath === null ? null : digestCanonical({ workspacePath }),
+        ),
+      authorizeEgress: (kind, taskId, turnId, prompt) => {
+        const authorize =
+          kind === 'claude' ? authorizeClaudeProviderEgress : authorizeCodexProviderEgress;
+        return authorize({
+          broker: this.permissionBroker,
+          task: this.persistence.getTask(taskId),
+          turnId,
+          prompt,
+          context: { fragments: [], usageEvents: [], compacted: false },
+          now: new Date().toISOString(),
+        }).allowed;
+      },
+    });
+    this.teamCoordinator = new TeamCoordinator(
+      persistence,
+      this.teamWorkerRuntime,
+      (taskId, detail) => {
       if (this.teamSubscriptions.has(taskId) && !this.window.isDestroyed())
         this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
           taskId,
           event: teamEventSchema.parse({ type: 'updated', detail }),
         });
-    });
+      },
+      undefined,
+      // Real worker turns run a full provider CLI invocation; the deterministic 10s default is
+      // far too tight for that.
+      180_000,
+    );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
       now: () => new Date().toISOString(),
@@ -730,6 +771,7 @@ export class IpcRouter {
     this.approvalCoordinator.dispose();
     await this.mockRuntime.dispose();
     this.codexRuntime.dispose();
+    this.teamWorkerRuntime.dispose();
     this.claudeRuntime.dispose();
   }
 

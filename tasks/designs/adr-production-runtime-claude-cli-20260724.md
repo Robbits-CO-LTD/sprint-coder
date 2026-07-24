@@ -18,7 +18,7 @@ Use the locally installed Claude Code CLI through a fixed, immutable per-turn in
 
 ```
 claude -p --output-format stream-json --verbose --include-partial-messages \
-  --tools "" --strict-mcp-config --safe-mode --permission-mode plan \
+  --tools "" --strict-mcp-config --safe-mode \
   --no-session-persistence [--model <id>]
 ```
 
@@ -44,7 +44,6 @@ un-normalized.
 | `--tools ""`                  | Disables every built-in tool. Verified via probe: `system/init` reports `"tools":[]`. This is the primary read-only/no-execution guarantee — stronger than Codex's `--sandbox read-only` (which still permits read-only shell/file access): no tool exists to invoke at all, so no file write, no command execution, and no read access is possible either.                                                                                                                                                                                                                                                                                                              |
 | `--strict-mcp-config`         | Only load MCP servers from `--mcp-config` (none is ever passed), ignoring all project/user MCP configuration. Verified via probe: `system/init` reports `"mcp_servers":[]` even though this machine's user config has MCP servers configured.                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `--safe-mode`                 | Disables CLAUDE.md auto-discovery, plugins, hooks, custom commands/agents, output styles, and workflows for the session (`CLAUDE_CODE_SAFE_MODE=1`), the Claude analog of Codex's `--ignore-user-config --ignore-rules`. Crucially, per its own `--help` text, "Auth, model selection, built-in tools, and permissions work normally" — unlike `--bare`, `--safe-mode` does **not** force API-key-only auth, so the CLI's own local auth (OAuth/keychain) keeps working, satisfying "no API keys handled by the app." Verified via probe with a minimal env (no `ANTHROPIC_API_KEY`): `system/init` reports `"apiKeySource":"none"` and the turn completes successfully. |
-| `--permission-mode plan`      | Defense in depth. With `--tools ""` no tool exists to request permission for, so this flag cannot itself be exercised — but it documents and reinforces the read-only intent, and costs nothing (matches Codex's belt-and-suspenders `--sandbox read-only` + `approval_policy="never"` pairing).                                                                                                                                                                                                                                                                                                                                                                         |
 | `--no-session-persistence`    | Turn is ephemeral: no session is written to disk and none can be resumed later (Codex's `--ephemeral` analog). Only valid with `--print`, which this profile always uses.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `--model <id>`                | Omitted entirely for the `auto` sentinel (falls back to the CLI's own default model), passed through otherwise. Verified aliases `sonnet`/`opus`/`haiku` each resolve to a concrete model id at session init (`claude-sonnet-5`, `claude-opus-4-8`, `claude-haiku-4-5-20251001` respectively, on this CLI version).                                                                                                                                                                                                                                                                                                                                                      |
 
@@ -80,6 +79,10 @@ concrete model id via a real probe. Main validates `settingsSetModel` against th
 active_ Runtime kind's own capability list (Codex's or Claude's are disjoint id spaces), so a
 Codex model id can never leak into a Claude turn or vice versa — the renderer only ever sees
 already-validated display entries for the active kind.
+
+## Amendment (2026-07-24)
+
+`--permission-mode plan` was removed after real-team smoke testing: with `--tools ""` it added no enforcement, and plan mode made the model narrate planning mechanics (ExitPlanMode, plan files under ~/.claude/plans) into user-visible answers and Worker reports. The read-only/no-tools guarantee rests on `--tools ""` + `--strict-mcp-config` + `--safe-mode`, which are all still verified by the adapter tests and the codex/claude smoke suites.
 
 ## Consequences
 

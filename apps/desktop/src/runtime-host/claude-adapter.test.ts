@@ -20,8 +20,6 @@ describe('Claude runtime probe', () => {
       '',
       '--strict-mcp-config',
       '--safe-mode',
-      '--permission-mode',
-      'plan',
       '--no-session-persistence',
     ]);
   });

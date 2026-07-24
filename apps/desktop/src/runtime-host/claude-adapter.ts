@@ -202,8 +202,9 @@ export function buildClaudePrompt(
 // Immutable per-turn invocation profile (see the ADR for the verified rationale behind each
 // flag). `--tools ""` and `--strict-mcp-config` are the read-only/no-tools guarantee;
 // `--safe-mode` drops hooks/plugins/CLAUDE.md/custom commands the way Codex's
-// `--ignore-user-config --ignore-rules` do; `--no-session-persistence` keeps the turn ephemeral;
-// `--permission-mode plan` is defense in depth (no tool exists to approve regardless).
+// `--ignore-user-config --ignore-rules` do; `--no-session-persistence` keeps the turn ephemeral.
+// Plan mode is deliberately NOT used: with `--tools ""` no tool exists anyway, and plan mode
+// makes the model narrate planning mechanics (ExitPlanMode, plan files) into its answers.
 export function buildClaudeArgs(model: string): string[] {
   return [
     '-p',
@@ -215,8 +216,6 @@ export function buildClaudeArgs(model: string): string[] {
     '',
     '--strict-mcp-config',
     '--safe-mode',
-    '--permission-mode',
-    'plan',
     '--no-session-persistence',
     ...(model === 'auto' ? [] : ['--model', model]),
   ];
