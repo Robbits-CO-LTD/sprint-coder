@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { nextCameraOwner, shouldRunAutomaticMove } from './cameraOwnership';
+import type { CameraOwner } from './cameraOwnership';
 
 // Pannable/zoomable camera for the Team Canvas (demo/index.html lines 756-828). Mutates refs and
 // writes directly to `style.transform`/`style.backgroundPosition` on every frame instead of
@@ -35,10 +37,22 @@ export function useCamera(onSettle?: () => void) {
   const lodRef = useRef<'0' | '1' | '2'>('0');
   const wheelSettleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onSettleRef = useRef(onSettle);
+  // CameraDirector ownership (Slice 6.3 item 2) — see cameraOwnership.ts for the transition rule.
+  const ownerRef = useRef<CameraOwner>('system');
 
   useEffect(() => {
     reducedRef.current = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }, []);
+
+  // Mirrors ownership onto a dev-only data attribute on the canvas root so e2e/tests can assert
+  // it directly (`data-camera-owner="system" | "user"`) without instrumenting internals.
+  const writeOwnerAttribute = useCallback((owner: CameraOwner) => {
+    if (canvasRef.current) canvasRef.current.dataset.cameraOwner = owner;
+  }, []);
+
+  useEffect(() => {
+    writeOwnerAttribute(ownerRef.current);
+  }, [writeOwnerAttribute]);
 
   // Mirror the latest `onSettle` into a ref inside an effect (not read/written during render
   // itself, per react-hooks/refs) so the pointer/wheel/animateCamTo callbacks below — which are
@@ -74,6 +88,27 @@ export function useCamera(onSettle?: () => void) {
       animRef.current = null;
     }
   }, []);
+
+  // ANY manual input (pan start, wheel zoom, node drag start) claims 'user' ownership and cancels
+  // whatever system animation is in flight — the viewport freezes exactly where it currently is
+  // rather than snapping anywhere. Callers of the camera hook (TeamCanvas) call this from their
+  // own node-drag pointerdown handler too; the pan/wheel handlers below call it directly.
+  const claimUserOwnership = useCallback(() => {
+    cancelCamAnim();
+    ownerRef.current = nextCameraOwner(ownerRef.current, 'manual-input');
+    writeOwnerAttribute(ownerRef.current);
+  }, [cancelCamAnim, writeOwnerAttribute]);
+
+  // Explicit user view commands (Fit view, Leaderへ, Enter-focus, keyboard f/l) always execute
+  // and hand ownership back to 'system' — call this immediately before animating.
+  const claimSystemOwnership = useCallback(() => {
+    ownerRef.current = nextCameraOwner(ownerRef.current, 'explicit-command');
+    writeOwnerAttribute(ownerRef.current);
+  }, [writeOwnerAttribute]);
+
+  // Gate for every *automatic* move (spawn-follow, scheduleFit, the saved-view redirect, ...):
+  // these must no-op once the user owns the camera, instead of fighting a manual pan/zoom/drag.
+  const isSystemOwned = useCallback(() => shouldRunAutomaticMove(ownerRef.current), []);
 
   const animateCamTo = useCallback(
     (target: CamState, dur = 560, opts?: { silent?: boolean }): Promise<void> => {
@@ -167,7 +202,7 @@ export function useCamera(onSettle?: () => void) {
         target.closest('.team-canvas-controls')
       )
         return;
-      cancelCamAnim();
+      claimUserOwnership(); // manual input: cancels any in-flight system animation, keeps the view
       dragging = { x: e.clientX, y: e.clientY, cx: camRef.current.x, cy: camRef.current.y };
       draggingRef.current = true;
       canvas!.setPointerCapture(e.pointerId);
@@ -190,7 +225,7 @@ export function useCamera(onSettle?: () => void) {
     }
     function onWheel(e: WheelEvent) {
       e.preventDefault();
-      cancelCamAnim();
+      claimUserOwnership(); // manual input: same ownership claim as a pan start, every tick
       const current = camRef.current;
       if (e.ctrlKey || Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
         const k = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0016));
@@ -223,7 +258,7 @@ export function useCamera(onSettle?: () => void) {
       canvas.removeEventListener('wheel', onWheel);
       if (wheelSettleTimeoutRef.current) clearTimeout(wheelSettleTimeoutRef.current);
     };
-  }, [applyCam, cancelCamAnim]);
+  }, [applyCam, claimUserOwnership]);
 
   return {
     canvasRef,
@@ -237,5 +272,8 @@ export function useCamera(onSettle?: () => void) {
     camToFit,
     camToFocus,
     worldRectOf,
+    claimUserOwnership,
+    claimSystemOwnership,
+    isSystemOwned,
   };
 }

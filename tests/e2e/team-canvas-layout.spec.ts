@@ -162,3 +162,120 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
     }
   });
 });
+
+// Phase 6 Slice 6.3: CameraDirector ownership + collision-aware placement.
+test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
+  test('camera ownership starts system, a manual pan claims user, and Fit view returns it to system', async () => {
+    const userDataDir = createUserDataDir('camera-ownership');
+    let app: ElectronApplication | null = null;
+    try {
+      app = await launchApp(userDataDir);
+      const page: Page = await firstWindow(app);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await page.getByTestId('team-toggle').click();
+      await expect(page.getByTestId('team-list')).toBeVisible();
+      // Entering the canvas is system-owned (seed-then-fly) — let that settle first.
+      await page.waitForTimeout(700);
+      await expect(page.locator('.team-canvas')).toHaveAttribute('data-camera-owner', 'system');
+
+      const canvasBox = await page.locator('.team-canvas').boundingBox();
+      if (!canvasBox) throw new Error('team-canvas not found');
+      const startX = canvasBox.x + canvasBox.width / 2;
+      const startY = canvasBox.y + canvasBox.height / 2;
+      await page.mouse.move(startX, startY);
+      await page.mouse.down();
+      await page.mouse.move(startX + 120, startY + 80, { steps: 8 });
+      await page.mouse.up();
+      await expect(page.locator('.team-canvas')).toHaveAttribute('data-camera-owner', 'user');
+
+      // An explicit user view command (Fit view) always executes and hands ownership back.
+      await page.getByTestId('team-canvas-fit').click();
+      await expect(page.locator('.team-canvas')).toHaveAttribute('data-camera-owner', 'system');
+    } finally {
+      await closeApp(app);
+      removeUserDataDir(userDataDir);
+    }
+  });
+
+  test('a manually-repositioned Worker does not collide with a newly hired one', async () => {
+    const userDataDir = createUserDataDir('placement-collision');
+    let app: ElectronApplication | null = null;
+    try {
+      app = await launchApp(userDataDir);
+      const page: Page = await firstWindow(app);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await page.getByTestId('team-toggle').click();
+
+      await page.getByLabel('役割').fill('実装');
+      await page.getByLabel('目的').fill('機能を実装する');
+      await page.getByTestId('team-hire').click();
+      await expect(page.getByTestId('team-worker')).toHaveCount(1);
+      await page.getByTestId('team-canvas-fit').click();
+      await page.waitForTimeout(700);
+
+      // Drag the first Worker directly onto the SECOND Worker's default slot (WORKER_SLOTS[1] in
+      // TeamCanvas.tsx: {x:1000, y:420}), so hiring a second Worker next would collide with it if
+      // placement were still a fixed, unconditional slot lookup. The screen-space drag delta is
+      // computed from the CURRENT camera scale (read from `.team-world`'s transform) rather than
+      // assumed — Fit view's scale depends on the actual window size, not always ~1.
+      const beforeDrag = await readWorkerPosition(page);
+      const cam = await readWorldTransform(page);
+      const targetWorldPos = { x: 1000, y: 420 };
+      const worldDx = targetWorldPos.x - parseFloat(beforeDrag.left);
+      const worldDy = targetWorldPos.y - parseFloat(beforeDrag.top);
+
+      const head = page.getByTestId('team-worker').locator('.w-head');
+      const headBox = await head.boundingBox();
+      if (!headBox) throw new Error('worker head not found');
+      const startX = headBox.x + headBox.width / 2;
+      const startY = headBox.y + headBox.height / 2;
+      await page.mouse.move(startX, startY);
+      await page.mouse.down();
+      await page.mouse.move(startX + worldDx * cam.s, startY + worldDy * cam.s, { steps: 12 });
+      await page.mouse.up();
+
+      const afterDrag = await readWorkerPosition(page);
+      // Sanity check the drag actually landed near the intended world position — otherwise the
+      // rest of this test wouldn't be exercising the intended collision scenario at all.
+      expect(Math.abs(parseFloat(afterDrag.left) - targetWorldPos.x)).toBeLessThan(20);
+      expect(Math.abs(parseFloat(afterDrag.top) - targetWorldPos.y)).toBeLessThan(20);
+
+      // Re-fit: the drag itself only moves the Worker in world space, but the hire ghost may now
+      // have relocated to avoid it (`recomputeHirePosition`), potentially outside the camera view
+      // that was fit for the pre-drag layout — bring everything back into view before hiring.
+      await page.getByTestId('team-canvas-fit').click();
+      await page.waitForTimeout(700);
+
+      await page.getByLabel('役割').fill('レビュー');
+      await page.getByLabel('目的').fill('変更をレビューする');
+      await page.getByTestId('team-hire').click();
+      await expect(page.getByTestId('team-worker')).toHaveCount(2);
+      await page.waitForTimeout(300);
+
+      const cards = page.getByTestId('team-worker');
+      const secondPos = await cards
+        .nth(1)
+        .evaluate((el: HTMLElement) => ({ left: el.style.left, top: el.style.top }));
+
+      // No overlap between the manually-dragged first Worker and the newly placed second, in
+      // WORLD coordinates (the same space `findFreePosition`/`rectsOverlap` operate in) — this is
+      // what the app itself reasons about, independent of camera scale/viewport quirks.
+      const first = { x: parseFloat(afterDrag.left), y: parseFloat(afterDrag.top), w: 480, h: 260 };
+      const second = {
+        x: parseFloat(secondPos.left),
+        y: parseFloat(secondPos.top),
+        w: 480,
+        h: 260,
+      };
+      const overlaps =
+        first.x < second.x + second.w &&
+        first.x + first.w > second.x &&
+        first.y < second.y + second.h &&
+        first.y + first.h > second.y;
+      expect(overlaps).toBe(false);
+    } finally {
+      await closeApp(app);
+      removeUserDataDir(userDataDir);
+    }
+  });
+});
