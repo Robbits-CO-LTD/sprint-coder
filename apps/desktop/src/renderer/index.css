@@ -1254,7 +1254,10 @@ button {
 }
 .composer-input::placeholder {
   color: var(--text-secondary);
-  opacity: 0.7;
+  /* 0.7 measured 3.88:1 on --bg-elevated (fails WCAG AA 4.5:1 for real text — see
+     apps/desktop/src/renderer/lib/contrast.test.ts). 0.85 clears it at ~5.04:1 while keeping the
+     placeholder visually dimmer than committed text. */
+  opacity: 0.85;
 }
 .composer-row {
   display: flex;
@@ -2055,6 +2058,26 @@ button {
   flex-direction: column;
   min-height: 0;
 }
+/* Narrow effective viewports (e.g. 200% zoom, NFR-A11Y): the docked panel cannot fit beside
+   the chat column, so it overlays the right edge instead of forcing horizontal overflow. */
+@media (max-width: 900px) {
+  .team-list-view {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(460px, 100%);
+    z-index: 7;
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+    overflow-x: clip;
+  }
+  .tlv-header {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 52px;
+    padding: 8px 16px;
+  }
+}
 .tlv-header {
   flex: none;
   display: flex;
@@ -2170,7 +2193,9 @@ button {
 }
 .tlv-timeline small {
   color: var(--text-secondary);
-  opacity: 0.75;
+  /* 0.75 measured only 4.53:1 on --bg-surface — technically over WCAG AA 4.5:1 but too close for
+     rounding/anti-aliasing safety (see contrast.test.ts). 0.85 gives ~5.44:1 headroom. */
+  opacity: 0.85;
 }
 .tlv-empty {
   color: var(--text-secondary);

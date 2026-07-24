@@ -357,6 +357,20 @@ export function TeamCanvas({
     applyCam,
   ]);
 
+  // Mount-time focus (a11y fix, Phase 7 / NFR-A11Y-02): entering Team mode makes Sidebar/TaskHeader
+  // `inert` in the SAME commit this component mounts (App.tsx's `chromeInert`). If the element that
+  // triggered the transition — the "⬡ Team" button inside TaskHeader — was itself focused (the
+  // keyboard-only path), it goes inert mid-interaction and the browser silently drops focus to
+  // `document.body`, breaking keyboard navigation. Move focus onto the canvas root itself as soon
+  // as it mounts. This always runs before SurfaceLayer's own re-parent effect (App.tsx renders
+  // TeamCanvas ahead of SurfaceLayer in the same parent, and React fires layout effects in tree
+  // order for a shared commit), so whenever there IS a captured in-host focus to restore
+  // (re-entering Team mode while the composer was focused, see team-morph.spec.ts), that effect's
+  // `restoreSurfaceState` still wins and moves focus there instead, immediately after this.
+  useLayoutEffect(() => {
+    canvasRef.current?.focus({ preventScroll: true });
+  }, [canvasRef]);
+
   // Load the saved canvas view (Slice 6.1) once per mount. Node positions merge in immediately
   // (new Worker cards not present in the saved map simply keep their default slot — "fixed slots
   // are defaults for NEW workers only"); the camera redirects to the saved position, silently, on
@@ -769,13 +783,39 @@ export function TeamCanvas({
     focusIntoNode,
   ]);
 
+  // Escape-from-anywhere (a11y fix, Phase 7 / NFR-A11Y-02): a plain, non-React `addEventListener`
+  // on the canvas root, kept separate from `handleCanvasKeyDown` below. The Leader's composer
+  // (SurfaceLayer/ChatSurface) is a REACT PORTAL whose content is rendered into `.leader-anchor`
+  // (a real DOM descendant of this section) but whose React-tree parent is `<SurfaceLayer>` — a
+  // *sibling* of this component in App.tsx, not an ancestor. React's synthetic `onKeyDown` bubbles
+  // along the React tree, so a key pressed inside the portaled composer never reaches this
+  // section's JSX `onKeyDown` at all, no matter how deep it is in the real DOM — `handleCanvasKeyDown`
+  // below's Escape branch (and its "always works, even from the composer" comment) was simply
+  // never true for that case. A native listener bubbles along the real DOM tree instead, so it
+  // does reach here regardless of the portal. Scoped to only `Escape` — every other shortcut
+  // (arrows/Enter/f/l) must stay off while the user is typing in the composer, which
+  // `handleCanvasKeyDown`'s `e.target !== e.currentTarget` guard already ensures for the
+  // non-portaled cases (a selected Worker's own 停止 button, a direct child) below.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      canvasRef.current?.focus({ preventScroll: true });
+    }
+    canvas.addEventListener('keydown', onKeyDown);
+    return () => canvas.removeEventListener('keydown', onKeyDown);
+  }, [canvasRef]);
+
   const handleCanvasKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLElement>) => {
       if (e.key === 'Escape') {
-        // Works even when a descendant (e.g. the Leader's composer textarea) currently has
-        // focus — Escape always returns keyboard focus to the canvas root itself.
+        // Native-DOM Escape handling above already covers every case (including from inside the
+        // portaled composer); this branch just avoids a double `.preventDefault()`/no-op re-run
+        // for the ordinary, non-portaled case where this synthetic handler also fires.
         e.preventDefault();
-        canvasRef.current?.focus();
+        canvasRef.current?.focus({ preventScroll: true });
         return;
       }
       // Every other shortcut only fires when the canvas root itself is the event target — i.e.

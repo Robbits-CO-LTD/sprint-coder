@@ -73,6 +73,25 @@ export default function App() {
     readStoredTeamViewPreference,
   );
 
+  // Focus restoration on full Team-mode exit (a11y fix, Phase 7 / NFR-A11Y-02): both exit paths
+  // ("Chatに戻る" from the Canvas — after its reverse-FLIP tail — and from the List view) end by
+  // unmounting whichever Team surface was showing. If focus was on that surface's own "戻る"
+  // button (the common keyboard-only path), the browser drops it to `document.body` the instant
+  // the button's DOM node is removed — there is nothing inside the plain Chat layout that already
+  // owns re-focusing itself the way TeamCanvas/TeamListView's own mount-focus effects do for
+  // *entering*. Watch `teamViewOpen`'s own true -> false edge (not `teamCanvasActive`/
+  // `teamListActive`, which also flip on a same-mode Canvas<->List *switch* — already handled by
+  // each view's own mount-focus effect) and, only if focus was actually lost to `<body>`, return
+  // it to the "⬡ Team" button that (re)opens Team mode — a standard "restore focus to the control
+  // that opened this" pattern.
+  const teamViewOpenRef = useRef(teamViewOpen);
+  useEffect(() => {
+    if (teamViewOpenRef.current && !teamViewOpen && document.activeElement === document.body) {
+      document.querySelector<HTMLElement>('[data-testid="team-toggle"]')?.focus({ preventScroll: true });
+    }
+    teamViewOpenRef.current = teamViewOpen;
+  }, [teamViewOpen]);
+
   const setTeamViewPreference = useCallback((preference: TeamViewPreference) => {
     setTeamViewPreferenceState(preference);
     try {

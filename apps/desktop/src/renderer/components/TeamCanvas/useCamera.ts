@@ -33,7 +33,19 @@ export function useCamera(onSettle?: () => void) {
   const camRef = useRef<CamState>({ x: 0, y: 0, s: 1 });
   const animRef = useRef<number | null>(null);
   const draggingRef = useRef(false);
-  const reducedRef = useRef(false);
+  // Reduced-motion (a11y fix, Phase 7 / NFR-A11Y-04): computed synchronously as the ref's initial
+  // value, NOT in a `useEffect` (as this previously was). TeamCanvas's own camera-seed choreography
+  // reads `isReduced()` from a `useLayoutEffect` in the SAME commit this hook mounts in — layout
+  // effects always run before passive `useEffect`s for a given commit, so a plain `useEffect` here
+  // could never win that race: on every single Team-mode entry (a fresh mount each time — see
+  // App.tsx's `showTeamCanvas`), the seed-then-fly read `reducedRef.current` while it was still at
+  // its default `false`, silently ignoring "prefers-reduced-motion: reduce" for that first,
+  // choreographed camera move every time, no matter the OS setting. A synchronous initial value has
+  // no such ordering to race. The `change` listener below then keeps it live for any *later* camera
+  // move within the same mount, if the user toggles the OS setting mid-session.
+  const reducedRef = useRef(
+    typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  );
   const lodRef = useRef<'0' | '1' | '2'>('0');
   const wheelSettleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onSettleRef = useRef(onSettle);
@@ -41,7 +53,13 @@ export function useCamera(onSettle?: () => void) {
   const ownerRef = useRef<CameraOwner>('system');
 
   useEffect(() => {
-    reducedRef.current = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    reducedRef.current = media.matches; // keep in sync in case it changed between mount and here
+    const onChange = (e: MediaQueryListEvent) => {
+      reducedRef.current = e.matches;
+    };
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
   }, []);
 
   // Mirrors ownership onto a dev-only data attribute on the canvas root so e2e/tests can assert

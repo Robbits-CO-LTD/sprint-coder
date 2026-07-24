@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
@@ -32,14 +33,26 @@ export function TeamListView({
   const teamBusy = useAppStore((state) => state.teamBusy);
   const stopTeamWorker = useAppStore((state) => state.stopTeamWorker);
   const stopAllTeamWorkers = useAppStore((state) => state.stopAllTeamWorkers);
+  const sectionRef = useRef<HTMLElement>(null);
+
+  // Mount-time focus (a11y fix, Phase 7 / NFR-A11Y-02), mirroring TeamCanvas's own mount-focus
+  // fix: switching from Canvas to List view (the "List表示" button, itself INSIDE TeamCanvas)
+  // unmounts TeamCanvas in the very same commit this component mounts. Without this, the browser
+  // drops focus to `document.body` the instant that button's own DOM node is removed — moving
+  // focus onto this view's root the moment it exists keeps keyboard focus somewhere sensible.
+  useEffect(() => {
+    sectionRef.current?.focus({ preventScroll: true });
+  }, []);
 
   if (!detail) {
     return (
       <section
+        ref={sectionRef}
         className="team-list-view"
         data-testid="team-list"
         aria-label="Team list"
         aria-labelledby="team-list-title"
+        tabIndex={-1}
       >
         <h2 id="team-list-title">Teamを準備しています</h2>
       </section>
@@ -50,10 +63,12 @@ export function TeamListView({
 
   return (
     <section
+      ref={sectionRef}
       className="team-list-view"
       data-testid="team-list"
       aria-label="Team list"
       aria-labelledby="team-list-title"
+      tabIndex={-1}
     >
       <header
         className="tlv-header"

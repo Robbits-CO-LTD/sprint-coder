@@ -74,6 +74,21 @@ export function Composer({ taskId }: { taskId: string }) {
     node.style.height = `${Math.min(node.scrollHeight, 140)}px`;
   }, [draft]);
 
+  // Focus restoration after send (a11y fix, Phase 7 / NFR-A11Y-02): the textarea is
+  // `disabled={sending}` for the brief window between `startTurn` firing and the `turn.accepted`
+  // event reconciling it back to `false` (see appStore.ts). Disabling a focused element drops
+  // keyboard focus to `document.body` — the same defocus-on-disable/inert class of bug fixed
+  // elsewhere for the Team morph (TeamCanvas.tsx/TeamListView.tsx/App.tsx) — so every keyboard-only
+  // message send was silently losing focus for that window. Only re-focus if it actually landed on
+  // `<body>`, so a deliberate click elsewhere during that brief gap isn't overridden.
+  const wasSendingRef = useRef(sending);
+  useEffect(() => {
+    if (wasSendingRef.current && !sending && document.activeElement === document.body) {
+      textareaRef.current?.focus({ preventScroll: true });
+    }
+    wasSendingRef.current = sending;
+  }, [sending]);
+
   const activeModeCapable =
     sendMode === 'queue'
       ? canQueue
