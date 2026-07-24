@@ -167,3 +167,18 @@ Wave 2(完了 2026-07-22):
   7. main/preload両entryがindex.tsで`.vite/build/index.js`を上書き合戦 → preload出力名を明示分離(window.sprintCoder未公開の原因)
 - 2026-07-22 ユーザー実機確認: golden path #1(Task作成→hello送信→Run Card→mock streaming応答)成功のスクリーンショットを受領。Chat Alpha骨格ラウンド完了
 - 未了(次ラウンド送り): operations ledger(冪等性、Slice 1.2)、Forge起動時のnative自動rebuild恒久化(workspace hoisting対策)、npm audit 24件(critical 1)、E2E(Playwright Electron、Phase 0 spike対象)、Team/Canvas(Phase 5-6)
+
+## Phase 6ゲート判定(2026-07-24 Fable)
+
+**判定: 通過**(Team Canvasとcinematic motion。実装はSonnetサブエージェント4スライス+レビュー2回+ゲート修正1回、Fableが監督・独立検証)
+
+- コミット列: `5d6238d`(Canvas再構築・視覚正本demo/index.html準拠)→ `f060995`(6.2 SurfaceLayer同一instance morph)→ `0006894`(6.1 canvas_views永続化 migration v29・node drag・LOD・keyboard nav・List fallback)→ `c305195`(6.3+6.4 collision placement・CameraDirector ownership・delivery同期cable・reduced motion textual event)→ `34c0f32`(ゲート修正: 入力サイズ上限・team mode中chromeのinert化・TeamCanvasのtask key化)
+- 機械検証: unit 277+276+23、team系E2E 15本(morph連続性: mount count不変・draft/scroll/選択範囲、layout永続化+再起動復元、LOD、List⇔Canvas、camera ownership遷移、collision placement、cable: 雇用時無し/正しいpair/ack因果/offscreen無追従/pan中安全、keyboard nav、reduced motion代替+aria-live)
+- 設計逸脱の記録: React Flow不採用 → 設計書既定fallback(custom DOM world)を正式採用(ADR: adr-team-canvas-custom-dom-world-20260724.md)
+- 既知の限界(非ブロッキング、follow-up):
+  1. IME変換中のmorphは変換状態を維持できない(DOM移動のプラットフォーム制約。コード内に文書化)
+  2. mid-stream morphの無欠落は手動確認のみ(自動テスト未整備)
+  3. quit時にcanvas view autosaveの直近~1秒が失われうる(既存draft autosaveと同型の設計限界)
+  4. focus占有率65–75%は定数で強制(0.70/0.75)、数値アサートは無し
+  5. packaged Electronの起動不能はこの開発環境固有(E2Eは全てSPRINT_CODER_E2E_MODE=dev)。CI環境での要再確認はChat Alphaゲートから継続
+- 発見・修正された注目バグ: StrictModeのcleanup-only effectがcable描画を全滅させていた潜在バグ(c305195で修正)、team mode中の不可視chrome残留フォーカス(34c0f32でinert化)
