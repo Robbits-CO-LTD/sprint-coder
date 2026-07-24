@@ -16,6 +16,8 @@ import {
 } from './command-runner';
 import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
+import type { TeamCoordinator } from './team-coordinator';
+import { registerTeamTools, TEAM_TOOLS } from './team-tools';
 
 export const MOCK_ECHO_TOOL = createToolDefinition({
   toolId: createToolId({ provider: 'builtin', namespace: 'mock', name: 'echo', version: '1' }),
@@ -105,6 +107,10 @@ export function createDefaultToolBroker(
     >;
     publish(event: TurnEvent): void;
   },
+  // Leader team tools (Slice 5.2 / FR-TEAM-06): only registered when a TeamCoordinator is
+  // supplied, i.e. only on the mock/intelligence-loop broker — real Codex/Claude adapters never
+  // pass this bundle, so they stay no-tools per the current production boundary.
+  team?: { coordinator: TeamCoordinator },
 ): ToolBroker {
   const commandRunner = new CommandRunner();
   const commandIds = new WeakMap<object, string>();
@@ -112,6 +118,7 @@ export function createDefaultToolBroker(
   registry.register(MOCK_ECHO_TOOL);
   registry.register(COMMAND_RUNNER_TOOL);
   registry.register(APPROVAL_PROBE_TOOL);
+  if (team !== undefined) for (const definition of TEAM_TOOLS) registry.register(definition);
   const defaultAuthorizer: ToolAuthorizer = ({ entry }) =>
     entry.sideEffect === 'none' && entry.requiredCapabilities.length === 0
       ? { decision: 'allow', reason: 'pure_builtin' }
@@ -248,6 +255,7 @@ export function createDefaultToolBroker(
       }
     },
   });
+  if (team !== undefined) registerTeamTools(broker, team.coordinator);
   return broker;
 }
 

@@ -130,6 +130,21 @@ export class TeamCoordinator {
     return team === null ? null : this.detail(team.id);
   }
 
+  /** Read-only replay for the team_wait_reports Leader tool: sendToWorker already persists the
+   * Worker→Leader report synchronously (see persistWorkerResult below), so this just filters
+   * messages targeting the Leader by seq watermark — it never mutates Team/Worker state. */
+  listWorkerReports(taskId: string, afterSeq: number): readonly TeamMessageSummary[] {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) return [];
+    const snapshot = this.persistence.getTeamSnapshot(team.id);
+    const leader = snapshot.agents.find(({ kind }) => kind === 'leader');
+    if (leader === undefined) return [];
+    return snapshot.messages
+      .filter((message) => message.targetAgentId === leader.id && message.seq > afterSeq)
+      .sort((left, right) => left.seq - right.seq)
+      .map((message) => this.messageSummaryFromSnapshot(snapshot, message.id));
+  }
+
   async hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary> {
     return this.enqueue(input.taskId, async () => {
       assertSpawnAuthority('leader');

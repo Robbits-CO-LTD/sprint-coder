@@ -159,6 +159,9 @@ export class IpcRouter {
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
       (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
+      // Wires the Leader team tools (team_hire_worker/team_send_to_worker/team_wait_reports/
+      // team_stop_worker) into the mock intelligence loop — see team-tools.ts.
+      this.teamCoordinator,
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -440,6 +443,11 @@ export class IpcRouter {
     this.handle(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), (input) =>
       this.teamCoordinator.get(input.taskId),
     );
+    // hireWorker/sendToWorker IPC handlers remain wired for the current UI, but the primary path
+    // is now the Leader's own tool use during its Turn (team_hire_worker/team_send_to_worker in
+    // team-tools.ts, going through this same TeamCoordinator) per FR-TEAM-06/13 — the user
+    // converses with the Leader, the Leader drives the Team. These handlers stay until the
+    // renderer is reworked to stop calling them directly.
     this.handleMutation(
       IPC_CHANNELS.teamsHireWorker,
       teamHireWorkerInputSchema,
