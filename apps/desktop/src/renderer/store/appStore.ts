@@ -13,7 +13,9 @@ import type {
   GeneratedImage,
   QueuedInput,
   PermissionSettings,
+  DatabaseRecovery,
   RuntimeKind,
+  RuntimeStatus,
   TaskSummary,
   TeamDetail,
   TurnDiff,
@@ -136,6 +138,15 @@ type AppState = {
    * backend hasn't wired the `settings` API yet — see `loadRuntime`). */
   runtime: RuntimeState;
 
+  /** What this launch's database recovery pass did, once `app.getInfo()` resolves (issue #9).
+   * Absent until then, and absent forever if the backend predates the field. */
+  recovery: DatabaseRecovery | null;
+  /** Whether the recovery notice has been dismissed. A launch-scoped fact, so acknowledging it
+   * should not require persistence — it simply stops being shown for this session. */
+  recoveryAcknowledged: boolean;
+  /** Latest Runtime process liveness, pushed by main. Null until the first transition. */
+  runtimeStatus: RuntimeStatus | null;
+
   /** Latest stage/turn-completion announcement text for the aria-live region (NFR-A11Y-03). */
   stageAnnouncement: string;
   /** Ephemeral toast for non-fatal notices (e.g. STEER_STALE). */
@@ -143,6 +154,7 @@ type AppState = {
 
   init(): Promise<void>;
   loadRuntime(): Promise<void>;
+  acknowledgeRecovery(): void;
   setRuntime(kind: RuntimeKind): Promise<void>;
   setModel(model: string): Promise<void>;
   setEffort(effort: ClaudeEffort): Promise<void>;
@@ -596,6 +608,9 @@ export const useAppStore = create<AppState>((set, get) => {
       effort: 'medium',
       codexEffort: '',
     },
+    recovery: null,
+    recoveryAcknowledged: false,
+    runtimeStatus: null,
     stageAnnouncement: '',
     toast: null,
 
@@ -606,6 +621,17 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       set({ sprintCoderAvailable: true, loadingTasks: true, error: null });
       void get().loadRuntime();
+      // Startup recovery outcome and Runtime liveness both feed the SurfaceFooter (issue #9).
+      // Both are best-effort: an older backend simply leaves the footer's quiet default in place.
+      if (typeof window.sprintCoder.app?.getInfo === 'function')
+        void window.sprintCoder.app
+          .getInfo()
+          .then((info) => {
+            if (info.recovery !== undefined) set({ recovery: info.recovery });
+          })
+          .catch(() => undefined);
+      if (typeof window.sprintCoder.runtime?.subscribeStatus === 'function')
+        window.sprintCoder.runtime.subscribeStatus((runtimeStatus) => set({ runtimeStatus }));
       try {
         const tasks = await window.sprintCoder.tasks.list();
         set({ tasks, loadingTasks: false, initialized: true });
@@ -616,6 +642,10 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (err) {
         set({ loadingTasks: false, initialized: true, error: describeError(err) });
       }
+    },
+
+    acknowledgeRecovery() {
+      set({ recoveryAcknowledged: true });
     },
 
     async loadRuntime() {

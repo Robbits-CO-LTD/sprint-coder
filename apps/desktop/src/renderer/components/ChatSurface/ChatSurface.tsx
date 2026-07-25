@@ -4,6 +4,7 @@ import { useAppStore } from '../../store/appStore';
 import { SurfaceHeader } from './SurfaceHeader';
 import { Timeline } from './Timeline';
 import { Composer } from './Composer';
+import { SurfaceFooter } from './SurfaceFooter';
 import type { TaskSummary } from '../../types/sprint-coder';
 
 // Dev-only mount counter (ADR-002 / Phase 6 Slice 6.2 acceptance: "mount count=1" across a
@@ -22,7 +23,8 @@ declare global {
   }
 }
 
-// ChatSurface: SurfaceHeader + Timeline + ContextBar + Composer (§4.2). Container layout and
+// ChatSurface: SurfaceHeader + Timeline + ContextBar + Composer + SurfaceFooter (§4.2). Container
+// layout and
 // viewport context are the only things that differ between the normal Chat layout and the
 // Canvas Leader node (demo/index.html §"ChatSurface" / #surfaceWrap.node) — `variant` picks
 // between the two; the rest of the tree (Timeline/Composer/store wiring) is shared so a Leader
@@ -62,6 +64,7 @@ export function ChatSurface({
       </div>
       <Timeline taskId={task.id} />
       <Composer taskId={task.id} />
+      <SurfaceFooter variant={variant} />
     </div>
   );
 }

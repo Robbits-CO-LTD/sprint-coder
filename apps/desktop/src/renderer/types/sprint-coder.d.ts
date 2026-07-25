@@ -274,6 +274,22 @@ export type SprintCoderErrorCode =
   'TURN_ACTIVE' | 'STEER_STALE' | 'RUNTIME_UNAVAILABLE' | 'STEER_UNSUPPORTED' | string;
 
 export type RuntimeKind = 'mock' | 'codex' | 'claude';
+/** Outcome of this launch's database recovery pass (issue #9). */
+export type DatabaseRecovery = {
+  corruptionDetected: boolean;
+  restoredFromBackup: boolean;
+  freshStart: boolean;
+  interruptedTurns: number;
+};
+export type RuntimeConnectionState = 'idle' | 'running' | 'failed';
+/** Runtime process liveness. Pushed, never persisted — see contracts' runtimeStatusSchema. */
+export type RuntimeStatus = {
+  kind: RuntimeKind;
+  state: RuntimeConnectionState;
+  taskId: string | null;
+  errorCode: string | null;
+  userMessage: string | null;
+};
 export type EffortOption = { id: string; description: string };
 export type CodexModelOption = {
   id: string;
@@ -363,7 +379,12 @@ export type CanvasViewSaveInput = {
 export type CanvasViewSaveResult = { revision: number };
 
 export interface SprintCoderApi {
-  app: { getInfo(): Promise<{ version: string; platform: string }> };
+  app: {
+    getInfo(): Promise<{ version: string; platform: string; recovery: DatabaseRecovery }>;
+  };
+  runtime: {
+    subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
+  };
   tasks: {
     list(): Promise<TaskSummary[]>;
     create(input?: { title?: string; localOnly?: boolean }): Promise<TaskSummary>;

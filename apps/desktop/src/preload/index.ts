@@ -24,6 +24,7 @@ import {
   runtimeCodexEffortSetInputSchema,
   runtimeSetInputSchema,
   runtimeSettingsSchema,
+  runtimeStatusSchema,
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
@@ -189,6 +190,19 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.workspaceSelect, taskIdPayloadSchema, workspaceSelectionSchema, {
         taskId,
       }),
+  },
+  runtime: {
+    // Push-only channel, unlike every `invoke` here: Runtime liveness is a transient property of the
+    // current process (issue #9), so it is never persisted and never replayed. Unknown payloads are
+    // dropped by `safeParse` exactly like the Turn/Team subscriptions do.
+    subscribeStatus: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        const parsed = runtimeStatusSchema.safeParse(raw);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.runtimeStatusEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.runtimeStatusEvent, handler);
+    },
   },
   images: {
     list: (taskId) =>

@@ -2360,6 +2360,71 @@ button {
   }
 }
 
+/* ---------- SurfaceFooter (issue #9) ----------
+   The fifth §4.2 element. Quiet by default: one slim row stating the connection, plus extra rows
+   only when something abnormal happened. Sized so the ordinary case costs the conversation column
+   as little vertical space as a chip row. */
+.surface-footer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 24px 8px;
+  font-size: 11.5px;
+  /* Tighter than the body's 1.6: the footer is a status strip, and inside the Leader node's fixed
+     620px card every row it costs is a row the conversation does not get. */
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+.surface-footer--node {
+  padding: 0 16px 6px;
+}
+.sf-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 2px 0;
+}
+.sf-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sf-dot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+.sf-dot--idle {
+  color: var(--state-success);
+}
+.sf-dot--running {
+  color: var(--accent-primary);
+}
+.sf-dot--failed {
+  color: var(--state-danger);
+}
+/* Only the abnormal rows get any presence: a border and the warning colour, so the eye lands on
+   them without the normal state ever needing to compete. */
+.sf-row--notice {
+  color: var(--state-warning);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 6px;
+}
+.sf-dismiss {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  border-radius: 5px;
+  color: inherit;
+}
+.sf-dismiss:hover {
+  background: rgba(255, 244, 224, 0.1);
 /* ---------- Composer plus menu (issue #13) ---------- */
 .composer-plus {
   display: grid;
