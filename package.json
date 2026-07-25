@@ -11,8 +11,8 @@
     "build:native-safe-fs:test": "node build-native-safe-fs.mjs --test",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "lint": "eslint apps/*/src packages/*/src",
-    "lint:fix": "eslint apps/*/src packages/*/src --fix",
+    "lint": "eslint \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\"",
+    "lint:fix": "eslint \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\" --fix",
     "format": "prettier --write \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
     "format:check": "prettier --check \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
     "e2e": "playwright test"
