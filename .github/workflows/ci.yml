@@ -1,9 +1,18 @@
 name: CI
 
+# Automatic triggers are off for now. This workflow has never passed on any platform
+# (see the CI issue): main was failing at Lint, and once that was cleared each OS surfaced a
+# different pre-existing problem — a truncated Electron download on macOS, node-gyp being
+# unable to recognise Visual Studio 2026 on the Windows runner image. Leaving it wired to
+# every push and pull request only produced a permanent red X that told us nothing new, so
+# it runs on demand until those are actually fixed.
+#
+# To re-enable, replace `workflow_dispatch:` below with the original triggers:
+#   push:
+#     branches: [main]
+#   pull_request:
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
