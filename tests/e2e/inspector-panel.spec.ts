@@ -216,14 +216,16 @@ test.describe('inspector panel', () => {
     });
   });
 
-  test('states that the edit stream is not connected instead of showing an empty window', async () => {
-    // The condition for this becoming a real stream is a runtime producer of prepared patches; there
-    // is none today. A window that never fills is exactly the "偽の窓" the issue forbids.
+  test('names the missing condition instead of showing an empty window', async () => {
+    // Issue #37 gave the stream a real producer, so "not connected" is no longer the permanent
+    // state — but it is still the state with no Workspace, and the panel has to say WHICH condition
+    // is missing rather than showing an empty list. A window that never fills is the "偽の窓" the
+    // issue forbids; a list that is empty for an unstated reason is the same mistake in a new shape.
     await withApp('inspector-stream', async (page) => {
       await page.getByTestId('inspector-toggle').click();
       const disconnected = page.getByTestId('inspector-stream-disconnected');
       await expect(disconnected).toBeVisible();
-      await expect(disconnected).toContainText('接続されていません');
+      await expect(disconnected).toContainText('Workspace');
       // No code window, no line numbers, no caret — nothing that implies content is coming.
       await expect(page.locator('.insp-panel pre')).toHaveCount(0);
     });

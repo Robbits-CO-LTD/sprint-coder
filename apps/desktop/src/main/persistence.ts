@@ -22,6 +22,8 @@ import {
   type QueuedInput,
   type RuntimeKind,
   type DatabaseRecovery,
+  type FileChange,
+  type FileChangeRecord,
   type GeneratedImage,
   generatedImageSchema,
   type TaskSummary,
@@ -2265,7 +2267,13 @@ export interface PersistenceClient {
     turnId: string;
     bytes: Buffer;
   }): { event: TurnEvent; image: GeneratedImage } | null;
+  recordFileChanges(input: {
+    taskId: string;
+    turnId: string;
+    changes: FileChange[];
+  }): TurnEvent | null;
   listGeneratedImages(taskId: string): GeneratedImage[];
+  listFileChanges(taskId: string): FileChangeRecord[];
   readGeneratedImage(imageId: string): { image: GeneratedImage; bytes: Buffer } | null;
   close(): void;
 }
@@ -6638,6 +6646,61 @@ export class SqlitePersistenceClient implements PersistenceClient {
       });
       return { event, image };
     })();
+  }
+
+  /**
+   * Appends one `files.changed` event for a Runtime tool call that wrote files (issue #37).
+   *
+   * No side table: unlike a generated image there are no bytes to take custody of, and the event
+   * stream already is the durable record. Keeping it there means a reopened Task replays the edits
+   * in the order they happened for free, and there is no second store to keep consistent with it.
+   *
+   * Paths are expected to be workspace-relative and already validated by the caller — this is the
+   * persistence boundary, not the place that decides what is inside the Workspace.
+   */
+  recordFileChanges(input: {
+    taskId: string;
+    turnId: string;
+    changes: FileChange[];
+  }): TurnEvent | null {
+    const changes = input.changes.slice(0, 200);
+    if (changes.length === 0) return null;
+    return this.appendEvent({
+      type: 'files.changed',
+      taskId: input.taskId,
+      turnId: input.turnId,
+      changes,
+    });
+  }
+
+  /**
+   * Every `files.changed` event recorded for this Task, oldest first.
+   *
+   * Read back out of `turn_events` rather than from a side table: the event stream is already the
+   * record, and a second store would be one more thing that can disagree with it. The payload was
+   * validated on the way in, so a row that no longer parses means the database was edited outside
+   * the app — dropped rather than thrown on, so one bad row cannot make a Task unopenable.
+   */
+  listFileChanges(taskId: string): FileChangeRecord[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        "SELECT payload_json FROM turn_events WHERE task_id = ? AND type = 'files.changed' ORDER BY seq",
+      )
+      .all(taskId) as { payload_json: string }[];
+    const records: FileChangeRecord[] = [];
+    for (const row of rows) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.payload_json);
+      } catch {
+        continue;
+      }
+      const event = turnEventSchema.safeParse(parsed);
+      if (!event.success || event.data.type !== 'files.changed') continue;
+      records.push({ seq: event.data.seq, turnId: event.data.turnId, changes: event.data.changes });
+    }
+    return records;
   }
 
   listGeneratedImages(taskId: string): GeneratedImage[] {

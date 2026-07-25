@@ -69,7 +69,14 @@ export type RuntimeCanonicalEvent =
   // ~/.ssh/id_rsa and the app would copy it into an artifact the user then opens. Verified on
   // codex-cli 0.144.4 that `thread.started`'s `thread_id` matches the directory name exactly, so
   // Main can enumerate a bounded directory and never parse a path at all.
-  | { type: 'thread'; threadId: string };
+  | { type: 'thread'; threadId: string }
+  // Files the Runtime changed (issue #37). Taken from the CLI's own structured report — Codex's
+  // `item.type: "file_change"` and Claude's `tool_use` input — and never from model prose, for the
+  // same reason the thread id above is an id rather than a path.
+  //
+  // Paths arrive absolute here and are made workspace-relative in Main, which is the only side that
+  // knows the Workspace root: the runtime-host process is deliberately not told policy.
+  | { type: 'fileChange'; changes: { path: string; kind: 'add' | 'update' | 'delete' }[] };
 
 export type MainToRuntimeEnvelope =
   | (EnvelopeBase & { type: 'hello' })
@@ -81,6 +88,11 @@ export type MainToRuntimeEnvelope =
       // Additive, optional: only meaningful for the Claude adapter (see buildClaudeArgs' effort
       // param) — Codex has no equivalent CLI flag on this version and its adapter ignores it.
       effort?: string;
+      // How much the Runtime may write this Turn (issue #37). Decided in Main from the Task's
+      // Access preset and whether a Workspace exists; the adapters translate it into CLI flags and
+      // never widen it. Optional so an older Main that omits it still starts a turn — absent means
+      // 'read-only', which is the pre-#37 behaviour.
+      writeScope?: 'read-only' | 'workspace-write' | 'full';
       contextFragments: RuntimeContextFragment[];
       toolCatalogSnapshot: ToolCatalogSnapshot;
       teamMcp?: RuntimeTeamMcpOption;
@@ -121,6 +133,13 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     (!('effort' in value) ||
       value.effort === undefined ||
       claudeEffortSchema.safeParse(value.effort).success) &&
+    // Validated here rather than trusted: this value decides whether the adapter hands the CLI a
+    // writable sandbox, so an unrecognised string must not fall through to a permissive default.
+    (!('writeScope' in value) ||
+      value.writeScope === undefined ||
+      value.writeScope === 'read-only' ||
+      value.writeScope === 'workspace-write' ||
+      value.writeScope === 'full') &&
     'contextFragments' in value &&
     isRuntimeContextFragments(value.contextFragments) &&
     'toolCatalogSnapshot' in value &&
@@ -257,6 +276,22 @@ function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent
     );
   // Constrained to a UUID shape rather than any string: this value is interpolated into a
   // filesystem path by Main, so it must not be able to carry separators or traversal segments.
+  if (value.type === 'fileChange')
+    return (
+      'changes' in value &&
+      Array.isArray(value.changes) &&
+      value.changes.length > 0 &&
+      value.changes.length <= 200 &&
+      value.changes.every(
+        (change) =>
+          typeof change === 'object' &&
+          change !== null &&
+          typeof (change as { path?: unknown }).path === 'string' &&
+          (change as { path: string }).path.length > 0 &&
+          (change as { path: string }).path.length <= 4096 &&
+          ['add', 'update', 'delete'].includes(String((change as { kind?: unknown }).kind)),
+      )
+    );
   if (value.type === 'thread')
     return (
       'threadId' in value &&

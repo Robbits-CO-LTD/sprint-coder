@@ -424,6 +424,56 @@ export const generatedImageSchema = z
   })
   .strict();
 export type GeneratedImage = z.infer<typeof generatedImageSchema>;
+
+/**
+ * How much of the filesystem this Turn's Runtime may write (issue #37).
+ *
+ * Derived in Main from the Task's Access preset AND whether a Workspace is selected — never from
+ * the preset alone. With no Workspace the Runtime's cwd is a throwaway temp directory, so a write
+ * capability there would let a Turn produce edits the user can never see or keep; that case is
+ * always `read-only` regardless of preset.
+ *
+ * The three values are not equally trustworthy, and the difference is the one §Managed Runtime
+ * draws:
+ *   - `workspace-write` on Codex is an OS boundary — `--sandbox workspace-write` is enforced by
+ *     Seatbelt on macOS, outside the model's reach.
+ *   - the same value on Claude is only a tool allowlist the CLI applies to itself. The design doc
+ *     is explicit that "単なるtool非公開はsecurity boundaryに数えない", so a write-capable Claude
+ *     Turn is surfaced as `trusted-unmanaged` in the UI rather than presented as sandboxed.
+ * `full` drops even the CLI-side boundary and is never the default.
+ */
+export const runtimeWriteScopeSchema = z.enum(['read-only', 'workspace-write', 'full']);
+export type RuntimeWriteScope = z.infer<typeof runtimeWriteScopeSchema>;
+
+/**
+ * One file a Runtime created, modified, or deleted during a Turn (issue #37).
+ *
+ * `path` is workspace-relative and is the CLI's own structured report — Codex's
+ * `item.type: "file_change"` and Claude's `tool_use` input — never a path parsed out of model
+ * prose. Same rule as generated images (issue #11): prose is attacker-influenceable, structured
+ * events are not.
+ */
+export const fileChangeSchema = z
+  .object({
+    /** Relative to the Workspace root. Absolute paths and anything escaping the root are dropped in
+     * Main rather than shown, so this can be rendered as plain text without further checking. */
+    path: z.string().min(1).max(1024),
+    kind: z.enum(['add', 'update', 'delete']),
+  })
+  .strict();
+export type FileChange = z.infer<typeof fileChangeSchema>;
+
+/** One Turn's worth of edits as stored, replayed by `files.list` when a Task is reopened (issue
+ * #37). `seq` is the originating event's sequence number, which is what makes a replay
+ * distinguishable from a second edit. */
+export const fileChangeRecordSchema = z
+  .object({
+    seq: z.number().int().nonnegative(),
+    turnId: idSchema,
+    changes: z.array(fileChangeSchema).min(1),
+  })
+  .strict();
+export type FileChangeRecord = z.infer<typeof fileChangeRecordSchema>;
 export const generatedImageBytesSchema = z
   .object({
     id: digestSchema,
@@ -726,6 +776,17 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       taskId: idSchema,
       seq: z.number().int().positive(),
       usage: contextUsageSchema,
+    })
+    .strict(),
+  // Files the Runtime changed (issue #37). Persisted like image.generated and for the same reason:
+  // "this Turn edited these files" is a fact about the conversation's history, and reopening a Task
+  // has to show it again. One event per tool call, so the order in the timeline is the order the
+  // edits actually happened in.
+  z
+    .object({
+      type: z.literal('files.changed'),
+      ...turnEventBase,
+      changes: z.array(fileChangeSchema).min(1).max(200),
     })
     .strict(),
   // A generated image took custody (issue #11). Persisted and replayed like any other Turn event:
@@ -1124,6 +1185,11 @@ export interface SprintCoderApi {
     /** Subscribes to Runtime process liveness. Returns an unsubscribe function. */
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
   };
+  files: {
+    /** Every edit recorded for this Task, oldest first. Read on select rather than replayed through
+     * the event port, which only carries events newer than the snapshot's lastSeq. */
+    list(taskId: string): Promise<FileChangeRecord[]>;
+  };
   images: {
     list(taskId: string): Promise<GeneratedImage[]>;
     /** Bytes as base64, for a `data:` URL. Rejects an unknown id. */
@@ -1207,6 +1273,7 @@ export const IPC_CHANNELS = {
   reasoningEvent: 'sprint-coder:turns:reasoning',
   runtimeStatusEvent: 'sprint-coder:runtime:status',
   imagesList: 'sprint-coder:images:list',
+  filesList: 'sprint-coder:files:list',
   imagesRead: 'sprint-coder:images:read',
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
   permissionsGet: 'sprint-coder:permissions:get',

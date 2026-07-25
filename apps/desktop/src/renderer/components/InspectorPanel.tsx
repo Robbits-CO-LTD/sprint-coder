@@ -3,18 +3,22 @@ import { turnProgress } from '../lib/turn-progress';
 import { ArrowRightLeft, X } from './icons';
 import type { InspectorState } from '../lib/inspector-preference';
 
-// Inspector panel (issue #16): progress for the active Turn, and the slot for a live edit stream.
+const FILE_KIND_LABEL: Record<'add' | 'update' | 'delete', string> = {
+  add: '新規',
+  update: '変更',
+  delete: '削除',
+};
+
+// Inspector panel (issue #16): progress for the active Turn, and the live edit stream.
 //
-// WHAT THIS DOES NOT DO, and why: there is no edit stream. The issue's plan was to replay one from
-// `prepareStructuredPatch`'s postImage, but that function has no runtime caller — index.ts calls its
-// own wiring "dormant", no write ToolDefinition is published, and the native mutation session
-// resolver refuses unconditionally. Building the `editStreamEvent` contract and its main-side
-// pipeline would be a channel nothing can ever send on, and a window that never fills is exactly the
-// "偽の窓" the issue forbids. So the stream slot states plainly that it is not connected, which the
-// issue itself asks to make a first-class state.
+// The edit stream was empty when this panel shipped: the issue's plan was to replay
+// `prepareStructuredPatch`'s postImage, and that function had no runtime caller. Issue #37 gave it a
+// real producer instead — the Runtimes now report their own writes (`files.changed`), so what is
+// listed here is a file the CLI actually wrote, path-checked against the Workspace root in Main.
 //
-// The progress gauge, by contrast, has a real source: `stage.changed` already flows, so every segment
-// shown reflects something that happened.
+// The disconnected state is still a first-class case rather than an empty list, because it is the
+// normal one at the `ask` preset and whenever no Workspace is selected: nothing can be written, so
+// saying "no edits yet" would misdescribe why.
 
 export function InspectorPanel({
   state,
@@ -29,7 +33,25 @@ export function InspectorPanel({
 }) {
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const turn = useAppStore((s) => s.turnByTask[selectedTaskId ?? '']);
+  const entries = useAppStore((s) => s.fileChangesByTask[selectedTaskId ?? '']);
+  const permission = useAppStore((s) => s.permissionByTask[selectedTaskId ?? '']);
+  const workspacePath = useAppStore((s) => s.workspaceByTask[selectedTaskId ?? '']);
   if (state === 'hidden') return null;
+
+  // Mirrors main/write-scope.ts's resolveWriteScope. Kept as an explicit pair rather than a single
+  // boolean so the panel can say WHICH of the two conditions is missing — "grant access" and "pick a
+  // folder" are different actions, and a generic "not connected" would leave the user guessing.
+  const hasWorkspace = workspacePath !== undefined && workspacePath !== null;
+  const writable = hasWorkspace && permission !== undefined && permission.preset !== 'ask';
+  const reason = !hasWorkspace
+    ? 'Workspaceが選択されていないため、Runtimeはファイルを書き込めません。ヘッダーからフォルダを選んでください。'
+    : 'Access modeが「確認する」のため、Runtimeはファイルを書き込みません。「自動」以上にすると編集できます。';
+  // Newest first, capped: this panel is a live tail, not an audit log — the full history stays in
+  // the timeline, which shows each edit in the Turn that produced it.
+  const recent = (entries ?? [])
+    .flatMap((entry) => entry.changes.map((change) => ({ ...change, seq: entry.seq })))
+    .slice(-40)
+    .reverse();
 
   const progress =
     turn === undefined
@@ -94,13 +116,34 @@ export function InspectorPanel({
 
       {!rail && (
         <div className="insp-section" data-testid="inspector-stream">
-          <span className="insp-label">編集中のファイル</span>
-          {/* No fake window and no dummy progress. The condition for this becoming a real stream is
-              a runtime producer of prepared patches — see the file header. */}
-          <p className="insp-disconnected" data-testid="inspector-stream-disconnected">
-            編集ストリームは接続されていません。現在のプロファイルではRuntimeがファイルを書き込まないため、
-            表示できる編集がありません。
-          </p>
+          <span className="insp-label">編集したファイル</span>
+          {writable ? (
+            recent.length === 0 ? (
+              <p className="insp-disconnected" data-testid="inspector-stream-empty">
+                このTaskではまだファイルが変更されていません。
+              </p>
+            ) : (
+              <ul className="insp-files" data-testid="inspector-file-list">
+                {recent.map((entry) => (
+                  <li className="insp-file" key={`${entry.seq}:${entry.path}`}>
+                    <span className={`insp-file-kind insp-file-kind--${entry.kind}`}>
+                      {FILE_KIND_LABEL[entry.kind]}
+                    </span>
+                    {/* dir=ltr and bdi: a path is a machine string, and a right-to-left character
+                        anywhere in it would otherwise reorder the whole line and misrepresent which
+                        file was touched. */}
+                    <bdi className="insp-file-path" dir="ltr" title={entry.path}>
+                      {entry.path}
+                    </bdi>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : (
+            <p className="insp-disconnected" data-testid="inspector-stream-disconnected">
+              {reason}
+            </p>
+          )}
         </div>
       )}
     </aside>

@@ -15,6 +15,7 @@ import { ApprovalAuditRow } from '../ApprovalAuditRow';
 import { AutoDecisionAuditRow } from '../AutoDecisionAuditRow';
 import { TurnDiffCard } from '../TurnDiffCard';
 import { GeneratedImageCard, MissingGeneratedImageNotice } from '../GeneratedImageCard';
+import { FileChangeCard } from '../FileChangeCard';
 import { IMAGEGEN_PREFIX } from './imagegen';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
@@ -23,6 +24,7 @@ const NO_APPROVALS: ApprovalSummary[] = [];
 const NO_COMMANDS: ReturnType<typeof useAppStore.getState>['commandsByTask'][string] = [];
 const NO_AUTO_DECISIONS: AutoPermissionDecision[] = [];
 const NO_IMAGES: ReturnType<typeof useAppStore.getState>['imagesByTask'][string] = [];
+const NO_FILE_CHANGES: ReturnType<typeof useAppStore.getState>['fileChangesByTask'][string] = [];
 
 export function Timeline({ taskId }: { taskId: string }) {
   const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? NO_MESSAGES;
@@ -35,6 +37,7 @@ export function Timeline({ taskId }: { taskId: string }) {
   const autoDecisions = useAppStore((s) => s.autoDecisionsByTask[taskId]) ?? NO_AUTO_DECISIONS;
   const turnDiff = useAppStore((s) => s.turnDiffByTask[taskId]);
   const images = useAppStore((s) => s.imagesByTask[taskId]) ?? NO_IMAGES;
+  const fileChanges = useAppStore((s) => s.fileChangesByTask[taskId]) ?? NO_FILE_CHANGES;
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
   const resolveApproval = useAppStore((s) => s.resolveApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -134,6 +137,13 @@ export function Timeline({ taskId }: { taskId: string }) {
             message.author === 'user' && message.turnId !== null
               ? images.filter((image) => image.turnId === message.turnId)
               : [];
+          // One card per tool call rather than one merged list per Turn (issue #37): the order and
+          // grouping are what the Runtime actually did, and collapsing them would turn "edited A,
+          // ran the test, then edited B" into a flat set that reads as a single batch.
+          const turnFileChanges =
+            message.author === 'user' && message.turnId !== null
+              ? fileChanges.filter((entry) => entry.turnId === message.turnId)
+              : [];
           // A request that produced nothing must not read as success (issue #11). Detected from the
           // stored message, which is exactly why the directive is kept in the message text rather
           // than injected invisibly in the adapter.
@@ -164,6 +174,9 @@ export function Timeline({ taskId }: { taskId: string }) {
               ))}
               {commandCards.map((card) => (
                 <CommandCard key={card.command.id} taskId={taskId} card={card} />
+              ))}
+              {turnFileChanges.map((entry) => (
+                <FileChangeCard key={entry.seq} changes={entry.changes} />
               ))}
               {turnImages.map((image) => (
                 <GeneratedImageCard key={image.id} image={image} />

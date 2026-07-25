@@ -69,6 +69,16 @@ export class CodexJsonlNormalizer {
         ? stageEvents
         : [...stageEvents, { type: 'reasoning', text }];
     }
+    // Files Codex actually changed (issue #37). Only `item.completed` is reported: an
+    // `item.started` file_change is an intent, and a Turn that is cancelled or fails between the
+    // two would otherwise leave the timeline claiming an edit that never landed.
+    if (itemType === 'file_change') {
+      const stageEvents = this.advanceTo('executing');
+      if (type !== 'item.completed' && readString(item, 'status') !== 'completed')
+        return stageEvents;
+      const changes = readFileChanges(item);
+      return changes.length === 0 ? stageEvents : [...stageEvents, { type: 'fileChange', changes }];
+    }
     if (isExecutingItem(itemType)) return this.advanceTo('executing');
     if (isAssistantItem(itemType, type)) {
       const delta = extractText(value, item);
@@ -104,6 +114,31 @@ function isExecutingItem(type: string): boolean {
     type.includes('web_search') ||
     type.includes('file_')
   );
+}
+
+/**
+ * Reads `changes: [{ path, kind }]` off a completed `file_change` item.
+ *
+ * Verified against codex-cli 0.144.4, which emits exactly this shape with absolute paths. Anything
+ * that does not match is dropped rather than guessed at: a half-understood edit record shown in the
+ * timeline would be worse than no record, because the user would trust it.
+ */
+function readFileChanges(item: Record<string, unknown>): {
+  path: string;
+  kind: 'add' | 'update' | 'delete';
+}[] {
+  const raw = item['changes'];
+  if (!Array.isArray(raw)) return [];
+  const changes: { path: string; kind: 'add' | 'update' | 'delete' }[] = [];
+  for (const entry of raw.slice(0, 200)) {
+    if (!isRecord(entry)) continue;
+    const path = readString(entry, 'path');
+    const kind = readString(entry, 'kind');
+    if (path === null || path.length === 0 || path.length > 4096) continue;
+    if (kind !== 'add' && kind !== 'update' && kind !== 'delete') continue;
+    changes.push({ path, kind });
+  }
+  return changes;
 }
 
 function isAssistantItem(itemType: string, eventType: string): boolean {

@@ -150,3 +150,75 @@ describe('ClaudeJsonlNormalizer reasoning (issue #17)', () => {
     expect(answer.some((event) => event.type === 'delta')).toBe(true);
   });
 });
+
+describe('file writes (issue #37)', () => {
+  const toolUse = (id: string, name: string, filePath: string): string =>
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id, name, input: { file_path: filePath } }],
+      },
+    });
+  const toolResult = (id: string, content: string, isError = false): string =>
+    JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: id, content, ...(isError ? { is_error: true } : {}) },
+        ],
+      },
+    });
+
+  it('reports a write only after its tool_result confirms it', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    // The intent alone proves nothing: under the ask preset the CLI denies every one of these, and
+    // the denial arrives as the tool_result. Emitting on the intent would report edits that a
+    // read-only Turn never made.
+    expect(normalizer.push(toolUse('t1', 'Edit', '/ws/a.ts'))).toEqual([]);
+    expect(normalizer.push(toolResult('t1', 'The file has been updated.'))).toContainEqual({
+      type: 'fileChange',
+      changes: [{ path: '/ws/a.ts', kind: 'update' }],
+    });
+  });
+
+  it('does not report a write whose tool_result is an error', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(toolUse('t1', 'Write', '/ws/a.ts'));
+    expect(
+      normalizer.push(
+        toolResult(
+          't1',
+          "Claude requested permissions to write, but you haven't granted it yet.",
+          true,
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  it('distinguishes a created file from a replaced one using the CLI’s own wording', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(toolUse('t1', 'Write', '/ws/new.ts'));
+    expect(
+      normalizer.push(toolResult('t1', 'File created successfully at: /ws/new.ts')),
+    ).toContainEqual({
+      type: 'fileChange',
+      changes: [{ path: '/ws/new.ts', kind: 'add' }],
+    });
+    // Without that wording it stays `update`, which claims less: that the file now differs, not
+    // that this Turn brought it into existence.
+    normalizer.push(toolUse('t2', 'Write', '/ws/old.ts'));
+    expect(normalizer.push(toolResult('t2', 'Wrote 3 lines.'))).toContainEqual({
+      type: 'fileChange',
+      changes: [{ path: '/ws/old.ts', kind: 'update' }],
+    });
+  });
+
+  it('ignores tools that do not write and results with no matching intent', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(toolUse('t1', 'Read', '/ws/a.ts'));
+    expect(normalizer.push(toolResult('t1', '1\tcontents'))).toEqual([]);
+    expect(normalizer.push(toolResult('unknown', 'done'))).toEqual([]);
+  });
+});
