@@ -99,15 +99,18 @@ describe('EditArtifactStore', () => {
     } satisfies Partial<EditArtifactError>);
   });
 
-  it('fails closed when artifact files become writable by other users', async () => {
-    const { root, store } = await fixture();
-    const ref = await store.put({
-      owner: { sagaId: 'saga-1', ordinal: 1, role: 'preimage' },
-      bytes: Buffer.from('before'),
-    });
-    await chmod(join(root, `${ref.artifactId}.bin`), 0o666);
-    await expect(store.read(ref)).rejects.toMatchObject({
-      code: 'UNSAFE_ARTIFACT',
-    } satisfies Partial<EditArtifactError>);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'fails closed when artifact files become writable by other users',
+    async () => {
+      const { root, store } = await fixture();
+      const ref = await store.put({
+        owner: { sagaId: 'saga-1', ordinal: 1, role: 'preimage' },
+        bytes: Buffer.from('before'),
+      });
+      await chmod(join(root, `${ref.artifactId}.bin`), 0o666);
+      await expect(store.read(ref)).rejects.toMatchObject({
+        code: 'UNSAFE_ARTIFACT',
+      } satisfies Partial<EditArtifactError>);
+    },
+  );
 });
