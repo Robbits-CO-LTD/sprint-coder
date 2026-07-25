@@ -1,7 +1,5 @@
 import { createConnection } from 'node:net';
-import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import type { TeamCoordinator } from './team-coordinator';
@@ -25,8 +23,7 @@ afterEach(async () => {
 });
 
 function testSocketPath(): () => string {
-  const path = join(tmpdir(), `sc-team-bridge-test-${randomBytes(6).toString('hex')}.sock`);
-  return () => path;
+  return defaultSocketPathFactory(tmpdir());
 }
 
 /** Sends one line and collects every line the server writes back before the socket closes (or a
@@ -67,9 +64,17 @@ function roundTrip(
 
 describe('defaultSocketPathFactory', () => {
   it('only returns candidates whose byte length fits the platform sun_path limit', () => {
-    const factory = defaultSocketPathFactory('/some/long/looking/app-user-data/directory/path');
+    const factory = defaultSocketPathFactory(
+      '/some/long/looking/app-user-data/directory/path',
+      'darwin',
+    );
     const path = factory();
     expect(Buffer.byteLength(path, 'utf8')).toBeLessThanOrEqual(100);
+  });
+
+  it('returns a named-pipe endpoint on Windows', () => {
+    const factory = defaultSocketPathFactory('C:\\ignored', 'win32');
+    expect(factory()).toMatch(/^\\\\\.\\pipe\\sc-team-[0-9a-f]{16}$/);
   });
 
   it('generates a fresh path on every call', () => {
