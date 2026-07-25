@@ -89,7 +89,11 @@ test.describe('file edits', () => {
       expect(path.startsWith('/'), `absolute path leaked into the timeline: ${path}`).toBe(false);
 
     await page.getByTestId('inspector-toggle').click();
-    await expect(page.getByTestId('inspector-file-list')).toContainText('src/parser.ts');
+    // While a Turn is live the panel shows one row per file with its own state; the historical list
+    // is suppressed so the same paths are not printed twice (issue #45).
+    await expect(
+      page.getByTestId('live-edit-file-row').filter({ hasText: 'parser.ts' }),
+    ).toHaveCount(1);
     await expect(page.getByTestId('inspector-stream-disconnected')).toHaveCount(0);
 
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {

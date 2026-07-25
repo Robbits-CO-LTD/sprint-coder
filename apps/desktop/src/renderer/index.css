@@ -3145,40 +3145,114 @@ button {
   border: 1px solid rgba(211, 166, 83, 0.45);
 }
 
-/* ---------- Live file body (issue #39) ----------
-   The file as the model types it. A code surface, so it is monospace and scrolls on its own — the
-   Inspector must never move the conversation's scroll position. */
+/* ---------- Live file panel (issues #39, #45) ----------
+   One list of files, each row carrying its own state, and the selected file's body below it filling
+   whatever height the panel has. Before #45 this was a tab strip, a path row and a separate summary
+   list — three renderings of the same two filenames in a 380px column. */
 .liveedit {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
+  /* Takes the panel's spare height rather than sitting in a 260px box with 900px of nothing under
+     it. min-height:0 is what lets the <pre> inside actually scroll instead of pushing the panel. */
+  flex: 1;
+  min-height: 0;
 }
-.liveedit-tabs {
+.liveedit-files {
   display: flex;
-  gap: 4px;
-  overflow-x: auto;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
   min-width: 0;
-}
-.liveedit-tab {
   flex: none;
-  font-size: 11px;
-  font-family: var(--font-mono);
-  padding: 2px 7px;
-  border-radius: 6px;
-  border: 1px solid var(--border-subtle);
+  max-height: 132px;
+  overflow-y: auto;
+}
+.liveedit-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 7px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  text-align: left;
   color: var(--text-secondary);
 }
-.liveedit-tab.current {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
+.liveedit-file:hover {
   background: var(--bg-hover);
 }
+.liveedit-file.current {
+  color: var(--text-primary);
+  background: var(--bg-selected);
+  border-color: var(--border-strong);
+}
+.liveedit-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-disabled);
+}
+.liveedit-dot.writing {
+  background: var(--accent);
+  animation: liveEditPulse 1.1s var(--ease-ui) infinite;
+}
+@keyframes liveEditPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(115, 152, 246, 0.55);
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(115, 152, 246, 0);
+    opacity: 0.55;
+  }
+}
+.liveedit-file-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.liveedit-file-meta {
+  flex: none;
+  display: inline-flex;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.liveedit-added {
+  color: var(--success);
+}
+.liveedit-removed {
+  color: var(--danger);
+}
+.liveedit-file-state {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.liveedit-file[data-writing='true'] .liveedit-file-state {
+  color: var(--accent);
+}
+
 .liveedit-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+  flex: none;
 }
 .liveedit-path {
   flex: 1;
@@ -3199,7 +3273,8 @@ button {
 }
 .liveedit-body {
   margin: 0;
-  max-height: 260px;
+  flex: 1;
+  min-height: 120px;
   overflow: auto;
   padding: 8px 10px;
   border-radius: 8px;
@@ -3214,16 +3289,55 @@ button {
   white-space: pre-wrap;
   word-break: break-word;
   tab-size: 2;
+  position: relative;
 }
-
-/* Lines that changed in the last frame. The highlight decays on its own so the panel settles rather
-   than staying lit — and it is a background wash, never the only way to read the text. */
+/* A thread of light along the top edge while a file is being written. Peripheral on purpose — the
+   caret and the pulsing dot are the signals; this only says the box is live. */
+.liveedit-body.writing {
+  border-color: rgba(115, 152, 246, 0.35);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent) 40%,
+    var(--accent) 60%,
+    transparent 100%
+  );
+  background-size: 45% 2px;
+  background-repeat: no-repeat;
+  background-position-y: 0;
+  animation: liveEditScan 1.6s linear infinite;
+}
+@keyframes liveEditScan {
+  from {
+    background-position-x: -45%;
+  }
+  to {
+    background-position-x: 145%;
+  }
+}
+/* Sits where the next character lands. `inline-block` with a zero-width box so it never shifts the
+   text it follows. */
+.liveedit-caret {
+  display: inline-block;
+  width: 0;
+  height: 1.05em;
+  vertical-align: text-bottom;
+  border-left: 2px solid var(--accent);
+  margin-left: 1px;
+  animation: liveEditBlink 1s steps(2, jump-none) infinite;
+}
+@keyframes liveEditBlink {
+  50% {
+    opacity: 0;
+  }
+}
 .liveedit-line {
   display: inline;
 }
+/* Wash only, no leading bar: an `inset` edge on an inline span renders at the start of the text run
+   rather than the start of the line, which on a wrapped body looks exactly like a second caret. */
 .liveedit-line.changed {
   background: rgba(115, 152, 246, 0.16);
-  box-shadow: inset 2px 0 0 var(--accent);
   animation: liveEditSettle var(--t-cinematic) var(--ease-ui) forwards;
 }
 @keyframes liveEditSettle {
@@ -3235,9 +3349,19 @@ button {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  /* No decay: a steady wash conveys the same "this line is new" without motion. */
+  /* Every animation here has a static equivalent that says the same thing: a solid dot, a solid
+     caret, a solid edge, a steady wash. Motion is an accent, never the only carrier of state. */
+  .liveedit-dot.writing,
+  .liveedit-caret,
+  .liveedit-body.writing,
   .liveedit-line.changed {
     animation: none;
+  }
+  .liveedit-body.writing {
+    background-image: none;
+    border-color: var(--accent);
+  }
+  .liveedit-line.changed {
     background: rgba(115, 152, 246, 0.16);
   }
 }
@@ -3245,6 +3369,12 @@ button {
   .liveedit-line.changed {
     background: Highlight;
     color: HighlightText;
+  }
+  .liveedit-caret {
+    border-left-color: CanvasText;
+  }
+  .liveedit-dot.writing {
+    background: Highlight;
   }
 }
 
@@ -3256,9 +3386,14 @@ button {
   border: 1px solid var(--border-subtle);
   background: var(--bg-app);
   overflow: hidden;
+  /* Takes the panel's spare height, like the live body it replaces (issue #45). */
+  flex: 1;
+  min-height: 120px;
+  display: flex;
 }
 .filediff .cm-editor {
-  max-height: 320px;
+  flex: 1;
+  min-height: 0;
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.55;
@@ -3289,11 +3424,29 @@ button {
   background: rgba(240, 124, 133, 0.12);
   color: var(--text-secondary);
 }
-.filediff .cm-changedText {
-  background: rgba(97, 184, 138, 0.26);
+/* CodeMirror ships `.cm-changedText` as a linear-gradient underline, which on this palette reads as
+   broken or misspelled text rather than as an edit. Replaced with a plain wash.
+   The extra `.cm-editor` in the selector is load-bearing: style-mod injects CodeMirror's own rules
+   into <head> after this stylesheet, so at equal specificity theirs would win on order. */
+.filediff .cm-editor .cm-changedText,
+.filediff .cm-editor .cm-deletedChunk .cm-deletedText {
+  background-image: none;
+  text-decoration: none;
 }
-.filediff .cm-deletedChunk .cm-deletedText {
-  background: rgba(240, 124, 133, 0.28);
+.filediff .cm-editor .cm-changedText {
+  background-color: rgba(97, 184, 138, 0.28);
+}
+.filediff .cm-editor .cm-deletedChunk .cm-deletedText {
+  background-color: rgba(240, 124, 133, 0.3);
+}
+/* The deleted block is context, not the result: dimmer than the surviving text, and struck through
+   so the distinction survives forced colours and greyscale. */
+.filediff .cm-deletedChunk {
+  padding: 0;
+}
+.filediff .cm-deletedChunk .cm-deletedLine {
+  text-decoration: line-through;
+  text-decoration-color: rgba(240, 124, 133, 0.55);
 }
 @media (forced-colors: active) {
   .filediff .cm-changedLine,
@@ -3435,4 +3588,14 @@ button {
   color: var(--text-primary);
   border-color: var(--border-strong);
   background: var(--bg-hover);
+}
+
+/* The edit stream is the part of the Inspector worth giving the leftover height to (issue #45):
+   the gauge and the header are fixed-size, and everything below used to be empty space. */
+.insp-panel [data-testid='inspector-stream'] {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }

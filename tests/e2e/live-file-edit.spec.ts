@@ -10,6 +10,12 @@ import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir 
 // is exercised separately, by writing a file from the test itself — which is exactly the case the
 // watcher exists for: a change the Runtime never reported.
 
+/** Selects a file by name in the panel's single file list (issue #45 replaced the tab strip).
+ * "parser.test.ts" does not contain "parser.ts", so a substring filter tells them apart. */
+function fileRow(page: Page, name: string) {
+  return page.getByTestId('live-edit-file-row').filter({ hasText: name });
+}
+
 async function openTaskWithWorkspace(
   app: ElectronApplication,
   page: Page,
@@ -70,8 +76,10 @@ test.describe('live file edit', () => {
     // bytes came from, and getting it wrong would misdescribe the Runtime.
     await expect(page.getByTestId('live-edit-state')).not.toHaveText('ファイルの現在の内容');
 
-    // Changed lines are marked while it streams, so a whole-file jump is readable.
-    expect(await page.locator('.liveedit-line[data-changed="true"]').count()).toBeGreaterThan(0);
+    // The per-line change marks are deliberately NOT asserted here. They are computed per frame, and
+    // the terminal frame adds no text, so the set is legitimately empty by the time a poll can look —
+    // asserting it would be a race, not a check. changed-lines.test.ts covers the logic exhaustively,
+    // and the caret above proves the wiring is live.
 
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
       timeout: 30_000,
@@ -80,6 +88,51 @@ test.describe('live file edit', () => {
     await expect(page.getByTestId('live-edit-state')).toHaveText('書き込み完了');
     // The body is plain text: nothing inside it is a live element, whatever the file contains.
     expect(await body.locator('script, img, a').count()).toBe(0);
+  });
+
+  test('shows one row per file with its own state, and never contradicts itself', async () => {
+    mkdirSync(join(workspaceDir, 'src'), { recursive: true });
+    writeFileSync(
+      join(workspaceDir, 'src/parser.ts'),
+      'export const ORIGINAL = 1;\nexport const GONE = 2;\n',
+    );
+
+    app = await launchApp(userDataDir);
+    const page = await firstWindow(app);
+    await openTaskWithWorkspace(app, page, workspaceDir);
+
+    const textarea = page.getByTestId('composer-textarea');
+    await textarea.fill('parser を書き直してください');
+    await textarea.press('Enter');
+
+    // The caret only exists while a file is actively being typed — it is the strongest live signal
+    // in the panel, so its presence is what "you can tell it is writing" is asserted on.
+    await expect(page.getByTestId('live-edit-caret')).toBeVisible({ timeout: 30_000 });
+    // ...and the row for that file says so in words, not only by the pulsing dot: motion must never
+    // be the sole carrier of state.
+    await expect(
+      page.locator('[data-testid="live-edit-file-row"][data-writing="true"]'),
+    ).toContainText('書き込み中');
+
+    // The contradiction issue #45 was filed for: this sentence used to render directly beneath two
+    // files that were visibly being written.
+    await expect(page.getByTestId('inspector-stream-empty')).toHaveCount(0);
+    // And the old duplicate list of the same paths is gone while the live rows are up.
+    await expect(page.getByTestId('inspector-file-list')).toHaveCount(0);
+
+    await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
+      timeout: 30_000,
+    });
+    // Nothing claims to still be writing once the Turn is over, and the caret is gone with it.
+    await expect(page.getByTestId('live-edit-caret')).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="live-edit-file-row"][data-writing="true"]'),
+    ).toHaveCount(0);
+
+    // One row per file, each selectable, each carrying its own numbers.
+    const rows = page.getByTestId('live-edit-file-row');
+    await expect(rows).toHaveCount(2);
+    await expect(rows.filter({ hasText: 'parser.ts' }).first()).toContainText('+');
   });
 
   test('picks up a write the Runtime never reported, via the Workspace watcher', async () => {
@@ -99,7 +152,7 @@ test.describe('live file edit', () => {
     // fired at the wrong instant could land before the watcher is listening. Repeating removes that
     // race without weakening the assertion — a model writing the same file several times is the
     // ordinary case anyway.
-    const tab = page.getByRole('tab', { name: 'unreported.txt' });
+    const tab = fileRow(page, 'unreported.txt');
     await expect
       .poll(
         async () => {
@@ -139,7 +192,7 @@ test.describe('live file edit', () => {
     // The panel follows the newest write, which here is the file the Turn *created* — so the one
     // with a "before" has to be selected. That ordering is deliberate (the newest write is what is
     // happening now), which is exactly why this test picks a tab rather than assuming.
-    await page.getByRole('tab', { name: 'parser.ts', exact: true }).click();
+    await fileRow(page, 'parser.ts').click();
     const diff = page.getByTestId('file-diff-view');
     await expect(diff).toBeVisible({ timeout: 30_000 });
     await expect(page.getByTestId('live-edit-state')).toHaveText('変更前との差分');
@@ -151,7 +204,7 @@ test.describe('live file edit', () => {
     expect(await diff.locator('[contenteditable="true"]').count()).toBe(0);
 
     // The file the Turn created has no "before", and that is stated rather than faked.
-    await page.getByRole('tab', { name: 'parser.test.ts', exact: true }).click();
+    await fileRow(page, 'parser.test.ts').click();
     await expect(page.getByTestId('live-edit-no-diff')).toBeVisible();
     await expect(page.getByTestId('file-diff-view')).toHaveCount(0);
   });
@@ -178,7 +231,7 @@ test.describe('live file edit', () => {
       timeout: 30_000,
     });
 
-    await page.getByRole('tab', { name: 'parser.ts', exact: true }).click();
+    await fileRow(page, 'parser.ts').click();
     await page.getByTestId('live-edit-mode-edit').click();
     const editor = page.getByTestId('file-editor');
     await expect(editor).toBeVisible();
