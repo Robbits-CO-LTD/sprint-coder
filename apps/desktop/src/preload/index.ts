@@ -26,6 +26,7 @@ import {
   runtimeSettingsSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
+  fileChangeRecordSchema,
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
@@ -217,6 +218,12 @@ const api: SprintCoderApi = {
       ipcRenderer.on(IPC_CHANNELS.runtimeStatusEvent, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.runtimeStatusEvent, handler);
     },
+  },
+  files: {
+    list: (taskId) =>
+      invoke(IPC_CHANNELS.filesList, taskIdPayloadSchema, z.array(fileChangeRecordSchema), {
+        taskId,
+      }),
   },
   images: {
     list: (taskId) =>

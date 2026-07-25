@@ -123,3 +123,82 @@ describe('CodexJsonlNormalizer', () => {
     expect(second).toEqual([]);
   });
 });
+
+describe('file_change items (issue #37)', () => {
+  it('emits a fileChange only once the item completes', () => {
+    const normalizer = new CodexJsonlNormalizer();
+    // An `item.started` file_change is an intent. A Turn cancelled between started and completed
+    // would otherwise leave the timeline asserting an edit that never landed.
+    expect(
+      normalizer.push(
+        JSON.stringify({
+          type: 'item.started',
+          item: {
+            type: 'file_change',
+            status: 'in_progress',
+            changes: [{ path: '/ws/a.ts', kind: 'update' }],
+          },
+        }),
+      ),
+    ).not.toContainEqual(expect.objectContaining({ type: 'fileChange' }));
+
+    expect(
+      normalizer.push(
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            type: 'file_change',
+            status: 'completed',
+            changes: [
+              { path: '/ws/a.ts', kind: 'update' },
+              { path: '/ws/b.ts', kind: 'add' },
+            ],
+          },
+        }),
+      ),
+    ).toContainEqual({
+      type: 'fileChange',
+      changes: [
+        { path: '/ws/a.ts', kind: 'update' },
+        { path: '/ws/b.ts', kind: 'add' },
+      ],
+    });
+  });
+
+  it('drops entries it cannot read rather than guessing at them', () => {
+    // A half-understood edit record is worse than none: the timeline is read as a record of fact.
+    const events = new CodexJsonlNormalizer().push(
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          type: 'file_change',
+          status: 'completed',
+          changes: [
+            { path: '/ws/ok.ts', kind: 'update' },
+            { path: '/ws/no-kind.ts' },
+            { kind: 'add' },
+            { path: '', kind: 'add' },
+            { path: '/ws/bad-kind.ts', kind: 'chmod' },
+          ],
+        },
+      }),
+    );
+    expect(events).toContainEqual({
+      type: 'fileChange',
+      changes: [{ path: '/ws/ok.ts', kind: 'update' }],
+    });
+  });
+
+  it('still advances the stage when every entry was dropped', () => {
+    // The Turn really is executing even if nothing readable came back, so the Run Card must not
+    // stall on "planning" because of a malformed payload.
+    const events = new CodexJsonlNormalizer().push(
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'file_change', status: 'completed', changes: 'not-an-array' },
+      }),
+    );
+    expect(events).toContainEqual({ type: 'stage', stage: 'executing' });
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'fileChange' }));
+  });
+});

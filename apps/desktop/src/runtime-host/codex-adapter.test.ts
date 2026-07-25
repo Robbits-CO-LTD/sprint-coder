@@ -9,6 +9,26 @@ describe('Codex runtime probe', () => {
     });
   });
 
+  it('selects the sandbox mode from the write scope, and defaults to read-only', () => {
+    // The sandbox mode is the entire boundary for Codex — `approval_policy` stays "never" at every
+    // scope because `codex exec` has no channel to ask on — so these three mappings are the feature.
+    const sandboxOf = (...args: Parameters<typeof buildCodexArgs>) => {
+      const argv = buildCodexArgs(...args);
+      return argv[argv.indexOf('--sandbox') + 1];
+    };
+    expect(sandboxOf('auto')).toBe('read-only');
+    expect(sandboxOf('auto', undefined, 'read-only')).toBe('read-only');
+    expect(sandboxOf('auto', undefined, 'workspace-write')).toBe('workspace-write');
+    expect(sandboxOf('auto', undefined, 'full')).toBe('danger-full-access');
+  });
+
+  it('never asks for approval, at any scope', () => {
+    // `on-request` in exec mode stalls the tool instead of surfacing anything answerable, so a scope
+    // that flipped this would hang a Turn rather than prompt anyone.
+    for (const scope of ['read-only', 'workspace-write', 'full'] as const)
+      expect(buildCodexArgs('auto', undefined, scope)).toContain('approval_policy="never"');
+  });
+
   it('passes an explicit model without changing the immutable execution profile', () => {
     expect(buildCodexArgs('gpt-5.6-terra')).toEqual([
       'exec',
@@ -24,7 +44,7 @@ describe('Codex runtime probe', () => {
       '-c',
       'approval_policy="never"',
       '-c',
-      'shell_environment_policy.inherit="none"',
+      'shell_environment_policy.inherit="core"',
       '--model',
       'gpt-5.6-terra',
       '-',
@@ -42,7 +62,7 @@ describe('Codex runtime probe', () => {
     // The read-only execution profile is not negotiable — an effort override must not displace it.
     expect(args).toContain('model_reasoning_effort="xhigh"');
     expect(args).toContain('approval_policy="never"');
-    expect(args).toContain('shell_environment_policy.inherit="none"');
+    expect(args).toContain('shell_environment_policy.inherit="core"');
     expect(args.slice(0, 4)).toEqual(['exec', '--json', '--sandbox', 'read-only']);
     expect(args.at(-1)).toBe('-');
   });

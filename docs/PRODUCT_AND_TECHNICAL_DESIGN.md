@@ -598,6 +598,20 @@ Safe rewind前にworkspace mutation lease、free-space check、restore rehearsal
 
 Access presetはCapability policyのUI shortcutにすぎず、保存時は個別policyへ展開する。「安全時は自動」は判定理由をeventへ残し、不明な操作は確認へ倒す。
 
+外部CLI Runtimeについては、presetはさらにRuntimeのwrite scopeへ写像する（`main/write-scope.ts`）。写像はpresetとWorkspaceの有無の両方に依存し、Workspace未選択なら常に`read-only`である — Workspace無しのcwdは使い捨てのtemp directoryであり、そこへの書き込みはユーザーが二度と見られない編集を「成功」として報告することになるためである。
+
+| preset | Codex | Claude |
+| --- | --- | --- |
+| 確認する | `--sandbox read-only` | `--tools Read,Glob,Grep` + `--permission-mode manual` |
+| 安全時は自動 | `--sandbox workspace-write` | 編集ツール + `--permission-mode acceptEdits` + `--add-dir <workspace>` |
+| フルアクセス | `--sandbox danger-full-access` | `--tools default` + `--permission-mode bypassPermissions` |
+
+この二列は強度が異なり、その差をUIへ明示する義務がある。Codexの`workspace-write`はmacOSではSeatbeltが強制するOS境界であり、実測でWorkspace外への書き込みは拒否される。一方Claudeの同じscopeはCLIが自身へ適用するtool allowlistにすぎず、上の§Managed Runtimeが言う「単なるtool非公開はsecurity boundaryに数えない」に該当する。したがって書き込み可能なClaude Turnは`trusted-unmanaged`としてAccess chipに「非サンドボックス」を表示する。
+
+ターン内の対話的承認は行わない。`codex exec`はone-shot stdinで応答できる承認channelを持たず、Claude CLI 2.1.218にはpermission prompt hookが無い（`--permission-mode manual`は拒否したうえで`permission_denials`に構造化して返すのみ）。「確認する」を「尋ねる」と実装できない以上、「提案するが書かない」として実装し、読み取りツールは与えて具体的な提案ができるようにする。
+
+Runtimeが書いたファイルは`files.changed` TurnEventとして永続化する。pathはCLI自身の構造化eventからのみ取得し、model proseからは決して読まない（issue #11のimage pathと同じ理由）。MainがWorkspace rootの内側であることを検証し、外へ解決するpathは表示しない。
+
 Policy evaluation order:
 
 1. managed administrator deny。

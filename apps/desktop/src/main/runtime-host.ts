@@ -1,7 +1,7 @@
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { CodexModelOption, PublicError } from '@sprint-coder/contracts';
+import type { CodexModelOption, PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { PreparedContext } from './context-ledger';
 import {
@@ -66,6 +66,9 @@ export class RuntimeHostClient {
     teamMcp?: RuntimeTeamMcpOption,
     // Claude-only reasoning effort (see the ADR amendment); ignored by the Codex adapter.
     effort?: string,
+    // How much this Turn may write (issue #37). Decided by the caller from the Task's Access preset
+    // and whether a Workspace exists — never defaulted to anything permissive here.
+    writeScope?: RuntimeWriteScope,
   ): void {
     const contextFragments = (
       preparedContext?.fragments ??
@@ -98,6 +101,7 @@ export class RuntimeHostClient {
       toolCatalogSnapshot,
       ...(teamMcp === undefined ? {} : { teamMcp }),
       ...(effort === undefined ? {} : { effort }),
+      ...(writeScope === undefined ? {} : { writeScope }),
     });
   }
 

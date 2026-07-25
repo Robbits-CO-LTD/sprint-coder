@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { WorkspaceChip } from './WorkspaceChip';
 import { Hexagon, LayoutGrid, List, MoreHorizontal, Target } from './icons';
+import { ACCESS_PRESET_LABEL, accessDescription, accessEnforcement } from '../lib/access-labels';
 import type { TaskSummary } from '../types/sprint-coder';
 
 export function TaskHeader({
@@ -29,6 +30,8 @@ export function TaskHeader({
 }) {
   const renameTask = useAppStore((s) => s.renameTask);
   const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
+  const runtimeKind = useAppStore((s) => s.runtime.kind);
+  const enforcement = accessEnforcement(accessPreset, runtimeKind);
   const teamViewOpen = useAppStore((s) => s.teamViewOpen);
   const teamBusy = useAppStore((s) => s.teamBusy);
   const [editing, setEditing] = useState(false);
@@ -133,8 +136,21 @@ export function TaskHeader({
           <LayoutGrid size={13} /> Inspector
         </button>
       )}
-      <span className="goal-chip" title="現在のAccess mode">
-        Access: {accessPreset === 'ask' ? '確認する' : accessPreset === 'auto' ? '自動' : 'フル'}
+      <span
+        className="goal-chip access-chip"
+        data-testid="access-chip"
+        data-access-preset={accessPreset}
+        data-access-enforcement={enforcement}
+        title={accessDescription(accessPreset, runtimeKind)}
+      >
+        Access: {ACCESS_PRESET_LABEL[accessPreset]}
+        {/* Shown as a word, not only as a colour: this is the one place the app admits that a
+            write-capable Claude is not sandboxed by anything the app controls (issue #37). */}
+        {enforcement === 'trusted-unmanaged' && (
+          <span className="access-unmanaged" data-testid="access-unmanaged">
+            非サンドボックス
+          </span>
+        )}
       </span>
       <button
         type="button"

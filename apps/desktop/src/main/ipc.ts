@@ -8,7 +8,7 @@ import {
   type MessagePortMain,
 } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename } from 'node:path';
+import { basename, relative as relativePath, resolve as resolvePath } from 'node:path';
 import { workspaceMutationBinding } from './path-guard';
 import { z } from 'zod';
 import {
@@ -27,6 +27,8 @@ import {
   commandOutputTailInputSchema,
   commandEnvelopeSchema,
   emptyPayloadSchema,
+  fileChangeRecordSchema,
+  type FileChange,
   permissionSetInputSchema,
   permissionSettingsSchema,
   runtimeSetInputSchema,
@@ -92,6 +94,7 @@ import { MockRuntimeAdapter } from './runtime';
 import { RuntimeHostClient } from './runtime-host';
 import { PermissionBroker } from './permission-broker';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
+import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
 import { permissionRequestFingerprint, type Capability } from '@sprint-coder/domain';
@@ -349,6 +352,12 @@ export class IpcRouter {
             );
         }).value;
       },
+    );
+    this.handle(
+      IPC_CHANNELS.filesList,
+      taskIdPayloadSchema,
+      z.array(fileChangeRecordSchema),
+      (input) => this.persistence.listFileChanges(input.taskId),
     );
     this.handle(
       IPC_CHANNELS.imagesList,
@@ -1214,6 +1223,13 @@ export class IpcRouter {
     const workspaceId =
       workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
     const context = this.prepareContext(taskId, started.turnId);
+    // What this Turn may write (issue #37). Both inputs matter: the Access preset is the user's
+    // choice, and the Workspace is what makes a write meaningful at all — without one the Runtime's
+    // cwd is a throwaway temp directory, so an edit would land somewhere the user can never see.
+    const writeScope = resolveWriteScope(
+      this.persistence.getPermissionPolicy(taskId).preset,
+      workspacePath,
+    );
     const dispatchEgress =
       kind === 'claude' ? dispatchAfterClaudeProviderEgress : dispatchAfterCodexProviderEgress;
     const egress = dispatchEgress(
@@ -1242,6 +1258,7 @@ export class IpcRouter {
           kind === 'claude'
             ? this.persistence.getEffort()
             : this.persistence.getCodexEffort() || undefined,
+          writeScope,
         ),
     );
     if (!egress.allowed) {
@@ -1331,6 +1348,8 @@ export class IpcRouter {
           );
         else if (runtimeEvent.type === 'thread')
           this.codexThreadByTurn.set(turnId, runtimeEvent.threadId);
+        else if (runtimeEvent.type === 'fileChange')
+          this.recordFileChanges(taskId, turnId, runtimeEvent.changes);
         else {
           if (runtimeEvent.resolvedModel !== undefined)
             this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
@@ -1338,6 +1357,34 @@ export class IpcRouter {
         }
       })
       .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
+  }
+
+  /**
+   * Records the files a Runtime changed, after checking each path is inside the Workspace.
+   *
+   * The check is the reason this lives in Main rather than in the adapter: only Main knows the
+   * Workspace root, and only Main can decide that a path outside it is not shown. A Runtime that
+   * reports `/Users/x/.ssh/id_rsa` — because it was prompt-injected, or simply because the model
+   * hallucinated the path into a tool call — must not get that string rendered in a timeline the
+   * user reads as a record of what happened. Out-of-root paths are dropped silently; the Turn's own
+   * output still stands, and there is nothing truthful to say about an edit that either did not
+   * happen or happened somewhere the app never authorised.
+   */
+  private recordFileChanges(
+    taskId: string,
+    turnId: string,
+    changes: readonly { path: string; kind: 'add' | 'update' | 'delete' }[],
+  ): void {
+    const workspacePath = this.persistence.getWorkspace(taskId);
+    if (workspacePath === null) return;
+    const inside: FileChange[] = [];
+    for (const change of changes) {
+      const path = relativizeWorkspacePath(workspacePath, change.path, resolvePath, relativePath);
+      if (path !== null) inside.push({ path, kind: change.kind });
+    }
+    if (inside.length === 0) return;
+    const event = this.persistence.recordFileChanges({ taskId, turnId, changes: inside });
+    if (event !== null) this.publish(event);
   }
 
   /**

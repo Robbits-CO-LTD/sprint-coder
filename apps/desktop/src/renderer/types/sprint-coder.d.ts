@@ -162,6 +162,11 @@ export type GeneratedImage = {
   createdAt: string;
 };
 
+/** One file a Runtime changed during a Turn (issue #37). Workspace-relative — Main drops anything
+ * that resolves outside the Workspace root rather than passing it here. */
+export type FileChange = { path: string; kind: 'add' | 'update' | 'delete' };
+export type FileChangeRecord = { seq: number; turnId: string; changes: FileChange[] };
+
 export type TurnEvent =
   | { type: 'turn.accepted'; taskId: string; turnId: string; seq: number; userMessage: ChatMessage }
   | { type: 'stage.changed'; taskId: string; turnId: string; seq: number; stage: TurnStage }
@@ -251,6 +256,13 @@ export type TurnEvent =
       turnId: string;
       seq: number;
       image: GeneratedImage;
+    }
+  | {
+      type: 'files.changed';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      changes: FileChange[];
     };
 
 export type TurnSnapshot = {
@@ -450,6 +462,9 @@ export interface SprintCoderApi {
   };
   reasoning: {
     subscribe(listener: (batch: ReasoningBatch) => void): () => void;
+  };
+  files: {
+    list(taskId: string): Promise<FileChangeRecord[]>;
   };
   images: {
     list(taskId: string): Promise<GeneratedImage[]>;
