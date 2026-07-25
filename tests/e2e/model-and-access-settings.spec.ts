@@ -77,7 +77,10 @@ test.describe('claude model clarity and effort settings', () => {
     await expect(page.getByTestId('model-selector')).toBeEnabled();
     await page.getByTestId('model-selector').click();
     await expect(page.getByTestId('model-option-sonnet')).toContainText('Sonnet 5');
-    await expect(page.getByTestId('model-option-opus')).toContainText('Opus 4.8');
+    // The top tier pins the concrete id rather than the `opus` alias, which still resolves to
+    // claude-opus-4-8 on CLI 2.1.218 (issue #7) — hence the id-shaped testid here.
+    await expect(page.getByTestId('model-option-claude-opus-5')).toContainText('Opus 5');
+    await expect(page.getByTestId('model-option-claude-opus-5')).toContainText('claude-opus-5');
     await expect(page.getByTestId('model-option-haiku')).toContainText('Haiku 4.5');
     await expect(page.getByTestId('model-option-auto')).toContainText('claude-sonnet-5');
     await page.getByTestId('model-option-auto').click();

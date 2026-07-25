@@ -194,9 +194,11 @@ ChatSurfaceは以下を内包する再利用可能なproduct surfaceである。
 
 1. ユーザーの依頼を理解中
 2. 方針を組み立て中
-3. ファイル・情報を確認中
-4. コマンドまたは変更を実行中
+3. ファイル・コマンドを実行中
+4. 承認を待っています
 5. 回答をまとめ中
+
+「ファイル・情報を確認中」と「コマンドまたは変更を実行中」は分けない。Runtimeから観測できるのは読み取りと書き込み・実行を含む一つのtool実行局面であり、この二つを別stageとして提示すると実際には遷移しないラベルが並ぶ。代わりに、承認待ちを独立したstageとして持つ。承認待ちはユーザーの操作を待って停止している状態であり、実行中と区別できなければ「進んでいないのは誰の番か」が分からない。実装の正はrendererの`STAGE_ORDER` / `STAGE_LABEL`（`store/appStore.ts`）。
 
 各stageは短い現在形のラベルとelapsed timeを持つ。完了したstageは折り畳み、現在stageだけ詳細を開く。回答tokenが届き始めたらRun Cardの下にAssistant messageをstreamし、Run Cardはcompact summaryへ縮む。
 
@@ -294,7 +296,7 @@ spawn開始から約120ms後にCameraを対象へ移動し、nodeがviewportの6
 | UI | React | ChatSurfaceの同一component再利用とstream更新 |
 | Build/Package | Electron Forge | 公式toolchain、maker、fuses、native module対応 |
 | Bundler | Forge Vite plugin | 高速開発。experimental表記のためPhase 0でpackage/release spikeを必須化 |
-| Canvas | `@xyflow/react` | custom node、viewport、fit/focusを利用。ChatSurfaceはcustom node化 |
+| Canvas | 自前DOM world（追加依存なし） | ref直接変異のカメラ（`TeamCanvas/useCamera.ts`）、world座標のabsolute配置node、world内SVGケーブル。`@xyflow/react`は不採用（ADR-010）。ChatSurfaceはcustom node化せず、SurfaceLayerが単一instanceをanchorへ再親付けする（ADR-002） |
 | State | Zustand + reducer | transient UI stateを小さく管理。永続状態はDB/eventから投影 |
 | Validation | Zod | IPC、Runtime adapter、永続event境界のruntime validation |
 | DB | SQLite + better-sqlite3 + PersistenceClient | connectionの物理配置はMainまたはDB Utility ProcessをPhase 0で比較決定。transaction、WAL、native rebuildをCIで検証 |
@@ -836,13 +838,21 @@ UIは分類に応じて「修正」「再試行」「Runtime再起動」「安�
 - Alternatives: 一つのUndo、conversation rollbackのみ。
 - Consequences: UI操作は増えるが、外部副作用まで戻ったという誤認を防げる。
 
+### ADR-010: Team Canvasを自前DOM worldで実装する（React Flow不採用）
+
+- Status: Accepted（全文: `tasks/designs/adr-team-canvas-custom-dom-world-20260724.md`）
+- Context: §18 spike 3はReact Flow custom node内での720px ChatSurface・nested scroll・keyboard・10 nodeの性能を検証対象とし、不足時のfallbackを「custom DOM world + spatial index」と定義していた。Phase 6着手時点で、視覚正本`demo/index.html`のカメラ演出（morph時のシード→セトル、背景格子の追従、world座標に同期するケーブル）はrefを直接変異する自前カメラで既に忠実に再現できていた。
+- Decision: React Flowを導入せず、fallback構成を正式実装として採用する。カメラは`useCamera`（ref + 直接style変異でReact再レンダリングなし）、nodeはworld座標のabsolute配置、ケーブルはworld内SVG、LODはカメラscale閾値の`data-lod`属性、位置と視点は`canvas_views`（migration v29、revision付き楽観ロック）へ永続化する。
+- Alternatives: `@xyflow/react`のviewportモデルへ載せ替える、canvas/WebGL描画。
+- Consequences: selection・keyboard navigation・fit/focus・drag・位置永続化はReact Flow相当を自前で維持する。node数の設計上限が小さい（Leader 1 + Worker 3、将来10）ためspatial indexは未実装で、上限を引き上げる際の必須検討事項として残る。性能はNFR-PERF-03の実測でゲートする。`canvas_views`のデータモデルとCameraDirectorのownership modelは、将来React Flow導入を再検討する場合にそのまま移植できる境界として設計してある。
+
 ## 18. 未決事項とPhase 0 Spike
 
 実装開始前に以下を実測し、ADRを更新する。
 
 1. Forge Vite pluginでMain/Preload/Renderer、native SQLite、package、signingの最小buildが全対象OSで通るか。
 2. better-sqlite3の対象Electron ABI prebuild有無とrebuild時間。
-3. React Flow custom node内で720px ChatSurface、nested scroll、keyboard、10 nodeの性能が要件を満たすか。
+3. ~~React Flow custom node内で720px ChatSurface、nested scroll、keyboard、10 nodeの性能が要件を満たすか。~~ 解決済み（ADR-010）: React Flowは検証に進まず不採用となり、fallbackの自前DOM worldを正式実装として採用した。
 4. 同一ChatSurface instanceを通常layoutからCanvasへ移すportal/FLIP方式でfocusとselectionが維持されるか。
 5. UtilityProcessとruntime CLIのstream/cancel/exit behaviorが各OSで一致するか。
 6. providerがBroker方式のtool executionを許すか。許さない場合のCapabilityReportと警告表現。
@@ -857,7 +867,7 @@ Spike failure時の代替:
 
 - Forge Vite不成立 → Forge Webpack pluginへ変更。
 - native SQLite不成立 → Node built-in SQLiteの採用可能性を対象Electronで再評価。
-- React Flow性能不足 → custom DOM world + spatial indexへ変更。
+- React Flow性能不足 → custom DOM world + spatial indexへ変更。**この代替を採用済み**（ADR-010）。spatial indexはnode数上限を引き上げる際の検討事項として残る。
 - UtilityProcess互換不足 → child process adapterへ限定しsandbox境界を補強。
 
 ## 18.1 残余リスク
@@ -898,7 +908,6 @@ UtilityProcessとchild processは同一OS user権限を持ち、単独ではsecu
 - Electron Support Timeline: https://www.electronjs.org/docs/latest/tutorial/electron-timelines
 - Electron Forge Vite Plugin: https://www.electronforge.io/config/plugins/vite
 - Electron Forge Plugins: https://www.electronforge.io/config/plugins
-- React Flow Custom Nodes: https://reactflow.dev/learn/customization/custom-nodes
 - better-sqlite3: https://github.com/WiseLibs/better-sqlite3
 - Playwright Electron: https://playwright.dev/docs/api/class-electron
 - OpenAI Codex source: https://github.com/openai/codex/tree/fd3c1dc13d0a0941af406e1bc1f697c9d14110ea
