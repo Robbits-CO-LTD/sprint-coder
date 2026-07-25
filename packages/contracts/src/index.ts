@@ -508,6 +508,19 @@ export const fileEditFrameSchema = z
      * would misdescribe the tool.
      */
     source: z.enum(['stream', 'disk']),
+    /**
+     * The file as this Turn found it, for a before/after diff (issue #41).
+     *
+     * Null is a normal outcome, not a failure: the Turn may have learned about the path only after
+     * it changed (a watcher never sees a file before it is written), the Workspace may not be a git
+     * repository, or the file may have had uncommitted work in it when the Turn started — in which
+     * case HEAD would attribute the user's own edits to the model. The UI shows the full text and
+     * says why rather than inventing a comparison.
+     *
+     * Arrives on a later frame than the text often does, because establishing it can require a git
+     * call. Frames are cumulative, so the view simply gains its diff when this lands.
+     */
+    baseline: z.string().max(262_144).nullable(),
   })
   .strict();
 export type FileEditFrame = z.infer<typeof fileEditFrameSchema>;

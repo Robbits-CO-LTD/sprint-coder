@@ -3247,3 +3247,69 @@ button {
     color: HighlightText;
   }
 }
+
+/* ---------- File diff (issue #41) ----------
+   CodeMirror's unified merge view, read-only. Themed from the app's tokens rather than importing a
+   CodeMirror theme, so it cannot drift from the palette the contrast audit checks. */
+.filediff {
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-app);
+  overflow: hidden;
+}
+.filediff .cm-editor {
+  max-height: 320px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  background: transparent;
+  color: var(--text-primary);
+}
+.filediff .cm-scroller {
+  overflow: auto;
+  font-family: inherit;
+}
+.filediff .cm-gutters {
+  background: transparent;
+  border-right: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+}
+.filediff .cm-content {
+  caret-color: transparent;
+}
+.filediff .cm-focused {
+  outline: none;
+}
+/* Added and removed lines. Each also carries CodeMirror's own +/- affordance in the gutter, so
+   colour is not the only signal. */
+.filediff .cm-changedLine {
+  background: rgba(97, 184, 138, 0.14);
+}
+.filediff .cm-deletedChunk {
+  background: rgba(240, 124, 133, 0.12);
+  color: var(--text-secondary);
+}
+.filediff .cm-changedText {
+  background: rgba(97, 184, 138, 0.26);
+}
+.filediff .cm-deletedChunk .cm-deletedText {
+  background: rgba(240, 124, 133, 0.28);
+}
+@media (forced-colors: active) {
+  .filediff .cm-changedLine,
+  .filediff .cm-changedText {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .filediff .cm-deletedChunk {
+    background: Canvas;
+    color: GrayText;
+    text-decoration: line-through;
+  }
+}
+.liveedit-nodiff {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}

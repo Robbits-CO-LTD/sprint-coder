@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { fileEditVersion, readFileEdits, type LiveFileEdit } from '../lib/file-edit-buffer';
+import { FileDiffView } from './FileDiffView';
 
 // The file body as the Runtime writes it (issue #39).
 //
@@ -72,14 +73,32 @@ export function LiveFileEditView() {
             moment the file changes, but in whole-file jumps — calling that "typing" would describe
             a tool behaviour that does not exist. */}
         <span className="liveedit-state" data-testid="live-edit-state">
-          {active.source === 'disk'
-            ? 'ファイルの現在の内容'
-            : active.complete
-              ? '書き込み完了'
-              : '書き込み中'}
+          {/* Order matters. A disk-sourced body is never "complete" — on disk there is only current
+              — so the incomplete check must not claim it is still being typed. */}
+          {active.complete && active.baseline !== null
+            ? '変更前との差分'
+            : active.source === 'disk'
+              ? 'ファイルの現在の内容'
+              : active.complete
+                ? '書き込み完了'
+                : '書き込み中'}
         </span>
       </div>
-      <LiveBody text={active.text} changed={active.changed} following={!active.complete} />
+      {/* The diff replaces the plain body only once the file has settled AND there is something
+          honest to compare against. Diffing a half-written file would mark every unfinished line as
+          a change, and inventing a baseline would attribute the user's own work to the model. */}
+      {active.complete && active.baseline !== null ? (
+        <FileDiffView baseline={active.baseline} text={active.text} />
+      ) : (
+        <>
+          <LiveBody text={active.text} changed={active.changed} following={!active.complete} />
+          {active.complete && (
+            <p className="liveedit-nodiff" data-testid="live-edit-no-diff">
+              変更前の内容を特定できないため、差分ではなく全文を表示しています。
+            </p>
+          )}
+        </>
+      )}
     </div>
   );
 }

@@ -177,6 +177,9 @@ export type FileEditFrame = {
   /** `stream` is the model's text as it types (Claude only); `disk` is the file's contents re-read
    * when a watcher saw it change (Codex, and any write a CLI does not report). */
   source: 'stream' | 'disk';
+  /** The file as this Turn found it (issue #41). Null when no honest comparison exists — see
+   * contracts' fileEditFrameSchema. */
+  baseline: string | null;
 };
 
 export type TurnEvent =

@@ -16,6 +16,9 @@ export type LiveFileEdit = {
   text: string;
   complete: boolean;
   source: 'stream' | 'disk';
+  /** The file as the Turn found it, once Main could establish it (issue #41). Null means no honest
+   * comparison exists and the full text is shown instead. */
+  baseline: string | null;
   /** Line indices that differ from the previous frame of this same file.
    *
    * Computed here, once per frame, rather than in the component. Deriving it during render would
@@ -51,6 +54,9 @@ export function applyFileEditFrame(frame: FileEditFrame): void {
     text: frame.text,
     complete: frame.complete,
     source: frame.source,
+    // A later frame carrying only the baseline must not lose one already held, and a frame that
+    // brings one must not be overwritten by a stale null.
+    baseline: frame.baseline ?? existing?.baseline ?? null,
     changed: changedLineIndices(existing?.text ?? '', frame.text),
     order: existing?.order ?? nextOrder++,
   });

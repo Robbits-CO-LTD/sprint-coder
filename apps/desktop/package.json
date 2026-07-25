@@ -10,6 +10,9 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@codemirror/merge": "^6.12.2",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.6",
     "@sprint-coder/contracts": "*",
     "@sprint-coder/domain": "*",
     "better-sqlite3": "^12.2.0",
