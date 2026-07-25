@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 // Reading a Workspace file in full so the user can edit it, and writing their edit back (issue #43).
 //
@@ -138,8 +138,16 @@ function insideWorkspace(workspacePath: string, relativePath: string): string | 
   if (relativePath.length === 0 || relativePath.length > 1024) return null;
   const root = resolve(workspacePath);
   const absolute = resolve(root, relativePath);
-  const prefix = root.endsWith('/') ? root : `${root}/`;
-  if (!absolute.startsWith(prefix)) return null;
-  if (!dirname(absolute).startsWith(root)) return null;
+  if (!isInside(root, absolute) || !isInside(root, dirname(absolute), true)) return null;
   return absolute;
+}
+
+function isInside(root: string, candidate: string, allowRoot = false): boolean {
+  const relation = relative(root, candidate);
+  return (
+    (allowRoot || relation.length > 0) &&
+    relation !== '..' &&
+    !relation.startsWith(`..${sep}`) &&
+    !isAbsolute(relation)
+  );
 }
