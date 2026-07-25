@@ -40,6 +40,7 @@ export function Sidebar({
   const createTask = useAppStore((s) => s.createTask);
   const setPinned = useAppStore((s) => s.setPinned);
   const setArchived = useAppStore((s) => s.setArchived);
+  const editorDirty = useAppStore((s) => s.editorDirty);
   const [query, setQuery] = useState('');
 
   const groups = useMemo(() => groupTasks(tasks, query), [tasks, query]);
@@ -54,9 +55,21 @@ export function Sidebar({
     typeof window.sprintCoder?.tasks?.setPinned === 'function' &&
     typeof window.sprintCoder?.tasks?.setArchived === 'function';
 
+  // Switching Task unmounts the editor, so unsaved typing would vanish without a word (issue #43).
+  // A confirm is blunt, but losing someone's edit silently is worse, and the alternative — keeping
+  // per-Task editor buffers alive — means holding the user's code in memory indefinitely.
+  const selectTaskGuarded = (id: string): void => {
+    if (
+      editorDirty &&
+      !window.confirm('編集中のファイルに未保存の変更があります。破棄して移動しますか？')
+    )
+      return;
+    void selectTask(id);
+  };
+
   const rowProps = {
     selectedTaskId,
-    onSelect: selectTask,
+    onSelect: selectTaskGuarded,
     canManage,
     onTogglePin: (task: TaskSummary) => void setPinned(task.id, !task.pinned),
     onToggleArchive: (task: TaskSummary) => void setArchived(task.id, !task.archived),

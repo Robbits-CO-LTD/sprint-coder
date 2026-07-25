@@ -28,7 +28,11 @@ import {
   commandEnvelopeSchema,
   emptyPayloadSchema,
   fileChangeRecordSchema,
+  filePathPayloadSchema,
   fileEditFrameSchema,
+  fileOpenResultSchema,
+  fileSaveInputSchema,
+  fileSaveResultSchema,
   type FileChange,
   permissionSetInputSchema,
   permissionSettingsSchema,
@@ -98,6 +102,10 @@ import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinato
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
 import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
+import { openWorkspaceFileForEdit, saveWorkspaceFile } from './workspace-edit';
+
+/** sha256 of nothing, used when a refusal has no file to hash. */
+const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
@@ -379,6 +387,47 @@ export class IpcRouter {
             );
         }).value;
       },
+    );
+    this.handle(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, (input) => {
+      const workspacePath = this.persistence.getWorkspace(input.taskId);
+      // No Workspace means no file to open and nowhere to save one, so this is a refusal rather
+      // than an empty document the user could type into and then fail to save.
+      if (workspacePath === null)
+        return {
+          path: input.path,
+          text: '',
+          digest: EMPTY_FILE_DIGEST,
+          editable: false,
+          reason: 'outside_workspace' as const,
+        };
+      return openWorkspaceFileForEdit(workspacePath, input.path);
+    });
+    this.handleMutation(
+      IPC_CHANNELS.filesSave,
+      fileSaveInputSchema,
+      fileSaveResultSchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.filesSave, () => {
+          const workspacePath = this.persistence.getWorkspace(input.taskId);
+          if (workspacePath === null)
+            return {
+              outcome: 'refused' as const,
+              digest: null,
+              reason: 'outside_workspace' as const,
+            };
+          const result = saveWorkspaceFile(workspacePath, input.path, input.text, input.baseDigest);
+          // Audited only on an actual write, and as its own event type: `files.changed` is the record
+          // of what a Runtime did, and a human's edit does not belong in it (issue #43).
+          if (result.outcome === 'saved')
+            this.publish(
+              this.persistence.recordUserFileSave({
+                taskId: input.taskId,
+                path: input.path,
+                byteLength: Buffer.byteLength(input.text, 'utf8'),
+              }),
+            );
+          return result;
+        }).value,
     );
     this.handle(
       IPC_CHANNELS.filesList,

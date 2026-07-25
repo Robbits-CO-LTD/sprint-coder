@@ -137,6 +137,22 @@ export default function App() {
     setInspectorStateRaw(next);
     writeStoredInspectorState(next);
   }, []);
+  const setEditorDirty = useAppStore((s) => s.setEditorDirty);
+  const editorDirty = useAppStore((s) => s.editorDirty);
+  // Closing the window discards the editor's buffer. `beforeunload` is the only hook that can stop
+  // that, and it needs a listener registered while the edit is outstanding (issue #43).
+  useEffect(() => {
+    if (!editorDirty) return;
+    const warn = (event: BeforeUnloadEvent): void => {
+      event.preventDefault();
+      // Legacy assignment as well: Electron's Chromium honours preventDefault, but returnValue is
+      // what older paths check and setting both costs nothing.
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [editorDirty]);
+
   const cycleInspector = useCallback(
     () => setInspectorState(nextInspectorState(inspectorState)),
     [inspectorState, setInspectorState],
@@ -376,6 +392,7 @@ export default function App() {
         onCycle={cycleInspector}
         onHide={hideInspector}
         overlay={inspectorOverlay}
+        onDirtyChange={setEditorDirty}
       />
       {teamListActive && selectedTask && (
         <TeamListView

@@ -633,6 +633,23 @@ HEADは「Turn開始時点」ではない。Turn開始前にユーザーの未�
 
 表示はinline unified（削除行を追加行の直上に置く形）。Inspectorは既定380px・最大560pxで、split diffでは1カラムが190pxとなりコードが読めないためである。実装はCodeMirror 6の`unifiedMergeView`を`readOnly`で使う。Monacoを採らないのはrendererのCSP（`script-src 'self' http://localhost:*`、`worker-src`も`blob:`も無い）にworkerをblob URLで起動する前提が噛み合わないためで、CodeMirrorはworkerも`eval`も使わない。syntax highlightingは入れない — untrustedなテキストを構文解析する部品を増やす価値が、色に見合わない。
 
+AIが書いたファイルはその場で編集して保存できる（issue #43）。**これはEdit Sagaに乗せない。** あの機構は*Runtime*がWorkspaceへ与える副作用を縛るためのもので、`native-mutation-platform-gate.ts`によりパッケージ済みビルドへ限定されている。エディタを開いた人間が自分のファイルを保存する行為はagentの副作用ではなく、そこへ通すとdev buildでは永久に編集できない機能になる。
+
+代わりに狭くて明示的な別経路を持つ（`main/workspace-edit.ts`）。ADR-004は維持し、書くのはMainでrendererはIPCで頼むだけである。
+
+- pathはWorkspace root内へresolveできること。読み出しと同じ規則で、`lstat`によりsymlinkを追わず、通常ファイルのみ。
+- 呼び出し側は編集開始時点のdigestを提示し、ディスク上の現在の内容と一致しなければ書かない（`conflict`）。Runtimeが同じファイルを書き換えた場合も、他プロセスが触った場合もこれで止まる。競合時のUIは「上書き / 破棄して読み直す」であり、どちらも黙って行わない。
+- 一時ファイルへ書いてrenameする。途中で落ちても、動いていたコードのあった場所に半端なファイルが残らない。
+- 保存は`file.saved`として監査する。**`files.changed`へ混ぜてはならない** — あれはRuntimeが何をしたかの記録であり、人間の編集を混ぜるとtimelineが嘘になる。
+
+サイズ上限は性能ではなく**正しさ**の要件である。`workspace-file.ts`はライブ表示のために末尾262KBだけを返す。その文字列を保存すると、ファイルを自身の末尾で上書きし先頭を黙って捨てることになる。編集用には別の全文読み出しを持ち、上限を超えるファイルは編集不可として拒否する。
+
+編集はInspectorが最大幅(560px)のときだけ提供する。380pxでコードは編集できず、そこへ編集を出すのは見えない箱の中で間違えさせることになる。差分ビュー(`unifiedMergeView`)は削除行をwidgetとして描画しwidgetは編集できないため、差分と編集はタブで切り替える。
+
+未保存の編集は永続化しない。アプリのDBへユーザーのコード片を残すのは別種の責任を負う。Task切り替え時と`beforeunload`で確認する。
+
+Access presetは編集可否に影響しない。presetはRuntimeの権限であってユーザー自身の権限ではない。
+
 本文はrenderer到達前にMain側でsecret除去する。除去はstreaming（frame単位ではない）で行う — secretがframe境界をまたぐと、frameごとに独立して除去した場合に分割されたtokenが通り抜けるためである。描画はplain textで、Markdownもsyntax highlighterも通さない。前frameから変わった行は短時間ハイライトする（diffではなく行単位のLCS。patch適用は数十行が一度に変わるため、印が無いと読めない）。
 
 Policy evaluation order:
