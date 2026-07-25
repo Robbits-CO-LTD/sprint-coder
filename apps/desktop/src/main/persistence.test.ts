@@ -127,6 +127,13 @@ class PersistenceTestArtifacts implements EditArtifactRepository {
   }
 }
 
+/** Walks a freshly-started Turn through the stage machine to a clean completion. */
+function finishTurn(persistence: SqlitePersistenceClient, taskId: string, turnId: string) {
+  for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+    persistence.changeStage(taskId, turnId, stage);
+  persistence.completeTurn(taskId, turnId, 'completed');
+}
+
 function startExecutingTurn(persistence: SqlitePersistenceClient, taskId: string) {
   const started = persistence.startTurn(taskId, 'approval test');
   persistence.changeStage(taskId, started.turnId, 'understanding');
@@ -288,6 +295,150 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('takes custody of a generated image and announces it on the Turn event stream', () => {
+      // issue #11. The bytes come from a directory the Codex CLI owns, so their *contents* are the
+      // only thing worth trusting — hence the magic-byte gate rather than a filename check.
+      const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from('payload'),
+      ]);
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const started = persistence.startTurn(task.id, '画像を生成して');
+
+      const recorded = persistence.recordGeneratedImage({
+        taskId: task.id,
+        turnId: started.turnId,
+        bytes: png,
+      });
+      expect(recorded).not.toBeNull();
+      expect(recorded?.event.type).toBe('image.generated');
+      expect(recorded?.image.mimeType).toBe('image/png');
+      expect(recorded?.image.byteLength).toBe(png.byteLength);
+
+      expect(persistence.listGeneratedImages(task.id)).toHaveLength(1);
+      const read = persistence.readGeneratedImage(recorded!.image.id);
+      expect(read?.bytes.equals(png)).toBe(true);
+      persistence.close();
+    });
+
+    it('stores the same image once, so a re-run cannot pile up copies or events', () => {
+      // The id is a content digest, which is what makes this free rather than a lookup.
+      const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from('same'),
+      ]);
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const started = persistence.startTurn(task.id, '画像を生成して');
+      const input = { taskId: task.id, turnId: started.turnId, bytes: png };
+
+      expect(persistence.recordGeneratedImage(input)).not.toBeNull();
+      expect(persistence.recordGeneratedImage(input)).toBeNull();
+      expect(persistence.listGeneratedImages(task.id)).toHaveLength(1);
+      persistence.close();
+    });
+
+    it('refuses anything that is not a PNG by its magic bytes', () => {
+      // A file extension is a filter, never evidence — and these bytes end up in a `data:` URL in
+      // the renderer, so "display a generated image" must not become "render whatever landed there".
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const started = persistence.startTurn(task.id, '画像を生成して');
+      for (const bytes of [
+        Buffer.from('<svg onload=alert(1)></svg>'),
+        Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]), // JPEG
+        Buffer.from([0x89, 0x50, 0x4e, 0x47]), // truncated signature
+        Buffer.alloc(0),
+      ]) {
+        expect(
+          persistence.recordGeneratedImage({ taskId: task.id, turnId: started.turnId, bytes }),
+        ).toBeNull();
+      }
+      expect(persistence.listGeneratedImages(task.id)).toEqual([]);
+      persistence.close();
+    });
+
+    it('returns null for an unknown image id rather than throwing', () => {
+      const { persistence } = createPersistence();
+      expect(persistence.readGeneratedImage('a'.repeat(64))).toBeNull();
+      persistence.close();
+    });
+
+    it('names a new Task from its first message and returns the updated summary', () => {
+      // issue #4: the only path that ever set a Task title was the header's inline rename, so the
+      // sidebar filled up with rows all reading "新しいタスク".
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      expect(task.title).toBe('新しいタスク');
+
+      const started = persistence.startTurn(task.id, 'ログイン画面のバグを直して');
+      expect(started.renamedTask?.title).toBe('ログイン画面のバグを直して');
+      expect(persistence.getTask(task.id).title).toBe('ログイン画面のバグを直して');
+      persistence.close();
+    });
+
+    it('never renames again after the first message', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const first = persistence.startTurn(task.id, '最初の依頼');
+      finishTurn(persistence, task.id, first.turnId);
+
+      const second = persistence.startTurn(task.id, '全く違う二通目の内容');
+      expect(second.renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('最初の依頼');
+      persistence.close();
+    });
+
+    it('never overwrites a title the user set by hand', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.renameTask(task.id, '自分で付けた名前');
+
+      const started = persistence.startTurn(task.id, 'この内容では上書きされないはず');
+      expect(started.renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('自分で付けた名前');
+      persistence.close();
+    });
+
+    it('respects a manual rename that happens to match the placeholder', () => {
+      // Guarded by title_source rather than by comparing against the placeholder string: a user who
+      // renames a Task to literally "新しいタスク" still owns that name.
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.renameTask(task.id, '新しいタスク');
+
+      expect(persistence.startTurn(task.id, '上書きされないはず').renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('新しいタスク');
+      persistence.close();
+    });
+
+    it('keeps an explicit createTask title out of auto-naming', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('呼び出し側が決めた名前');
+
+      expect(persistence.startTurn(task.id, '上書きされないはず').renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('呼び出し側が決めた名前');
+      persistence.close();
+    });
+
+    it('leaves the placeholder and stays eligible when a message yields no usable title', () => {
+      // "命名に失敗しても会話自体は継続する": the Turn starts normally, the title is untouched, and
+      // the *next* message still gets a chance to name the Task.
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+
+      const first = persistence.startTurn(task.id, '```\njust code\n```');
+      expect(first.turnId).toBeTruthy();
+      expect(first.renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('新しいタスク');
+      finishTurn(persistence, task.id, first.turnId);
+
+      const second = persistence.startTurn(task.id, '今度は名前になる依頼');
+      expect(second.renamedTask?.title).toBe('今度は名前になる依頼');
+      persistence.close();
+    });
+
     it('defaults to mock and persists the selected runtime across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getRuntime()).toBe('mock');
@@ -302,6 +453,36 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('remaps a retired Claude model id so an old preference does not pin an older model', () => {
+      // issue #7: `opus` was the catalog id for the top Claude tier, but on CLI 2.1.218 that
+      // alias resolves to claude-opus-4-8, so the catalog pins claude-opus-5 explicitly. A
+      // preference stored before that change has to follow — ipc.ts's unknown-model fallback only
+      // fixes what the picker displays, while startTurn reads getModel() straight through.
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('claude');
+      persistence.setModel('opus');
+      expect(persistence.getModel()).toBe('claude-opus-5');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getModel()).toBe('claude-opus-5');
+      const task = reopened.createTask();
+      expect(reopened.startTurn(task.id, 'run on the top tier')).toMatchObject({
+        runtimeKind: 'claude',
+        model: 'claude-opus-5',
+      });
+      reopened.close();
+    });
+
+    it('leaves a Codex model named like a retired Claude id alone', () => {
+      // The settings row is shared between Codex and mock, so the remap has to be kind-scoped.
+      const { persistence } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('opus');
+      expect(persistence.getModel()).toBe('opus');
+      persistence.close();
+    });
+
     it('defaults to medium and persists the selected Claude effort across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getEffort()).toBe('medium');
@@ -310,6 +491,29 @@ if (runsWithElectronAbi)
 
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.getEffort()).toBe('high');
+      reopened.close();
+    });
+
+    it('keeps the Codex effort under its own key so the two providers do not clobber each other', () => {
+      // issue #6: Claude's effort is a fixed enum, Codex's is per-model and includes values Claude
+      // has never heard of (and vice versa: `ultracode`). Sharing one key would mean switching
+      // Runtime silently rewrote the other provider's preference into a value it cannot use.
+      const { persistence, path } = createPersistence();
+      expect(persistence.getCodexEffort()).toBe('');
+      persistence.setEffort('xhigh');
+      persistence.setCodexEffort('ultra');
+      expect(persistence.getEffort()).toBe('xhigh');
+      expect(persistence.getCodexEffort()).toBe('ultra');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getEffort()).toBe('xhigh');
+      expect(reopened.getCodexEffort()).toBe('ultra');
+      // Deliberately not validated against a fixed enum here — the authority is the CLI's
+      // per-model cache, and the settings read clamps. But a value that could not be a level id at
+      // all is treated as absent rather than handed to the CLI.
+      reopened.setCodexEffort('not a level');
+      expect(reopened.getCodexEffort()).toBe('');
       reopened.close();
     });
 
@@ -4106,6 +4310,8 @@ if (runsWithElectronAbi)
         { version: 28 },
         { version: 29 },
         { version: 30 },
+        { version: 31 },
+        { version: 32 },
       ]);
       const migratedTables = new Set(
         (

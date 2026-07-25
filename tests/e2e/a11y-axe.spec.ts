@@ -41,6 +41,34 @@ test.describe('axe: no serious/critical violations', () => {
     expect(populatedViolations, formatViolations(populatedViolations)).toEqual([]);
   });
 
+  // Issue #5 added the first modal in the app. A dialog is exactly where serious violations show
+  // up (unlabelled dialog, unlabelled controls, an aria-hidden container holding focusable nodes),
+  // so it gets its own pass with the dialog actually open.
+  test('settings dialog open', async () => {
+    const dir = createUserDataDir('a11y-axe-settings');
+    let dialogApp: ElectronApplication | null = null;
+    try {
+      dialogApp = await launchApp(dir);
+      const page: Page = await firstWindow(dialogApp);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await page.getByTestId('sidebar-settings-button').click();
+      await expect(page.getByTestId('settings-dialog')).toBeVisible();
+      // Wait for the open animation to finish before measuring. axe samples *computed* colours, so
+      // mid-fade it reads every foreground at partial opacity and reports contrast failures for
+      // text that is fine once settled — a false positive about a transient frame, not about the UI.
+      await page.waitForFunction(() => {
+        const dialogEl = document.querySelector('[data-testid="settings-dialog"]');
+        return dialogEl !== null && dialogEl.getAnimations().length === 0;
+      });
+
+      const violations = await runAxeSerious(page);
+      expect(violations, formatViolations(violations)).toEqual([]);
+    } finally {
+      await closeApp(dialogApp);
+      removeUserDataDir(dir);
+    }
+  });
+
   test('approval card visible state', async () => {
     const dir = createUserDataDir('a11y-axe-approval');
     let approvalApp: ElectronApplication | null = null;

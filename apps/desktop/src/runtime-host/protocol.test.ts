@@ -124,7 +124,7 @@ describe('Runtime Host protocol', () => {
   it('validates the additive optional Claude effort field on start envelopes', () => {
     const valid = startEnvelope();
     expect(isMainToRuntimeEnvelope(valid)).toBe(true);
-    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']) {
       expect(isMainToRuntimeEnvelope({ ...valid, effort })).toBe(true);
     }
     expect(isMainToRuntimeEnvelope({ ...valid, effort: 'bogus' })).toBe(false);

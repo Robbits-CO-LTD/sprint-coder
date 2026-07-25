@@ -2,6 +2,7 @@ import { useLayoutEffect, useState } from 'react';
 import type { Ref, RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { ChatSurface } from './ChatSurface';
+import { isPinnedToBottom } from '../../lib/scroll-follow';
 import type { TaskSummary } from '../../types/sprint-coder';
 
 // SurfaceLayer: the "single resident ChatSurface instance" from ADR-002 / docs
@@ -30,6 +31,13 @@ export type CapturedSurfaceState = {
   selection: { start: number | null; end: number | null } | null;
   scrollEl: HTMLElement | null;
   scrollTop: number | null;
+  /**
+   * Whether the timeline was following the live tail at capture time. The two variants have
+   * different timeline heights (main is flex-sized, `.surface--node` is a fixed 720x620), so
+   * replaying a raw `scrollTop` across the morph can land short of the bottom and silently drop
+   * the reader out of autoscroll (issue #3). Re-pinning instead preserves the *intent*.
+   */
+  pinnedToBottom: boolean;
 };
 
 // Snapshot the bits of DOM state a synchronous `appendChild` re-parent can disturb (Slice 6.2
@@ -47,11 +55,19 @@ export function captureSurfaceState(host: HTMLElement): CapturedSurfaceState {
     ? { start: focused.selectionStart, end: focused.selectionEnd }
     : null;
   const scrollEl = host.querySelector<HTMLElement>('.timeline-scroll');
-  return { focused, selection, scrollEl, scrollTop: scrollEl ? scrollEl.scrollTop : null };
+  return {
+    focused,
+    selection,
+    scrollEl,
+    scrollTop: scrollEl ? scrollEl.scrollTop : null,
+    pinnedToBottom: scrollEl ? isPinnedToBottom(scrollEl) : false,
+  };
 }
 
 function restoreSurfaceState(state: CapturedSurfaceState): void {
-  if (state.scrollEl && state.scrollTop !== null) {
+  if (state.scrollEl && state.pinnedToBottom) {
+    state.scrollEl.scrollTop = state.scrollEl.scrollHeight;
+  } else if (state.scrollEl && state.scrollTop !== null) {
     state.scrollEl.scrollTop = state.scrollTop;
   }
   if (state.focused && document.contains(state.focused)) {

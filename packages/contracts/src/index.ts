@@ -404,6 +404,37 @@ export const contextUsageSchema = z
   .strict();
 export type ContextUsage = z.infer<typeof contextUsageSchema>;
 
+/**
+ * An image the Runtime generated during a Turn, after Main has taken custody of it (issue #11).
+ *
+ * `id` is the content digest, so the same image generated twice is stored once. Bytes are NOT in
+ * this record: they are fetched separately through `images.read`, which keeps a Turn snapshot from
+ * carrying megabytes of base64 through every re-subscribe.
+ */
+export const generatedImageSchema = z
+  .object({
+    id: digestSchema,
+    taskId: idSchema,
+    turnId: idSchema,
+    /** Always image/png today — the only format Codex's built-in generator emits, verified by magic
+     * bytes before the file is accepted rather than trusted from its extension. */
+    mimeType: z.literal('image/png'),
+    byteLength: z.number().int().positive(),
+    createdAt: timestampSchema,
+  })
+  .strict();
+export type GeneratedImage = z.infer<typeof generatedImageSchema>;
+export const generatedImageBytesSchema = z
+  .object({
+    id: digestSchema,
+    mimeType: z.literal('image/png'),
+    /** base64 of the stored bytes. The renderer turns this into a `data:` URL — never a path or an
+     * http(s) URL, so displaying an image can neither read the filesystem nor make a request. */
+    base64: z.string().max(24_000_000),
+  })
+  .strict();
+export const generatedImageRefSchema = z.object({ imageId: digestSchema }).strict();
+
 export const turnDiffEntrySchema = z
   .object({
     ordinal: z.number().int().positive(),
@@ -697,6 +728,17 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       usage: contextUsageSchema,
     })
     .strict(),
+  // A generated image took custody (issue #11). Persisted and replayed like any other Turn event:
+  // unlike a transient status, "this Turn produced this image" IS a fact about the conversation's
+  // history, and the timeline has to show it again when the Task is reopened. Carries only the
+  // metadata record — bytes are fetched on demand via `images.read`.
+  z
+    .object({
+      type: z.literal('image.generated'),
+      ...turnEventBase,
+      image: generatedImageSchema,
+    })
+    .strict(),
 ]);
 export type TurnEvent = z.infer<typeof turnEventSchema>;
 
@@ -764,11 +806,47 @@ export const codexModelIdSchema = z
   .min(1)
   .max(128)
   .regex(/^[A-Za-z0-9._:-]+$/);
+/**
+ * A reasoning effort level a specific model advertises as supported.
+ *
+ * Unlike Claude's fixed `claudeEffortSchema`, Codex's valid set is per-model and published by the
+ * CLI itself — `~/.codex/models_cache.json` carries `supported_reasoning_levels` (each with the
+ * CLI's own description text) and `default_reasoning_level` per model. So this is deliberately an
+ * open string rather than an enum: the authority is that file, not this schema, and a new model
+ * that advertises a level this build has never heard of must still be selectable.
+ *
+ * Getting it wrong is not cosmetic. Passing an unsupported level fails the whole turn — the API
+ * answers 400 `invalid_request_error` and `codex exec` exits 1 — where Claude merely warns and
+ * falls back to its default. Verified 2026-07-25 on codex-cli 0.144.4: `minimal` (advertised by no
+ * model) returned "Unsupported value: 'minimal' is not supported with the
+ * 'gpt-5.6-sol-1p-codexswic-ev3' model. Supported values are: 'none', 'low', 'medium', 'high', and
+ * 'xhigh'." That is why the candidate list is derived per model instead of hardcoded.
+ */
+export const effortOptionSchema = z
+  .object({
+    id: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9][a-z0-9_-]*$/),
+    description: z.string().max(300),
+  })
+  .strict();
+export type EffortOption = z.infer<typeof effortOptionSchema>;
 export const codexModelOptionSchema = z
   .object({
     id: codexModelIdSchema,
     displayName: z.string().min(1).max(128),
     description: z.string().max(300),
+    // Reasoning levels this model advertises, newest-CLI-first. Absent (rather than empty) means
+    // "this provider does not publish a per-model set" — Claude's curated entries leave it off and
+    // keep using `claudeEffortSchema`; Codex's `auto` sentinel leaves it off because the concrete
+    // model it resolves to is chosen by the CLI, so nothing can be promised about its set.
+    efforts: z.array(effortOptionSchema).max(16).optional(),
+    // The model's own default level, used to clamp a persisted choice this model does not support
+    // (switching from Sol to GPT-5.5 drops `max`/`ultra`, and keeping the old value would fail the
+    // next turn outright).
+    defaultEffort: effortOptionSchema.shape.id.optional(),
   })
   .strict();
 export type CodexModelOption = z.infer<typeof codexModelOptionSchema>;
@@ -776,10 +854,29 @@ export type CodexModelOption = z.infer<typeof codexModelOptionSchema>;
 // `claude --help` lists "--effort <level>  Effort level for the current session (low, medium,
 // high, xhigh, max)", and a probe with an invalid value (`--effort bogus`) prints "Unknown
 // --effort value 'bogus' — ignoring it and using the default effort. Valid values: low, medium,
-// high, xhigh, max." confirming this exact enum. Codex has no equivalent flag on this CLI
-// version, so — unlike `codexModelIdSchema` (deliberately provider-agnostic) — this schema is
-// Claude-specific.
-export const claudeEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+// high, xhigh, max."
+//
+// `ultracode` is a sixth accepted value that the help text's parenthetical omits (issue #8). The
+// discriminator is that same warning: the CLI is explicit when it ignores an `--effort` value, so
+// "accepted" and "silently dropped" are distinguishable without any observable effort field in
+// the output. Re-probed 2026-07-25 on 2.1.218 with
+//   claude -p "1" --effort <v> --output-format stream-json --verbose --tools '' \
+//          --strict-mcp-config --safe-mode --no-session-persistence
+// and reading stderr:
+//   max        -> no warning, exit 0
+//   ultracode  -> no warning, exit 0
+//   ultra      -> "Unknown --effort value 'ultra' — ignoring it ..."
+//   bogus      -> "Unknown --effort value 'bogus' — ignoring it ..."
+//   bogus2     -> "Unknown --effort value 'bogus2' — ignoring it ..."
+// i.e. `ultracode` behaves like a documented level and unlike three separate near-misses and
+// nonsense values, so it is a recognised level rather than an unvalidated pass-through. The
+// `system/init` event carries no effort field on this version, so the warning channel is the only
+// available evidence — claude-smoke.test.ts guards it so a future CLI that drops the value fails
+// loudly instead of silently degrading to the default.
+//
+// Codex has no equivalent flag on this CLI version, so — unlike `codexModelIdSchema`
+// (deliberately provider-agnostic) — this schema is Claude-specific.
+export const claudeEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']);
 export type ClaudeEffort = z.infer<typeof claudeEffortSchema>;
 export const runtimeSettingsSchema = z
   .object({
@@ -793,15 +890,27 @@ export const runtimeSettingsSchema = z
     models: z.array(codexModelOptionSchema).max(32),
     // Additive field for the Claude effort control. Persisted under the single
     // 'runtime.claude.effort' settings key regardless of which Runtime kind is currently active
-    // (unlike `model`, which is scoped per-kind) — it only takes effect on Claude turns, and the
-    // Composer's effort selector is only enabled while Claude is the active Runtime.
+    // (unlike `model`, which is scoped per-kind) — it only takes effect on Claude turns.
     effort: claudeEffortSchema,
+    // Codex's own reasoning level, kept separate from `effort` because the two providers do not
+    // share a value space: Claude's set is fixed and includes `ultracode`, Codex's is per-model
+    // and includes `max`/`ultra` only on the models that advertise them. Persisted under
+    // 'runtime.codex.effort' so switching Runtime does not clobber the other's preference.
+    //
+    // Already clamped by Main to the selected model's advertised set (see the settings read), so
+    // the renderer can show it as-is. Empty string means "no override" — the `auto` model sentinel
+    // resolves its model inside the CLI, so there is no advertised set to choose from and the
+    // CLI's own per-model default is left to apply.
+    codexEffort: z.union([effortOptionSchema.shape.id, z.literal('')]),
   })
   .strict();
 export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;
 export const runtimeSetInputSchema = z.object({ kind: runtimeKindSchema }).strict();
 export const runtimeModelSetInputSchema = z.object({ model: codexModelIdSchema }).strict();
 export const runtimeEffortSetInputSchema = z.object({ effort: claudeEffortSchema }).strict();
+export const runtimeCodexEffortSetInputSchema = z
+  .object({ effort: effortOptionSchema.shape.id })
+  .strict();
 
 export const accessPresetSchema = z.enum(['ask', 'auto', 'full']);
 export type AccessPreset = z.infer<typeof accessPresetSchema>;
@@ -938,7 +1047,21 @@ export const runtimeStatusSchema = z
   })
   .strict();
 export type RuntimeStatus = z.infer<typeof runtimeStatusSchema>;
-export const turnStartResultSchema = z.object({ turnId: idSchema }).strict();
+export const turnStartResultSchema = z
+  .object({
+    turnId: idSchema,
+    /**
+     * The Task's updated summary, present only when this message triggered automatic naming
+     * (issue #4) — a Task still carrying the placeholder title gets named from its first message.
+     *
+     * Returned on the start result rather than as a TurnEvent on purpose: every TurnEvent is
+     * appended to `turn_events` and replayed on re-subscribe, and a rename is a Task-level fact
+     * with no place in a Turn's event history. Callers that ignore it simply keep showing the old
+     * title until their next `tasks.list()`.
+     */
+    renamedTask: taskSummarySchema.optional(),
+  })
+  .strict();
 export const voidResultSchema = z.undefined();
 
 export interface SprintCoderApi {
@@ -973,11 +1096,19 @@ export interface SprintCoderApi {
     /** Subscribes to Runtime process liveness. Returns an unsubscribe function. */
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
   };
+  images: {
+    list(taskId: string): Promise<GeneratedImage[]>;
+    /** Bytes as base64, for a `data:` URL. Rejects an unknown id. */
+    read(imageId: string): Promise<{ id: string; mimeType: 'image/png'; base64: string }>;
+  };
   settings: {
     getRuntime(): Promise<RuntimeSettings>;
     setRuntime(kind: RuntimeKind): Promise<void>;
     setModel(model: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
+    /** Codex reasoning level. Rejects a level the selected model does not advertise (see
+     * `effortOptionSchema`) — Codex fails the whole turn on an unsupported one. */
+    setCodexEffort(effort: string): Promise<void>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
@@ -999,7 +1130,10 @@ export interface SprintCoderApi {
     outputTail(input: CommandOutputTailInput): Promise<CommandOutputPage>;
   };
   turns: {
-    start(input: { taskId: string; text: string }): Promise<{ turnId: string }>;
+    start(input: {
+      taskId: string;
+      text: string;
+    }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
     steer(input: { taskId: string; text: string; expectedTurnId: string }): Promise<void>;
     stopAndSend(input: { taskId: string; text: string }): Promise<void>;
@@ -1043,6 +1177,9 @@ export const IPC_CHANNELS = {
   settingsSetEffort: 'sprint-coder:settings:set-effort',
   /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */
   runtimeStatusEvent: 'sprint-coder:runtime:status',
+  imagesList: 'sprint-coder:images:list',
+  imagesRead: 'sprint-coder:images:read',
+  settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

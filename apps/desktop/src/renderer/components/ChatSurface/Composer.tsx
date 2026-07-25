@@ -1,9 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useAppStore } from '../../store/appStore';
+import type { RuntimeState } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
-import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square } from '../icons';
-import { RUNTIME_LABEL } from '../../lib/runtime-labels';
+import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square, Target } from '../icons';
+import { ComposerMenu } from './ComposerMenu';
+import { IMAGEGEN_PREFIX } from './imagegen';
+import type { ComposerMenuItem } from './ComposerMenu';
+// Shared with the settings dialog (issue #5) so the same option can never be named two ways.
+import {
+  EFFORT_DESC,
+  EFFORT_LABEL,
+  EFFORT_LEVELS,
+  RUNTIME_CLI_MISSING_HINT,
+  RUNTIME_DESC,
+  RUNTIME_KINDS,
+  RUNTIME_LABEL,
+} from '../../lib/runtime-labels';
 import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
 const STEER_UNSUPPORTED_HINT =
@@ -45,6 +58,12 @@ export function Composer({ taskId }: { taskId: string }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [sendMode, setSendMode] = useState<SendMode>('queue');
   const [wasTurnActive, setWasTurnActive] = useState(false);
+  // Goal editing moved here from the header (issue #13): TaskHeader's chip is now a read-only
+  // display of the current value, and the plus menu is the single entry point for changing it.
+  const [goalEditing, setGoalEditing] = useState(false);
+  // Armed by the plus menu, consumed by the next send. One-shot rather than a mode, so a user who
+  // opens the menu and changes their mind is not stuck generating images.
+  const [imageRequested, setImageRequested] = useState(false);
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
@@ -99,8 +118,14 @@ export function Composer({ taskId }: { taskId: string }) {
   const sendDisabled = !draft.trim() || sending || (turnActive && !activeModeCapable);
 
   function handleSend() {
-    const text = draft.trim();
-    if (!text || sendDisabled) return;
+    const raw = draft.trim();
+    if (!raw || sendDisabled) return;
+    // The prefix goes into the stored message rather than being injected invisibly in the adapter.
+    // The issue names this as an open question; traceability wins. An image appearing with no
+    // explanation in the history is worse than a visible directive, and a hidden one would make
+    // "why did this turn generate an image?" unanswerable after the fact.
+    const text = imageRequested ? `${IMAGEGEN_PREFIX} ${raw}` : raw;
+    setImageRequested(false);
     if (!turnActive) {
       void startTurn(taskId, text);
       return;
@@ -125,6 +150,7 @@ export function Composer({ taskId }: { taskId: string }) {
     <div className="composer-zone">
       <div className="composer-inner">
         <ContextBar taskId={taskId} />
+        {goalEditing && <GoalEditor taskId={taskId} onDone={() => setGoalEditing(false)} />}
         <QueuedList items={queued} />
         <div className="composer">
           <textarea
@@ -147,15 +173,22 @@ export function Composer({ taskId }: { taskId: string }) {
             <RuntimeChip />
             <ModelChip />
             <EffortChip />
-            <button
-              type="button"
-              className="cmp-chip"
-              disabled
-              title="添付は今回のスコープ外です"
-              aria-label="添付"
-            >
-              <Paperclip size={15} />
-            </button>
+            <PlusMenu
+              taskId={taskId}
+              onSetGoal={() => setGoalEditing(true)}
+              onRequestImage={() => setImageRequested(true)}
+            />
+            {imageRequested && (
+              <button
+                type="button"
+                className="cmp-chip imagegen-armed"
+                data-testid="composer-imagegen-armed"
+                title="この送信で画像生成を呼び出します。クリックで取り消し"
+                onClick={() => setImageRequested(false)}
+              >
+                画像生成 ×
+              </button>
+            )}
             {turnActive && hasAnyActiveModeCapability && (
               <div className="send-mode-group" role="group" aria-label="実行中の送信方法">
                 {(['queue', 'steer', 'stopAndSend'] as SendMode[])
@@ -212,17 +245,6 @@ export function Composer({ taskId }: { taskId: string }) {
     </div>
   );
 }
-
-const RUNTIME_DESC: Record<RuntimeKind, string> = {
-  mock: '決定論的ローカル応答',
-  codex: 'ローカルのCodex CLIで実応答',
-  claude: 'ローカルのClaude Code CLIで実応答',
-};
-
-const RUNTIME_CLI_MISSING_HINT: Record<'codex' | 'claude', string> = {
-  codex: 'Codex CLIが見つかりません',
-  claude: 'Claude CLIが見つかりません',
-};
 
 // Runtime selector chip (FR-SET-03). Falls back to the legacy dummy "GPT-6.2 mini" chip when
 // the backend hasn't wired the `settings` API yet — graceful degrade per the sprint-coder.d.ts contract.
@@ -282,7 +304,7 @@ function RuntimeChip() {
       </button>
       {open && (
         <div className="runtime-menu" role="menu" aria-label="Runtime選択">
-          {(['mock', 'codex', 'claude'] as RuntimeKind[]).map((kind) => {
+          {RUNTIME_KINDS.map((kind) => {
             const disabled =
               (kind === 'codex' && !runtime.codexAvailable) ||
               (kind === 'claude' && !runtime.claudeAvailable);
@@ -395,35 +417,98 @@ function ModelChip() {
   );
 }
 
-const EFFORT_LEVELS: ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-const EFFORT_LABEL: Record<ClaudeEffort, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'X-High',
-  max: 'Max',
-};
-const EFFORT_DESC: Record<ClaudeEffort, string> = {
-  low: '最速・最小のコストで応答',
-  medium: '速度と精度のバランス',
-  high: 'じっくり考えて応答',
-  xhigh: 'より深く考えて応答',
-  max: '最大限考えて応答（最も低速・高コスト）',
-};
+type EffortChoice = { id: string; label: string; description: string };
 
-// Effort selector (FR-SET-03 follow-up). Verified empirically against the installed Claude CLI
-// (2.1.218, `claude --help`): `--effort <level>` accepts exactly these 5 values and is honored
-// per-turn (see the ADR amendment) — unlike the model chip, this control is Claude-only: Codex
-// has no equivalent flag on this CLI version, and mock has no effort concept at all, so both stay
-// disabled with a static display, mirroring how ModelChip disables for an inactive Runtime.
+/** Title-cases a level id the app has no curated label for, so a level a future CLI adds still
+ * renders as a name rather than a raw slug. `xhigh` keeps the hyphenated form used above. */
+function effortLabel(id: string): string {
+  return (
+    EFFORT_LABEL[id as ClaudeEffort] ??
+    (id === 'ultra' ? 'Ultra' : id.replace(/^./, (c) => c.toUpperCase()))
+  );
+}
+
+/**
+ * The levels offered for the active Runtime, and why the chip is disabled when it is.
+ *
+ * The two providers do not share a value space (issue #6). Claude's set is fixed and verified
+ * against `claude --help` plus the `ultracode` probe. Codex's is per-model and published by the CLI
+ * in models_cache.json, so it is read off the selected model rather than hardcoded — GPT-5.6-Sol
+ * advertises `max`/`ultra` and GPT-5.5 does not, and offering a level the model has not advertised
+ * fails the whole turn with an API 400 rather than falling back.
+ */
+function effortChoicesFor(runtime: RuntimeState): {
+  choices: EffortChoice[];
+  selected: string;
+  disabledReason: string | null;
+} {
+  if (runtime.kind === 'claude') {
+    if (!runtime.claudeAvailable)
+      return {
+        choices: [],
+        selected: runtime.effort,
+        disabledReason: 'Claude CLIが利用できません',
+      };
+    return {
+      choices: EFFORT_LEVELS.map((id) => ({
+        id,
+        label: EFFORT_LABEL[id],
+        description: EFFORT_DESC[id],
+      })),
+      selected: runtime.effort,
+      disabledReason: null,
+    };
+  }
+  if (runtime.kind === 'codex') {
+    if (!runtime.codexAvailable)
+      return { choices: [], selected: '', disabledReason: 'Codex CLIが利用できません' };
+    const model = runtime.models.find(({ id }) => id === runtime.model);
+    const efforts = model?.efforts ?? [];
+    if (efforts.length === 0)
+      return {
+        choices: [],
+        selected: '',
+        // The `auto` sentinel is the common case here: the CLI picks the concrete model itself, so
+        // there is no advertised level set to choose from and its own default applies.
+        disabledReason:
+          runtime.model === 'auto'
+            ? 'モデルをAuto以外にするとEffortを変更できます'
+            : 'このモデルはEffortの選択肢を公開していません',
+      };
+    return {
+      choices: efforts.map(({ id, description }) => ({
+        id,
+        label: effortLabel(id),
+        description,
+      })),
+      // '' means nothing is persisted, in which case the level actually in force is the model's own
+      // advertised default — so showing that is accurate, not a guess.
+      selected: runtime.codexEffort || model?.defaultEffort || '',
+      disabledReason: null,
+    };
+  }
+  return {
+    choices: [],
+    selected: '',
+    disabledReason: 'Codex/Claude Runtime選択時にEffortを変更できます',
+  };
+}
+
+// Effort selector (FR-SET-03 follow-up), now available for both real Runtimes. Mock has no effort
+// concept at all, so it stays disabled with a static display, mirroring how ModelChip disables for
+// an inactive Runtime.
 function EffortChip() {
   const runtime = useAppStore((s) => s.runtime);
   const setEffort = useAppStore((s) => s.setEffort);
+  const setCodexEffort = useAppStore((s) => s.setCodexEffort);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const supported =
-    typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.setEffort === 'function';
-  const enabled = supported && runtime.kind === 'claude' && runtime.claudeAvailable;
+    typeof window !== 'undefined' &&
+    typeof window.sprintCoder?.settings?.setEffort === 'function' &&
+    typeof window.sprintCoder?.settings?.setCodexEffort === 'function';
+  const { choices, selected, disabledReason } = effortChoicesFor(runtime);
+  const enabled = supported && disabledReason === null && choices.length > 0;
 
   useEffect(() => {
     if (!open) return;
@@ -434,9 +519,11 @@ function EffortChip() {
     return () => document.removeEventListener('mousedown', handlePointerDown);
   }, [open]);
 
-  function choose(effort: ClaudeEffort) {
+  function choose(effort: string) {
     setOpen(false);
-    if (effort !== runtime.effort) void setEffort(effort);
+    if (effort === selected) return;
+    if (runtime.kind === 'claude') void setEffort(effort as ClaudeEffort);
+    else void setCodexEffort(effort);
   }
 
   return (
@@ -458,28 +545,143 @@ function EffortChip() {
         aria-expanded={open}
         disabled={!enabled}
         onClick={() => setOpen((value) => !value)}
-        title={enabled ? 'Effortを選択' : 'Claude Runtime選択時にEffortを変更できます'}
+        title={enabled ? 'Effortを選択' : (disabledReason ?? 'Effortを変更できません')}
       >
-        {`effort: ${EFFORT_LABEL[runtime.effort]}`}
+        {`effort: ${selected === '' ? '—' : effortLabel(selected)}`}
       </button>
       {open && (
         <div className="runtime-menu effort-menu" role="menu" aria-label="Effort選択">
-          {EFFORT_LEVELS.map((effort) => (
+          {choices.map(({ id, label, description }) => (
             <button
-              data-testid={`effort-option-${effort}`}
-              key={effort}
+              data-testid={`effort-option-${id}`}
+              key={id}
               type="button"
               role="menuitemradio"
-              aria-checked={runtime.effort === effort}
-              className={`runtime-menu-item${runtime.effort === effort ? ' active' : ''}`}
-              onClick={() => choose(effort)}
+              aria-checked={selected === id}
+              className={`runtime-menu-item${selected === id ? ' active' : ''}`}
+              onClick={() => choose(id)}
             >
-              <span className="runtime-menu-title">{EFFORT_LABEL[effort]}</span>
-              <span className="runtime-menu-desc">{EFFORT_DESC[effort]}</span>
+              <span className="runtime-menu-title">{label}</span>
+              <span className="runtime-menu-desc">{description}</span>
             </button>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Composer plus menu (issue #13). Replaces the permanently-`disabled` paperclip button, which
+// advertised an affordance the app did not have; attachment becomes one entry in this menu instead,
+// so there is nothing left for a standalone clip button to mean.
+//
+// Items the app cannot honour yet are shown and announced unavailable with the reason, matching how
+// the Runtime/Effort chips already treat an unusable option — hiding them would leave the user
+// wondering whether the feature exists at all.
+function PlusMenu({
+  taskId,
+  onSetGoal,
+  onRequestImage,
+}: {
+  taskId: string;
+  onSetGoal: () => void;
+  onRequestImage: () => void;
+}) {
+  const goal = useAppStore((s) => s.tasks.find((t) => t.id === taskId)?.goal ?? null);
+  const runtime = useAppStore((s) => s.runtime);
+  const goalSupported =
+    typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
+
+  const items: ComposerMenuItem[] = [
+    {
+      id: 'goal',
+      label: 'ゴールを設定',
+      description: goal === null || goal === '' ? '未設定' : goal,
+      icon: <Target size={14} />,
+      ...(goalSupported
+        ? { onSelect: onSetGoal }
+        : { unavailableReason: 'Goal編集に対応していません' }),
+    },
+    {
+      id: 'attach',
+      label: 'ファイルを添付',
+      description: '会話にファイルを添える',
+      icon: <Paperclip size={14} />,
+      // Genuinely unimplemented end to end: there is no attachment type in the contracts, so IPC,
+      // persistence and rendering are all still missing.
+      unavailableReason: '添付は未実装です',
+    },
+    {
+      id: 'imagegen',
+      label: '画像を生成',
+      description: '次の送信でCodexの画像生成を呼び出す',
+      icon: <Plus size={14} />,
+      // Codex-only: `$imagegen` is a Codex CLI facility with no Claude equivalent.
+      ...(runtime.kind === 'codex' && runtime.codexAvailable
+        ? { onSelect: onRequestImage }
+        : {
+            unavailableReason:
+              runtime.kind === 'codex'
+                ? 'Codex CLIが見つかりません'
+                : 'Codex Runtime選択時に画像生成を使えます',
+          }),
+    },
+  ];
+
+  return (
+    <ComposerMenu
+      items={items}
+      triggerTestId="composer-plus"
+      triggerLabel="操作を追加"
+      menuLabel="Composerの操作"
+      triggerIcon={<Plus size={15} />}
+    />
+  );
+}
+
+// Inline Goal editor, opened from the plus menu. Mirrors the interaction the header chip used to
+// own (Enter commits, Escape cancels, blur commits) so the muscle memory carries over.
+function GoalEditor({ taskId, onDone }: { taskId: string; onDone: () => void }) {
+  const goal = useAppStore((s) => s.tasks.find((t) => t.id === taskId)?.goal ?? '');
+  const setGoal = useAppStore((s) => s.setGoal);
+  const [draft, setDraft] = useState(goal);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  function commit() {
+    const trimmed = draft.trim();
+    if (trimmed !== goal) void setGoal(taskId, trimmed);
+    onDone();
+  }
+
+  return (
+    <div className="goal-editor">
+      <label className="goal-editor-label" htmlFor={`goal-input-${taskId}`}>
+        <Target size={13} /> Goal
+      </label>
+      <input
+        ref={inputRef}
+        id={`goal-input-${taskId}`}
+        className="goal-input"
+        data-testid="composer-goal-input"
+        value={draft}
+        placeholder="このTaskのゴールを入力"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            onDone();
+          }
+        }}
+      />
     </div>
   );
 }

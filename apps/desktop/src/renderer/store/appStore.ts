@@ -10,6 +10,7 @@ import type {
   CodexModelOption,
   CommandSummary,
   CommandOutputRecord,
+  GeneratedImage,
   QueuedInput,
   PermissionSettings,
   DatabaseRecovery,
@@ -48,6 +49,11 @@ export type RuntimeState = {
   model: string;
   models: CodexModelOption[];
   effort: ClaudeEffort;
+  /** Codex reasoning level, already clamped by Main to the selected model's advertised set (issue
+   * #6). '' means no override — the `auto` model sentinel resolves its model inside the CLI, so
+   * there is no advertised set to pick from and the CLI's own per-model default applies. Kept
+   * separate from `effort` because the two providers do not share a value space. */
+  codexEffort: string;
   /** The concrete model id the Claude CLI actually resolved on the most recently completed Claude
    * turn (e.g. "claude-sonnet-5"), surfaced in the model chip's tooltip. Not per-task — mirrors
    * the rest of `RuntimeState`'s global-only design — and cleared back to undefined only by a
@@ -118,6 +124,9 @@ type AppState = {
   autoDecisionsByTask: Record<string, AutoPermissionDecision[]>;
   commandsByTask: Record<string, CommandCardState[]>;
   turnDiffByTask: Record<string, TurnDiff | undefined>;
+  /** Images generated per task, oldest first (issue #11). Metadata only — bytes are fetched by the
+   * card that displays them, so switching tasks never drags base64 through the store. */
+  imagesByTask: Record<string, GeneratedImage[]>;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
   teamByTask: Record<string, TeamDetail | null | undefined>;
@@ -149,6 +158,7 @@ type AppState = {
   setRuntime(kind: RuntimeKind): Promise<void>;
   setModel(model: string): Promise<void>;
   setEffort(effort: ClaudeEffort): Promise<void>;
+  setCodexEffort(effort: string): Promise<void>;
   setAccessPreset(taskId: string, preset: AccessPreset): Promise<void>;
   resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision): Promise<void>;
   selectTask(taskId: string): Promise<void>;
@@ -542,6 +552,16 @@ function handleTurnEvent(
       }));
       break;
     }
+    case 'image.generated': {
+      apply((state) => {
+        const existing = state.imagesByTask[taskId] ?? [];
+        // Replay-safe: this event is persisted, so re-subscribing delivers it again. The id is a
+        // content digest, so de-duplicating on it also collapses the same image generated twice.
+        if (existing.some((image) => image.id === ev.image.id)) return {};
+        return { imagesByTask: { ...state.imagesByTask, [taskId]: [...existing, ev.image] } };
+      });
+      break;
+    }
     default:
       break;
   }
@@ -573,6 +593,7 @@ export const useAppStore = create<AppState>((set, get) => {
     autoDecisionsByTask: {},
     commandsByTask: {},
     turnDiffByTask: {},
+    imagesByTask: {},
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     teamByTask: {},
@@ -585,6 +606,7 @@ export const useAppStore = create<AppState>((set, get) => {
       model: 'auto',
       models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
       effort: 'medium',
+      codexEffort: '',
     },
     recovery: null,
     recoveryAcknowledged: false,
@@ -691,6 +713,23 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    async setCodexEffort(effort: string) {
+      if (!window.sprintCoder || typeof window.sprintCoder.settings?.setCodexEffort !== 'function')
+        return;
+      const previous = get().runtime;
+      if (previous.codexEffort === effort) return;
+      set({ runtime: { ...previous, codexEffort: effort } });
+      try {
+        await window.sprintCoder.settings.setCodexEffort(effort);
+        await get().loadRuntime();
+      } catch (err) {
+        // Main rejects a level the selected model does not advertise, so the optimistic update has
+        // to be rolled back — unlike Claude, a bad Codex level would fail the turn outright.
+        set({ runtime: previous });
+        set({ error: describeError(err) });
+      }
+    },
+
     async setAccessPreset(taskId: string, preset: AccessPreset) {
       if (!window.sprintCoder || typeof window.sprintCoder.permissions?.set !== 'function') return;
       const previous = get().permissionByTask[taskId] ?? { preset: 'ask', policyEpoch: 0 };
@@ -783,6 +822,15 @@ export const useAppStore = create<AppState>((set, get) => {
       void restoreDraft(taskId, apply, get);
       void loadWorkspace(taskId, apply, get);
       void loadPermission(taskId, apply, get);
+      // Fetched alongside the other per-task reads rather than reconstructed from replayed events:
+      // metadata only, so this stays cheap even for a Task with many images (issue #11).
+      if (typeof window.sprintCoder?.images?.list === 'function')
+        void window.sprintCoder.images
+          .list(taskId)
+          .then((images) =>
+            apply((state) => ({ imagesByTask: { ...state.imagesByTask, [taskId]: images } })),
+          )
+          .catch(() => undefined);
 
       if (!window.sprintCoder) {
         set({ loadingMessages: false });
@@ -1078,8 +1126,14 @@ export const useAppStore = create<AppState>((set, get) => {
       persistDraftDebounced(taskId, '');
 
       try {
-        await window.sprintCoder.turns.start({ taskId, text: trimmed });
+        const result = await window.sprintCoder.turns.start({ taskId, text: trimmed });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
+        // `renamedTask` is present only when this was the Task's first message and it was still
+        // carrying the placeholder title (issue #4) — merge it so the sidebar updates immediately
+        // instead of at the next full `tasks.list()`.
+        const renamed = result?.renamedTask;
+        if (renamed !== undefined)
+          set((state) => ({ tasks: state.tasks.map((t) => (t.id === renamed.id ? renamed : t)) }));
       } catch (err) {
         const code = errorCode(err);
         set((state) => ({

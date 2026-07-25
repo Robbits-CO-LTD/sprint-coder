@@ -9,6 +9,44 @@ import {
   REPO_ROOT,
 } from './helpers';
 
+/**
+ * Presses Tab until the named approval-card button has focus, returning everything it passed through.
+ *
+ * Counting Tabs is what issue #34 was: the card's focusable count is conditional. `ApprovalCard`
+ * only renders its "実行内容をすべて表示" disclosure when `approval.execution.length > 512`, and the
+ * execution string embeds the workspace path — so on a short checkout the card has three focusables
+ * and on a deeper one it has four. A hardcoded count therefore passed or failed based on where the
+ * repository happened to live, not on whether the UI worked.
+ *
+ * Walking to the target instead keeps what the test is actually for — the approval choices are
+ * reachable by keyboard alone, without focus escaping the card — and stays correct however many
+ * focusables the card has.
+ */
+async function tabToApprovalButton(page: Page, testId: string): Promise<string[]> {
+  const visited: string[] = [];
+  // Generous bound: the card has three or four focusables today, and this only needs to stop a
+  // runaway loop if focus somehow cycles.
+  for (let step = 0; step < 10; step += 1) {
+    await page.keyboard.press('Tab');
+    const focused = await page.evaluate(() => {
+      const active = document.activeElement;
+      const card = document.querySelector('[data-testid="approval-card"]');
+      return {
+        testId: active?.getAttribute('data-testid') ?? null,
+        label: active instanceof HTMLElement ? active.innerText.trim().slice(0, 40) : '',
+        insideCard: card !== null && active !== null && card.contains(active),
+      };
+    });
+    visited.push(focused.testId ?? focused.label ?? '(unknown)');
+    if (!focused.insideCard)
+      throw new Error(
+        `focus left the approval card before reaching ${testId}; visited ${visited.join(' -> ')}`,
+      );
+    if (focused.testId === testId) return visited;
+  }
+  throw new Error(`never reached ${testId}; visited ${visited.join(' -> ')}`);
+}
+
 test.describe('command runner flow', () => {
   let userDataDir: string;
   let app: ElectronApplication | null = null;
@@ -45,12 +83,18 @@ test.describe('command runner flow', () => {
     await expect(card).toContainText(
       process.platform === 'win32' ? 'where.exe' : '/usr/bin/printf',
     );
-    await page.keyboard.press('Tab');
-    await page.keyboard.press('Tab');
-    await page.keyboard.press('Tab');
-    await page.keyboard.press('Tab');
+    const toDeny = await tabToApprovalButton(page, 'approval-deny');
+    // The three decisions are the last stops and keep their order, whether or not the disclosure
+    // button precedes them.
+    expect(toDeny.slice(-3)).toEqual([
+      'approval-allow-once',
+      'approval-allow-task',
+      'approval-deny',
+    ]);
     await expect(page.getByTestId('approval-deny')).toBeFocused();
-    await page.getByTestId('approval-deny').press('Enter');
+    // `page.keyboard`, not `locator.press` — the latter focuses the element first, which would mask
+    // exactly the focus bug this walk exists to catch.
+    await page.keyboard.press('Enter');
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
       timeout: 20_000,
     });
@@ -59,10 +103,12 @@ test.describe('command runner flow', () => {
     await textarea.press('Enter');
     await expect(card).toBeVisible();
     await expect(card).toBeFocused();
-    await page.keyboard.press('Tab');
-    await page.keyboard.press('Tab');
+    // Same fix here. This one was worse than a failure waiting to happen: with three focusables, two
+    // Tabs land on 「Task中許可」 — a *broader* grant than the test means to give.
+    const toAllowOnce = await tabToApprovalButton(page, 'approval-allow-once');
+    expect(toAllowOnce.at(-1)).toBe('approval-allow-once');
     await expect(page.getByRole('button', { name: '今回のみ許可' })).toBeFocused();
-    await page.getByRole('button', { name: '今回のみ許可' }).press('Enter');
+    await page.keyboard.press('Enter');
     const commandCard = page.locator('[data-testid="command-card"].command-card--exited').last();
     await expect(commandCard).toBeVisible();
     await expect(commandCard).toContainText('変更の整合性を確認');

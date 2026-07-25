@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError } from '@sprint-coder/contracts';
-import type { CodexModelOption } from '@sprint-coder/contracts';
+import type { CodexModelOption, EffortOption } from '@sprint-coder/contracts';
 import { ApprovalRequestedError, CodexJsonlNormalizer } from './codex-normalizer';
 import type {
   RuntimeCanonicalEvent,
@@ -80,10 +80,10 @@ export class CodexRuntimeAdapter {
     // this adapter's `start` keeps the same call signature as ClaudeRuntimeAdapter's for
     // index.ts's shared dispatch, and always ignored.
     _teamMcp?: RuntimeTeamMcpOption,
-    // Codex has no `--effort`-equivalent flag on this CLI version (verified: absent from `codex
-    // --help`); accepted only for call-signature parity with ClaudeRuntimeAdapter.start, always
-    // ignored.
-    _effort?: string,
+    // The reasoning level for this turn, already clamped by Main to something the selected model
+    // advertises (issue #6). There is no `--effort` flag on this CLI, but `-c
+    // model_reasoning_effort=` works — see buildCodexArgs.
+    effort?: string,
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
@@ -93,7 +93,7 @@ export class CodexRuntimeAdapter {
     const cwd =
       workspacePath ?? (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-')));
     const normalizer = new CodexJsonlNormalizer();
-    const child = spawn('codex', buildCodexArgs(model), {
+    const child = spawn('codex', buildCodexArgs(model, effort), {
       cwd,
       env: minimalEnvironment(),
       detached: process.platform !== 'win32',
@@ -201,7 +201,20 @@ export function buildCodexPrompt(
   ].join('\n\n');
 }
 
-export function buildCodexArgs(model: string): string[] {
+/**
+ * `effort` maps to the `model_reasoning_effort` config key via `-c`, the same override mechanism
+ * already used for `approval_policy` and `shell_environment_policy.inherit`.
+ *
+ * There is no `--effort`-equivalent flag (verified: absent from `codex exec --help` on 0.144.4),
+ * but the config path works and is the CLI's documented way to override any config.toml value.
+ * TOML quoting matters: `-c` parses the value portion as TOML and only falls back to a raw string
+ * if that fails, so the level is quoted exactly like the two existing overrides.
+ *
+ * An empty/undefined effort adds nothing, leaving the CLI's own per-model default — which is the
+ * correct behaviour for the `auto` model sentinel, where the concrete model (and therefore its
+ * advertised level set) is chosen inside the CLI.
+ */
+export function buildCodexArgs(model: string, effort?: string): string[] {
   return [
     'exec',
     '--json',
@@ -217,9 +230,54 @@ export function buildCodexArgs(model: string): string[] {
     'approval_policy="never"',
     '-c',
     'shell_environment_policy.inherit="none"',
+    ...(effort === undefined || effort === '' ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
     ...(model === 'auto' ? [] : ['--model', model]),
     '-',
   ];
+}
+
+/**
+ * Reads a model's advertised reasoning levels out of its models_cache.json entry.
+ *
+ * The CLI publishes `supported_reasoning_levels: [{ effort, description }]` plus
+ * `default_reasoning_level` per model, so the effort candidates are data, not a curated guess.
+ * They genuinely differ — verified 2026-07-25 against codex-cli 0.144.4's own cache:
+ *   GPT-5.6-Sol / GPT-5.6-Terra    low medium high xhigh max ultra
+ *   GPT-5.6-Luna                   low medium high xhigh max
+ *   GPT-5.5 / 5.4 / 5.4-Mini / 5.3-Codex-Spark
+ *                                  low medium high xhigh
+ * Offering a level the selected model does not advertise fails the entire turn (API 400 ->
+ * `codex exec` exits 1), so a single fixed list would ship a real defect rather than a cosmetic
+ * one. Unparseable or absent levels yield `undefined`, which the settings read treats as "no
+ * override available" and leaves the CLI's own default in place.
+ */
+function parseSupportedEfforts(
+  record: Record<string, unknown>,
+): Pick<CodexModelOption, 'efforts' | 'defaultEffort'> {
+  const levels = record['supported_reasoning_levels'];
+  if (!Array.isArray(levels)) return {};
+  const efforts: EffortOption[] = [];
+  const seen = new Set<string>();
+  for (const level of levels) {
+    if (typeof level !== 'object' || level === null) continue;
+    const entry = level as Record<string, unknown>;
+    const id = entry['effort'];
+    const description = entry['description'];
+    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    efforts.push({
+      id,
+      description: typeof description === 'string' ? description.slice(0, 300) : '',
+    });
+    if (efforts.length === 16) break;
+  }
+  if (efforts.length === 0) return {};
+  const fallback = record['default_reasoning_level'];
+  // Only trust the advertised default if it is actually one of the advertised levels — otherwise
+  // clamping would substitute a value that fails just as hard as the one it replaced.
+  const defaultEffort =
+    typeof fallback === 'string' && seen.has(fallback) ? fallback : efforts[0]?.id;
+  return defaultEffort === undefined ? { efforts } : { efforts, defaultEffort };
 }
 
 export function parseCodexModels(value: unknown): CodexModelOption[] {
@@ -247,7 +305,7 @@ export function parseCodexModels(value: unknown): CodexModelOption[] {
     )
       continue;
     seen.add(id);
-    result.push({ id, displayName, description });
+    result.push({ id, displayName, description, ...parseSupportedEfforts(record) });
     if (result.length === 31) break;
   }
   return result;
