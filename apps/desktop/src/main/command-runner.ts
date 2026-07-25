@@ -266,16 +266,19 @@ export class CommandRunner {
     };
     this.active.set(executionId, active);
     let processStartIdentity = await readProcessStartIdentity(child.pid);
-    if (
-      process.platform === 'win32' &&
-      processStartIdentity === 'unavailable' &&
-      (child.exitCode !== null || child.signalCode !== null)
-    ) {
-      // A short-lived Windows process can exit while PowerShell is still
-      // reading its creation time. It is no longer a PID-reuse/termination
-      // risk, so retain a unique lifecycle identity instead of taskkilling an
-      // already-gone PID.
-      processStartIdentity = `win32:exited:${child.pid}:${startedAt}`;
+    if (process.platform === 'win32' && processStartIdentity === 'unavailable') {
+      // PowerShell can observe that a short-lived process is already gone
+      // before Node has delivered its close event. Give that event one small,
+      // bounded window before treating the missing identity as a live-process
+      // safety failure and forcing the tree down.
+      const alreadyExited = await Promise.race([
+        active.outcome.then(
+          () => true,
+          () => false,
+        ),
+        delay(50).then(() => false),
+      ]);
+      if (alreadyExited) processStartIdentity = `win32:exited:${child.pid}:${startedAt}`;
     }
     if (processStartIdentity === 'unavailable' || processStartIdentity.startsWith('unsupported:')) {
       try {
