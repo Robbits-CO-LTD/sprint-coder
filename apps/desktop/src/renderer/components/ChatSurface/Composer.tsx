@@ -4,6 +4,7 @@ import { useAppStore } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
 import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square, Target } from '../icons';
 import { ComposerMenu } from './ComposerMenu';
+import { IMAGEGEN_PREFIX } from './imagegen';
 import type { ComposerMenuItem } from './ComposerMenu';
 import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
@@ -49,6 +50,9 @@ export function Composer({ taskId }: { taskId: string }) {
   // Goal editing moved here from the header (issue #13): TaskHeader's chip is now a read-only
   // display of the current value, and the plus menu is the single entry point for changing it.
   const [goalEditing, setGoalEditing] = useState(false);
+  // Armed by the plus menu, consumed by the next send. One-shot rather than a mode, so a user who
+  // opens the menu and changes their mind is not stuck generating images.
+  const [imageRequested, setImageRequested] = useState(false);
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
@@ -103,8 +107,14 @@ export function Composer({ taskId }: { taskId: string }) {
   const sendDisabled = !draft.trim() || sending || (turnActive && !activeModeCapable);
 
   function handleSend() {
-    const text = draft.trim();
-    if (!text || sendDisabled) return;
+    const raw = draft.trim();
+    if (!raw || sendDisabled) return;
+    // The prefix goes into the stored message rather than being injected invisibly in the adapter.
+    // The issue names this as an open question; traceability wins. An image appearing with no
+    // explanation in the history is worse than a visible directive, and a hidden one would make
+    // "why did this turn generate an image?" unanswerable after the fact.
+    const text = imageRequested ? `${IMAGEGEN_PREFIX} ${raw}` : raw;
+    setImageRequested(false);
     if (!turnActive) {
       void startTurn(taskId, text);
       return;
@@ -152,7 +162,22 @@ export function Composer({ taskId }: { taskId: string }) {
             <RuntimeChip />
             <ModelChip />
             <EffortChip />
-            <PlusMenu taskId={taskId} onSetGoal={() => setGoalEditing(true)} />
+            <PlusMenu
+              taskId={taskId}
+              onSetGoal={() => setGoalEditing(true)}
+              onRequestImage={() => setImageRequested(true)}
+            />
+            {imageRequested && (
+              <button
+                type="button"
+                className="cmp-chip imagegen-armed"
+                data-testid="composer-imagegen-armed"
+                title="この送信で画像生成を呼び出します。クリックで取り消し"
+                onClick={() => setImageRequested(false)}
+              >
+                画像生成 ×
+              </button>
+            )}
             {turnActive && hasAnyActiveModeCapability && (
               <div className="send-mode-group" role="group" aria-label="実行中の送信方法">
                 {(['queue', 'steer', 'stopAndSend'] as SendMode[])
@@ -494,7 +519,15 @@ function EffortChip() {
 // Items the app cannot honour yet are shown and announced unavailable with the reason, matching how
 // the Runtime/Effort chips already treat an unusable option — hiding them would leave the user
 // wondering whether the feature exists at all.
-function PlusMenu({ taskId, onSetGoal }: { taskId: string; onSetGoal: () => void }) {
+function PlusMenu({
+  taskId,
+  onSetGoal,
+  onRequestImage,
+}: {
+  taskId: string;
+  onSetGoal: () => void;
+  onRequestImage: () => void;
+}) {
   const goal = useAppStore((s) => s.tasks.find((t) => t.id === taskId)?.goal ?? null);
   const runtime = useAppStore((s) => s.runtime);
   const goalSupported =
@@ -522,14 +555,17 @@ function PlusMenu({ taskId, onSetGoal }: { taskId: string; onSetGoal: () => void
     {
       id: 'imagegen',
       label: '画像を生成',
-      description: 'Codexの画像生成を呼び出す',
+      description: '次の送信でCodexの画像生成を呼び出す',
       icon: <Plus size={14} />,
-      // Codex-only by design, and blocked besides — see #11 for the read-only-sandbox problem that
-      // has to be solved before a generated image can be saved or shown at all.
-      unavailableReason:
-        runtime.kind === 'codex'
-          ? '画像生成は未実装です'
-          : 'Codex Runtime選択時に画像生成を使えます',
+      // Codex-only: `$imagegen` is a Codex CLI facility with no Claude equivalent.
+      ...(runtime.kind === 'codex' && runtime.codexAvailable
+        ? { onSelect: onRequestImage }
+        : {
+            unavailableReason:
+              runtime.kind === 'codex'
+                ? 'Codex CLIが見つかりません'
+                : 'Codex Runtime選択時に画像生成を使えます',
+          }),
     },
   ];
 

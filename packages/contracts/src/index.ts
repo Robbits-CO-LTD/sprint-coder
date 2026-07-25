@@ -404,6 +404,37 @@ export const contextUsageSchema = z
   .strict();
 export type ContextUsage = z.infer<typeof contextUsageSchema>;
 
+/**
+ * An image the Runtime generated during a Turn, after Main has taken custody of it (issue #11).
+ *
+ * `id` is the content digest, so the same image generated twice is stored once. Bytes are NOT in
+ * this record: they are fetched separately through `images.read`, which keeps a Turn snapshot from
+ * carrying megabytes of base64 through every re-subscribe.
+ */
+export const generatedImageSchema = z
+  .object({
+    id: digestSchema,
+    taskId: idSchema,
+    turnId: idSchema,
+    /** Always image/png today — the only format Codex's built-in generator emits, verified by magic
+     * bytes before the file is accepted rather than trusted from its extension. */
+    mimeType: z.literal('image/png'),
+    byteLength: z.number().int().positive(),
+    createdAt: timestampSchema,
+  })
+  .strict();
+export type GeneratedImage = z.infer<typeof generatedImageSchema>;
+export const generatedImageBytesSchema = z
+  .object({
+    id: digestSchema,
+    mimeType: z.literal('image/png'),
+    /** base64 of the stored bytes. The renderer turns this into a `data:` URL — never a path or an
+     * http(s) URL, so displaying an image can neither read the filesystem nor make a request. */
+    base64: z.string().max(24_000_000),
+  })
+  .strict();
+export const generatedImageRefSchema = z.object({ imageId: digestSchema }).strict();
+
 export const turnDiffEntrySchema = z
   .object({
     ordinal: z.number().int().positive(),
@@ -697,6 +728,17 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       usage: contextUsageSchema,
     })
     .strict(),
+  // A generated image took custody (issue #11). Persisted and replayed like any other Turn event:
+  // unlike a transient status, "this Turn produced this image" IS a fact about the conversation's
+  // history, and the timeline has to show it again when the Task is reopened. Carries only the
+  // metadata record — bytes are fetched on demand via `images.read`.
+  z
+    .object({
+      type: z.literal('image.generated'),
+      ...turnEventBase,
+      image: generatedImageSchema,
+    })
+    .strict(),
 ]);
 export type TurnEvent = z.infer<typeof turnEventSchema>;
 
@@ -920,6 +962,11 @@ export interface SprintCoderApi {
     get(taskId: string): Promise<WorkspaceSelection>;
     select(taskId: string): Promise<WorkspaceSelection>;
   };
+  images: {
+    list(taskId: string): Promise<GeneratedImage[]>;
+    /** Bytes as base64, for a `data:` URL. Rejects an unknown id. */
+    read(imageId: string): Promise<{ id: string; mimeType: 'image/png'; base64: string }>;
+  };
   settings: {
     getRuntime(): Promise<RuntimeSettings>;
     setRuntime(kind: RuntimeKind): Promise<void>;
@@ -988,6 +1035,8 @@ export const IPC_CHANNELS = {
   settingsSetRuntime: 'sprint-coder:settings:set-runtime',
   settingsSetModel: 'sprint-coder:settings:set-model',
   settingsSetEffort: 'sprint-coder:settings:set-effort',
+  imagesList: 'sprint-coder:images:list',
+  imagesRead: 'sprint-coder:images:read',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

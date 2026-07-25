@@ -10,6 +10,7 @@ import type {
   CodexModelOption,
   CommandSummary,
   CommandOutputRecord,
+  GeneratedImage,
   QueuedInput,
   PermissionSettings,
   RuntimeKind,
@@ -116,6 +117,9 @@ type AppState = {
   autoDecisionsByTask: Record<string, AutoPermissionDecision[]>;
   commandsByTask: Record<string, CommandCardState[]>;
   turnDiffByTask: Record<string, TurnDiff | undefined>;
+  /** Images generated per task, oldest first (issue #11). Metadata only — bytes are fetched by the
+   * card that displays them, so switching tasks never drags base64 through the store. */
+  imagesByTask: Record<string, GeneratedImage[]>;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
   teamByTask: Record<string, TeamDetail | null | undefined>;
@@ -530,6 +534,16 @@ function handleTurnEvent(
       }));
       break;
     }
+    case 'image.generated': {
+      apply((state) => {
+        const existing = state.imagesByTask[taskId] ?? [];
+        // Replay-safe: this event is persisted, so re-subscribing delivers it again. The id is a
+        // content digest, so de-duplicating on it also collapses the same image generated twice.
+        if (existing.some((image) => image.id === ev.image.id)) return {};
+        return { imagesByTask: { ...state.imagesByTask, [taskId]: [...existing, ev.image] } };
+      });
+      break;
+    }
     default:
       break;
   }
@@ -561,6 +575,7 @@ export const useAppStore = create<AppState>((set, get) => {
     autoDecisionsByTask: {},
     commandsByTask: {},
     turnDiffByTask: {},
+    imagesByTask: {},
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     teamByTask: {},
@@ -753,6 +768,15 @@ export const useAppStore = create<AppState>((set, get) => {
       void restoreDraft(taskId, apply, get);
       void loadWorkspace(taskId, apply, get);
       void loadPermission(taskId, apply, get);
+      // Fetched alongside the other per-task reads rather than reconstructed from replayed events:
+      // metadata only, so this stays cheap even for a Task with many images (issue #11).
+      if (typeof window.sprintCoder?.images?.list === 'function')
+        void window.sprintCoder.images
+          .list(taskId)
+          .then((images) =>
+            apply((state) => ({ imagesByTask: { ...state.imagesByTask, [taskId]: images } })),
+          )
+          .catch(() => undefined);
 
       if (!window.sprintCoder) {
         set({ loadingMessages: false });

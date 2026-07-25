@@ -288,6 +288,76 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('takes custody of a generated image and announces it on the Turn event stream', () => {
+      // issue #11. The bytes come from a directory the Codex CLI owns, so their *contents* are the
+      // only thing worth trusting — hence the magic-byte gate rather than a filename check.
+      const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from('payload'),
+      ]);
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const started = persistence.startTurn(task.id, '画像を生成して');
+
+      const recorded = persistence.recordGeneratedImage({
+        taskId: task.id,
+        turnId: started.turnId,
+        bytes: png,
+      });
+      expect(recorded).not.toBeNull();
+      expect(recorded?.event.type).toBe('image.generated');
+      expect(recorded?.image.mimeType).toBe('image/png');
+      expect(recorded?.image.byteLength).toBe(png.byteLength);
+
+      expect(persistence.listGeneratedImages(task.id)).toHaveLength(1);
+      const read = persistence.readGeneratedImage(recorded!.image.id);
+      expect(read?.bytes.equals(png)).toBe(true);
+      persistence.close();
+    });
+
+    it('stores the same image once, so a re-run cannot pile up copies or events', () => {
+      // The id is a content digest, which is what makes this free rather than a lookup.
+      const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from('same'),
+      ]);
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const started = persistence.startTurn(task.id, '画像を生成して');
+      const input = { taskId: task.id, turnId: started.turnId, bytes: png };
+
+      expect(persistence.recordGeneratedImage(input)).not.toBeNull();
+      expect(persistence.recordGeneratedImage(input)).toBeNull();
+      expect(persistence.listGeneratedImages(task.id)).toHaveLength(1);
+      persistence.close();
+    });
+
+    it('refuses anything that is not a PNG by its magic bytes', () => {
+      // A file extension is a filter, never evidence — and these bytes end up in a `data:` URL in
+      // the renderer, so "display a generated image" must not become "render whatever landed there".
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const started = persistence.startTurn(task.id, '画像を生成して');
+      for (const bytes of [
+        Buffer.from('<svg onload=alert(1)></svg>'),
+        Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]), // JPEG
+        Buffer.from([0x89, 0x50, 0x4e, 0x47]), // truncated signature
+        Buffer.alloc(0),
+      ]) {
+        expect(
+          persistence.recordGeneratedImage({ taskId: task.id, turnId: started.turnId, bytes }),
+        ).toBeNull();
+      }
+      expect(persistence.listGeneratedImages(task.id)).toEqual([]);
+      persistence.close();
+    });
+
+    it('returns null for an unknown image id rather than throwing', () => {
+      const { persistence } = createPersistence();
+      expect(persistence.readGeneratedImage('a'.repeat(64))).toBeNull();
+      persistence.close();
+    });
+
     it('defaults to mock and persists the selected runtime across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getRuntime()).toBe('mock');
@@ -4106,6 +4176,7 @@ if (runsWithElectronAbi)
         { version: 28 },
         { version: 29 },
         { version: 30 },
+        { version: 31 },
       ]);
       const migratedTables = new Set(
         (

@@ -21,6 +21,8 @@ import {
   type ContextUsage,
   type QueuedInput,
   type RuntimeKind,
+  type GeneratedImage,
+  generatedImageSchema,
   type TaskSummary,
   type TeamBudgetStatus,
   type TeamUsageTotals,
@@ -198,6 +200,43 @@ export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
     if (token === undefined || token !== lease) throw new MutationLeaseStaleError();
     return token;
   }
+}
+
+type GeneratedImageRow = {
+  id: string;
+  task_id: string;
+  turn_id: string;
+  mime_type: 'image/png';
+  byte_length: number;
+  created_at: string;
+};
+
+function toGeneratedImage(row: GeneratedImageRow): GeneratedImage {
+  return generatedImageSchema.parse({
+    id: row.id,
+    taskId: row.task_id,
+    turnId: row.turn_id,
+    mimeType: row.mime_type,
+    byteLength: row.byte_length,
+    createdAt: row.created_at,
+  });
+}
+
+/** A single generated icon is tens of KB; this is a sanity ceiling, not a target. */
+const MAX_GENERATED_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The 8-byte PNG signature.
+ *
+ * Checked because the extension of a file in a directory the CLI owns proves nothing about its
+ * contents, and these bytes end up in a `data:` URL in the renderer. Refusing anything else is what
+ * keeps "display a generated image" from becoming "render whatever landed in that directory".
+ */
+function isPngBuffer(bytes: Buffer): boolean {
+  return (
+    bytes.byteLength > 8 &&
+    bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  );
 }
 
 type TaskRow = {
@@ -1524,6 +1563,30 @@ const migrations = [
     `,
     requiresForeignKeysOff: true,
   },
+  {
+    version: 31,
+    checksum: 'generated-images-v31-codex-imagegen',
+    // Images a Runtime generated during a Turn (issue #11). Bytes live in the row rather than on
+    // disk: they are small (a single icon), already content-addressed, and keeping them in the same
+    // transaction as the Turn event means an image can never be referenced by a committed event
+    // while its file is missing.
+    //
+    // `id` is the SHA-256 of the bytes, so re-generating the same image stores it once. `mime_type`
+    // is CHECKed rather than free-form because the only accepted format is verified by magic bytes
+    // before insert — an extension is not evidence.
+    sql: `
+      CREATE TABLE generated_images (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        mime_type TEXT NOT NULL CHECK (mime_type = 'image/png'),
+        byte_length INTEGER NOT NULL CHECK (byte_length > 0),
+        bytes BLOB NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX generated_images_task_idx ON generated_images(task_id, created_at, id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2165,6 +2228,13 @@ export interface PersistenceClient {
     requestHash: string,
   ): { found: boolean; value?: T };
   interruptActiveTurns(): number;
+  recordGeneratedImage(input: {
+    taskId: string;
+    turnId: string;
+    bytes: Buffer;
+  }): { event: TurnEvent; image: GeneratedImage } | null;
+  listGeneratedImages(taskId: string): GeneratedImage[];
+  readGeneratedImage(imageId: string): { image: GeneratedImage; bytes: Buffer } | null;
   close(): void;
 }
 
@@ -6408,6 +6478,77 @@ export class SqlitePersistenceClient implements PersistenceClient {
     if (row.state !== 'completed' || row.result_json === null) throw new OperationInProgressError();
     const decoded = JSON.parse(row.result_json) as { value: T };
     return { found: true, value: decoded.value };
+  }
+
+  /**
+   * Takes custody of a generated image, in the same transaction as the Turn event that announces it.
+   *
+   * Rejects anything that is not a PNG by magic bytes — the file came from a directory the CLI owns,
+   * not from a path this app chose, so its contents are the only thing worth trusting. Returns null
+   * for a duplicate (same content digest already stored), so re-running a Turn cannot pile up copies
+   * or emit a second event for the same image.
+   */
+  recordGeneratedImage(input: {
+    taskId: string;
+    turnId: string;
+    bytes: Buffer;
+  }): { event: TurnEvent; image: GeneratedImage } | null {
+    if (!isPngBuffer(input.bytes)) return null;
+    if (input.bytes.byteLength > MAX_GENERATED_IMAGE_BYTES) return null;
+    const id = createHash('sha256').update(input.bytes).digest('hex');
+    return this.db.transaction(() => {
+      const existing = this.db
+        .prepare('SELECT 1 FROM generated_images WHERE id = ?')
+        .get(id) as unknown;
+      if (existing !== undefined) return null;
+      const now = new Date().toISOString();
+      const image = generatedImageSchema.parse({
+        id,
+        taskId: input.taskId,
+        turnId: input.turnId,
+        mimeType: 'image/png',
+        byteLength: input.bytes.byteLength,
+        createdAt: now,
+      });
+      this.db
+        .prepare(
+          `INSERT INTO generated_images(id, task_id, turn_id, mime_type, byte_length, bytes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          image.id,
+          image.taskId,
+          image.turnId,
+          image.mimeType,
+          image.byteLength,
+          input.bytes,
+          now,
+        );
+      const event = this.appendEvent({
+        type: 'image.generated',
+        taskId: input.taskId,
+        turnId: input.turnId,
+        image,
+      });
+      return { event, image };
+    })();
+  }
+
+  listGeneratedImages(taskId: string): GeneratedImage[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, task_id, turn_id, mime_type, byte_length, created_at FROM generated_images
+         WHERE task_id = ? ORDER BY created_at, id`,
+      )
+      .all(taskId) as GeneratedImageRow[];
+    return rows.map(toGeneratedImage);
+  }
+
+  readGeneratedImage(imageId: string): { image: GeneratedImage; bytes: Buffer } | null {
+    const row = this.db.prepare('SELECT * FROM generated_images WHERE id = ?').get(imageId) as
+      (GeneratedImageRow & { bytes: Buffer }) | undefined;
+    if (row === undefined) return null;
+    return { image: toGeneratedImage(row), bytes: row.bytes };
   }
 
   interruptActiveTurns(): number {

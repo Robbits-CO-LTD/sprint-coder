@@ -151,6 +151,17 @@ export type TurnDiffEntry = {
 
 export type TurnDiff = { turnId: string; entries: TurnDiffEntry[] };
 
+/** An image a Runtime generated, after Main took custody of it (issue #11). Bytes are fetched
+ * separately via `images.read` so a Turn snapshot never carries base64. */
+export type GeneratedImage = {
+  id: string;
+  taskId: string;
+  turnId: string;
+  mimeType: 'image/png';
+  byteLength: number;
+  createdAt: string;
+};
+
 export type TurnEvent =
   | { type: 'turn.accepted'; taskId: string; turnId: string; seq: number; userMessage: ChatMessage }
   | { type: 'stage.changed'; taskId: string; turnId: string; seq: number; stage: TurnStage }
@@ -233,7 +244,14 @@ export type TurnEvent =
       fragmentId: string;
     }
   | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
-  | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage };
+  | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage }
+  | {
+      type: 'image.generated';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      image: GeneratedImage;
+    };
 
 export type TurnSnapshot = {
   lastSeq: number;
@@ -392,6 +410,10 @@ export interface SprintCoderApi {
   };
   /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
    * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
+  images: {
+    list(taskId: string): Promise<GeneratedImage[]>;
+    read(imageId: string): Promise<{ id: string; mimeType: 'image/png'; base64: string }>;
+  };
   settings: {
     getRuntime(): Promise<{
       kind: RuntimeKind;

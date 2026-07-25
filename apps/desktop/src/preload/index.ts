@@ -23,6 +23,9 @@ import {
   runtimeEffortSetInputSchema,
   runtimeSetInputSchema,
   runtimeSettingsSchema,
+  generatedImageSchema,
+  generatedImageBytesSchema,
+  generatedImageRefSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -184,6 +187,16 @@ const api: SprintCoderApi = {
     select: (taskId) =>
       invoke(IPC_CHANNELS.workspaceSelect, taskIdPayloadSchema, workspaceSelectionSchema, {
         taskId,
+      }),
+  },
+  images: {
+    list: (taskId) =>
+      invoke(IPC_CHANNELS.imagesList, taskIdPayloadSchema, z.array(generatedImageSchema), {
+        taskId,
+      }),
+    read: (imageId) =>
+      invoke(IPC_CHANNELS.imagesRead, generatedImageRefSchema, generatedImageBytesSchema, {
+        imageId,
       }),
   },
   settings: {
