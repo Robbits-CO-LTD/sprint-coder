@@ -40,7 +40,9 @@ jobs:
         run: node node_modules/electron/install.js
 
       - name: Verify Electron binary
-        run: node node_modules/electron/cli.js --version
+        run: node node_modules/electron/cli.js -p "process.versions.electron"
+        env:
+          ELECTRON_RUN_AS_NODE: '1'
 
       - name: Typecheck
         run: npm run typecheck
