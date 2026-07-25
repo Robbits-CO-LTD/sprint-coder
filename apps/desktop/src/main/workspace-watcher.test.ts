@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { join, resolve } from 'node:path';
 import { isWatchable } from './workspace-watcher';
 
-const root = '/tmp/ws';
+const root = resolve('sprint-coder-watchable-workspace');
 
 describe('isWatchable (issue #39)', () => {
   it('accepts an ordinary source file', () => {
@@ -38,11 +39,11 @@ describe('isWatchable (issue #39)', () => {
 
   it('rejects a path that escapes the Workspace', () => {
     expect(isWatchable(root, '../outside.txt')).toBe(false);
-    expect(isWatchable('/tmp/ws', '/tmp/elsewhere/a.ts')).toBe(false);
+    expect(isWatchable(root, resolve('sprint-coder-watchable-elsewhere/a.ts'))).toBe(false);
   });
 
   it('accepts an absolute path that is genuinely inside, which some platforms report', () => {
-    expect(isWatchable('/tmp/ws', '/tmp/ws/src/a.ts')).toBe(true);
+    expect(isWatchable(root, join(root, 'src', 'a.ts'))).toBe(true);
   });
 
   it('rejects an empty or absurdly long path', () => {

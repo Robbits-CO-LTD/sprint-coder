@@ -50,7 +50,8 @@ export function relativizeWorkspacePath(
   if (target === root) return null;
   const rel = relative(root, target);
   if (rel === '' || rel.startsWith('..') || isAbsoluteLike(rel)) return null;
-  return rel.length > 1024 ? null : rel;
+  const portable = rel.replaceAll('\\', '/');
+  return portable.length > 1024 ? null : portable;
 }
 
 function isAbsoluteLike(path: string): boolean {
