@@ -3,6 +3,7 @@ import type { KeyboardEvent } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
 import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square } from '../icons';
+import { RUNTIME_LABEL } from '../../lib/runtime-labels';
 import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
 const STEER_UNSUPPORTED_HINT =
@@ -211,12 +212,6 @@ export function Composer({ taskId }: { taskId: string }) {
     </div>
   );
 }
-
-const RUNTIME_LABEL: Record<RuntimeKind, string> = {
-  mock: 'Mock Runtime',
-  codex: 'Codex',
-  claude: 'Claude Code',
-};
 
 const RUNTIME_DESC: Record<RuntimeKind, string> = {
   mock: '決定論的ローカル応答',

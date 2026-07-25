@@ -21,6 +21,7 @@ import {
   type ContextUsage,
   type QueuedInput,
   type RuntimeKind,
+  type DatabaseRecovery,
   type TaskSummary,
   type TeamBudgetStatus,
   type TeamUsageTotals,
@@ -2165,6 +2166,7 @@ export interface PersistenceClient {
     requestHash: string,
   ): { found: boolean; value?: T };
   interruptActiveTurns(): number;
+  getStartupRecovery(): DatabaseRecovery;
   close(): void;
 }
 
@@ -2238,6 +2240,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private readonly contextLedger: ContextLedger;
   private nativeMutationAuthorityDisabled = false;
   readonly recoveryReport: DatabaseRecoveryReport;
+  private startupInterruptedTurns = 0;
 
   constructor(
     databasePath: string,
@@ -5109,9 +5112,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
   initializeMutationRecovery(holderInstanceId: string, now: string): readonly MutationQuarantine[] {
     return this.db.transaction(() => {
       const quarantines = this.quarantineStartupMutations(holderInstanceId, now);
-      this.interruptActiveTurns();
+      // Retained rather than discarded: the count is the only evidence a user has that a Turn they
+      // left running was reaped by a crash, and the SurfaceFooter reports it (issue #9).
+      this.startupInterruptedTurns = this.interruptActiveTurns();
       return quarantines;
     })();
+  }
+
+  /**
+   * What this launch's recovery pass did. Combines the pre-open corruption probe with the
+   * interrupted-turn sweep, which run at different points and were previously both unreported.
+   *
+   * Zero/false across the board is the normal case; the footer stays quiet for it.
+   */
+  getStartupRecovery(): DatabaseRecovery {
+    return {
+      corruptionDetected: this.recoveryReport.corruptionDetected,
+      restoredFromBackup: this.recoveryReport.restoredFromBackup,
+      freshStart: this.recoveryReport.freshStart,
+      interruptedTurns: this.startupInterruptedTurns,
+    };
   }
 
   clearMutationQuarantine(workspaceKey: string, expectedFence: number, now: string): void {

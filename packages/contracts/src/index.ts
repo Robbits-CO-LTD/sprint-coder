@@ -888,7 +888,56 @@ export const turnSubscriptionInputSchema = z
     afterSeq: z.number().int().nonnegative().optional(),
   })
   .strict();
-export const appInfoSchema = z.object({ version: z.string(), platform: z.string() }).strict();
+/**
+ * What the startup database probe did, so the SurfaceFooter can say so (issue #9).
+ *
+ * The persistence layer has always produced this — `recoverDatabaseIfCorrupt` moves a corrupt file
+ * aside and restores the pre-migration backup, and `interruptActiveTurns` finalises turns that were
+ * mid-flight when the app died — but nothing ever reached the renderer, so a user whose database was
+ * restored or whose in-flight Turn was reaped had no way to know.
+ *
+ * Carried on `app.getInfo()` rather than as an event: it is a fact about this launch, established
+ * before the window exists, and read once.
+ */
+export const databaseRecoverySchema = z
+  .object({
+    corruptionDetected: z.boolean(),
+    restoredFromBackup: z.boolean(),
+    freshStart: z.boolean(),
+    /** Turns finalised as `interrupted` because the app exited while they were running. */
+    interruptedTurns: z.number().int().nonnegative(),
+  })
+  .strict();
+export type DatabaseRecovery = z.infer<typeof databaseRecoverySchema>;
+
+export const appInfoSchema = z
+  .object({ version: z.string(), platform: z.string(), recovery: databaseRecoverySchema })
+  .strict();
+
+/**
+ * Liveness of the Runtime process, for the SurfaceFooter's connection indicator (issue #9).
+ *
+ * Deliberately NOT a TurnEvent. Every TurnEvent is appended to `turn_events` and replayed on
+ * re-subscribe, and "the CLI died" is a transient property of the current process, not a fact about
+ * the conversation's history — replaying it would resurrect a stale failure every time a Task is
+ * reopened. Pushed on its own non-persisted channel instead.
+ *
+ * `failed` carries the reason, which `handleRuntimeFailure` previously discarded: the renderer could
+ * see a Turn end in `failed` but never why, so it could not distinguish "the model refused" from
+ * "the CLI is gone".
+ */
+export const runtimeConnectionStateSchema = z.enum(['idle', 'running', 'failed']);
+export type RuntimeConnectionState = z.infer<typeof runtimeConnectionStateSchema>;
+export const runtimeStatusSchema = z
+  .object({
+    kind: runtimeKindSchema,
+    state: runtimeConnectionStateSchema,
+    taskId: idSchema.nullable(),
+    errorCode: z.string().max(64).nullable(),
+    userMessage: z.string().max(500).nullable(),
+  })
+  .strict();
+export type RuntimeStatus = z.infer<typeof runtimeStatusSchema>;
 export const turnStartResultSchema = z.object({ turnId: idSchema }).strict();
 export const voidResultSchema = z.undefined();
 
@@ -919,6 +968,10 @@ export interface SprintCoderApi {
   workspace: {
     get(taskId: string): Promise<WorkspaceSelection>;
     select(taskId: string): Promise<WorkspaceSelection>;
+  };
+  runtime: {
+    /** Subscribes to Runtime process liveness. Returns an unsubscribe function. */
+    subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
   };
   settings: {
     getRuntime(): Promise<RuntimeSettings>;
@@ -988,6 +1041,8 @@ export const IPC_CHANNELS = {
   settingsSetRuntime: 'sprint-coder:settings:set-runtime',
   settingsSetModel: 'sprint-coder:settings:set-model',
   settingsSetEffort: 'sprint-coder:settings:set-effort',
+  /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */
+  runtimeStatusEvent: 'sprint-coder:runtime:status',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

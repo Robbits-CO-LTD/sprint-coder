@@ -33,6 +33,7 @@ import {
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
   runtimeSettingsSchema,
+  runtimeStatusSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -245,6 +246,9 @@ export class IpcRouter {
     this.handle(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, () => ({
       version: app.getVersion(),
       platform: process.platform,
+      // Startup recovery outcome (issue #9). Already computed before the window existed — this is
+      // just the first path that ever carried it to the renderer.
+      recovery: this.persistence.getStartupRecovery(),
     }));
     this.handle(
       IPC_CHANNELS.settingsGetRuntime,
@@ -886,7 +890,18 @@ export class IpcRouter {
   }
 
   private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {
+    const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
+    // Back to idle on a clean finish. A failure already pushed its own `failed` status with the
+    // reason attached (see handleRuntimeFailure), and must not be overwritten by an idle here.
+    if (kind !== undefined && state === 'completed')
+      this.pushRuntimeStatus({
+        kind,
+        state: 'idle',
+        taskId,
+        errorCode: null,
+        userMessage: null,
+      });
     this.teamMcpBridge.unregister(turnId);
     const event = this.persistence.completeTurn(taskId, turnId, state);
     const resolvedModel = this.resolvedModelByTurn.get(turnId);
@@ -1067,6 +1082,13 @@ export class IpcRouter {
   }
 
   private startSelectedRuntime(started: StartedTurn): void {
+    this.pushRuntimeStatus({
+      kind: started.runtimeKind,
+      state: 'running',
+      taskId: started.event.taskId,
+      errorCode: null,
+      userMessage: null,
+    });
     const taskId = started.event.taskId;
     let kind = started.runtimeKind;
     // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Claude Leader drives team_* tools itself over
@@ -1221,12 +1243,41 @@ export class IpcRouter {
     kind: 'codex' | 'claude',
     taskId: string,
     turnId: string,
-    _error: PublicError,
+    error: PublicError,
   ): void {
     void this.mailbox.run(taskId, () => {
       if (this.turnRuntimes.get(turnId) !== kind) return;
+      // The reason used to be dropped here, so the renderer saw a Turn end in `failed` with no way
+      // to tell "the model refused" from "the CLI is gone" (issue #9). Pushed on the transient
+      // status channel rather than folded into the persisted Turn event.
+      this.pushRuntimeStatus({
+        kind,
+        state: 'failed',
+        taskId,
+        errorCode: error.code,
+        userMessage: error.userMessage,
+      });
       this.finishAndAdvance(taskId, turnId, 'failed');
     });
+  }
+
+  /**
+   * Sends Runtime liveness to the renderer. Best-effort and non-persisted: a dropped status only
+   * costs a stale footer line until the next transition, whereas persisting it would replay a
+   * long-dead failure every time the Task is reopened.
+   */
+  private pushRuntimeStatus(status: {
+    kind: RuntimeKind;
+    state: 'idle' | 'running' | 'failed';
+    taskId: string | null;
+    errorCode: string | null;
+    userMessage: string | null;
+  }): void {
+    if (this.window.isDestroyed()) return;
+    this.window.webContents.send(
+      IPC_CHANNELS.runtimeStatusEvent,
+      runtimeStatusSchema.parse(status),
+    );
   }
 
   private validateSender(event: InvokeEvent): void {
