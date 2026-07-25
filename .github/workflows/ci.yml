@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Electron node-gyp revision in the lockfile supports Visual Studio
+        # through 2022. GitHub moved windows-latest to Visual Studio 2026, so
+        # keep this job on the supported image until that dependency is updated.
+        os: [macos-latest, windows-2022, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Electron 43 downloads its platform binary on first use instead of from
+      # an npm install script. Install it once before Vitest workers can race to
+      # extract the same archive into node_modules/electron/dist.
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Verify Electron binary
+        run: node node_modules/electron/cli.js --version
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      # Rebuilds better-sqlite3 against this project's Electron ABI. Ordered
+      # before test to catch native-module/Electron ABI regressions early.
+      - name: Rebuild native modules for Electron ABI
+        working-directory: apps/desktop
+        run: npx --yes @electron/rebuild -f -w better-sqlite3
+
+      - name: Build NativeSafeFs for Electron ABI
+        run: npm run build:native-safe-fs
+
+      - name: Test
+        run: npm run test
+
+      - name: Package smoke
+        working-directory: apps/desktop
+        run: npx electron-forge package
