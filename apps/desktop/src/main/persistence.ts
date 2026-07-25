@@ -1927,6 +1927,8 @@ export interface PersistenceClient {
   setModel(model: string): void;
   getEffort(): ClaudeEffort;
   setEffort(effort: ClaudeEffort): void;
+  getCodexEffort(): string;
+  setCodexEffort(effort: string): void;
   getPermissionPolicy(taskId: string): PermissionPolicyRecord;
   setAccessPreset(
     taskId: string,
@@ -2199,7 +2201,33 @@ function modelSettingsKey(kind: RuntimeKind): string {
   return kind === 'claude' ? 'runtime.claude.model' : 'runtime.codex.model';
 }
 
-const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+/**
+ * Claude catalog ids that were retired, mapped to their replacement.
+ *
+ * `opus` used to be the id for the top Claude tier. It resolves to claude-opus-4-8 on CLI
+ * 2.1.218, so the curated catalog now pins `claude-opus-5` explicitly (see the probe log in
+ * runtime-host/claude-adapter.ts). Remapping on read is what makes an existing preference follow:
+ * ipc.ts's settings read already falls back to 'auto' for an id that is no longer in the catalog,
+ * but that only corrects what the picker *displays* — `startTurnInTransaction` reads `getModel()`
+ * directly, so without this the UI would say "Auto" while the run still passed `--model opus` and
+ * got claude-opus-4-8.
+ *
+ * Keyed by Runtime kind because the settings row is shared between Codex and mock; an `opus` id
+ * only ever means the Claude alias.
+ */
+const RETIRED_MODEL_IDS: Readonly<Partial<Record<RuntimeKind, Readonly<Record<string, string>>>>> =
+  {
+    claude: { opus: 'claude-opus-5' },
+  };
+
+const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultracode',
+];
 function isClaudeEffort(value: string | undefined): value is ClaudeEffort {
   return value !== undefined && (CLAUDE_EFFORT_VALUES as readonly string[]).includes(value);
 }
@@ -3456,10 +3484,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   // Codex and Claude does not clobber the other's remembered preference. 'mock' has no model
   // concept and shares Codex's key, matching pre-Claude behavior exactly.
   getModel(): string {
+    const kind = this.getRuntime();
     const row = this.db
       .prepare('SELECT value FROM settings WHERE key = ?')
-      .get(modelSettingsKey(this.getRuntime())) as { value: string } | undefined;
-    return row?.value ?? 'auto';
+      .get(modelSettingsKey(kind)) as { value: string } | undefined;
+    const stored = row?.value ?? 'auto';
+    return RETIRED_MODEL_IDS[kind]?.[stored] ?? stored;
   }
 
   setModel(model: string): void {
@@ -3486,6 +3516,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare(
         `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.claude.effort', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(effort, new Date().toISOString());
+  }
+
+  // Codex reasoning level, under its own key so switching Runtime does not clobber the Claude
+  // preference (issue #6). Deliberately NOT validated against a fixed enum here: the valid set is
+  // per-model and published by the CLI in models_cache.json, so this layer stores whatever was
+  // chosen and the settings read clamps it to the currently selected model's advertised set. An
+  // empty string means "no override" — the correct state for the `auto` model sentinel.
+  getCodexEffort(): string {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'runtime.codex.effort'")
+      .get() as { value: string } | undefined;
+    const stored = row?.value ?? '';
+    return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(stored) ? stored : '';
+  }
+
+  setCodexEffort(effort: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.codex.effort', ?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(effort, new Date().toISOString());

@@ -332,10 +332,16 @@ describe('public contracts', () => {
           },
         ],
         effort: 'medium',
+        codexEffort: 'high',
       }),
-    ).toMatchObject({ kind: 'codex', model: 'gpt-5.6-terra', effort: 'medium' });
+    ).toMatchObject({
+      kind: 'codex',
+      model: 'gpt-5.6-terra',
+      effort: 'medium',
+      codexEffort: 'high',
+    });
     expect(() => claudeEffortSchema.parse('bogus')).toThrow();
-    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max'])
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'])
       expect(claudeEffortSchema.parse(effort)).toBe(effort);
     expect(
       publicErrorSchema.parse({

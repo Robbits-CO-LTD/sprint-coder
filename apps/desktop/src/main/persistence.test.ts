@@ -383,6 +383,36 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('remaps a retired Claude model id so an old preference does not pin an older model', () => {
+      // issue #7: `opus` was the catalog id for the top Claude tier, but on CLI 2.1.218 that
+      // alias resolves to claude-opus-4-8, so the catalog pins claude-opus-5 explicitly. A
+      // preference stored before that change has to follow — ipc.ts's unknown-model fallback only
+      // fixes what the picker displays, while startTurn reads getModel() straight through.
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('claude');
+      persistence.setModel('opus');
+      expect(persistence.getModel()).toBe('claude-opus-5');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getModel()).toBe('claude-opus-5');
+      const task = reopened.createTask();
+      expect(reopened.startTurn(task.id, 'run on the top tier')).toMatchObject({
+        runtimeKind: 'claude',
+        model: 'claude-opus-5',
+      });
+      reopened.close();
+    });
+
+    it('leaves a Codex model named like a retired Claude id alone', () => {
+      // The settings row is shared between Codex and mock, so the remap has to be kind-scoped.
+      const { persistence } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('opus');
+      expect(persistence.getModel()).toBe('opus');
+      persistence.close();
+    });
+
     it('defaults to medium and persists the selected Claude effort across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getEffort()).toBe('medium');
@@ -391,6 +421,29 @@ if (runsWithElectronAbi)
 
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.getEffort()).toBe('high');
+      reopened.close();
+    });
+
+    it('keeps the Codex effort under its own key so the two providers do not clobber each other', () => {
+      // issue #6: Claude's effort is a fixed enum, Codex's is per-model and includes values Claude
+      // has never heard of (and vice versa: `ultracode`). Sharing one key would mean switching
+      // Runtime silently rewrote the other provider's preference into a value it cannot use.
+      const { persistence, path } = createPersistence();
+      expect(persistence.getCodexEffort()).toBe('');
+      persistence.setEffort('xhigh');
+      persistence.setCodexEffort('ultra');
+      expect(persistence.getEffort()).toBe('xhigh');
+      expect(persistence.getCodexEffort()).toBe('ultra');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getEffort()).toBe('xhigh');
+      expect(reopened.getCodexEffort()).toBe('ultra');
+      // Deliberately not validated against a fixed enum here — the authority is the CLI's
+      // per-model cache, and the settings read clamps. But a value that could not be a level id at
+      // all is treated as absent rather than handed to the CLI.
+      reopened.setCodexEffort('not a level');
+      expect(reopened.getCodexEffort()).toBe('');
       reopened.close();
     });
 

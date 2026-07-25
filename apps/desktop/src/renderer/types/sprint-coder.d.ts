@@ -256,8 +256,16 @@ export type SprintCoderErrorCode =
   'TURN_ACTIVE' | 'STEER_STALE' | 'RUNTIME_UNAVAILABLE' | 'STEER_UNSUPPORTED' | string;
 
 export type RuntimeKind = 'mock' | 'codex' | 'claude';
-export type CodexModelOption = { id: string; displayName: string; description: string };
-export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type EffortOption = { id: string; description: string };
+export type CodexModelOption = {
+  id: string;
+  displayName: string;
+  description: string;
+  /** Reasoning levels this model advertises (Codex only; see contracts' effortOptionSchema). */
+  efforts?: EffortOption[];
+  defaultEffort?: string;
+};
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultracode';
 export type AccessPreset = 'ask' | 'auto' | 'full';
 export type PermissionSettings = { preset: AccessPreset; policyEpoch: number };
 export type TeamSummary = {
@@ -403,10 +411,14 @@ export interface SprintCoderApi {
       model: string;
       models: CodexModelOption[];
       effort: ClaudeEffort;
+      /** Codex reasoning level, already clamped by Main to the selected model's advertised set.
+       * '' means no override (the `auto` model sentinel, or a model publishing no set). */
+      codexEffort: string;
     }>;
     setRuntime(kind: RuntimeKind): Promise<void>;
     setModel(model: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
+    setCodexEffort(effort: string): Promise<void>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
