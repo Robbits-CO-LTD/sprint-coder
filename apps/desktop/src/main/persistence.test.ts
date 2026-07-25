@@ -302,6 +302,36 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('remaps a retired Claude model id so an old preference does not pin an older model', () => {
+      // issue #7: `opus` was the catalog id for the top Claude tier, but on CLI 2.1.218 that
+      // alias resolves to claude-opus-4-8, so the catalog pins claude-opus-5 explicitly. A
+      // preference stored before that change has to follow — ipc.ts's unknown-model fallback only
+      // fixes what the picker displays, while startTurn reads getModel() straight through.
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('claude');
+      persistence.setModel('opus');
+      expect(persistence.getModel()).toBe('claude-opus-5');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getModel()).toBe('claude-opus-5');
+      const task = reopened.createTask();
+      expect(reopened.startTurn(task.id, 'run on the top tier')).toMatchObject({
+        runtimeKind: 'claude',
+        model: 'claude-opus-5',
+      });
+      reopened.close();
+    });
+
+    it('leaves a Codex model named like a retired Claude id alone', () => {
+      // The settings row is shared between Codex and mock, so the remap has to be kind-scoped.
+      const { persistence } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('opus');
+      expect(persistence.getModel()).toBe('opus');
+      persistence.close();
+    });
+
     it('defaults to medium and persists the selected Claude effort across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getEffort()).toBe('medium');
