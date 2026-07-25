@@ -166,6 +166,19 @@ export type GeneratedImage = {
  * that resolves outside the Workspace root rather than passing it here. */
 export type FileChange = { path: string; kind: 'add' | 'update' | 'delete' };
 export type FileChangeRecord = { seq: number; turnId: string; changes: FileChange[] };
+/** A file read in full for editing, or a refusal with its reason (issue #43). */
+export type FileOpenResult = {
+  path: string;
+  text: string;
+  digest: string;
+  editable: boolean;
+  reason: 'too_large' | 'binary' | 'not_a_file' | 'outside_workspace' | null;
+};
+export type FileSaveResult = {
+  outcome: 'saved' | 'conflict' | 'refused';
+  digest: string | null;
+  reason: 'too_large' | 'binary' | 'not_a_file' | 'outside_workspace' | 'io_error' | null;
+};
 /** A file's body as a Runtime writes it (issue #39). Pushed, never persisted — see contracts'
  * fileEditFrameSchema. `text` is the whole body so far, already secret-redacted by Main. */
 export type FileEditFrame = {
@@ -272,6 +285,7 @@ export type TurnEvent =
       seq: number;
       image: GeneratedImage;
     }
+  | { type: 'file.saved'; taskId: string; seq: number; path: string; byteLength: number }
   | {
       type: 'files.changed';
       taskId: string;
@@ -483,6 +497,13 @@ export interface SprintCoderApi {
   };
   files: {
     list(taskId: string): Promise<FileChangeRecord[]>;
+    open(taskId: string, path: string): Promise<FileOpenResult>;
+    save(input: {
+      taskId: string;
+      path: string;
+      text: string;
+      baseDigest: string;
+    }): Promise<FileSaveResult>;
   };
   images: {
     list(taskId: string): Promise<GeneratedImage[]>;

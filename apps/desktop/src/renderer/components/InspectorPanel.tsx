@@ -26,11 +26,14 @@ export function InspectorPanel({
   onCycle,
   onHide,
   overlay,
+  onDirtyChange,
 }: {
   state: InspectorState;
   onCycle: () => void;
   onHide: () => void;
   overlay: boolean;
+  /** Raised when the editor holds unsaved changes, so the shell can warn before losing them. */
+  onDirtyChange: (dirty: boolean) => void;
 }) {
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const turn = useAppStore((s) => s.turnByTask[selectedTaskId ?? '']);
@@ -120,7 +123,12 @@ export function InspectorPanel({
           <span className="insp-label">編集中のファイル</span>
           {/* The live body sits above the list: while a Turn is writing, the contents are what the
               user is watching, and the list of what has already landed is the summary beneath it. */}
-          <LiveFileEditView />
+          <LiveFileEditView
+            taskId={selectedTaskId}
+            // Editing only at the widest step (issue #43).
+            editable={state === 'wide'}
+            onDirtyChange={onDirtyChange}
+          />
           {writable ? (
             recent.length === 0 ? (
               <p className="insp-disconnected" data-testid="inspector-stream-empty">

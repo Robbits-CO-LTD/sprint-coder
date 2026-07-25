@@ -131,6 +131,11 @@ type AppState = {
   /** The Task whose live file bodies are currently buffered (issue #39). The bodies themselves live
    * in lib/file-edit-buffer.ts; this is only the signal that there is something to show. */
   liveEditTaskId: string | null;
+  /** The in-place editor holds unsaved changes (issue #43). Kept in the store rather than local to
+   * the editor because the shell has to know before it discards the view — switching Task or closing
+   * the window would otherwise lose the user's typing without a word. */
+  editorDirty: boolean;
+  setEditorDirty: (dirty: boolean) => void;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
   teamByTask: Record<string, TeamDetail | null | undefined>;
@@ -578,6 +583,13 @@ function handleTurnEvent(
       }));
       break;
     }
+    case 'file.saved': {
+      // The user's own save (issue #43). Deliberately NOT merged into fileChangesByTask: that list is
+      // what the Runtime did, and the Inspector reads it as such. Nothing in the store needs the
+      // path today — the case exists so the event is handled rather than silently dropped, and so a
+      // future audit view has an obvious place to hook in.
+      break;
+    }
     case 'files.changed': {
       apply((state) => {
         const existing = state.fileChangesByTask[taskId] ?? [];
@@ -638,6 +650,7 @@ export const useAppStore = create<AppState>((set, get) => {
     imagesByTask: {},
     fileChangesByTask: {},
     liveEditTaskId: null,
+    editorDirty: false,
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     teamByTask: {},
@@ -894,12 +907,18 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    setEditorDirty(dirty: boolean) {
+      set((state) => (state.editorDirty === dirty ? {} : { editorDirty: dirty }));
+    },
+
     async selectTask(taskId: string) {
       // Live bodies belong to the Task that produced them; carrying them across a switch would show
       // one Task's file under another's name (issue #39).
       if (get().selectedTaskId !== taskId) {
         clearFileEdits();
-        set({ liveEditTaskId: null });
+        // The editor is unmounted by the switch, so whatever it was holding is gone; the guard that
+        // asks the user happens before this is ever called (see Sidebar).
+        set({ liveEditTaskId: null, editorDirty: false });
       }
       set({ selectedTaskId: taskId, loadingMessages: true, error: null });
       if (currentUnsubscribe) {

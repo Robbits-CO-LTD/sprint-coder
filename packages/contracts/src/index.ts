@@ -524,6 +524,59 @@ export const fileEditFrameSchema = z
   })
   .strict();
 export type FileEditFrame = z.infer<typeof fileEditFrameSchema>;
+
+/**
+ * A file opened for editing by the user (issue #43).
+ *
+ * Separate from `fileEditFrameSchema` on purpose. That one carries a *tail* — capped at 262KB
+ * because it exists to be watched, not kept — and saving an edited tail back would overwrite the
+ * file with its own last 262KB, silently truncating the front. So editing needs its own read that
+ * either returns the whole file or refuses.
+ *
+ * `digest` is what makes a save safe: the renderer sends it back, and Main writes only if the file on
+ * disk still hashes to it. That catches the Runtime rewriting the same file mid-edit and any other
+ * process touching it.
+ */
+export const fileOpenResultSchema = z
+  .object({
+    path: z.string().min(1).max(1024),
+    /** The complete file, present only when `editable` is true. */
+    text: z.string().max(2_097_152),
+    /** sha256 of the bytes on disk at the moment of reading. */
+    digest: digestSchema,
+    editable: z.boolean(),
+    /** Why not, when `editable` is false. Shown to the user rather than a generic failure. */
+    reason: z.enum(['too_large', 'binary', 'not_a_file', 'outside_workspace']).nullable(),
+  })
+  .strict();
+export type FileOpenResult = z.infer<typeof fileOpenResultSchema>;
+
+export const fileSaveInputSchema = z
+  .object({
+    taskId: idSchema,
+    path: z.string().min(1).max(1024),
+    text: z.string().max(2_097_152),
+    /** The digest the editor started from. A mismatch means someone else wrote the file since. */
+    baseDigest: digestSchema,
+  })
+  .strict();
+
+/**
+ * `conflict` is not an error, it is the mechanism: the file changed under the editor, so the write
+ * did not happen and the user gets to decide. `refused` covers everything the app will not do at
+ * all — outside the Workspace, a symlink, not a regular file, too large.
+ */
+export const fileSaveResultSchema = z
+  .object({
+    outcome: z.enum(['saved', 'conflict', 'refused']),
+    /** The file's digest after a successful save, so the editor can keep editing without re-opening. */
+    digest: digestSchema.nullable(),
+    reason: z
+      .enum(['too_large', 'binary', 'not_a_file', 'outside_workspace', 'io_error'])
+      .nullable(),
+  })
+  .strict();
+export type FileSaveResult = z.infer<typeof fileSaveResultSchema>;
 export const generatedImageBytesSchema = z
   .object({
     id: digestSchema,
@@ -812,6 +865,21 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       resolvedModel: z.string().min(1).max(128).optional(),
     })
     .strict(),
+  // The user saved their own edit to a Workspace file (issue #43).
+  //
+  // Task-level, with no turnId, and deliberately NOT folded into `files.changed`. That event is the
+  // record of what a Runtime did; putting a human's edit in it would make the timeline claim the
+  // model wrote something it did not. Persisted, because "you changed this file from here" is a
+  // durable fact about the Task and the audit trail should survive a restart.
+  z
+    .object({
+      type: z.literal('file.saved'),
+      taskId: idSchema,
+      seq: z.number().int().positive(),
+      path: z.string().min(1).max(1024),
+      byteLength: z.number().int().nonnegative(),
+    })
+    .strict(),
   z
     .object({
       type: z.literal('queue.changed'),
@@ -1079,6 +1147,11 @@ export const taskCreateInputSchema = z
   })
   .strict();
 export const taskIdPayloadSchema = z.object({ taskId: idSchema }).strict();
+/** A Workspace-relative path within a Task. Validated as a bounded string here; whether it is
+ * actually inside the Workspace is Main's decision, not the schema's (issue #43). */
+export const filePathPayloadSchema = z
+  .object({ taskId: idSchema, path: z.string().min(1).max(1024) })
+  .strict();
 export const taskRenameInputSchema = z
   .object({ taskId: idSchema, title: z.string().trim().min(1).max(200) })
   .strict();
@@ -1243,6 +1316,15 @@ export interface SprintCoderApi {
     /** Every edit recorded for this Task, oldest first. Read on select rather than replayed through
      * the event port, which only carries events newer than the snapshot's lastSeq. */
     list(taskId: string): Promise<FileChangeRecord[]>;
+    /** Reads a file in full so it can be edited, or refuses with a reason. */
+    open(taskId: string, path: string): Promise<FileOpenResult>;
+    /** Writes the user's own edit. Refuses rather than overwriting when the file changed underneath. */
+    save(input: {
+      taskId: string;
+      path: string;
+      text: string;
+      baseDigest: string;
+    }): Promise<FileSaveResult>;
   };
   images: {
     list(taskId: string): Promise<GeneratedImage[]>;
@@ -1329,6 +1411,8 @@ export const IPC_CHANNELS = {
   runtimeStatusEvent: 'sprint-coder:runtime:status',
   imagesList: 'sprint-coder:images:list',
   filesList: 'sprint-coder:files:list',
+  filesOpen: 'sprint-coder:files:open',
+  filesSave: 'sprint-coder:files:save',
   imagesRead: 'sprint-coder:images:read',
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
   permissionsGet: 'sprint-coder:permissions:get',

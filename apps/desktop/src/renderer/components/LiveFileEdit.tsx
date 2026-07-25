@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fileEditVersion, readFileEdits, type LiveFileEdit } from '../lib/file-edit-buffer';
 import { FileDiffView } from './FileDiffView';
+import { FileEditor } from './FileEditor';
 
 // The file body as the Runtime writes it (issue #39).
 //
@@ -21,9 +22,20 @@ import { FileDiffView } from './FileDiffView';
 // reader announce every frame of a file being typed, which is the same mistake NFR-A11Y-03 forbids
 // for reasoning. The completed set of files is announced once, by the file list beneath it.
 
-export function LiveFileEditView() {
+export function LiveFileEditView({
+  taskId,
+  editable,
+  onDirtyChange,
+}: {
+  taskId: string | null;
+  /** Only at the Inspector's widest step: code cannot be edited in 380px, and offering it there
+   * would be an invitation to make a mistake in a box too small to see it (issue #43). */
+  editable: boolean;
+  onDirtyChange: (dirty: boolean) => void;
+}) {
   const [edits, setEdits] = useState<LiveFileEdit[]>(() => readFileEdits());
   const [selected, setSelected] = useState<string | null>(null);
+  const [mode, setMode] = useState<'view' | 'edit'>('view');
 
   useEffect(() => {
     let frame = 0;
@@ -84,10 +96,42 @@ export function LiveFileEditView() {
                 : '書き込み中'}
         </span>
       </div>
-      {/* The diff replaces the plain body only once the file has settled AND there is something
-          honest to compare against. Diffing a half-written file would mark every unfinished line as
-          a change, and inventing a baseline would attribute the user's own work to the model. */}
-      {active.complete && active.baseline !== null ? (
+      {editable && active.complete && taskId !== null && (
+        <div className="liveedit-modes" role="group" aria-label="表示の切り替え">
+          <button
+            type="button"
+            className={`liveedit-mode${mode === 'view' ? ' current' : ''}`}
+            data-testid="live-edit-mode-view"
+            aria-pressed={mode === 'view'}
+            onClick={() => setMode('view')}
+          >
+            差分
+          </button>
+          <button
+            type="button"
+            className={`liveedit-mode${mode === 'edit' ? ' current' : ''}`}
+            data-testid="live-edit-mode-edit"
+            aria-pressed={mode === 'edit'}
+            onClick={() => setMode('edit')}
+          >
+            編集
+          </button>
+        </div>
+      )}
+      {editable && active.complete && taskId !== null && mode === 'edit' ? (
+        // Keyed by path so switching files gets a fresh editor rather than a reused buffer holding
+        // the previous file's text.
+        <FileEditor
+          key={`${taskId}:${active.path}`}
+          taskId={taskId}
+          path={active.path}
+          onDirtyChange={onDirtyChange}
+        />
+      ) : /* The diff replaces the plain body only once the file has settled AND there is something
+             honest to compare against. Diffing a half-written file would mark every unfinished line
+             as a change, and inventing a baseline would attribute the user's own work to the
+             model. */
+      active.complete && active.baseline !== null ? (
         <FileDiffView baseline={active.baseline} text={active.text} />
       ) : (
         <>

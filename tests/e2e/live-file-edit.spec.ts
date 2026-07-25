@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
@@ -154,6 +154,88 @@ test.describe('live file edit', () => {
     await page.getByRole('tab', { name: 'parser.test.ts', exact: true }).click();
     await expect(page.getByTestId('live-edit-no-diff')).toBeVisible();
     await expect(page.getByTestId('file-diff-view')).toHaveCount(0);
+  });
+
+  test('edits and saves the file, and refuses to overwrite one that changed underneath', async () => {
+    mkdirSync(join(workspaceDir, 'src'), { recursive: true });
+    writeFileSync(join(workspaceDir, 'src/parser.ts'), 'export const ORIGINAL = 1;\n');
+
+    app = await launchApp(userDataDir);
+    const page = await firstWindow(app);
+    await openTaskWithWorkspace(app, page, workspaceDir);
+    // Editing is offered only at the widest step: code cannot be edited in 380px. The toggle cycles
+    // hidden -> panel -> wide -> rail, and openTaskWithWorkspace already advanced it to panel.
+    await page.getByTestId('inspector-toggle').click();
+    await expect(page.getByTestId('inspector-panel')).toHaveAttribute(
+      'data-inspector-state',
+      'wide',
+    );
+
+    const textarea = page.getByTestId('composer-textarea');
+    await textarea.fill('parser を書き直してください');
+    await textarea.press('Enter');
+    await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
+      timeout: 30_000,
+    });
+
+    await page.getByRole('tab', { name: 'parser.ts', exact: true }).click();
+    await page.getByTestId('live-edit-mode-edit').click();
+    const editor = page.getByTestId('file-editor');
+    await expect(editor).toBeVisible();
+    // The editor holds the file from disk, not the live view's 262KB tail — saving a tail back would
+    // overwrite the file with its own end.
+    await expect(editor).toContainText('ORIGINAL');
+    await expect(page.getByTestId('file-editor-save')).toBeDisabled();
+
+    await editor.locator('.cm-content').click();
+    await page.keyboard.type('// edited by hand\n');
+    await expect(page.getByTestId('file-editor-state')).toHaveText('未保存の変更があります');
+    await page.getByTestId('file-editor-save').click();
+    await expect(page.getByTestId('file-editor-state')).toHaveText('保存しました');
+    expect(readFileSync(join(workspaceDir, 'src/parser.ts'), 'utf8')).toContain(
+      '// edited by hand',
+    );
+
+    // Something else rewrites the file while the editor holds it. The save must refuse rather than
+    // clobber, and the file must be exactly what the other writer left.
+    await editor.locator('.cm-content').click();
+    await page.keyboard.type('// second edit\n');
+    writeFileSync(join(workspaceDir, 'src/parser.ts'), 'written by someone else\n');
+    await page.getByTestId('file-editor-save').click();
+    await expect(page.getByTestId('file-editor-conflict')).toBeVisible();
+    expect(readFileSync(join(workspaceDir, 'src/parser.ts'), 'utf8')).toBe(
+      'written by someone else\n',
+    );
+
+    // Discarding reloads what is on disk, and the buffer stops being dirty.
+    await page.getByTestId('file-editor-reload').click();
+    await expect(page.getByTestId('file-editor-conflict')).toHaveCount(0);
+    await expect(page.getByTestId('file-editor')).toContainText('written by someone else');
+    await expect(page.getByTestId('file-editor-save')).toBeDisabled();
+  });
+
+  test('does not offer editing at the narrow widths', async () => {
+    mkdirSync(join(workspaceDir, 'src'), { recursive: true });
+    writeFileSync(join(workspaceDir, 'src/parser.ts'), 'export const ORIGINAL = 1;\n');
+
+    app = await launchApp(userDataDir);
+    const page = await firstWindow(app);
+    await openTaskWithWorkspace(app, page, workspaceDir);
+
+    const textarea = page.getByTestId('composer-textarea');
+    await textarea.fill('parser を書き直してください');
+    await textarea.press('Enter');
+    await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
+      timeout: 30_000,
+    });
+    // Still at the default panel width: no edit affordance at all, rather than one that opens into a
+    // box too small to see a mistake in.
+    await expect(page.getByTestId('inspector-panel')).toHaveAttribute(
+      'data-inspector-state',
+      'panel',
+    );
+    await expect(page.getByTestId('live-edit-mode-edit')).toHaveCount(0);
+    await expect(page.getByTestId('file-editor')).toHaveCount(0);
   });
 
   test('never shows a file from outside the Workspace, or one reached through a symlink', async () => {
