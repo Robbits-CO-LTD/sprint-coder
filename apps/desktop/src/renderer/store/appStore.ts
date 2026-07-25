@@ -22,6 +22,8 @@ import type {
   TurnEvent,
   TurnStage,
 } from '../types/sprint-coder';
+import { STAGE_LABEL } from '../lib/stages';
+import { advanceStageIndex } from '../lib/turn-progress';
 import { appendReasoning, pruneReasoning } from '../lib/reasoning-buffer';
 import {
   appendCommandOutput,
@@ -35,6 +37,10 @@ export type TurnStatus =
 export type TurnRuntimeState = {
   turnId: string;
   stage: TurnStage;
+  /** Highest stage index reached, clamped so it never decreases (issue #16). `stage` alone is not
+   * enough: `waiting_approval` sits between `executing` and `synthesizing` in STAGE_ORDER, so a turn
+   * that returns to `executing` for a later tool would make a stage-derived gauge walk backwards. */
+  reachedStageIndex: number;
   status: TurnStatus;
   startedAt: number;
   streamingMessageId: string | null;
@@ -68,21 +74,9 @@ export type CommandCardState = Readonly<{
   tail: CommandTailProjection;
 }>;
 
-export const STAGE_LABEL: Record<TurnStage, string> = {
-  understanding: 'ユーザーの依頼を理解中',
-  planning: '方針を組み立て中',
-  executing: 'ファイル・コマンドを実行中',
-  synthesizing: '回答をまとめ中',
-  waiting_approval: '承認を待っています',
-};
-
-export const STAGE_ORDER: TurnStage[] = [
-  'understanding',
-  'planning',
-  'executing',
-  'waiting_approval',
-  'synthesizing',
-];
+// Re-exported so existing importers keep working; the definitions moved to lib/stages.ts to break
+// the cycle with lib/turn-progress.ts (issue #16).
+export { STAGE_LABEL, STAGE_ORDER } from '../lib/stages';
 
 function finalStateLabel(status: TurnStatus): string {
   switch (status) {
@@ -389,6 +383,7 @@ function handleTurnEvent(
             [taskId]: {
               turnId: ev.turnId,
               stage: 'understanding',
+              reachedStageIndex: 0,
               status: 'running',
               startedAt: Date.now(),
               streamingMessageId: null,
@@ -405,7 +400,14 @@ function handleTurnEvent(
         const turn = state.turnByTask[taskId];
         if (!turn || turn.turnId !== ev.turnId) return {};
         return {
-          turnByTask: { ...state.turnByTask, [taskId]: { ...turn, stage: ev.stage } },
+          turnByTask: {
+            ...state.turnByTask,
+            [taskId]: {
+              ...turn,
+              stage: ev.stage,
+              reachedStageIndex: advanceStageIndex(turn.reachedStageIndex, ev.stage),
+            },
+          },
           stageAnnouncement: STAGE_LABEL[ev.stage],
         };
       });
@@ -972,6 +974,9 @@ export const useAppStore = create<AppState>((set, get) => {
               ? {
                   turnId: activeTurn.turnId,
                   stage: activeTurn.stage,
+                  // Restored from the snapshot's stage, which is the furthest this turn is known to
+                  // have reached — earlier stage events are not replayed for a resumed turn.
+                  reachedStageIndex: advanceStageIndex(0, activeTurn.stage),
                   status: 'running',
                   startedAt: activeTurn.startedAtEpochMs,
                   streamingMessageId: activeTurn.messageId,

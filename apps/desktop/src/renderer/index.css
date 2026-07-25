@@ -2360,6 +2360,66 @@ button {
   }
 }
 
+/* ---------- Inspector panel (issue #16) ----------
+   Flex sibling of `.main`, four widths under progressive disclosure. Hidden renders nothing at all
+   rather than a zero-width element, so it cannot report a scrollWidth to an overflow check. */
+.insp-panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  padding: 12px;
+  overflow: hidden;
+  transition: width var(--t-standard) var(--ease-ui);
+  /* Isolates the width transition's reflow from the rest of the shell, which is what keeps a
+     380->560 change off the conversation column's paint path. */
+  contain: layout paint;
+}
+.insp-panel--rail {
+  width: 44px;
+  align-items: center;
+  padding: 12px 6px;
+}
+.insp-panel--panel {
+  width: 380px;
+}
+.insp-panel--wide {
+  width: 560px;
+}
+
+/* Narrow viewports (<=900px, the same breakpoint the Team List View and sidebar use): overlay
+   instead of taking width from the conversation, which at those sizes it cannot afford to. */
+.insp-panel--overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 8;
+  max-width: 100%;
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+  /* Translate, not width: no layout cost at all in the overlay form. */
+  transition: transform var(--t-spatial) var(--ease-spatial);
+}
+
+.insp-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.insp-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* ---------- Thinking pill (issue #17) ----------
    Replaces the always-expanded five-stage list. Everything FR-RUN-04 requires (elapsed, current
    stage, stop) is on one row; §4.3's stage visibility survives as the 3px bar inside the panel. */
@@ -2383,6 +2443,28 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.insp-cycle,
+.insp-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+}
+.insp-cycle:hover,
+.insp-close:hover {
+  background: rgba(255, 244, 224, 0.08);
+  color: var(--text-primary);
+}
+
+.insp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 /* ---------- SurfaceFooter (issue #9) ----------
    The fifth §4.2 element. Quiet by default: one slim row stating the connection, plus extra rows
@@ -2814,6 +2896,60 @@ button {
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+}
+.insp-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+/* Five discrete segments. No percentage fill anywhere — the Claude CLI settles no step count, so a
+   partial fill would be a number the app invented (issue #16). */
+.insp-gauge {
+  display: flex;
+  gap: 3px;
+  height: 6px;
+}
+.insp-gauge--rail {
+  flex-direction: column;
+  height: auto;
+  width: 6px;
+  flex: 1;
+  max-height: 160px;
+}
+.insp-seg {
+  flex: 1;
+  border-radius: 3px;
+  background: rgba(255, 244, 224, 0.07);
+  transition: background var(--t-spatial) var(--ease-spatial);
+}
+.insp-seg--done {
+  background: var(--text-secondary);
+}
+.insp-seg--current {
+  background: var(--accent-primary);
+}
+.insp-seg--waiting {
+  background: var(--state-warning);
+}
+.insp-seg--failed {
+  background: var(--state-danger);
+}
+.insp-seg--complete {
+  background: var(--state-success);
+}
+
+.insp-stage {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+.insp-disconnected {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
 }
 .settings-field select {
   font: inherit;
