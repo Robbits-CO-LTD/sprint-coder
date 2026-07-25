@@ -3,6 +3,7 @@ import { turnProgress } from '../lib/turn-progress';
 import { ArrowRightLeft, X } from './icons';
 import type { InspectorState } from '../lib/inspector-preference';
 import { LiveFileEditView } from './LiveFileEdit';
+import { useLiveFileEdits } from '../lib/useLiveFileEdits';
 
 const FILE_KIND_LABEL: Record<'add' | 'update' | 'delete', string> = {
   add: '新規',
@@ -38,6 +39,7 @@ export function InspectorPanel({
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const turn = useAppStore((s) => s.turnByTask[selectedTaskId ?? '']);
   const entries = useAppStore((s) => s.fileChangesByTask[selectedTaskId ?? '']);
+  const live = useLiveFileEdits();
   const permission = useAppStore((s) => s.permissionByTask[selectedTaskId ?? '']);
   const workspacePath = useAppStore((s) => s.workspaceByTask[selectedTaskId ?? '']);
   if (state === 'hidden') return null;
@@ -129,8 +131,12 @@ export function InspectorPanel({
             editable={state === 'wide'}
             onDirtyChange={onDirtyChange}
           />
+          {/* The historical list is shown only when nothing is live. During a Turn the rows above
+              already name every file with its state, and printing the same paths again — or worse,
+              saying "no files have changed yet" directly beneath two files being written, which is
+              what this did before issue #45 — is noise at best and a contradiction at worst. */}
           {writable ? (
-            recent.length === 0 ? (
+            live.length > 0 ? null : recent.length === 0 ? (
               <p className="insp-disconnected" data-testid="inspector-stream-empty">
                 このTaskではまだファイルが変更されていません。
               </p>
