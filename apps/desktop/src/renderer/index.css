@@ -2360,93 +2360,140 @@ button {
   }
 }
 
-/* ---------- Settings dialog (issue #5) ----------
+/* ---------- Composer plus menu (issue #13) ---------- */
+.composer-plus {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  padding: 0;
+}
+.composer-plus-menu {
+  min-width: 260px;
+  max-width: min(320px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow-y: auto;
+}
+.composer-plus-menu .runtime-menu-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+/* Unavailable items stay focusable (aria-disabled, not the disabled attribute) so the reason in
+   their description is reachable by keyboard and screen reader. Dim the title only — the
+   description IS the reason, and it is the line the user most needs to read. */
+.composer-plus-menu .runtime-menu-item.unavailable {
+  cursor: not-allowed;
+}
+.composer-plus-menu .runtime-menu-item.unavailable .runtime-menu-title {
+  color: var(--text-secondary);
+}
+.composer-plus-menu .runtime-menu-item.unavailable:hover {
+  background: none;
+}
+
+.goal-editor {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px 2px;
+}
+.goal-editor-label {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* ---------- Settings dialog (issue #5) ----------
    Native <dialog showModal>, so the focus trap, Escape handling, inert backdrop, and top-layer
    stacking come from the platform rather than from hand-rolled JS. Top-layer matters here: the
    dialog must not be clipped by `.team-canvas`'s `overflow: clip` when opened in Team mode. */
-.settings-dialog {
-  border: 1px solid var(--border-subtle);
-  border-radius: 14px;
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  padding: 0;
-  width: min(520px, calc(100vw - 32px));
-  max-height: min(680px, calc(100vh - 48px));
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
-}
-.settings-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.5);
-}
-.settings-dialog[open] {
-  animation: settingsIn var(--t-standard) var(--ease-ui);
-}
-@keyframes settingsIn {
-  from {
-    opacity: 0;
-    transform: translateY(8px) scale(0.985);
+  .settings-dialog {
+    border: 1px solid var(--border-subtle);
+    border-radius: 14px;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    padding: 0;
+    width: min(520px, calc(100vw - 32px));
+    max-height: min(680px, calc(100vh - 48px));
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
   }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
+  .settings-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.5);
   }
-}
+  .settings-dialog[open] {
+    animation: settingsIn var(--t-standard) var(--ease-ui);
+  }
+  @keyframes settingsIn {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
 
-.settings-body {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  padding: 18px 20px 22px;
-  overflow-y: auto;
-  max-height: inherit;
-}
+  .settings-body {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding: 18px 20px 22px;
+    overflow-y: auto;
+    max-height: inherit;
+  }
 
-.settings-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.settings-header h2 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  flex: 1;
-}
-.settings-close {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  color: var(--text-secondary);
-}
-.settings-close:hover {
-  background: rgba(255, 244, 224, 0.08);
-  color: var(--text-primary);
-}
+  .settings-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .settings-header h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    flex: 1;
+  }
+  .settings-close {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    color: var(--text-secondary);
+  }
+  .settings-close:hover {
+    background: rgba(255, 244, 224, 0.08);
+    color: var(--text-primary);
+  }
 
-.settings-note {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--text-secondary);
-}
+  .settings-note {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
 
-.settings-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border: none;
-  margin: 0;
-  padding: 0;
-  min-width: 0;
-}
-.settings-group legend,
-.settings-field-label {
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
+  .settings-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border: none;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+  }
+  .settings-group legend,
+  .settings-field-label {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+  .goal-editor .goal-input {
+    flex: 1;
+    min-width: 0;
+  }
   padding: 0;
 }
 
