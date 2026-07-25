@@ -25,7 +25,10 @@ function groupTasks(tasks: TaskSummary[], query: string) {
   };
 }
 
-export function Sidebar({ inert }: { inert?: boolean } = {}) {
+export function Sidebar({
+  inert,
+  collapsed = false,
+}: { inert?: boolean; collapsed?: boolean } = {}) {
   const tasks = useAppStore((s) => s.tasks);
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const selectTask = useAppStore((s) => s.selectTask);
@@ -55,7 +58,13 @@ export function Sidebar({ inert }: { inert?: boolean } = {}) {
   };
 
   return (
-    <nav className="sidebar" aria-label="Task履歴" inert={inert}>
+    <nav
+      className="sidebar"
+      data-testid="sidebar"
+      aria-label="Task履歴"
+      aria-hidden={collapsed || undefined}
+      inert={inert}
+    >
       <button
         type="button"
         className="sb-new"
