@@ -8,6 +8,7 @@ import type { CapturedSurfaceState } from './components/ChatSurface/SurfaceLayer
 import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
+import { SettingsDialog } from './components/SettingsDialog';
 import { Plus } from './components/icons';
 
 // Team view preference (Slice 6.1 item 4, List fallback): renderer-only, not part of the
@@ -72,6 +73,9 @@ export default function App() {
   const [teamViewPreference, setTeamViewPreferenceState] = useState<TeamViewPreference>(
     readStoredTeamViewPreference,
   );
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   // Focus restoration on full Team-mode exit (a11y fix, Phase 7 / NFR-A11Y-02): both exit paths
   // ("Chatに戻る" from the Canvas — after its reverse-FLIP tail — and from the List view) end by
@@ -208,7 +212,7 @@ export default function App() {
 
   return (
     <div className={`app-shell${chromeInert ? ' team-mode' : ''}`}>
-      <Sidebar inert={chromeInert} />
+      <Sidebar inert={chromeInert} onOpenSettings={openSettings} />
       <div className="main">
         {selectedTask ? (
           <>
@@ -255,6 +259,10 @@ export default function App() {
           onSwitchToCanvasView={switchToCanvasView}
         />
       )}
+      {/* Outside `.main` and every Team surface: <dialog showModal> renders in the browser's top
+          layer, so it is never clipped by `.team-canvas`'s `overflow: clip`, and it stays mounted
+          across the Chat<->Team morph. */}
+      <SettingsDialog open={settingsOpen} onClose={closeSettings} />
       {selectedTask && (
         <SurfaceLayer
           task={selectedTask}

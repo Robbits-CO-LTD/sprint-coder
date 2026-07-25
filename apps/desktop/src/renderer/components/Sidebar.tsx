@@ -25,7 +25,10 @@ function groupTasks(tasks: TaskSummary[], query: string) {
   };
 }
 
-export function Sidebar({ inert }: { inert?: boolean } = {}) {
+export function Sidebar({
+  inert,
+  onOpenSettings,
+}: { inert?: boolean; onOpenSettings?: (() => void) | undefined } = {}) {
   const tasks = useAppStore((s) => s.tasks);
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const selectTask = useAppStore((s) => s.selectTask);
@@ -97,7 +100,16 @@ export function Sidebar({ inert }: { inert?: boolean } = {}) {
           </>
         )}
       </div>
-      <button type="button" className="sb-footer">
+      <button
+        type="button"
+        className="sb-footer"
+        data-testid="sidebar-settings-button"
+        onClick={onOpenSettings}
+        // The button had no onClick and was not disabled either, so it looked pressable and did
+        // nothing (issue #5). If the host never wires a handler, say so rather than repeat that.
+        disabled={onOpenSettings === undefined}
+        title={onOpenSettings === undefined ? '設定は利用できません' : undefined}
+      >
         <Settings size={15} /> 設定
       </button>
     </nav>
