@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { WorkspaceChip } from './WorkspaceChip';
 import { Hexagon, LayoutGrid, List, MoreHorizontal, Target } from './icons';
-import { ACCESS_PRESET_LABEL, accessDescription, accessEnforcement } from '../lib/access-labels';
 import type { TaskSummary } from '../types/sprint-coder';
 
 export function TaskHeader({
@@ -29,9 +27,6 @@ export function TaskHeader({
   sidebarCollapsed?: boolean;
 }) {
   const renameTask = useAppStore((s) => s.renameTask);
-  const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
-  const runtimeKind = useAppStore((s) => s.runtime.kind);
-  const enforcement = accessEnforcement(accessPreset, runtimeKind);
   const teamViewOpen = useAppStore((s) => s.teamViewOpen);
   const teamBusy = useAppStore((s) => s.teamBusy);
   const [editing, setEditing] = useState(false);
@@ -122,8 +117,12 @@ export function TaskHeader({
           {task.title || '無題のTask'}
         </button>
       )}
-      <GoalChip task={task} />
-      <WorkspaceChip taskId={task.id} variant="header" />
+      {/* Workspace and Access used to sit here too (issue #47), as read-only copies of controls that
+          already live in the ContextBar directly above the composer — the header was printing the
+          same state a second time. Goal stays, because the ContextBar does NOT show it and this is
+          the only place to check it at a glance, but only once there is one: a chip that exists to
+          say 「未設定」 spends space to report an absence. */}
+      {(task.goal ?? '') !== '' && <GoalChip task={task} />}
       {onToggleInspector !== undefined && (
         <button
           type="button"
@@ -136,22 +135,6 @@ export function TaskHeader({
           <LayoutGrid size={13} /> Inspector
         </button>
       )}
-      <span
-        className="goal-chip access-chip"
-        data-testid="access-chip"
-        data-access-preset={accessPreset}
-        data-access-enforcement={enforcement}
-        title={accessDescription(accessPreset, runtimeKind)}
-      >
-        Access: {ACCESS_PRESET_LABEL[accessPreset]}
-        {/* Shown as a word, not only as a colour: this is the one place the app admits that a
-            write-capable Claude is not sandboxed by anything the app controls (issue #37). */}
-        {enforcement === 'trusted-unmanaged' && (
-          <span className="access-unmanaged" data-testid="access-unmanaged">
-            非サンドボックス
-          </span>
-        )}
-      </span>
       <button
         type="button"
         className="team-btn"
@@ -183,19 +166,18 @@ export function TaskHeader({
 // alternative, and the reason to prefer one is that a Goal is read far more often than it is
 // changed: the header is where the user *checks* it while working, and mixing an edit affordance
 // into that spot makes an accidental click mutate state they only meant to glance at.
+//
+// Rendered only when a Goal exists (issue #47). The caller decides that, so this component never has
+// to describe an absence.
 function GoalChip({ task }: { task: TaskSummary }) {
   const goal = task.goal ?? '';
   return (
     <span
       className="goal-chip"
       data-testid="task-goal-chip"
-      title={
-        goal === ''
-          ? 'ComposerのプラスボタンからGoalを設定できます'
-          : `Goal: ${goal}（Composerのプラスボタンから変更できます）`
-      }
+      title={`Goal: ${goal}（Composerのプラスボタンから変更できます）`}
     >
-      <Target size={13} /> Goal: {goal === '' ? '未設定' : goal}
+      <Target size={13} /> {goal}
     </span>
   );
 }

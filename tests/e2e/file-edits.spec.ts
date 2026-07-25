@@ -54,7 +54,10 @@ test.describe('file edits', () => {
     await selectWorkspace(app, page, workspaceDir);
     // Workspace present, preset still `ask` (the default): now the preset is the reason.
     await expect(page.getByTestId('inspector-stream-disconnected')).toContainText('確認する');
-    await expect(page.getByTestId('access-chip')).toHaveAttribute('data-access-preset', 'ask');
+    // The Access control lives in the ContextBar; the header's read-only copy was removed as a
+    // duplicate (issue #47), and the sandbox disclosure moved with the control rather than being
+    // dropped.
+    await expect(page.getByTestId('access-selector')).toHaveAttribute('data-access-preset', 'ask');
     await expect(page.getByTestId('access-unmanaged')).toHaveCount(0);
 
     const textarea = page.getByTestId('composer-textarea');

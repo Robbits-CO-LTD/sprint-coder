@@ -81,7 +81,9 @@ test.describe('composer plus menu', () => {
 
   test('sets a Goal from the menu, and the header reflects it', async () => {
     await withApp('composer-plus-goal', async (page) => {
-      await expect(page.getByTestId('task-goal-chip')).toContainText('未設定');
+      // No chip at all before a Goal exists (issue #47): one that says 「未設定」 spends header space
+      // to report an absence.
+      await expect(page.getByTestId('task-goal-chip')).toHaveCount(0);
 
       await page.getByTestId('composer-plus').click();
       await page.getByTestId('composer-menu-goal').click();
