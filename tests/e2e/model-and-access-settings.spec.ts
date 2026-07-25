@@ -121,10 +121,99 @@ test.describe('claude model clarity and effort settings', () => {
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('effort-selector')).toHaveAttribute('aria-expanded', 'false');
 
-    // Switching to mock disables the effort selector again (Claude-only control) without losing
+    // Switching to mock disables the effort selector (mock has no effort concept) without losing
     // the persisted preference.
     await page.getByTestId('runtime-selector').click();
     await page.getByTestId('runtime-option-mock').click();
     await expect(page.getByTestId('effort-selector')).toBeDisabled();
+  });
+});
+
+test.describe('codex per-model effort settings', () => {
+  // Own describe block + userDataDir for the same reason as the Claude suite above.
+  let userDataDir: string;
+  let app: ElectronApplication | null = null;
+
+  test.beforeAll(() => {
+    userDataDir = createUserDataDir('codex-effort-settings');
+  });
+
+  test.afterAll(async () => {
+    await closeApp(app);
+    removeUserDataDir(userDataDir);
+  });
+
+  // issue #6: Codex's reasoning levels come from the selected model's own
+  // `supported_reasoning_levels` in models_cache.json, not a fixed list — so what this asserts is
+  // the *rule*, not a specific level set, which differs per install and per CLI version.
+  test('offers the selected model own levels, and nothing at all for Auto', async () => {
+    app = await launchApp(userDataDir);
+    let page: Page = await firstWindow(app);
+    if ((await page.getByTestId('runtime-selector').count()) === 0)
+      await page.getByTestId('empty-state-create-task-button').click();
+
+    await page.getByTestId('runtime-selector').click();
+    const codexOption = page.getByTestId('runtime-option-codex');
+    await expect(codexOption).toBeEnabled();
+    await codexOption.click();
+    await expect(page.getByTestId('runtime-selector')).toHaveText('Codex');
+
+    // Auto is the default model: the CLI resolves the concrete model itself, so there is no
+    // advertised level set to choose from and the chip stays disabled with that as its reason.
+    await expect(page.getByTestId('model-selector')).toHaveText('Auto');
+    const effortChip = page.getByTestId('effort-selector');
+    await expect(effortChip).toBeDisabled();
+    await expect(effortChip).toHaveAttribute('title', /Auto以外/);
+    await expect(effortChip).toHaveText('effort: —');
+
+    // Pick a concrete model; the chip becomes usable and lists exactly what that model advertises.
+    await page.getByTestId('model-selector').click();
+    await page.getByTestId('model-option-gpt-5.6-terra').click();
+    await expect(page.getByTestId('model-selector')).toHaveText('GPT-5.6-Terra');
+    await expect(effortChip).toBeEnabled();
+
+    await effortChip.click();
+    const options = page.locator('.effort-menu [role="menuitemradio"]');
+    await expect(options.first()).toBeVisible();
+    const offered = await options.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute('data-testid')),
+    );
+    // Every level the CLI advertises for this model, and descriptions taken from the CLI itself
+    // rather than invented here.
+    expect(offered).toContain('effort-option-low');
+    expect(offered).toContain('effort-option-high');
+    expect(offered.length).toBeGreaterThanOrEqual(4);
+    await expect(options.first()).not.toHaveText(/^\s*$/);
+
+    // Selecting the highest offered level persists across a restart, under its own settings key —
+    // the Claude preference set by the sibling suite lives elsewhere and is unaffected.
+    const highest = offered.at(-1);
+    if (highest === null || highest === undefined) throw new Error('no effort options offered');
+    const highestId = highest.replace('effort-option-', '');
+    await page.getByTestId(highest).click();
+    await expect(effortChip).toHaveText(new RegExp(`effort: `, 'i'));
+    const labelAfterPick = await effortChip.textContent();
+
+    await closeApp(app);
+    app = await launchApp(userDataDir);
+    page = await firstWindow(app);
+    await expect(page.getByTestId('runtime-selector')).toHaveText('Codex');
+    await expect(page.getByTestId('model-selector')).toHaveText('GPT-5.6-Terra');
+    await expect(page.getByTestId('effort-selector')).toHaveText(labelAfterPick ?? '');
+
+    // Switching back to Auto drops the override rather than carrying a level the CLI cannot be
+    // promised to accept.
+    await page.getByTestId('model-selector').click();
+    await page.getByTestId('model-option-auto').click();
+    await expect(page.getByTestId('effort-selector')).toHaveText('effort: —');
+    await expect(page.getByTestId('effort-selector')).toBeDisabled();
+
+    // ...and coming back to the model restores a usable level (clamped to that model's default if
+    // the stored one is no longer advertised), never a stale value that would fail the turn.
+    await page.getByTestId('model-selector').click();
+    await page.getByTestId('model-option-gpt-5.6-terra').click();
+    await expect(page.getByTestId('effort-selector')).toBeEnabled();
+    await page.getByTestId('effort-selector').click();
+    await expect(page.getByTestId(`effort-option-${highestId}`)).toBeVisible();
   });
 });

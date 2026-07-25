@@ -313,6 +313,29 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('keeps the Codex effort under its own key so the two providers do not clobber each other', () => {
+      // issue #6: Claude's effort is a fixed enum, Codex's is per-model and includes values Claude
+      // has never heard of (and vice versa: `ultracode`). Sharing one key would mean switching
+      // Runtime silently rewrote the other provider's preference into a value it cannot use.
+      const { persistence, path } = createPersistence();
+      expect(persistence.getCodexEffort()).toBe('');
+      persistence.setEffort('xhigh');
+      persistence.setCodexEffort('ultra');
+      expect(persistence.getEffort()).toBe('xhigh');
+      expect(persistence.getCodexEffort()).toBe('ultra');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getEffort()).toBe('xhigh');
+      expect(reopened.getCodexEffort()).toBe('ultra');
+      // Deliberately not validated against a fixed enum here — the authority is the CLI's
+      // per-model cache, and the settings read clamps. But a value that could not be a level id at
+      // all is treated as absent rather than handed to the CLI.
+      reopened.setCodexEffort('not a level');
+      expect(reopened.getCodexEffort()).toBe('');
+      reopened.close();
+    });
+
     it('keeps the Claude effort setting independent of the active Runtime kind (unlike model)', () => {
       const { persistence } = createPersistence();
       persistence.setEffort('xhigh');
