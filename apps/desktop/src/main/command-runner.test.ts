@@ -151,6 +151,44 @@ describe('CommandRunner', () => {
     expect(identity).not.toBe('unavailable');
   });
 
+  // Regression (CI-only flake on ubuntu, chased down to a real data-loss bug): while a batch is
+  // awaiting a slow sink, more output can arrive. `queueText` merged that arrival into the LAST
+  // pending segment — but when that segment is already inside the in-flight batch, the batch the
+  // sink received is a value snapshot holding the OLD text while `pending` holds the longer one.
+  // The post-await `pending.splice(0, count)` then discarded the whole segment including the
+  // appended bytes, so they reached no batch at all and `pendingBytes` was decremented by only the
+  // snapshot's length.
+  //
+  // Reproduced by writing continuously (300 bytes every 10ms) against a sink that holds 300ms, so
+  // arrivals during an in-flight batch are guaranteed, and by picking a write size that does not
+  // divide maxBatchBytes so the trailing segment is reliably partial (a full trailing segment takes
+  // the push path and cannot reproduce this).
+  it('does not drop output that arrives while a batch is still in the sink', async () => {
+    const root = await workspace();
+    const writes = 100;
+    const perWrite = 300;
+    const spec = await prepareExecutionSpec({
+      workspacePath: root,
+      executable: process.execPath,
+      argv: [
+        '-e',
+        `let n=0; const t=setInterval(()=>{ process.stdout.write('x'.repeat(${perWrite})); if(++n>=${writes}) clearInterval(t); },10);`,
+      ],
+      cwd: '.',
+    });
+
+    let observed = 0;
+    const result = await new CommandRunner({ maxBatchBytes: 1024 }).run(spec, {
+      onBatch: async (batch) => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        observed += batch.reduce((total, chunk) => total + chunk.byteLength, 0);
+      },
+    });
+
+    expect(result.outputBytes).toBe(writes * perWrite);
+    expect(observed).toBe(writes * perWrite);
+  }, 30_000);
+
   it('drains tail output after process exit and applies async sink backpressure in batches', async () => {
     const root = await workspace();
     const expectedBytes = 2 * 1024 * 1024;

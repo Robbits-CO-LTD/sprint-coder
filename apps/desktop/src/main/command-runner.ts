@@ -313,7 +313,16 @@ export class CommandRunner {
     let canceled = false;
     let termination: CommandResult['termination'] = 'natural';
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
-    const pending: { stream: 'stdout' | 'stderr'; text: string; byteLength: number }[] = [];
+    // `sealed` marks a segment that has already been snapshotted into a batch handed to the sink.
+    // `queueText` must not append to such a segment: the batch holds a value copy, so a late append
+    // would be invisible to the sink yet still removed by this flush's `pending.splice`, silently
+    // losing that output (see the regression test in command-runner.test.ts).
+    const pending: {
+      stream: 'stdout' | 'stderr';
+      text: string;
+      byteLength: number;
+      sealed?: boolean;
+    }[] = [];
     const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
     const sanitizers: Record<'stdout' | 'stderr', TerminalOutputSanitizer> = {
       stdout: sanitizeTerminalOutput.createStream(),
@@ -337,9 +346,19 @@ export class CommandRunner {
       flushChain = flushChain.then(async () => {
         while (pending.length > 0 && sinkError === undefined) {
           const count = pending.length;
-          const batch = pending
-            .slice(0, count)
-            .map((segment, index) => Object.freeze({ seq: nextSeq + index, ...segment }));
+          // Seal before snapshotting: from here until the splice below these segments are in
+          // flight, and any further output must start a new segment instead of appending to one
+          // the sink has already been handed a copy of. Fields are listed explicitly rather than
+          // spread so `sealed` never leaks into the public CommandOutputChunk shape.
+          const batch = pending.slice(0, count).map((segment, index) => {
+            segment.sealed = true;
+            return Object.freeze({
+              seq: nextSeq + index,
+              stream: segment.stream,
+              text: segment.text,
+              byteLength: segment.byteLength,
+            });
+          });
           try {
             if (options.onBatch !== undefined) await options.onBatch(Object.freeze(batch));
             else if (options.onChunk !== undefined)
@@ -388,6 +407,7 @@ export class CommandRunner {
         const previous = pending.at(-1);
         if (
           previous !== undefined &&
+          previous.sealed !== true &&
           previous.stream === stream &&
           previous.byteLength + byteLength <= this.maxBatchBytes
         ) {
