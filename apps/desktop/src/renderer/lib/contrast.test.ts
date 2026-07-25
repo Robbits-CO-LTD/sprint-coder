@@ -176,6 +176,47 @@ describe('design-token contrast audit (WCAG 2.2 AA)', () => {
   });
 });
 
+// issue #17: the thinking pill's label is painted with a `background-clip: text` gradient that sweeps
+// across it, so its effective colour cycles through every stop. Asserting each stop against the
+// surface the pill sits on is what makes "readable at every phase of the sweep" a checked property
+// rather than a hope — a gradient is exactly the kind of thing that looks fine in the frame someone
+// screenshots and fails in the frames they do not.
+describe('thinking pill sheen gradient (issue #17)', () => {
+  it.each(['text-primary', 'accent-primary', 'accent-cool'] as const)(
+    'stop --%s stays readable on the card surface',
+    (stop) => {
+      const ratio = contrastRatio(tokenRgb(stop), tokenRgb('bg-surface'));
+      expect(ratio, `--${stop} on --bg-surface`).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
+    },
+  );
+
+  it('the gradient uses only tokens, so no literal can slip past this audit', () => {
+    // A hex or rgba() literal in the gradient would still render, but would be invisible to the token
+    // audit above — the assertion is on the CSS text, not on the tokens.
+    const sheen = /\.run-title\.sheen\s*\{[^}]*\}/.exec(css)?.[0] ?? '';
+    expect(sheen, '.run-title.sheen rule found').not.toBe('');
+    expect(sheen).toContain('var(--text-primary)');
+    expect(sheen).toContain('var(--accent-primary)');
+    expect(sheen).toContain('var(--accent-cool)');
+    expect(sheen).not.toMatch(/#[0-9a-fA-F]{3,8}|rgba?\(/);
+  });
+
+  it('reduced motion restores a solid, painted colour rather than only stopping the animation', () => {
+    // With `-webkit-text-fill-color: transparent` still in force, stopping the animation alone leaves
+    // the label invisible — the global 0.01ms squash is not enough on its own.
+    const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
+    const block = reduced.slice(0, reduced.indexOf('@media (forced-colors'));
+    expect(block).toContain('.run-title.sheen');
+    expect(block).toMatch(/-webkit-text-fill-color:\s*var\(--text-primary\)/);
+  });
+
+  it('forced colours paint the label with a system colour', () => {
+    const forced = css.slice(css.indexOf('@media (forced-colors: active)'));
+    expect(forced).toContain('.run-title.sheen');
+    expect(forced).toMatch(/-webkit-text-fill-color:\s*CanvasText/);
+  });
+});
+
 describe('opacity-dimmed text usages (real text, not decorative)', () => {
   // Placeholder text and de-emphasized list metadata are real, readable content (not disabled or
   // decorative) — WCAG's contrast SC still applies, even though the visual design intentionally

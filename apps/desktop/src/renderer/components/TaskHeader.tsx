@@ -1,19 +1,31 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { WorkspaceChip } from './WorkspaceChip';
-import { Hexagon, MoreHorizontal, Target } from './icons';
+import { Hexagon, LayoutGrid, List, MoreHorizontal, Target } from './icons';
 import type { TaskSummary } from '../types/sprint-coder';
 
 export function TaskHeader({
   task,
   onToggleTeam,
   inert,
+  onToggleInspector,
+  inspectorOpen = false,
+  onToggleSidebar,
+  sidebarCollapsed = false,
 }: {
   task: TaskSummary;
   /** Enters Team mode via App's morph orchestration (SurfaceLayer/TeamCanvas, Slice 6.2) instead
    * of flipping the store directly — see App.tsx's `requestEnterTeam`. */
   onToggleTeam: () => void;
   inert?: boolean;
+  /** Cycles the inspector panel's width (issue #16). Lives in the header rather than in the panel so
+   * it stays reachable while the panel is hidden. */
+  onToggleInspector?: (() => void) | undefined;
+  inspectorOpen?: boolean;
+  /** Shows/hides the Task history sidebar (issue #12). Lives here rather than inside the sidebar
+   * itself because it has to stay reachable while the sidebar is collapsed. */
+  onToggleSidebar?: (() => void) | undefined;
+  sidebarCollapsed?: boolean;
 }) {
   const renameTask = useAppStore((s) => s.renameTask);
   const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
@@ -55,6 +67,19 @@ export function TaskHeader({
 
   return (
     <header className="task-header" inert={inert}>
+      {onToggleSidebar !== undefined && (
+        <button
+          type="button"
+          className="sidebar-toggle"
+          data-testid="sidebar-toggle"
+          aria-expanded={!sidebarCollapsed}
+          aria-label={sidebarCollapsed ? 'Task履歴を開く' : 'Task履歴を閉じる'}
+          title={sidebarCollapsed ? 'Task履歴を開く' : 'Task履歴を閉じる'}
+          onClick={onToggleSidebar}
+        >
+          <List size={16} />
+        </button>
+      )}
       {editing ? (
         <input
           ref={inputRef}
@@ -96,6 +121,18 @@ export function TaskHeader({
       )}
       <GoalChip task={task} />
       <WorkspaceChip taskId={task.id} variant="header" />
+      {onToggleInspector !== undefined && (
+        <button
+          type="button"
+          className="chip-btn goal-chip"
+          data-testid="inspector-toggle"
+          aria-expanded={inspectorOpen}
+          title="実行インスペクタを開閉"
+          onClick={onToggleInspector}
+        >
+          <LayoutGrid size={13} /> Inspector
+        </button>
+      )}
       <span className="goal-chip" title="現在のAccess mode">
         Access: {accessPreset === 'ask' ? '確認する' : accessPreset === 'auto' ? '自動' : 'フル'}
       </span>
@@ -124,82 +161,25 @@ export function TaskHeader({
   );
 }
 
-// Goal chip: click → inline edit → tasks.setGoal (FR-COMP-05). Falls back to a read-only chip
-// when the backend hasn't wired setGoal yet (graceful degrade).
+// Goal chip: read-only display of the current Goal (FR-COMP-05).
+//
+// Editing moved to the Composer's plus menu (issue #13). Two entry points for one setting was the
+// alternative, and the reason to prefer one is that a Goal is read far more often than it is
+// changed: the header is where the user *checks* it while working, and mixing an edit affordance
+// into that spot makes an accidental click mutate state they only meant to glance at.
 function GoalChip({ task }: { task: TaskSummary }) {
-  const setGoal = useAppStore((s) => s.setGoal);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(task.goal ?? '');
-  const [syncedGoal, setSyncedGoal] = useState(task.goal ?? '');
-  const inputRef = useRef<HTMLInputElement>(null);
-  const supported =
-    typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
-
-  // Render-time adjustment instead of an effect, per react-hooks/set-state-in-effect.
-  if (!editing && (task.goal ?? '') !== syncedGoal) {
-    setSyncedGoal(task.goal ?? '');
-    setDraft(task.goal ?? '');
-  }
-
-  useEffect(() => {
-    if (editing) {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
-  }, [editing]);
-
-  function commit() {
-    setEditing(false);
-    const trimmed = draft.trim();
-    if (trimmed !== (task.goal ?? '')) {
-      void setGoal(task.id, trimmed);
-    }
-  }
-
-  function cancel() {
-    setEditing(false);
-    setDraft(task.goal ?? '');
-  }
-
-  if (!supported) {
-    return (
-      <span className="goal-chip" title="Goal編集は今回のバックエンドでは未対応です">
-        <Target size={13} /> Goal: {task.goal ?? '未設定'}
-      </span>
-    );
-  }
-
-  if (editing) {
-    return (
-      <input
-        ref={inputRef}
-        className="goal-input"
-        value={draft}
-        placeholder="Goalを入力"
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            commit();
-          } else if (e.key === 'Escape') {
-            e.preventDefault();
-            cancel();
-          }
-        }}
-        aria-label="Goalを編集"
-      />
-    );
-  }
-
+  const goal = task.goal ?? '';
   return (
-    <button
-      type="button"
-      className="goal-chip chip-btn"
-      onClick={() => setEditing(true)}
-      title="クリックしてGoalを編集"
+    <span
+      className="goal-chip"
+      data-testid="task-goal-chip"
+      title={
+        goal === ''
+          ? 'ComposerのプラスボタンからGoalを設定できます'
+          : `Goal: ${goal}（Composerのプラスボタンから変更できます）`
+      }
     >
-      <Target size={13} /> Goal: {task.goal ?? '未設定'}
-    </button>
+      <Target size={13} /> Goal: {goal === '' ? '未設定' : goal}
+    </span>
   );
 }

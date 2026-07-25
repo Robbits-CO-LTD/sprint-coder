@@ -25,9 +25,9 @@ describe('Claude runtime probe', () => {
   });
 
   it('passes an explicit model without changing the immutable execution profile', () => {
-    const args = buildClaudeArgs('opus');
+    const args = buildClaudeArgs('claude-opus-5');
     expect(args).toContain('--model');
-    expect(args.at(-1)).toBe('opus');
+    expect(args.at(-1)).toBe('claude-opus-5');
     expect(args).not.toContain('gpt-5.6-terra');
   });
 
@@ -36,7 +36,7 @@ describe('Claude runtime probe', () => {
   });
 
   it('passes --effort when an effort level is given, verified valid values from the installed CLI', () => {
-    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']) {
       const args = buildClaudeArgs('auto', undefined, effort);
       expect(args.at(-2)).toBe('--effort');
       expect(args.at(-1)).toBe(effort);
@@ -45,11 +45,11 @@ describe('Claude runtime probe', () => {
 
   it('never adds --effort when no effort is given (Codex/mock and pre-effort call sites unaffected)', () => {
     expect(buildClaudeArgs('auto')).not.toContain('--effort');
-    expect(buildClaudeArgs('opus')).not.toContain('--effort');
+    expect(buildClaudeArgs('claude-opus-5')).not.toContain('--effort');
   });
 
   it('always keeps the no-tools and no-MCP flags present regardless of model', () => {
-    for (const model of ['auto', 'sonnet', 'opus', 'haiku', 'claude-sonnet-5']) {
+    for (const model of ['auto', 'sonnet', 'claude-opus-5', 'haiku', 'claude-sonnet-5']) {
       const args = buildClaudeArgs(model);
       const toolsFlagIndex = args.indexOf('--tools');
       expect(toolsFlagIndex).toBeGreaterThanOrEqual(0);

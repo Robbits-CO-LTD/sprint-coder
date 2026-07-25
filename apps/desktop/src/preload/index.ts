@@ -21,8 +21,14 @@ import {
   permissionSettingsSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
+  runtimeCodexEffortSetInputSchema,
   runtimeSetInputSchema,
   runtimeSettingsSchema,
+  reasoningBatchSchema,
+  runtimeStatusSchema,
+  generatedImageSchema,
+  generatedImageBytesSchema,
+  generatedImageRefSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -186,6 +192,42 @@ const api: SprintCoderApi = {
         taskId,
       }),
   },
+  reasoning: {
+    // Push-only, and unfiltered by taskId here on purpose: the batch carries its own taskId/turnId
+    // and the store decides relevance, mirroring how the Team subscription is shaped. Unknown
+    // payloads are dropped by `safeParse` exactly as the other subscriptions do.
+    subscribe: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        const parsed = reasoningBatchSchema.safeParse(raw);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.reasoningEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.reasoningEvent, handler);
+    },
+  },
+  runtime: {
+    // Push-only channel, unlike every `invoke` here: Runtime liveness is a transient property of the
+    // current process (issue #9), so it is never persisted and never replayed. Unknown payloads are
+    // dropped by `safeParse` exactly like the Turn/Team subscriptions do.
+    subscribeStatus: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        const parsed = runtimeStatusSchema.safeParse(raw);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.runtimeStatusEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.runtimeStatusEvent, handler);
+    },
+  },
+  images: {
+    list: (taskId) =>
+      invoke(IPC_CHANNELS.imagesList, taskIdPayloadSchema, z.array(generatedImageSchema), {
+        taskId,
+      }),
+    read: (imageId) =>
+      invoke(IPC_CHANNELS.imagesRead, generatedImageRefSchema, generatedImageBytesSchema, {
+        imageId,
+      }),
+  },
   settings: {
     getRuntime: () =>
       invoke(IPC_CHANNELS.settingsGetRuntime, emptyPayloadSchema, runtimeSettingsSchema, {}),
@@ -195,6 +237,14 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.settingsSetModel, runtimeModelSetInputSchema, z.undefined(), { model }),
     setEffort: (effort) =>
       invoke(IPC_CHANNELS.settingsSetEffort, runtimeEffortSetInputSchema, z.undefined(), {
+        effort,
+      }),
+    // Separate from setEffort because the two providers do not share a value space: Claude's is a
+    // fixed enum, Codex's is whatever the selected model advertises (issue #6). Main validates the
+    // level against that model's set and rejects an unsupported one, since Codex fails the whole
+    // turn rather than falling back.
+    setCodexEffort: (effort) =>
+      invoke(IPC_CHANNELS.settingsSetCodexEffort, runtimeCodexEffortSetInputSchema, z.undefined(), {
         effort,
       }),
   },

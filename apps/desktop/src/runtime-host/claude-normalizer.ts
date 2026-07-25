@@ -61,7 +61,24 @@ export class ClaudeJsonlNormalizer {
     const event = isRecord(value['event']) ? value['event'] : null;
     if (event === null || event['type'] !== 'content_block_delta') return [];
     const delta = isRecord(event['delta']) ? event['delta'] : null;
-    if (delta === null || delta['type'] !== 'text_delta') return [];
+    if (delta === null) return [];
+
+    // Reasoning text (issue #17). `--include-partial-messages` is already on the argv
+    // (claude-adapter.ts), so no CLI flag change was needed — this was simply being dropped.
+    //
+    // Deliberately does NOT advance the stage: reasoning arrives during understanding/planning, and
+    // treating it as synthesis would jump the Run Card's stage the moment the model starts thinking.
+    if (delta['type'] === 'thinking_delta') {
+      const thinking = readString(delta, 'thinking') ?? readString(delta, 'text');
+      return thinking === null || thinking.length === 0
+        ? []
+        : [{ type: 'reasoning', text: thinking }];
+    }
+    // `signature_delta` (the thinking block's cryptographic signature) and `input_json_delta` (tool
+    // arguments) are dropped explicitly rather than by falling through: both are real deltas that
+    // carry nothing displayable, and a future reader should see that they were considered.
+    if (delta['type'] !== 'text_delta') return [];
+
     const text = readString(delta, 'text');
     if (text === null || text.length === 0) return [];
     return [
