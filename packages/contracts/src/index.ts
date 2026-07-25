@@ -888,6 +888,30 @@ export const turnSubscriptionInputSchema = z
     afterSeq: z.number().int().nonnegative().optional(),
   })
   .strict();
+/**
+ * A batch of the model's reasoning text for the active Turn (issue #17).
+ *
+ * NOT a TurnEvent, deliberately. Every TurnEvent is appended to `turn_events` and replayed on
+ * re-subscribe; reasoning is high-frequency, and it is also unvetted intermediate text that may
+ * carry guesses and content pulled in from elsewhere. Not persisting it was the product decision, so
+ * this rides a transient push channel — no migration, no `turn_events` growth, and nothing on disk.
+ * The cost is that reopening a Task shows no earlier reasoning, which the UI states rather than
+ * silently showing an empty panel.
+ *
+ * Already secret-redacted and batched by Main before it is sent.
+ */
+export const reasoningBatchSchema = z
+  .object({
+    taskId: idSchema,
+    turnId: idSchema,
+    text: z.string().max(16_384),
+    /** True once the per-turn budget was exceeded — a truncated trail must not read as the whole
+     * thought process. */
+    truncated: z.boolean(),
+  })
+  .strict();
+export type ReasoningBatch = z.infer<typeof reasoningBatchSchema>;
+
 export const appInfoSchema = z.object({ version: z.string(), platform: z.string() }).strict();
 export const turnStartResultSchema = z.object({ turnId: idSchema }).strict();
 export const voidResultSchema = z.undefined();
@@ -919,6 +943,10 @@ export interface SprintCoderApi {
   workspace: {
     get(taskId: string): Promise<WorkspaceSelection>;
     select(taskId: string): Promise<WorkspaceSelection>;
+  };
+  reasoning: {
+    /** Subscribes to the active Turn's reasoning stream. Returns an unsubscribe function. */
+    subscribe(listener: (batch: ReasoningBatch) => void): () => void;
   };
   settings: {
     getRuntime(): Promise<RuntimeSettings>;
@@ -988,6 +1016,8 @@ export const IPC_CHANNELS = {
   settingsSetRuntime: 'sprint-coder:settings:set-runtime',
   settingsSetModel: 'sprint-coder:settings:set-model',
   settingsSetEffort: 'sprint-coder:settings:set-effort',
+  /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */
+  reasoningEvent: 'sprint-coder:turns:reasoning',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

@@ -49,7 +49,15 @@ export type RuntimeCanonicalEvent =
   // claude-normalizer.ts), giving Main a way to surface the concrete model id the CLI actually
   // resolved for an `auto`/alias selection (see the ADR amendment). Codex's normalizer never sets
   // it, so this stays undefined for Codex turns.
-  | { type: 'completed'; resolvedModel?: string };
+  | { type: 'completed'; resolvedModel?: string }
+  // The model's own reasoning text (issue #17). Verified to arrive in the current profile:
+  // `--effort max` on a prompt that needs reasoning produces `content_block_start type='thinking'`
+  // followed by `thinking_delta` (codex-cli's Claude CLI 2.1.218). It does NOT arrive for a trivial
+  // prompt at `--effort high`, which is why the degraded "no reasoning at all" path is a normal
+  // case rather than a hypothetical.
+  //
+  // Additive: runtime-host and main ship in the same app, so RUNTIME_PROTOCOL_VERSION stays put.
+  | { type: 'reasoning'; text: string };
 
 export type MainToRuntimeEnvelope =
   | (EnvelopeBase & { type: 'hello' })
@@ -228,6 +236,13 @@ function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent
     );
   if (value.type === 'stage')
     return 'stage' in value && turnStageSchema.safeParse(value.stage).success;
+  if (value.type === 'reasoning')
+    return (
+      'text' in value &&
+      typeof value.text === 'string' &&
+      value.text.length > 0 &&
+      value.text.length <= 16_384
+    );
   return (
     value.type === 'delta' &&
     'messageId' in value &&

@@ -66,6 +66,10 @@ export class MockRuntimeAdapter {
     // IpcRouter) — real Codex/Claude adapters never construct MockRuntimeAdapter, so this stays
     // isolated to the mock/intelligence-loop path.
     private readonly teamCoordinator?: TeamCoordinator,
+    // Pseudo-reasoning sink (issue #17). Mock is the ONLY runtime under
+    // SPRINT_CODER_E2E_MODE=dev, so without this the reasoning panel is permanently empty in every
+    // E2E run and the feature would be untestable end to end.
+    private readonly emitReasoning?: (taskId: string, turnId: string, text: string) => void,
   ) {
     this.toolBroker = createDefaultToolBroker(
       (taskId) => this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0,
@@ -148,6 +152,14 @@ export class MockRuntimeAdapter {
         await this.serialize(taskId, () =>
           this.publish(this.persistence.changeStage(taskId, turnId, stage)),
         );
+        // Reasoning during understanding/planning only, matching where a real model produces it —
+        // Claude's thinking blocks arrive before the answer, never interleaved with it.
+        if (stage === 'understanding' || stage === 'planning')
+          for (const fragment of mockReasoning(stage, input)) {
+            await pause(Math.max(12, Math.floor(this.delayMs / 8)));
+            if (control.canceled) return;
+            this.emitReasoning?.(taskId, turnId, fragment);
+          }
       }
 
       const workspacePath = this.persistence.getWorkspace?.(taskId) ?? null;
@@ -261,6 +273,33 @@ function intelligenceRecorder(
     transitionIntelligenceStep: (stepId, state) =>
       serialize(taskId, () => transition.call(persistence, stepId, state)),
   };
+}
+
+/**
+ * Deterministic stand-in for a model's reasoning.
+ *
+ * Two paragraphs per stage, emitted as several fragments each, so the renderer's paragraph-boundary
+ * animation and its coalescing both get exercised — a single blob would make the panel look right
+ * while proving nothing about the streaming path.
+ */
+function mockReasoning(stage: 'understanding' | 'planning', input: string): string[] {
+  const excerpt = input.replace(/\s+/g, ' ').trim().slice(0, 40);
+  const paragraphs =
+    stage === 'understanding'
+      ? [`「${excerpt}」という依頼として読み取りました。`, '前提と制約を洗い出しています。\n\n']
+      : [
+          '手順を組み立てています。まず確認、次に変更、最後に検証。',
+          '想定される失敗も見ています。\n\n',
+        ];
+  // Split each paragraph into a few fragments, the way a real delta stream arrives.
+  return paragraphs.flatMap((paragraph) => {
+    const size = Math.max(4, Math.ceil(Array.from(paragraph).length / 4));
+    const characters = Array.from(paragraph);
+    const fragments: string[] = [];
+    for (let index = 0; index < characters.length; index += size)
+      fragments.push(characters.slice(index, index + size).join(''));
+    return fragments;
+  });
 }
 
 function buildReply(input: string): string {

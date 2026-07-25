@@ -23,6 +23,7 @@ import {
   runtimeEffortSetInputSchema,
   runtimeSetInputSchema,
   runtimeSettingsSchema,
+  reasoningBatchSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -185,6 +186,19 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.workspaceSelect, taskIdPayloadSchema, workspaceSelectionSchema, {
         taskId,
       }),
+  },
+  reasoning: {
+    // Push-only, and unfiltered by taskId here on purpose: the batch carries its own taskId/turnId
+    // and the store decides relevance, mirroring how the Team subscription is shaped. Unknown
+    // payloads are dropped by `safeParse` exactly as the other subscriptions do.
+    subscribe: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        const parsed = reasoningBatchSchema.safeParse(raw);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.reasoningEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.reasoningEvent, handler);
+    },
   },
   settings: {
     getRuntime: () =>

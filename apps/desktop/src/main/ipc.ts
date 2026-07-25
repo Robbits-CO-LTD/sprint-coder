@@ -33,6 +33,7 @@ import {
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
   runtimeSettingsSchema,
+  reasoningBatchSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -98,6 +99,8 @@ import {
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
 } from './provider-egress';
+import { ReasoningBatcher } from './reasoning-batcher';
+import { createStreamingSecretRedactor } from './secret-redactor';
 import { TeamCoordinator } from './team-coordinator';
 import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
 import { isTeamScenarioInput, LEADER_MCP_SYSTEM_PROMPT } from './team-tools';
@@ -120,6 +123,15 @@ export class IpcRouter {
   // finishAndAdvance folds it into the outgoing `turn.completed` event. Not persisted — see the
   // `resolvedModel` doc comment on turnEventSchema.
   private readonly resolvedModelByTurn = new Map<string, string>();
+  // One reasoning batcher per active turn (issue #17). Keyed by turnId and disposed in
+  // finishAndAdvance, so a turn cannot leave a timer behind.
+  private readonly reasoningByTurn = new Map<string, ReasoningBatcher>();
+  // Per-turn streaming secret redactor. Streaming (not per-fragment) because a key can straddle a
+  // batch boundary — redacting each fragment in isolation would let a split token through.
+  private readonly reasoningRedactorByTurn = new Map<
+    string,
+    ReturnType<typeof createStreamingSecretRedactor>
+  >();
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly autoReviewer = AutoReviewer.createProduction();
@@ -222,6 +234,9 @@ export class IpcRouter {
       // Wires the Leader team tools (team_hire_worker/team_send_to_worker/team_wait_reports/
       // team_stop_worker) into the mock intelligence loop — see team-tools.ts.
       this.teamCoordinator,
+      // Mock pseudo-reasoning goes through the same redact → batch → push path as a real runtime's,
+      // so the E2E exercises the actual pipeline rather than a shortcut (issue #17).
+      (taskId, turnId, text) => this.pushReasoning(taskId, turnId, text),
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -887,6 +902,11 @@ export class IpcRouter {
 
   private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {
     this.turnRuntimes.delete(turnId);
+    // Flush the tail and stop the timer before the turn is finalised, so the last thought is not
+    // lost to the 120ms window and no timer outlives the turn.
+    this.reasoningByTurn.get(turnId)?.dispose();
+    this.reasoningByTurn.delete(turnId);
+    this.reasoningRedactorByTurn.delete(turnId);
     this.teamMcpBridge.unregister(turnId);
     const event = this.persistence.completeTurn(taskId, turnId, state);
     const resolvedModel = this.resolvedModelByTurn.get(turnId);
@@ -1199,6 +1219,8 @@ export class IpcRouter {
         if (this.turnRuntimes.get(turnId) !== kind) return;
         if (runtimeEvent.type === 'stage')
           this.publish(this.persistence.changeStage(taskId, turnId, runtimeEvent.stage));
+        else if (runtimeEvent.type === 'reasoning')
+          this.pushReasoning(taskId, turnId, runtimeEvent.text);
         else if (runtimeEvent.type === 'delta')
           this.publish(
             this.persistence.appendDelta(
@@ -1215,6 +1237,34 @@ export class IpcRouter {
         }
       })
       .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
+  }
+
+  /**
+   * Redacts, batches, and pushes reasoning text for a turn.
+   *
+   * Redaction happens here, in Main, before the text ever leaves the process — the renderer must
+   * never be the place a key is first seen, and this text is provider output that can echo whatever
+   * the model read.
+   */
+  private pushReasoning(taskId: string, turnId: string, text: string): void {
+    let redactor = this.reasoningRedactorByTurn.get(turnId);
+    if (redactor === undefined) {
+      redactor = createStreamingSecretRedactor();
+      this.reasoningRedactorByTurn.set(turnId, redactor);
+    }
+    const safe = redactor.write(text);
+    let batcher = this.reasoningByTurn.get(turnId);
+    if (batcher === undefined) {
+      batcher = new ReasoningBatcher(({ text: batch, truncated }) => {
+        if (this.window.isDestroyed()) return;
+        this.window.webContents.send(
+          IPC_CHANNELS.reasoningEvent,
+          reasoningBatchSchema.parse({ taskId, turnId, text: batch, truncated }),
+        );
+      });
+      this.reasoningByTurn.set(turnId, batcher);
+    }
+    if (safe !== '') batcher.push(safe);
   }
 
   private handleRuntimeFailure(

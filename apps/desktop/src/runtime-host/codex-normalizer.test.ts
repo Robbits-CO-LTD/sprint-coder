@@ -15,6 +15,9 @@ describe('CodexJsonlNormalizer', () => {
     expect(events.map((event) => (event.type === 'stage' ? event.stage : event.type))).toEqual([
       'understanding',
       'planning',
+      // Codex's reasoning text, which the planning branch used to discard along with the stage
+      // transition (issue #17).
+      'reasoning',
       'executing',
       'synthesizing',
       'delta',

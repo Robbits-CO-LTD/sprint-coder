@@ -256,6 +256,14 @@ export type SprintCoderErrorCode =
   'TURN_ACTIVE' | 'STEER_STALE' | 'RUNTIME_UNAVAILABLE' | 'STEER_UNSUPPORTED' | string;
 
 export type RuntimeKind = 'mock' | 'codex' | 'claude';
+/** A batch of the model's reasoning text (issue #17). Pushed, never persisted — see contracts'
+ * reasoningBatchSchema for why. Already secret-redacted and batched by Main. */
+export type ReasoningBatch = {
+  taskId: string;
+  turnId: string;
+  text: string;
+  truncated: boolean;
+};
 export type CodexModelOption = { id: string; displayName: string; description: string };
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type AccessPreset = 'ask' | 'auto' | 'full';
@@ -392,6 +400,9 @@ export interface SprintCoderApi {
   };
   /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
    * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
+  reasoning: {
+    subscribe(listener: (batch: ReasoningBatch) => void): () => void;
+  };
   settings: {
     getRuntime(): Promise<{
       kind: RuntimeKind;
