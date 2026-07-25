@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
@@ -114,6 +114,46 @@ test.describe('live file edit', () => {
     // Disk-sourced content is labelled as such: it updates promptly but arrives in whole-file jumps,
     // so calling it live typing would describe behaviour the tool does not have.
     await expect(page.getByTestId('live-edit-state')).toHaveText('ファイルの現在の内容');
+  });
+
+  test('shows a before/after diff once the file settles, and says so when it cannot', async () => {
+    // The Runtime's write lands on a file that already exists, which is what gives Main a "before"
+    // to read. Written before the Turn starts, exactly as a real edit to existing code would be.
+    mkdirSync(join(workspaceDir, 'src'), { recursive: true });
+    writeFileSync(
+      join(workspaceDir, 'src/parser.ts'),
+      'export const KEEP = 1;\nexport const GONE = 2;\n',
+    );
+
+    app = await launchApp(userDataDir);
+    const page = await firstWindow(app);
+    await openTaskWithWorkspace(app, page, workspaceDir);
+
+    const textarea = page.getByTestId('composer-textarea');
+    await textarea.fill('parser を書き直してください');
+    await textarea.press('Enter');
+
+    // While it streams there is deliberately no diff: every unfinished line would read as a change.
+    await expect(page.getByTestId('live-edit-body')).toBeVisible({ timeout: 30_000 });
+
+    // The panel follows the newest write, which here is the file the Turn *created* — so the one
+    // with a "before" has to be selected. That ordering is deliberate (the newest write is what is
+    // happening now), which is exactly why this test picks a tab rather than assuming.
+    await page.getByRole('tab', { name: 'parser.ts', exact: true }).click();
+    const diff = page.getByTestId('file-diff-view');
+    await expect(diff).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId('live-edit-state')).toHaveText('変更前との差分');
+    // Both sides are present: the removed line from the original and the new content.
+    await expect(diff).toContainText('GONE');
+    await expect(diff).toContainText('parser');
+    // Read-only: the agreed scope is a viewer, and an editable surface here would imply the panel
+    // can write back.
+    expect(await diff.locator('[contenteditable="true"]').count()).toBe(0);
+
+    // The file the Turn created has no "before", and that is stated rather than faked.
+    await page.getByRole('tab', { name: 'parser.test.ts', exact: true }).click();
+    await expect(page.getByTestId('live-edit-no-diff')).toBeVisible();
+    await expect(page.getByTestId('file-diff-view')).toHaveCount(0);
   });
 
   test('never shows a file from outside the Workspace, or one reached through a symlink', async () => {

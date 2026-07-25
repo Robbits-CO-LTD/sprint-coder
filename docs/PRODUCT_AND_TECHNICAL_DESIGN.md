@@ -621,6 +621,18 @@ Runtimeが書いたファイルは`files.changed` TurnEventとして永続化す
 
 watcherは速度のためではなく網羅のためにある。macOSで実測すると、同じ書き込みに対してwatcherの通知はCLI自身の`item.completed`より約270ms遅い（FSEventsのlatency）。watcherが拾えるのはCLIが報告しない書き込み — shell commandが書き換えたファイルなど — であり、報告されたものは`recordFileChanges`側の読み直しの方が速い。
 
+書き終わったファイルは**変更前との差分**として表示する。before側の取得は次の優先順で決める（`main/edit-baseline.ts`）。
+
+1. Turn開始時にcleanだったtrackedファイル → `git show HEAD:<path>`。Codexが書き換えたあとでも同じ答えが返るため、snapshotのタイミング問題が無い（実測）。
+2. Turn開始時にdirty、またはgit管理外 → そのpathを**最初に知った瞬間**にディスクから読む。
+3. beforeを確立できない → 差分ではなく全文を表示し、UIがその理由を述べる。
+
+HEADは「Turn開始時点」ではない。Turn開始前にユーザーの未コミット変更があった場合、HEADとの差分はそれも含み、人間の編集をモデルの仕業として表示することになる。そのためTurn開始時に`git status --porcelain`を一度だけ読み、cleanだったpathにだけHEADを使う。3は異常系ではなく通常の状態として設計する — watcherが最初に知るpathは既に書き換わっており、beforeは原理的に取れない。
+
+差分は`complete`を受けた本文にだけ適用する。書いている最中に差分を取り直すと未完成の行がすべて変更として並び、読めない。
+
+表示はinline unified（削除行を追加行の直上に置く形）。Inspectorは既定380px・最大560pxで、split diffでは1カラムが190pxとなりコードが読めないためである。実装はCodeMirror 6の`unifiedMergeView`を`readOnly`で使う。Monacoを採らないのはrendererのCSP（`script-src 'self' http://localhost:*`、`worker-src`も`blob:`も無い）にworkerをblob URLで起動する前提が噛み合わないためで、CodeMirrorはworkerも`eval`も使わない。syntax highlightingは入れない — untrustedなテキストを構文解析する部品を増やす価値が、色に見合わない。
+
 本文はrenderer到達前にMain側でsecret除去する。除去はstreaming（frame単位ではない）で行う — secretがframe境界をまたぐと、frameごとに独立して除去した場合に分割されたtokenが通り抜けるためである。描画はplain textで、Markdownもsyntax highlighterも通さない。前frameから変わった行は短時間ハイライトする（diffではなく行単位のLCS。patch適用は数十行が一度に変わるため、印が無いと読めない）。
 
 Policy evaluation order:

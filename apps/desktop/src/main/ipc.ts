@@ -98,6 +98,7 @@ import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinato
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
 import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
+import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
 import { permissionRequestFingerprint, type Capability } from '@sprint-coder/domain';
@@ -143,6 +144,8 @@ export class IpcRouter {
   // concurrent files and cleared when a body completes or its turn ends.
   // One recursive Workspace watch per writing Turn (issue #39), stopped in finishAndAdvance.
   private readonly workspaceWatchByTurn = new Map<string, WorkspaceWatcher>();
+  // "The file as this Turn found it", per Turn (issue #41). Disposed with the Turn.
+  private readonly baselinesByTurn = new Map<string, EditBaselines>();
   private readonly fileEditByKey = new Map<
     string,
     { redactor: ReturnType<typeof createStreamingSecretRedactor>; safe: string; consumed: number }
@@ -1021,6 +1024,7 @@ export class IpcRouter {
     this.reasoningRedactorByTurn.delete(turnId);
     this.workspaceWatchByTurn.get(turnId)?.stop();
     this.workspaceWatchByTurn.delete(turnId);
+    this.baselinesByTurn.delete(turnId);
     // A turn that ends mid-write leaves its redaction state behind otherwise (issue #39).
     for (const key of this.fileEditByKey.keys())
       if (key.startsWith(`${turnId}\u0000`)) this.fileEditByKey.delete(key);
@@ -1263,8 +1267,13 @@ export class IpcRouter {
       turnWorkspace !== null &&
       resolveWriteScope(this.persistence.getPermissionPolicy(taskId).preset, turnWorkspace) !==
         'read-only'
-    )
+    ) {
       this.startWorkspaceWatch(taskId, started.turnId, turnWorkspace);
+      // Baselines are per Turn: "the file as this Turn found it" is only meaningful inside one
+      // (issue #41). Created here so `git status` is read once, at the moment the Turn starts,
+      // rather than after the Runtime has already begun changing things.
+      this.baselinesByTurn.set(started.turnId, createEditBaselines(turnWorkspace));
+    }
     if (kind === 'mock') {
       this.mockRuntime.start(taskId, started.turnId, started.text);
       return;
@@ -1468,6 +1477,10 @@ export class IpcRouter {
       if (this.fileEditByKey.size >= 16) return;
       state = { redactor: createStreamingSecretRedactor(), safe: '', consumed: 0 };
       this.fileEditByKey.set(key, state);
+      // First time this Turn has mentioned this path — the last moment the file might still hold
+      // its "before" content (issue #41). For a streamed write that is genuinely before the write;
+      // for a watcher event it is already too late, which `note` handles by falling back to git.
+      this.baselinesByTurn.get(turnId)?.note(path);
     }
     // Frames are cumulative. A shorter body than last time means the Runtime restarted the value,
     // which the redactor cannot un-consume — drop rather than emit a spliced mixture of two bodies.
@@ -1475,6 +1488,35 @@ export class IpcRouter {
     state.safe += state.redactor.write(text.slice(state.consumed));
     state.consumed = text.length;
     if (options.complete) this.fileEditByKey.delete(key);
+    const safeText = state.safe.slice(-262_144);
+    // The tail is what the user is watching; an early frame of a large file is not worth the IPC.
+    // The cap matches the schema's.
+    this.sendFileEditFrame(taskId, turnId, path, safeText, options, null);
+    // The baseline can require a git call, so it is never waited for: the text goes out now and the
+    // frame that carries the diff follows when there is one. Frames are cumulative, so the view
+    // simply gains its diff. Only for a settled body — a diff recomputed against a half-written file
+    // would show every unfinished line as a change.
+    if (!options.complete) return;
+    const baselines = this.baselinesByTurn.get(turnId);
+    if (baselines === undefined) return;
+    void baselines
+      .get(path)
+      .then((baseline) => {
+        // Nothing to compare against, or the file is unchanged: no second frame, no wasted repaint.
+        if (baseline === null || baseline === safeText) return;
+        this.sendFileEditFrame(taskId, turnId, path, safeText, options, baseline);
+      })
+      .catch(() => undefined);
+  }
+
+  private sendFileEditFrame(
+    taskId: string,
+    turnId: string,
+    path: string,
+    text: string,
+    options: { complete: boolean; source: 'stream' | 'disk' },
+    baseline: string | null,
+  ): void {
     if (this.window.isDestroyed()) return;
     this.window.webContents.send(
       IPC_CHANNELS.fileEditEvent,
@@ -1482,11 +1524,10 @@ export class IpcRouter {
         taskId,
         turnId,
         path,
-        // The tail is what the user is watching; an early frame of a large file is not worth the
-        // IPC. The cap matches the schema's.
-        text: state.safe.slice(-262_144),
+        text,
         complete: options.complete,
         source: options.source,
+        baseline: baseline === null ? null : baseline.slice(-262_144),
       }),
     );
   }
