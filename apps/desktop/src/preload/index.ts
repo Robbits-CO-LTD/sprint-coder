@@ -20,6 +20,7 @@ import {
   permissionSetInputSchema,
   permissionSettingsSchema,
   runtimeModelSetInputSchema,
+  runtimeEffortSetInputSchema,
   runtimeSetInputSchema,
   runtimeSettingsSchema,
   taskArchivedInputSchema,
@@ -192,6 +193,10 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.settingsSetRuntime, runtimeSetInputSchema, z.undefined(), { kind }),
     setModel: (model) =>
       invoke(IPC_CHANNELS.settingsSetModel, runtimeModelSetInputSchema, z.undefined(), { model }),
+    setEffort: (effort) =>
+      invoke(IPC_CHANNELS.settingsSetEffort, runtimeEffortSetInputSchema, z.undefined(), {
+        effort,
+      }),
   },
   permissions: {
     get: (taskId) =>

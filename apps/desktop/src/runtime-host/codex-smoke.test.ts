@@ -32,7 +32,8 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
   const cleanupDirs: string[] = [];
 
   afterEach(() => {
-    for (const directory of cleanupDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
+    for (const directory of cleanupDirs.splice(0))
+      rmSync(directory, { recursive: true, force: true });
   });
 
   it('probes the real CLI as available', async () => {

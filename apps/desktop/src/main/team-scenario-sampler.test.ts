@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ToolTranscriptItem } from './context-compiler';
-import { createTeamScenarioSampler, isTeamScenarioInput, TEAM_SCENARIO_TRIGGER } from './team-tools';
+import {
+  createTeamScenarioSampler,
+  isTeamScenarioInput,
+  TEAM_SCENARIO_TRIGGER,
+} from './team-tools';
 
 const INPUT = `${TEAM_SCENARIO_TRIGGER}で対応してください`;
 
@@ -26,7 +30,13 @@ describe('createTeamScenarioSampler', () => {
       stepOrdinal: 1,
       compiledContextDigest: 'digest',
       transcript: [],
-      toolCatalogSnapshot: { revision: 0, providerId: 'mock', workspaceId: null, entries: [], digest: 'd' },
+      toolCatalogSnapshot: {
+        revision: 0,
+        providerId: 'mock',
+        workspaceId: null,
+        entries: [],
+        digest: 'd',
+      },
     });
     if (sample.kind !== 'tool-calls') throw new Error('expected tool-calls');
     expect(sample.calls).toHaveLength(3);
@@ -45,7 +55,13 @@ describe('createTeamScenarioSampler', () => {
       stepOrdinal: 1,
       compiledContextDigest: 'digest',
       transcript: [],
-      toolCatalogSnapshot: { revision: 0, providerId: 'mock', workspaceId: null, entries: [], digest: 'd' },
+      toolCatalogSnapshot: {
+        revision: 0,
+        providerId: 'mock',
+        workspaceId: null,
+        entries: [],
+        digest: 'd',
+      },
     });
     if (again.kind !== 'tool-calls') throw new Error('expected tool-calls');
     expect(again.calls.map((call) => call.callId)).toEqual(sample.calls.map((call) => call.callId));
@@ -65,7 +81,13 @@ describe('createTeamScenarioSampler', () => {
       stepOrdinal: 2,
       compiledContextDigest: 'digest',
       transcript,
-      toolCatalogSnapshot: { revision: 0, providerId: 'mock', workspaceId: null, entries: [], digest: 'd' },
+      toolCatalogSnapshot: {
+        revision: 0,
+        providerId: 'mock',
+        workspaceId: null,
+        entries: [],
+        digest: 'd',
+      },
     });
     if (sample.kind !== 'tool-calls') throw new Error('expected tool-calls');
     expect(sample.calls).toHaveLength(3);
@@ -91,7 +113,13 @@ describe('createTeamScenarioSampler', () => {
       stepOrdinal: 3,
       compiledContextDigest: 'digest',
       transcript,
-      toolCatalogSnapshot: { revision: 0, providerId: 'mock', workspaceId: null, entries: [], digest: 'd' },
+      toolCatalogSnapshot: {
+        revision: 0,
+        providerId: 'mock',
+        workspaceId: null,
+        entries: [],
+        digest: 'd',
+      },
     });
     if (sample.kind !== 'tool-calls') throw new Error('expected tool-calls');
     expect(sample.calls).toHaveLength(1);
@@ -117,9 +145,17 @@ describe('createTeamScenarioSampler', () => {
       toolResult('wait-1', {
         ok: true,
         reports: [
-          { workerId: 'w-research', seq: 4, content: JSON.stringify({ summary: '調査完了しました' }) },
+          {
+            workerId: 'w-research',
+            seq: 4,
+            content: JSON.stringify({ summary: '調査完了しました' }),
+          },
           { workerId: 'w-impl', seq: 5, content: JSON.stringify({ summary: '実装完了しました' }) },
-          { workerId: 'w-review', seq: 6, content: JSON.stringify({ summary: 'レビュー完了しました' }) },
+          {
+            workerId: 'w-review',
+            seq: 6,
+            content: JSON.stringify({ summary: 'レビュー完了しました' }),
+          },
         ],
       }),
     ];
@@ -127,7 +163,13 @@ describe('createTeamScenarioSampler', () => {
       stepOrdinal: 4,
       compiledContextDigest: 'digest',
       transcript,
-      toolCatalogSnapshot: { revision: 0, providerId: 'mock', workspaceId: null, entries: [], digest: 'd' },
+      toolCatalogSnapshot: {
+        revision: 0,
+        providerId: 'mock',
+        workspaceId: null,
+        entries: [],
+        digest: 'd',
+      },
     });
     if (sample.kind !== 'final') throw new Error('expected a final answer');
     expect(sample.text).toContain('調査完了しました');

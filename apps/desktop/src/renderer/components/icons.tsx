@@ -13,7 +13,12 @@ import type { SVGProps } from 'react';
 
 type IconProps = SVGProps<SVGSVGElement> & { size?: number };
 
-function Icon({ size = 16, className, children, ...rest }: IconProps & { children: React.ReactNode }) {
+function Icon({
+  size = 16,
+  className,
+  children,
+  ...rest
+}: IconProps & { children: React.ReactNode }) {
   return (
     <svg
       width={size}

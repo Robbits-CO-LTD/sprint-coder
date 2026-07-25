@@ -73,7 +73,10 @@ describe.skipIf(!enabled)('Claude runtime adapter (REAL CLI smoke)', () => {
     expect(failures).toEqual([]);
     expect(events.map((event) => event.type)).toContain('stage');
     expect(events.map((event) => event.type)).toContain('delta');
-    expect(events.at(-1)).toEqual({ type: 'completed' });
+    // The real CLI's system/init event always carries a concrete `model` id (verified via direct
+    // probe), which the normalizer surfaces here so Main can show "what actually ran" — see the
+    // ADR amendment.
+    expect(events.at(-1)).toMatchObject({ type: 'completed', resolvedModel: expect.any(String) });
     expect(exitInfo).toMatchObject({ code: 0, canceled: false });
   }, 60_000);
 

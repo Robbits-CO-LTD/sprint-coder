@@ -3,7 +3,7 @@ import type { KeyboardEvent } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
 import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square } from '../icons';
-import type { QueuedInput, RuntimeKind } from '../../types/sprint-coder';
+import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
 const STEER_UNSUPPORTED_HINT =
   '選択中のruntimeでは実行中の追加指示に対応していません。キュー追加を使ってください';
@@ -145,14 +145,7 @@ export function Composer({ taskId }: { taskId: string }) {
           <div className="composer-row">
             <RuntimeChip />
             <ModelChip />
-            <button
-              type="button"
-              className="cmp-chip"
-              disabled
-              title="Reasoning effort選択は今回のスコープ外です"
-            >
-              effort: medium
-            </button>
+            <EffortChip />
             <button
               type="button"
               className="cmp-chip"
@@ -375,7 +368,13 @@ function ModelChip() {
         aria-expanded={open}
         disabled={!enabled}
         onClick={() => setOpen((value) => !value)}
-        title={enabled ? 'Modelを選択' : 'Codex/Claude Runtime選択時にモデルを変更できます'}
+        title={
+          enabled
+            ? runtime.kind === 'claude' && runtime.resolvedModel
+              ? `Modelを選択（直近のTurnで実際に使用: ${runtime.resolvedModel}）`
+              : 'Modelを選択'
+            : 'Codex/Claude Runtime選択時にモデルを変更できます'
+        }
       >
         {selected.displayName}
       </button>
@@ -393,6 +392,95 @@ function ModelChip() {
             >
               <span className="runtime-menu-title">{model.displayName}</span>
               <span className="runtime-menu-desc">{model.description}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const EFFORT_LEVELS: ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_LABEL: Record<ClaudeEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'X-High',
+  max: 'Max',
+};
+const EFFORT_DESC: Record<ClaudeEffort, string> = {
+  low: '最速・最小のコストで応答',
+  medium: '速度と精度のバランス',
+  high: 'じっくり考えて応答',
+  xhigh: 'より深く考えて応答',
+  max: '最大限考えて応答（最も低速・高コスト）',
+};
+
+// Effort selector (FR-SET-03 follow-up). Verified empirically against the installed Claude CLI
+// (2.1.218, `claude --help`): `--effort <level>` accepts exactly these 5 values and is honored
+// per-turn (see the ADR amendment) — unlike the model chip, this control is Claude-only: Codex
+// has no equivalent flag on this CLI version, and mock has no effort concept at all, so both stay
+// disabled with a static display, mirroring how ModelChip disables for an inactive Runtime.
+function EffortChip() {
+  const runtime = useAppStore((s) => s.runtime);
+  const setEffort = useAppStore((s) => s.setEffort);
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const supported =
+    typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.setEffort === 'function';
+  const enabled = supported && runtime.kind === 'claude' && runtime.claudeAvailable;
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  function choose(effort: ClaudeEffort) {
+    setOpen(false);
+    if (effort !== runtime.effort) void setEffort(effort);
+  }
+
+  return (
+    <div
+      className="runtime-chip-wrap"
+      ref={wrapRef}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        data-testid="effort-selector"
+        type="button"
+        className="cmp-chip runtime-chip effort-chip"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={!enabled}
+        onClick={() => setOpen((value) => !value)}
+        title={enabled ? 'Effortを選択' : 'Claude Runtime選択時にEffortを変更できます'}
+      >
+        {`effort: ${EFFORT_LABEL[runtime.effort]}`}
+      </button>
+      {open && (
+        <div className="runtime-menu effort-menu" role="menu" aria-label="Effort選択">
+          {EFFORT_LEVELS.map((effort) => (
+            <button
+              data-testid={`effort-option-${effort}`}
+              key={effort}
+              type="button"
+              role="menuitemradio"
+              aria-checked={runtime.effort === effort}
+              className={`runtime-menu-item${runtime.effort === effort ? ' active' : ''}`}
+              onClick={() => choose(effort)}
+            >
+              <span className="runtime-menu-title">{EFFORT_LABEL[effort]}</span>
+              <span className="runtime-menu-desc">{EFFORT_DESC[effort]}</span>
             </button>
           ))}
         </div>

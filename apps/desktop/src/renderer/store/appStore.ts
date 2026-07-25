@@ -5,6 +5,7 @@ import type {
   ApprovalDecision,
   ApprovalSummary,
   ChatMessage,
+  ClaudeEffort,
   ContextUsage,
   CodexModelOption,
   CommandSummary,
@@ -44,6 +45,13 @@ export type RuntimeState = {
   claudeAvailable: boolean;
   model: string;
   models: CodexModelOption[];
+  effort: ClaudeEffort;
+  /** The concrete model id the Claude CLI actually resolved on the most recently completed Claude
+   * turn (e.g. "claude-sonnet-5"), surfaced in the model chip's tooltip. Not per-task — mirrors
+   * the rest of `RuntimeState`'s global-only design — and cleared back to undefined only by a
+   * fresh `loadRuntime()` never repopulating it (it simply persists until the next Claude turn
+   * completes with a resolved model). */
+  resolvedModel?: string;
 };
 
 export type CommandCardState = Readonly<{
@@ -128,6 +136,7 @@ type AppState = {
   loadRuntime(): Promise<void>;
   setRuntime(kind: RuntimeKind): Promise<void>;
   setModel(model: string): Promise<void>;
+  setEffort(effort: ClaudeEffort): Promise<void>;
   setAccessPreset(taskId: string, preset: AccessPreset): Promise<void>;
   resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision): Promise<void>;
   selectTask(taskId: string): Promise<void>;
@@ -500,6 +509,11 @@ function handleTurnEvent(
             [taskId]: { turnId: ev.turnId, entries: ev.diff },
           },
           stageAnnouncement: finalStateLabel(ev.state),
+          // Smallest-surface exposure of "which model actually ran" (FR clarity ask): the model
+          // chip's tooltip reads this after a Claude turn completes with a resolved model id.
+          ...(ev.resolvedModel !== undefined
+            ? { runtime: { ...state.runtime, resolvedModel: ev.resolvedModel } }
+            : {}),
         };
       });
       break;
@@ -558,6 +572,7 @@ export const useAppStore = create<AppState>((set, get) => {
       claudeAvailable: false,
       model: 'auto',
       models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
+      effort: 'medium',
     },
     stageAnnouncement: '',
     toast: null,
@@ -624,6 +639,21 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ runtime: { ...previous, model } });
       try {
         await window.sprintCoder.settings.setModel(model);
+        await get().loadRuntime();
+      } catch (err) {
+        set({ runtime: previous });
+        set({ error: describeError(err) });
+      }
+    },
+
+    async setEffort(effort: ClaudeEffort) {
+      if (!window.sprintCoder || typeof window.sprintCoder.settings?.setEffort !== 'function')
+        return;
+      const previous = get().runtime;
+      if (previous.effort === effort) return;
+      set({ runtime: { ...previous, effort } });
+      try {
+        await window.sprintCoder.settings.setEffort(effort);
         await get().loadRuntime();
       } catch (err) {
         set({ runtime: previous });

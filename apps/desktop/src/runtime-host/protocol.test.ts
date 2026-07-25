@@ -121,6 +121,42 @@ describe('Runtime Host protocol', () => {
     expect(isRuntimeToMainEnvelope({ ...hello, claudeModels: undefined })).toBe(false);
   });
 
+  it('validates the additive optional Claude effort field on start envelopes', () => {
+    const valid = startEnvelope();
+    expect(isMainToRuntimeEnvelope(valid)).toBe(true);
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+      expect(isMainToRuntimeEnvelope({ ...valid, effort })).toBe(true);
+    }
+    expect(isMainToRuntimeEnvelope({ ...valid, effort: 'bogus' })).toBe(false);
+    expect(isMainToRuntimeEnvelope({ ...valid, effort: 5 })).toBe(false);
+  });
+
+  it('validates the additive optional resolvedModel field on the completed canonical event', () => {
+    const event = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: 'operation-1',
+      type: 'event',
+      event: { type: 'completed' },
+    };
+    expect(isRuntimeToMainEnvelope(event)).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...event,
+        event: { type: 'completed', resolvedModel: 'claude-sonnet-5' },
+      }),
+    ).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope({ ...event, event: { type: 'completed', resolvedModel: '' } }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({ ...event, event: { type: 'completed', resolvedModel: 42 } }),
+    ).toBe(false);
+  });
+
   it('accepts only bounded unique context acknowledgements', () => {
     const base = startEnvelope();
     const started = {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as contracts from './index';
 import {
+  claudeEffortSchema,
   commandEnvelopeSchema,
   permissionSettingsSchema,
   permissionSetInputSchema,
@@ -330,8 +331,12 @@ describe('public contracts', () => {
             description: 'Balanced model',
           },
         ],
+        effort: 'medium',
       }),
-    ).toMatchObject({ kind: 'codex', model: 'gpt-5.6-terra' });
+    ).toMatchObject({ kind: 'codex', model: 'gpt-5.6-terra', effort: 'medium' });
+    expect(() => claudeEffortSchema.parse('bogus')).toThrow();
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max'])
+      expect(claudeEffortSchema.parse(effort)).toBe(effort);
     expect(
       publicErrorSchema.parse({
         code: 'STEER_UNSUPPORTED',

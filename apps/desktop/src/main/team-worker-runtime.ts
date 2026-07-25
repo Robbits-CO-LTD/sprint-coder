@@ -24,7 +24,12 @@ export type TeamWorkerRuntimeDeps = Readonly<{
   workspaceFor: (taskId: string) => string | null;
   catalogFor: (kind: 'claude' | 'codex', workspacePath: string | null) => unknown;
   /** Provider egress gate; returns false when policy denies the dispatch. */
-  authorizeEgress: (kind: 'claude' | 'codex', taskId: string, turnId: string, prompt: string) => boolean;
+  authorizeEgress: (
+    kind: 'claude' | 'codex',
+    taskId: string,
+    turnId: string,
+    prompt: string,
+  ) => boolean;
 }>;
 
 type PendingRun = {

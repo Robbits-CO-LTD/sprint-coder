@@ -1,0 +1,19 @@
+# Normalize line endings on checkout for every platform.
+#
+# GitHub's Windows runner checks out with git's default `core.autocrlf=true`,
+# which rewrites every text file to CRLF. Prettier's default `endOfLine: "lf"`
+# then reports the whole tree as unformatted, so `npm run format:check` failed
+# on windows-latest only — every file flagged, with no real formatting issue.
+#
+# `text=auto` lets git detect text vs binary; `eol=lf` pins the working-tree
+# ending to LF regardless of the platform default. Every tracked file in this
+# repo is already LF, so this changes no content — it only stops Windows from
+# converting on checkout.
+* text=auto eol=lf
+
+# Binary artifacts git should never touch.
+*.node binary
+*.png binary
+*.icns binary
+*.ico binary
+*.sqlite3 binary

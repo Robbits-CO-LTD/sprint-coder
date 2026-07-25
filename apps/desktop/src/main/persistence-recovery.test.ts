@@ -29,79 +29,79 @@ afterEach(() => {
 
 if (runsWithElectronAbi)
   describe('database corruption recovery (backup/restore)', () => {
-  it('restores from the pre-migration backup when the database file is corrupt', () => {
-    const path = tempDatabasePath();
-    const seeded = new SqlitePersistenceClient(path);
-    const task = seeded.createTask('復元対象タスク');
-    seeded.close();
-    copyFileSync(path, `${path}.pre-migration.bak`);
-    writeFileSync(path, 'not a sqlite database — simulated corruption');
+    it('restores from the pre-migration backup when the database file is corrupt', () => {
+      const path = tempDatabasePath();
+      const seeded = new SqlitePersistenceClient(path);
+      const task = seeded.createTask('復元対象タスク');
+      seeded.close();
+      copyFileSync(path, `${path}.pre-migration.bak`);
+      writeFileSync(path, 'not a sqlite database — simulated corruption');
 
-    const recovered = new SqlitePersistenceClient(path);
-    expect(recovered.recoveryReport.corruptionDetected).toBe(true);
-    expect(recovered.recoveryReport.restoredFromBackup).toBe(true);
-    expect(recovered.recoveryReport.freshStart).toBe(false);
-    expect(recovered.recoveryReport.corruptFileMovedTo).not.toBeNull();
-    expect(existsSync(recovered.recoveryReport.corruptFileMovedTo ?? '')).toBe(true);
-    expect(recovered.listTasks().some((row) => row.id === task.id)).toBe(true);
-    recovered.close();
-  });
-
-  it('starts fresh when the database is corrupt and no usable backup exists', () => {
-    const path = tempDatabasePath();
-    writeFileSync(path, 'garbage bytes without any backup');
-
-    const recovered = new SqlitePersistenceClient(path);
-    expect(recovered.recoveryReport.corruptionDetected).toBe(true);
-    expect(recovered.recoveryReport.restoredFromBackup).toBe(false);
-    expect(recovered.recoveryReport.freshStart).toBe(true);
-    const task = recovered.createTask('fresh start after corruption');
-    expect(recovered.listTasks().some((row) => row.id === task.id)).toBe(true);
-    recovered.close();
-  });
-
-  it('reports a clean open for a healthy database', () => {
-    const path = tempDatabasePath();
-    const client = new SqlitePersistenceClient(path);
-    expect(client.recoveryReport).toEqual({
-      corruptionDetected: false,
-      restoredFromBackup: false,
-      freshStart: false,
-      corruptFileMovedTo: null,
+      const recovered = new SqlitePersistenceClient(path);
+      expect(recovered.recoveryReport.corruptionDetected).toBe(true);
+      expect(recovered.recoveryReport.restoredFromBackup).toBe(true);
+      expect(recovered.recoveryReport.freshStart).toBe(false);
+      expect(recovered.recoveryReport.corruptFileMovedTo).not.toBeNull();
+      expect(existsSync(recovered.recoveryReport.corruptFileMovedTo ?? '')).toBe(true);
+      expect(recovered.listTasks().some((row) => row.id === task.id)).toBe(true);
+      recovered.close();
     });
-    client.close();
+
+    it('starts fresh when the database is corrupt and no usable backup exists', () => {
+      const path = tempDatabasePath();
+      writeFileSync(path, 'garbage bytes without any backup');
+
+      const recovered = new SqlitePersistenceClient(path);
+      expect(recovered.recoveryReport.corruptionDetected).toBe(true);
+      expect(recovered.recoveryReport.restoredFromBackup).toBe(false);
+      expect(recovered.recoveryReport.freshStart).toBe(true);
+      const task = recovered.createTask('fresh start after corruption');
+      expect(recovered.listTasks().some((row) => row.id === task.id)).toBe(true);
+      recovered.close();
+    });
+
+    it('reports a clean open for a healthy database', () => {
+      const path = tempDatabasePath();
+      const client = new SqlitePersistenceClient(path);
+      expect(client.recoveryReport).toEqual({
+        corruptionDetected: false,
+        restoredFromBackup: false,
+        freshStart: false,
+        corruptFileMovedTo: null,
+      });
+      client.close();
+    });
   });
-});
 
 if (runsWithElectronAbi)
   describe('10k-event projection restore (NFR-PERF-04)', () => {
-  it('reopens and projects a 10,000-delta task within budget', () => {
-    const path = tempDatabasePath();
-    const seeded = new SqlitePersistenceClient(path);
-    const task = seeded.createTask('projection perf fixture');
-    const started = seeded.startTurn(task.id, '大量イベントの復元計測');
-    for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
-      seeded.changeStage(task.id, started.turnId, stage);
-    const messageId = randomUUID();
-    for (let index = 0; index < 10_000; index += 1) {
-      seeded.appendDelta(task.id, started.turnId, messageId, `chunk-${index} `);
-    }
-    seeded.close();
+    it('reopens and projects a 10,000-delta task within budget', () => {
+      const path = tempDatabasePath();
+      const seeded = new SqlitePersistenceClient(path);
+      const task = seeded.createTask('projection perf fixture');
+      const started = seeded.startTurn(task.id, '大量イベントの復元計測');
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        seeded.changeStage(task.id, started.turnId, stage);
+      const messageId = randomUUID();
+      for (let index = 0; index < 10_000; index += 1) {
+        seeded.appendDelta(task.id, started.turnId, messageId, `chunk-${index} `);
+      }
+      seeded.close();
 
-    const openStart = performance.now();
-    const reopened = new SqlitePersistenceClient(path);
-    const messages = reopened.listMessages(task.id);
-    const elapsedMs = performance.now() - openStart;
-    reopened.close();
+      const openStart = performance.now();
+      const reopened = new SqlitePersistenceClient(path);
+      const messages = reopened.listMessages(task.id);
+      const elapsedMs = performance.now() - openStart;
+      reopened.close();
 
-    expect(messages.some((message) => message.content.includes('chunk-9999'))).toBe(true);
-    // NFR-PERF-04 targets 500ms first render; the DB open + projection share of that budget is
-    // asserted with headroom for slow CI machines. The measured value is printed for the gate
-    // record.
-    console.info(`[perf] 10k-event reopen+projection: ${Math.round(elapsedMs)}ms`);
-    expect(elapsedMs).toBeLessThan(1500);
+      expect(messages.some((message) => message.content.includes('chunk-9999'))).toBe(true);
+      // NFR-PERF-04 targets 500ms first render; the DB open + projection share of that budget is
+      // asserted with headroom for slow CI machines. The measured value is printed for the gate
+      // record.
+      console.info(`[perf] 10k-event reopen+projection: ${Math.round(elapsedMs)}ms`);
+      expect(elapsedMs).toBeLessThan(1500);
+    });
   });
-});
 
 describe('recovery suite Electron ABI bridge', () => {
   it('runs the corruption-recovery and projection-perf suites with the Electron Node ABI', () => {

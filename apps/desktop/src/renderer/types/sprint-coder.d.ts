@@ -170,6 +170,9 @@ export type TurnEvent =
       state: 'completed' | 'canceled' | 'failed' | 'interrupted';
       message?: ChatMessage;
       diff: TurnDiffEntry[];
+      /** The concrete model id the Claude CLI actually resolved for this turn (e.g.
+       * "claude-sonnet-5"), when the runtime reported one. Absent for Codex/mock turns. */
+      resolvedModel?: string;
     }
   | {
       type: 'approval.requested' | 'approval.canceled' | 'approval.stale' | 'approval.expired';
@@ -254,6 +257,7 @@ export type SprintCoderErrorCode =
 
 export type RuntimeKind = 'mock' | 'codex' | 'claude';
 export type CodexModelOption = { id: string; displayName: string; description: string };
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type AccessPreset = 'ask' | 'auto' | 'full';
 export type PermissionSettings = { preset: AccessPreset; policyEpoch: number };
 export type TeamSummary = {
@@ -395,9 +399,11 @@ export interface SprintCoderApi {
       claudeAvailable: boolean;
       model: string;
       models: CodexModelOption[];
+      effort: ClaudeEffort;
     }>;
     setRuntime(kind: RuntimeKind): Promise<void>;
     setModel(model: string): Promise<void>;
+    setEffort(effort: ClaudeEffort): Promise<void>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;

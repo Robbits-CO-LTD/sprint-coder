@@ -1,4 +1,5 @@
 import {
+  claudeEffortSchema,
   codexModelIdSchema,
   codexModelOptionSchema,
   publicErrorSchema,
@@ -10,7 +11,7 @@ import {
 } from '@sprint-coder/contracts';
 import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
 
-export const RUNTIME_PROTOCOL_VERSION = 4;
+export const RUNTIME_PROTOCOL_VERSION = 5;
 
 export type RuntimeContextFragment = Readonly<{
   id: string;
@@ -43,7 +44,12 @@ type EnvelopeBase = {
 export type RuntimeCanonicalEvent =
   | { type: 'stage'; stage: TurnStage }
   | { type: 'delta'; messageId: string; delta: string }
-  | { type: 'completed' };
+  // `resolvedModel` is additive/optional: only the Claude adapter's normalizer ever populates it
+  // (captured from the stream-json `system/init` event's `model` field — see
+  // claude-normalizer.ts), giving Main a way to surface the concrete model id the CLI actually
+  // resolved for an `auto`/alias selection (see the ADR amendment). Codex's normalizer never sets
+  // it, so this stays undefined for Codex turns.
+  | { type: 'completed'; resolvedModel?: string };
 
 export type MainToRuntimeEnvelope =
   | (EnvelopeBase & { type: 'hello' })
@@ -52,6 +58,9 @@ export type MainToRuntimeEnvelope =
       input: string;
       workspacePath: string | null;
       model: string;
+      // Additive, optional: only meaningful for the Claude adapter (see buildClaudeArgs' effort
+      // param) — Codex has no equivalent CLI flag on this version and its adapter ignores it.
+      effort?: string;
       contextFragments: RuntimeContextFragment[];
       toolCatalogSnapshot: ToolCatalogSnapshot;
       teamMcp?: RuntimeTeamMcpOption;
@@ -89,6 +98,9 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     (value.workspacePath === null || typeof value.workspacePath === 'string') &&
     'model' in value &&
     codexModelIdSchema.safeParse(value.model).success &&
+    (!('effort' in value) ||
+      value.effort === undefined ||
+      claudeEffortSchema.safeParse(value.effort).success) &&
     'contextFragments' in value &&
     isRuntimeContextFragments(value.contextFragments) &&
     'toolCatalogSnapshot' in value &&
@@ -206,7 +218,14 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
 
 function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent {
   if (typeof value !== 'object' || value === null || !('type' in value)) return false;
-  if (value.type === 'completed') return true;
+  if (value.type === 'completed')
+    return (
+      !('resolvedModel' in value) ||
+      value.resolvedModel === undefined ||
+      (typeof value.resolvedModel === 'string' &&
+        value.resolvedModel.length > 0 &&
+        value.resolvedModel.length <= 128)
+    );
   if (value.type === 'stage')
     return 'stage' in value && turnStageSchema.safeParse(value.stage).success;
   return (

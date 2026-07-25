@@ -10,6 +10,7 @@ import {
   emptyPayloadSchema,
   permissionSetInputSchema,
   runtimeModelSetInputSchema,
+  runtimeEffortSetInputSchema,
   runtimeSetInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
@@ -161,6 +162,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.settingsGetRuntime]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetRuntime]: runtimeSetInputSchema,
   [IPC_CHANNELS.settingsSetModel]: runtimeModelSetInputSchema,
+  [IPC_CHANNELS.settingsSetEffort]: runtimeEffortSetInputSchema,
   [IPC_CHANNELS.permissionsGet]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsListAutoDecisions]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsSet]: permissionSetInputSchema,
@@ -217,109 +219,139 @@ describe('IPC channel registry stays in sync with the adversarial fuzz table', (
 describe('every registered IPC channel rejects adversarial envelopes', () => {
   const channels = Object.entries(CHANNEL_INPUT_SCHEMAS);
 
-  it.each(channels)('parses a well-formed minimal envelope shape check for %s (schema is invocable)', (_channel, schema) => {
-    // Not every schema accepts `{}` — this just proves `commandEnvelopeSchema` composes with
-    // each registered schema without throwing during construction (a broken schema composition
-    // would throw here, before any adversarial input is even tried).
-    expect(() => commandEnvelopeSchema(schema)).not.toThrow();
-  });
+  it.each(channels)(
+    'parses a well-formed minimal envelope shape check for %s (schema is invocable)',
+    (_channel, schema) => {
+      // Not every schema accepts `{}` — this just proves `commandEnvelopeSchema` composes with
+      // each registered schema without throwing during construction (a broken schema composition
+      // would throw here, before any adversarial input is even tried).
+      expect(() => commandEnvelopeSchema(schema)).not.toThrow();
+    },
+  );
 
-  it.each(channels)('rejects a prototype-pollution-shaped envelope for %s without polluting Object.prototype', (_channel, schema) => {
-    const envelopeSchema = commandEnvelopeSchema(schema);
-    // Simulates the real IPC wire shape: JSON.parse gives "__proto__"/"constructor" as ordinary
-    // own-enumerable string keys (never the special object-literal prototype setter), which is
-    // exactly what a hostile renderer or a compromised preload would actually transmit.
-    const hostile = JSON.parse(
-      JSON.stringify({
-        requestId: 'r1',
-        operationId: 'o1',
-        taskId: 'polluted-task',
-        payload: { __proto__: { polluted: true }, constructor: { prototype: { polluted: true } } },
-      }),
-    ) as unknown;
+  it.each(channels)(
+    'rejects a prototype-pollution-shaped envelope for %s without polluting Object.prototype',
+    (_channel, schema) => {
+      const envelopeSchema = commandEnvelopeSchema(schema);
+      // Simulates the real IPC wire shape: JSON.parse gives "__proto__"/"constructor" as ordinary
+      // own-enumerable string keys (never the special object-literal prototype setter), which is
+      // exactly what a hostile renderer or a compromised preload would actually transmit.
+      const hostile = JSON.parse(
+        JSON.stringify({
+          requestId: 'r1',
+          operationId: 'o1',
+          taskId: 'polluted-task',
+          payload: {
+            __proto__: { polluted: true },
+            constructor: { prototype: { polluted: true } },
+          },
+        }),
+      ) as unknown;
 
-    const result = envelopeSchema.safeParse(hostile);
-    expect(result.success).toBe(false);
-    expect((Object.prototype as Record<string, unknown>)['polluted']).toBeUndefined();
-    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
-  });
+      const result = envelopeSchema.safeParse(hostile);
+      expect(result.success).toBe(false);
+      expect((Object.prototype as Record<string, unknown>)['polluted']).toBeUndefined();
+      expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+    },
+  );
 
-  it.each(channels)('rejects an oversized requestId/operationId for %s (envelope-level bound applies to every channel)', (_channel, schema) => {
-    const envelopeSchema = commandEnvelopeSchema(schema);
-    const oversized = 'x'.repeat(1_000_000);
+  it.each(channels)(
+    'rejects an oversized requestId/operationId for %s (envelope-level bound applies to every channel)',
+    (_channel, schema) => {
+      const envelopeSchema = commandEnvelopeSchema(schema);
+      const oversized = 'x'.repeat(1_000_000);
 
-    expect(
-      envelopeSchema.safeParse({ requestId: oversized, operationId: 'o1', payload: {} }).success,
-    ).toBe(false);
-    expect(
-      envelopeSchema.safeParse({ requestId: 'r1', operationId: oversized, payload: {} }).success,
-    ).toBe(false);
-  });
+      expect(
+        envelopeSchema.safeParse({ requestId: oversized, operationId: 'o1', payload: {} }).success,
+      ).toBe(false);
+      expect(
+        envelopeSchema.safeParse({ requestId: 'r1', operationId: oversized, payload: {} }).success,
+      ).toBe(false);
+    },
+  );
 
-  it.each(channels)('rejects wrong-typed envelope fields for %s (number/array/null instead of string/object)', (_channel, schema) => {
-    const envelopeSchema = commandEnvelopeSchema(schema);
+  it.each(channels)(
+    'rejects wrong-typed envelope fields for %s (number/array/null instead of string/object)',
+    (_channel, schema) => {
+      const envelopeSchema = commandEnvelopeSchema(schema);
 
-    expect(
-      envelopeSchema.safeParse({ requestId: 12345, operationId: 'o1', payload: {} }).success,
-    ).toBe(false);
-    expect(
-      envelopeSchema.safeParse({ requestId: 'r1', operationId: ['array'], payload: {} }).success,
-    ).toBe(false);
-    expect(envelopeSchema.safeParse({ requestId: 'r1', operationId: 'o1', payload: null }).success).toBe(
-      false,
-    );
-    expect(envelopeSchema.safeParse({ requestId: 'r1', operationId: 'o1', payload: 'a string' }).success).toBe(
-      false,
-    );
-    expect(envelopeSchema.safeParse({ requestId: 'r1', operationId: 'o1', payload: [1, 2, 3] }).success).toBe(
-      false,
-    );
-  });
+      expect(
+        envelopeSchema.safeParse({ requestId: 12345, operationId: 'o1', payload: {} }).success,
+      ).toBe(false);
+      expect(
+        envelopeSchema.safeParse({ requestId: 'r1', operationId: ['array'], payload: {} }).success,
+      ).toBe(false);
+      expect(
+        envelopeSchema.safeParse({ requestId: 'r1', operationId: 'o1', payload: null }).success,
+      ).toBe(false);
+      expect(
+        envelopeSchema.safeParse({ requestId: 'r1', operationId: 'o1', payload: 'a string' })
+          .success,
+      ).toBe(false);
+      expect(
+        envelopeSchema.safeParse({ requestId: 'r1', operationId: 'o1', payload: [1, 2, 3] })
+          .success,
+      ).toBe(false);
+    },
+  );
 
-  it.each(channels)('rejects a completely missing payload/envelope for %s rather than crashing', (_channel, schema) => {
-    const envelopeSchema = commandEnvelopeSchema(schema);
+  it.each(channels)(
+    'rejects a completely missing payload/envelope for %s rather than crashing',
+    (_channel, schema) => {
+      const envelopeSchema = commandEnvelopeSchema(schema);
 
-    for (const garbage of [undefined, null, 'a string', 42, [], true, () => undefined]) {
-      expect(() => envelopeSchema.safeParse(garbage)).not.toThrow();
-      expect(envelopeSchema.safeParse(garbage).success).toBe(false);
-    }
-  });
+      for (const garbage of [undefined, null, 'a string', 42, [], true, () => undefined]) {
+        expect(() => envelopeSchema.safeParse(garbage)).not.toThrow();
+        expect(envelopeSchema.safeParse(garbage).success).toBe(false);
+      }
+    },
+  );
 
-  it.each(channels)('never throws synchronously for %s on a deeply nested or cyclic-looking adversarial payload', (_channel, schema) => {
-    const envelopeSchema = commandEnvelopeSchema(schema);
-    let deep: unknown = 'leaf';
-    for (let index = 0; index < 2_000; index += 1) deep = { nested: deep };
-    const throwingGetterPayload = {};
-    Object.defineProperty(throwingGetterPayload, 'boom', {
-      enumerable: true,
-      get(): never {
-        throw new Error('adversarial getter');
-      },
-    });
+  it.each(channels)(
+    'never throws synchronously for %s on a deeply nested or cyclic-looking adversarial payload',
+    (_channel, schema) => {
+      const envelopeSchema = commandEnvelopeSchema(schema);
+      let deep: unknown = 'leaf';
+      for (let index = 0; index < 2_000; index += 1) deep = { nested: deep };
+      const throwingGetterPayload = {};
+      Object.defineProperty(throwingGetterPayload, 'boom', {
+        enumerable: true,
+        get(): never {
+          throw new Error('adversarial getter');
+        },
+      });
 
-    expect(() =>
-      envelopeSchema.safeParse({ requestId: 'r1', operationId: 'o1', payload: deep }),
-    ).not.toThrow();
-    // A throwing getter on the payload is allowed to surface as a thrown error (zod must read
-    // the property to validate it) — the contract here is only that the envelope schema itself
-    // does not corrupt state or hang; callers (ipc.ts's `handle`) already wrap the whole parse in
-    // try/catch and convert any thrown error into a typed PublicError.
-    expect(() => envelopeSchema.safeParse({ requestId: 'r1', operationId: 'o1', payload: throwingGetterPayload })).not.toThrow(
-      RangeError,
-    );
-  });
+      expect(() =>
+        envelopeSchema.safeParse({ requestId: 'r1', operationId: 'o1', payload: deep }),
+      ).not.toThrow();
+      // A throwing getter on the payload is allowed to surface as a thrown error (zod must read
+      // the property to validate it) — the contract here is only that the envelope schema itself
+      // does not corrupt state or hang; callers (ipc.ts's `handle`) already wrap the whole parse in
+      // try/catch and convert any thrown error into a typed PublicError.
+      expect(() =>
+        envelopeSchema.safeParse({
+          requestId: 'r1',
+          operationId: 'o1',
+          payload: throwingGetterPayload,
+        }),
+      ).not.toThrow(RangeError);
+    },
+  );
 
-  it.each(channels)('rejects an extra unrecognized top-level envelope key for %s (strict envelope)', (_channel, schema) => {
-    const envelopeSchema = commandEnvelopeSchema(schema);
-    expect(
-      envelopeSchema.safeParse({
-        requestId: 'r1',
-        operationId: 'o1',
-        payload: {},
-        extraHostileField: 'smuggled',
-      }).success,
-    ).toBe(false);
-  });
+  it.each(channels)(
+    'rejects an extra unrecognized top-level envelope key for %s (strict envelope)',
+    (_channel, schema) => {
+      const envelopeSchema = commandEnvelopeSchema(schema);
+      expect(
+        envelopeSchema.safeParse({
+          requestId: 'r1',
+          operationId: 'o1',
+          payload: {},
+          extraHostileField: 'smuggled',
+        }).success,
+      ).toBe(false);
+    },
+  );
 });
 
 describe('taskId cross-check adversarial cases (mirrors ipc.ts handle() hasTaskId guard)', () => {

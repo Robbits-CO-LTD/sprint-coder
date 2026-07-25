@@ -23,9 +23,7 @@ describe('decideCableOutcome', () => {
   });
 
   it('holds (no glow yet) while pre-ack: state dispatching/delivered', () => {
-    expect(decideCableOutcome(message({ state: 'dispatching', deliveryState: null }))).toBe(
-      'hold',
-    );
+    expect(decideCableOutcome(message({ state: 'dispatching', deliveryState: null }))).toBe('hold');
     expect(decideCableOutcome(message({ state: 'delivered', deliveryState: null }))).toBe('hold');
   });
 
@@ -44,8 +42,8 @@ describe('decideCableOutcome', () => {
   });
 
   it('danger takes priority even if state looks otherwise ambiguous', () => {
-    expect(
-      decideCableOutcome(message({ state: 'delivered', deliveryState: 'timedOut' })),
-    ).toBe('danger');
+    expect(decideCableOutcome(message({ state: 'delivered', deliveryState: 'timedOut' }))).toBe(
+      'danger',
+    );
   });
 });

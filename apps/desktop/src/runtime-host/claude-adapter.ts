@@ -32,13 +32,40 @@ export type ClaudeProbe = {
 };
 
 // The CLI does not expose a model catalog to enumerate (unlike Codex's models_cache.json), so a
-// static curated list ships instead, per the ADR. Aliases verified against the installed CLI
-// (2.1.218) via `claude --model <alias> ...` resolving to a concrete model id at session init.
+// static curated list ships instead, per the ADR. Each alias below was verified against the
+// installed CLI (2.1.218) with a real probe turn (`claude -p "1" --model <alias> --output-format
+// json ...`), reading the concrete model id back from the result's `modelUsage`/`canonicalModel`
+// field — displayName/description spell out that verified id so "which model is this?" has a
+// concrete answer instead of a bare label:
+//   auto   -> no --model flag at all (the adapter's own sentinel) -> claude-sonnet-5
+//   sonnet -> claude-sonnet-5
+//   opus   -> claude-opus-4-8
+//   haiku  -> claude-haiku-4-5-20251001 (canonicalModel: claude-haiku-4-5)
+// A `fable` alias also resolves (to claude-fable-5) on this installation, but it is deliberately
+// left out of the curated list: unlike the other three, it is not a documented general-audience
+// model tier in `claude --help`'s own example text, and adding it is a product/curation call
+// beyond "clarify the existing labels" — noted here for whoever revisits this list.
 const CLAUDE_MODELS: CodexModelOption[] = [
-  { id: 'auto', displayName: 'Auto', description: 'Claude Codeの既定モデルを使用' },
-  { id: 'sonnet', displayName: 'Sonnet', description: 'バランス型モデル' },
-  { id: 'opus', displayName: 'Opus', description: '最も高性能なモデル（低速・高コスト）' },
-  { id: 'haiku', displayName: 'Haiku', description: '高速・軽量なモデル' },
+  {
+    id: 'auto',
+    displayName: 'Auto',
+    description: 'Claude Codeの既定モデルを使用（現在: Sonnet 5 / claude-sonnet-5）',
+  },
+  {
+    id: 'sonnet',
+    displayName: 'Sonnet 5',
+    description: 'バランス型モデル（claude-sonnet-5）',
+  },
+  {
+    id: 'opus',
+    displayName: 'Opus 4.8',
+    description: '最も高性能なモデル（claude-opus-4-8、低速・高コスト）',
+  },
+  {
+    id: 'haiku',
+    displayName: 'Haiku 4.5',
+    description: '高速・軽量なモデル（claude-haiku-4-5）',
+  },
 ];
 
 export async function probeClaude(command = 'claude'): Promise<ClaudeProbe> {
@@ -92,6 +119,7 @@ export class ClaudeRuntimeAdapter {
     fail: EmitError,
     exited: (code: number, canceled: boolean) => void,
     teamMcp?: RuntimeTeamMcpOption,
+    effort?: string,
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
@@ -130,7 +158,7 @@ export class ClaudeRuntimeAdapter {
     const normalizer = new ClaudeJsonlNormalizer(
       teamMcp === undefined ? undefined : teamMcpExpectedCapabilities(),
     );
-    const child = spawn('claude', buildClaudeArgs(model, teamMcpArgs), {
+    const child = spawn('claude', buildClaudeArgs(model, teamMcpArgs, effort), {
       cwd,
       env: minimalEnvironment(),
       detached: process.platform !== 'win32',
@@ -280,9 +308,17 @@ export function buildClaudePrompt(
 // source") still connects and `--tools ""` still empties the built-in tool set exactly as
 // without `--safe-mode`. `--strict-mcp-config` then pins the MCP surface to exactly that one
 // server, and `--allowedTools mcp__team__*` further pins it to exactly the 4 team tools.
+//
+// `effort` (reasoning effort control, see the ADR amendment) maps straight to `--effort <level>`.
+// Verified directly against the installed CLI: `claude --help` documents "Effort level for the
+// current session (low, medium, high, xhigh, max)", and a probe with an invalid value emits a
+// non-fatal warning and falls back to the CLI's own default rather than erroring — so an
+// out-of-range value here degrades gracefully even if it ever reached the CLI unvalidated (Main
+// still validates against `claudeEffortSchema` before it gets this far).
 export function buildClaudeArgs(
   model: string,
   teamMcp?: { configPath: string; guidance: string },
+  effort?: string,
 ): string[] {
   return [
     '-p',
@@ -308,6 +344,7 @@ export function buildClaudeArgs(
           teamMcp.guidance,
         ]),
     ...(model === 'auto' ? [] : ['--model', model]),
+    ...(effort === undefined ? [] : ['--effort', effort]),
   ];
 }
 

@@ -102,10 +102,18 @@ async function startHarness(): Promise<Harness> {
 describe('team-mcp-server-source (MCP stdio handshake)', () => {
   it('responds to initialize, ignores notifications/initialized, and lists exactly the 4 team tools', async () => {
     const harness = await startHarness();
-    harness.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2099-01-01' } });
+    harness.send({
+      jsonrpc: '2.0',
+      id: 0,
+      method: 'initialize',
+      params: { protocolVersion: '2099-01-01' },
+    });
     const initReply = await harness.nextMessage();
     expect(initReply['id']).toBe(0);
-    const result = initReply['result'] as { protocolVersion: string; capabilities: { tools: unknown } };
+    const result = initReply['result'] as {
+      protocolVersion: string;
+      capabilities: { tools: unknown };
+    };
     // Echoes the client's requested protocol version back, matching what a real handshake needs.
     expect(result.protocolVersion).toBe('2099-01-01');
     expect(result.capabilities.tools).toEqual({});
@@ -135,7 +143,10 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
       tool: 'team_hire_worker',
       args: { role: '調査', objective: '調べる' },
     });
-    harness.bridgeRespond({ ok: true, result: { ok: true, workerId: 'w1', role: '調査', state: 'ready' } });
+    harness.bridgeRespond({
+      ok: true,
+      result: { ok: true, workerId: 'w1', role: '調査', state: 'ready' },
+    });
 
     const reply = await harness.nextMessage();
     expect(reply['id']).toBe(2);

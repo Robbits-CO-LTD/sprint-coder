@@ -64,30 +64,32 @@ class Redactor implements StreamingSecretRedactor {
 }
 
 export function redactSecrets(input: string): string {
-  return input
-    .replace(
-      /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/gi,
-      '[REDACTED_PRIVATE_KEY]',
-    )
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer [REDACTED]')
-    // AWS long-term/temporary access key IDs are self-identifying by prefix and fixed length,
-    // so this catches one embedded inline in output with no surrounding `KEY=` label at all.
-    .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[REDACTED_AWS_KEY]')
-    // Provider secret-key prefixes. The separator is `[_-]` (not just `_`) so this also catches
-    // Anthropic (`sk-ant-...`) and OpenAI (`sk-proj-...`) hyphenated key shapes, not only the
-    // underscore-separated GitHub/legacy OpenAI shape.
-    .replace(/\b(?:sk|gh[pousr]|github_pat)[_-][A-Za-z0-9_-]{12,}\b/g, '[REDACTED_TOKEN]')
-    .replace(
-      // The lookbehind (rather than `\b`) is deliberate: `\b` treats `_`/`-` as word characters,
-      // so it cannot see a keyword boundary inside `DB_PASSWORD` or `AWS_SECRET_ACCESS_KEY` — the
-      // overwhelmingly common .env/CI naming convention. Requiring "not directly preceded by an
-      // alnum" still rejects an unrelated compound word like `mypasswordfield`.
-      /(?<![a-z0-9])(api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret|aws[_-]?access[_-]?key[_-]?id|access[_-]?key[_-]?id|aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key)\s*([:=])\s*([^\s,;]{4,})/gi,
-      '$1$2[REDACTED]',
-    )
-    // A bare JWT (three dot-separated base64url segments, header starting `eyJ`) can appear
-    // without any `token=`/`Authorization:` label at all (e.g. a cookie value, a URL fragment).
-    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_JWT]');
+  return (
+    input
+      .replace(
+        /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/gi,
+        '[REDACTED_PRIVATE_KEY]',
+      )
+      .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer [REDACTED]')
+      // AWS long-term/temporary access key IDs are self-identifying by prefix and fixed length,
+      // so this catches one embedded inline in output with no surrounding `KEY=` label at all.
+      .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[REDACTED_AWS_KEY]')
+      // Provider secret-key prefixes. The separator is `[_-]` (not just `_`) so this also catches
+      // Anthropic (`sk-ant-...`) and OpenAI (`sk-proj-...`) hyphenated key shapes, not only the
+      // underscore-separated GitHub/legacy OpenAI shape.
+      .replace(/\b(?:sk|gh[pousr]|github_pat)[_-][A-Za-z0-9_-]{12,}\b/g, '[REDACTED_TOKEN]')
+      .replace(
+        // The lookbehind (rather than `\b`) is deliberate: `\b` treats `_`/`-` as word characters,
+        // so it cannot see a keyword boundary inside `DB_PASSWORD` or `AWS_SECRET_ACCESS_KEY` — the
+        // overwhelmingly common .env/CI naming convention. Requiring "not directly preceded by an
+        // alnum" still rejects an unrelated compound word like `mypasswordfield`.
+        /(?<![a-z0-9])(api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret|aws[_-]?access[_-]?key[_-]?id|access[_-]?key[_-]?id|aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key)\s*([:=])\s*([^\s,;]{4,})/gi,
+        '$1$2[REDACTED]',
+      )
+      // A bare JWT (three dot-separated base64url segments, header starting `eyJ`) can appear
+      // without any `token=`/`Authorization:` label at all (e.g. a cookie value, a URL fragment).
+      .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_JWT]')
+  );
 }
 
 export function createStreamingSecretRedactor(): StreamingSecretRedactor {
