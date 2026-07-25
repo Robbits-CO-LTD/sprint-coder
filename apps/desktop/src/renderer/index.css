@@ -636,6 +636,54 @@ button {
   gap: 20px;
 }
 
+/* Jump-to-latest (issue #3). A sticky, zero-height rail: it pins to the bottom of the scrollport
+   without consuming layout space, so showing/hiding it never reflows the timeline (which would
+   otherwise shift the very content the reader stopped to read). The button is absolutely
+   positioned inside it — `position: sticky` establishes the containing block. */
+.timeline-jump {
+  position: sticky;
+  bottom: 0;
+  height: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+.timeline-jump-button {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid rgba(227, 154, 98, 0.45);
+  border-radius: 99px;
+  padding: 6px 14px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  animation: jumpIn var(--t-quick) var(--ease-ui);
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    border-color var(--t-quick) var(--ease-ui);
+}
+.timeline-jump-button:hover {
+  background: rgba(227, 154, 98, 0.14);
+  border-color: var(--accent-primary);
+}
+@keyframes jumpIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -1400,6 +1448,12 @@ button {
 .effort-menu {
   min-width: 240px;
   max-width: min(320px, calc(100vw - 32px));
+  /* Same scroll guard as .model-menu. Six levels (issue #8 added Ultracode) still fit at 100%,
+     but the Leader node is a fixed 620px tall inside a `overflow: clip` Canvas and the effective
+     viewport shrinks further under zoom — without this the last option would be clipped away
+     instead of reachable. */
+  max-height: 320px;
+  overflow-y: auto;
 }
 .runtime-menu-item {
   display: flex;

@@ -151,6 +151,15 @@ export function ArrowUp(props: IconProps) {
   );
 }
 
+export function ArrowDown(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 5v14" />
+      <path d="m19 12-7 7-7-7" />
+    </Icon>
+  );
+}
+
 export function ArrowRightLeft(props: IconProps) {
   return (
     <Icon {...props}>

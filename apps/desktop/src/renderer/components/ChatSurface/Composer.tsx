@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useAppStore } from '../../store/appStore';
+import type { RuntimeState } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
 import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square } from '../icons';
 import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
@@ -400,13 +401,14 @@ function ModelChip() {
   );
 }
 
-const EFFORT_LEVELS: ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_LEVELS: ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
 const EFFORT_LABEL: Record<ClaudeEffort, string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
   xhigh: 'X-High',
   max: 'Max',
+  ultracode: 'Ultracode',
 };
 const EFFORT_DESC: Record<ClaudeEffort, string> = {
   low: '最速・最小のコストで応答',
@@ -414,21 +416,101 @@ const EFFORT_DESC: Record<ClaudeEffort, string> = {
   high: 'じっくり考えて応答',
   xhigh: 'より深く考えて応答',
   max: '最大限考えて応答（最も低速・高コスト）',
+  ultracode: '複数エージェントを動員して最大限に検証（最も低速・高コスト）',
 };
 
-// Effort selector (FR-SET-03 follow-up). Verified empirically against the installed Claude CLI
-// (2.1.218, `claude --help`): `--effort <level>` accepts exactly these 5 values and is honored
-// per-turn (see the ADR amendment) — unlike the model chip, this control is Claude-only: Codex
-// has no equivalent flag on this CLI version, and mock has no effort concept at all, so both stay
-// disabled with a static display, mirroring how ModelChip disables for an inactive Runtime.
+type EffortChoice = { id: string; label: string; description: string };
+
+/** Title-cases a level id the app has no curated label for, so a level a future CLI adds still
+ * renders as a name rather than a raw slug. `xhigh` keeps the hyphenated form used above. */
+function effortLabel(id: string): string {
+  return (
+    EFFORT_LABEL[id as ClaudeEffort] ??
+    (id === 'ultra' ? 'Ultra' : id.replace(/^./, (c) => c.toUpperCase()))
+  );
+}
+
+/**
+ * The levels offered for the active Runtime, and why the chip is disabled when it is.
+ *
+ * The two providers do not share a value space (issue #6). Claude's set is fixed and verified
+ * against `claude --help` plus the `ultracode` probe. Codex's is per-model and published by the CLI
+ * in models_cache.json, so it is read off the selected model rather than hardcoded — GPT-5.6-Sol
+ * advertises `max`/`ultra` and GPT-5.5 does not, and offering a level the model has not advertised
+ * fails the whole turn with an API 400 rather than falling back.
+ */
+function effortChoicesFor(runtime: RuntimeState): {
+  choices: EffortChoice[];
+  selected: string;
+  disabledReason: string | null;
+} {
+  if (runtime.kind === 'claude') {
+    if (!runtime.claudeAvailable)
+      return {
+        choices: [],
+        selected: runtime.effort,
+        disabledReason: 'Claude CLIが利用できません',
+      };
+    return {
+      choices: EFFORT_LEVELS.map((id) => ({
+        id,
+        label: EFFORT_LABEL[id],
+        description: EFFORT_DESC[id],
+      })),
+      selected: runtime.effort,
+      disabledReason: null,
+    };
+  }
+  if (runtime.kind === 'codex') {
+    if (!runtime.codexAvailable)
+      return { choices: [], selected: '', disabledReason: 'Codex CLIが利用できません' };
+    const model = runtime.models.find(({ id }) => id === runtime.model);
+    const efforts = model?.efforts ?? [];
+    if (efforts.length === 0)
+      return {
+        choices: [],
+        selected: '',
+        // The `auto` sentinel is the common case here: the CLI picks the concrete model itself, so
+        // there is no advertised level set to choose from and its own default applies.
+        disabledReason:
+          runtime.model === 'auto'
+            ? 'モデルをAuto以外にするとEffortを変更できます'
+            : 'このモデルはEffortの選択肢を公開していません',
+      };
+    return {
+      choices: efforts.map(({ id, description }) => ({
+        id,
+        label: effortLabel(id),
+        description,
+      })),
+      // '' means nothing is persisted, in which case the level actually in force is the model's own
+      // advertised default — so showing that is accurate, not a guess.
+      selected: runtime.codexEffort || model?.defaultEffort || '',
+      disabledReason: null,
+    };
+  }
+  return {
+    choices: [],
+    selected: '',
+    disabledReason: 'Codex/Claude Runtime選択時にEffortを変更できます',
+  };
+}
+
+// Effort selector (FR-SET-03 follow-up), now available for both real Runtimes. Mock has no effort
+// concept at all, so it stays disabled with a static display, mirroring how ModelChip disables for
+// an inactive Runtime.
 function EffortChip() {
   const runtime = useAppStore((s) => s.runtime);
   const setEffort = useAppStore((s) => s.setEffort);
+  const setCodexEffort = useAppStore((s) => s.setCodexEffort);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const supported =
-    typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.setEffort === 'function';
-  const enabled = supported && runtime.kind === 'claude' && runtime.claudeAvailable;
+    typeof window !== 'undefined' &&
+    typeof window.sprintCoder?.settings?.setEffort === 'function' &&
+    typeof window.sprintCoder?.settings?.setCodexEffort === 'function';
+  const { choices, selected, disabledReason } = effortChoicesFor(runtime);
+  const enabled = supported && disabledReason === null && choices.length > 0;
 
   useEffect(() => {
     if (!open) return;
@@ -439,9 +521,11 @@ function EffortChip() {
     return () => document.removeEventListener('mousedown', handlePointerDown);
   }, [open]);
 
-  function choose(effort: ClaudeEffort) {
+  function choose(effort: string) {
     setOpen(false);
-    if (effort !== runtime.effort) void setEffort(effort);
+    if (effort === selected) return;
+    if (runtime.kind === 'claude') void setEffort(effort as ClaudeEffort);
+    else void setCodexEffort(effort);
   }
 
   return (
@@ -463,24 +547,24 @@ function EffortChip() {
         aria-expanded={open}
         disabled={!enabled}
         onClick={() => setOpen((value) => !value)}
-        title={enabled ? 'Effortを選択' : 'Claude Runtime選択時にEffortを変更できます'}
+        title={enabled ? 'Effortを選択' : (disabledReason ?? 'Effortを変更できません')}
       >
-        {`effort: ${EFFORT_LABEL[runtime.effort]}`}
+        {`effort: ${selected === '' ? '—' : effortLabel(selected)}`}
       </button>
       {open && (
         <div className="runtime-menu effort-menu" role="menu" aria-label="Effort選択">
-          {EFFORT_LEVELS.map((effort) => (
+          {choices.map(({ id, label, description }) => (
             <button
-              data-testid={`effort-option-${effort}`}
-              key={effort}
+              data-testid={`effort-option-${id}`}
+              key={id}
               type="button"
               role="menuitemradio"
-              aria-checked={runtime.effort === effort}
-              className={`runtime-menu-item${runtime.effort === effort ? ' active' : ''}`}
-              onClick={() => choose(effort)}
+              aria-checked={selected === id}
+              className={`runtime-menu-item${selected === id ? ' active' : ''}`}
+              onClick={() => choose(id)}
             >
-              <span className="runtime-menu-title">{EFFORT_LABEL[effort]}</span>
-              <span className="runtime-menu-desc">{EFFORT_DESC[effort]}</span>
+              <span className="runtime-menu-title">{label}</span>
+              <span className="runtime-menu-desc">{description}</span>
             </button>
           ))}
         </div>
