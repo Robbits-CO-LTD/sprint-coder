@@ -248,6 +248,9 @@ export class EditArtifactStore {
   }
 
   private async syncDirectory(): Promise<void> {
+    // Windows does not support fsync on directory handles through Node and
+    // returns EPERM. The artifact files themselves are synced before rename.
+    if (process.platform === 'win32') return;
     const directory = await open(this.rootPath, constants.O_RDONLY);
     try {
       await directory.sync();
