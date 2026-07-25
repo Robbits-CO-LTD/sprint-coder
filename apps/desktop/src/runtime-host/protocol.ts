@@ -98,7 +98,9 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     (value.workspacePath === null || typeof value.workspacePath === 'string') &&
     'model' in value &&
     codexModelIdSchema.safeParse(value.model).success &&
-    (!('effort' in value) || value.effort === undefined || claudeEffortSchema.safeParse(value.effort).success) &&
+    (!('effort' in value) ||
+      value.effort === undefined ||
+      claudeEffortSchema.safeParse(value.effort).success) &&
     'contextFragments' in value &&
     isRuntimeContextFragments(value.contextFragments) &&
     'toolCatalogSnapshot' in value &&
