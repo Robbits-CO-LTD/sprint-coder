@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { WorkspaceChip } from '../WorkspaceChip';
 import { useAppStore } from '../../store/appStore';
+import { accessDescription, accessEnforcement } from '../../lib/access-labels';
 import type { ContextUsage } from '../../types/sprint-coder';
 import type { AccessPreset } from '../../types/sprint-coder';
 
@@ -48,6 +49,8 @@ function PermissionChip({ taskId }: { taskId: string }) {
     policyEpoch: 0,
   };
   const setAccessPreset = useAppStore((state) => state.setAccessPreset);
+  const runtimeKind = useAppStore((state) => state.runtime.kind);
+  const enforcement = accessEnforcement(permission.preset, runtimeKind);
   const [open, setOpen] = useState(false);
   const [confirmingFull, setConfirmingFull] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -100,9 +103,20 @@ function PermissionChip({ taskId }: { taskId: string }) {
           setOpen((value) => !value);
           setConfirmingFull(false);
         }}
-        title={`Access modeを選択（policy epoch ${permission.policyEpoch}）`}
+        data-access-preset={permission.preset}
+        data-access-enforcement={enforcement}
+        title={accessDescription(permission.preset, runtimeKind)}
       >
         {PRESET_LABEL[permission.preset]}
+        {/* Moved here from the TaskHeader when the duplicate chips were removed (issue #47). It must
+            travel with the control, not be dropped: this is the one place the app admits that a
+            write-capable Claude is not sandboxed by anything the app enforces (issue #37). A word,
+            never only a colour. */}
+        {enforcement === 'trusted-unmanaged' && (
+          <span className="access-unmanaged" data-testid="access-unmanaged">
+            非サンドボックス
+          </span>
+        )}
       </button>
       {open && (
         <div className="runtime-menu permission-menu" role="menu" aria-label="Access mode選択">
