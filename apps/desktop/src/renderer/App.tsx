@@ -8,7 +8,15 @@ import type { CapturedSurfaceState } from './components/ChatSurface/SurfaceLayer
 import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
+import { InspectorPanel } from './components/InspectorPanel';
 import { Plus } from './components/icons';
+import { useMediaQuery } from './lib/useMediaQuery';
+import {
+  nextInspectorState,
+  readStoredInspectorState,
+  writeStoredInspectorState,
+  type InspectorState,
+} from './lib/inspector-preference';
 
 // Team view preference (Slice 6.1 item 4, List fallback): renderer-only, not part of the
 // persisted Task/Team domain — a per-install UI preference, so localStorage is the right home for
@@ -73,6 +81,26 @@ export default function App() {
     readStoredTeamViewPreference,
   );
 
+  // --- Inspector panel (issue #16) ---
+  //
+  // Default `hidden`, and that is not timidity: every existing E2E baseline was recorded without this
+  // panel, so one that appeared unbidden would change the measured layout of specs that have nothing
+  // to do with it.
+  const [inspectorState, setInspectorStateRaw] = useState<InspectorState>(readStoredInspectorState);
+  // Same 900px breakpoint the Team List View and the sidebar already use, so the app has one
+  // narrow-viewport rule rather than three that disagree.
+  const inspectorOverlay = useMediaQuery('(max-width: 900px)');
+
+  const setInspectorState = useCallback((next: InspectorState) => {
+    setInspectorStateRaw(next);
+    writeStoredInspectorState(next);
+  }, []);
+  const cycleInspector = useCallback(
+    () => setInspectorState(nextInspectorState(inspectorState)),
+    [inspectorState, setInspectorState],
+  );
+  const hideInspector = useCallback(() => setInspectorState('hidden'), [setInspectorState]);
+
   // Focus restoration on full Team-mode exit (a11y fix, Phase 7 / NFR-A11Y-02): both exit paths
   // ("Chatに戻る" from the Canvas — after its reverse-FLIP tail — and from the List view) end by
   // unmounting whichever Team surface was showing. If focus was on that surface's own "戻る"
@@ -112,6 +140,11 @@ export default function App() {
   // must not make this component and TeamCanvas (still finishing its own exit) render at once.
   const teamListActive =
     teamViewOpen && teamViewPreference === 'list' && !exiting && selectedTask !== null;
+  // The List view is 460px and the panel 380/560, so showing both needs 840px+ of shell. They are
+  // exclusive: while the List is up the panel drops to `rail`, which keeps the gauge visible without
+  // competing for width. The stored preference is untouched, so it returns on leaving List view.
+  const effectiveInspectorState =
+    teamListActive && inspectorState !== 'hidden' ? 'rail' : inspectorState;
 
   // Render-time sync (not an effect — react-hooks/set-state-in-effect convention, see
   // TaskHeader/GoalChip): keep `surfaceMode` following `teamCanvasActive`, except during
@@ -212,7 +245,13 @@ export default function App() {
       <div className="main">
         {selectedTask ? (
           <>
-            <TaskHeader task={selectedTask} onToggleTeam={requestEnterTeam} inert={chromeInert} />
+            <TaskHeader
+              task={selectedTask}
+              onToggleTeam={requestEnterTeam}
+              inert={chromeInert}
+              onToggleInspector={cycleInspector}
+              inspectorOpen={inspectorState !== 'hidden'}
+            />
             {/* SurfaceLayer portals the shared ChatSurface instance in here when `surfaceMode`
                 is 'main' — this anchor only reserves the slot, see the morph orchestration
                 above and SurfaceLayer.tsx. This is also where the Chat lives in List mode: List
@@ -248,6 +287,16 @@ export default function App() {
           onSwitchToListView={switchToListView}
         />
       )}
+      {/* Flex sibling of `.main`, deliberately NOT inside `.surface-anchor`/`.leader-anchor`/
+          `.surface-host`: SurfaceLayer re-parents that host between anchors on every Chat<->Team
+          morph (ADR-002), and anything nested inside it would be torn out and re-inserted with it,
+          losing its own state. Asserted mechanically in the E2E. */}
+      <InspectorPanel
+        state={effectiveInspectorState}
+        onCycle={cycleInspector}
+        onHide={hideInspector}
+        overlay={inspectorOverlay}
+      />
       {teamListActive && selectedTask && (
         <TeamListView
           task={selectedTask}

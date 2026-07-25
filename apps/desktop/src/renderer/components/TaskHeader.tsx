@@ -1,19 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { WorkspaceChip } from './WorkspaceChip';
-import { Hexagon, MoreHorizontal, Target } from './icons';
+import { Hexagon, LayoutGrid, MoreHorizontal, Target } from './icons';
 import type { TaskSummary } from '../types/sprint-coder';
 
 export function TaskHeader({
   task,
   onToggleTeam,
   inert,
+  onToggleInspector,
+  inspectorOpen = false,
 }: {
   task: TaskSummary;
   /** Enters Team mode via App's morph orchestration (SurfaceLayer/TeamCanvas, Slice 6.2) instead
    * of flipping the store directly — see App.tsx's `requestEnterTeam`. */
   onToggleTeam: () => void;
   inert?: boolean;
+  /** Cycles the inspector panel's width (issue #16). Lives in the header rather than in the panel so
+   * it stays reachable while the panel is hidden. */
+  onToggleInspector?: (() => void) | undefined;
+  inspectorOpen?: boolean;
 }) {
   const renameTask = useAppStore((s) => s.renameTask);
   const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
@@ -96,6 +102,18 @@ export function TaskHeader({
       )}
       <GoalChip task={task} />
       <WorkspaceChip taskId={task.id} variant="header" />
+      {onToggleInspector !== undefined && (
+        <button
+          type="button"
+          className="chip-btn goal-chip"
+          data-testid="inspector-toggle"
+          aria-expanded={inspectorOpen}
+          title="実行インスペクタを開閉"
+          onClick={onToggleInspector}
+        >
+          <LayoutGrid size={13} /> Inspector
+        </button>
+      )}
       <span className="goal-chip" title="現在のAccess mode">
         Access: {accessPreset === 'ask' ? '確認する' : accessPreset === 'auto' ? '自動' : 'フル'}
       </span>
