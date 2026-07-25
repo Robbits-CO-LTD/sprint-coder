@@ -956,7 +956,21 @@ export const turnSubscriptionInputSchema = z
   })
   .strict();
 export const appInfoSchema = z.object({ version: z.string(), platform: z.string() }).strict();
-export const turnStartResultSchema = z.object({ turnId: idSchema }).strict();
+export const turnStartResultSchema = z
+  .object({
+    turnId: idSchema,
+    /**
+     * The Task's updated summary, present only when this message triggered automatic naming
+     * (issue #4) — a Task still carrying the placeholder title gets named from its first message.
+     *
+     * Returned on the start result rather than as a TurnEvent on purpose: every TurnEvent is
+     * appended to `turn_events` and replayed on re-subscribe, and a rename is a Task-level fact
+     * with no place in a Turn's event history. Callers that ignore it simply keep showing the old
+     * title until their next `tasks.list()`.
+     */
+    renamedTask: taskSummarySchema.optional(),
+  })
+  .strict();
 export const voidResultSchema = z.undefined();
 
 export interface SprintCoderApi {
@@ -1016,7 +1030,10 @@ export interface SprintCoderApi {
     outputTail(input: CommandOutputTailInput): Promise<CommandOutputPage>;
   };
   turns: {
-    start(input: { taskId: string; text: string }): Promise<{ turnId: string }>;
+    start(input: {
+      taskId: string;
+      text: string;
+    }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
     steer(input: { taskId: string; text: string; expectedTurnId: string }): Promise<void>;
     stopAndSend(input: { taskId: string; text: string }): Promise<void>;
