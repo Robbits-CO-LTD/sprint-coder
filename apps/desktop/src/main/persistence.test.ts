@@ -439,6 +439,25 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('tells "never chose" apart from "chose mock", so a real CLI can be adopted once', () => {
+      // Issue #50: the app used to start on Mock even with a real CLI installed, and Mock emits
+      // plausible-looking code instantly — which reads as the app working rather than as a
+      // stand-in. Main adopts an installed CLI on first run, and the only thing that makes that
+      // safe is this distinction: a user who deliberately picked Mock must not have it replaced on
+      // every launch.
+      const { persistence, path } = createPersistence();
+      expect(persistence.getStoredRuntime()).toBeNull();
+      expect(persistence.getRuntime()).toBe('mock');
+
+      persistence.setRuntime('mock');
+      expect(persistence.getStoredRuntime()).toBe('mock');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getStoredRuntime()).toBe('mock');
+      reopened.close();
+    });
+
     it('defaults to mock and persists the selected runtime across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getRuntime()).toBe('mock');

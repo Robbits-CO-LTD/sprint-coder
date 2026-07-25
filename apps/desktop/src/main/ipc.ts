@@ -971,6 +971,45 @@ export class IpcRouter {
     this.teamCoordinator.recoverOnStartup();
     await this.permissionBroker.drainPolicyEpochOutbox();
     if (process.env['SPRINT_CODER_LEADER_MCP'] === '1') await this.teamMcpBridge.ensureStarted();
+    await this.adoptInstalledRuntime();
+  }
+
+  /**
+   * Picks an installed CLI the first time the app runs, instead of leaving Mock in place (issue #50).
+   *
+   * Mock is the fallback for a machine with nothing installed, not the default for one with
+   * everything installed. Left as the default it produces plausible-looking code instantly, which
+   * reads as the app working rather than as a stand-in — the failure mode that prompted this.
+   *
+   * Only when the user has never chosen. An explicit choice of Mock is a choice and is left alone,
+   * which is why this needs `getStoredRuntime()` rather than `getRuntime()`.
+   *
+   * Best-effort: a probe failure or a write failure must not stop the app from starting.
+   */
+  private async adoptInstalledRuntime(): Promise<void> {
+    try {
+      // Opt-out for launches that must stay deterministic. The E2E harness sets it, because every
+      // spec asserts against the mock's fixed output — without this, a machine with a CLI installed
+      // would run the whole suite against a real model, slowly and at real cost.
+      if (process.env['SPRINT_CODER_RUNTIME_ADOPT'] === '0') return;
+      if (this.persistence.getStoredRuntime() !== null) return;
+      const [codex, claude] = await Promise.all([
+        this.codexRuntime.probe(),
+        this.claudeRuntime.probe(),
+      ]);
+      // Codex first only because it is the historical default of this app's settings key; neither is
+      // "better", and the user changes it in one click either way.
+      const installed: RuntimeKind | null = codex.available
+        ? 'codex'
+        : claude.available
+          ? 'claude'
+          : null;
+      if (installed === null) return;
+      this.persistence.setRuntime(installed);
+    } catch {
+      // Nothing to recover: the stored value stays absent and the app runs on Mock, exactly as
+      // before this existed.
+    }
   }
 
   async dispose(): Promise<void> {

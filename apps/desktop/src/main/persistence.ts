@@ -1991,6 +1991,7 @@ export interface PersistenceClient {
   clearMutationQuarantine(workspaceKey: string, expectedFence: number, now: string): void;
   isNativeMutationAuthorityAvailable(): boolean;
   getRuntime(): RuntimeKind;
+  getStoredRuntime(): RuntimeKind | null;
   setRuntime(kind: RuntimeKind): void;
   getModel(): string;
   setModel(model: string): void;
@@ -3556,13 +3557,45 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return 'mock';
   }
 
+  /**
+   * The Runtime the user actually chose, or null if they never have (issue #50).
+   *
+   * `getRuntime()` cannot tell those apart, and the difference matters: "no preference yet" should
+   * resolve to whichever real CLI is installed, while an explicit choice of Mock must be left alone.
+   * Only Main can decide the first case, because only Main has probed.
+   *
+   * A separate marker key rather than the presence of `runtime.kind`, because the schema seeds that
+   * row with 'mock' when the database is created — so its presence says nothing about whether anyone
+   * chose it. The marker is written only by `setRuntime`, which is only ever called by a user
+   * action or by the one-time adoption itself.
+   */
+  getStoredRuntime(): RuntimeKind | null {
+    const chosen = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'runtime.kind.chosen'")
+      .get() as { value: string } | undefined;
+    if (chosen?.value !== '1') return null;
+    return this.getRuntime();
+  }
+
   setRuntime(kind: RuntimeKind): void {
-    this.db
-      .prepare(
-        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.kind', ?, ?)
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.kind', ?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-      )
-      .run(kind, new Date().toISOString());
+        )
+        .run(kind, now);
+      // Marks the preference as decided rather than seeded (issue #50). Written here because every
+      // caller of setRuntime is either the user picking one or the one-time adoption of an installed
+      // CLI — both of which are decisions, unlike the 'mock' row the schema creates.
+      this.db
+        .prepare(
+          `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.kind.chosen', '1', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(now);
+    })();
   }
 
   // The selected model is scoped per Runtime kind (its settings key), so switching between
