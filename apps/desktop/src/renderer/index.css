@@ -2,17 +2,62 @@
    Visual baseline: demo/index.html (§13 UI system). Chat layout only; Team/Canvas out of scope. */
 
 :root {
-  --bg-canvas: #12110f;
-  --bg-surface: #1b1a17;
-  --bg-elevated: #24221e;
-  --border-subtle: rgba(255, 244, 224, 0.09);
-  --text-primary: #f4efe6;
-  --text-secondary: #aaa49a;
-  --accent-primary: #e39a62;
-  --accent-cool: #78a9c2;
-  --state-success: #79b58a;
-  --state-warning: #d5a85b;
-  --state-danger: #d9786b;
+  /* Cool-neutral palette (issue #14). Every token below that renders text or an essential UI
+     boundary is held to a measured threshold rather than an eyeballed one — see
+     lib/contrast.test.ts, which reads these values straight out of this file.
+
+     Four values differ from the palette as specified in the issue, because the specified ones did
+     not clear their own stated bar. Each was raised by the minimum amount that does (computed, not
+     guessed), keeping the intended hue:
+       --text-muted   #737D8C -> #929CAB  (was 3.03-4.46; body text needs 4.5:1 everywhere)
+       --border-strong #363D49 -> #6E7581 (was 1.16-1.70; an essential boundary needs 3:1)
+       --danger       #E06C75 -> #F07C85  (was 3.96 on --bg-selected)
+       --ai-accent    #9B8AFB -> #9C8BFC  (was 4.47 on --bg-selected)
+       --accent       #7297F5 -> #7398F6  (was 4.49 on --bg-selected — 0.01 short)
+     Raising the values rather than writing usage rules was the deliberate choice: a rule like
+     "never use --text-muted for body text" has to be remembered by every future change, whereas a
+     token that simply meets the bar cannot be misused. */
+
+  /* Surfaces */
+  --bg-app: #111318;
+  --bg-sidebar: #15181e;
+  --bg-panel: #191c23;
+  --bg-elevated: #20242c;
+  --bg-hover: #262b35;
+  --bg-selected: #293348;
+
+  /* Text */
+  --text-primary: #e6e9ef;
+  --text-secondary: #a8b0be;
+  --text-muted: #929cab;
+  /* Disabled text is exempt from WCAG 1.4.3, so this one keeps the specified value. Its use is
+     confined to genuinely inactive controls; anything a user is expected to read uses
+     --text-muted or above. */
+  --text-disabled: #515967;
+
+  /* Borders. --border-subtle is decorative separation only (1.01-1.33, nowhere near 3:1) and must
+     never be the sole indicator of a control's bounds; --border-strong is the one to reach for when
+     the boundary carries meaning. */
+  --border-subtle: #272c35;
+  --border-strong: #6e7581;
+
+  /* Brand / interaction */
+  --accent: #7398f6;
+  --accent-hover: #86a6fa;
+  /* An accent-tinted *fill*, not a foreground. Its sanctioned text colour is --text-primary
+     (9.48:1); accent-on-accent-muted is 4.10 and is not a pairing this palette offers. */
+  --accent-muted: #28385f;
+  --focus-ring: #7da2ff;
+
+  /* State */
+  --success: #61b88a;
+  --warning: #d3a653;
+  --danger: #f07c85;
+  --info: #6fa8dc;
+
+  /* AI */
+  --ai-accent: #9c8bfc;
+  --ai-surface: #24213a;
 
   --ease-ui: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-spatial: cubic-bezier(0.22, 1, 0.36, 1);
@@ -48,7 +93,7 @@ body,
 
 body {
   margin: 0;
-  background: var(--bg-canvas);
+  background: var(--bg-app);
   color: var(--text-primary);
   font-family: var(--font-ui);
   font-size: 14px;
@@ -74,7 +119,7 @@ button {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 244, 224, 0.12);
+  background: rgba(230, 233, 239, 0.12);
   border-radius: 5px;
   border: 2px solid transparent;
   background-clip: content-box;
@@ -85,7 +130,7 @@ button {
 
 /* Keep focus rings visible everywhere (NFR-A11Y-02). */
 :focus-visible {
-  outline: 2px solid var(--accent-cool);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -121,7 +166,7 @@ button {
   padding: 32px;
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
-  background: var(--bg-surface);
+  background: var(--bg-panel);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -141,7 +186,7 @@ button {
 .sidebar {
   width: 264px;
   flex: none;
-  background: var(--bg-surface);
+  background: var(--bg-sidebar);
   border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
@@ -174,7 +219,7 @@ button {
   transition: border-color var(--t-quick) var(--ease-ui);
 }
 .sb-new:hover {
-  border-color: rgba(227, 154, 98, 0.4);
+  border-color: rgba(115, 152, 246, 0.4);
 }
 .sb-new:disabled {
   opacity: 0.5;
@@ -229,10 +274,10 @@ button {
   transition: background var(--t-quick) var(--ease-ui);
 }
 .sb-row:hover {
-  background: rgba(255, 244, 224, 0.05);
+  background: var(--bg-hover);
 }
 .sb-row.active {
-  background: rgba(227, 154, 98, 0.13);
+  background: var(--bg-selected);
 }
 
 .sb-item {
@@ -280,7 +325,7 @@ button {
   flex: none;
 }
 .sb-action-btn:hover {
-  background: rgba(255, 244, 224, 0.08);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 
@@ -317,7 +362,7 @@ button {
   text-align: left;
 }
 .sb-footer:hover {
-  background: rgba(255, 244, 224, 0.05);
+  background: var(--bg-hover);
 }
 
 /* ---------- Main / Task header ---------- */
@@ -386,7 +431,7 @@ button {
 }
 .chip-btn:hover {
   color: var(--text-primary);
-  border-color: rgba(227, 154, 98, 0.45);
+  border-color: rgba(115, 152, 246, 0.45);
 }
 .goal-input {
   font: inherit;
@@ -413,26 +458,26 @@ button {
 }
 .team-btn:hover {
   color: var(--text-primary);
-  border-color: rgba(120, 169, 194, 0.5);
+  border-color: rgba(111, 168, 220, 0.5);
 }
 /* Post-first-turn nudge toward Team mode (demo/index.html lines 91-100). Not currently wired to
    a trigger in the real app; ported so a future "hint after first turn" affordance is a
    class-toggle away. */
 .team-btn.hinted {
-  color: var(--accent-cool);
-  border-color: rgba(120, 169, 194, 0.55);
-  box-shadow: 0 0 0 0 rgba(120, 169, 194, 0.35);
+  color: var(--info);
+  border-color: rgba(111, 168, 220, 0.55);
+  box-shadow: 0 0 0 0 rgba(111, 168, 220, 0.35);
   animation: hintPulse 2.2s var(--ease-ui) infinite;
 }
 @keyframes hintPulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(120, 169, 194, 0.3);
+    box-shadow: 0 0 0 0 rgba(111, 168, 220, 0.3);
   }
   60% {
-    box-shadow: 0 0 0 9px rgba(120, 169, 194, 0);
+    box-shadow: 0 0 0 9px rgba(111, 168, 220, 0);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(120, 169, 194, 0);
+    box-shadow: 0 0 0 0 rgba(111, 168, 220, 0);
   }
 }
 .icon-btn {
@@ -445,7 +490,7 @@ button {
   flex: none;
 }
 .icon-btn:hover {
-  background: rgba(255, 244, 224, 0.06);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 
@@ -475,8 +520,8 @@ button {
   place-items: center;
   font-size: 13px;
   font-weight: 700;
-  background: linear-gradient(135deg, rgba(227, 154, 98, 0.9), rgba(213, 168, 91, 0.8));
-  color: #1b1a17;
+  background: linear-gradient(135deg, rgba(115, 152, 246, 0.9), rgba(211, 166, 83, 0.8));
+  color: var(--bg-app);
 }
 /* Global (demo/index.html lines 169-171): shared by the Leader's SurfaceHeader *and* Worker
    cards' `.w-head` (WorkerNode uses the identical role-line/role-name/role-sub markup) — must not
@@ -507,8 +552,8 @@ button {
   margin-left: auto;
   font-size: 11px;
   font-weight: 600;
-  color: var(--accent-primary);
-  border: 1px solid rgba(227, 154, 98, 0.45);
+  color: var(--accent);
+  border: 1px solid rgba(115, 152, 246, 0.45);
   padding: 2px 10px;
   border-radius: 99px;
 }
@@ -522,7 +567,7 @@ button {
   width: 720px;
   height: 620px;
   flex: none;
-  background: var(--bg-surface);
+  background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
@@ -536,7 +581,7 @@ button {
 }
 .surface--node .composer-zone {
   padding: 6px 16px 14px;
-  background: var(--bg-surface);
+  background: var(--bg-panel);
 }
 
 .timeline-scroll {
@@ -569,8 +614,8 @@ button {
   display: grid;
   place-items: center;
   font-weight: 700;
-  background: linear-gradient(135deg, rgba(227, 154, 98, 0.9), rgba(213, 168, 91, 0.8));
-  color: #1b1a17;
+  background: linear-gradient(135deg, rgba(115, 152, 246, 0.9), rgba(211, 166, 83, 0.8));
+  color: var(--bg-app);
 }
 .empty-state h2 {
   font-size: 19px;
@@ -603,8 +648,8 @@ button {
 }
 .chip:hover {
   color: var(--text-primary);
-  border-color: rgba(227, 154, 98, 0.45);
-  background: rgba(227, 154, 98, 0.07);
+  border-color: rgba(115, 152, 246, 0.45);
+  background: rgba(115, 152, 246, 0.07);
 }
 
 .msg {
@@ -650,7 +695,7 @@ button {
 }
 .caret::after {
   content: '▍';
-  color: var(--accent-primary);
+  color: var(--accent);
   animation: blink 1s steps(2) infinite;
 }
 @keyframes blink {
@@ -665,7 +710,7 @@ button {
   color: var(--text-secondary);
   padding: 5px 14px;
   border-radius: 99px;
-  background: rgba(255, 244, 224, 0.05);
+  background: var(--bg-hover);
   animation: msgIn var(--t-standard) var(--ease-ui);
 }
 
@@ -673,7 +718,7 @@ button {
 .run-card {
   border: 1px solid var(--border-subtle);
   border-radius: 13px;
-  background: var(--bg-surface);
+  background: var(--bg-panel);
   overflow: hidden;
   animation: msgIn var(--t-standard) var(--ease-ui);
 }
@@ -687,7 +732,7 @@ button {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent-primary);
+  background: var(--accent);
   flex: none;
 }
 .run-card.running .run-dot {
@@ -703,11 +748,11 @@ button {
   }
 }
 .run-card.done .run-dot {
-  background: var(--state-success);
+  background: var(--success);
   animation: none;
 }
 .run-card.blocked .run-dot {
-  background: var(--state-danger);
+  background: var(--danger);
   animation: none;
 }
 .run-title {
@@ -728,8 +773,8 @@ button {
   border-radius: 8px;
 }
 .run-stop:hover:not(:disabled) {
-  color: var(--state-danger);
-  border-color: rgba(217, 120, 107, 0.5);
+  color: var(--danger);
+  border-color: rgba(240, 124, 133, 0.5);
 }
 .run-stop:disabled {
   opacity: 0.55;
@@ -761,10 +806,10 @@ button {
   color: var(--text-primary);
 }
 .stage-row.current .s-icon {
-  color: var(--accent-primary);
+  color: var(--accent);
 }
 .stage-row.done .s-icon {
-  color: var(--state-success);
+  color: var(--success);
 }
 .run-card.compact .run-stages {
   display: none;
@@ -783,7 +828,7 @@ button {
   overflow: hidden;
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
-  background: var(--bg-surface);
+  background: var(--bg-panel);
   animation: msgIn var(--t-standard) var(--ease-ui);
 }
 .command-card__head {
@@ -794,7 +839,7 @@ button {
   border-bottom: 1px solid var(--border-subtle);
 }
 .command-card__kind {
-  color: var(--accent-cool);
+  color: var(--info);
   font-size: 12px;
   font-weight: 650;
 }
@@ -804,17 +849,17 @@ button {
   font: 12px/1.5 var(--font-mono);
 }
 .command-card--exited .command-card__status {
-  color: var(--state-success);
+  color: var(--success);
 }
 .command-card--failed .command-card__status,
 .command-card--interrupted .command-card__status {
-  color: var(--state-danger);
+  color: var(--danger);
 }
 .command-card__risk {
   padding: 1px 7px;
   border-radius: 999px;
   color: var(--text-secondary);
-  background: rgba(255, 244, 224, 0.06);
+  background: var(--bg-hover);
   font-size: 10px;
 }
 .command-card__duration {
@@ -853,7 +898,7 @@ button {
 .command-card__copy:hover,
 .command-card__footer button:hover {
   color: var(--text-primary);
-  border-color: rgba(120, 169, 194, 0.45);
+  border-color: rgba(111, 168, 220, 0.45);
 }
 .command-card__output {
   min-height: 28px;
@@ -893,7 +938,7 @@ button {
 }
 .command-card__output-line.is-stderr::before {
   content: 'stderr ';
-  color: var(--state-warning);
+  color: var(--warning);
   font-size: 9px;
   text-transform: uppercase;
 }
@@ -904,7 +949,7 @@ button {
   font-size: 11px;
 }
 .command-card__notice.is-error {
-  color: var(--state-danger);
+  color: var(--danger);
 }
 .command-card__footer {
   display: flex;
@@ -912,7 +957,7 @@ button {
   justify-content: space-between;
   min-height: 34px;
   padding: 5px 12px 7px 16px;
-  color: var(--state-warning);
+  color: var(--warning);
   font-size: 11px;
 }
 
@@ -920,9 +965,9 @@ button {
   width: min(680px, 100%);
   margin: 8px 0 16px 44px;
   padding: 16px;
-  border: 1px solid rgba(213, 168, 91, 0.38);
+  border: 1px solid rgba(211, 166, 83, 0.38);
   border-radius: 12px;
-  background: linear-gradient(145deg, rgba(213, 168, 91, 0.11), var(--bg-elevated));
+  background: linear-gradient(145deg, rgba(211, 166, 83, 0.11), var(--bg-elevated));
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.2);
 }
 .approval-card__head {
@@ -936,8 +981,8 @@ button {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  color: #17130c;
-  background: var(--state-warning);
+  color: var(--bg-app);
+  background: var(--warning);
   font-weight: 800;
 }
 .approval-card__tool {
@@ -950,7 +995,7 @@ button {
   border-radius: 999px;
   text-transform: uppercase;
   font: 600 10px/1.6 var(--font-mono);
-  background: rgba(213, 168, 91, 0.16);
+  background: rgba(211, 166, 83, 0.16);
 }
 .approval-card__facts {
   display: grid;
@@ -982,7 +1027,7 @@ button {
 .approval-card__disclosure {
   margin-top: 6px;
   padding: 3px 0;
-  color: var(--accent-cool);
+  color: var(--info);
   font-size: 11px;
 }
 .approval-card__actions {
@@ -994,23 +1039,23 @@ button {
   padding: 7px 11px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: rgba(255, 244, 224, 0.06);
+  background: var(--bg-hover);
   font-size: 12px;
 }
 .approval-card__actions button:hover {
-  border-color: var(--accent-primary);
+  border-color: var(--accent);
 }
 .approval-card__actions .primary {
-  color: var(--accent-primary);
-  border-color: rgba(227, 154, 98, 0.48);
-  background: rgba(227, 154, 98, 0.12);
+  color: var(--accent);
+  border-color: rgba(115, 152, 246, 0.48);
+  background: var(--bg-selected);
 }
 .approval-card__actions button:disabled {
   opacity: 0.5;
   cursor: wait;
 }
 .approval-card__actions .danger {
-  color: var(--state-danger);
+  color: var(--danger);
 }
 
 .approval-audit {
@@ -1022,13 +1067,13 @@ button {
   padding: 7px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: 9px;
-  color: var(--state-success);
-  background: rgba(121, 181, 138, 0.07);
+  color: var(--success);
+  background: rgba(97, 184, 138, 0.07);
   font-size: 12px;
 }
 .approval-audit--deny {
-  color: var(--state-danger);
-  background: rgba(217, 120, 107, 0.07);
+  color: var(--danger);
+  background: rgba(240, 124, 133, 0.07);
 }
 .approval-audit__scope {
   margin-left: auto;
@@ -1066,7 +1111,7 @@ button {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--state-success);
+  background: var(--success);
 }
 .ctx-spacer {
   margin-left: auto;
@@ -1093,26 +1138,26 @@ button {
 }
 .permission-confirm-action {
   margin-top: 3px;
-  color: var(--state-danger);
-  border: 1px solid color-mix(in srgb, var(--state-danger) 38%, transparent);
-  background: color-mix(in srgb, var(--state-danger) 8%, transparent);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 38%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
 .permission-confirm-action:hover {
-  background: color-mix(in srgb, var(--state-danger) 14%, transparent);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
 }
 .permission-confirm-cancel {
   color: var(--text-secondary);
 }
 .permission-confirm-cancel:hover {
   color: var(--text-primary);
-  background: rgba(255, 244, 224, 0.06);
+  background: var(--bg-hover);
 }
 
 .ctx-usage-wrap {
   position: relative;
 }
 .ctx-usage-warning {
-  color: var(--state-warning);
+  color: var(--warning);
 }
 .ctx-usage-popover {
   position: absolute;
@@ -1172,7 +1217,7 @@ button {
   align-items: baseline;
   font-size: 12px;
   color: var(--text-secondary);
-  background: rgba(255, 244, 224, 0.04);
+  background: rgba(230, 233, 239, 0.04);
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
   padding: 5px 10px;
@@ -1180,7 +1225,7 @@ button {
 .queued-ordinal {
   flex: none;
   font-variant-numeric: tabular-nums;
-  color: var(--accent-primary);
+  color: var(--accent);
   font-weight: 600;
 }
 .queued-text {
@@ -1194,7 +1239,7 @@ button {
   gap: 2px;
   padding: 2px;
   border-radius: 9px;
-  background: var(--bg-canvas);
+  background: var(--bg-app);
   border: 1px solid var(--border-subtle);
 }
 .send-mode-btn {
@@ -1208,7 +1253,7 @@ button {
   color: var(--text-primary);
 }
 .send-mode-btn.active {
-  background: rgba(227, 154, 98, 0.16);
+  background: var(--bg-selected);
   color: var(--text-primary);
 }
 
@@ -1218,7 +1263,7 @@ button {
   bottom: 96px;
   transform: translateX(-50%);
   background: var(--bg-elevated);
-  border: 1px solid rgba(217, 120, 107, 0.5);
+  border: 1px solid rgba(240, 124, 133, 0.5);
   color: var(--text-primary);
   padding: 8px 16px;
   border-radius: 10px;
@@ -1237,7 +1282,7 @@ button {
   transition: border-color var(--t-quick) var(--ease-ui);
 }
 .composer:focus-within {
-  border-color: rgba(227, 154, 98, 0.45);
+  border-color: rgba(115, 152, 246, 0.45);
 }
 .composer-input {
   width: 100%;
@@ -1329,10 +1374,10 @@ button {
   text-align: left;
 }
 .runtime-menu-item:hover:not(:disabled) {
-  background: rgba(255, 244, 224, 0.06);
+  background: var(--bg-hover);
 }
 .runtime-menu-item.active {
-  background: rgba(227, 154, 98, 0.16);
+  background: var(--bg-selected);
 }
 .runtime-menu-item:disabled {
   cursor: not-allowed;
@@ -1352,22 +1397,22 @@ button {
   width: 32px;
   height: 32px;
   border-radius: 10px;
-  background: var(--accent-primary);
-  color: #1b1a17;
+  background: var(--accent);
+  color: var(--bg-app);
   display: grid;
   place-items: center;
   font-size: 15px;
   transition: all var(--t-quick) var(--ease-ui);
 }
 .send-btn:disabled {
-  background: rgba(255, 244, 224, 0.12);
+  background: rgba(230, 233, 239, 0.12);
   color: var(--text-secondary);
   cursor: default;
 }
 .send-btn.stop {
-  background: var(--bg-canvas);
-  color: var(--state-danger);
-  border: 1px solid rgba(217, 120, 107, 0.5);
+  background: var(--bg-app);
+  color: var(--danger);
+  border: 1px solid rgba(240, 124, 133, 0.5);
 }
 
 /* ---------- Markdown content (FR-CHAT-07, §12.3) ---------- */
@@ -1403,7 +1448,7 @@ button {
   margin-top: 0;
 }
 .md-body a {
-  color: var(--accent-cool);
+  color: var(--info);
   text-decoration: underline;
   text-underline-offset: 2px;
   cursor: pointer;
@@ -1429,7 +1474,7 @@ button {
 .md-body code {
   font-family: var(--font-mono);
   font-size: 12.5px;
-  background: rgba(255, 244, 224, 0.07);
+  background: rgba(230, 233, 239, 0.07);
   padding: 1.5px 6px;
   border-radius: 5px;
 }
@@ -1463,7 +1508,7 @@ button {
   border: 1px solid var(--border-subtle);
   padding: 3px 9px;
   border-radius: 7px;
-  background: var(--bg-surface);
+  background: var(--bg-panel);
   opacity: 0;
   transition:
     opacity var(--t-quick) var(--ease-ui),
@@ -1475,7 +1520,7 @@ button {
 }
 .md-copy-btn:hover {
   color: var(--text-primary);
-  border-color: rgba(227, 154, 98, 0.45);
+  border-color: rgba(115, 152, 246, 0.45);
 }
 .md-body table {
   border-collapse: collapse;
@@ -1490,7 +1535,7 @@ button {
   text-align: left;
 }
 .md-body th {
-  background: rgba(255, 244, 224, 0.04);
+  background: rgba(230, 233, 239, 0.04);
   font-weight: 600;
 }
 .md-body hr {
@@ -1558,16 +1603,16 @@ button {
   flex: 0 0 auto;
   padding: 2px 6px;
   border-radius: 999px;
-  background: var(--bg-surface);
+  background: var(--bg-panel);
 }
 
 .turn-diff-kind-add {
-  color: var(--state-success);
+  color: var(--success);
 }
 
 .turn-diff-kind-delete,
 .turn-diff-drift {
-  color: var(--state-danger);
+  color: var(--danger);
 }
 
 /* ---------- Team Canvas (demo/index.html §Team mode) ---------- */
@@ -1580,9 +1625,9 @@ button {
      which would shift the whole world AND the header/controls overlays; `clip` forbids
      programmatic scrolling entirely while still clipping overflow the same way. */
   overflow: clip;
-  background: radial-gradient(rgba(255, 244, 224, 0.075) 1px, transparent 1.4px);
+  background: radial-gradient(rgba(230, 233, 239, 0.075) 1px, transparent 1.4px);
   background-size: 26px 26px;
-  background-color: var(--bg-canvas);
+  background-color: var(--bg-app);
   /* Entry fade (demo/index.html line 107: `#canvasLayer` transitions opacity 220ms on
      `.team-mode`). This component only ever mounts when entering Team mode (App.tsx renders it
      conditionally, never toggles a class on an already-mounted instance), so an unconditional
@@ -1649,7 +1694,7 @@ button {
 }
 .cable-path {
   fill: none;
-  stroke: var(--accent-cool);
+  stroke: var(--info);
   stroke-width: 1.6;
   opacity: 0.85;
 }
@@ -1658,12 +1703,12 @@ button {
   opacity: 0;
 }
 .packet {
-  fill: var(--accent-primary);
+  fill: var(--accent);
 }
 /* Danger flash (Slice 6.4 item 4): delivery timed out/failed before ack — no glow, just a brief
    danger-colored flash on the cable itself before the normal `.afterglow` fade removes it. */
 .cable-path.cable-danger {
-  stroke: var(--state-danger);
+  stroke: var(--danger);
   animation: cableDangerFlash 130ms ease-in-out 2;
 }
 @keyframes cableDangerFlash {
@@ -1729,7 +1774,7 @@ button {
 }
 .cc-btn:hover:not(:disabled) {
   color: var(--text-primary);
-  border-color: rgba(255, 244, 224, 0.2);
+  border-color: rgba(230, 233, 239, 0.2);
 }
 .cc-btn:disabled {
   opacity: 0.5;
@@ -1739,7 +1784,7 @@ button {
   font-size: 11.5px;
   color: var(--text-secondary);
   opacity: 0.75;
-  background: rgba(18, 17, 15, 0.7);
+  background: rgba(17, 19, 24, 0.7);
   padding: 4px 10px;
   border-radius: 8px;
   text-align: right;
@@ -1784,8 +1829,8 @@ button {
 }
 .team-badge {
   font-size: 11px;
-  color: var(--accent-cool);
-  border: 1px solid rgba(120, 169, 194, 0.4);
+  color: var(--info);
+  border: 1px solid rgba(111, 168, 220, 0.4);
   padding: 2px 9px;
   border-radius: 99px;
   flex: none;
@@ -1808,8 +1853,8 @@ button {
   flex: none;
 }
 .team-stop-all-btn:hover:not(:disabled) {
-  color: var(--state-danger);
-  border-color: rgba(217, 120, 107, 0.5);
+  color: var(--danger);
+  border-color: rgba(240, 124, 133, 0.5);
 }
 .team-stop-all-btn:disabled {
   opacity: 0.5;
@@ -1820,7 +1865,7 @@ button {
 .worker {
   position: absolute;
   width: 480px;
-  background: var(--bg-surface);
+  background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: 14px;
   box-shadow: 0 16px 44px rgba(0, 0, 0, 0.4);
@@ -1862,9 +1907,9 @@ button {
   place-items: center;
   font-size: 12px;
   font-weight: 700;
-  color: #1b1a17;
+  color: var(--bg-app);
   flex: none;
-  background: linear-gradient(135deg, rgba(120, 169, 194, 0.9), rgba(121, 181, 138, 0.75));
+  background: linear-gradient(135deg, rgba(111, 168, 220, 0.9), rgba(97, 184, 138, 0.75));
 }
 .w-status {
   margin-left: auto;
@@ -1882,14 +1927,14 @@ button {
   background: var(--text-secondary);
 }
 .w-status.ready .dot {
-  background: var(--state-success);
+  background: var(--success);
 }
 .w-status.busy .dot {
-  background: var(--accent-primary);
+  background: var(--accent);
   animation: runPulse 1.4s infinite;
 }
 .w-status.done .dot {
-  background: var(--state-success);
+  background: var(--success);
 }
 /* Receiving-node glow when a cable arrives (demo/index.html lines 371-376). Shared by Worker
    heads (`.w-head`) and the Leader's own header (`.surface-header`). */
@@ -1898,7 +1943,7 @@ button {
   content: '';
   position: absolute;
   inset: 0;
-  box-shadow: inset 0 0 0 1.5px rgba(120, 169, 194, 0.7);
+  box-shadow: inset 0 0 0 1.5px rgba(111, 168, 220, 0.7);
   animation: glowFade 700ms var(--ease-ui) forwards;
   pointer-events: none;
 }
@@ -1920,8 +1965,8 @@ button {
   flex: none;
 }
 .w-stop-btn:hover:not(:disabled) {
-  color: var(--state-danger);
-  border-color: rgba(217, 120, 107, 0.5);
+  color: var(--danger);
+  border-color: rgba(240, 124, 133, 0.5);
 }
 .w-stop-btn:disabled {
   opacity: 0.5;
@@ -1944,15 +1989,15 @@ button {
 }
 .w-line .tag {
   font-size: 10.5px;
-  color: var(--accent-cool);
+  color: var(--info);
   margin-right: 7px;
-  border: 1px solid rgba(120, 169, 194, 0.35);
+  border: 1px solid rgba(111, 168, 220, 0.35);
   padding: 1px 7px;
   border-radius: 99px;
 }
 .w-line .tag.out {
-  color: var(--accent-primary);
-  border-color: rgba(227, 154, 98, 0.4);
+  color: var(--accent);
+  border-color: rgba(115, 152, 246, 0.4);
 }
 .w-run {
   display: flex;
@@ -1964,8 +2009,8 @@ button {
 .w-run .spinner {
   width: 11px;
   height: 11px;
-  border: 1.5px solid rgba(227, 154, 98, 0.3);
-  border-top-color: var(--accent-primary);
+  border: 1.5px solid rgba(115, 152, 246, 0.3);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -2027,7 +2072,7 @@ button {
 /* ---------- Canvas keyboard-navigation selection ring (Slice 6.1) ---------- */
 .worker.node-selected,
 .surface--node.node-selected {
-  outline: 2px solid var(--accent-cool);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
@@ -2053,7 +2098,7 @@ button {
 }
 .team-view-toggle-btn:hover {
   color: var(--text-primary);
-  border-color: rgba(255, 244, 224, 0.2);
+  border-color: rgba(230, 233, 239, 0.2);
 }
 
 /* ---------- Team List View (Slice 6.1 item 4: accessible list fallback) ---------- */
@@ -2063,7 +2108,7 @@ button {
   width: 460px;
   flex: none;
   border-left: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
+  background: var(--bg-panel);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -2193,7 +2238,7 @@ button {
   font-size: 12.5px;
 }
 .tlv-timeline li button {
-  color: var(--accent-cool);
+  color: var(--info);
   font-size: 12px;
   text-decoration: underline;
 }
@@ -2203,7 +2248,7 @@ button {
 }
 .tlv-timeline small {
   color: var(--text-secondary);
-  /* 0.75 measured only 4.53:1 on --bg-surface — technically over WCAG AA 4.5:1 but too close for
+  /* 0.75 measured only 4.53:1 on --bg-panel — technically over WCAG AA 4.5:1 but too close for
      rounding/anti-aliasing safety (see contrast.test.ts). 0.85 gives ~5.44:1 headroom. */
   opacity: 0.85;
 }

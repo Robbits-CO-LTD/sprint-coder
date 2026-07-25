@@ -22,7 +22,7 @@ export function WorkspaceChip({
     variant === 'context' ? (
       <span
         className="dot"
-        style={{ background: workspace ? 'var(--state-success)' : 'var(--text-secondary)' }}
+        style={{ background: workspace ? 'var(--success)' : 'var(--text-secondary)' }}
       />
     ) : null;
 
