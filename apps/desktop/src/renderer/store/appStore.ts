@@ -10,6 +10,7 @@ import type {
   CodexModelOption,
   CommandSummary,
   CommandOutputRecord,
+  FileChange,
   GeneratedImage,
   QueuedInput,
   PermissionSettings,
@@ -122,6 +123,10 @@ type AppState = {
   /** Images generated per task, oldest first (issue #11). Metadata only — bytes are fetched by the
    * card that displays them, so switching tasks never drags base64 through the store. */
   imagesByTask: Record<string, GeneratedImage[]>;
+  /** Files each Turn changed, newest last (issue #37). Keyed by task and kept in arrival order,
+   * which is the order the edits actually happened — the Inspector reads the tail of this and the
+   * timeline renders one entry per tool call. */
+  fileChangesByTask: Record<string, { seq: number; turnId: string; changes: FileChange[] }[]>;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
   teamByTask: Record<string, TeamDetail | null | undefined>;
@@ -568,6 +573,22 @@ function handleTurnEvent(
       }));
       break;
     }
+    case 'files.changed': {
+      apply((state) => {
+        const existing = state.fileChangesByTask[taskId] ?? [];
+        // Replay-safe like image.generated: this event is persisted, so re-subscribing delivers it
+        // again. There is no content digest to key on here, so the guard is the event's own seq —
+        // the same seq arriving twice is a replay, never two separate edits.
+        if (existing.some((entry) => entry.seq === ev.seq)) return {};
+        return {
+          fileChangesByTask: {
+            ...state.fileChangesByTask,
+            [taskId]: [...existing, { seq: ev.seq, turnId: ev.turnId, changes: ev.changes }],
+          },
+        };
+      });
+      break;
+    }
     case 'image.generated': {
       apply((state) => {
         const existing = state.imagesByTask[taskId] ?? [];
@@ -610,6 +631,7 @@ export const useAppStore = create<AppState>((set, get) => {
     commandsByTask: {},
     turnDiffByTask: {},
     imagesByTask: {},
+    fileChangesByTask: {},
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     teamByTask: {},
@@ -867,6 +889,18 @@ export const useAppStore = create<AppState>((set, get) => {
       void loadPermission(taskId, apply, get);
       // Fetched alongside the other per-task reads rather than reconstructed from replayed events:
       // metadata only, so this stays cheap even for a Task with many images (issue #11).
+      // Read rather than replayed: the event port only carries events newer than the snapshot's
+      // lastSeq, so reopening a Task would otherwise show an empty edit history (issue #37).
+      if (typeof window.sprintCoder?.files?.list === 'function')
+        void window.sprintCoder.files
+          .list(taskId)
+          .then((records) =>
+            apply((state) => ({
+              fileChangesByTask: { ...state.fileChangesByTask, [taskId]: records },
+            })),
+          )
+          .catch(() => undefined);
+
       if (typeof window.sprintCoder?.images?.list === 'function')
         void window.sprintCoder.images
           .list(taskId)

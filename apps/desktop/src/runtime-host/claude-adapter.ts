@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import type { PublicError } from '@sprint-coder/contracts';
+import type { PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { CodexModelOption } from '@sprint-coder/contracts';
 import {
   ClaudeCapabilityViolationError,
@@ -136,6 +136,7 @@ export class ClaudeRuntimeAdapter {
     exited: (code: number, canceled: boolean) => void,
     teamMcp?: RuntimeTeamMcpOption,
     effort?: string,
+    writeScope: RuntimeWriteScope = 'read-only',
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
@@ -174,12 +175,19 @@ export class ClaudeRuntimeAdapter {
     const normalizer = new ClaudeJsonlNormalizer(
       teamMcp === undefined ? undefined : teamMcpExpectedCapabilities(),
     );
-    const child = spawn('claude', buildClaudeArgs(model, teamMcpArgs, effort), {
-      cwd,
-      env: minimalEnvironment(),
-      detached: process.platform !== 'win32',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    // Same independent refusal as the Codex adapter: with no Workspace the cwd is a throwaway temp
+    // directory, so nothing may be written there whatever Main asked for.
+    const effectiveScope: RuntimeWriteScope = workspacePath === null ? 'read-only' : writeScope;
+    const child = spawn(
+      'claude',
+      buildClaudeArgs(model, teamMcpArgs, effort, effectiveScope, workspacePath),
+      {
+        cwd,
+        env: minimalEnvironment(),
+        detached: process.platform !== 'win32',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
     const cleanup = (): void => {
       if (temporaryDirectory !== null) rmSync(temporaryDirectory, { recursive: true, force: true });
       if (teamMcpDirectory !== null) rmSync(teamMcpDirectory, { recursive: true, force: true });
@@ -332,11 +340,43 @@ export function buildClaudePrompt(
 // a non-fatal warning and falls back to the CLI's own default rather than erroring — so an
 // out-of-range value here degrades gracefully even if it ever reached the CLI unvalidated (Main
 // still validates against `claudeEffortSchema` before it gets this far).
+/**
+ * The built-in tool set for each write scope.
+ *
+ * Read-only gets the read tools rather than the empty set it had before issue #37. The empty set was
+ * the stronger statement, but it made the default preset useless in a way that was actively
+ * misleading: with no tools at all the model still believes it has them (the system prompt describes
+ * them), so it narrates invented tool calls in prose — observed directly, a turn that answered "Let
+ * me find the file first. **Tool: bash** …" and then stopped. Read/Glob/Grep cannot write, and
+ * `--permission-mode manual` refuses anything that is not on this list, so the boundary that matters
+ * is unchanged while the model can actually look at the code it is being asked about.
+ *
+ * The wider sets are an allowlist the CLI applies to itself, NOT an OS boundary —
+ * §Managed Runtime is explicit that "単なるtool非公開はsecurity boundaryに数えない", so a Turn run
+ * at either of the wider scopes is labelled trusted-unmanaged in the UI. Bash is included from
+ * workspace-write up because a code assistant that can edit but not run the test it just changed is
+ * not usable; that is exactly the trade the label exists to disclose.
+ */
+const CLAUDE_TOOLS_BY_SCOPE: Record<RuntimeWriteScope, string> = {
+  'read-only': 'Read,Glob,Grep',
+  'workspace-write': 'Read,Glob,Grep,Edit,Write,MultiEdit,NotebookEdit,Bash,TodoWrite',
+  full: 'default',
+};
+
+const CLAUDE_PERMISSION_MODE_BY_SCOPE: Record<RuntimeWriteScope, string> = {
+  'read-only': 'manual',
+  'workspace-write': 'acceptEdits',
+  full: 'bypassPermissions',
+};
+
 export function buildClaudeArgs(
   model: string,
   teamMcp?: { configPath: string; guidance: string },
   effort?: string,
+  writeScope: RuntimeWriteScope = 'read-only',
+  workspacePath?: string | null,
 ): string[] {
+  const tools = CLAUDE_TOOLS_BY_SCOPE[writeScope];
   return [
     '-p',
     '--output-format',
@@ -344,7 +384,19 @@ export function buildClaudeArgs(
     '--verbose',
     '--include-partial-messages',
     '--tools',
-    '',
+    tools,
+    // Only meaningful once tools exist. `acceptEdits` lets the edit tools through without an
+    // interactive prompt there is no channel for; `manual` is what read-only relies on to refuse
+    // anything that slips into the tool set, and its refusals come back structured on
+    // `permission_denials` rather than as prose (verified on 2.1.218).
+    '--permission-mode',
+    CLAUDE_PERMISSION_MODE_BY_SCOPE[writeScope],
+    // Pins writable paths to the Workspace even at workspace-write. Without it the CLI's own notion
+    // of the project root is the cwd, which is the same directory — this makes the intent explicit
+    // and survives a future change to how cwd is chosen.
+    ...(writeScope === 'workspace-write' && workspacePath !== undefined && workspacePath !== null
+      ? ['--add-dir', workspacePath]
+      : []),
     '--strict-mcp-config',
     ...(teamMcp === undefined
       ? ['--safe-mode']

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError } from '@sprint-coder/contracts';
-import type { CodexModelOption, EffortOption } from '@sprint-coder/contracts';
+import type { CodexModelOption, EffortOption, RuntimeWriteScope } from '@sprint-coder/contracts';
 import { ApprovalRequestedError, CodexJsonlNormalizer } from './codex-normalizer';
 import type {
   RuntimeCanonicalEvent,
@@ -84,6 +84,7 @@ export class CodexRuntimeAdapter {
     // advertises (issue #6). There is no `--effort` flag on this CLI, but `-c
     // model_reasoning_effort=` works — see buildCodexArgs.
     effort?: string,
+    writeScope: RuntimeWriteScope = 'read-only',
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
@@ -93,7 +94,12 @@ export class CodexRuntimeAdapter {
     const cwd =
       workspacePath ?? (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-')));
     const normalizer = new CodexJsonlNormalizer();
-    const child = spawn('codex', buildCodexArgs(model, effort), {
+    // No Workspace means the cwd is a throwaway temp directory, so a write scope there would
+    // produce edits the user can never see. Main already refuses to send anything but 'read-only'
+    // in that case; this is the adapter refusing independently, so the two would have to fail
+    // together for a write to escape.
+    const effectiveScope: RuntimeWriteScope = workspacePath === null ? 'read-only' : writeScope;
+    const child = spawn('codex', buildCodexArgs(model, effort, effectiveScope), {
       cwd,
       env: minimalEnvironment(),
       detached: process.platform !== 'win32',
@@ -202,6 +208,20 @@ export function buildCodexPrompt(
 }
 
 /**
+ * The Access preset's write scope as a Codex sandbox mode.
+ *
+ * These are OS-enforced on macOS (Seatbelt), not advisory: verified 2026-07-25 on codex-cli 0.144.4
+ * that `workspace-write` writes inside the cwd and that `read-only` refuses `apply_patch` outright.
+ * That is what lets the Codex path be presented as a real boundary rather than as a promise the
+ * model is asked to keep.
+ */
+const CODEX_SANDBOX_BY_SCOPE: Record<RuntimeWriteScope, string> = {
+  'read-only': 'read-only',
+  'workspace-write': 'workspace-write',
+  full: 'danger-full-access',
+};
+
+/**
  * `effort` maps to the `model_reasoning_effort` config key via `-c`, the same override mechanism
  * already used for `approval_policy` and `shell_environment_policy.inherit`.
  *
@@ -214,22 +234,35 @@ export function buildCodexPrompt(
  * correct behaviour for the `auto` model sentinel, where the concrete model (and therefore its
  * advertised level set) is chosen inside the CLI.
  */
-export function buildCodexArgs(model: string, effort?: string): string[] {
+export function buildCodexArgs(
+  model: string,
+  effort?: string,
+  writeScope: RuntimeWriteScope = 'read-only',
+): string[] {
   return [
     'exec',
     '--json',
     '--sandbox',
-    'read-only',
+    CODEX_SANDBOX_BY_SCOPE[writeScope],
     '--ephemeral',
     '--ignore-user-config',
     '--ignore-rules',
     '--skip-git-repo-check',
     '--color',
     'never',
+    // Stays "never" at every scope. `approval_policy` governs asking the *user* mid-turn, and
+    // `codex exec` has no channel to ask on — verified: it is a one-shot stdin invocation, and
+    // `on-request` in this mode simply stalls the tool rather than surfacing anything answerable.
+    // The sandbox mode above is therefore the entire boundary, which is why it is derived from a
+    // validated enum and never from a free-form string.
     '-c',
     'approval_policy="never"',
+    // "core" rather than "none": with an empty environment the model's shell has no PATH, so even
+    // `sed` fails with "command not found" (observed directly) and the model burns turns
+    // rediscovering which tools exist. "core" passes HOME/PATH/USER-class variables and nothing
+    // else — secrets in the parent environment still do not reach the model's shell.
     '-c',
-    'shell_environment_policy.inherit="none"',
+    'shell_environment_policy.inherit="core"',
     ...(effort === undefined || effort === '' ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
     ...(model === 'auto' ? [] : ['--model', model]),
     '-',

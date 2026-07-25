@@ -166,6 +166,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.settingsSetRuntime]: runtimeSetInputSchema,
   [IPC_CHANNELS.settingsSetModel]: runtimeModelSetInputSchema,
   [IPC_CHANNELS.settingsSetEffort]: runtimeEffortSetInputSchema,
+  [IPC_CHANNELS.filesList]: taskIdPayloadSchema,
   [IPC_CHANNELS.imagesList]: taskIdPayloadSchema,
   [IPC_CHANNELS.imagesRead]: generatedImageRefSchema,
   [IPC_CHANNELS.settingsSetCodexEffort]: runtimeCodexEffortSetInputSchema,

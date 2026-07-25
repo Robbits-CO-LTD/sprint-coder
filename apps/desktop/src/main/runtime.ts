@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { TurnEvent, TurnStage } from '@sprint-coder/contracts';
+import type { FileChange, TurnEvent, TurnStage } from '@sprint-coder/contracts';
 import type { PersistenceClient } from './persistence';
 import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
@@ -44,6 +44,7 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
       | 'completeCommand'
       | 'getCommand'
       | 'getTeamByTask'
+      | 'recordFileChanges'
     >
   >;
 
@@ -164,6 +165,23 @@ export class MockRuntimeAdapter {
 
       const workspacePath = this.persistence.getWorkspace?.(taskId) ?? null;
       const policyEpoch = this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0;
+      // Pseudo file changes (issue #37). Mock is the ONLY runtime under SPRINT_CODER_E2E_MODE=dev,
+      // so without this the edit path — timeline card, Inspector stream, replay after restart — has
+      // no producer in any E2E run. Gated on exactly the two conditions Main uses for a real
+      // Runtime (see write-scope.ts), so the mock cannot report an edit in a configuration where a
+      // real Runtime would have been refused one.
+      if (
+        workspacePath !== null &&
+        (this.persistence.getPermissionPolicy?.(taskId).preset ?? 'ask') !== 'ask'
+      )
+        await this.serialize(taskId, () => {
+          const event = this.persistence.recordFileChanges?.({
+            taskId,
+            turnId,
+            changes: mockFileChanges(input),
+          });
+          if (event !== undefined && event !== null) this.publish(event);
+        });
       const workspaceId = workspacePath === null ? null : digestCanonical({ workspacePath });
       const contractRevision =
         this.persistence.getAcceptanceContract?.(taskId, turnId).revision ?? null;
@@ -273,6 +291,22 @@ function intelligenceRecorder(
     transitionIntelligenceStep: (stepId, state) =>
       serialize(taskId, () => transition.call(persistence, stepId, state)),
   };
+}
+
+/**
+ * Deterministic stand-in for the files a model would have edited.
+ *
+ * Derived from the input so a given prompt always yields the same paths — an E2E that asserts on a
+ * filename needs that to be stable, and a random path would make the assertion flaky rather than the
+ * feature. Always relative and always inside the Workspace, exactly like the real path Main lets
+ * through.
+ */
+export function mockFileChanges(input: string): FileChange[] {
+  const slug = (input.match(/[A-Za-z0-9_-]{3,24}/)?.[0] ?? 'note').toLowerCase();
+  return [
+    { path: `src/${slug}.ts`, kind: 'update' },
+    { path: `src/${slug}.test.ts`, kind: 'add' },
+  ];
 }
 
 /**
