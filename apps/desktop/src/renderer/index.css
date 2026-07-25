@@ -2222,3 +2222,55 @@ button {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------- Composer plus menu (issue #13) ---------- */
+.composer-plus {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  padding: 0;
+}
+.composer-plus-menu {
+  min-width: 260px;
+  max-width: min(320px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow-y: auto;
+}
+.composer-plus-menu .runtime-menu-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+/* Unavailable items stay focusable (aria-disabled, not the disabled attribute) so the reason in
+   their description is reachable by keyboard and screen reader. Dim the title only — the
+   description IS the reason, and it is the line the user most needs to read. */
+.composer-plus-menu .runtime-menu-item.unavailable {
+  cursor: not-allowed;
+}
+.composer-plus-menu .runtime-menu-item.unavailable .runtime-menu-title {
+  color: var(--text-secondary);
+}
+.composer-plus-menu .runtime-menu-item.unavailable:hover {
+  background: none;
+}
+
+.goal-editor {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px 2px;
+}
+.goal-editor-label {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.goal-editor .goal-input {
+  flex: 1;
+  min-width: 0;
+}

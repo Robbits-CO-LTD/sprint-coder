@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
-import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square } from '../icons';
+import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square, Target } from '../icons';
+import { ComposerMenu } from './ComposerMenu';
+import type { ComposerMenuItem } from './ComposerMenu';
 import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
 const STEER_UNSUPPORTED_HINT =
@@ -44,6 +46,9 @@ export function Composer({ taskId }: { taskId: string }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [sendMode, setSendMode] = useState<SendMode>('queue');
   const [wasTurnActive, setWasTurnActive] = useState(false);
+  // Goal editing moved here from the header (issue #13): TaskHeader's chip is now a read-only
+  // display of the current value, and the plus menu is the single entry point for changing it.
+  const [goalEditing, setGoalEditing] = useState(false);
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
@@ -124,6 +129,7 @@ export function Composer({ taskId }: { taskId: string }) {
     <div className="composer-zone">
       <div className="composer-inner">
         <ContextBar taskId={taskId} />
+        {goalEditing && <GoalEditor taskId={taskId} onDone={() => setGoalEditing(false)} />}
         <QueuedList items={queued} />
         <div className="composer">
           <textarea
@@ -146,15 +152,7 @@ export function Composer({ taskId }: { taskId: string }) {
             <RuntimeChip />
             <ModelChip />
             <EffortChip />
-            <button
-              type="button"
-              className="cmp-chip"
-              disabled
-              title="添付は今回のスコープ外です"
-              aria-label="添付"
-            >
-              <Paperclip size={15} />
-            </button>
+            <PlusMenu taskId={taskId} onSetGoal={() => setGoalEditing(true)} />
             {turnActive && hasAnyActiveModeCapability && (
               <div className="send-mode-group" role="group" aria-label="実行中の送信方法">
                 {(['queue', 'steer', 'stopAndSend'] as SendMode[])
@@ -485,6 +483,110 @@ function EffortChip() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Composer plus menu (issue #13). Replaces the permanently-`disabled` paperclip button, which
+// advertised an affordance the app did not have; attachment becomes one entry in this menu instead,
+// so there is nothing left for a standalone clip button to mean.
+//
+// Items the app cannot honour yet are shown and announced unavailable with the reason, matching how
+// the Runtime/Effort chips already treat an unusable option — hiding them would leave the user
+// wondering whether the feature exists at all.
+function PlusMenu({ taskId, onSetGoal }: { taskId: string; onSetGoal: () => void }) {
+  const goal = useAppStore((s) => s.tasks.find((t) => t.id === taskId)?.goal ?? null);
+  const runtime = useAppStore((s) => s.runtime);
+  const goalSupported =
+    typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
+
+  const items: ComposerMenuItem[] = [
+    {
+      id: 'goal',
+      label: 'ゴールを設定',
+      description: goal === null || goal === '' ? '未設定' : goal,
+      icon: <Target size={14} />,
+      ...(goalSupported
+        ? { onSelect: onSetGoal }
+        : { unavailableReason: 'Goal編集に対応していません' }),
+    },
+    {
+      id: 'attach',
+      label: 'ファイルを添付',
+      description: '会話にファイルを添える',
+      icon: <Paperclip size={14} />,
+      // Genuinely unimplemented end to end: there is no attachment type in the contracts, so IPC,
+      // persistence and rendering are all still missing.
+      unavailableReason: '添付は未実装です',
+    },
+    {
+      id: 'imagegen',
+      label: '画像を生成',
+      description: 'Codexの画像生成を呼び出す',
+      icon: <Plus size={14} />,
+      // Codex-only by design, and blocked besides — see #11 for the read-only-sandbox problem that
+      // has to be solved before a generated image can be saved or shown at all.
+      unavailableReason:
+        runtime.kind === 'codex'
+          ? '画像生成は未実装です'
+          : 'Codex Runtime選択時に画像生成を使えます',
+    },
+  ];
+
+  return (
+    <ComposerMenu
+      items={items}
+      triggerTestId="composer-plus"
+      triggerLabel="操作を追加"
+      menuLabel="Composerの操作"
+      triggerIcon={<Plus size={15} />}
+    />
+  );
+}
+
+// Inline Goal editor, opened from the plus menu. Mirrors the interaction the header chip used to
+// own (Enter commits, Escape cancels, blur commits) so the muscle memory carries over.
+function GoalEditor({ taskId, onDone }: { taskId: string; onDone: () => void }) {
+  const goal = useAppStore((s) => s.tasks.find((t) => t.id === taskId)?.goal ?? '');
+  const setGoal = useAppStore((s) => s.setGoal);
+  const [draft, setDraft] = useState(goal);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  function commit() {
+    const trimmed = draft.trim();
+    if (trimmed !== goal) void setGoal(taskId, trimmed);
+    onDone();
+  }
+
+  return (
+    <div className="goal-editor">
+      <label className="goal-editor-label" htmlFor={`goal-input-${taskId}`}>
+        <Target size={13} /> Goal
+      </label>
+      <input
+        ref={inputRef}
+        id={`goal-input-${taskId}`}
+        className="goal-input"
+        data-testid="composer-goal-input"
+        value={draft}
+        placeholder="このTaskのゴールを入力"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            onDone();
+          }
+        }}
+      />
     </div>
   );
 }

@@ -124,82 +124,25 @@ export function TaskHeader({
   );
 }
 
-// Goal chip: click → inline edit → tasks.setGoal (FR-COMP-05). Falls back to a read-only chip
-// when the backend hasn't wired setGoal yet (graceful degrade).
+// Goal chip: read-only display of the current Goal (FR-COMP-05).
+//
+// Editing moved to the Composer's plus menu (issue #13). Two entry points for one setting was the
+// alternative, and the reason to prefer one is that a Goal is read far more often than it is
+// changed: the header is where the user *checks* it while working, and mixing an edit affordance
+// into that spot makes an accidental click mutate state they only meant to glance at.
 function GoalChip({ task }: { task: TaskSummary }) {
-  const setGoal = useAppStore((s) => s.setGoal);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(task.goal ?? '');
-  const [syncedGoal, setSyncedGoal] = useState(task.goal ?? '');
-  const inputRef = useRef<HTMLInputElement>(null);
-  const supported =
-    typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
-
-  // Render-time adjustment instead of an effect, per react-hooks/set-state-in-effect.
-  if (!editing && (task.goal ?? '') !== syncedGoal) {
-    setSyncedGoal(task.goal ?? '');
-    setDraft(task.goal ?? '');
-  }
-
-  useEffect(() => {
-    if (editing) {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
-  }, [editing]);
-
-  function commit() {
-    setEditing(false);
-    const trimmed = draft.trim();
-    if (trimmed !== (task.goal ?? '')) {
-      void setGoal(task.id, trimmed);
-    }
-  }
-
-  function cancel() {
-    setEditing(false);
-    setDraft(task.goal ?? '');
-  }
-
-  if (!supported) {
-    return (
-      <span className="goal-chip" title="Goal編集は今回のバックエンドでは未対応です">
-        <Target size={13} /> Goal: {task.goal ?? '未設定'}
-      </span>
-    );
-  }
-
-  if (editing) {
-    return (
-      <input
-        ref={inputRef}
-        className="goal-input"
-        value={draft}
-        placeholder="Goalを入力"
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            commit();
-          } else if (e.key === 'Escape') {
-            e.preventDefault();
-            cancel();
-          }
-        }}
-        aria-label="Goalを編集"
-      />
-    );
-  }
-
+  const goal = task.goal ?? '';
   return (
-    <button
-      type="button"
-      className="goal-chip chip-btn"
-      onClick={() => setEditing(true)}
-      title="クリックしてGoalを編集"
+    <span
+      className="goal-chip"
+      data-testid="task-goal-chip"
+      title={
+        goal === ''
+          ? 'ComposerのプラスボタンからGoalを設定できます'
+          : `Goal: ${goal}（Composerのプラスボタンから変更できます）`
+      }
     >
-      <Target size={13} /> Goal: {task.goal ?? '未設定'}
-    </button>
+      <Target size={13} /> Goal: {goal === '' ? '未設定' : goal}
+    </span>
   );
 }
