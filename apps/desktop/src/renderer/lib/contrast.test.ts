@@ -13,17 +13,20 @@ import {
 import type { RGB } from './contrast';
 
 // NFR-A11Y-01 (docs/PRODUCT_AND_TECHNICAL_DESIGN.md): "WCAG 2.2 AA相当のcontrastを満たす". This
-// audits every design-token color pair actually used as text/UI color against the backgrounds it
-// actually appears on in index.css — computed from the real token values (not hand-copied
-// numbers), so it regresses the moment either side of a pair drifts.
+// audits every design token used as text/UI colour against the backgrounds it actually appears on
+// in index.css — computed from the real token values (not hand-copied numbers), so it regresses the
+// moment either side of a pair drifts.
 //
-// Adjustments made as a result of this audit (see index.css comments at each site):
-//   - `.composer-input::placeholder` opacity 0.7 -> 0.85 (was 3.88:1 on --bg-elevated, fails AA).
-//   - `.tlv-timeline small` opacity 0.75 -> 0.85 (was 4.53:1 on --bg-surface — technically over
-//     4.5 but too close to the line to trust across renderers/anti-aliasing).
-// No `:root` token itself needed changing — every token pair at full opacity already clears AA
-// (worst case 5.18:1, `--state-danger` on `--bg-elevated`); only two *usages* that intentionally
-// dim text via `opacity` needed adjusting.
+// Rewritten for the cool-neutral palette (issue #14), which brought four new surfaces and four new
+// foregrounds. The classification below is the substance of the change, not the token renames:
+// the old palette had one bar (4.5:1 for everything) because every token happened to clear it,
+// whereas the new one has tokens whose *purpose* is a different bar. Each group states which bar it
+// is held to and why, so a future token cannot be added without answering that question.
+//
+// The palette as specified in the issue did not clear its own stated bars in four places; those
+// values were raised by the computed minimum (see the :root comment). No usage rules are relied on
+// for text — a token that meets the bar cannot be misused, whereas "do not use X for body text" has
+// to be remembered forever.
 
 const cssPath = join(__dirname, '..', 'index.css');
 const css = readFileSync(cssPath, 'utf8');
@@ -37,48 +40,140 @@ function tokenRgb(name: string): RGB {
   return rgb;
 }
 
-const BACKGROUNDS = ['bg-canvas', 'bg-surface', 'bg-elevated'] as const;
+/**
+ * Every surface real content is rendered on.
+ *
+ * `--accent-muted` is deliberately absent: it is an accent-tinted *fill*, and the only foreground
+ * this palette puts on it is `--text-primary` (asserted separately below). Including it here would
+ * force every accent-family token lighter to survive an accent-on-accent pairing the palette does
+ * not offer.
+ */
+const CONTENT_SURFACES = [
+  'bg-app',
+  'bg-sidebar',
+  'bg-panel',
+  'bg-elevated',
+  'bg-hover',
+  'bg-selected',
+  'ai-surface',
+] as const;
+
+/**
+ * Surfaces that host a bordered control.
+ *
+ * `--bg-selected` is a row-selection fill — it never hosts an input — so it is not part of the bar
+ * for `--border-strong`.
+ */
+const CONTROL_SURFACES = ['bg-app', 'bg-sidebar', 'bg-panel', 'bg-elevated', 'bg-hover'] as const;
+
+/** Held to 4.5:1 on every content surface: all of these render real, readable text somewhere. */
+const TEXT_TOKENS = [
+  'text-primary',
+  'text-secondary',
+  'text-muted',
+  'accent',
+  'accent-hover',
+  'focus-ring',
+  'success',
+  'warning',
+  'danger',
+  'info',
+  'ai-accent',
+] as const;
 
 describe('design-token contrast audit (WCAG 2.2 AA)', () => {
-  it('every background token is actually opaque (parseable as hex)', () => {
-    for (const bg of BACKGROUNDS) {
+  it('every surface token is actually opaque (parseable as hex)', () => {
+    for (const bg of [...CONTENT_SURFACES, 'accent-muted']) {
       expect(() => tokenRgb(bg)).not.toThrow();
     }
   });
 
-  describe.each(['text-primary', 'text-secondary'] as const)('%s (normal text)', (fg) => {
-    it.each(BACKGROUNDS)(`meets ${WCAG_AA_NORMAL_TEXT}:1 on --%s`, (bg) => {
+  // One bar for every text-bearing token rather than a per-token exception list. Accent and status
+  // colours are used both as small-UI colour (status dots, focus rings — 3:1 would suffice) and as
+  // regular-sized text (chip labels, risk badges, sender links), so holding all of them to the
+  // stricter normal-text bar covers every real usage without tracking call sites.
+  describe.each(TEXT_TOKENS)('%s (renders text)', (fg) => {
+    it.each(CONTENT_SURFACES)(`meets ${WCAG_AA_NORMAL_TEXT}:1 on --%s`, (bg) => {
       const ratio = contrastRatio(tokenRgb(fg), tokenRgb(bg));
-      expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
+      expect(ratio, `--${fg} on --${bg}`).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
     });
   });
 
-  // Accent/status colors are used both as small-UI-component color (status dots, focus rings —
-  // 3:1 is sufficient) and, in several places, as regular-sized text (e.g. the runtime-chip label,
-  // approval risk badge, `tlv-timeline` sender links) — held to the stricter 4.5:1 normal-text bar
-  // throughout so every real usage is covered without needing to track each call site.
-  describe.each([
-    'accent-primary',
-    'accent-cool',
-    'state-success',
-    'state-warning',
-    'state-danger',
-  ] as const)('%s (accent/status, used as text)', (fg) => {
-    it.each(BACKGROUNDS)(`meets ${WCAG_AA_NORMAL_TEXT}:1 on --%s`, (bg) => {
-      const ratio = contrastRatio(tokenRgb(fg), tokenRgb(bg));
-      expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
-    });
-  });
-
-  // The focus ring itself (`:focus-visible { outline: 2px solid var(--accent-cool) }`, NFR-A11Y-02)
-  // is a non-text UI indicator — WCAG 1.4.11 only requires 3:1 against its adjacent backgrounds.
-  it.each(BACKGROUNDS)(
-    'focus ring (--accent-cool) meets %s 3:1 as a UI indicator on --%s',
+  // WCAG 1.4.11: a boundary that carries meaning (an input's edge) is a non-text UI component and
+  // needs 3:1. `--border-strong` exists precisely for those, so it is the token that must clear it.
+  it.each(CONTROL_SURFACES)(
+    `--border-strong meets ${WCAG_AA_LARGE_TEXT_OR_UI}:1 as a UI boundary on --%s`,
     (bg) => {
-      const ratio = contrastRatio(tokenRgb('accent-cool'), tokenRgb(bg));
-      expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_LARGE_TEXT_OR_UI);
+      const ratio = contrastRatio(tokenRgb('border-strong'), tokenRgb(bg));
+      expect(ratio, `--border-strong on --${bg}`).toBeGreaterThanOrEqual(WCAG_AA_LARGE_TEXT_OR_UI);
     },
   );
+
+  // The counterpart assertion: --border-subtle is decorative separation and does NOT clear 3:1.
+  // Asserting that it does not is what stops it from being quietly promoted into an essential
+  // boundary because "it looked fine" — the two tokens have to stay distinguishable in purpose.
+  it('--border-subtle stays below the UI-boundary bar, so it cannot be the sole indicator', () => {
+    const ratio = contrastRatio(tokenRgb('border-subtle'), tokenRgb('bg-app'));
+    expect(ratio).toBeLessThan(WCAG_AA_LARGE_TEXT_OR_UI);
+  });
+
+  // The focus ring (`:focus-visible { outline: 2px solid var(--focus-ring) }`, NFR-A11Y-02) only
+  // needs 3:1 as a non-text indicator, but it is in TEXT_TOKENS above at 4.5:1 — this records the
+  // headroom rather than a second, weaker bar.
+  it.each(CONTENT_SURFACES)('focus ring keeps headroom above the 3:1 UI bar on --%s', (bg) => {
+    const ratio = contrastRatio(tokenRgb('focus-ring'), tokenRgb(bg));
+    expect(ratio).toBeGreaterThan(WCAG_AA_LARGE_TEXT_OR_UI);
+  });
+
+  // --accent-muted is a fill. Its sanctioned foreground is --text-primary; accent-on-accent-muted
+  // measures 4.10 and is not a pairing the palette offers.
+  it('--text-primary is readable on the --accent-muted fill', () => {
+    const ratio = contrastRatio(tokenRgb('text-primary'), tokenRgb('accent-muted'));
+    expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
+  });
+
+  // Disabled text is exempt from WCAG 1.4.3, so --text-disabled has no contrast bar. What it does
+  // need is to stay clearly *below* --text-muted, or the two stop being visually distinguishable
+  // and "disabled" loses its meaning.
+  it('--text-disabled reads as dimmer than --text-muted', () => {
+    const disabled = contrastRatio(tokenRgb('text-disabled'), tokenRgb('bg-app'));
+    const muted = contrastRatio(tokenRgb('text-muted'), tokenRgb('bg-app'));
+    expect(disabled).toBeLessThan(muted);
+  });
+
+  // No warm residue: the old palette left 72 rgba()/hex literals derived from warm tokens, and a
+  // half-migrated file mixes temperatures in gradients and glows where no token audit would catch
+  // it. Asserted mechanically because it is exactly the kind of thing that gets missed by eye.
+  it('index.css contains no literal derived from the retired warm palette', () => {
+    const retired = [
+      '255, 244, 224', // old --text-primary #f4efe6
+      '227, 154, 98', // old --accent-primary #e39a62
+      '213, 168, 91', // old --state-warning #d5a85b (value happened to survive; the literal did not)
+      '217, 120, 107', // old --state-danger #d9786b
+      '121, 181, 138', // old --state-success #79b58a
+      '120, 169, 194', // old --accent-cool #78a9c2
+      '18, 17, 15', // old --bg-canvas #12110f
+      '#1b1a17', // old --bg-surface
+      '#17130c',
+    ];
+    for (const literal of retired) {
+      expect(css, `retired warm literal ${literal} still present`).not.toContain(literal);
+    }
+  });
+
+  it('no retired token name is still referenced', () => {
+    for (const retired of [
+      'bg-canvas',
+      'bg-surface',
+      'accent-primary',
+      'accent-cool',
+      'state-success',
+      'state-warning',
+      'state-danger',
+    ]) {
+      expect(css, `var(--${retired}) still referenced`).not.toContain(`var(--${retired})`);
+    }
+  });
 });
 
 // issue #17: the thinking pill's label is painted with a `background-clip: text` gradient that sweeps
@@ -87,11 +182,11 @@ describe('design-token contrast audit (WCAG 2.2 AA)', () => {
 // rather than a hope — a gradient is exactly the kind of thing that looks fine in the frame someone
 // screenshots and fails in the frames they do not.
 describe('thinking pill sheen gradient (issue #17)', () => {
-  it.each(['text-primary', 'accent-primary', 'accent-cool'] as const)(
+  it.each(['text-primary', 'accent', 'ai-accent'] as const)(
     'stop --%s stays readable on the card surface',
     (stop) => {
-      const ratio = contrastRatio(tokenRgb(stop), tokenRgb('bg-surface'));
-      expect(ratio, `--${stop} on --bg-surface`).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
+      const ratio = contrastRatio(tokenRgb(stop), tokenRgb('bg-panel'));
+      expect(ratio, `--${stop} on --bg-panel`).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
     },
   );
 
@@ -101,8 +196,8 @@ describe('thinking pill sheen gradient (issue #17)', () => {
     const sheen = /\.run-title\.sheen\s*\{[^}]*\}/.exec(css)?.[0] ?? '';
     expect(sheen, '.run-title.sheen rule found').not.toBe('');
     expect(sheen).toContain('var(--text-primary)');
-    expect(sheen).toContain('var(--accent-primary)');
-    expect(sheen).toContain('var(--accent-cool)');
+    expect(sheen).toContain('var(--accent)');
+    expect(sheen).toContain('var(--ai-accent)');
     expect(sheen).not.toMatch(/#[0-9a-fA-F]{3,8}|rgba?\(/);
   });
 
@@ -128,13 +223,13 @@ describe('opacity-dimmed text usages (real text, not decorative)', () => {
   // dims them below full --text-secondary strength via `opacity`.
   const cases: Array<{ selector: string; bg: string; label: string }> = [
     { selector: '.composer-input::placeholder', bg: 'bg-elevated', label: 'Composer placeholder' },
-    { selector: '.tlv-timeline small', bg: 'bg-surface', label: 'List View timeline metadata' },
+    { selector: '.tlv-timeline small', bg: 'bg-panel', label: 'List View timeline metadata' },
     {
       selector: '.sb-search input::placeholder',
-      bg: 'bg-surface',
+      bg: 'bg-panel',
       label: 'Sidebar search placeholder',
     },
-    { selector: '.cc-hint', bg: 'bg-canvas', label: 'Canvas keyboard-shortcut hint' },
+    { selector: '.cc-hint', bg: 'bg-app', label: 'Canvas keyboard-shortcut hint' },
   ];
 
   it.each(cases)('$label ($selector) meets 4.5:1 on --$bg after opacity', ({ selector, bg }) => {

@@ -659,20 +659,38 @@ Managed Runtimeは実行前probeでOS sandboxとdirect filesystem/process/networ
 ### 13.1 Dark theme token
 
 ```text
-bg.canvas       #12110F
-bg.surface      #1B1A17
-bg.elevated     #24221E
-border.subtle   rgba(255,244,224,.09)
-text.primary    #F4EFE6
-text.secondary  #AAA49A
-accent.primary  #E39A62
-accent.cool     #78A9C2
-state.success   #79B58A
-state.warning   #D5A85B
-state.danger    #D9786B
+bg.app          #111318
+bg.sidebar      #15181E
+bg.panel        #191C23
+bg.elevated     #20242C
+bg.hover        #262B35
+bg.selected     #293348
+text.primary    #E6E9EF
+text.secondary  #A8B0BE
+text.muted      #929CAB
+text.disabled   #515967
+border.subtle   #272C35
+border.strong   #6E7581
+accent          #7398F6
+accent.hover    #86A6FA
+accent.muted    #28385F
+focus.ring      #7DA2FF
+success         #61B88A
+warning         #D3A653
+danger          #F07C85
+info            #6FA8DC
+ai.accent       #9C8BFC
+ai.surface      #24213A
 ```
 
-純黒・純白を避け、暖かいneutralを使う。accentは重要actionと通信pulseへ限定し、大面積に塗らない。spacingは4px base、主要section 24–32px、message間20pxを基準に余白を確保する。
+純黒・純白を避け、寒色のneutralを使う。accentは重要actionと通信pulseへ限定し、大面積に塗らない。spacingは4px base、主要section 24–32px、message間20pxを基準に余白を確保する。
+
+tokenの用途は以下に固定する。実装の正は`apps/desktop/src/renderer/index.css`の`:root`で、`lib/contrast.test.ts`がその値を直接読んで機械的に検証する。
+
+- text/UIとして文字を描くtoken（text.primary、text.secondary、text.muted、accent、accent.hover、focus.ring、success、warning、danger、info、ai.accent）は、contentを載せる全surface上で4.5:1以上を満たす。**用途の運用ルールでは担保しない** — 「text.mutedは本文に使わない」のような規約は変更のたびに思い出す必要があるが、基準を満たすtokenは誤用しようがない。
+- border.strongは識別に必須の境界（入力欄の枠など）に使い、controlを載せるsurface上で3:1以上を満たす。border.subtleは装飾的な区切りのみで3:1を満たさないため、境界の唯一の手がかりにしてはならない。
+- accent.mutedはaccent色のfillであり、その上に置く文字はtext.primaryとする。accent文字をaccent面に置く組合せは提供しない。
+- text.disabledはWCAG 1.4.3の適用除外である無効状態専用で、contrast基準を持たない。text.mutedより明確に暗いことだけを保証する。
 
 ### 13.2 Typography
 
