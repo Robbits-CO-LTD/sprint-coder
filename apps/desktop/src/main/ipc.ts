@@ -32,6 +32,7 @@ import {
   runtimeSetInputSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
+  runtimeCodexEffortSetInputSchema,
   runtimeSettingsSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
@@ -63,6 +64,7 @@ import {
   type CommandEnvelope,
   type CommandResult,
   type AccessPreset,
+  type CodexModelOption,
   type PublicError,
   type RuntimeKind,
   type TurnEvent,
@@ -268,6 +270,15 @@ export class IpcRouter {
           model,
           models: activeCapability.models,
           effort: this.persistence.getEffort(),
+          // Clamped for display against whichever Codex model is currently selected. Normally a
+          // no-op — setModel clamps and re-persists on every model change — but the cache can also
+          // change underneath us (a CLI upgrade rewrites models_cache.json), so the read never
+          // reports a level the selected model does not advertise.
+          codexEffort: clampCodexEffort(
+            this.persistence.getCodexEffort(),
+            codexCapability.models,
+            kind === 'claude' ? 'auto' : storedModel,
+          ),
         };
       },
     );
@@ -299,9 +310,17 @@ export class IpcRouter {
         if (!capability.available) throw new RuntimeUnavailableError(runtimeKind);
         if (!capability.models.some(({ id }) => id === input.model))
           throw new InvalidModelError(runtimeKind);
-        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () =>
-          this.persistence.setModel(input.model),
-        ).value;
+        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () => {
+          this.persistence.setModel(input.model);
+          // Models advertise different reasoning levels, so a model change can strand the stored
+          // Codex level (Sol advertises `ultra`, GPT-5.5 does not). Re-clamp and persist here so
+          // the synchronous turn dispatch can trust `getCodexEffort()` without a probe — leaving
+          // it stale would fail the next turn outright rather than degrade.
+          if (runtimeKind === 'codex')
+            this.persistence.setCodexEffort(
+              clampCodexEffort(this.persistence.getCodexEffort(), capability.models, input.model),
+            );
+        }).value;
       },
     );
     this.handleMutation(
@@ -317,6 +336,24 @@ export class IpcRouter {
         this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetEffort, () =>
           this.persistence.setEffort(input.effort),
         ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetCodexEffort,
+      runtimeCodexEffortSetInputSchema,
+      z.undefined(),
+      async (input, event, envelope) => {
+        // Unlike Claude's handler, this one *must* validate against a capability list: the set of
+        // valid levels is per-model (published in models_cache.json) rather than a fixed enum, and
+        // an unsupported level does not fall back — it fails the turn with an API 400.
+        const capability = await this.runtimeFor('codex').probe();
+        if (!capability.available) throw new RuntimeUnavailableError('codex');
+        const selected = capability.models.find(({ id }) => id === this.persistence.getModel());
+        if (!selected?.efforts?.some(({ id }) => id === input.effort))
+          throw new InvalidEffortError(selected?.displayName ?? 'このモデル');
+        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetCodexEffort, () =>
+          this.persistence.setCodexEffort(input.effort),
+        ).value;
+      },
     );
     this.handle(
       IPC_CHANNELS.permissionsGet,
@@ -636,7 +673,10 @@ export class IpcRouter {
           IPC_CHANNELS.turnsStart,
           () => {
             started = this.persistence.startTurn(input.taskId, input.text);
-            return { turnId: started.turnId };
+            return {
+              turnId: started.turnId,
+              ...(started.renamedTask === undefined ? {} : { renamedTask: started.renamedTask }),
+            };
           },
         );
         if (result.executed && started !== undefined) this.dispatchStarted(started);
@@ -1120,9 +1160,13 @@ export class IpcRouter {
           createEmptyToolCatalogSnapshot(kind, workspaceId),
           context,
           teamMcp,
-          // Claude-only reasoning effort: read live (not captured on StartedTurn) since it isn't
-          // persisted per-turn, unlike model — see persistence.ts's getEffort doc comment.
-          kind === 'claude' ? this.persistence.getEffort() : undefined,
+          // Reasoning effort: read live (not captured on StartedTurn) since it isn't persisted
+          // per-turn, unlike model — see persistence.ts's getEffort doc comment. The Codex value
+          // needs no probe here because setModel/setCodexEffort keep the stored level clamped to
+          // the selected model's advertised set; '' means "no override".
+          kind === 'claude'
+            ? this.persistence.getEffort()
+            : this.persistence.getCodexEffort() || undefined,
         ),
     );
     if (!egress.allowed) {
@@ -1329,8 +1373,42 @@ class RuntimeUnavailableError extends Error {
     super();
   }
 }
+/**
+ * Narrows a stored Codex reasoning level to something the given model actually advertises.
+ *
+ * Returns '' ("no override, use the CLI's own default") whenever there is nothing trustworthy to
+ * send: the `auto` sentinel, a model that publishes no level set, or a cache we could not read.
+ * Otherwise an unsupported stored value falls back to the model's advertised default rather than
+ * being dropped, so raising effort on Sol and switching to GPT-5.5 keeps a deliberate level
+ * instead of silently reverting to whatever the CLI defaults to.
+ */
+export function clampCodexEffort(
+  stored: string,
+  models: readonly CodexModelOption[],
+  selectedModelId: string,
+): string {
+  if (stored === '' || selectedModelId === 'auto') return '';
+  const efforts = models.find(({ id }) => id === selectedModelId)?.efforts;
+  if (efforts === undefined || efforts.length === 0) return '';
+  if (efforts.some(({ id }) => id === stored)) return stored;
+  return models.find(({ id }) => id === selectedModelId)?.defaultEffort ?? '';
+}
+
 class InvalidModelError extends Error {
   constructor(readonly kind: 'codex' | 'claude' = 'codex') {
+    super();
+  }
+}
+/**
+ * A Codex reasoning level the selected model does not advertise.
+ *
+ * Rejected up front rather than passed through, because the CLI does not degrade gracefully: an
+ * unsupported level makes the API answer 400 and `codex exec` exit 1, i.e. the whole turn dies.
+ * Better to refuse the setting while the user is in the picker than to let them discover it when
+ * their next message fails.
+ */
+class InvalidEffortError extends Error {
+  constructor(readonly modelDisplayName: string) {
     super();
   }
 }
@@ -1441,6 +1519,12 @@ function toPublicError(error: unknown): PublicError {
         error.kind === 'claude'
           ? '選択したモデルは現在のClaude CLIで利用できません。'
           : '選択したモデルは現在のCodex CLIで利用できません。',
+      retryable: false,
+    };
+  if (error instanceof InvalidEffortError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: `選択したEffortは${error.modelDisplayName}では利用できません。`,
       retryable: false,
     };
   if (error instanceof StalePermissionPolicyError)

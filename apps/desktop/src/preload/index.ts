@@ -21,6 +21,7 @@ import {
   permissionSettingsSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
+  runtimeCodexEffortSetInputSchema,
   runtimeSetInputSchema,
   runtimeSettingsSchema,
   taskArchivedInputSchema,
@@ -195,6 +196,14 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.settingsSetModel, runtimeModelSetInputSchema, z.undefined(), { model }),
     setEffort: (effort) =>
       invoke(IPC_CHANNELS.settingsSetEffort, runtimeEffortSetInputSchema, z.undefined(), {
+        effort,
+      }),
+    // Separate from setEffort because the two providers do not share a value space: Claude's is a
+    // fixed enum, Codex's is whatever the selected model advertises (issue #6). Main validates the
+    // level against that model's set and rejects an unsupported one, since Codex fails the whole
+    // turn rather than falling back.
+    setCodexEffort: (effort) =>
+      invoke(IPC_CHANNELS.settingsSetCodexEffort, runtimeCodexEffortSetInputSchema, z.undefined(), {
         effort,
       }),
   },
