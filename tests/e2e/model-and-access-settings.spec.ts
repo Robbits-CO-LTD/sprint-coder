@@ -93,11 +93,36 @@ test.describe('claude model clarity and effort settings', () => {
     await page.getByTestId('effort-option-high').click();
     await expect(page.getByTestId('effort-selector')).toHaveText('effort: High');
 
+    // Task 3 (issue #8): Ultracode is the sixth level. It is reachable from the same menu, keeps
+    // the menuitemradio semantics, and persists like the documented five.
+    await page.getByTestId('effort-selector').click();
+    const ultracode = page.getByTestId('effort-option-ultracode');
+    await expect(ultracode).toHaveAttribute('role', 'menuitemradio');
+    await expect(ultracode).toHaveAttribute('aria-checked', 'false');
+    await ultracode.click();
+    await expect(page.getByTestId('effort-selector')).toHaveText('effort: Ultracode');
+
     await closeApp(app);
     app = await launchApp(userDataDir);
     page = await firstWindow(app);
     await expect(page.getByTestId('runtime-selector')).toHaveText('Claude Code');
-    await expect(page.getByTestId('effort-selector')).toHaveText('effort: High');
+    await expect(page.getByTestId('effort-selector')).toHaveText('effort: Ultracode');
+
+    // Keyboard-only round trip through the enlarged menu: the trigger is reachable by Tab-less
+    // focus, Enter opens it, the option takes focus, Enter selects, and Escape closes.
+    await page.getByTestId('effort-selector').focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('effort-selector')).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByTestId('effort-option-ultracode')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    await page.getByTestId('effort-option-max').focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('effort-selector')).toHaveText('effort: Max');
+    await page.getByTestId('effort-selector').click();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('effort-selector')).toHaveAttribute('aria-expanded', 'false');
 
     // Switching to mock disables the effort selector again (Claude-only control) without losing
     // the persisted preference.

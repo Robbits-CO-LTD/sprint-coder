@@ -2193,7 +2193,14 @@ const RETIRED_MODEL_IDS: Readonly<Partial<Record<RuntimeKind, Readonly<Record<st
     claude: { opus: 'claude-opus-5' },
   };
 
-const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultracode',
+];
 function isClaudeEffort(value: string | undefined): value is ClaudeEffort {
   return value !== undefined && (CLAUDE_EFFORT_VALUES as readonly string[]).includes(value);
 }

@@ -1,6 +1,6 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import type { PublicError } from '@sprint-coder/contracts';
+import { claudeEffortSchema, type PublicError } from '@sprint-coder/contracts';
 import { ClaudeRuntimeAdapter, probeClaude } from './claude-adapter';
 import type { RuntimeCanonicalEvent } from './protocol';
 
@@ -34,6 +34,50 @@ describe.skipIf(!enabled)('Claude runtime adapter (REAL CLI smoke)', () => {
     expect(probe.version).toBeDefined();
     console.log('[claude-smoke] probe:', probe);
   });
+
+  // issue #8: `ultracode` is accepted by `--effort` but omitted from `claude --help`'s
+  // parenthetical list, and the CLI exposes no effort field in its output — so the only evidence
+  // that a level is honoured rather than silently dropped is the CLI's own warning, which it
+  // prints on stderr whenever it ignores an `--effort` value. This asserts both directions so a
+  // future CLI that stops recognising a level fails here instead of quietly degrading every
+  // Ultracode turn to the default effort.
+  const IGNORED_EFFORT_WARNING = /Unknown --effort value/;
+
+  function effortWarning(effort: string): string {
+    const result = spawnSync(
+      'claude',
+      [
+        '-p',
+        '1',
+        '--effort',
+        effort,
+        '--output-format',
+        'json',
+        '--tools',
+        '',
+        '--strict-mcp-config',
+        '--safe-mode',
+        '--no-session-persistence',
+      ],
+      { encoding: 'utf8', timeout: 60_000 },
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    return result.stderr;
+  }
+
+  it('accepts every claudeEffortSchema level without the CLI warning that it ignored one', () => {
+    for (const effort of claudeEffortSchema.options) {
+      expect(effortWarning(effort), `--effort ${effort}`).not.toMatch(IGNORED_EFFORT_WARNING);
+    }
+  }, 300_000);
+
+  it('does warn for values outside the schema, proving the check above discriminates', () => {
+    // 'ultra' is a deliberate near-miss of 'ultracode': if the CLI merely accepted anything
+    // prefix-matching a known level, the assertion above would prove nothing.
+    for (const effort of ['ultra', 'bogus']) {
+      expect(effortWarning(effort), `--effort ${effort}`).toMatch(IGNORED_EFFORT_WARNING);
+    }
+  }, 120_000);
 
   it('streams stages and deltas and completes with a real short turn, then cancel leaves no child process', async () => {
     const adapter = new ClaudeRuntimeAdapter();

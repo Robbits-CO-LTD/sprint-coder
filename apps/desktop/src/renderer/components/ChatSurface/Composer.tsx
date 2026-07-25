@@ -400,13 +400,14 @@ function ModelChip() {
   );
 }
 
-const EFFORT_LEVELS: ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_LEVELS: ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
 const EFFORT_LABEL: Record<ClaudeEffort, string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
   xhigh: 'X-High',
   max: 'Max',
+  ultracode: 'Ultracode',
 };
 const EFFORT_DESC: Record<ClaudeEffort, string> = {
   low: '最速・最小のコストで応答',
@@ -414,13 +415,16 @@ const EFFORT_DESC: Record<ClaudeEffort, string> = {
   high: 'じっくり考えて応答',
   xhigh: 'より深く考えて応答',
   max: '最大限考えて応答（最も低速・高コスト）',
+  ultracode: '複数エージェントを動員して最大限に検証（最も低速・高コスト）',
 };
 
 // Effort selector (FR-SET-03 follow-up). Verified empirically against the installed Claude CLI
-// (2.1.218, `claude --help`): `--effort <level>` accepts exactly these 5 values and is honored
-// per-turn (see the ADR amendment) — unlike the model chip, this control is Claude-only: Codex
-// has no equivalent flag on this CLI version, and mock has no effort concept at all, so both stay
-// disabled with a static display, mirroring how ModelChip disables for an inactive Runtime.
+// (2.1.218): `--effort <level>` accepts exactly these 6 values and is honored per-turn (see the
+// ADR amendment). `ultracode` is accepted but absent from `claude --help`'s parenthetical list —
+// see the probe log on `claudeEffortSchema` for how it was distinguished from a silently ignored
+// value. Unlike the model chip, this control is Claude-only: Codex has no equivalent flag on this
+// CLI version, and mock has no effort concept at all, so both stay disabled with a static
+// display, mirroring how ModelChip disables for an inactive Runtime.
 function EffortChip() {
   const runtime = useAppStore((s) => s.runtime);
   const setEffort = useAppStore((s) => s.setEffort);
