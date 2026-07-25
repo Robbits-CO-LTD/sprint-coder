@@ -46,6 +46,11 @@ export type RuntimeState = {
   model: string;
   models: CodexModelOption[];
   effort: ClaudeEffort;
+  /** Codex reasoning level, already clamped by Main to the selected model's advertised set (issue
+   * #6). '' means no override — the `auto` model sentinel resolves its model inside the CLI, so
+   * there is no advertised set to pick from and the CLI's own per-model default applies. Kept
+   * separate from `effort` because the two providers do not share a value space. */
+  codexEffort: string;
   /** The concrete model id the Claude CLI actually resolved on the most recently completed Claude
    * turn (e.g. "claude-sonnet-5"), surfaced in the model chip's tooltip. Not per-task — mirrors
    * the rest of `RuntimeState`'s global-only design — and cleared back to undefined only by a
@@ -137,6 +142,7 @@ type AppState = {
   setRuntime(kind: RuntimeKind): Promise<void>;
   setModel(model: string): Promise<void>;
   setEffort(effort: ClaudeEffort): Promise<void>;
+  setCodexEffort(effort: string): Promise<void>;
   setAccessPreset(taskId: string, preset: AccessPreset): Promise<void>;
   resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision): Promise<void>;
   selectTask(taskId: string): Promise<void>;
@@ -573,6 +579,7 @@ export const useAppStore = create<AppState>((set, get) => {
       model: 'auto',
       models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
       effort: 'medium',
+      codexEffort: '',
     },
     stageAnnouncement: '',
     toast: null,
@@ -656,6 +663,23 @@ export const useAppStore = create<AppState>((set, get) => {
         await window.sprintCoder.settings.setEffort(effort);
         await get().loadRuntime();
       } catch (err) {
+        set({ runtime: previous });
+        set({ error: describeError(err) });
+      }
+    },
+
+    async setCodexEffort(effort: string) {
+      if (!window.sprintCoder || typeof window.sprintCoder.settings?.setCodexEffort !== 'function')
+        return;
+      const previous = get().runtime;
+      if (previous.codexEffort === effort) return;
+      set({ runtime: { ...previous, codexEffort: effort } });
+      try {
+        await window.sprintCoder.settings.setCodexEffort(effort);
+        await get().loadRuntime();
+      } catch (err) {
+        // Main rejects a level the selected model does not advertise, so the optimistic update has
+        // to be rolled back — unlike Claude, a bad Codex level would fail the turn outright.
         set({ runtime: previous });
         set({ error: describeError(err) });
       }
@@ -1048,8 +1072,14 @@ export const useAppStore = create<AppState>((set, get) => {
       persistDraftDebounced(taskId, '');
 
       try {
-        await window.sprintCoder.turns.start({ taskId, text: trimmed });
+        const result = await window.sprintCoder.turns.start({ taskId, text: trimmed });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
+        // `renamedTask` is present only when this was the Task's first message and it was still
+        // carrying the placeholder title (issue #4) — merge it so the sidebar updates immediately
+        // instead of at the next full `tasks.list()`.
+        const renamed = result?.renamedTask;
+        if (renamed !== undefined)
+          set((state) => ({ tasks: state.tasks.map((t) => (t.id === renamed.id ? renamed : t)) }));
       } catch (err) {
         const code = errorCode(err);
         set((state) => ({

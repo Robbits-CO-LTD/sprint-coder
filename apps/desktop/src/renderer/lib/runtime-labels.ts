@@ -23,7 +23,14 @@ export const RUNTIME_CLI_MISSING_HINT: Record<'codex' | 'claude', string> = {
 
 export const RUNTIME_KINDS: readonly RuntimeKind[] = ['mock', 'codex', 'claude'];
 
-export const EFFORT_LEVELS: readonly ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const EFFORT_LEVELS: readonly ClaudeEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultracode',
+];
 
 export const EFFORT_LABEL: Record<ClaudeEffort, string> = {
   low: 'Low',
@@ -31,6 +38,7 @@ export const EFFORT_LABEL: Record<ClaudeEffort, string> = {
   high: 'High',
   xhigh: 'X-High',
   max: 'Max',
+  ultracode: 'Ultracode',
 };
 
 export const EFFORT_DESC: Record<ClaudeEffort, string> = {
@@ -39,6 +47,7 @@ export const EFFORT_DESC: Record<ClaudeEffort, string> = {
   high: 'じっくり考えて応答',
   xhigh: 'より深く考えて応答',
   max: '最大限考えて応答（最も低速・高コスト）',
+  ultracode: '複数エージェントを動員して最大限に検証（最も低速・高コスト）',
 };
 
 /** Why the effort control is unavailable, or null when it is usable. */
