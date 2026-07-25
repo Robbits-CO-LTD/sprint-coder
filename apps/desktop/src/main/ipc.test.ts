@@ -11,6 +11,7 @@ import {
   permissionSetInputSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
+  runtimeCodexEffortSetInputSchema,
   runtimeSetInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
@@ -29,7 +30,7 @@ import {
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
 } from '@sprint-coder/contracts';
-import { isTrustedIpcSender } from './ipc';
+import { clampCodexEffort, isTrustedIpcSender } from './ipc';
 
 // Adversarial IPC hardening (Phase 7, IMPLEMENTATION_PLAN §10.4, NFR-SEC-03). Two independent
 // properties are proven here without needing a live BrowserWindow/WebContents:
@@ -163,6 +164,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.settingsSetRuntime]: runtimeSetInputSchema,
   [IPC_CHANNELS.settingsSetModel]: runtimeModelSetInputSchema,
   [IPC_CHANNELS.settingsSetEffort]: runtimeEffortSetInputSchema,
+  [IPC_CHANNELS.settingsSetCodexEffort]: runtimeCodexEffortSetInputSchema,
   [IPC_CHANNELS.permissionsGet]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsListAutoDecisions]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsSet]: permissionSetInputSchema,
@@ -369,5 +371,65 @@ describe('taskId cross-check adversarial cases (mirrors ipc.ts handle() hasTaskI
         payload: { taskId: { nested: 'task-b' } },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('clampCodexEffort (issue #6)', () => {
+  // The valid reasoning levels are per-model and published by the CLI in models_cache.json, and
+  // Codex does NOT degrade gracefully — an unsupported level makes the API answer 400 and
+  // `codex exec` exit 1, killing the whole turn. So a stored level has to be narrowed to the
+  // selected model's advertised set before it can ever reach the CLI.
+  const models = [
+    { id: 'auto', displayName: 'Auto', description: '' },
+    {
+      id: 'gpt-5.6-sol',
+      displayName: 'GPT-5.6-Sol',
+      description: '',
+      defaultEffort: 'low',
+      efforts: [
+        { id: 'low', description: '' },
+        { id: 'high', description: '' },
+        { id: 'ultra', description: '' },
+      ],
+    },
+    {
+      id: 'gpt-5.5',
+      displayName: 'GPT-5.5',
+      description: '',
+      defaultEffort: 'medium',
+      efforts: [
+        { id: 'low', description: '' },
+        { id: 'medium', description: '' },
+        { id: 'high', description: '' },
+      ],
+    },
+    { id: 'no-levels', displayName: 'No Levels', description: '' },
+  ];
+
+  it('keeps a level the selected model advertises', () => {
+    expect(clampCodexEffort('ultra', models, 'gpt-5.6-sol')).toBe('ultra');
+    expect(clampCodexEffort('medium', models, 'gpt-5.5')).toBe('medium');
+  });
+
+  it("falls back to the model's own default when the stored level is unsupported", () => {
+    // The real regression this guards: raise effort to `ultra` on Sol, switch to GPT-5.5, send.
+    // Passing `ultra` through would fail the turn outright.
+    expect(clampCodexEffort('ultra', models, 'gpt-5.5')).toBe('medium');
+  });
+
+  it('sends no override for the auto sentinel', () => {
+    // The CLI picks the concrete model itself, so there is no advertised set to validate against
+    // and its own per-model default is the right thing to leave in place.
+    expect(clampCodexEffort('ultra', models, 'auto')).toBe('');
+  });
+
+  it('sends no override for a model that publishes no levels, or an unknown model', () => {
+    expect(clampCodexEffort('high', models, 'no-levels')).toBe('');
+    expect(clampCodexEffort('high', models, 'never-heard-of-it')).toBe('');
+    expect(clampCodexEffort('high', [], 'gpt-5.5')).toBe('');
+  });
+
+  it('passes an empty stored level straight through', () => {
+    expect(clampCodexEffort('', models, 'gpt-5.6-sol')).toBe('');
   });
 });

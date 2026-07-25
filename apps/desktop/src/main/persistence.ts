@@ -1902,6 +1902,8 @@ export interface PersistenceClient {
   setModel(model: string): void;
   getEffort(): ClaudeEffort;
   setEffort(effort: ClaudeEffort): void;
+  getCodexEffort(): string;
+  setCodexEffort(effort: string): void;
   getPermissionPolicy(taskId: string): PermissionPolicyRecord;
   setAccessPreset(
     taskId: string,
@@ -3483,6 +3485,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare(
         `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.claude.effort', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(effort, new Date().toISOString());
+  }
+
+  // Codex reasoning level, under its own key so switching Runtime does not clobber the Claude
+  // preference (issue #6). Deliberately NOT validated against a fixed enum here: the valid set is
+  // per-model and published by the CLI in models_cache.json, so this layer stores whatever was
+  // chosen and the settings read clamps it to the currently selected model's advertised set. An
+  // empty string means "no override" — the correct state for the `auto` model sentinel.
+  getCodexEffort(): string {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'runtime.codex.effort'")
+      .get() as { value: string } | undefined;
+    const stored = row?.value ?? '';
+    return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(stored) ? stored : '';
+  }
+
+  setCodexEffort(effort: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.codex.effort', ?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(effort, new Date().toISOString());
