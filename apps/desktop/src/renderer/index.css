@@ -158,6 +158,89 @@ button {
   pointer-events: none;
 }
 
+/* ---------- Sidebar collapse (issue #12) ----------
+   Two distinct forms, because the problem is different at each size.
+
+   Wide: the sidebar is a flex sibling, so collapsing has to actually give its 264px back to the
+   conversation — width goes to 0 rather than the panel merely sliding out of sight.
+
+   Narrow (<=900px, the same breakpoint the Team List View switches at): the sidebar stops being a
+   layout sibling entirely and overlays instead. At the 760px minimum window it was taking ~35% of
+   the shell, and at 200% zoom the ~590px effective viewport left the conversation 326px against a
+   341px intrinsic minimum — the Composer's send button spilled off the right edge. Overlaying means
+   the sidebar can be open at those sizes without costing the conversation a single pixel.
+
+   Both forms are written so they cannot fight `.team-mode`'s own hiding rule above: that rule only
+   sets transform/opacity/pointer-events, none of which these touch except in the overlay form,
+   where `.team-mode` wins by being declared first at equal specificity only if it is also more
+   specific — hence the explicit `:not(.team-mode)` guard on the overlay transform. */
+.app-shell.sidebar-collapsed:not(.sidebar-overlay) .sidebar {
+  width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  border-right-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.app-shell.sidebar-collapsed:not(.sidebar-overlay) .sidebar > * {
+  /* Content is clipped by `overflow: hidden` above, but a zero-width flex container still lays its
+     children out and can report a scrollWidth — which is what a horizontal-overflow check measures.
+     Removing them from flow keeps that measurement honest. */
+  display: none;
+}
+.app-shell:not(.team-mode).sidebar-overlay .sidebar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(264px, 82vw);
+  z-index: 9;
+  box-shadow: 12px 0 32px rgba(0, 0, 0, 0.45);
+}
+.app-shell:not(.team-mode).sidebar-overlay.sidebar-collapsed .sidebar {
+  transform: translateX(-100%);
+  pointer-events: none;
+}
+
+/* Dismiss surface for the overlaid sidebar. A real button so it is keyboard-reachable and named,
+   rather than a bare div that only responds to a pointer. */
+.sidebar-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  background: rgba(0, 0, 0, 0.42);
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  animation: scrimIn var(--t-quick) var(--ease-ui);
+}
+@keyframes scrimIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.sidebar-toggle {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-left: -4px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui);
+}
+.sidebar-toggle:hover {
+  background: rgba(255, 244, 224, 0.08);
+  color: var(--text-primary);
+}
+
 .sb-new {
   display: flex;
   align-items: center;
