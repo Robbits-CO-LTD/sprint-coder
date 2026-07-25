@@ -57,7 +57,19 @@ export type RuntimeCanonicalEvent =
   // case rather than a hypothetical.
   //
   // Additive: runtime-host and main ship in the same app, so RUNTIME_PROTOCOL_VERSION stays put.
-  | { type: 'reasoning'; text: string };
+  | { type: 'reasoning'; text: string }
+  // Codex's thread id, captured from its structured `thread.started` event (issue #11).
+  //
+  // This is how generated images are located, and the reason it is an *id* rather than a path is
+  // the whole security argument: the CLI writes images to
+  // `$CODEX_HOME/generated_images/<thread_id>/<call_id>.png` itself, and the only place a path to
+  // them appears in the event stream is inside model-generated prose ("生成済みファイル:
+  // [call_x.png](/Users/…)"). Reading a path out of that prose would be an arbitrary-file-read
+  // primitive driven by attacker-influenceable text — a prompt injection in repo content could name
+  // ~/.ssh/id_rsa and the app would copy it into an artifact the user then opens. Verified on
+  // codex-cli 0.144.4 that `thread.started`'s `thread_id` matches the directory name exactly, so
+  // Main can enumerate a bounded directory and never parse a path at all.
+  | { type: 'thread'; threadId: string };
 
 export type MainToRuntimeEnvelope =
   | (EnvelopeBase & { type: 'hello' })
@@ -242,6 +254,14 @@ function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent
       typeof value.text === 'string' &&
       value.text.length > 0 &&
       value.text.length <= 16_384
+    );
+  // Constrained to a UUID shape rather than any string: this value is interpolated into a
+  // filesystem path by Main, so it must not be able to carry separators or traversal segments.
+  if (value.type === 'thread')
+    return (
+      'threadId' in value &&
+      typeof value.threadId === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.threadId)
     );
   return (
     value.type === 'delta' &&

@@ -1,4 +1,4 @@
-{"type":"thread.started","thread_id":"thread-1"}
+{"type":"thread.started","thread_id":"019f976e-45b1-7a60-bd4d-14374e766d9a"}
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"reasoning-1","type":"reasoning","text":"internal summary"}}
 {"type":"item.started","item":{"id":"command-1","type":"command_execution","command":"pwd"}}

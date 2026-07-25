@@ -21,6 +21,9 @@ import {
   type ContextUsage,
   type QueuedInput,
   type RuntimeKind,
+  type DatabaseRecovery,
+  type GeneratedImage,
+  generatedImageSchema,
   type TaskSummary,
   type TeamBudgetStatus,
   type TeamUsageTotals,
@@ -92,6 +95,7 @@ import {
   type PreparedContext,
 } from './context-ledger';
 import { redactSecrets } from './secret-redactor';
+import { deriveTaskTitle } from './task-title';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
 import {
   legacyMutationWorkspaceKey,
@@ -200,6 +204,43 @@ export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
   }
 }
 
+type GeneratedImageRow = {
+  id: string;
+  task_id: string;
+  turn_id: string;
+  mime_type: 'image/png';
+  byte_length: number;
+  created_at: string;
+};
+
+function toGeneratedImage(row: GeneratedImageRow): GeneratedImage {
+  return generatedImageSchema.parse({
+    id: row.id,
+    taskId: row.task_id,
+    turnId: row.turn_id,
+    mimeType: row.mime_type,
+    byteLength: row.byte_length,
+    createdAt: row.created_at,
+  });
+}
+
+/** A single generated icon is tens of KB; this is a sanity ceiling, not a target. */
+const MAX_GENERATED_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The 8-byte PNG signature.
+ *
+ * Checked because the extension of a file in a directory the CLI owns proves nothing about its
+ * contents, and these bytes end up in a `data:` URL in the renderer. Refusing anything else is what
+ * keeps "display a generated image" from becoming "render whatever landed in that directory".
+ */
+function isPngBuffer(bytes: Buffer): boolean {
+  return (
+    bytes.byteLength > 8 &&
+    bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  );
+}
+
 type TaskRow = {
   id: string;
   primary_thread_id: string;
@@ -214,6 +255,7 @@ type TaskRow = {
   draft: string;
   branch_epoch: number;
   context_epoch: number;
+  title_source: 'default' | 'auto' | 'manual';
   created_at: string;
   updated_at: string;
 };
@@ -1524,12 +1566,59 @@ const migrations = [
     `,
     requiresForeignKeysOff: true,
   },
+  {
+    version: 31,
+    checksum: 'task-title-v31-auto-naming-source',
+    // Tracks where a Task's title came from, so automatic naming from the first user message
+    // (issue #4) can never overwrite a name the user chose. 'default' is the only state eligible
+    // for auto-naming; it becomes 'auto' once derived and 'manual' on any explicit rename.
+    //
+    // Every pre-existing row is frozen to 'manual' rather than left at the column default. Those
+    // Tasks already have history, so their next message is not a first message — auto-naming them
+    // would rename an established conversation after the fact, and for any the user had already
+    // renamed by hand it would silently discard that name.
+    sql: `
+      ALTER TABLE tasks ADD COLUMN title_source TEXT NOT NULL DEFAULT 'default'
+        CHECK (title_source IN ('default', 'auto', 'manual'));
+      UPDATE tasks SET title_source = 'manual';
+    `,
+  },
+  {
+    // v32, not v31: issue #4's auto-naming migration landed on this number first. Two migrations
+    // sharing a version would leave whichever ran second permanently unapplied on any database that
+    // already recorded the number.
+    version: 32,
+    checksum: 'generated-images-v32-codex-imagegen',
+    // Images a Runtime generated during a Turn (issue #11). Bytes live in the row rather than on
+    // disk: they are small (a single icon), already content-addressed, and keeping them in the same
+    // transaction as the Turn event means an image can never be referenced by a committed event
+    // while its file is missing.
+    //
+    // `id` is the SHA-256 of the bytes, so re-generating the same image stores it once. `mime_type`
+    // is CHECKed rather than free-form because the only accepted format is verified by magic bytes
+    // before insert — an extension is not evidence.
+    sql: `
+      CREATE TABLE generated_images (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        mime_type TEXT NOT NULL CHECK (mime_type = 'image/png'),
+        byte_length INTEGER NOT NULL CHECK (byte_length > 0),
+        bytes BLOB NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX generated_images_task_idx ON generated_images(task_id, created_at, id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
 // Bounds mirror packages/contracts's canvasCameraSchema/canvasNodePositionSchema (kept as literal
 // duplicates here, not imports, since main must reject bad data even if a caller bypasses the IPC
 // schema — e.g. direct PersistenceClient use in tests).
+/** Placeholder a Task is born with. Auto-naming replaces it on the first message (issue #4). */
+export const DEFAULT_TASK_TITLE = '新しいタスク';
+
 export const CANVAS_MIN_SCALE = 0.18;
 export const CANVAS_MAX_SCALE = 1.6;
 export const CANVAS_WORLD_BOUND = 20_000;
@@ -1656,6 +1745,9 @@ export type StartedTurn = {
   runtimeKind: RuntimeKind;
   model: string;
   event: TurnEvent;
+  /** Present only when this Turn's message triggered automatic naming (issue #4), so the caller
+   * can push the new title to the renderer without a dedicated event. */
+  renamedTask?: TaskSummary;
 };
 export type QueueTransition = { started: StartedTurn; queueEvent: TurnEvent } | null;
 export type BackgroundActivityRecord = Readonly<{
@@ -1902,6 +1994,8 @@ export interface PersistenceClient {
   setModel(model: string): void;
   getEffort(): ClaudeEffort;
   setEffort(effort: ClaudeEffort): void;
+  getCodexEffort(): string;
+  setCodexEffort(effort: string): void;
   getPermissionPolicy(taskId: string): PermissionPolicyRecord;
   setAccessPreset(
     taskId: string,
@@ -2165,6 +2259,14 @@ export interface PersistenceClient {
     requestHash: string,
   ): { found: boolean; value?: T };
   interruptActiveTurns(): number;
+  getStartupRecovery(): DatabaseRecovery;
+  recordGeneratedImage(input: {
+    taskId: string;
+    turnId: string;
+    bytes: Buffer;
+  }): { event: TurnEvent; image: GeneratedImage } | null;
+  listGeneratedImages(taskId: string): GeneratedImage[];
+  readGeneratedImage(imageId: string): { image: GeneratedImage; bytes: Buffer } | null;
   close(): void;
 }
 
@@ -2174,7 +2276,33 @@ function modelSettingsKey(kind: RuntimeKind): string {
   return kind === 'claude' ? 'runtime.claude.model' : 'runtime.codex.model';
 }
 
-const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+/**
+ * Claude catalog ids that were retired, mapped to their replacement.
+ *
+ * `opus` used to be the id for the top Claude tier. It resolves to claude-opus-4-8 on CLI
+ * 2.1.218, so the curated catalog now pins `claude-opus-5` explicitly (see the probe log in
+ * runtime-host/claude-adapter.ts). Remapping on read is what makes an existing preference follow:
+ * ipc.ts's settings read already falls back to 'auto' for an id that is no longer in the catalog,
+ * but that only corrects what the picker *displays* — `startTurnInTransaction` reads `getModel()`
+ * directly, so without this the UI would say "Auto" while the run still passed `--model opus` and
+ * got claude-opus-4-8.
+ *
+ * Keyed by Runtime kind because the settings row is shared between Codex and mock; an `opus` id
+ * only ever means the Claude alias.
+ */
+const RETIRED_MODEL_IDS: Readonly<Partial<Record<RuntimeKind, Readonly<Record<string, string>>>>> =
+  {
+    claude: { opus: 'claude-opus-5' },
+  };
+
+const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultracode',
+];
 function isClaudeEffort(value: string | undefined): value is ClaudeEffort {
   return value !== undefined && (CLAUDE_EFFORT_VALUES as readonly string[]).includes(value);
 }
@@ -2238,6 +2366,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private readonly contextLedger: ContextLedger;
   private nativeMutationAuthorityDisabled = false;
   readonly recoveryReport: DatabaseRecoveryReport;
+  private startupInterruptedTurns = 0;
 
   constructor(
     databasePath: string,
@@ -2497,13 +2626,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toTask(this.getTaskRow(taskId));
   }
 
-  createTask(title = '新しいタスク', localOnly = false): TaskSummary {
+  createTask(title?: string, localOnly = false): TaskSummary {
     const now = new Date().toISOString();
     const primaryThreadId = randomUUID();
     const leaderAgentId = randomUUID();
+    // An explicit title is the caller's choice and must survive the first message, so it is
+    // recorded as 'manual'. Only the placeholder is eligible for auto-naming (issue #4).
+    const titleSource = title === undefined ? 'default' : 'manual';
     const task = taskSummarySchema.parse({
       id: randomUUID(),
-      title,
+      title: title ?? DEFAULT_TASK_TITLE,
       pinned: false,
       archived: false,
       goal: null,
@@ -2517,10 +2649,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `INSERT INTO tasks(
              id, title, pinned, archived, goal, workspace_path, local_only, draft,
-             primary_thread_id, created_at, updated_at
-           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?)`,
+             primary_thread_id, title_source, created_at, updated_at
+           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?, ?)`,
         )
-        .run(task.id, task.title, localOnly ? 1 : 0, now, now);
+        .run(task.id, task.title, localOnly ? 1 : 0, titleSource, now, now);
       this.db
         .prepare(
           `INSERT INTO agent_threads(
@@ -3184,6 +3316,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   renameTask(taskId: string, title: string): TaskSummary {
+    // An explicit rename takes the Task out of auto-naming for good, so a later first-message
+    // derivation can never overwrite it (issue #4's "手動でリネームした Task は…名前が勝手に変わらない").
+    this.db.prepare("UPDATE tasks SET title_source = 'manual' WHERE id = ?").run(taskId);
     return this.updateTask(taskId, 'title', title);
   }
   setPinned(taskId: string, pinned: boolean): TaskSummary {
@@ -3425,10 +3560,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   // Codex and Claude does not clobber the other's remembered preference. 'mock' has no model
   // concept and shares Codex's key, matching pre-Claude behavior exactly.
   getModel(): string {
+    const kind = this.getRuntime();
     const row = this.db
       .prepare('SELECT value FROM settings WHERE key = ?')
-      .get(modelSettingsKey(this.getRuntime())) as { value: string } | undefined;
-    return row?.value ?? 'auto';
+      .get(modelSettingsKey(kind)) as { value: string } | undefined;
+    const stored = row?.value ?? 'auto';
+    return RETIRED_MODEL_IDS[kind]?.[stored] ?? stored;
   }
 
   setModel(model: string): void {
@@ -3455,6 +3592,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare(
         `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.claude.effort', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(effort, new Date().toISOString());
+  }
+
+  // Codex reasoning level, under its own key so switching Runtime does not clobber the Claude
+  // preference (issue #6). Deliberately NOT validated against a fixed enum here: the valid set is
+  // per-model and published by the CLI in models_cache.json, so this layer stores whatever was
+  // chosen and the settings read clamps it to the currently selected model's advertised set. An
+  // empty string means "no override" — the correct state for the `auto` model sentinel.
+  getCodexEffort(): string {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'runtime.codex.effort'")
+      .get() as { value: string } | undefined;
+    const stored = row?.value ?? '';
+    return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(stored) ? stored : '';
+  }
+
+  setCodexEffort(effort: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.codex.effort', ?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(effort, new Date().toISOString());
@@ -5109,9 +5268,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
   initializeMutationRecovery(holderInstanceId: string, now: string): readonly MutationQuarantine[] {
     return this.db.transaction(() => {
       const quarantines = this.quarantineStartupMutations(holderInstanceId, now);
-      this.interruptActiveTurns();
+      // Retained rather than discarded: the count is the only evidence a user has that a Turn they
+      // left running was reaped by a crash, and the SurfaceFooter reports it (issue #9).
+      this.startupInterruptedTurns = this.interruptActiveTurns();
       return quarantines;
     })();
+  }
+
+  /**
+   * What this launch's recovery pass did. Combines the pre-open corruption probe with the
+   * interrupted-turn sweep, which run at different points and were previously both unreported.
+   *
+   * Zero/false across the board is the normal case; the footer stays quiet for it.
+   */
+  getStartupRecovery(): DatabaseRecovery {
+    return {
+      corruptionDetected: this.recoveryReport.corruptionDetected,
+      restoredFromBackup: this.recoveryReport.restoredFromBackup,
+      freshStart: this.recoveryReport.freshStart,
+      interruptedTurns: this.startupInterruptedTurns,
+    };
   }
 
   clearMutationQuarantine(workspaceKey: string, expectedFence: number, now: string): void {
@@ -6410,6 +6586,77 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return { found: true, value: decoded.value };
   }
 
+  /**
+   * Takes custody of a generated image, in the same transaction as the Turn event that announces it.
+   *
+   * Rejects anything that is not a PNG by magic bytes — the file came from a directory the CLI owns,
+   * not from a path this app chose, so its contents are the only thing worth trusting. Returns null
+   * for a duplicate (same content digest already stored), so re-running a Turn cannot pile up copies
+   * or emit a second event for the same image.
+   */
+  recordGeneratedImage(input: {
+    taskId: string;
+    turnId: string;
+    bytes: Buffer;
+  }): { event: TurnEvent; image: GeneratedImage } | null {
+    if (!isPngBuffer(input.bytes)) return null;
+    if (input.bytes.byteLength > MAX_GENERATED_IMAGE_BYTES) return null;
+    const id = createHash('sha256').update(input.bytes).digest('hex');
+    return this.db.transaction(() => {
+      const existing = this.db
+        .prepare('SELECT 1 FROM generated_images WHERE id = ?')
+        .get(id) as unknown;
+      if (existing !== undefined) return null;
+      const now = new Date().toISOString();
+      const image = generatedImageSchema.parse({
+        id,
+        taskId: input.taskId,
+        turnId: input.turnId,
+        mimeType: 'image/png',
+        byteLength: input.bytes.byteLength,
+        createdAt: now,
+      });
+      this.db
+        .prepare(
+          `INSERT INTO generated_images(id, task_id, turn_id, mime_type, byte_length, bytes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          image.id,
+          image.taskId,
+          image.turnId,
+          image.mimeType,
+          image.byteLength,
+          input.bytes,
+          now,
+        );
+      const event = this.appendEvent({
+        type: 'image.generated',
+        taskId: input.taskId,
+        turnId: input.turnId,
+        image,
+      });
+      return { event, image };
+    })();
+  }
+
+  listGeneratedImages(taskId: string): GeneratedImage[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, task_id, turn_id, mime_type, byte_length, created_at FROM generated_images
+         WHERE task_id = ? ORDER BY created_at, id`,
+      )
+      .all(taskId) as GeneratedImageRow[];
+    return rows.map(toGeneratedImage);
+  }
+
+  readGeneratedImage(imageId: string): { image: GeneratedImage; bytes: Buffer } | null {
+    const row = this.db.prepare('SELECT * FROM generated_images WHERE id = ?').get(imageId) as
+      (GeneratedImageRow & { bytes: Buffer }) | undefined;
+    if (row === undefined) return null;
+    return { image: toGeneratedImage(row), bytes: row.bytes };
+  }
+
   interruptActiveTurns(): number {
     return this.db.transaction(() => {
       const turns = this.db
@@ -6465,7 +6712,41 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.attachBackgroundCompletionsInTransaction(taskId, turnId, now);
     const event = this.appendEvent({ type: 'turn.accepted', taskId, turnId, userMessage });
     this.db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(now, taskId);
-    return { turnId, text, runtimeKind, model, event };
+    const renamedTask = this.autoNameTaskInTransaction(taskId, text, now);
+    return {
+      turnId,
+      text,
+      runtimeKind,
+      model,
+      event,
+      ...(renamedTask === null ? {} : { renamedTask }),
+    };
+  }
+
+  /**
+   * Names a still-unnamed Task from the message that just started its first Turn (issue #4).
+   *
+   * Runs inside `startTurnInTransaction` on purpose: the rename and the user message commit or roll
+   * back together, so there is no window where the sidebar shows a name for a message that was
+   * never stored. Returns the updated summary only when a rename actually happened, which is what
+   * lets `turns.start` hand it straight back to the renderer instead of needing a new TurnEvent
+   * variant (a new variant would land in `turn_events` and be replayed on every re-subscribe).
+   *
+   * Guarded by `title_source`, not by comparing against the placeholder string: a user who renames
+   * a Task to literally "新しいタスク" still owns that name.
+   */
+  private autoNameTaskInTransaction(taskId: string, text: string, now: string): TaskSummary | null {
+    const row = this.db.prepare('SELECT title_source FROM tasks WHERE id = ?').get(taskId) as
+      { title_source: string } | undefined;
+    if (row?.title_source !== 'default') return null;
+    const derived = deriveTaskTitle(text);
+    // No usable title (a message that is only whitespace, a code fence, or punctuation) leaves the
+    // placeholder and `title_source` alone, so the *next* message gets another chance to name it.
+    if (derived === null) return null;
+    this.db
+      .prepare("UPDATE tasks SET title = ?, title_source = 'auto', updated_at = ? WHERE id = ?")
+      .run(derived, now, taskId);
+    return toTask(this.getTaskRow(taskId));
   }
 
   private attachBackgroundCompletionsInTransaction(

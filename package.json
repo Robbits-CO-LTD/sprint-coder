@@ -13,8 +13,8 @@
     "test": "npm run test --workspaces --if-present",
     "lint": "eslint \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\"",
     "lint:fix": "eslint \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\" --fix",
-    "format": "prettier --write \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
-    "format:check": "prettier --check \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
+    "format": "prettier --write \"apps/*/src/**/*.{ts,tsx,css}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
+    "format:check": "prettier --check \"apps/*/src/**/*.{ts,tsx,css}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
     "e2e": "playwright test"
   },
   "dependencies": {

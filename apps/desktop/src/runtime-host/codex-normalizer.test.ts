@@ -13,6 +13,9 @@ describe('CodexJsonlNormalizer', () => {
       .flatMap((line) => normalizer.push(line));
 
     expect(events.map((event) => (event.type === 'stage' ? event.stage : event.type))).toEqual([
+      // Codex's own thread id, emitted from its structured `thread.started` event so Main can locate
+      // generated images without parsing a path out of model prose (issue #11).
+      'thread',
       'understanding',
       'planning',
       // Codex's reasoning text, which the planning branch used to discard along with the stage
@@ -28,6 +31,39 @@ describe('CodexJsonlNormalizer', () => {
       delta: 'Canonical answer.',
     });
     expect(JSON.stringify(events)).not.toContain('input_tokens');
+  });
+
+  // issue #11: the thread id is the *only* handle used to find generated images, so it has to come
+  // from this structured field and be usable as one path segment — nothing more.
+  it('surfaces the thread id from thread.started and nothing else from that event', () => {
+    const normalizer = new CodexJsonlNormalizer();
+    const events = normalizer.push(
+      JSON.stringify({
+        type: 'thread.started',
+        thread_id: '019f976e-45b1-7a60-bd4d-14374e766d9a',
+        cwd: '/private/tmp',
+        secret: 'must not be forwarded',
+      }),
+    );
+    expect(events).toEqual([{ type: 'thread', threadId: '019f976e-45b1-7a60-bd4d-14374e766d9a' }]);
+    expect(JSON.stringify(events)).not.toContain('must not be forwarded');
+  });
+
+  it('emits nothing when thread.started carries no usable id', () => {
+    // Validated here rather than only at the protocol boundary: Main interpolates this into a
+    // filesystem path, and a normalizer that can emit something the protocol rejects would drop the
+    // event silently, so images would stop appearing for no visible reason.
+    for (const raw of [
+      { type: 'thread.started' },
+      { type: 'thread.started', thread_id: '' },
+      { type: 'thread.started', thread_id: 'thread-1' },
+      { type: 'thread.started', thread_id: '../escape' },
+      { type: 'thread.started', thread_id: '/absolute/path' },
+      { type: 'thread.started', thread_id: 42 },
+    ]) {
+      const normalizer = new CodexJsonlNormalizer();
+      expect(normalizer.push(JSON.stringify(raw)), JSON.stringify(raw)).toEqual([]);
+    }
   });
 
   // Adversarial fixtures (Phase 7 hardening, IMPLEMENTATION_PLAN §10.4 5a): the Codex CLI is

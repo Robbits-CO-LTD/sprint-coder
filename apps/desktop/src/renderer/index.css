@@ -158,6 +158,89 @@ button {
   pointer-events: none;
 }
 
+/* ---------- Sidebar collapse (issue #12) ----------
+   Two distinct forms, because the problem is different at each size.
+
+   Wide: the sidebar is a flex sibling, so collapsing has to actually give its 264px back to the
+   conversation — width goes to 0 rather than the panel merely sliding out of sight.
+
+   Narrow (<=900px, the same breakpoint the Team List View switches at): the sidebar stops being a
+   layout sibling entirely and overlays instead. At the 760px minimum window it was taking ~35% of
+   the shell, and at 200% zoom the ~590px effective viewport left the conversation 326px against a
+   341px intrinsic minimum — the Composer's send button spilled off the right edge. Overlaying means
+   the sidebar can be open at those sizes without costing the conversation a single pixel.
+
+   Both forms are written so they cannot fight `.team-mode`'s own hiding rule above: that rule only
+   sets transform/opacity/pointer-events, none of which these touch except in the overlay form,
+   where `.team-mode` wins by being declared first at equal specificity only if it is also more
+   specific — hence the explicit `:not(.team-mode)` guard on the overlay transform. */
+.app-shell.sidebar-collapsed:not(.sidebar-overlay) .sidebar {
+  width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  border-right-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.app-shell.sidebar-collapsed:not(.sidebar-overlay) .sidebar > * {
+  /* Content is clipped by `overflow: hidden` above, but a zero-width flex container still lays its
+     children out and can report a scrollWidth — which is what a horizontal-overflow check measures.
+     Removing them from flow keeps that measurement honest. */
+  display: none;
+}
+.app-shell:not(.team-mode).sidebar-overlay .sidebar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(264px, 82vw);
+  z-index: 9;
+  box-shadow: 12px 0 32px rgba(0, 0, 0, 0.45);
+}
+.app-shell:not(.team-mode).sidebar-overlay.sidebar-collapsed .sidebar {
+  transform: translateX(-100%);
+  pointer-events: none;
+}
+
+/* Dismiss surface for the overlaid sidebar. A real button so it is keyboard-reachable and named,
+   rather than a bare div that only responds to a pointer. */
+.sidebar-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  background: rgba(0, 0, 0, 0.42);
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  animation: scrimIn var(--t-quick) var(--ease-ui);
+}
+@keyframes scrimIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.sidebar-toggle {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-left: -4px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui);
+}
+.sidebar-toggle:hover {
+  background: rgba(255, 244, 224, 0.08);
+  color: var(--text-primary);
+}
+
 .sb-new {
   display: flex;
   align-items: center;
@@ -551,6 +634,54 @@ button {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+/* Jump-to-latest (issue #3). A sticky, zero-height rail: it pins to the bottom of the scrollport
+   without consuming layout space, so showing/hiding it never reflows the timeline (which would
+   otherwise shift the very content the reader stopped to read). The button is absolutely
+   positioned inside it — `position: sticky` establishes the containing block. */
+.timeline-jump {
+  position: sticky;
+  bottom: 0;
+  height: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+.timeline-jump-button {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid rgba(227, 154, 98, 0.45);
+  border-radius: 99px;
+  padding: 6px 14px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  animation: jumpIn var(--t-quick) var(--ease-ui);
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    border-color var(--t-quick) var(--ease-ui);
+}
+.timeline-jump-button:hover {
+  background: rgba(227, 154, 98, 0.14);
+  border-color: var(--accent-primary);
+}
+@keyframes jumpIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 
 .empty-state {
@@ -1317,6 +1448,12 @@ button {
 .effort-menu {
   min-width: 240px;
   max-width: min(320px, calc(100vw - 32px));
+  /* Same scroll guard as .model-menu. Six levels (issue #8 added Ultracode) still fit at 100%,
+     but the Leader node is a fixed 620px tall inside a `overflow: clip` Canvas and the effective
+     viewport shrinks further under zoom — without this the last option would be clipped away
+     instead of reachable. */
+  max-height: 320px;
+  overflow-y: auto;
 }
 .runtime-menu-item {
   display: flex;
@@ -2247,6 +2384,38 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* ---------- SurfaceFooter (issue #9) ----------
+   The fifth §4.2 element. Quiet by default: one slim row stating the connection, plus extra rows
+   only when something abnormal happened. Sized so the ordinary case costs the conversation column
+   as little vertical space as a chip row. */
+.surface-footer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 24px 8px;
+  font-size: 11.5px;
+  /* Tighter than the body's 1.6: the footer is a status strip, and inside the Leader node's fixed
+     620px card every row it costs is a row the conversation does not get. */
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+.surface-footer--node {
+  padding: 0 16px 6px;
+}
+.sf-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 2px 0;
+}
+.sf-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .think-chevron {
   font-size: 11px;
   color: var(--text-secondary);
@@ -2370,4 +2539,325 @@ button {
     -webkit-text-fill-color: CanvasText;
     color: CanvasText;
   }
+}
+.sf-dot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+.sf-dot--idle {
+  color: var(--state-success);
+}
+.sf-dot--running {
+  color: var(--accent-primary);
+}
+.sf-dot--failed {
+  color: var(--state-danger);
+}
+/* Only the abnormal rows get any presence: a border and the warning colour, so the eye lands on
+   them without the normal state ever needing to compete. */
+.sf-row--notice {
+  color: var(--state-warning);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 6px;
+}
+.sf-dismiss {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  border-radius: 5px;
+  color: inherit;
+}
+.sf-dismiss:hover {
+  background: rgba(255, 244, 224, 0.1);
+}
+/* ---------- Composer plus menu (issue #13) ---------- */
+.composer-plus {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  padding: 0;
+}
+.composer-plus-menu {
+  min-width: 260px;
+  max-width: min(320px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow-y: auto;
+}
+.composer-plus-menu .runtime-menu-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+/* Unavailable items stay focusable (aria-disabled, not the disabled attribute) so the reason in
+   their description is reachable by keyboard and screen reader. Dim the title only — the
+   description IS the reason, and it is the line the user most needs to read. */
+.composer-plus-menu .runtime-menu-item.unavailable {
+  cursor: not-allowed;
+}
+.composer-plus-menu .runtime-menu-item.unavailable .runtime-menu-title {
+  color: var(--text-secondary);
+}
+.composer-plus-menu .runtime-menu-item.unavailable:hover {
+  background: none;
+}
+
+.goal-editor {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px 2px;
+}
+.goal-editor-label {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* ---------- Settings dialog (issue #5) ----------
+   Native <dialog showModal>, so the focus trap, Escape handling, inert backdrop, and top-layer
+   stacking come from the platform rather than from hand-rolled JS. Top-layer matters here: the
+   dialog must not be clipped by `.team-canvas`'s `overflow: clip` when opened in Team mode. */
+  .settings-dialog {
+    border: 1px solid var(--border-subtle);
+    border-radius: 14px;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    padding: 0;
+    width: min(520px, calc(100vw - 32px));
+    max-height: min(680px, calc(100vh - 48px));
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  }
+  .settings-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+  }
+  .settings-dialog[open] {
+    animation: settingsIn var(--t-standard) var(--ease-ui);
+  }
+  @keyframes settingsIn {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .settings-body {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding: 18px 20px 22px;
+    overflow-y: auto;
+    max-height: inherit;
+  }
+
+  .settings-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .settings-header h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    flex: 1;
+  }
+  .settings-close {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    color: var(--text-secondary);
+  }
+  .settings-close:hover {
+    background: rgba(255, 244, 224, 0.08);
+    color: var(--text-primary);
+  }
+
+  .settings-note {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+
+  .settings-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border: none;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+  }
+  .settings-group legend,
+  .settings-field-label {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+  .goal-editor .goal-input {
+    flex: 1;
+    min-width: 0;
+  }
+  padding: 0;
+}
+
+.settings-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: border-color var(--t-quick) var(--ease-ui);
+}
+.settings-radio:hover:not(.disabled) {
+  border-color: rgba(227, 154, 98, 0.45);
+}
+/* Deliberately NOT `opacity: 0.5` on the whole row. The description of a disabled Runtime is where
+   its reason lives ("Codex CLIが見つかりません") — the one line the user most needs to read is the
+   one a blanket dim would push to ~2.8:1 contrast. Only the input and the title recede; the reason
+   stays at full --text-secondary. */
+.settings-radio.disabled {
+  cursor: not-allowed;
+  border-style: dashed;
+}
+.settings-radio.disabled input {
+  opacity: 0.5;
+}
+.settings-radio.disabled .settings-radio-title {
+  color: var(--text-secondary);
+}
+.settings-radio input {
+  margin: 3px 0 0;
+  accent-color: var(--accent-primary);
+  flex: none;
+}
+.settings-radio-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+/* ---------- Generated image card (issue #11) ---------- */
+.genimg-card {
+  margin: 0;
+  align-self: flex-start;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 13px;
+  background: var(--bg-surface);
+}
+.genimg {
+  display: block;
+  max-width: min(420px, 100%);
+  height: auto;
+  border-radius: 8px;
+  background: var(--bg-canvas);
+}
+.genimg-placeholder {
+  display: grid;
+  place-items: center;
+  width: min(420px, 100%);
+  min-height: 120px;
+  border-radius: 8px;
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+.genimg-caption {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+/* Absence of an image after an explicit request is a real outcome, not a blank space — it gets the
+   warning treatment so it cannot be mistaken for success. */
+.genimg-missing {
+  align-self: flex-start;
+  max-width: 100%;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--state-warning);
+  border: 1px solid rgba(213, 168, 91, 0.38);
+  border-radius: 11px;
+  padding: 9px 12px;
+  background: rgba(213, 168, 91, 0.07);
+}
+.imagegen-armed {
+  color: var(--accent-primary);
+  border-color: rgba(227, 154, 98, 0.45);
+}
+.settings-radio-title {
+  font-size: 13px;
+}
+.settings-radio-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.settings-field select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 7px 10px;
+  width: 100%;
+}
+.settings-field select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-status {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-status li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.settings-status .settings-hint {
+  margin-left: auto;
+}
+.settings-ok {
+  color: var(--state-success);
+  display: inline-flex;
+}
+.settings-missing {
+  color: var(--state-danger);
+  display: inline-flex;
 }

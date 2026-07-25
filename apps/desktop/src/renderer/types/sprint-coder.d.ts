@@ -151,6 +151,17 @@ export type TurnDiffEntry = {
 
 export type TurnDiff = { turnId: string; entries: TurnDiffEntry[] };
 
+/** An image a Runtime generated, after Main took custody of it (issue #11). Bytes are fetched
+ * separately via `images.read` so a Turn snapshot never carries base64. */
+export type GeneratedImage = {
+  id: string;
+  taskId: string;
+  turnId: string;
+  mimeType: 'image/png';
+  byteLength: number;
+  createdAt: string;
+};
+
 export type TurnEvent =
   | { type: 'turn.accepted'; taskId: string; turnId: string; seq: number; userMessage: ChatMessage }
   | { type: 'stage.changed'; taskId: string; turnId: string; seq: number; stage: TurnStage }
@@ -233,7 +244,14 @@ export type TurnEvent =
       fragmentId: string;
     }
   | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
-  | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage };
+  | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage }
+  | {
+      type: 'image.generated';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      image: GeneratedImage;
+    };
 
 export type TurnSnapshot = {
   lastSeq: number;
@@ -264,8 +282,32 @@ export type ReasoningBatch = {
   text: string;
   truncated: boolean;
 };
-export type CodexModelOption = { id: string; displayName: string; description: string };
-export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+/** Outcome of this launch's database recovery pass (issue #9). */
+export type DatabaseRecovery = {
+  corruptionDetected: boolean;
+  restoredFromBackup: boolean;
+  freshStart: boolean;
+  interruptedTurns: number;
+};
+export type RuntimeConnectionState = 'idle' | 'running' | 'failed';
+/** Runtime process liveness. Pushed, never persisted — see contracts' runtimeStatusSchema. */
+export type RuntimeStatus = {
+  kind: RuntimeKind;
+  state: RuntimeConnectionState;
+  taskId: string | null;
+  errorCode: string | null;
+  userMessage: string | null;
+};
+export type EffortOption = { id: string; description: string };
+export type CodexModelOption = {
+  id: string;
+  displayName: string;
+  description: string;
+  /** Reasoning levels this model advertises (Codex only; see contracts' effortOptionSchema). */
+  efforts?: EffortOption[];
+  defaultEffort?: string;
+};
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultracode';
 export type AccessPreset = 'ask' | 'auto' | 'full';
 export type PermissionSettings = { preset: AccessPreset; policyEpoch: number };
 export type TeamSummary = {
@@ -345,7 +387,12 @@ export type CanvasViewSaveInput = {
 export type CanvasViewSaveResult = { revision: number };
 
 export interface SprintCoderApi {
-  app: { getInfo(): Promise<{ version: string; platform: string }> };
+  app: {
+    getInfo(): Promise<{ version: string; platform: string; recovery: DatabaseRecovery }>;
+  };
+  runtime: {
+    subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
+  };
   tasks: {
     list(): Promise<TaskSummary[]>;
     create(input?: { title?: string; localOnly?: boolean }): Promise<TaskSummary>;
@@ -386,7 +433,10 @@ export interface SprintCoderApi {
     select(taskId: string): Promise<{ path: string; name: string } | null>;
   };
   turns: {
-    start(input: { taskId: string; text: string }): Promise<{ turnId: string }>;
+    start(input: {
+      taskId: string;
+      text: string;
+    }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
     queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
     steer(input: { taskId: string; text: string; expectedTurnId: string }): Promise<void>;
@@ -398,11 +448,15 @@ export interface SprintCoderApi {
       opts?: { afterSeq?: number },
     ): () => void; // returns unsubscribe
   };
-  /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
-   * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
   reasoning: {
     subscribe(listener: (batch: ReasoningBatch) => void): () => void;
   };
+  images: {
+    list(taskId: string): Promise<GeneratedImage[]>;
+    read(imageId: string): Promise<{ id: string; mimeType: 'image/png'; base64: string }>;
+  };
+  /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
+   * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
   settings: {
     getRuntime(): Promise<{
       kind: RuntimeKind;
@@ -411,10 +465,14 @@ export interface SprintCoderApi {
       model: string;
       models: CodexModelOption[];
       effort: ClaudeEffort;
+      /** Codex reasoning level, already clamped by Main to the selected model's advertised set.
+       * '' means no override (the `auto` model sentinel, or a model publishing no set). */
+      codexEffort: string;
     }>;
     setRuntime(kind: RuntimeKind): Promise<void>;
     setModel(model: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
+    setCodexEffort(effort: string): Promise<void>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;

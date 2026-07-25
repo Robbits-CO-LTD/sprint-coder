@@ -4,6 +4,17 @@ import type { RuntimeCanonicalEvent } from './protocol';
 
 const stages: TurnStage[] = ['understanding', 'planning', 'executing', 'synthesizing'];
 
+/**
+ * Codex thread ids are UUIDs (verified against codex-cli 0.144.4, where the id matches the
+ * `generated_images/<id>` directory name exactly).
+ *
+ * Validated here, at the source, rather than only in `isRuntimeCanonicalEvent`: Main interpolates
+ * this value into a filesystem path, and a normalizer that can emit something the protocol then
+ * rejects is a latent bug — the event would be dropped silently and images would stop appearing for
+ * no visible reason.
+ */
+const THREAD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export class ApprovalRequestedError extends Error {}
 export class CodexOutputError extends Error {}
 
@@ -27,6 +38,14 @@ export class CodexJsonlNormalizer {
       throw new ApprovalRequestedError('Codex requested approval in non-interactive mode');
     if (type === 'error' || type === 'turn.failed')
       throw new CodexOutputError(readString(value, 'message') ?? 'Codex reported a failed turn');
+    // Codex's own thread id, the bounded handle Main uses to find generated images (issue #11).
+    // Emitted from this structured event and never scraped out of an agent message.
+    if (type === 'thread.started') {
+      const threadId = readString(value, 'thread_id');
+      return threadId === null || !THREAD_ID_PATTERN.test(threadId)
+        ? []
+        : [{ type: 'thread', threadId }];
+    }
     if (type === 'turn.started') return this.advanceTo('understanding');
     if (type === 'turn.completed') {
       if (this.completed) return [];
