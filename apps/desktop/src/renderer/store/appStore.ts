@@ -1048,8 +1048,14 @@ export const useAppStore = create<AppState>((set, get) => {
       persistDraftDebounced(taskId, '');
 
       try {
-        await window.sprintCoder.turns.start({ taskId, text: trimmed });
+        const result = await window.sprintCoder.turns.start({ taskId, text: trimmed });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
+        // `renamedTask` is present only when this was the Task's first message and it was still
+        // carrying the placeholder title (issue #4) — merge it so the sidebar updates immediately
+        // instead of at the next full `tasks.list()`.
+        const renamed = result?.renamedTask;
+        if (renamed !== undefined)
+          set((state) => ({ tasks: state.tasks.map((t) => (t.id === renamed.id ? renamed : t)) }));
       } catch (err) {
         const code = errorCode(err);
         set((state) => ({

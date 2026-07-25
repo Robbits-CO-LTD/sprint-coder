@@ -92,6 +92,7 @@ import {
   type PreparedContext,
 } from './context-ledger';
 import { redactSecrets } from './secret-redactor';
+import { deriveTaskTitle } from './task-title';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
 import {
   legacyMutationWorkspaceKey,
@@ -214,6 +215,7 @@ type TaskRow = {
   draft: string;
   branch_epoch: number;
   context_epoch: number;
+  title_source: 'default' | 'auto' | 'manual';
   created_at: string;
   updated_at: string;
 };
@@ -1524,12 +1526,32 @@ const migrations = [
     `,
     requiresForeignKeysOff: true,
   },
+  {
+    version: 31,
+    checksum: 'task-title-v31-auto-naming-source',
+    // Tracks where a Task's title came from, so automatic naming from the first user message
+    // (issue #4) can never overwrite a name the user chose. 'default' is the only state eligible
+    // for auto-naming; it becomes 'auto' once derived and 'manual' on any explicit rename.
+    //
+    // Every pre-existing row is frozen to 'manual' rather than left at the column default. Those
+    // Tasks already have history, so their next message is not a first message — auto-naming them
+    // would rename an established conversation after the fact, and for any the user had already
+    // renamed by hand it would silently discard that name.
+    sql: `
+      ALTER TABLE tasks ADD COLUMN title_source TEXT NOT NULL DEFAULT 'default'
+        CHECK (title_source IN ('default', 'auto', 'manual'));
+      UPDATE tasks SET title_source = 'manual';
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
 // Bounds mirror packages/contracts's canvasCameraSchema/canvasNodePositionSchema (kept as literal
 // duplicates here, not imports, since main must reject bad data even if a caller bypasses the IPC
 // schema — e.g. direct PersistenceClient use in tests).
+/** Placeholder a Task is born with. Auto-naming replaces it on the first message (issue #4). */
+export const DEFAULT_TASK_TITLE = '新しいタスク';
+
 export const CANVAS_MIN_SCALE = 0.18;
 export const CANVAS_MAX_SCALE = 1.6;
 export const CANVAS_WORLD_BOUND = 20_000;
@@ -1656,6 +1678,9 @@ export type StartedTurn = {
   runtimeKind: RuntimeKind;
   model: string;
   event: TurnEvent;
+  /** Present only when this Turn's message triggered automatic naming (issue #4), so the caller
+   * can push the new title to the renderer without a dedicated event. */
+  renamedTask?: TaskSummary;
 };
 export type QueueTransition = { started: StartedTurn; queueEvent: TurnEvent } | null;
 export type BackgroundActivityRecord = Readonly<{
@@ -2497,13 +2522,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toTask(this.getTaskRow(taskId));
   }
 
-  createTask(title = '新しいタスク', localOnly = false): TaskSummary {
+  createTask(title?: string, localOnly = false): TaskSummary {
     const now = new Date().toISOString();
     const primaryThreadId = randomUUID();
     const leaderAgentId = randomUUID();
+    // An explicit title is the caller's choice and must survive the first message, so it is
+    // recorded as 'manual'. Only the placeholder is eligible for auto-naming (issue #4).
+    const titleSource = title === undefined ? 'default' : 'manual';
     const task = taskSummarySchema.parse({
       id: randomUUID(),
-      title,
+      title: title ?? DEFAULT_TASK_TITLE,
       pinned: false,
       archived: false,
       goal: null,
@@ -2517,10 +2545,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `INSERT INTO tasks(
              id, title, pinned, archived, goal, workspace_path, local_only, draft,
-             primary_thread_id, created_at, updated_at
-           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?)`,
+             primary_thread_id, title_source, created_at, updated_at
+           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?, ?)`,
         )
-        .run(task.id, task.title, localOnly ? 1 : 0, now, now);
+        .run(task.id, task.title, localOnly ? 1 : 0, titleSource, now, now);
       this.db
         .prepare(
           `INSERT INTO agent_threads(
@@ -3184,6 +3212,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   renameTask(taskId: string, title: string): TaskSummary {
+    // An explicit rename takes the Task out of auto-naming for good, so a later first-message
+    // derivation can never overwrite it (issue #4's "手動でリネームした Task は…名前が勝手に変わらない").
+    this.db.prepare("UPDATE tasks SET title_source = 'manual' WHERE id = ?").run(taskId);
     return this.updateTask(taskId, 'title', title);
   }
   setPinned(taskId: string, pinned: boolean): TaskSummary {
@@ -6465,7 +6496,41 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.attachBackgroundCompletionsInTransaction(taskId, turnId, now);
     const event = this.appendEvent({ type: 'turn.accepted', taskId, turnId, userMessage });
     this.db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(now, taskId);
-    return { turnId, text, runtimeKind, model, event };
+    const renamedTask = this.autoNameTaskInTransaction(taskId, text, now);
+    return {
+      turnId,
+      text,
+      runtimeKind,
+      model,
+      event,
+      ...(renamedTask === null ? {} : { renamedTask }),
+    };
+  }
+
+  /**
+   * Names a still-unnamed Task from the message that just started its first Turn (issue #4).
+   *
+   * Runs inside `startTurnInTransaction` on purpose: the rename and the user message commit or roll
+   * back together, so there is no window where the sidebar shows a name for a message that was
+   * never stored. Returns the updated summary only when a rename actually happened, which is what
+   * lets `turns.start` hand it straight back to the renderer instead of needing a new TurnEvent
+   * variant (a new variant would land in `turn_events` and be replayed on every re-subscribe).
+   *
+   * Guarded by `title_source`, not by comparing against the placeholder string: a user who renames
+   * a Task to literally "新しいタスク" still owns that name.
+   */
+  private autoNameTaskInTransaction(taskId: string, text: string, now: string): TaskSummary | null {
+    const row = this.db.prepare('SELECT title_source FROM tasks WHERE id = ?').get(taskId) as
+      { title_source: string } | undefined;
+    if (row?.title_source !== 'default') return null;
+    const derived = deriveTaskTitle(text);
+    // No usable title (a message that is only whitespace, a code fence, or punctuation) leaves the
+    // placeholder and `title_source` alone, so the *next* message gets another chance to name it.
+    if (derived === null) return null;
+    this.db
+      .prepare("UPDATE tasks SET title = ?, title_source = 'auto', updated_at = ? WHERE id = ?")
+      .run(derived, now, taskId);
+    return toTask(this.getTaskRow(taskId));
   }
 
   private attachBackgroundCompletionsInTransaction(

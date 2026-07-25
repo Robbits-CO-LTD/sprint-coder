@@ -636,7 +636,10 @@ export class IpcRouter {
           IPC_CHANNELS.turnsStart,
           () => {
             started = this.persistence.startTurn(input.taskId, input.text);
-            return { turnId: started.turnId };
+            return {
+              turnId: started.turnId,
+              ...(started.renamedTask === undefined ? {} : { renamedTask: started.renamedTask }),
+            };
           },
         );
         if (result.executed && started !== undefined) this.dispatchStarted(started);

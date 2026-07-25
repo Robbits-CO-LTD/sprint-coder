@@ -378,7 +378,10 @@ export interface SprintCoderApi {
     select(taskId: string): Promise<{ path: string; name: string } | null>;
   };
   turns: {
-    start(input: { taskId: string; text: string }): Promise<{ turnId: string }>;
+    start(input: {
+      taskId: string;
+      text: string;
+    }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
     queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
     steer(input: { taskId: string; text: string; expectedTurnId: string }): Promise<void>;

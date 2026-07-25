@@ -127,6 +127,13 @@ class PersistenceTestArtifacts implements EditArtifactRepository {
   }
 }
 
+/** Walks a freshly-started Turn through the stage machine to a clean completion. */
+function finishTurn(persistence: SqlitePersistenceClient, taskId: string, turnId: string) {
+  for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+    persistence.changeStage(taskId, turnId, stage);
+  persistence.completeTurn(taskId, turnId, 'completed');
+}
+
 function startExecutingTurn(persistence: SqlitePersistenceClient, taskId: string) {
   const started = persistence.startTurn(taskId, 'approval test');
   persistence.changeStage(taskId, started.turnId, 'understanding');
@@ -286,6 +293,80 @@ if (runsWithElectronAbi)
       });
       expect(reopened.startNextQueued(task.id)?.started.text).toBe('resume me');
       reopened.close();
+    });
+
+    it('names a new Task from its first message and returns the updated summary', () => {
+      // issue #4: the only path that ever set a Task title was the header's inline rename, so the
+      // sidebar filled up with rows all reading "新しいタスク".
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      expect(task.title).toBe('新しいタスク');
+
+      const started = persistence.startTurn(task.id, 'ログイン画面のバグを直して');
+      expect(started.renamedTask?.title).toBe('ログイン画面のバグを直して');
+      expect(persistence.getTask(task.id).title).toBe('ログイン画面のバグを直して');
+      persistence.close();
+    });
+
+    it('never renames again after the first message', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const first = persistence.startTurn(task.id, '最初の依頼');
+      finishTurn(persistence, task.id, first.turnId);
+
+      const second = persistence.startTurn(task.id, '全く違う二通目の内容');
+      expect(second.renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('最初の依頼');
+      persistence.close();
+    });
+
+    it('never overwrites a title the user set by hand', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.renameTask(task.id, '自分で付けた名前');
+
+      const started = persistence.startTurn(task.id, 'この内容では上書きされないはず');
+      expect(started.renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('自分で付けた名前');
+      persistence.close();
+    });
+
+    it('respects a manual rename that happens to match the placeholder', () => {
+      // Guarded by title_source rather than by comparing against the placeholder string: a user who
+      // renames a Task to literally "新しいタスク" still owns that name.
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.renameTask(task.id, '新しいタスク');
+
+      expect(persistence.startTurn(task.id, '上書きされないはず').renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('新しいタスク');
+      persistence.close();
+    });
+
+    it('keeps an explicit createTask title out of auto-naming', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('呼び出し側が決めた名前');
+
+      expect(persistence.startTurn(task.id, '上書きされないはず').renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('呼び出し側が決めた名前');
+      persistence.close();
+    });
+
+    it('leaves the placeholder and stays eligible when a message yields no usable title', () => {
+      // "命名に失敗しても会話自体は継続する": the Turn starts normally, the title is untouched, and
+      // the *next* message still gets a chance to name the Task.
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+
+      const first = persistence.startTurn(task.id, '```\njust code\n```');
+      expect(first.turnId).toBeTruthy();
+      expect(first.renamedTask).toBeUndefined();
+      expect(persistence.getTask(task.id).title).toBe('新しいタスク');
+      finishTurn(persistence, task.id, first.turnId);
+
+      const second = persistence.startTurn(task.id, '今度は名前になる依頼');
+      expect(second.renamedTask?.title).toBe('今度は名前になる依頼');
+      persistence.close();
     });
 
     it('defaults to mock and persists the selected runtime across restart', () => {
@@ -4106,6 +4187,7 @@ if (runsWithElectronAbi)
         { version: 28 },
         { version: 29 },
         { version: 30 },
+        { version: 31 },
       ]);
       const migratedTables = new Set(
         (
