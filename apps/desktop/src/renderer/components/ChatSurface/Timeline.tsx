@@ -14,12 +14,15 @@ import { CommandCard } from '../CommandCard';
 import { ApprovalAuditRow } from '../ApprovalAuditRow';
 import { AutoDecisionAuditRow } from '../AutoDecisionAuditRow';
 import { TurnDiffCard } from '../TurnDiffCard';
+import { GeneratedImageCard, MissingGeneratedImageNotice } from '../GeneratedImageCard';
+import { IMAGEGEN_PREFIX } from './imagegen';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
 const NO_MESSAGES: ChatMessage[] = [];
 const NO_APPROVALS: ApprovalSummary[] = [];
 const NO_COMMANDS: ReturnType<typeof useAppStore.getState>['commandsByTask'][string] = [];
 const NO_AUTO_DECISIONS: AutoPermissionDecision[] = [];
+const NO_IMAGES: ReturnType<typeof useAppStore.getState>['imagesByTask'][string] = [];
 
 export function Timeline({ taskId }: { taskId: string }) {
   const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? NO_MESSAGES;
@@ -31,6 +34,7 @@ export function Timeline({ taskId }: { taskId: string }) {
   const approvalHistory = useAppStore((s) => s.approvalHistoryByTask[taskId]) ?? NO_APPROVALS;
   const autoDecisions = useAppStore((s) => s.autoDecisionsByTask[taskId]) ?? NO_AUTO_DECISIONS;
   const turnDiff = useAppStore((s) => s.turnDiffByTask[taskId]);
+  const images = useAppStore((s) => s.imagesByTask[taskId]) ?? NO_IMAGES;
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
   const resolveApproval = useAppStore((s) => s.resolveApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -126,6 +130,26 @@ export function Timeline({ taskId }: { taskId: string }) {
             message.author === 'user' && message.turnId !== null
               ? autoDecisions.filter((decision) => decision.turnId === message.turnId)
               : [];
+          const turnImages =
+            message.author === 'user' && message.turnId !== null
+              ? images.filter((image) => image.turnId === message.turnId)
+              : [];
+          // A request that produced nothing must not read as success (issue #11). Detected from the
+          // stored message, which is exactly why the directive is kept in the message text rather
+          // than injected invisibly in the adapter.
+          // Only once this message's Turn has actually stopped. The Run Card stays mounted after
+          // completion (with a terminal status), so "is `turn` still about this message" is not the
+          // question — "is it still working" is.
+          const stillRunning =
+            turn !== undefined &&
+            turn.turnId === message.turnId &&
+            (turn.status === 'running' || turn.status === 'canceling');
+          const imageRequestUnfulfilled =
+            message.author === 'user' &&
+            message.turnId !== null &&
+            message.content.startsWith(IMAGEGEN_PREFIX) &&
+            turnImages.length === 0 &&
+            !stillRunning;
           return (
             <div key={message.id} style={{ display: 'contents' }}>
               <MessageBubble author={message.author} content={message.content} />
@@ -141,6 +165,10 @@ export function Timeline({ taskId }: { taskId: string }) {
               {commandCards.map((card) => (
                 <CommandCard key={card.command.id} taskId={taskId} card={card} />
               ))}
+              {turnImages.map((image) => (
+                <GeneratedImageCard key={image.id} image={image} />
+              ))}
+              {imageRequestUnfulfilled && <MissingGeneratedImageNotice />}
               {turnDiff?.turnId === message.turnId && <TurnDiffCard diff={turnDiff} />}
             </div>
           );

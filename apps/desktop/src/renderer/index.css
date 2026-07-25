@@ -2535,6 +2535,57 @@ button {
   gap: 1px;
   min-width: 0;
 }
+
+/* ---------- Generated image card (issue #11) ---------- */
+.genimg-card {
+  margin: 0;
+  align-self: flex-start;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 13px;
+  background: var(--bg-surface);
+}
+.genimg {
+  display: block;
+  max-width: min(420px, 100%);
+  height: auto;
+  border-radius: 8px;
+  background: var(--bg-canvas);
+}
+.genimg-placeholder {
+  display: grid;
+  place-items: center;
+  width: min(420px, 100%);
+  min-height: 120px;
+  border-radius: 8px;
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+.genimg-caption {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+/* Absence of an image after an explicit request is a real outcome, not a blank space — it gets the
+   warning treatment so it cannot be mistaken for success. */
+.genimg-missing {
+  align-self: flex-start;
+  max-width: 100%;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--state-warning);
+  border: 1px solid rgba(213, 168, 91, 0.38);
+  border-radius: 11px;
+  padding: 9px 12px;
+  background: rgba(213, 168, 91, 0.07);
+}
+.imagegen-armed {
+  color: var(--accent-primary);
+  border-color: rgba(227, 154, 98, 0.45);
 .settings-radio-title {
   font-size: 13px;
 }

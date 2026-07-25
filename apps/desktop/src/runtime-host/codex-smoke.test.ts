@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PublicError } from '@sprint-coder/contracts';
 import { CodexRuntimeAdapter, probeCodex } from './codex-adapter';
+import { collectThreadImages } from '../main/generated-image-collector';
 import type { RuntimeCanonicalEvent } from './protocol';
 
 // Opt-in REAL smoke test (Phase 7 hardening, IMPLEMENTATION_PLAN §10.4 5a/5b): drives real turns
@@ -82,6 +83,52 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
     expect(exitInfo).toMatchObject({ code: 0, canceled: false });
   }, 60_000);
 
+  // issue #11: proves the whole image path against the real CLI — that `$imagegen` runs, that the
+  // adapter surfaces the thread id, and that the file the CLI wrote is findable from that id alone.
+  // Deliberately does NOT parse any path out of the agent's message: doing so is the vulnerability
+  // this design exists to avoid, so the test must not demonstrate it working either.
+  it('generates an image and makes it findable from the thread id alone', async () => {
+    const adapter = new CodexRuntimeAdapter();
+    const events: RuntimeCanonicalEvent[] = [];
+    const failures: PublicError[] = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'codex-smoke-imagegen',
+        '$imagegen 単色の青い正方形アイコンを1つ生成してください。生成のみで、ファイルのコピーや移動は行わないでください。',
+        [],
+        () => undefined,
+        null,
+        'auto',
+        (event) => {
+          events.push(event);
+        },
+        (error) => {
+          failures.push(error);
+        },
+        () => resolve(),
+      );
+    });
+
+    expect(failures).toEqual([]);
+    const threadEvent = events.find((event) => event.type === 'thread');
+    expect(threadEvent, 'adapter surfaced a thread id').toBeDefined();
+    const threadId = threadEvent?.type === 'thread' ? threadEvent.threadId : '';
+    console.log('[codex-smoke] imagegen thread:', threadId);
+
+    const collected = collectThreadImages(threadId);
+    console.log(
+      '[codex-smoke] collected:',
+      collected.map(({ fileName, bytes }) => `${fileName} (${bytes.byteLength}B)`),
+    );
+    expect(collected.length, 'at least one PNG was generated for this thread').toBeGreaterThan(0);
+    // The magic-byte gate persistence applies, asserted here against a real generated file rather
+    // than a synthetic fixture.
+    for (const { bytes } of collected)
+      expect(bytes.subarray(0, 8)).toEqual(
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
+  }, 300_000);
   // issue #6: proves the reasoning-effort override actually lands. Not a "does the flag parse"
   // check — the level is sent to the API, which validates it per model and answers 400 on an
   // unsupported one, so `codex exec` exits 1 and the adapter reports a failure. A clean run of

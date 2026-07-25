@@ -34,6 +34,9 @@ import {
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeSettingsSchema,
+  generatedImageSchema,
+  generatedImageBytesSchema,
+  generatedImageRefSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -100,6 +103,7 @@ import {
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
 } from './provider-egress';
+import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
 import { isTeamScenarioInput, LEADER_MCP_SYSTEM_PROMPT } from './team-tools';
@@ -122,6 +126,10 @@ export class IpcRouter {
   // finishAndAdvance folds it into the outgoing `turn.completed` event. Not persisted — see the
   // `resolvedModel` doc comment on turnEventSchema.
   private readonly resolvedModelByTurn = new Map<string, string>();
+  // Codex's own thread id for a turn, from its `thread.started` event. The only handle used to find
+  // generated images — never a path from a model message (issue #11; see
+  // generated-image-collector.ts for why).
+  private readonly codexThreadByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly autoReviewer = AutoReviewer.createProduction();
@@ -321,6 +329,28 @@ export class IpcRouter {
               clampCodexEffort(this.persistence.getCodexEffort(), capability.models, input.model),
             );
         }).value;
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.imagesList,
+      taskIdPayloadSchema,
+      z.array(generatedImageSchema),
+      (input) => this.persistence.listGeneratedImages(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.imagesRead,
+      generatedImageRefSchema,
+      generatedImageBytesSchema,
+      (input) => {
+        const found = this.persistence.readGeneratedImage(input.imageId);
+        if (found === null) throw new NotFoundError('Generated image not found');
+        // base64 rather than a path or a file:// URL: the renderer builds a `data:` URL from it, so
+        // displaying an image can neither touch the filesystem nor issue a request (ADR-004).
+        return {
+          id: found.image.id,
+          mimeType: found.image.mimeType,
+          base64: found.bytes.toString('base64'),
+        };
       },
     );
     this.handleMutation(
@@ -927,6 +957,9 @@ export class IpcRouter {
 
   private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {
     this.turnRuntimes.delete(turnId);
+    // Before the Turn is finalised, so `image.generated` lands in the event stream ahead of
+    // `turn.completed` and the timeline shows the image inside the Turn that produced it.
+    this.ingestGeneratedImages(taskId, turnId);
     this.teamMcpBridge.unregister(turnId);
     const event = this.persistence.completeTurn(taskId, turnId, state);
     const resolvedModel = this.resolvedModelByTurn.get(turnId);
@@ -1252,6 +1285,8 @@ export class IpcRouter {
               runtimeEvent.delta,
             ),
           );
+        else if (runtimeEvent.type === 'thread')
+          this.codexThreadByTurn.set(turnId, runtimeEvent.threadId);
         else {
           if (runtimeEvent.resolvedModel !== undefined)
             this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
@@ -1259,6 +1294,28 @@ export class IpcRouter {
         }
       })
       .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
+  }
+
+  /**
+   * Moves any images Codex generated for this turn into the app's own storage.
+   *
+   * Best-effort: a failure here must never keep a Turn from finalising, since the conversation is
+   * more important than the artifact. Runs for failed turns too — Codex generates the image before
+   * the shell copy that the read-only sandbox refuses, so a Turn whose final message says it could
+   * not save the file has still produced one.
+   */
+  private ingestGeneratedImages(taskId: string, turnId: string): void {
+    const threadId = this.codexThreadByTurn.get(turnId);
+    this.codexThreadByTurn.delete(turnId);
+    if (threadId === undefined) return;
+    try {
+      for (const { bytes } of collectThreadImages(threadId)) {
+        const recorded = this.persistence.recordGeneratedImage({ taskId, turnId, bytes });
+        if (recorded !== null) this.publish(recorded.event);
+      }
+    } catch {
+      // Nothing to surface: the image is an extra, and the Turn's own result already stands.
+    }
   }
 
   private handleRuntimeFailure(
