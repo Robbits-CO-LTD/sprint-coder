@@ -265,7 +265,18 @@ export class CommandRunner {
       outcome: outcomePromise,
     };
     this.active.set(executionId, active);
-    const processStartIdentity = await readProcessStartIdentity(child.pid);
+    let processStartIdentity = await readProcessStartIdentity(child.pid);
+    if (
+      process.platform === 'win32' &&
+      processStartIdentity === 'unavailable' &&
+      (child.exitCode !== null || child.signalCode !== null)
+    ) {
+      // A short-lived Windows process can exit while PowerShell is still
+      // reading its creation time. It is no longer a PID-reuse/termination
+      // risk, so retain a unique lifecycle identity instead of taskkilling an
+      // already-gone PID.
+      processStartIdentity = `win32:exited:${child.pid}:${startedAt}`;
+    }
     if (processStartIdentity === 'unavailable' || processStartIdentity.startsWith('unsupported:')) {
       try {
         await this.forceUnidentifiedProcess(active);
