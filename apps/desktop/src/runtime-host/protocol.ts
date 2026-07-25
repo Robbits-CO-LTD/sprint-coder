@@ -76,7 +76,14 @@ export type RuntimeCanonicalEvent =
   //
   // Paths arrive absolute here and are made workspace-relative in Main, which is the only side that
   // knows the Workspace root: the runtime-host process is deliberately not told policy.
-  | { type: 'fileChange'; changes: { path: string; kind: 'add' | 'update' | 'delete' }[] };
+  | { type: 'fileChange'; changes: { path: string; kind: 'add' | 'update' | 'delete' }[] }
+  // The body of a file as the model writes it (issue #39). `text` is the whole value decoded so
+  // far, not a delta: the producer already holds the accumulated buffer, and sending the total
+  // makes a dropped or reordered frame cost a repaint instead of a corrupted file view.
+  //
+  // Transient, like reasoning — never a TurnEvent. A file body at typing speed would flood
+  // `turn_events` and be replayed on every re-subscribe.
+  | { type: 'fileEdit'; path: string; text: string; complete: boolean };
 
 export type MainToRuntimeEnvelope =
   | (EnvelopeBase & { type: 'hello' })
@@ -276,6 +283,18 @@ function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent
     );
   // Constrained to a UUID shape rather than any string: this value is interpolated into a
   // filesystem path by Main, so it must not be able to carry separators or traversal segments.
+  if (value.type === 'fileEdit')
+    return (
+      'path' in value &&
+      typeof value.path === 'string' &&
+      value.path.length > 0 &&
+      value.path.length <= 4096 &&
+      'text' in value &&
+      typeof value.text === 'string' &&
+      value.text.length <= 1_048_576 &&
+      'complete' in value &&
+      typeof value.complete === 'boolean'
+    );
   if (value.type === 'fileChange')
     return (
       'changes' in value &&

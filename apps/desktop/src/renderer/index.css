@@ -3144,3 +3144,106 @@ button {
   color: var(--warning);
   border: 1px solid rgba(211, 166, 83, 0.45);
 }
+
+/* ---------- Live file body (issue #39) ----------
+   The file as the model types it. A code surface, so it is monospace and scrolls on its own — the
+   Inspector must never move the conversation's scroll position. */
+.liveedit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.liveedit-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  min-width: 0;
+}
+.liveedit-tab {
+  flex: none;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+.liveedit-tab.current {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.liveedit-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.liveedit-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.liveedit-state {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.liveedit-body {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-app);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  /* pre-wrap, not pre: a long generated line would otherwise force the panel to scroll sideways,
+     and the panel is as narrow as 380px. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  tab-size: 2;
+}
+
+/* Lines that changed in the last frame. The highlight decays on its own so the panel settles rather
+   than staying lit — and it is a background wash, never the only way to read the text. */
+.liveedit-line {
+  display: inline;
+}
+.liveedit-line.changed {
+  background: rgba(115, 152, 246, 0.16);
+  box-shadow: inset 2px 0 0 var(--accent);
+  animation: liveEditSettle var(--t-cinematic) var(--ease-ui) forwards;
+}
+@keyframes liveEditSettle {
+  from {
+    background: rgba(115, 152, 246, 0.3);
+  }
+  to {
+    background: rgba(115, 152, 246, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No decay: a steady wash conveys the same "this line is new" without motion. */
+  .liveedit-line.changed {
+    animation: none;
+    background: rgba(115, 152, 246, 0.16);
+  }
+}
+@media (forced-colors: active) {
+  .liveedit-line.changed {
+    background: Highlight;
+    color: HighlightText;
+  }
+}

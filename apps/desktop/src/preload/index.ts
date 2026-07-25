@@ -27,6 +27,7 @@ import {
   reasoningBatchSchema,
   runtimeStatusSchema,
   fileChangeRecordSchema,
+  fileEditFrameSchema,
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
@@ -217,6 +218,18 @@ const api: SprintCoderApi = {
       };
       ipcRenderer.on(IPC_CHANNELS.runtimeStatusEvent, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.runtimeStatusEvent, handler);
+    },
+  },
+  fileEdits: {
+    // Push-only, mirroring `reasoning` above: the frame carries its own taskId/turnId and the store
+    // decides relevance. Unknown payloads are dropped by `safeParse` like every other subscription.
+    subscribe: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        const parsed = fileEditFrameSchema.safeParse(raw);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.fileEditEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.fileEditEvent, handler);
     },
   },
   files: {

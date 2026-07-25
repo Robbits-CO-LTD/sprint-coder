@@ -2,6 +2,7 @@ import { STAGE_LABEL, STAGE_ORDER, useAppStore } from '../store/appStore';
 import { turnProgress } from '../lib/turn-progress';
 import { ArrowRightLeft, X } from './icons';
 import type { InspectorState } from '../lib/inspector-preference';
+import { LiveFileEditView } from './LiveFileEdit';
 
 const FILE_KIND_LABEL: Record<'add' | 'update' | 'delete', string> = {
   add: '新規',
@@ -116,7 +117,10 @@ export function InspectorPanel({
 
       {!rail && (
         <div className="insp-section" data-testid="inspector-stream">
-          <span className="insp-label">編集したファイル</span>
+          <span className="insp-label">編集中のファイル</span>
+          {/* The live body sits above the list: while a Turn is writing, the contents are what the
+              user is watching, and the list of what has already landed is the summary beneath it. */}
+          <LiveFileEditView />
           {writable ? (
             recent.length === 0 ? (
               <p className="insp-disconnected" data-testid="inspector-stream-empty">

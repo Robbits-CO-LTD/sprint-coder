@@ -28,6 +28,7 @@ import {
   commandEnvelopeSchema,
   emptyPayloadSchema,
   fileChangeRecordSchema,
+  fileEditFrameSchema,
   type FileChange,
   permissionSetInputSchema,
   permissionSettingsSchema,
@@ -95,6 +96,8 @@ import { RuntimeHostClient } from './runtime-host';
 import { PermissionBroker } from './permission-broker';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
+import { readWorkspaceTextFile } from './workspace-file';
+import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
 import { permissionRequestFingerprint, type Capability } from '@sprint-coder/domain';
@@ -136,6 +139,14 @@ export class IpcRouter {
   // One reasoning batcher per active turn (issue #17). Keyed by turnId and disposed in
   // finishAndAdvance, so a turn cannot leave a timer behind.
   private readonly reasoningByTurn = new Map<string, ReasoningBatcher>();
+  // Streaming redaction state per (turn, path) for live file bodies (issue #39). Bounded at 16
+  // concurrent files and cleared when a body completes or its turn ends.
+  // One recursive Workspace watch per writing Turn (issue #39), stopped in finishAndAdvance.
+  private readonly workspaceWatchByTurn = new Map<string, WorkspaceWatcher>();
+  private readonly fileEditByKey = new Map<
+    string,
+    { redactor: ReturnType<typeof createStreamingSecretRedactor>; safe: string; consumed: number }
+  >();
   // Per-turn streaming secret redactor. Streaming (not per-fragment) because a key can straddle a
   // batch boundary — redacting each fragment in isolation would let a split token through.
   private readonly reasoningRedactorByTurn = new Map<
@@ -251,6 +262,19 @@ export class IpcRouter {
       // Mock pseudo-reasoning goes through the same redact → batch → push path as a real runtime's,
       // so the E2E exercises the actual pipeline rather than a shortcut (issue #17).
       (taskId, turnId, text) => this.pushReasoning(taskId, turnId, text),
+      // Mock file bodies go through the same redact → path-check → push path a real Runtime's do,
+      // so the E2E exercises the pipeline rather than a shortcut (issue #39).
+      (taskId, turnId, path, text, complete) =>
+        this.pushFileEdit(
+          taskId,
+          turnId,
+          resolvePath(this.persistence.getWorkspace(taskId) ?? '/', path),
+          text,
+          {
+            complete,
+            source: 'stream',
+          },
+        ),
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -902,6 +926,10 @@ export class IpcRouter {
     this.closeAllPorts();
     this.teamSubscriptions.clear();
     this.approvalCoordinator.dispose();
+    // A watch outlives its Turn only if the app is torn down mid-write; close them here so the
+    // process can actually exit (issue #39).
+    for (const watcher of this.workspaceWatchByTurn.values()) watcher.stop();
+    this.workspaceWatchByTurn.clear();
     await this.mockRuntime.dispose();
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
@@ -991,6 +1019,11 @@ export class IpcRouter {
     this.reasoningByTurn.get(turnId)?.dispose();
     this.reasoningByTurn.delete(turnId);
     this.reasoningRedactorByTurn.delete(turnId);
+    this.workspaceWatchByTurn.get(turnId)?.stop();
+    this.workspaceWatchByTurn.delete(turnId);
+    // A turn that ends mid-write leaves its redaction state behind otherwise (issue #39).
+    for (const key of this.fileEditByKey.keys())
+      if (key.startsWith(`${turnId}\u0000`)) this.fileEditByKey.delete(key);
     // Back to idle on a clean finish. A failure already pushed its own `failed` status with the
     // reason attached (see handleRuntimeFailure), and must not be overwritten by an idle here.
     if (kind !== undefined && state === 'completed')
@@ -1215,11 +1248,28 @@ export class IpcRouter {
       kind = 'mock';
     }
     this.turnRuntimes.set(started.turnId, kind);
+    // Watch the Workspace for the duration of the Turn (issue #39). Above the mock early-return on
+    // purpose: this is about what the Turn writes, not about which Runtime writes it.
+    //
+    // This is the coverage net, not the fast path — measured, a watcher notification lands ~270ms
+    // after the CLI's own report of the same write. What it catches is the writes no Runtime reports
+    // at all: a file a shell command rewrote, a formatter that ran on save. The reported ones are
+    // read back in recordFileChanges, which is quicker.
+    //
+    // Only started when the Turn can actually write: at read-only there is nothing to watch for, and
+    // a recursive watch on a large repository is not free.
+    const turnWorkspace = this.persistence.getWorkspace(taskId);
+    if (
+      turnWorkspace !== null &&
+      resolveWriteScope(this.persistence.getPermissionPolicy(taskId).preset, turnWorkspace) !==
+        'read-only'
+    )
+      this.startWorkspaceWatch(taskId, started.turnId, turnWorkspace);
     if (kind === 'mock') {
       this.mockRuntime.start(taskId, started.turnId, started.text);
       return;
     }
-    const workspacePath = this.persistence.getWorkspace(taskId);
+    const workspacePath = turnWorkspace;
     const workspaceId =
       workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
     const context = this.prepareContext(taskId, started.turnId);
@@ -1350,6 +1400,11 @@ export class IpcRouter {
           this.codexThreadByTurn.set(turnId, runtimeEvent.threadId);
         else if (runtimeEvent.type === 'fileChange')
           this.recordFileChanges(taskId, turnId, runtimeEvent.changes);
+        else if (runtimeEvent.type === 'fileEdit')
+          this.pushFileEdit(taskId, turnId, runtimeEvent.path, runtimeEvent.text, {
+            complete: runtimeEvent.complete,
+            source: 'stream',
+          });
         else {
           if (runtimeEvent.resolvedModel !== undefined)
             this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
@@ -1357,6 +1412,83 @@ export class IpcRouter {
         }
       })
       .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
+  }
+
+  /**
+   * Follows the Workspace for the life of a Turn, pushing each changed file's contents (issue #39).
+   *
+   * Deliberately not filtered against what the Runtime reported: the point is to catch the writes it
+   * does not report. The path is still checked against the Workspace root by `pushFileEdit`, and the
+   * read itself refuses symlinks and binaries (see workspace-file.ts), so "anything that changed" is
+   * a safe net to cast here.
+   */
+  private startWorkspaceWatch(taskId: string, turnId: string, workspacePath: string): void {
+    this.workspaceWatchByTurn.get(turnId)?.stop();
+    const watcher = watchWorkspace(workspacePath, (relativePath) => {
+      // Turn already finished: a late filesystem event must not reopen a closed Turn's view.
+      if (!this.workspaceWatchByTurn.has(turnId)) return;
+      const body = readWorkspaceTextFile(workspacePath, relativePath);
+      if (body === null) return;
+      this.pushFileEdit(taskId, turnId, resolvePath(workspacePath, relativePath), body, {
+        // Never "complete": on disk there is no such thing as finished, only current. The Turn
+        // ending is what stops the view following.
+        complete: false,
+        source: 'disk',
+      });
+    });
+    if (watcher !== null) this.workspaceWatchByTurn.set(turnId, watcher);
+  }
+
+  /**
+   * Pushes the body of a file a Runtime is writing, redacted and path-checked (issue #39).
+   *
+   * Redaction happens here, in Main, before the text leaves the process — the same rule reasoning
+   * follows, and it matters more here: a model writing a config file can put a real key in the
+   * body. The redactor is per (turn, path) and streaming, because a secret can straddle two frames
+   * and redacting each frame in isolation would let a split token through. Frames carry the whole
+   * body so far, so the redactor is fed only the newly appended tail.
+   *
+   * Non-persisted push channel, exactly like reasoning: this is high-frequency and the durable
+   * record is `files.changed` plus the file itself.
+   */
+  private pushFileEdit(
+    taskId: string,
+    turnId: string,
+    absolutePath: string,
+    text: string,
+    options: { complete: boolean; source: 'stream' | 'disk' },
+  ): void {
+    const workspacePath = this.persistence.getWorkspace(taskId);
+    if (workspacePath === null) return;
+    const path = relativizeWorkspacePath(workspacePath, absolutePath, resolvePath, relativePath);
+    if (path === null) return;
+    const key = `${turnId}\u0000${path}`;
+    let state = this.fileEditByKey.get(key);
+    if (state === undefined) {
+      if (this.fileEditByKey.size >= 16) return;
+      state = { redactor: createStreamingSecretRedactor(), safe: '', consumed: 0 };
+      this.fileEditByKey.set(key, state);
+    }
+    // Frames are cumulative. A shorter body than last time means the Runtime restarted the value,
+    // which the redactor cannot un-consume — drop rather than emit a spliced mixture of two bodies.
+    if (text.length < state.consumed) return;
+    state.safe += state.redactor.write(text.slice(state.consumed));
+    state.consumed = text.length;
+    if (options.complete) this.fileEditByKey.delete(key);
+    if (this.window.isDestroyed()) return;
+    this.window.webContents.send(
+      IPC_CHANNELS.fileEditEvent,
+      fileEditFrameSchema.parse({
+        taskId,
+        turnId,
+        path,
+        // The tail is what the user is watching; an early frame of a large file is not worth the
+        // IPC. The cap matches the schema's.
+        text: state.safe.slice(-262_144),
+        complete: options.complete,
+        source: options.source,
+      }),
+    );
   }
 
   /**
@@ -1385,6 +1517,22 @@ export class IpcRouter {
     if (inside.length === 0) return;
     const event = this.persistence.recordFileChanges({ taskId, turnId, changes: inside });
     if (event !== null) this.publish(event);
+    // Codex reports no body at all while it writes (verified on 0.144.4: `file_change` carries only
+    // path and kind, and apply_patch writes to a temp file and renames, so there is nothing to tail
+    // either). Reading the result back is the only way to show its content — clearly marked
+    // `source: 'disk'` so the UI does not present it as live typing. Claude streams instead, and its
+    // frames have already arrived by now, so re-reading would only overwrite the live body with the
+    // same bytes.
+    for (const change of inside) {
+      if (change.kind === 'delete') continue;
+      if (this.fileEditByKey.has(`${turnId}\u0000${change.path}`)) continue;
+      const body = readWorkspaceTextFile(workspacePath, change.path);
+      if (body !== null)
+        this.pushFileEdit(taskId, turnId, resolvePath(workspacePath, change.path), body, {
+          complete: true,
+          source: 'disk',
+        });
+    }
   }
 
   /**

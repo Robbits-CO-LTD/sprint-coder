@@ -474,6 +474,43 @@ export const fileChangeRecordSchema = z
   })
   .strict();
 export type FileChangeRecord = z.infer<typeof fileChangeRecordSchema>;
+
+/**
+ * The body of a file as a Runtime writes it (issue #39).
+ *
+ * NOT a TurnEvent, for the same reason `reasoningBatchSchema` is not: this arrives at the model's
+ * typing speed, and every TurnEvent is appended to `turn_events` and replayed on re-subscribe.
+ * Persisting it would spend the NFR-PERF-04 budget on frames nobody will ever read twice — the
+ * durable record of an edit is `files.changed`, which says what changed, and the file on disk,
+ * which is the result.
+ *
+ * `text` is the whole body decoded so far rather than a delta: the producer already holds the
+ * accumulated buffer, so sending the total costs nothing extra and makes a dropped frame a repaint
+ * instead of a corrupted view. Already secret-redacted by Main.
+ */
+export const fileEditFrameSchema = z
+  .object({
+    taskId: idSchema,
+    turnId: idSchema,
+    /** Workspace-relative. Main drops anything resolving outside the Workspace root. */
+    path: z.string().min(1).max(1024),
+    text: z.string().max(262_144),
+    /** True once the Runtime finished writing this file — the view stops following. */
+    complete: z.boolean(),
+    /**
+     * Where this body came from, because the two are honestly different things and the UI says so.
+     *
+     * `stream` is the model's own text as it types — only Claude produces it, via `input_json_delta`
+     * on the tool call. `disk` is the file's current contents, re-read when a watcher sees it
+     * change; that is the only option for Codex, which reports no body at all while writing and
+     * applies patches through a temp-file rename (verified on 0.144.4). Disk updates are prompt but
+     * arrive in whole-file jumps rather than character by character, so calling them "live typing"
+     * would misdescribe the tool.
+     */
+    source: z.enum(['stream', 'disk']),
+  })
+  .strict();
+export type FileEditFrame = z.infer<typeof fileEditFrameSchema>;
 export const generatedImageBytesSchema = z
   .object({
     id: digestSchema,
@@ -1181,6 +1218,10 @@ export interface SprintCoderApi {
     /** Subscribes to the active Turn's reasoning stream. Returns an unsubscribe function. */
     subscribe(listener: (batch: ReasoningBatch) => void): () => void;
   };
+  fileEdits: {
+    /** Subscribes to file bodies as Runtimes write them. Returns an unsubscribe function. */
+    subscribe(listener: (frame: FileEditFrame) => void): () => void;
+  };
   runtime: {
     /** Subscribes to Runtime process liveness. Returns an unsubscribe function. */
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
@@ -1271,6 +1312,7 @@ export const IPC_CHANNELS = {
   settingsSetEffort: 'sprint-coder:settings:set-effort',
   /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */
   reasoningEvent: 'sprint-coder:turns:reasoning',
+  fileEditEvent: 'sprint-coder:turns:file-edit',
   runtimeStatusEvent: 'sprint-coder:runtime:status',
   imagesList: 'sprint-coder:images:list',
   filesList: 'sprint-coder:files:list',
