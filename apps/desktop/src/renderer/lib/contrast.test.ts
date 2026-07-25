@@ -182,11 +182,11 @@ describe('design-token contrast audit (WCAG 2.2 AA)', () => {
 // rather than a hope — a gradient is exactly the kind of thing that looks fine in the frame someone
 // screenshots and fails in the frames they do not.
 describe('thinking pill sheen gradient (issue #17)', () => {
-  it.each(['text-primary', 'accent-primary', 'accent-cool'] as const)(
+  it.each(['text-primary', 'accent', 'ai-accent'] as const)(
     'stop --%s stays readable on the card surface',
     (stop) => {
-      const ratio = contrastRatio(tokenRgb(stop), tokenRgb('bg-surface'));
-      expect(ratio, `--${stop} on --bg-surface`).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
+      const ratio = contrastRatio(tokenRgb(stop), tokenRgb('bg-panel'));
+      expect(ratio, `--${stop} on --bg-panel`).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
     },
   );
 
@@ -196,8 +196,8 @@ describe('thinking pill sheen gradient (issue #17)', () => {
     const sheen = /\.run-title\.sheen\s*\{[^}]*\}/.exec(css)?.[0] ?? '';
     expect(sheen, '.run-title.sheen rule found').not.toBe('');
     expect(sheen).toContain('var(--text-primary)');
-    expect(sheen).toContain('var(--accent-primary)');
-    expect(sheen).toContain('var(--accent-cool)');
+    expect(sheen).toContain('var(--accent)');
+    expect(sheen).toContain('var(--ai-accent)');
     expect(sheen).not.toMatch(/#[0-9a-fA-F]{3,8}|rgba?\(/);
   });
 

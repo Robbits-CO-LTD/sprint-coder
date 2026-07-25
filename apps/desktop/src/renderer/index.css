@@ -282,7 +282,7 @@ button {
     color var(--t-quick) var(--ease-ui);
 }
 .sidebar-toggle:hover {
-  background: rgba(255, 244, 224, 0.08);
+  background: rgba(230, 233, 239, 0.08);
   color: var(--text-primary);
 }
 
@@ -704,7 +704,7 @@ button {
   font-size: 12.5px;
   color: var(--text-primary);
   background: var(--bg-elevated);
-  border: 1px solid rgba(227, 154, 98, 0.45);
+  border: 1px solid rgba(115, 152, 246, 0.45);
   border-radius: 99px;
   padding: 6px 14px;
   cursor: pointer;
@@ -715,8 +715,8 @@ button {
     border-color var(--t-quick) var(--ease-ui);
 }
 .timeline-jump-button:hover {
-  background: rgba(227, 154, 98, 0.14);
-  border-color: var(--accent-primary);
+  background: rgba(115, 152, 246, 0.14);
+  border-color: var(--accent);
 }
 @keyframes jumpIn {
   from {
@@ -2414,7 +2414,7 @@ button {
   flex-direction: column;
   gap: 14px;
   border-left: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
+  background: var(--bg-panel);
   padding: 12px;
   overflow: hidden;
   transition: width var(--t-standard) var(--ease-ui);
@@ -2501,7 +2501,7 @@ button {
 }
 .insp-cycle:hover,
 .insp-close:hover {
-  background: rgba(255, 244, 224, 0.08);
+  background: rgba(230, 233, 239, 0.08);
   color: var(--text-primary);
 }
 
@@ -2557,8 +2557,8 @@ button {
   background: linear-gradient(
     100deg,
     var(--text-primary) 20%,
-    var(--accent-primary) 40%,
-    var(--accent-cool) 60%,
+    var(--accent) 40%,
+    var(--ai-accent) 60%,
     var(--text-primary) 80%
   );
   background-size: 240% 100%;
@@ -2585,13 +2585,13 @@ button {
   flex: 1;
   height: 3px;
   border-radius: 2px;
-  background: rgba(255, 244, 224, 0.07);
+  background: rgba(230, 233, 239, 0.07);
 }
 .think-seg.done {
   background: var(--text-secondary);
 }
 .think-seg.current {
-  background: var(--accent-primary);
+  background: var(--accent);
 }
 
 .think-panel {
@@ -2640,7 +2640,7 @@ button {
 }
 .think-truncated {
   margin-top: 8px;
-  color: var(--state-warning);
+  color: var(--warning);
 }
 
 /* `prefers-reduced-motion` needs its own block, not just the global 0.01ms squash: with
@@ -2673,18 +2673,18 @@ button {
   align-items: center;
 }
 .sf-dot--idle {
-  color: var(--state-success);
+  color: var(--success);
 }
 .sf-dot--running {
-  color: var(--accent-primary);
+  color: var(--accent);
 }
 .sf-dot--failed {
-  color: var(--state-danger);
+  color: var(--danger);
 }
 /* Only the abnormal rows get any presence: a border and the warning colour, so the eye lands on
    them without the normal state ever needing to compete. */
 .sf-row--notice {
-  color: var(--state-warning);
+  color: var(--warning);
   border-top: 1px solid var(--border-subtle);
   padding-top: 6px;
 }
@@ -2699,7 +2699,7 @@ button {
   color: inherit;
 }
 .sf-dismiss:hover {
-  background: rgba(255, 244, 224, 0.1);
+  background: rgba(230, 233, 239, 0.1);
 }
 /* ---------- Composer plus menu (issue #13) ---------- */
 .composer-plus {
@@ -2743,98 +2743,103 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  /* ---------- Settings dialog (issue #5) ----------
-   Native <dialog showModal>, so the focus trap, Escape handling, inert backdrop, and top-layer
-   stacking come from the platform rather than from hand-rolled JS. Top-layer matters here: the
-   dialog must not be clipped by `.team-canvas`'s `overflow: clip` when opened in Team mode. */
-  .settings-dialog {
-    border: 1px solid var(--border-subtle);
-    border-radius: 14px;
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    padding: 0;
-    width: min(520px, calc(100vw - 32px));
-    max-height: min(680px, calc(100vh - 48px));
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
-  }
-  .settings-dialog::backdrop {
-    background: rgba(0, 0, 0, 0.5);
-  }
-  .settings-dialog[open] {
-    animation: settingsIn var(--t-standard) var(--ease-ui);
-  }
-  @keyframes settingsIn {
-    from {
-      opacity: 0;
-      transform: translateY(8px) scale(0.985);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-  }
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.goal-editor .goal-input {
+  flex: 1;
+  min-width: 0;
+}
 
-  .settings-body {
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-    padding: 18px 20px 22px;
-    overflow-y: auto;
-    max-height: inherit;
+/* ---------- Settings dialog (issue #5) ----------
+ Native <dialog showModal>, so the focus trap, Escape handling, inert backdrop, and top-layer
+ stacking come from the platform rather than from hand-rolled JS. Top-layer matters here: the
+ dialog must not be clipped by `.team-canvas`'s `overflow: clip` when opened in Team mode. */
+.settings-dialog {
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  padding: 0;
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(680px, calc(100vh - 48px));
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+.settings-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+.settings-dialog[open] {
+  animation: settingsIn var(--t-standard) var(--ease-ui);
+}
+@keyframes settingsIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
   }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 
-  .settings-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .settings-header h2 {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-    flex: 1;
-  }
-  .settings-close {
-    flex: none;
-    display: grid;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 7px;
-    color: var(--text-secondary);
-  }
-  .settings-close:hover {
-    background: rgba(255, 244, 224, 0.08);
-    color: var(--text-primary);
-  }
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 20px 22px;
+  overflow-y: auto;
+  max-height: inherit;
+}
 
-  .settings-note {
-    margin: 0;
-    font-size: 12.5px;
-    line-height: 1.6;
-    color: var(--text-secondary);
-  }
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.settings-header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  flex: 1;
+}
+.settings-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+}
+.settings-close:hover {
+  background: rgba(230, 233, 239, 0.08);
+  color: var(--text-primary);
+}
 
-  .settings-group {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    border: none;
-    margin: 0;
-    padding: 0;
-    min-width: 0;
-  }
-  .settings-group legend,
-  .settings-field-label {
-    font-size: 11px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-secondary);
-  }
-  .goal-editor .goal-input {
-    flex: 1;
-    min-width: 0;
-  }
+.settings-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.settings-group legend,
+.settings-field-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
   padding: 0;
 }
 
@@ -2849,7 +2854,7 @@ button {
   transition: border-color var(--t-quick) var(--ease-ui);
 }
 .settings-radio:hover:not(.disabled) {
-  border-color: rgba(227, 154, 98, 0.45);
+  border-color: rgba(115, 152, 246, 0.45);
 }
 /* Deliberately NOT `opacity: 0.5` on the whole row. The description of a disabled Runtime is where
    its reason lives ("Codex CLIが見つかりません") — the one line the user most needs to read is the
@@ -2867,7 +2872,7 @@ button {
 }
 .settings-radio input {
   margin: 3px 0 0;
-  accent-color: var(--accent-primary);
+  accent-color: var(--accent);
   flex: none;
 }
 .settings-radio-text {
@@ -2888,14 +2893,14 @@ button {
   padding: 10px;
   border: 1px solid var(--border-subtle);
   border-radius: 13px;
-  background: var(--bg-surface);
+  background: var(--bg-panel);
 }
 .genimg {
   display: block;
   max-width: min(420px, 100%);
   height: auto;
   border-radius: 8px;
-  background: var(--bg-canvas);
+  background: var(--bg-app);
 }
 .genimg-placeholder {
   display: grid;
@@ -2903,7 +2908,7 @@ button {
   width: min(420px, 100%);
   min-height: 120px;
   border-radius: 8px;
-  background: var(--bg-canvas);
+  background: var(--bg-app);
   color: var(--text-secondary);
   font-size: 12.5px;
 }
@@ -2918,15 +2923,15 @@ button {
   max-width: 100%;
   font-size: 12.5px;
   line-height: 1.6;
-  color: var(--state-warning);
-  border: 1px solid rgba(213, 168, 91, 0.38);
+  color: var(--warning);
+  border: 1px solid rgba(211, 166, 83, 0.38);
   border-radius: 11px;
   padding: 9px 12px;
-  background: rgba(213, 168, 91, 0.07);
+  background: rgba(211, 166, 83, 0.07);
 }
 .imagegen-armed {
-  color: var(--accent-primary);
-  border-color: rgba(227, 154, 98, 0.45);
+  color: var(--accent);
+  border-color: rgba(115, 152, 246, 0.45);
 }
 .settings-radio-title {
   font-size: 13px;
@@ -2966,23 +2971,23 @@ button {
 .insp-seg {
   flex: 1;
   border-radius: 3px;
-  background: rgba(255, 244, 224, 0.07);
+  background: rgba(230, 233, 239, 0.07);
   transition: background var(--t-spatial) var(--ease-spatial);
 }
 .insp-seg--done {
   background: var(--text-secondary);
 }
 .insp-seg--current {
-  background: var(--accent-primary);
+  background: var(--accent);
 }
 .insp-seg--waiting {
-  background: var(--state-warning);
+  background: var(--warning);
 }
 .insp-seg--failed {
-  background: var(--state-danger);
+  background: var(--danger);
 }
 .insp-seg--complete {
-  background: var(--state-success);
+  background: var(--success);
 }
 
 .insp-stage {
@@ -3035,10 +3040,10 @@ button {
   margin-left: auto;
 }
 .settings-ok {
-  color: var(--state-success);
+  color: var(--success);
   display: inline-flex;
 }
 .settings-missing {
-  color: var(--state-danger);
+  color: var(--danger);
   display: inline-flex;
 }
