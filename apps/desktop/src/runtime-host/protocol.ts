@@ -50,6 +50,14 @@ export type RuntimeCanonicalEvent =
   // resolved for an `auto`/alias selection (see the ADR amendment). Codex's normalizer never sets
   // it, so this stays undefined for Codex turns.
   | { type: 'completed'; resolvedModel?: string }
+  // The model's own reasoning text (issue #17). Verified to arrive in the current profile:
+  // `--effort max` on a prompt that needs reasoning produces `content_block_start type='thinking'`
+  // followed by `thinking_delta` (codex-cli's Claude CLI 2.1.218). It does NOT arrive for a trivial
+  // prompt at `--effort high`, which is why the degraded "no reasoning at all" path is a normal
+  // case rather than a hypothetical.
+  //
+  // Additive: runtime-host and main ship in the same app, so RUNTIME_PROTOCOL_VERSION stays put.
+  | { type: 'reasoning'; text: string }
   // Codex's thread id, captured from its structured `thread.started` event (issue #11).
   //
   // This is how generated images are located, and the reason it is an *id* rather than a path is
@@ -240,6 +248,13 @@ function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent
     );
   if (value.type === 'stage')
     return 'stage' in value && turnStageSchema.safeParse(value.stage).success;
+  if (value.type === 'reasoning')
+    return (
+      'text' in value &&
+      typeof value.text === 'string' &&
+      value.text.length > 0 &&
+      value.text.length <= 16_384
+    );
   // Constrained to a UUID shape rather than any string: this value is interpolated into a
   // filesystem path by Main, so it must not be able to carry separators or traversal segments.
   if (value.type === 'thread')

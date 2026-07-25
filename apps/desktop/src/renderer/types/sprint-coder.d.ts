@@ -274,6 +274,14 @@ export type SprintCoderErrorCode =
   'TURN_ACTIVE' | 'STEER_STALE' | 'RUNTIME_UNAVAILABLE' | 'STEER_UNSUPPORTED' | string;
 
 export type RuntimeKind = 'mock' | 'codex' | 'claude';
+/** A batch of the model's reasoning text (issue #17). Pushed, never persisted — see contracts'
+ * reasoningBatchSchema for why. Already secret-redacted and batched by Main. */
+export type ReasoningBatch = {
+  taskId: string;
+  turnId: string;
+  text: string;
+  truncated: boolean;
+};
 /** Outcome of this launch's database recovery pass (issue #9). */
 export type DatabaseRecovery = {
   corruptionDetected: boolean;
@@ -440,12 +448,15 @@ export interface SprintCoderApi {
       opts?: { afterSeq?: number },
     ): () => void; // returns unsubscribe
   };
-  /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
-   * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
+  reasoning: {
+    subscribe(listener: (batch: ReasoningBatch) => void): () => void;
+  };
   images: {
     list(taskId: string): Promise<GeneratedImage[]>;
     read(imageId: string): Promise<{ id: string; mimeType: 'image/png'; base64: string }>;
   };
+  /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
+   * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
   settings: {
     getRuntime(): Promise<{
       kind: RuntimeKind;

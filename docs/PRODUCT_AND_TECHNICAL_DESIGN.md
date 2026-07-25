@@ -95,7 +95,7 @@ Team MVPからは高度なmessage branching、Task pin/archiveの高度化、Min
 - FR-RUN-01: 1回のAssistant応答をUI上はRun、domain/API上はTurnとして扱い、一意なturnIdを付与する。
 - FR-RUN-02: Runは `queued → understanding → planning → executing → synthesizing → completed` を基本状態とする。
 - FR-RUN-03: `waiting_approval`、`blocked`、`canceling`、`canceled`、`failed` を例外状態として持つ。
-- FR-RUN-04: Run Cardには経過時間、現在段階、要約、停止ボタンを常時表示する。
+- FR-RUN-04: Run Cardには経過時間、現在段階、停止ボタンを常時表示する。既定は1行のcompactな「思考中」pillとし、5段階の一覧は常時表示しない（issue #17、§4.3）。
 - FR-RUN-05: Tool callは検索、ファイル読取、ファイル変更、コマンド、外部通信を区別する。
 - FR-RUN-06: コマンドカードには目的、cwd、command、live output、exit code、所要時間を表示する。
 - FR-RUN-07: 大量出力はUI上で仮想化し、全文はログファイルまたはイベントDBから参照する。
@@ -190,7 +190,11 @@ ChatSurfaceは以下を内包する再利用可能なproduct surfaceである。
 
 ### 4.3 生成中の表示
 
-生成中は空の吹き出しへ点滅する三点リーダーを置かない。Run Cardを会話の一項目として置き、以下を順に更新する。
+生成中は空の吹き出しへ点滅する三点リーダーを置かない。Run Cardを会話の一項目として置く。
+
+**既定は1行のcompactな「思考中」pill**である。1行に (a) status dot (b)「思考中」label (c) 中黒 + 現在stage label (d) elapsed time (e) 停止ボタンを収める。FR-RUN-04の常時表示要件はこの1行で満たす。stageが`waiting_approval`のときだけlabelを「承認待ち」へ差し替える — ユーザーの操作を待って停止している状態を「思考中」と呼ぶと、モデルの責任のように読めてしまう。
+
+5段階の一覧を常時展開しない理由は、5行のうち意味があるのが現在stageの1行だけであり、残りは「これから来る / すでに済んだ」という読む必要のない情報を同じ密度で並べていたためである。段階は以下の5つで、pillを開いたときに5分割の進捗barとして残す（§13.3のmotion予算に収めるため、textではなく3px高のbar）。
 
 1. ユーザーの依頼を理解中
 2. 方針を組み立て中
@@ -200,7 +204,13 @@ ChatSurfaceは以下を内包する再利用可能なproduct surfaceである。
 
 「ファイル・情報を確認中」と「コマンドまたは変更を実行中」は分けない。Runtimeから観測できるのは読み取りと書き込み・実行を含む一つのtool実行局面であり、この二つを別stageとして提示すると実際には遷移しないラベルが並ぶ。代わりに、承認待ちを独立したstageとして持つ。承認待ちはユーザーの操作を待って停止している状態であり、実行中と区別できなければ「進んでいないのは誰の番か」が分からない。実装の正はrendererの`STAGE_ORDER` / `STAGE_LABEL`（`store/appStore.ts`）。
 
-各stageは短い現在形のラベルとelapsed timeを持つ。完了したstageは折り畳み、現在stageだけ詳細を開く。回答tokenが届き始めたらRun Cardの下にAssistant messageをstreamし、Run Cardはcompact summaryへ縮む。
+pillをクリックすると、モデル自身の思考textを展開して読める。思考textは以下の性質を持つ。
+
+- **永続化しない。** 未整理の推測や外部から取り込んだ文字列が混ざるため、diskへ残さないというプロダクト判断である。transientなpush channel（`IPC_CHANNELS.reasoningEvent`）で配信し、`turn_events`へは載せない — 載せると再購読ごとにreplayされ、NFR-PERF-04の予算を高頻度eventで食い潰す。結果としてTask再訪時に過去の思考は読めないため、UIはそれを明示する。
+- **untrusted dataとして扱う。** Markdownを通さずplain text（`white-space: pre-wrap`）で描画し、secret除去はrenderer到達前にMain側で完了させる。
+- **思考が1件も来ないTurnは通常のケースである。** Claude CLIは`--effort max`かつ相応の難度のpromptでthinking blockを出し、簡単なpromptや低いeffortでは出さない（実測）。その場合pillはdisclosureではなく非interactiveなlabelへ縮退する。
+
+回答tokenが届き始めたらRun Cardの下にAssistant messageをstreamする。
 
 ### 4.4 コマンドカード
 

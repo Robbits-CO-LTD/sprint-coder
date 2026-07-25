@@ -57,7 +57,18 @@ export class CodexJsonlNormalizer {
     const itemType = readString(item, 'type') ?? type;
     if (isApprovalItem(itemType))
       throw new ApprovalRequestedError('Codex requested approval in non-interactive mode');
-    if (isPlanningItem(itemType)) return this.advanceTo('planning');
+    if (isPlanningItem(itemType)) {
+      // Codex's reasoning text, which was being discarded along with the stage transition
+      // (issue #17). Same canonical event as Claude's thinking_delta, so the renderer sees one
+      // stream regardless of provider — the granularity and register differ between the two, and
+      // that difference is shown rather than smoothed over: hiding it would leave the user unable to
+      // tell which model's reasoning they are reading.
+      const text = extractText(value, item);
+      const stageEvents = this.advanceTo('planning');
+      return text === null || text.length === 0
+        ? stageEvents
+        : [...stageEvents, { type: 'reasoning', text }];
+    }
     if (isExecutingItem(itemType)) return this.advanceTo('executing');
     if (isAssistantItem(itemType, type)) {
       const delta = extractText(value, item);

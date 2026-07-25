@@ -22,6 +22,7 @@ import type {
   TurnEvent,
   TurnStage,
 } from '../types/sprint-coder';
+import { appendReasoning, pruneReasoning } from '../lib/reasoning-buffer';
 import {
   appendCommandOutput,
   projectCommandTail,
@@ -138,6 +139,10 @@ type AppState = {
    * backend hasn't wired the `settings` API yet — see `loadRuntime`). */
   runtime: RuntimeState;
 
+  /** Whether any reasoning has arrived for a turn (issue #17). Only a boolean and a truncation flag
+   * live in the store — the text itself stays in lib/reasoning-buffer.ts, because putting it here
+   * would make every fragment a store update and every update a re-render of every subscriber. */
+  reasoningSeenByTurn: Record<string, { seen: boolean; truncated: boolean } | undefined>;
   /** What this launch's database recovery pass did, once `app.getInfo()` resolves (issue #9).
    * Absent until then, and absent forever if the backend predates the field. */
   recovery: DatabaseRecovery | null;
@@ -187,6 +192,11 @@ type AppState = {
   dismissToast(): void;
 };
 
+// Reasoning is subscribed once for the window's lifetime, guarded like the other subscriptions
+// above. Without the guard, `init()` — called from an effect with `[]` deps — registers a second
+// listener under StrictMode's deliberate double-invocation in dev, and every fragment is appended
+// twice. Caught by looking at the rendered panel: every paragraph was duplicated.
+let reasoningUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
 let currentSubscribedTaskId: string | null = null;
@@ -358,6 +368,10 @@ function handleTurnEvent(
 
   switch (ev.type) {
     case 'turn.accepted': {
+      // Reasoning is not persisted, so this buffer is the only thing keeping old turns' text alive.
+      // Pruned on each new turn rather than on every append: it must not grow for the lifetime of the
+      // window, but the current turn's text has to survive the turn it belongs to.
+      pruneReasoning([ev.turnId]);
       apply((state) => {
         const existing = state.messagesByTask[taskId] ?? [];
         const pendingId = state.pendingOptimisticIdByTask[taskId];
@@ -608,6 +622,7 @@ export const useAppStore = create<AppState>((set, get) => {
       effort: 'medium',
       codexEffort: '',
     },
+    reasoningSeenByTurn: {},
     recovery: null,
     recoveryAcknowledged: false,
     runtimeStatus: null,
@@ -621,6 +636,32 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       set({ sprintCoderAvailable: true, loadingTasks: true, error: null });
       void get().loadRuntime();
+      // Reasoning is a transient push stream, subscribed once for the window's lifetime (issue #17).
+      // The batch carries its own turnId, so there is nothing per-task to re-subscribe.
+      if (reasoningUnsubscribe !== null) {
+        reasoningUnsubscribe();
+        reasoningUnsubscribe = null;
+      }
+      if (typeof window.sprintCoder.reasoning?.subscribe === 'function')
+        reasoningUnsubscribe = window.sprintCoder.reasoning.subscribe(
+          ({ turnId, text, truncated }) => {
+            appendReasoning(turnId, text, truncated);
+            set((state) => {
+              const previous = state.reasoningSeenByTurn[turnId];
+              const seen = previous?.seen === true || text !== '';
+              const nextTruncated = previous?.truncated === true || truncated;
+              // Returns the same state when nothing changed, so the high-frequency case costs no
+              // re-render at all — the text lives outside the store precisely so this can be cheap.
+              if (previous?.seen === seen && previous?.truncated === nextTruncated) return {};
+              return {
+                reasoningSeenByTurn: {
+                  ...state.reasoningSeenByTurn,
+                  [turnId]: { seen, truncated: nextTruncated },
+                },
+              };
+            });
+          },
+        );
       // Startup recovery outcome and Runtime liveness both feed the SurfaceFooter (issue #9).
       // Both are best-effort: an older backend simply leaves the footer's quiet default in place.
       if (typeof window.sprintCoder.app?.getInfo === 'function')

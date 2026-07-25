@@ -18,6 +18,9 @@ describe('CodexJsonlNormalizer', () => {
       'thread',
       'understanding',
       'planning',
+      // Codex's reasoning text, which the planning branch used to discard along with the stage
+      // transition (issue #17).
+      'reasoning',
       'executing',
       'synthesizing',
       'delta',

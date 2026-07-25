@@ -822,7 +822,7 @@ button {
   flex: none;
 }
 .run-card.running .run-dot {
-  animation: runPulse 1.4s ease-in-out infinite;
+  animation: none;
 }
 @keyframes runPulse {
   0%,
@@ -2360,6 +2360,30 @@ button {
   }
 }
 
+/* ---------- Thinking pill (issue #17) ----------
+   Replaces the always-expanded five-stage list. Everything FR-RUN-04 requires (elapsed, current
+   stage, stop) is on one row; §4.3's stage visibility survives as the 3px bar inside the panel. */
+.think-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+.think-toggle--static {
+  cursor: default;
+}
+.run-stage-inline {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* ---------- SurfaceFooter (issue #9) ----------
    The fifth §4.2 element. Quiet by default: one slim row stating the connection, plus extra rows
    only when something abnormal happened. Sized so the ordinary case costs the conversation column
@@ -2391,6 +2415,130 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.think-chevron {
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex: none;
+}
+
+/* The "currently thinking" sweep. `linear`, not an ease: an eased loop produces a visible "breath"
+   every cycle that catches peripheral vision, which is exactly what a background indicator must not
+   do. The three gradient stops are all colours already audited against --bg-surface, so the label
+   stays above 4.5:1 at every phase of the sweep (asserted in lib/contrast.test.ts). */
+.run-title.sheen {
+  background: linear-gradient(
+    100deg,
+    var(--text-primary) 20%,
+    var(--accent-primary) 40%,
+    var(--accent-cool) 60%,
+    var(--text-primary) 80%
+  );
+  background-size: 240% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thinkSheen 3200ms linear infinite;
+}
+@keyframes thinkSheen {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -140% 0;
+  }
+}
+
+.think-progress {
+  display: flex;
+  gap: 3px;
+  margin-top: 8px;
+}
+.think-seg {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 244, 224, 0.07);
+}
+.think-seg.done {
+  background: var(--text-secondary);
+}
+.think-seg.current {
+  background: var(--accent-primary);
+}
+
+.think-panel {
+  margin-top: 8px;
+  max-height: 208px;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border-radius: 9px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+/* The Leader node is a fixed 720x620 with `overflow: hidden`, so the panel has to be shorter there
+   or it pushes past the card. */
+.think-panel--node {
+  max-height: 140px;
+}
+.think-para {
+  margin: 0 0 8px;
+  /* Plain text, never Markdown: reasoning is provider output and must not gain any rendering
+     capability. `pre-wrap` keeps the model's own line breaks without interpreting anything. */
+  white-space: pre-wrap;
+}
+.think-para:last-child {
+  margin-bottom: 0;
+}
+.think-para.latest {
+  color: var(--text-primary);
+  animation: thinkParaIn 160ms var(--ease-ui);
+}
+@keyframes thinkParaIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.think-empty,
+.think-truncated {
+  margin: 0;
+  color: var(--text-secondary);
+}
+.think-truncated {
+  margin-top: 8px;
+  color: var(--state-warning);
+}
+
+/* `prefers-reduced-motion` needs its own block, not just the global 0.01ms squash: with
+   `background-clip: text` and a transparent text fill, stopping the animation alone can leave the
+   label invisible. The colour is reset to a solid one here so the text is always painted. */
+@media (prefers-reduced-motion: reduce) {
+  .run-title.sheen {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: var(--text-primary);
+    color: var(--text-primary);
+  }
+  .think-para.latest {
+    animation: none;
+  }
+}
+
+/* Forced colours strip the gradient but keep `-webkit-text-fill-color: transparent`, which would
+   erase the label entirely. */
+@media (forced-colors: active) {
+  .run-title.sheen {
+    background: none;
+    -webkit-text-fill-color: CanvasText;
+    color: CanvasText;
+  }
 }
 .sf-dot {
   flex: none;
@@ -2425,6 +2573,7 @@ button {
 }
 .sf-dismiss:hover {
   background: rgba(255, 244, 224, 0.1);
+}
 /* ---------- Composer plus menu (issue #13) ---------- */
 .composer-plus {
   display: grid;
@@ -2651,6 +2800,7 @@ button {
 .imagegen-armed {
   color: var(--accent-primary);
   border-color: rgba(227, 154, 98, 0.45);
+}
 .settings-radio-title {
   font-size: 13px;
 }
