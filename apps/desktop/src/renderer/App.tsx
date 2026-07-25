@@ -8,6 +8,7 @@ import type { CapturedSurfaceState } from './components/ChatSurface/SurfaceLayer
 import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
+import { SettingsDialog } from './components/SettingsDialog';
 import { List, Plus } from './components/icons';
 import { useMediaQuery } from './lib/useMediaQuery';
 import {
@@ -79,6 +80,9 @@ export default function App() {
   const [teamViewPreference, setTeamViewPreferenceState] = useState<TeamViewPreference>(
     readStoredTeamViewPreference,
   );
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   // --- Sidebar collapse (issue #12) ---
   //
@@ -256,7 +260,11 @@ export default function App() {
         .filter(Boolean)
         .join(' ')}
     >
-      <Sidebar inert={chromeInert || sidebarCollapsed} collapsed={sidebarCollapsed} />
+      <Sidebar
+        inert={chromeInert || sidebarCollapsed}
+        collapsed={sidebarCollapsed}
+        onOpenSettings={openSettings}
+      />
       {/* Tapping outside an overlaid sidebar closes it, the usual expectation for a panel that
           covers content. Only rendered in the overlay form, where the sidebar is not a layout
           sibling and so cannot be dismissed by simply looking away from it. */}
@@ -332,6 +340,10 @@ export default function App() {
           onSwitchToCanvasView={switchToCanvasView}
         />
       )}
+      {/* Outside `.main` and every Team surface: <dialog showModal> renders in the browser's top
+          layer, so it is never clipped by `.team-canvas`'s `overflow: clip`, and it stays mounted
+          across the Chat<->Team morph. */}
+      <SettingsDialog open={settingsOpen} onClose={closeSettings} />
       {selectedTask && (
         <SurfaceLayer
           task={selectedTask}

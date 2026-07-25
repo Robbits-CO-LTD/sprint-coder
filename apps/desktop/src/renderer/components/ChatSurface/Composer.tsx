@@ -4,6 +4,16 @@ import { useAppStore } from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
 import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square } from '../icons';
+// Shared with the settings dialog (issue #5) so the same option can never be named two ways.
+import {
+  EFFORT_DESC,
+  EFFORT_LABEL,
+  EFFORT_LEVELS,
+  RUNTIME_CLI_MISSING_HINT,
+  RUNTIME_DESC,
+  RUNTIME_KINDS,
+  RUNTIME_LABEL,
+} from '../../lib/runtime-labels';
 import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
 const STEER_UNSUPPORTED_HINT =
@@ -213,23 +223,6 @@ export function Composer({ taskId }: { taskId: string }) {
   );
 }
 
-const RUNTIME_LABEL: Record<RuntimeKind, string> = {
-  mock: 'Mock Runtime',
-  codex: 'Codex',
-  claude: 'Claude Code',
-};
-
-const RUNTIME_DESC: Record<RuntimeKind, string> = {
-  mock: '決定論的ローカル応答',
-  codex: 'ローカルのCodex CLIで実応答',
-  claude: 'ローカルのClaude Code CLIで実応答',
-};
-
-const RUNTIME_CLI_MISSING_HINT: Record<'codex' | 'claude', string> = {
-  codex: 'Codex CLIが見つかりません',
-  claude: 'Claude CLIが見つかりません',
-};
-
 // Runtime selector chip (FR-SET-03). Falls back to the legacy dummy "GPT-6.2 mini" chip when
 // the backend hasn't wired the `settings` API yet — graceful degrade per the sprint-coder.d.ts contract.
 function RuntimeChip() {
@@ -288,7 +281,7 @@ function RuntimeChip() {
       </button>
       {open && (
         <div className="runtime-menu" role="menu" aria-label="Runtime選択">
-          {(['mock', 'codex', 'claude'] as RuntimeKind[]).map((kind) => {
+          {RUNTIME_KINDS.map((kind) => {
             const disabled =
               (kind === 'codex' && !runtime.codexAvailable) ||
               (kind === 'claude' && !runtime.claudeAvailable);
@@ -400,24 +393,6 @@ function ModelChip() {
     </div>
   );
 }
-
-const EFFORT_LEVELS: ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
-const EFFORT_LABEL: Record<ClaudeEffort, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'X-High',
-  max: 'Max',
-  ultracode: 'Ultracode',
-};
-const EFFORT_DESC: Record<ClaudeEffort, string> = {
-  low: '最速・最小のコストで応答',
-  medium: '速度と精度のバランス',
-  high: 'じっくり考えて応答',
-  xhigh: 'より深く考えて応答',
-  max: '最大限考えて応答（最も低速・高コスト）',
-  ultracode: '複数エージェントを動員して最大限に検証（最も低速・高コスト）',
-};
 
 type EffortChoice = { id: string; label: string; description: string };
 
