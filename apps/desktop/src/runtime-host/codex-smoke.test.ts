@@ -129,6 +129,56 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
       );
   }, 300_000);
+  // issue #6: proves the reasoning-effort override actually lands. Not a "does the flag parse"
+  // check — the level is sent to the API, which validates it per model and answers 400 on an
+  // unsupported one, so `codex exec` exits 1 and the adapter reports a failure. A clean run of
+  // every level the model advertises therefore means the override reached the API and was accepted;
+  // a deliberate out-of-set level failing proves the check discriminates rather than passing
+  // vacuously.
+  it('runs every level the selected model advertises, and fails on one it does not', async () => {
+    const probe = await probeCodex();
+    expect(probe.available).toBe(true);
+    const found = probe.models.find(({ efforts }) => (efforts?.length ?? 0) > 0);
+    if (found === undefined) throw new Error('no cached Codex model advertises reasoning levels');
+    const model = found;
+    const advertised = model.efforts ?? [];
+    console.log(
+      '[codex-smoke] model:',
+      model.id,
+      'levels:',
+      advertised.map(({ id }) => id),
+    );
+
+    async function runWith(effort: string): Promise<PublicError[]> {
+      const adapter = new CodexRuntimeAdapter();
+      const failures: PublicError[] = [];
+      await new Promise<void>((resolve) => {
+        adapter.start(
+          `codex-smoke-effort-${effort}`,
+          '1+1は?数字のみ返答',
+          [],
+          () => undefined,
+          null,
+          model.id,
+          () => undefined,
+          (error) => {
+            failures.push(error);
+          },
+          () => resolve(),
+          undefined,
+          effort,
+        );
+      });
+      return failures;
+    }
+
+    for (const { id } of advertised) {
+      expect(await runWith(id), `--effort ${id} on ${model.id}`).toEqual([]);
+    }
+    // `minimal` is advertised by no model in the cache and was verified to return
+    // "Unsupported value: 'minimal' is not supported with the '...' model" (2026-07-25, 0.144.4).
+    expect((await runWith('minimal')).length).toBeGreaterThan(0);
+  }, 600_000);
 
   it('proves the read-only OS sandbox: a real turn instructed to write outside the workspace never creates the file', async () => {
     // Adversarial proof for deliverable 5b: this is not a Main-process path-guard check (that is

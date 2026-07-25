@@ -1,19 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { WorkspaceChip } from './WorkspaceChip';
-import { Hexagon, MoreHorizontal, Target } from './icons';
+import { Hexagon, List, MoreHorizontal, Target } from './icons';
 import type { TaskSummary } from '../types/sprint-coder';
 
 export function TaskHeader({
   task,
   onToggleTeam,
   inert,
+  onToggleSidebar,
+  sidebarCollapsed = false,
 }: {
   task: TaskSummary;
   /** Enters Team mode via App's morph orchestration (SurfaceLayer/TeamCanvas, Slice 6.2) instead
    * of flipping the store directly — see App.tsx's `requestEnterTeam`. */
   onToggleTeam: () => void;
   inert?: boolean;
+  /** Shows/hides the Task history sidebar (issue #12). Lives here rather than inside the sidebar
+   * itself because it has to stay reachable while the sidebar is collapsed. */
+  onToggleSidebar?: (() => void) | undefined;
+  sidebarCollapsed?: boolean;
 }) {
   const renameTask = useAppStore((s) => s.renameTask);
   const accessPreset = useAppStore((s) => s.permissionByTask[task.id]?.preset ?? ('ask' as const));
@@ -55,6 +61,19 @@ export function TaskHeader({
 
   return (
     <header className="task-header" inert={inert}>
+      {onToggleSidebar !== undefined && (
+        <button
+          type="button"
+          className="sidebar-toggle"
+          data-testid="sidebar-toggle"
+          aria-expanded={!sidebarCollapsed}
+          aria-label={sidebarCollapsed ? 'Task履歴を開く' : 'Task履歴を閉じる'}
+          title={sidebarCollapsed ? 'Task履歴を開く' : 'Task履歴を閉じる'}
+          onClick={onToggleSidebar}
+        >
+          <List size={16} />
+        </button>
+      )}
       {editing ? (
         <input
           ref={inputRef}
