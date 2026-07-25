@@ -62,10 +62,14 @@ test.describe('Phase 6 Slice 6.2: Chat <-> Leader morph', () => {
     await expect(textarea).toBeVisible();
 
     // Build up enough timeline content that a non-zero scroll position is meaningful — keep
-    // sending short exchanges until the timeline actually overflows its viewport.
+    // sending short exchanges until the timeline overflows its viewport by more than the
+    // scroll-follow threshold (renderer/lib/scroll-follow.ts, 40px), so the position pinned below
+    // can sit unambiguously *off* the live tail rather than a few pixels above it.
     const timelineScroll = page.locator('.timeline-scroll');
-    for (let i = 0; i < 8; i += 1) {
-      const overflowing = await timelineScroll.evaluate((el) => el.scrollHeight > el.clientHeight + 40);
+    for (let i = 0; i < 12; i += 1) {
+      const overflowing = await timelineScroll.evaluate(
+        (el) => el.scrollHeight > el.clientHeight + 240,
+      );
       if (overflowing) break;
       await textarea.fill(`スクロール用のメッセージ ${i + 1}`);
       await textarea.press('Enter');
@@ -94,11 +98,20 @@ test.describe('Phase 6 Slice 6.2: Chat <-> Leader morph', () => {
     }));
     expect(selectionBefore).toEqual({ start: 3, end: 9 });
 
+    // Park mid-history, well clear of both ends. Anything within 40px of the bottom counts as
+    // "following the live tail" (issue #3), and SurfaceLayer deliberately re-pins such a reader to
+    // the bottom across the morph rather than replaying a raw scrollTop — the two variants have
+    // different timeline heights, so the same offset is not the same reading position. Exact
+    // scrollTop preservation, which is what this test is about, applies to a reader who has
+    // genuinely scrolled away from the tail.
     await timelineScroll.evaluate((el) => {
-      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 4);
+      el.scrollTop = 80;
     });
     const scrollBefore = await timelineScroll.evaluate((el) => el.scrollTop);
     expect(scrollBefore).toBeGreaterThan(0);
+    expect(
+      await timelineScroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop),
+    ).toBeGreaterThan(40);
 
     const mountsBefore = await page.evaluate(() => window.__sprintCoderChatSurfaceMounts ?? 0);
 

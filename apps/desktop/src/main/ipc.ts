@@ -32,7 +32,13 @@ import {
   runtimeSetInputSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
+  runtimeCodexEffortSetInputSchema,
   runtimeSettingsSchema,
+  reasoningBatchSchema,
+  runtimeStatusSchema,
+  generatedImageSchema,
+  generatedImageBytesSchema,
+  generatedImageRefSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -63,6 +69,7 @@ import {
   type CommandEnvelope,
   type CommandResult,
   type AccessPreset,
+  type CodexModelOption,
   type PublicError,
   type RuntimeKind,
   type TurnEvent,
@@ -98,6 +105,9 @@ import {
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
 } from './provider-egress';
+import { ReasoningBatcher } from './reasoning-batcher';
+import { createStreamingSecretRedactor } from './secret-redactor';
+import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
 import { isTeamScenarioInput, LEADER_MCP_SYSTEM_PROMPT } from './team-tools';
@@ -120,6 +130,19 @@ export class IpcRouter {
   // finishAndAdvance folds it into the outgoing `turn.completed` event. Not persisted — see the
   // `resolvedModel` doc comment on turnEventSchema.
   private readonly resolvedModelByTurn = new Map<string, string>();
+  // One reasoning batcher per active turn (issue #17). Keyed by turnId and disposed in
+  // finishAndAdvance, so a turn cannot leave a timer behind.
+  private readonly reasoningByTurn = new Map<string, ReasoningBatcher>();
+  // Per-turn streaming secret redactor. Streaming (not per-fragment) because a key can straddle a
+  // batch boundary — redacting each fragment in isolation would let a split token through.
+  private readonly reasoningRedactorByTurn = new Map<
+    string,
+    ReturnType<typeof createStreamingSecretRedactor>
+  >();
+  // Codex's own thread id for a turn, from its `thread.started` event. The only handle used to find
+  // generated images — never a path from a model message (issue #11; see
+  // generated-image-collector.ts for why).
+  private readonly codexThreadByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly autoReviewer = AutoReviewer.createProduction();
@@ -222,6 +245,9 @@ export class IpcRouter {
       // Wires the Leader team tools (team_hire_worker/team_send_to_worker/team_wait_reports/
       // team_stop_worker) into the mock intelligence loop — see team-tools.ts.
       this.teamCoordinator,
+      // Mock pseudo-reasoning goes through the same redact → batch → push path as a real runtime's,
+      // so the E2E exercises the actual pipeline rather than a shortcut (issue #17).
+      (taskId, turnId, text) => this.pushReasoning(taskId, turnId, text),
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -245,6 +271,9 @@ export class IpcRouter {
     this.handle(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, () => ({
       version: app.getVersion(),
       platform: process.platform,
+      // Startup recovery outcome (issue #9). Already computed before the window existed — this is
+      // just the first path that ever carried it to the renderer.
+      recovery: this.persistence.getStartupRecovery(),
     }));
     this.handle(
       IPC_CHANNELS.settingsGetRuntime,
@@ -268,6 +297,15 @@ export class IpcRouter {
           model,
           models: activeCapability.models,
           effort: this.persistence.getEffort(),
+          // Clamped for display against whichever Codex model is currently selected. Normally a
+          // no-op — setModel clamps and re-persists on every model change — but the cache can also
+          // change underneath us (a CLI upgrade rewrites models_cache.json), so the read never
+          // reports a level the selected model does not advertise.
+          codexEffort: clampCodexEffort(
+            this.persistence.getCodexEffort(),
+            codexCapability.models,
+            kind === 'claude' ? 'auto' : storedModel,
+          ),
         };
       },
     );
@@ -299,9 +337,39 @@ export class IpcRouter {
         if (!capability.available) throw new RuntimeUnavailableError(runtimeKind);
         if (!capability.models.some(({ id }) => id === input.model))
           throw new InvalidModelError(runtimeKind);
-        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () =>
-          this.persistence.setModel(input.model),
-        ).value;
+        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () => {
+          this.persistence.setModel(input.model);
+          // Models advertise different reasoning levels, so a model change can strand the stored
+          // Codex level (Sol advertises `ultra`, GPT-5.5 does not). Re-clamp and persist here so
+          // the synchronous turn dispatch can trust `getCodexEffort()` without a probe — leaving
+          // it stale would fail the next turn outright rather than degrade.
+          if (runtimeKind === 'codex')
+            this.persistence.setCodexEffort(
+              clampCodexEffort(this.persistence.getCodexEffort(), capability.models, input.model),
+            );
+        }).value;
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.imagesList,
+      taskIdPayloadSchema,
+      z.array(generatedImageSchema),
+      (input) => this.persistence.listGeneratedImages(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.imagesRead,
+      generatedImageRefSchema,
+      generatedImageBytesSchema,
+      (input) => {
+        const found = this.persistence.readGeneratedImage(input.imageId);
+        if (found === null) throw new NotFoundError('Generated image not found');
+        // base64 rather than a path or a file:// URL: the renderer builds a `data:` URL from it, so
+        // displaying an image can neither touch the filesystem nor issue a request (ADR-004).
+        return {
+          id: found.image.id,
+          mimeType: found.image.mimeType,
+          base64: found.bytes.toString('base64'),
+        };
       },
     );
     this.handleMutation(
@@ -317,6 +385,24 @@ export class IpcRouter {
         this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetEffort, () =>
           this.persistence.setEffort(input.effort),
         ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetCodexEffort,
+      runtimeCodexEffortSetInputSchema,
+      z.undefined(),
+      async (input, event, envelope) => {
+        // Unlike Claude's handler, this one *must* validate against a capability list: the set of
+        // valid levels is per-model (published in models_cache.json) rather than a fixed enum, and
+        // an unsupported level does not fall back — it fails the turn with an API 400.
+        const capability = await this.runtimeFor('codex').probe();
+        if (!capability.available) throw new RuntimeUnavailableError('codex');
+        const selected = capability.models.find(({ id }) => id === this.persistence.getModel());
+        if (!selected?.efforts?.some(({ id }) => id === input.effort))
+          throw new InvalidEffortError(selected?.displayName ?? 'このモデル');
+        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetCodexEffort, () =>
+          this.persistence.setCodexEffort(input.effort),
+        ).value;
+      },
     );
     this.handle(
       IPC_CHANNELS.permissionsGet,
@@ -636,7 +722,10 @@ export class IpcRouter {
           IPC_CHANNELS.turnsStart,
           () => {
             started = this.persistence.startTurn(input.taskId, input.text);
-            return { turnId: started.turnId };
+            return {
+              turnId: started.turnId,
+              ...(started.renamedTask === undefined ? {} : { renamedTask: started.renamedTask }),
+            };
           },
         );
         if (result.executed && started !== undefined) this.dispatchStarted(started);
@@ -886,7 +975,26 @@ export class IpcRouter {
   }
 
   private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {
+    const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
+    // Flush the tail and stop the timer before the turn is finalised, so the last thought is not
+    // lost to the 120ms window and no timer outlives the turn.
+    this.reasoningByTurn.get(turnId)?.dispose();
+    this.reasoningByTurn.delete(turnId);
+    this.reasoningRedactorByTurn.delete(turnId);
+    // Back to idle on a clean finish. A failure already pushed its own `failed` status with the
+    // reason attached (see handleRuntimeFailure), and must not be overwritten by an idle here.
+    if (kind !== undefined && state === 'completed')
+      this.pushRuntimeStatus({
+        kind,
+        state: 'idle',
+        taskId,
+        errorCode: null,
+        userMessage: null,
+      });
+    // Before the Turn is finalised, so `image.generated` lands in the event stream ahead of
+    // `turn.completed` and the timeline shows the image inside the Turn that produced it.
+    this.ingestGeneratedImages(taskId, turnId);
     this.teamMcpBridge.unregister(turnId);
     const event = this.persistence.completeTurn(taskId, turnId, state);
     const resolvedModel = this.resolvedModelByTurn.get(turnId);
@@ -1067,6 +1175,13 @@ export class IpcRouter {
   }
 
   private startSelectedRuntime(started: StartedTurn): void {
+    this.pushRuntimeStatus({
+      kind: started.runtimeKind,
+      state: 'running',
+      taskId: started.event.taskId,
+      errorCode: null,
+      userMessage: null,
+    });
     const taskId = started.event.taskId;
     let kind = started.runtimeKind;
     // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Claude Leader drives team_* tools itself over
@@ -1120,9 +1235,13 @@ export class IpcRouter {
           createEmptyToolCatalogSnapshot(kind, workspaceId),
           context,
           teamMcp,
-          // Claude-only reasoning effort: read live (not captured on StartedTurn) since it isn't
-          // persisted per-turn, unlike model — see persistence.ts's getEffort doc comment.
-          kind === 'claude' ? this.persistence.getEffort() : undefined,
+          // Reasoning effort: read live (not captured on StartedTurn) since it isn't persisted
+          // per-turn, unlike model — see persistence.ts's getEffort doc comment. The Codex value
+          // needs no probe here because setModel/setCodexEffort keep the stored level clamped to
+          // the selected model's advertised set; '' means "no override".
+          kind === 'claude'
+            ? this.persistence.getEffort()
+            : this.persistence.getCodexEffort() || undefined,
         ),
     );
     if (!egress.allowed) {
@@ -1199,6 +1318,8 @@ export class IpcRouter {
         if (this.turnRuntimes.get(turnId) !== kind) return;
         if (runtimeEvent.type === 'stage')
           this.publish(this.persistence.changeStage(taskId, turnId, runtimeEvent.stage));
+        else if (runtimeEvent.type === 'reasoning')
+          this.pushReasoning(taskId, turnId, runtimeEvent.text);
         else if (runtimeEvent.type === 'delta')
           this.publish(
             this.persistence.appendDelta(
@@ -1208,6 +1329,8 @@ export class IpcRouter {
               runtimeEvent.delta,
             ),
           );
+        else if (runtimeEvent.type === 'thread')
+          this.codexThreadByTurn.set(turnId, runtimeEvent.threadId);
         else {
           if (runtimeEvent.resolvedModel !== undefined)
             this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
@@ -1217,16 +1340,95 @@ export class IpcRouter {
       .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
   }
 
+  /**
+   * Redacts, batches, and pushes reasoning text for a turn.
+   *
+   * Redaction happens here, in Main, before the text ever leaves the process — the renderer must
+   * never be the place a key is first seen, and this text is provider output that can echo whatever
+   * the model read.
+   */
+  private pushReasoning(taskId: string, turnId: string, text: string): void {
+    let redactor = this.reasoningRedactorByTurn.get(turnId);
+    if (redactor === undefined) {
+      redactor = createStreamingSecretRedactor();
+      this.reasoningRedactorByTurn.set(turnId, redactor);
+    }
+    const safe = redactor.write(text);
+    let batcher = this.reasoningByTurn.get(turnId);
+    if (batcher === undefined) {
+      batcher = new ReasoningBatcher(({ text: batch, truncated }) => {
+        if (this.window.isDestroyed()) return;
+        this.window.webContents.send(
+          IPC_CHANNELS.reasoningEvent,
+          reasoningBatchSchema.parse({ taskId, turnId, text: batch, truncated }),
+        );
+      });
+      this.reasoningByTurn.set(turnId, batcher);
+    }
+    if (safe !== '') batcher.push(safe);
+  }
+
+  /**
+   * Moves any images Codex generated for this turn into the app's own storage.
+   *
+   * Best-effort: a failure here must never keep a Turn from finalising, since the conversation is
+   * more important than the artifact. Runs for failed turns too — Codex generates the image before
+   * the shell copy that the read-only sandbox refuses, so a Turn whose final message says it could
+   * not save the file has still produced one.
+   */
+  private ingestGeneratedImages(taskId: string, turnId: string): void {
+    const threadId = this.codexThreadByTurn.get(turnId);
+    this.codexThreadByTurn.delete(turnId);
+    if (threadId === undefined) return;
+    try {
+      for (const { bytes } of collectThreadImages(threadId)) {
+        const recorded = this.persistence.recordGeneratedImage({ taskId, turnId, bytes });
+        if (recorded !== null) this.publish(recorded.event);
+      }
+    } catch {
+      // Nothing to surface: the image is an extra, and the Turn's own result already stands.
+    }
+  }
+
   private handleRuntimeFailure(
     kind: 'codex' | 'claude',
     taskId: string,
     turnId: string,
-    _error: PublicError,
+    error: PublicError,
   ): void {
     void this.mailbox.run(taskId, () => {
       if (this.turnRuntimes.get(turnId) !== kind) return;
+      // The reason used to be dropped here, so the renderer saw a Turn end in `failed` with no way
+      // to tell "the model refused" from "the CLI is gone" (issue #9). Pushed on the transient
+      // status channel rather than folded into the persisted Turn event.
+      this.pushRuntimeStatus({
+        kind,
+        state: 'failed',
+        taskId,
+        errorCode: error.code,
+        userMessage: error.userMessage,
+      });
       this.finishAndAdvance(taskId, turnId, 'failed');
     });
+  }
+
+  /**
+   * Sends Runtime liveness to the renderer. Best-effort and non-persisted: a dropped status only
+   * costs a stale footer line until the next transition, whereas persisting it would replay a
+   * long-dead failure every time the Task is reopened.
+   */
+  private pushRuntimeStatus(status: {
+    kind: RuntimeKind;
+    state: 'idle' | 'running' | 'failed';
+    taskId: string | null;
+    errorCode: string | null;
+    userMessage: string | null;
+  }): void {
+    if (this.window.isDestroyed()) return;
+    this.window.webContents.send(
+      IPC_CHANNELS.runtimeStatusEvent,
+      runtimeStatusSchema.parse(status),
+    );
   }
 
   private validateSender(event: InvokeEvent): void {
@@ -1329,8 +1531,42 @@ class RuntimeUnavailableError extends Error {
     super();
   }
 }
+/**
+ * Narrows a stored Codex reasoning level to something the given model actually advertises.
+ *
+ * Returns '' ("no override, use the CLI's own default") whenever there is nothing trustworthy to
+ * send: the `auto` sentinel, a model that publishes no level set, or a cache we could not read.
+ * Otherwise an unsupported stored value falls back to the model's advertised default rather than
+ * being dropped, so raising effort on Sol and switching to GPT-5.5 keeps a deliberate level
+ * instead of silently reverting to whatever the CLI defaults to.
+ */
+export function clampCodexEffort(
+  stored: string,
+  models: readonly CodexModelOption[],
+  selectedModelId: string,
+): string {
+  if (stored === '' || selectedModelId === 'auto') return '';
+  const efforts = models.find(({ id }) => id === selectedModelId)?.efforts;
+  if (efforts === undefined || efforts.length === 0) return '';
+  if (efforts.some(({ id }) => id === stored)) return stored;
+  return models.find(({ id }) => id === selectedModelId)?.defaultEffort ?? '';
+}
+
 class InvalidModelError extends Error {
   constructor(readonly kind: 'codex' | 'claude' = 'codex') {
+    super();
+  }
+}
+/**
+ * A Codex reasoning level the selected model does not advertise.
+ *
+ * Rejected up front rather than passed through, because the CLI does not degrade gracefully: an
+ * unsupported level makes the API answer 400 and `codex exec` exit 1, i.e. the whole turn dies.
+ * Better to refuse the setting while the user is in the picker than to let them discover it when
+ * their next message fails.
+ */
+class InvalidEffortError extends Error {
+  constructor(readonly modelDisplayName: string) {
     super();
   }
 }
@@ -1441,6 +1677,12 @@ function toPublicError(error: unknown): PublicError {
         error.kind === 'claude'
           ? '選択したモデルは現在のClaude CLIで利用できません。'
           : '選択したモデルは現在のCodex CLIで利用できません。',
+      retryable: false,
+    };
+  if (error instanceof InvalidEffortError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: `選択したEffortは${error.modelDisplayName}では利用できません。`,
       retryable: false,
     };
   if (error instanceof StalePermissionPolicyError)

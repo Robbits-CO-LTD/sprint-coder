@@ -9,14 +9,21 @@ import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
 import { InspectorPanel } from './components/InspectorPanel';
-import { Plus } from './components/icons';
-import { useMediaQuery } from './lib/useMediaQuery';
 import {
   nextInspectorState,
   readStoredInspectorState,
   writeStoredInspectorState,
   type InspectorState,
 } from './lib/inspector-preference';
+import { SettingsDialog } from './components/SettingsDialog';
+import { List, Plus } from './components/icons';
+import { useMediaQuery } from './lib/useMediaQuery';
+import {
+  NARROW_VIEWPORT_QUERY,
+  defaultSidebarCollapsed,
+  readStoredSidebarCollapsed,
+  writeStoredSidebarCollapsed,
+} from './lib/sidebar-preference';
 
 // Team view preference (Slice 6.1 item 4, List fallback): renderer-only, not part of the
 // persisted Task/Team domain — a per-install UI preference, so localStorage is the right home for
@@ -80,6 +87,41 @@ export default function App() {
   const [teamViewPreference, setTeamViewPreferenceState] = useState<TeamViewPreference>(
     readStoredTeamViewPreference,
   );
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+
+  // --- Sidebar collapse (issue #12) ---
+  //
+  // The sidebar was a fixed 264px with no way to collapse it, so at the 760px minimum window size
+  // it took ~35% of the shell, and at 200% zoom (effective viewport ~590px) the conversation column
+  // was squeezed to 326px against a 341px intrinsic minimum — the Composer's send button spilled
+  // 15px past the right edge, which is the measurable defect behind the two failing a11y-zoom
+  // specs. Below the breakpoint the sidebar becomes an overlay instead of a flex sibling, so it
+  // stops taking width from the conversation at all.
+  const narrowViewport = useMediaQuery(NARROW_VIEWPORT_QUERY);
+  const [sidebarCollapsed, setSidebarCollapsedState] = useState(() =>
+    defaultSidebarCollapsed(narrowViewport, readStoredSidebarCollapsed()),
+  );
+  // Crossing the breakpoint re-derives the default rather than keeping whatever was showing:
+  // entering narrow must collapse (an expanded overlay would cover the conversation), and leaving
+  // it restores the stored preference. The user's stored choice is never written by this path.
+  const wasNarrowRef = useRef(narrowViewport);
+  useEffect(() => {
+    if (wasNarrowRef.current === narrowViewport) return;
+    wasNarrowRef.current = narrowViewport;
+    setSidebarCollapsedState(defaultSidebarCollapsed(narrowViewport, readStoredSidebarCollapsed()));
+  }, [narrowViewport]);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsedState((collapsed) => {
+      const next = !collapsed;
+      // Only an explicit toggle persists. Recorded even at narrow widths so the choice survives
+      // into the next wide-window session.
+      writeStoredSidebarCollapsed(next);
+      return next;
+    });
+  }, []);
 
   // --- Inspector panel (issue #16) ---
   //
@@ -240,8 +282,33 @@ export default function App() {
   const chromeInert = teamCanvasActive || exiting;
 
   return (
-    <div className={`app-shell${chromeInert ? ' team-mode' : ''}`}>
-      <Sidebar inert={chromeInert} />
+    <div
+      className={[
+        'app-shell',
+        chromeInert ? 'team-mode' : '',
+        sidebarCollapsed ? 'sidebar-collapsed' : '',
+        narrowViewport ? 'sidebar-overlay' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+    >
+      <Sidebar
+        inert={chromeInert || sidebarCollapsed}
+        collapsed={sidebarCollapsed}
+        onOpenSettings={openSettings}
+      />
+      {/* Tapping outside an overlaid sidebar closes it, the usual expectation for a panel that
+          covers content. Only rendered in the overlay form, where the sidebar is not a layout
+          sibling and so cannot be dismissed by simply looking away from it. */}
+      {narrowViewport && !sidebarCollapsed && (
+        <button
+          type="button"
+          className="sidebar-scrim"
+          data-testid="sidebar-scrim"
+          aria-label="Task履歴を閉じる"
+          onClick={toggleSidebar}
+        />
+      )}
       <div className="main">
         {selectedTask ? (
           <>
@@ -251,6 +318,8 @@ export default function App() {
               inert={chromeInert}
               onToggleInspector={cycleInspector}
               inspectorOpen={inspectorState !== 'hidden'}
+              onToggleSidebar={toggleSidebar}
+              sidebarCollapsed={sidebarCollapsed}
             />
             {/* SurfaceLayer portals the shared ChatSurface instance in here when `surfaceMode`
                 is 'main' — this anchor only reserves the slot, see the morph orchestration
@@ -261,6 +330,17 @@ export default function App() {
           </>
         ) : (
           <div className="empty-state" style={{ margin: 'auto' }}>
+            {/* No TaskHeader in this branch, so the sidebar toggle would be unreachable once the
+                sidebar is collapsed with no Task selected. */}
+            <button
+              type="button"
+              className="chip"
+              data-testid="empty-state-sidebar-toggle"
+              aria-expanded={!sidebarCollapsed}
+              onClick={toggleSidebar}
+            >
+              <List size={14} /> Task履歴を{sidebarCollapsed ? '開く' : '閉じる'}
+            </button>
             <h2>Taskを選択してください</h2>
             <p>左のTask履歴から選ぶか、新しいTaskを作成して会話を始めます。</p>
             <div className="chips">
@@ -304,6 +384,10 @@ export default function App() {
           onSwitchToCanvasView={switchToCanvasView}
         />
       )}
+      {/* Outside `.main` and every Team surface: <dialog showModal> renders in the browser's top
+          layer, so it is never clipped by `.team-canvas`'s `overflow: clip`, and it stays mounted
+          across the Chat<->Team morph. */}
+      <SettingsDialog open={settingsOpen} onClose={closeSettings} />
       {selectedTask && (
         <SurfaceLayer
           task={selectedTask}

@@ -10,9 +10,12 @@ import type {
   CodexModelOption,
   CommandSummary,
   CommandOutputRecord,
+  GeneratedImage,
   QueuedInput,
   PermissionSettings,
+  DatabaseRecovery,
   RuntimeKind,
+  RuntimeStatus,
   TaskSummary,
   TeamDetail,
   TurnDiff,
@@ -21,6 +24,7 @@ import type {
 } from '../types/sprint-coder';
 import { STAGE_LABEL } from '../lib/stages';
 import { advanceStageIndex } from '../lib/turn-progress';
+import { appendReasoning, pruneReasoning } from '../lib/reasoning-buffer';
 import {
   appendCommandOutput,
   projectCommandTail,
@@ -52,6 +56,11 @@ export type RuntimeState = {
   model: string;
   models: CodexModelOption[];
   effort: ClaudeEffort;
+  /** Codex reasoning level, already clamped by Main to the selected model's advertised set (issue
+   * #6). '' means no override — the `auto` model sentinel resolves its model inside the CLI, so
+   * there is no advertised set to pick from and the CLI's own per-model default applies. Kept
+   * separate from `effort` because the two providers do not share a value space. */
+  codexEffort: string;
   /** The concrete model id the Claude CLI actually resolved on the most recently completed Claude
    * turn (e.g. "claude-sonnet-5"), surfaced in the model chip's tooltip. Not per-task — mirrors
    * the rest of `RuntimeState`'s global-only design — and cleared back to undefined only by a
@@ -110,6 +119,9 @@ type AppState = {
   autoDecisionsByTask: Record<string, AutoPermissionDecision[]>;
   commandsByTask: Record<string, CommandCardState[]>;
   turnDiffByTask: Record<string, TurnDiff | undefined>;
+  /** Images generated per task, oldest first (issue #11). Metadata only — bytes are fetched by the
+   * card that displays them, so switching tasks never drags base64 through the store. */
+  imagesByTask: Record<string, GeneratedImage[]>;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
   teamByTask: Record<string, TeamDetail | null | undefined>;
@@ -121,6 +133,19 @@ type AppState = {
    * backend hasn't wired the `settings` API yet — see `loadRuntime`). */
   runtime: RuntimeState;
 
+  /** Whether any reasoning has arrived for a turn (issue #17). Only a boolean and a truncation flag
+   * live in the store — the text itself stays in lib/reasoning-buffer.ts, because putting it here
+   * would make every fragment a store update and every update a re-render of every subscriber. */
+  reasoningSeenByTurn: Record<string, { seen: boolean; truncated: boolean } | undefined>;
+  /** What this launch's database recovery pass did, once `app.getInfo()` resolves (issue #9).
+   * Absent until then, and absent forever if the backend predates the field. */
+  recovery: DatabaseRecovery | null;
+  /** Whether the recovery notice has been dismissed. A launch-scoped fact, so acknowledging it
+   * should not require persistence — it simply stops being shown for this session. */
+  recoveryAcknowledged: boolean;
+  /** Latest Runtime process liveness, pushed by main. Null until the first transition. */
+  runtimeStatus: RuntimeStatus | null;
+
   /** Latest stage/turn-completion announcement text for the aria-live region (NFR-A11Y-03). */
   stageAnnouncement: string;
   /** Ephemeral toast for non-fatal notices (e.g. STEER_STALE). */
@@ -128,9 +153,11 @@ type AppState = {
 
   init(): Promise<void>;
   loadRuntime(): Promise<void>;
+  acknowledgeRecovery(): void;
   setRuntime(kind: RuntimeKind): Promise<void>;
   setModel(model: string): Promise<void>;
   setEffort(effort: ClaudeEffort): Promise<void>;
+  setCodexEffort(effort: string): Promise<void>;
   setAccessPreset(taskId: string, preset: AccessPreset): Promise<void>;
   resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision): Promise<void>;
   selectTask(taskId: string): Promise<void>;
@@ -159,6 +186,11 @@ type AppState = {
   dismissToast(): void;
 };
 
+// Reasoning is subscribed once for the window's lifetime, guarded like the other subscriptions
+// above. Without the guard, `init()` — called from an effect with `[]` deps — registers a second
+// listener under StrictMode's deliberate double-invocation in dev, and every fragment is appended
+// twice. Caught by looking at the rendered panel: every paragraph was duplicated.
+let reasoningUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
 let currentSubscribedTaskId: string | null = null;
@@ -330,6 +362,10 @@ function handleTurnEvent(
 
   switch (ev.type) {
     case 'turn.accepted': {
+      // Reasoning is not persisted, so this buffer is the only thing keeping old turns' text alive.
+      // Pruned on each new turn rather than on every append: it must not grow for the lifetime of the
+      // window, but the current turn's text has to survive the turn it belongs to.
+      pruneReasoning([ev.turnId]);
       apply((state) => {
         const existing = state.messagesByTask[taskId] ?? [];
         const pendingId = state.pendingOptimisticIdByTask[taskId];
@@ -532,6 +568,16 @@ function handleTurnEvent(
       }));
       break;
     }
+    case 'image.generated': {
+      apply((state) => {
+        const existing = state.imagesByTask[taskId] ?? [];
+        // Replay-safe: this event is persisted, so re-subscribing delivers it again. The id is a
+        // content digest, so de-duplicating on it also collapses the same image generated twice.
+        if (existing.some((image) => image.id === ev.image.id)) return {};
+        return { imagesByTask: { ...state.imagesByTask, [taskId]: [...existing, ev.image] } };
+      });
+      break;
+    }
     default:
       break;
   }
@@ -563,6 +609,7 @@ export const useAppStore = create<AppState>((set, get) => {
     autoDecisionsByTask: {},
     commandsByTask: {},
     turnDiffByTask: {},
+    imagesByTask: {},
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     teamByTask: {},
@@ -575,7 +622,12 @@ export const useAppStore = create<AppState>((set, get) => {
       model: 'auto',
       models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
       effort: 'medium',
+      codexEffort: '',
     },
+    reasoningSeenByTurn: {},
+    recovery: null,
+    recoveryAcknowledged: false,
+    runtimeStatus: null,
     stageAnnouncement: '',
     toast: null,
 
@@ -586,6 +638,43 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       set({ sprintCoderAvailable: true, loadingTasks: true, error: null });
       void get().loadRuntime();
+      // Reasoning is a transient push stream, subscribed once for the window's lifetime (issue #17).
+      // The batch carries its own turnId, so there is nothing per-task to re-subscribe.
+      if (reasoningUnsubscribe !== null) {
+        reasoningUnsubscribe();
+        reasoningUnsubscribe = null;
+      }
+      if (typeof window.sprintCoder.reasoning?.subscribe === 'function')
+        reasoningUnsubscribe = window.sprintCoder.reasoning.subscribe(
+          ({ turnId, text, truncated }) => {
+            appendReasoning(turnId, text, truncated);
+            set((state) => {
+              const previous = state.reasoningSeenByTurn[turnId];
+              const seen = previous?.seen === true || text !== '';
+              const nextTruncated = previous?.truncated === true || truncated;
+              // Returns the same state when nothing changed, so the high-frequency case costs no
+              // re-render at all — the text lives outside the store precisely so this can be cheap.
+              if (previous?.seen === seen && previous?.truncated === nextTruncated) return {};
+              return {
+                reasoningSeenByTurn: {
+                  ...state.reasoningSeenByTurn,
+                  [turnId]: { seen, truncated: nextTruncated },
+                },
+              };
+            });
+          },
+        );
+      // Startup recovery outcome and Runtime liveness both feed the SurfaceFooter (issue #9).
+      // Both are best-effort: an older backend simply leaves the footer's quiet default in place.
+      if (typeof window.sprintCoder.app?.getInfo === 'function')
+        void window.sprintCoder.app
+          .getInfo()
+          .then((info) => {
+            if (info.recovery !== undefined) set({ recovery: info.recovery });
+          })
+          .catch(() => undefined);
+      if (typeof window.sprintCoder.runtime?.subscribeStatus === 'function')
+        window.sprintCoder.runtime.subscribeStatus((runtimeStatus) => set({ runtimeStatus }));
       try {
         const tasks = await window.sprintCoder.tasks.list();
         set({ tasks, loadingTasks: false, initialized: true });
@@ -596,6 +685,10 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (err) {
         set({ loadingTasks: false, initialized: true, error: describeError(err) });
       }
+    },
+
+    acknowledgeRecovery() {
+      set({ recoveryAcknowledged: true });
     },
 
     async loadRuntime() {
@@ -658,6 +751,23 @@ export const useAppStore = create<AppState>((set, get) => {
         await window.sprintCoder.settings.setEffort(effort);
         await get().loadRuntime();
       } catch (err) {
+        set({ runtime: previous });
+        set({ error: describeError(err) });
+      }
+    },
+
+    async setCodexEffort(effort: string) {
+      if (!window.sprintCoder || typeof window.sprintCoder.settings?.setCodexEffort !== 'function')
+        return;
+      const previous = get().runtime;
+      if (previous.codexEffort === effort) return;
+      set({ runtime: { ...previous, codexEffort: effort } });
+      try {
+        await window.sprintCoder.settings.setCodexEffort(effort);
+        await get().loadRuntime();
+      } catch (err) {
+        // Main rejects a level the selected model does not advertise, so the optimistic update has
+        // to be rolled back — unlike Claude, a bad Codex level would fail the turn outright.
         set({ runtime: previous });
         set({ error: describeError(err) });
       }
@@ -755,6 +865,15 @@ export const useAppStore = create<AppState>((set, get) => {
       void restoreDraft(taskId, apply, get);
       void loadWorkspace(taskId, apply, get);
       void loadPermission(taskId, apply, get);
+      // Fetched alongside the other per-task reads rather than reconstructed from replayed events:
+      // metadata only, so this stays cheap even for a Task with many images (issue #11).
+      if (typeof window.sprintCoder?.images?.list === 'function')
+        void window.sprintCoder.images
+          .list(taskId)
+          .then((images) =>
+            apply((state) => ({ imagesByTask: { ...state.imagesByTask, [taskId]: images } })),
+          )
+          .catch(() => undefined);
 
       if (!window.sprintCoder) {
         set({ loadingMessages: false });
@@ -1053,8 +1172,14 @@ export const useAppStore = create<AppState>((set, get) => {
       persistDraftDebounced(taskId, '');
 
       try {
-        await window.sprintCoder.turns.start({ taskId, text: trimmed });
+        const result = await window.sprintCoder.turns.start({ taskId, text: trimmed });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
+        // `renamedTask` is present only when this was the Task's first message and it was still
+        // carrying the placeholder title (issue #4) — merge it so the sidebar updates immediately
+        // instead of at the next full `tasks.list()`.
+        const renamed = result?.renamedTask;
+        if (renamed !== undefined)
+          set((state) => ({ tasks: state.tasks.map((t) => (t.id === renamed.id ? renamed : t)) }));
       } catch (err) {
         const code = errorCode(err);
         set((state) => ({

@@ -99,3 +99,54 @@ describe('ClaudeJsonlNormalizer', () => {
     expect(second).toEqual([]);
   });
 });
+
+// issue #17: thinking text was being dropped. `--include-partial-messages` was already on the argv,
+// so this was purely a normalizer gap — verified against Claude CLI 2.1.218 that `--effort max` on a
+// demanding prompt does emit `content_block_start type='thinking'` followed by `thinking_delta`.
+describe('ClaudeJsonlNormalizer reasoning (issue #17)', () => {
+  function streamEvent(delta: Record<string, unknown>): string {
+    return JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta },
+    });
+  }
+
+  it('emits reasoning for a thinking_delta', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    expect(
+      normalizer.push(streamEvent({ type: 'thinking_delta', thinking: '考えています' })),
+    ).toEqual([{ type: 'reasoning', text: '考えています' }]);
+  });
+
+  it('does not advance the stage on reasoning', () => {
+    // Reasoning arrives during understanding/planning. Treating it as synthesis would jump the Run
+    // Card's stage the moment the model starts thinking, before it has done anything.
+    const normalizer = new ClaudeJsonlNormalizer();
+    const events = normalizer.push(streamEvent({ type: 'thinking_delta', thinking: 'x' }));
+    expect(events.some((event) => event.type === 'stage')).toBe(false);
+  });
+
+  it('drops signature_delta and input_json_delta explicitly', () => {
+    // Both are real deltas that carry nothing displayable; a signature in particular must never be
+    // shown as if it were the model's reasoning.
+    const normalizer = new ClaudeJsonlNormalizer();
+    expect(normalizer.push(streamEvent({ type: 'signature_delta', signature: 'abc' }))).toEqual([]);
+    expect(
+      normalizer.push(streamEvent({ type: 'input_json_delta', partial_json: '{"a":' })),
+    ).toEqual([]);
+  });
+
+  it('ignores an empty or absent thinking payload', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    expect(normalizer.push(streamEvent({ type: 'thinking_delta', thinking: '' }))).toEqual([]);
+    expect(normalizer.push(streamEvent({ type: 'thinking_delta' }))).toEqual([]);
+  });
+
+  it('still streams the answer text after reasoning', () => {
+    // The two block types interleave across one turn; reasoning must not swallow the answer.
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(streamEvent({ type: 'thinking_delta', thinking: '考え中' }));
+    const answer = normalizer.push(streamEvent({ type: 'text_delta', text: '答え' }));
+    expect(answer.some((event) => event.type === 'delta')).toBe(true);
+  });
+});
