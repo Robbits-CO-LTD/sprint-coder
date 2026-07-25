@@ -318,6 +318,11 @@ function intelligenceRecorder(
 export function mockFileBody(path: string): string {
   const name = path.replace(/^.*\//, '').replace(/\.[^.]*$/, '');
   return [
+    // Says what it is on the first line (issue #50). The previous body was plausible TypeScript with
+    // nothing marking it as a stand-in, so a live edit view full of it read as the app working
+    // rather than as a placeholder — which is exactly how it was misread.
+    `// Mock Runtimeが生成した内容です。実際のAIは動いていません。`,
+    `// Runtimeを Codex か Claude に切り替えると本物の出力になります。`,
     `// ${path}`,
     `export function ${name.replace(/[^A-Za-z0-9]/g, '_')}(value: string): string {`,
     '  const trimmed = value.trim();',

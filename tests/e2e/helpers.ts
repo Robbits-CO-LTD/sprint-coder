@@ -282,7 +282,14 @@ export async function launchApp(
   userDataDir: string,
   mode: E2EMode = resolveE2EMode(),
 ): Promise<ElectronApplication> {
-  const env = { ...process.env, SPRINT_CODER_USER_DATA_DIR: userDataDir };
+  const env = {
+    ...process.env,
+    SPRINT_CODER_USER_DATA_DIR: userDataDir,
+    // Every spec asserts against the mock's fixed output, so a fresh profile must NOT adopt an
+    // installed CLI (issue #50). Without this the suite runs against a real model on any machine
+    // that has one — slowly, and at real cost.
+    SPRINT_CODER_RUNTIME_ADOPT: '0',
+  };
 
   if (mode === 'packaged') {
     return electron.launch({ executablePath: findPackagedExecutable(), env });
