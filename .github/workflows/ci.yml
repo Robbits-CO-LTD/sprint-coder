@@ -32,33 +32,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # The Electron binary has been arriving truncated on macOS runners: the
-      # test suite's Electron ABI bridge specs died with
-      #   dyld: Library not loaded: @rpath/Electron Framework.framework/...
-      #   Reason: segment '__TEXT' load command content extends beyond end of file
-      # i.e. the extracted framework was incomplete, and the on-demand re-download
-      # the shim then attempted did not repair it either. Probe the binary once
-      # here — where a failure is obvious and cheap — and purge both the package's
-      # dist/ and the platform download cache before reinstalling, so a poisoned
-      # cached zip cannot simply be re-extracted.
-      - name: Verify Electron binary
-        shell: bash
-        run: |
-          probe() {
-            ELECTRON_RUN_AS_NODE=1 "$(node -p "require('electron')")" -e "process.exit(0)" \
-              >/dev/null 2>&1
-          }
-          if probe; then
-            echo "Electron binary is usable"
-            exit 0
-          fi
-          echo "::warning::Electron binary is unusable; purging caches and reinstalling"
-          rm -rf node_modules/electron/dist node_modules/electron/path.txt
-          rm -rf "$HOME/Library/Caches/electron" "$HOME/.cache/electron" \
-                 "$LOCALAPPDATA/electron/Cache" 2>/dev/null || true
-          npm rebuild electron --foreground-scripts
-          probe
-
       - name: Typecheck
         run: npm run typecheck
 
