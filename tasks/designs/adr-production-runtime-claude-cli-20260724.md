@@ -116,8 +116,8 @@ session (low, medium, high, xhigh, max)`, and a probe with an invalid value (`--
 printed a non-fatal warning naming the same 5 valid values and fell back to the CLI's default —
 confirming the exact enum without guessing. A real differential probe (`--model opus`, prompt
 `"1"`, otherwise identical invocation) proved the flag actually changes CLI behavior: `--effort
-low` produced zero `thinking_tokens` events, while `--effort max` produced a growing extended-
-thinking budget (`system/thinking_tokens` events, 50 → 165 estimated tokens) before the same
+low` produced zero `thinking_tokens` events, while `--effort max` produced a growing
+extended-thinking budget (`system/thinking_tokens` events, 50 → 165 estimated tokens) before the same
 `claude-opus-4-8` model answered — i.e. effort is honored, not merely accepted and ignored.
 
 Effort is therefore implemented as a real, persisted, Claude-only control, mirroring the existing
@@ -127,8 +127,8 @@ ever applies to a Claude turn), `settingsSetEffort` IPC channel/mutation, an `ef
 field on the Runtime Host protocol's `start` envelope (Codex's adapter accepts and ignores it, for
 call-signature parity — RUNTIME_PROTOCOL_VERSION bumped 4→5 for both this and the `completed`
 event's `resolvedModel` addition), and `buildClaudeArgs` appending `--effort <level>` verbatim.
-The Composer's effort chip (`data-testid="effort-selector"`) is a real interactive menu (low/
-medium/high/xhigh/max) when Claude is the active, available Runtime, and a disabled static display
+The Composer's effort chip (`data-testid="effort-selector"`) is a real interactive menu
+(low/medium/high/xhigh/max) when Claude is the active, available Runtime, and a disabled static display
 otherwise (mock/Codex/Claude-unavailable) — mirroring `ModelChip`'s enable/disable pattern.
 Team Workers (`team-worker-runtime.ts`) do not currently thread this setting through; they pick
 their own model per hire and are out of scope for this pass.
