@@ -2174,7 +2174,14 @@ function modelSettingsKey(kind: RuntimeKind): string {
   return kind === 'claude' ? 'runtime.claude.model' : 'runtime.codex.model';
 }
 
-const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultracode',
+];
 function isClaudeEffort(value: string | undefined): value is ClaudeEffort {
   return value !== undefined && (CLAUDE_EFFORT_VALUES as readonly string[]).includes(value);
 }

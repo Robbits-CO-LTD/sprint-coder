@@ -36,7 +36,7 @@ describe('Claude runtime probe', () => {
   });
 
   it('passes --effort when an effort level is given, verified valid values from the installed CLI', () => {
-    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']) {
       const args = buildClaudeArgs('auto', undefined, effort);
       expect(args.at(-2)).toBe('--effort');
       expect(args.at(-1)).toBe(effort);

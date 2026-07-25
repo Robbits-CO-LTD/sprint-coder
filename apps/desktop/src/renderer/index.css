@@ -1317,6 +1317,12 @@ button {
 .effort-menu {
   min-width: 240px;
   max-width: min(320px, calc(100vw - 32px));
+  /* Same scroll guard as .model-menu. Six levels (issue #8 added Ultracode) still fit at 100%,
+     but the Leader node is a fixed 620px tall inside a `overflow: clip` Canvas and the effective
+     viewport shrinks further under zoom — without this the last option would be clipped away
+     instead of reachable. */
+  max-height: 320px;
+  overflow-y: auto;
 }
 .runtime-menu-item {
   display: flex;

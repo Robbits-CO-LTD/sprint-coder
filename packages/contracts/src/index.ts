@@ -776,10 +776,29 @@ export type CodexModelOption = z.infer<typeof codexModelOptionSchema>;
 // `claude --help` lists "--effort <level>  Effort level for the current session (low, medium,
 // high, xhigh, max)", and a probe with an invalid value (`--effort bogus`) prints "Unknown
 // --effort value 'bogus' — ignoring it and using the default effort. Valid values: low, medium,
-// high, xhigh, max." confirming this exact enum. Codex has no equivalent flag on this CLI
-// version, so — unlike `codexModelIdSchema` (deliberately provider-agnostic) — this schema is
-// Claude-specific.
-export const claudeEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+// high, xhigh, max."
+//
+// `ultracode` is a sixth accepted value that the help text's parenthetical omits (issue #8). The
+// discriminator is that same warning: the CLI is explicit when it ignores an `--effort` value, so
+// "accepted" and "silently dropped" are distinguishable without any observable effort field in
+// the output. Re-probed 2026-07-25 on 2.1.218 with
+//   claude -p "1" --effort <v> --output-format stream-json --verbose --tools '' \
+//          --strict-mcp-config --safe-mode --no-session-persistence
+// and reading stderr:
+//   max        -> no warning, exit 0
+//   ultracode  -> no warning, exit 0
+//   ultra      -> "Unknown --effort value 'ultra' — ignoring it ..."
+//   bogus      -> "Unknown --effort value 'bogus' — ignoring it ..."
+//   bogus2     -> "Unknown --effort value 'bogus2' — ignoring it ..."
+// i.e. `ultracode` behaves like a documented level and unlike three separate near-misses and
+// nonsense values, so it is a recognised level rather than an unvalidated pass-through. The
+// `system/init` event carries no effort field on this version, so the warning channel is the only
+// available evidence — claude-smoke.test.ts guards it so a future CLI that drops the value fails
+// loudly instead of silently degrading to the default.
+//
+// Codex has no equivalent flag on this CLI version, so — unlike `codexModelIdSchema`
+// (deliberately provider-agnostic) — this schema is Claude-specific.
+export const claudeEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']);
 export type ClaudeEffort = z.infer<typeof claudeEffortSchema>;
 export const runtimeSettingsSchema = z
   .object({

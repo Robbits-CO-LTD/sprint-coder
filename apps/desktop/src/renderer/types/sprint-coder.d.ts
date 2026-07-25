@@ -257,7 +257,7 @@ export type SprintCoderErrorCode =
 
 export type RuntimeKind = 'mock' | 'codex' | 'claude';
 export type CodexModelOption = { id: string; displayName: string; description: string };
-export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultracode';
 export type AccessPreset = 'ask' | 'auto' | 'full';
 export type PermissionSettings = { preset: AccessPreset; policyEpoch: number };
 export type TeamSummary = {

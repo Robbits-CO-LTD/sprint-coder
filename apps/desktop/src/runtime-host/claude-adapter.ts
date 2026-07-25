@@ -311,8 +311,9 @@ export function buildClaudePrompt(
 //
 // `effort` (reasoning effort control, see the ADR amendment) maps straight to `--effort <level>`.
 // Verified directly against the installed CLI: `claude --help` documents "Effort level for the
-// current session (low, medium, high, xhigh, max)", and a probe with an invalid value emits a
-// non-fatal warning and falls back to the CLI's own default rather than erroring — so an
+// current session (low, medium, high, xhigh, max)", plus the undocumented-but-accepted
+// `ultracode` (see the probe log on `claudeEffortSchema`), and a probe with an invalid value emits
+// a non-fatal warning and falls back to the CLI's own default rather than erroring — so an
 // out-of-range value here degrades gracefully even if it ever reached the CLI unvalidated (Main
 // still validates against `claudeEffortSchema` before it gets this far).
 export function buildClaudeArgs(
