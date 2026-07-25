@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, Ref, RefObject } from 'react';
 import { useAppStore } from '../../store/appStore';
 import { WorkerNode } from './WorkerNode';
@@ -442,7 +450,15 @@ export function TeamCanvas({
         void animateCamTo(target, isReduced() ? 0 : 400, { silent: true });
       },
     }),
-    [cancelCamAnim, animateCamTo, isReduced, collectRects, camToFit, camToFocus, claimSystemOwnership],
+    [
+      cancelCamAnim,
+      animateCamTo,
+      isReduced,
+      collectRects,
+      camToFit,
+      camToFocus,
+      claimSystemOwnership,
+    ],
   );
 
   // --- Canvas view autosave (Slice 6.1) ---
@@ -455,7 +471,10 @@ export function TeamCanvas({
       nodePositions: nodePositionsRef.current,
     };
     try {
-      const result = await client.saveCanvasView({ ...payload, revision: canvasViewRevisionRef.current });
+      const result = await client.saveCanvasView({
+        ...payload,
+        revision: canvasViewRevisionRef.current,
+      });
       canvasViewRevisionRef.current = result.revision;
     } catch {
       // Optimistic-concurrency conflict (or the first save racing a slow initial load): re-read
@@ -1044,8 +1063,8 @@ function CanvasControlsOverlay({
         </button>
       </div>
       <div className="cc-hint">
-        ドラッグで移動 · ホイール/ピンチでズーム · ↑↓←→/Tabで選択 · Enterで開く · F: フィット ·
-        L: Leaderへ · Esc: 選択解除
+        ドラッグで移動 · ホイール/ピンチでズーム · ↑↓←→/Tabで選択 · Enterで開く · F: フィット · L:
+        Leaderへ · Esc: 選択解除
       </div>
     </div>
   );

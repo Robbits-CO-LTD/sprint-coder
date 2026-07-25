@@ -2218,8 +2218,7 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
   const movedTo = `${databasePath}.corrupt-${Date.now()}`;
   renameSync(databasePath, movedTo);
   report.corruptFileMovedTo = movedTo;
-  for (const suffix of ['-wal', '-shm'])
-    rmSync(`${databasePath}${suffix}`, { force: true });
+  for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
   const backupPath = `${databasePath}.pre-migration.bak`;
   if (existsSync(backupPath)) {
     copyFileSync(backupPath, databasePath);

@@ -52,7 +52,10 @@ if (runsWithElectronAbi)
       // Starting Task has no Team at all — this exercises the auto-promotion path end to end,
       // not just the tool layer in isolation.
       expect(persistence.getTeamByTask(task.id)).toBeNull();
-      const started = persistence.startTurn(task.id, `${TEAM_SCENARIO_TRIGGER}：障害調査をお願いします`);
+      const started = persistence.startTurn(
+        task.id,
+        `${TEAM_SCENARIO_TRIGGER}：障害調査をお願いします`,
+      );
       runtime.start(task.id, started.turnId, `${TEAM_SCENARIO_TRIGGER}：障害調査をお願いします`);
 
       await waitFor(() => published.some((event) => event.type === 'turn.completed'));
@@ -67,17 +70,23 @@ if (runsWithElectronAbi)
       const workers = detail?.workers.filter(({ kind }) => kind === 'worker') ?? [];
       expect(workers).toHaveLength(3);
       expect(workers.every(({ state }) => state === 'done')).toBe(true);
-      expect(new Set(workers.map(({ role }) => role))).toEqual(new Set(['調査', '実装', 'レビュー']));
+      expect(new Set(workers.map(({ role }) => role))).toEqual(
+        new Set(['調査', '実装', 'レビュー']),
+      );
 
       // 3 Leader→Worker dispatches + 3 Worker→Leader reports, in strictly increasing seq order.
       const messages = detail?.messages ?? [];
       expect(messages).toHaveLength(6);
       expect(messages.map(({ seq }) => seq)).toEqual([...messages].map((_, index) => index + 1));
       expect(
-        messages.filter(({ sourceKind, targetKind }) => sourceKind === 'leader' && targetKind === 'worker'),
+        messages.filter(
+          ({ sourceKind, targetKind }) => sourceKind === 'leader' && targetKind === 'worker',
+        ),
       ).toHaveLength(3);
       expect(
-        messages.filter(({ sourceKind, targetKind }) => sourceKind === 'worker' && targetKind === 'leader'),
+        messages.filter(
+          ({ sourceKind, targetKind }) => sourceKind === 'worker' && targetKind === 'leader',
+        ),
       ).toHaveLength(3);
 
       const deltas = published.filter((event) => event.type === 'message.delta');

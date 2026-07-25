@@ -100,7 +100,10 @@ describe('TeamMcpBridge', () => {
     });
     expect(closed).toBe(false);
     expect(lines).toHaveLength(1);
-    const response = JSON.parse(lines[0] as string) as { ok: boolean; result: { workerId: string } };
+    const response = JSON.parse(lines[0] as string) as {
+      ok: boolean;
+      result: { workerId: string };
+    };
     expect(response.ok).toBe(true);
     expect(response.result.workerId).toBe('worker-1');
     expect(coordinator.stopWorker).toHaveBeenCalledWith('task-1', 'worker-1');

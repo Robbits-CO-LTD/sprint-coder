@@ -117,5 +117,8 @@ export function SurfaceLayer({
     restoreSurfaceState(captured);
   }, [mode, mainAnchorRef, leaderAnchorRef, host, pendingCaptureRef]);
 
-  return createPortal(<ChatSurface task={task} variant={mode} id={surfaceId} ref={surfaceRef} />, host);
+  return createPortal(
+    <ChatSurface task={task} variant={mode} id={surfaceId} ref={surfaceRef} />,
+    host,
+  );
 }

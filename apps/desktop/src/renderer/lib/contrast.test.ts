@@ -57,22 +57,28 @@ describe('design-token contrast audit (WCAG 2.2 AA)', () => {
   // 3:1 is sufficient) and, in several places, as regular-sized text (e.g. the runtime-chip label,
   // approval risk badge, `tlv-timeline` sender links) — held to the stricter 4.5:1 normal-text bar
   // throughout so every real usage is covered without needing to track each call site.
-  describe.each(['accent-primary', 'accent-cool', 'state-success', 'state-warning', 'state-danger'] as const)(
-    '%s (accent/status, used as text)',
-    (fg) => {
-      it.each(BACKGROUNDS)(`meets ${WCAG_AA_NORMAL_TEXT}:1 on --%s`, (bg) => {
-        const ratio = contrastRatio(tokenRgb(fg), tokenRgb(bg));
-        expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
-      });
-    },
-  );
+  describe.each([
+    'accent-primary',
+    'accent-cool',
+    'state-success',
+    'state-warning',
+    'state-danger',
+  ] as const)('%s (accent/status, used as text)', (fg) => {
+    it.each(BACKGROUNDS)(`meets ${WCAG_AA_NORMAL_TEXT}:1 on --%s`, (bg) => {
+      const ratio = contrastRatio(tokenRgb(fg), tokenRgb(bg));
+      expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
+    });
+  });
 
   // The focus ring itself (`:focus-visible { outline: 2px solid var(--accent-cool) }`, NFR-A11Y-02)
   // is a non-text UI indicator — WCAG 1.4.11 only requires 3:1 against its adjacent backgrounds.
-  it.each(BACKGROUNDS)('focus ring (--accent-cool) meets %s 3:1 as a UI indicator on --%s', (bg) => {
-    const ratio = contrastRatio(tokenRgb('accent-cool'), tokenRgb(bg));
-    expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_LARGE_TEXT_OR_UI);
-  });
+  it.each(BACKGROUNDS)(
+    'focus ring (--accent-cool) meets %s 3:1 as a UI indicator on --%s',
+    (bg) => {
+      const ratio = contrastRatio(tokenRgb('accent-cool'), tokenRgb(bg));
+      expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_LARGE_TEXT_OR_UI);
+    },
+  );
 });
 
 describe('opacity-dimmed text usages (real text, not decorative)', () => {
@@ -82,7 +88,11 @@ describe('opacity-dimmed text usages (real text, not decorative)', () => {
   const cases: Array<{ selector: string; bg: string; label: string }> = [
     { selector: '.composer-input::placeholder', bg: 'bg-elevated', label: 'Composer placeholder' },
     { selector: '.tlv-timeline small', bg: 'bg-surface', label: 'List View timeline metadata' },
-    { selector: '.sb-search input::placeholder', bg: 'bg-surface', label: 'Sidebar search placeholder' },
+    {
+      selector: '.sb-search input::placeholder',
+      bg: 'bg-surface',
+      label: 'Sidebar search placeholder',
+    },
     { selector: '.cc-hint', bg: 'bg-canvas', label: 'Canvas keyboard-shortcut hint' },
   ];
 

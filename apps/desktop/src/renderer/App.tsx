@@ -87,7 +87,9 @@ export default function App() {
   const teamViewOpenRef = useRef(teamViewOpen);
   useEffect(() => {
     if (teamViewOpenRef.current && !teamViewOpen && document.activeElement === document.body) {
-      document.querySelector<HTMLElement>('[data-testid="team-toggle"]')?.focus({ preventScroll: true });
+      document
+        .querySelector<HTMLElement>('[data-testid="team-toggle"]')
+        ?.focus({ preventScroll: true });
     }
     teamViewOpenRef.current = teamViewOpen;
   }, [teamViewOpen]);
@@ -260,7 +262,9 @@ export default function App() {
           mainAnchorRef={mainAnchorRef}
           leaderAnchorRef={leaderAnchorRef}
           surfaceRef={leaderRef}
-          surfaceId={surfaceMode === 'node' && leaderAgentId ? `team-agent-${leaderAgentId}` : undefined}
+          surfaceId={
+            surfaceMode === 'node' && leaderAgentId ? `team-agent-${leaderAgentId}` : undefined
+          }
           pendingCaptureRef={pendingCaptureRef}
         />
       )}

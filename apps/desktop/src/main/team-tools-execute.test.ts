@@ -83,9 +83,7 @@ describe('executeTeamTool routing', () => {
     await expect(
       executeTeamTool(coordinator, 'task-1', 'team_wait_reports', { extra: true }),
     ).rejects.toThrow();
-    await expect(
-      executeTeamTool(coordinator, 'task-1', 'team_stop_worker', {}),
-    ).rejects.toThrow();
+    await expect(executeTeamTool(coordinator, 'task-1', 'team_stop_worker', {})).rejects.toThrow();
   });
 });
 
@@ -108,11 +106,17 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
           : [];
       }) as never,
     });
-    const result = (await executeTeamTool(coordinator, 'task-1', 'team_wait_reports', {}, {
-      longPoll: true,
-      longPollTimeoutMs: 5_000,
-      longPollIntervalMs: 5,
-    })) as { ok: true; reports: readonly { workerId: string }[] };
+    const result = (await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_wait_reports',
+      {},
+      {
+        longPoll: true,
+        longPollTimeoutMs: 5_000,
+        longPollIntervalMs: 5,
+      },
+    )) as { ok: true; reports: readonly { workerId: string }[] };
     expect(result.ok).toBe(true);
     expect(result.reports).toHaveLength(1);
     expect(result.reports[0]?.workerId).toBe('worker-1');
@@ -122,11 +126,17 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
   it('stops polling and returns an empty list once every Worker has settled', async () => {
     const coordinator = fakeCoordinator({ hasBusyWorkers: vi.fn(() => false) });
     const started = Date.now();
-    const result = await executeTeamTool(coordinator, 'task-1', 'team_wait_reports', {}, {
-      longPoll: true,
-      longPollTimeoutMs: 5_000,
-      longPollIntervalMs: 5,
-    });
+    const result = await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_wait_reports',
+      {},
+      {
+        longPoll: true,
+        longPollTimeoutMs: 5_000,
+        longPollIntervalMs: 5,
+      },
+    );
     expect(result).toEqual({ ok: true, reports: [] });
     expect(Date.now() - started).toBeLessThan(1_000);
   });
@@ -134,11 +144,17 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
   it('gives up after the timeout even if Workers are still busy', async () => {
     const coordinator = fakeCoordinator({ hasBusyWorkers: vi.fn(() => true) });
     const started = Date.now();
-    const result = await executeTeamTool(coordinator, 'task-1', 'team_wait_reports', {}, {
-      longPoll: true,
-      longPollTimeoutMs: 40,
-      longPollIntervalMs: 10,
-    });
+    const result = await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_wait_reports',
+      {},
+      {
+        longPoll: true,
+        longPollTimeoutMs: 40,
+        longPollIntervalMs: 10,
+      },
+    );
     expect(result).toEqual({ ok: true, reports: [] });
     expect(Date.now() - started).toBeGreaterThanOrEqual(30);
   });
@@ -155,13 +171,25 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
       ) as never,
     });
     let cursor = 0;
-    await executeTeamTool(coordinator, 'task-1', 'team_wait_reports', {}, {
-      waitReportsCursor: { read: () => cursor, advance: (seq) => (cursor = seq) },
-    });
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_wait_reports',
+      {},
+      {
+        waitReportsCursor: { read: () => cursor, advance: (seq) => (cursor = seq) },
+      },
+    );
     expect(cursor).toBe(2);
-    const second = await executeTeamTool(coordinator, 'task-1', 'team_wait_reports', {}, {
-      waitReportsCursor: { read: () => cursor, advance: (seq) => (cursor = seq) },
-    });
+    const second = await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_wait_reports',
+      {},
+      {
+        waitReportsCursor: { read: () => cursor, advance: (seq) => (cursor = seq) },
+      },
+    );
     expect(second).toEqual({ ok: true, reports: [] });
   });
 });
