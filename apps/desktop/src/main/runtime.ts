@@ -71,6 +71,15 @@ export class MockRuntimeAdapter {
     // SPRINT_CODER_E2E_MODE=dev, so without this the reasoning panel is permanently empty in every
     // E2E run and the feature would be untestable end to end.
     private readonly emitReasoning?: (taskId: string, turnId: string, text: string) => void,
+    // Pseudo live file bodies (issue #39), for the same reason as emitReasoning: mock is the only
+    // runtime under SPRINT_CODER_E2E_MODE=dev, so the live edit view would be untestable without it.
+    private readonly emitFileEdit?: (
+      taskId: string,
+      turnId: string,
+      path: string,
+      text: string,
+      complete: boolean,
+    ) => void,
   ) {
     this.toolBroker = createDefaultToolBroker(
       (taskId) => this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0,
@@ -173,15 +182,24 @@ export class MockRuntimeAdapter {
       if (
         workspacePath !== null &&
         (this.persistence.getPermissionPolicy?.(taskId).preset ?? 'ask') !== 'ask'
-      )
+      ) {
+        const changes = mockFileChanges(input);
+        // Stream each body before recording the change, in that order, because that is the order a
+        // real Runtime produces them in: the file is written, then reported (issue #39). An E2E
+        // that saw the summary first would be asserting on a sequence the real thing never emits.
+        for (const change of changes) {
+          const body = mockFileBody(change.path);
+          for (const upto of streamingPrefixes(body)) {
+            await pause(Math.max(8, Math.floor(this.delayMs / 12)));
+            if (control.canceled) return;
+            this.emitFileEdit?.(taskId, turnId, change.path, upto, upto.length === body.length);
+          }
+        }
         await this.serialize(taskId, () => {
-          const event = this.persistence.recordFileChanges?.({
-            taskId,
-            turnId,
-            changes: mockFileChanges(input),
-          });
+          const event = this.persistence.recordFileChanges?.({ taskId, turnId, changes });
           if (event !== undefined && event !== null) this.publish(event);
         });
+      }
       const workspaceId = workspacePath === null ? null : digestCanonical({ workspacePath });
       const contractRevision =
         this.persistence.getAcceptanceContract?.(taskId, turnId).revision ?? null;
@@ -291,6 +309,32 @@ function intelligenceRecorder(
     transitionIntelligenceStep: (stepId, state) =>
       serialize(taskId, () => transition.call(persistence, stepId, state)),
   };
+}
+
+/**
+ * Deterministic stand-in for a file body, keyed by its path so a given path always yields the same
+ * content — an E2E asserting on a line needs that to be stable.
+ */
+export function mockFileBody(path: string): string {
+  const name = path.replace(/^.*\//, '').replace(/\.[^.]*$/, '');
+  return [
+    `// ${path}`,
+    `export function ${name.replace(/[^A-Za-z0-9]/g, '_')}(value: string): string {`,
+    '  const trimmed = value.trim();',
+    '  if (trimmed.length === 0) return "";',
+    '  return trimmed.toUpperCase();',
+    '}',
+    '',
+  ].join('\n');
+}
+
+/** The prefixes a body is revealed through, mimicking a model emitting it a chunk at a time. */
+function streamingPrefixes(body: string): string[] {
+  const step = Math.max(8, Math.ceil(body.length / 6));
+  const prefixes: string[] = [];
+  for (let end = step; end < body.length; end += step) prefixes.push(body.slice(0, end));
+  prefixes.push(body);
+  return prefixes;
 }
 
 /**

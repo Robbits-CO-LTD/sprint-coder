@@ -222,3 +222,89 @@ describe('file writes (issue #37)', () => {
     expect(normalizer.push(toolResult('unknown', 'done'))).toEqual([]);
   });
 });
+
+describe('live file bodies (issue #39)', () => {
+  const start = (index: number, name: string, id = 'toolu_1'): string =>
+    JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index, content_block: { type: 'tool_use', id, name } },
+    });
+  const fragment = (index: number, partial_json: string): string =>
+    JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index,
+        delta: { type: 'input_json_delta', partial_json },
+      },
+    });
+
+  it('streams the file body as the arguments arrive, once the path is known', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(start(2, 'Write'));
+    // Nothing until the path is closed: a half-typed path names a different file than the one being
+    // written, and the view is labelled with it.
+    expect(normalizer.push(fragment(2, '{"file_path": "/ws/a'))).toEqual([]);
+    expect(normalizer.push(fragment(2, '.ts", "content": "const'))).toContainEqual({
+      type: 'fileEdit',
+      path: '/ws/a.ts',
+      text: 'const',
+      complete: false,
+    });
+    expect(normalizer.push(fragment(2, ' a = 1;'))).toContainEqual({
+      type: 'fileEdit',
+      path: '/ws/a.ts',
+      text: 'const a = 1;',
+      complete: false,
+    });
+    expect(normalizer.push(fragment(2, '"}'))).toContainEqual({
+      type: 'fileEdit',
+      path: '/ws/a.ts',
+      text: 'const a = 1;',
+      complete: true,
+    });
+  });
+
+  it('reads new_string for an Edit, which is what that tool is producing for the file', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(start(0, 'Edit'));
+    expect(
+      normalizer.push(
+        fragment(0, '{"file_path": "/ws/a.ts", "old_string": "1", "new_string": "2"}'),
+      ),
+    ).toContainEqual({ type: 'fileEdit', path: '/ws/a.ts', text: '2', complete: true });
+  });
+
+  it('ignores tool blocks that do not write a file', () => {
+    // A Read's arguments stream too. Showing a path being typed as though it were a file being
+    // written would misdescribe what the model is doing.
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(start(0, 'Read'));
+    expect(normalizer.push(fragment(0, '{"file_path": "/ws/a.ts"}'))).toEqual([]);
+  });
+
+  it('emits nothing for a fragment that ends mid-escape, then emits once it resolves', () => {
+    // A lone trailing backslash could still become \\n or \\\\; decoding it early and correcting it on
+    // the next fragment would make the live view flicker between wrong and right.
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(start(0, 'Write'));
+    normalizer.push(fragment(0, '{"file_path": "/ws/a.ts", "content": "a'));
+    expect(normalizer.push(fragment(0, '\\'))).toEqual([]);
+    expect(normalizer.push(fragment(0, 'n'))).toContainEqual({
+      type: 'fileEdit',
+      path: '/ws/a.ts',
+      text: 'a\n',
+      complete: false,
+    });
+  });
+
+  it('stops tracking a block once it closes, so a later index reuse cannot resume it', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(start(0, 'Write'));
+    normalizer.push(fragment(0, '{"file_path": "/ws/a.ts", "content": "x"}'));
+    normalizer.push(
+      JSON.stringify({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }),
+    );
+    expect(normalizer.push(fragment(0, 'ignored'))).toEqual([]);
+  });
+});

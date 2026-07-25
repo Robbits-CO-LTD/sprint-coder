@@ -166,6 +166,18 @@ export type GeneratedImage = {
  * that resolves outside the Workspace root rather than passing it here. */
 export type FileChange = { path: string; kind: 'add' | 'update' | 'delete' };
 export type FileChangeRecord = { seq: number; turnId: string; changes: FileChange[] };
+/** A file's body as a Runtime writes it (issue #39). Pushed, never persisted — see contracts'
+ * fileEditFrameSchema. `text` is the whole body so far, already secret-redacted by Main. */
+export type FileEditFrame = {
+  taskId: string;
+  turnId: string;
+  path: string;
+  text: string;
+  complete: boolean;
+  /** `stream` is the model's text as it types (Claude only); `disk` is the file's contents re-read
+   * when a watcher saw it change (Codex, and any write a CLI does not report). */
+  source: 'stream' | 'disk';
+};
 
 export type TurnEvent =
   | { type: 'turn.accepted'; taskId: string; turnId: string; seq: number; userMessage: ChatMessage }
@@ -462,6 +474,9 @@ export interface SprintCoderApi {
   };
   reasoning: {
     subscribe(listener: (batch: ReasoningBatch) => void): () => void;
+  };
+  fileEdits: {
+    subscribe(listener: (frame: FileEditFrame) => void): () => void;
   };
   files: {
     list(taskId: string): Promise<FileChangeRecord[]>;

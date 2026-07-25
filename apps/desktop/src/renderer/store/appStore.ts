@@ -26,6 +26,7 @@ import type {
 import { STAGE_LABEL } from '../lib/stages';
 import { advanceStageIndex } from '../lib/turn-progress';
 import { appendReasoning, pruneReasoning } from '../lib/reasoning-buffer';
+import { applyFileEditFrame, clearFileEdits } from '../lib/file-edit-buffer';
 import {
   appendCommandOutput,
   projectCommandTail,
@@ -127,6 +128,9 @@ type AppState = {
    * which is the order the edits actually happened — the Inspector reads the tail of this and the
    * timeline renders one entry per tool call. */
   fileChangesByTask: Record<string, { seq: number; turnId: string; changes: FileChange[] }[]>;
+  /** The Task whose live file bodies are currently buffered (issue #39). The bodies themselves live
+   * in lib/file-edit-buffer.ts; this is only the signal that there is something to show. */
+  liveEditTaskId: string | null;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
   teamByTask: Record<string, TeamDetail | null | undefined>;
@@ -196,6 +200,7 @@ type AppState = {
 // listener under StrictMode's deliberate double-invocation in dev, and every fragment is appended
 // twice. Caught by looking at the rendered panel: every paragraph was duplicated.
 let reasoningUnsubscribe: (() => void) | null = null;
+let fileEditUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
 let currentSubscribedTaskId: string | null = null;
@@ -632,6 +637,7 @@ export const useAppStore = create<AppState>((set, get) => {
     turnDiffByTask: {},
     imagesByTask: {},
     fileChangesByTask: {},
+    liveEditTaskId: null,
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     teamByTask: {},
@@ -686,6 +692,22 @@ export const useAppStore = create<AppState>((set, get) => {
             });
           },
         );
+      // Live file bodies (issue #39). Guarded the same way reasoning is: init() runs twice under
+      // StrictMode's deliberate double-invocation, and a second listener would apply every frame
+      // twice — harmless for a cumulative body, but it doubles the work at typing speed.
+      if (fileEditUnsubscribe !== null) {
+        fileEditUnsubscribe();
+        fileEditUnsubscribe = null;
+      }
+      if (typeof window.sprintCoder.fileEdits?.subscribe === 'function')
+        fileEditUnsubscribe = window.sprintCoder.fileEdits.subscribe((frame) => {
+          applyFileEditFrame(frame);
+          // One boolean in the store, so the panel can mount the live view without subscribing to
+          // the body itself. The text stays in the module buffer for the same reason reasoning does.
+          set((state) =>
+            state.liveEditTaskId === frame.taskId ? {} : { liveEditTaskId: frame.taskId },
+          );
+        });
       // Startup recovery outcome and Runtime liveness both feed the SurfaceFooter (issue #9).
       // Both are best-effort: an older backend simply leaves the footer's quiet default in place.
       if (typeof window.sprintCoder.app?.getInfo === 'function')
@@ -873,6 +895,12 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async selectTask(taskId: string) {
+      // Live bodies belong to the Task that produced them; carrying them across a switch would show
+      // one Task's file under another's name (issue #39).
+      if (get().selectedTaskId !== taskId) {
+        clearFileEdits();
+        set({ liveEditTaskId: null });
+      }
       set({ selectedTaskId: taskId, loadingMessages: true, error: null });
       if (currentUnsubscribe) {
         currentUnsubscribe();

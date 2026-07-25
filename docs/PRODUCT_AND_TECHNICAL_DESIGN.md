@@ -612,6 +612,17 @@ Access presetはCapability policyのUI shortcutにすぎず、保存時は個別
 
 Runtimeが書いたファイルは`files.changed` TurnEventとして永続化する。pathはCLI自身の構造化eventからのみ取得し、model proseからは決して読まない（issue #11のimage pathと同じ理由）。MainがWorkspace rootの内側であることを検証し、外へ解決するpathは表示しない。
 
+**編集中の本文**は`files.changed`とは別のtransient push channel（`IPC_CHANNELS.fileEditEvent`）で配信し、**永続化しない**。理由は#17のreasoningと同じで、モデルのタイピング速度で届くstreamを`turn_events`へ載せるとNFR-PERF-04の予算を食い潰し、再購読ごとにreplayされる。永続する記録は`files.changed`（何が変わったか）とdisk上のファイル（結果）である。
+
+本文の出所は2つあり、UIはどちらかを明示する。
+
+- `stream`: モデルが書いている文字そのもの。Claudeのみ。`--include-partial-messages`が既に付いており、tool呼び出しの引数が`input_json_delta`として断片で届く（Writeなら`content`、Editなら`new_string`）。未完成のJSONから逐次取り出すため、エスケープ途中で切れた断片は次まで保留する。
+- `disk`: ファイルの現在の中身。Codexは書き込み中に本文を一切出さず`apply_patch`もtemp+renameのため、これしか手段が無い。`files.changed`の到着時にMainが読み直し、加えてTurnの間Workspaceをwatchする。
+
+watcherは速度のためではなく網羅のためにある。macOSで実測すると、同じ書き込みに対してwatcherの通知はCLI自身の`item.completed`より約270ms遅い（FSEventsのlatency）。watcherが拾えるのはCLIが報告しない書き込み — shell commandが書き換えたファイルなど — であり、報告されたものは`recordFileChanges`側の読み直しの方が速い。
+
+本文はrenderer到達前にMain側でsecret除去する。除去はstreaming（frame単位ではない）で行う — secretがframe境界をまたぐと、frameごとに独立して除去した場合に分割されたtokenが通り抜けるためである。描画はplain textで、Markdownもsyntax highlighterも通さない。前frameから変わった行は短時間ハイライトする（diffではなく行単位のLCS。patch適用は数十行が一度に変わるため、印が無いと読めない）。
+
 Policy evaluation order:
 
 1. managed administrator deny。

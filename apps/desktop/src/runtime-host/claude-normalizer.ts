@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readPartialJsonString } from './partial-json-string';
 import type { TurnStage } from '@sprint-coder/contracts';
 import type { RuntimeCanonicalEvent } from './protocol';
 
@@ -21,6 +22,9 @@ export type ClaudeExpectedCapabilities =
 
 const NO_CAPABILITIES: ClaudeExpectedCapabilities = { kind: 'none' };
 
+/** A single tool call's arguments past this size are not a file body worth streaming (issue #39). */
+const MAX_TOOL_ARGUMENT_BYTES = 1_048_576;
+
 /** Built-in tools that write a file and report its path as `file_path` (issue #37). */
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 
@@ -35,6 +39,13 @@ export class ClaudeJsonlNormalizer {
   // tool_use_id -> the write it intends, held until its tool_result says whether it happened
   // (issue #37). Bounded at 200 entries so a runaway turn cannot grow this without limit.
   private readonly pendingWrites = new Map<string, { path: string; tool: string }>();
+  // Live file bodies being streamed, keyed by content-block index (issue #39). Bounded at 8
+  // concurrent blocks and at MAX_TOOL_ARGUMENT_BYTES each, so a runaway tool call cannot grow the
+  // runtime host's memory without limit.
+  private readonly editBlocks = new Map<
+    number,
+    { tool: string; buffer: string; path: string | null; sent: number; closed: boolean }
+  >();
 
   constructor(private readonly expected: ClaudeExpectedCapabilities = NO_CAPABILITIES) {}
 
@@ -70,7 +81,13 @@ export class ClaudeJsonlNormalizer {
 
   private pushStreamEvent(value: Record<string, unknown>): RuntimeCanonicalEvent[] {
     const event = isRecord(value['event']) ? value['event'] : null;
-    if (event === null || event['type'] !== 'content_block_delta') return [];
+    if (event === null) return [];
+    if (event['type'] === 'content_block_start') return this.startBlock(event);
+    if (event['type'] === 'content_block_stop') {
+      this.editBlocks.delete(readNumber(event, 'index') ?? -1);
+      return [];
+    }
+    if (event['type'] !== 'content_block_delta') return [];
     const delta = isRecord(event['delta']) ? event['delta'] : null;
     if (delta === null) return [];
 
@@ -85,9 +102,13 @@ export class ClaudeJsonlNormalizer {
         ? []
         : [{ type: 'reasoning', text: thinking }];
     }
-    // `signature_delta` (the thinking block's cryptographic signature) and `input_json_delta` (tool
-    // arguments) are dropped explicitly rather than by falling through: both are real deltas that
-    // carry nothing displayable, and a future reader should see that they were considered.
+    // The file body as the model types it (issue #39). This used to be dropped as "tool arguments
+    // carrying nothing displayable" — which was wrong: for Write and Edit these fragments ARE the
+    // file's contents, arriving at generation speed.
+    if (delta['type'] === 'input_json_delta') return this.pushToolArguments(event, delta);
+    // `signature_delta` (the thinking block's cryptographic signature) is dropped explicitly rather
+    // than by falling through: it is a real delta that carries nothing displayable, and a future
+    // reader should see it was considered.
     if (delta['type'] !== 'text_delta') return [];
 
     const text = readString(delta, 'text');
@@ -95,6 +116,69 @@ export class ClaudeJsonlNormalizer {
     return [
       ...this.advanceTo('synthesizing'),
       { type: 'delta', messageId: this.messageId, delta: text },
+    ];
+  }
+
+  /**
+   * Starts tracking a tool_use block whose arguments will carry a file body (issue #39).
+   *
+   * Keyed by the block index rather than the tool_use id, because that is what the deltas carry.
+   * Only the writing tools are tracked: a Read's arguments stream too, and showing a path being
+   * typed as though it were a file being written would be a lie about what is happening.
+   */
+  private startBlock(event: Record<string, unknown>): RuntimeCanonicalEvent[] {
+    const block = isRecord(event['content_block']) ? event['content_block'] : null;
+    const index = readNumber(event, 'index');
+    if (block === null || index === null || block['type'] !== 'tool_use') return [];
+    const name = readString(block, 'name');
+    if (name === null || !WRITE_TOOLS.has(name)) return [];
+    if (this.editBlocks.size >= 8) return [];
+    this.editBlocks.set(index, { tool: name, buffer: '', path: null, sent: -1, closed: false });
+    return [];
+  }
+
+  /**
+   * Accumulates a tool call's argument fragments and emits the file body decoded so far.
+   *
+   * Emits only when the decoded length actually grew: a fragment that ends mid-escape adds nothing
+   * yet, and re-sending an unchanged body would cost a repaint for no new information.
+   */
+  private pushToolArguments(
+    event: Record<string, unknown>,
+    delta: Record<string, unknown>,
+  ): RuntimeCanonicalEvent[] {
+    const index = readNumber(event, 'index');
+    const block = index === null ? undefined : this.editBlocks.get(index);
+    if (block === undefined) return [];
+    const fragment = readString(delta, 'partial_json');
+    if (fragment === null) return [];
+    if (block.buffer.length + fragment.length > MAX_TOOL_ARGUMENT_BYTES) return [];
+    block.buffer += fragment;
+
+    if (block.path === null) {
+      const path = readPartialJsonString(block.buffer, 'file_path');
+      // Only once closed: a half-typed path would name a different file than the one being written.
+      if (path === null || !path.complete) return [];
+      block.path = path.value;
+    }
+    // Write carries the whole file; Edit carries only the replacement. Both are what the model is
+    // producing for that file right now, which is what the view is showing.
+    const body = readPartialJsonString(
+      block.buffer,
+      block.tool === 'Write' ? 'content' : 'new_string',
+    );
+    // Emit when there is new text, and also on the closing quote even if it added none: the terminal
+    // frame is what tells the view to stop following and relabel itself, so suppressing it as
+    // "nothing changed" would leave the panel saying 書き込み中 forever.
+    if (body === null) return [];
+    const grew = body.value.length !== block.sent;
+    const closing = body.complete && !block.closed;
+    if (!grew && !closing) return [];
+    block.sent = body.value.length;
+    block.closed = body.complete;
+    return [
+      ...this.advanceTo('executing'),
+      { type: 'fileEdit', path: block.path, text: body.value, complete: body.complete },
     ];
   }
 
@@ -221,6 +305,11 @@ function assertExpectedCapabilities(
     throw new ClaudeCapabilityViolationError(
       'Claude session reported unexpected tool or MCP capability for the team MCP profile',
     );
+}
+
+function readNumber(value: Record<string, unknown>, key: string): number | null {
+  const candidate = value[key];
+  return typeof candidate === 'number' && Number.isInteger(candidate) ? candidate : null;
 }
 
 function readString(value: Record<string, unknown>, key: string): string | null {
