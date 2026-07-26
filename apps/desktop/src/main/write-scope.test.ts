@@ -34,8 +34,13 @@ describe('relativizeWorkspacePath (issue #37)', () => {
         'C:\\workspace\\src\\app.ts',
         win32.resolve,
         win32.relative,
+        win32.sep,
       ),
     ).toBe('src/app.ts');
+  });
+
+  it('preserves a backslash that is part of a valid POSIX file name', () => {
+    expect(rel('/tmp/ws', '/tmp/ws/foo\\bar.txt')).toBe('foo\\bar.txt');
   });
 
   it('rejects a path outside the Workspace, however it is spelled', () => {

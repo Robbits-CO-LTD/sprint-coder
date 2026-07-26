@@ -1,4 +1,5 @@
 import type { AccessPreset, RuntimeWriteScope } from '@sprint-coder/contracts';
+import { sep } from 'node:path';
 
 /**
  * The Access preset a Task is set to, plus whether it has a Workspace, decides how much the Runtime
@@ -43,6 +44,7 @@ export function relativizeWorkspacePath(
   candidate: string,
   resolve: (path: string) => string,
   relative: (from: string, to: string) => string,
+  separator = sep,
 ): string | null {
   if (candidate.length === 0 || candidate.length > 4096) return null;
   const root = resolve(workspacePath);
@@ -50,7 +52,7 @@ export function relativizeWorkspacePath(
   if (target === root) return null;
   const rel = relative(root, target);
   if (rel === '' || rel.startsWith('..') || isAbsoluteLike(rel)) return null;
-  const portable = rel.replaceAll('\\', '/');
+  const portable = separator === '/' ? rel : rel.split(separator).join('/');
   return portable.length > 1024 ? null : portable;
 }
 
