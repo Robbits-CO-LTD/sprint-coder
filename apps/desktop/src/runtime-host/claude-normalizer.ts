@@ -293,9 +293,7 @@ function assertExpectedCapabilities(
 
   const reportedTools = new Set(tools as string[]);
   const expectedMcpTools = new Set(expected.teamMcp?.toolNames ?? []);
-  const reportedMcpTools = new Set(
-    [...reportedTools].filter((tool) => tool.startsWith('mcp__')),
-  );
+  const reportedMcpTools = new Set([...reportedTools].filter((tool) => tool.startsWith('mcp__')));
   const reportedTeamServer =
     mcpServers.length === 1 && isRecord(mcpServers[0]) ? mcpServers[0] : null;
   const teamServerPending =
@@ -309,10 +307,7 @@ function assertExpectedCapabilities(
   const expectedExactTools =
     expected.builtInTools === 'default'
       ? null
-      : new Set([
-          ...expected.builtInTools,
-          ...(teamServerPending ? [] : [...expectedMcpTools]),
-        ]);
+      : new Set([...expected.builtInTools, ...(teamServerPending ? [] : [...expectedMcpTools])]);
   const toolsMatch =
     mcpToolsMatch &&
     (expectedExactTools === null ||

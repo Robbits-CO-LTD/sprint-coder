@@ -30,8 +30,7 @@ const WHEEL_SETTLE_MS = 260;
 export function preservesNestedScroll(target: EventTarget | null): boolean {
   const element = target as { closest?: (selectors: string) => Element | null } | null;
   return (
-    typeof element?.closest === 'function' &&
-    element.closest('.timeline-scroll, .w-body') !== null
+    typeof element?.closest === 'function' && element.closest('.timeline-scroll, .w-body') !== null
   );
 }
 
