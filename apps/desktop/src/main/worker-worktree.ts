@@ -155,8 +155,12 @@ function sanitizedGitEnv(): NodeJS.ProcessEnv {
   if (path !== undefined) env['PATH'] = path;
   if (home !== undefined) env['HOME'] = home;
   env['GIT_TERMINAL_PROMPT'] = '0';
-  env['GIT_CONFIG_GLOBAL'] = devNull;
-  env['GIT_CONFIG_SYSTEM'] = devNull;
+  // Git for Windows rewrites Node's `\\.\nul` device path to `//./nul` and
+  // rejects it as a config file. The native DOS device name is accepted by
+  // Git while preserving the same "ignore ambient config" behavior.
+  const nullConfig = process.platform === 'win32' ? 'NUL' : devNull;
+  env['GIT_CONFIG_GLOBAL'] = nullConfig;
+  env['GIT_CONFIG_SYSTEM'] = nullConfig;
   return env;
 }
 
