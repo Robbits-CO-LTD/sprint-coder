@@ -28,9 +28,17 @@ if ($operation -eq 'secure') {
     [System.Security.AccessControl.AccessControlType]::Allow
   )
   $acl.SetAccessRule($rule)
-  Set-Acl -LiteralPath $path -AclObject $acl
+  if ($kind -eq 'directory') {
+    [System.IO.Directory]::SetAccessControl($path, $acl)
+  } else {
+    [System.IO.File]::SetAccessControl($path, $acl)
+  }
 }
-$actual = Get-Acl -LiteralPath $path
+if ($kind -eq 'directory') {
+  $actual = [System.IO.Directory]::GetAccessControl($path)
+} else {
+  $actual = [System.IO.File]::GetAccessControl($path)
+}
 if (-not $actual.AreAccessRulesProtected) { throw 'ACL inheritance is enabled' }
 if ($actual.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) {
   throw 'ACL owner is not the current user'
