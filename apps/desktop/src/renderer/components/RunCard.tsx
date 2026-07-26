@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from 'react';
 import { STAGE_LABEL, STAGE_ORDER, useAppStore, type TurnRuntimeState } from '../store/appStore';
 import { formatElapsed } from '../lib/format';
+import { teamRunProgress } from '../lib/team-progress';
 import { ReasoningPanel } from './ReasoningPanel';
 
 // Run Card, collapsed to a single "思考中" pill with the reasoning behind a disclosure (issue #17).
@@ -25,10 +26,12 @@ const TITLE_BY_STATUS: Record<TurnRuntimeState['status'], string> = {
 
 export function RunCard({
   turn,
+  taskId,
   onStop,
   variant = 'main',
 }: {
   turn: TurnRuntimeState;
+  taskId: string;
   onStop: () => void;
   variant?: 'main' | 'node';
 }) {
@@ -37,6 +40,7 @@ export function RunCard({
   const [expanded, setExpanded] = useState(false);
   const panelId = useId();
   const reasoning = useAppStore((s) => s.reasoningSeenByTurn[turn.turnId]);
+  const team = useAppStore((s) => s.teamByTask[taskId]);
 
   useEffect(() => {
     if (!isActive) return;
@@ -60,8 +64,11 @@ export function RunCard({
   const hasReasoning = reasoning?.seen === true;
   // `waiting_approval` replaces the label outright: the turn is stopped waiting for the user, and
   // calling that "思考中" would blame the model for the user's turn.
+  const teamProgress = isActive ? teamRunProgress(team) : null;
   const label =
-    isActive && turn.stage === 'waiting_approval' ? '承認待ち' : TITLE_BY_STATUS[turn.status];
+    teamProgress?.label ??
+    (isActive && turn.stage === 'waiting_approval' ? '承認待ち' : TITLE_BY_STATUS[turn.status]);
+  const stageLabel = teamProgress?.detail ?? STAGE_LABEL[turn.stage];
 
   return (
     <div
@@ -82,7 +89,7 @@ export function RunCard({
           >
             <span className="run-dot" aria-hidden="true" />
             <span className={`run-title${isActive ? ' sheen' : ''}`}>{label}</span>
-            <span className="run-stage-inline">· {STAGE_LABEL[turn.stage]}</span>
+            <span className="run-stage-inline">· {stageLabel}</span>
             <span className="think-chevron" aria-hidden="true">
               {expanded ? '⌃' : '⌄'}
             </span>
@@ -93,7 +100,7 @@ export function RunCard({
           <span className="think-toggle think-toggle--static">
             <span className="run-dot" aria-hidden="true" />
             <span className={`run-title${isActive ? ' sheen' : ''}`}>{label}</span>
-            <span className="run-stage-inline">· {STAGE_LABEL[turn.stage]}</span>
+            <span className="run-stage-inline">· {stageLabel}</span>
           </span>
         )}
         {/* aria-hidden: this ticks every 500ms and would otherwise be announced each time
