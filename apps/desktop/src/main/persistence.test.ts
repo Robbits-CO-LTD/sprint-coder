@@ -63,6 +63,7 @@ import {
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
+const artifactIt = it.skipIf(process.platform === 'win32');
 
 afterEach(() => {
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -544,6 +545,7 @@ if (runsWithElectronAbi)
       expect(persistence.getEffort()).toBe('xhigh');
       persistence.setRuntime('claude');
       expect(persistence.getEffort()).toBe('xhigh');
+      persistence.close();
     });
 
     it('pins the selected runtime and model when a Turn is accepted', () => {
@@ -802,14 +804,17 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
-    it('reopens real artifacts and a real file before compensating a restart', async () => {
+    artifactIt('reopens real artifacts and a real file before compensating a restart', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
       const turn = persistence.startTurn(task.id, 'durable artifact restart');
       const workspaceFile = join(dirname(path), 'workspace.txt');
       const artifactRoot = join(dirname(path), 'edit-artifacts');
       writeFileSync(workspaceFile, 'before');
-      const artifacts = await EditArtifactStore.open({ rootPath: artifactRoot, quotaBytes: 4096 });
+      const artifacts = await EditArtifactStore.open({
+        rootPath: artifactRoot,
+        quotaBytes: 4096,
+      });
       const boundary = fileBoundary(workspaceFile, artifacts);
       const request = {
         id: 'disk-saga',
@@ -851,14 +856,17 @@ if (runsWithElectronAbi)
       reopenedPersistence.close();
     });
 
-    it('retries durable terminal artifact cleanup after restart', async () => {
+    artifactIt('retries durable terminal artifact cleanup after restart', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
       const turn = persistence.startTurn(task.id, 'terminal cleanup restart');
       const workspaceFile = join(dirname(path), 'cleanup-workspace.txt');
       const artifactRoot = join(dirname(path), 'cleanup-artifacts');
       writeFileSync(workspaceFile, 'before');
-      const artifacts = await EditArtifactStore.open({ rootPath: artifactRoot, quotaBytes: 4096 });
+      const artifacts = await EditArtifactStore.open({
+        rootPath: artifactRoot,
+        quotaBytes: 4096,
+      });
       await expect(
         new EditSagaExecutor(
           new PersistenceEditSagaStore(persistence),

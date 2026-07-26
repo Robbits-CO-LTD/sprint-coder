@@ -101,7 +101,7 @@ if (runsWithElectronAbi)
       // record.
       console.info(`[perf] 10k-event reopen+projection: ${Math.round(elapsedMs)}ms`);
       expect(elapsedMs).toBeLessThan(1500);
-    });
+    }, 60_000);
   });
 
 describe('recovery suite Electron ABI bridge', () => {

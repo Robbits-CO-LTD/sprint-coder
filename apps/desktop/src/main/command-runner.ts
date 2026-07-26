@@ -265,6 +265,19 @@ export class CommandRunner {
       outcome: outcomePromise,
     };
     this.active.set(executionId, active);
+    const bufferedOutput: { stream: 'stdout' | 'stderr'; data: Buffer }[] = [];
+    let bufferedOutputBytes = 0;
+    let outputConsumer = (stream: 'stdout' | 'stderr', data: Buffer): void => {
+      const copy = Buffer.from(data);
+      bufferedOutput.push({ stream, data: copy });
+      bufferedOutputBytes += copy.byteLength;
+      if (bufferedOutputBytes >= this.maxBufferedBytes) {
+        child.stdout?.pause();
+        child.stderr?.pause();
+      }
+    };
+    child.stdout?.on('data', (data: Buffer) => outputConsumer('stdout', data));
+    child.stderr?.on('data', (data: Buffer) => outputConsumer('stderr', data));
     let processStartIdentity = await readProcessStartIdentity(child.pid);
     if (process.platform === 'win32' && processStartIdentity === 'unavailable') {
       // PowerShell can observe that a short-lived process is already gone
@@ -278,7 +291,22 @@ export class CommandRunner {
         ),
         delay(50).then(() => false),
       ]);
-      if (alreadyExited) processStartIdentity = `win32:exited:${child.pid}:${startedAt}`;
+      if (alreadyExited) {
+        const descendants = await captureWindowsProcessTree(active.pid, active.startedAt);
+        if (descendants.length > 0) {
+          await Promise.allSettled(
+            [...descendants].reverse().map(({ pid }) => runTaskkill(pid, true)),
+          );
+          await verifyWindowsProcessesExited(descendants, 3_000);
+          this.active.delete(executionId);
+          active.resolveSettled();
+          throw new CommandRunnerError(
+            'SPAWN_FAILED',
+            'Command exited before identity capture and left a descendant process',
+          );
+        }
+        processStartIdentity = `win32:exited:${child.pid}:${startedAt}`;
+      }
     }
     if (processStartIdentity === 'unavailable' || processStartIdentity.startsWith('unsupported:')) {
       try {
@@ -441,8 +469,14 @@ export class CommandRunner {
       const decoded = decoders[stream].write(data);
       queueText(stream, redactors[stream].write(sanitizers[stream].write(decoded)));
     };
-    child.stdout?.on('data', (data: Buffer) => ingest('stdout', data));
-    child.stderr?.on('data', (data: Buffer) => ingest('stderr', data));
+    outputConsumer = ingest;
+    for (const buffered of bufferedOutput) ingest(buffered.stream, buffered.data);
+    bufferedOutput.length = 0;
+    bufferedOutputBytes = 0;
+    if (pendingBytes < this.maxBufferedBytes) {
+      child.stdout?.resume();
+      child.stderr?.resume();
+    }
     let streamsFinalized = false;
     const finalizeStreams = async (): Promise<void> => {
       if (streamsFinalized) return;
@@ -472,7 +506,7 @@ export class CommandRunner {
       if (process.platform === 'win32')
         active.windowsOwnedPids = (async () => {
           try {
-            return await captureWindowsProcessTree(active.pid);
+            return await captureWindowsProcessTree(active.pid, active.startedAt);
           } finally {
             await runTaskkill(active.pid, false).catch(() => undefined);
           }
@@ -613,9 +647,10 @@ export class CommandRunner {
       if (process.platform === 'win32') {
         let descendants: readonly Readonly<{ pid: number; processStartIdentity: string }>[];
         try {
-          descendants = await (active.windowsOwnedPids ?? captureWindowsProcessTree(active.pid));
+          descendants = await (active.windowsOwnedPids ??
+            captureWindowsProcessTree(active.pid, active.startedAt));
         } catch {
-          descendants = await captureWindowsProcessTree(active.pid);
+          descendants = await captureWindowsProcessTree(active.pid, active.startedAt);
         }
         const candidates = [
           ...[...descendants].reverse(),
@@ -691,6 +726,7 @@ export class CommandRunner {
 
 async function captureWindowsProcessTree(
   rootPid: number,
+  notBeforeMs = 0,
 ): Promise<readonly Readonly<{ pid: number; processStartIdentity: string }>[]> {
   if (process.platform !== 'win32') return [];
   const processes = await queryWindowsProcesses();
@@ -698,7 +734,9 @@ async function captureWindowsProcessTree(
   let frontier = [rootPid];
   while (frontier.length > 0) {
     const parents = new Set(frontier);
-    const children = [...processes.values()].filter((process) => parents.has(process.parentPid));
+    const children = [...processes.values()].filter(
+      (process) => parents.has(process.parentPid) && process.startedAtMs >= notBeforeMs,
+    );
     descendants.push(...children);
     frontier = children.map(({ pid }) => pid);
   }
@@ -718,6 +756,7 @@ async function runTaskkill(pid: number, force: boolean): Promise<void> {
 type WindowsProcessIdentity = Readonly<{
   pid: number;
   parentPid: number;
+  startedAtMs: number;
   processStartIdentity: string;
 }>;
 
@@ -726,6 +765,7 @@ async function queryWindowsProcesses(): Promise<ReadonlyMap<number, WindowsProce
   const script =
     `Get-CimInstance Win32_Process | ForEach-Object { ` +
     `[PSCustomObject]@{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;` +
+    `startedAtMs=[DateTimeOffset]$_.CreationDate.ToUniversalTime().ToUnixTimeMilliseconds();` +
     `identity=('win32:' + $_.CreationDate.ToUniversalTime().Ticks)} } | ConvertTo-Json -Compress`;
   const { stdout } = await execFileAsync(
     'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
@@ -734,8 +774,8 @@ async function queryWindowsProcesses(): Promise<ReadonlyMap<number, WindowsProce
   );
   if (stdout.trim().length === 0) return new Map();
   const parsed = JSON.parse(stdout) as
-    | { pid: number; parentPid: number; identity: string }
-    | { pid: number; parentPid: number; identity: string }[];
+    | { pid: number; parentPid: number; startedAtMs: number; identity: string }
+    | { pid: number; parentPid: number; startedAtMs: number; identity: string }[];
   const rows = Array.isArray(parsed) ? parsed : [parsed];
   return new Map(
     rows
@@ -744,11 +784,17 @@ async function queryWindowsProcesses(): Promise<ReadonlyMap<number, WindowsProce
           Number.isInteger(row.pid) &&
           row.pid > 0 &&
           Number.isInteger(row.parentPid) &&
+          Number.isFinite(row.startedAtMs) &&
           typeof row.identity === 'string',
       )
       .map((row) => [
         row.pid,
-        { pid: row.pid, parentPid: row.parentPid, processStartIdentity: row.identity },
+        {
+          pid: row.pid,
+          parentPid: row.parentPid,
+          startedAtMs: row.startedAtMs,
+          processStartIdentity: row.identity,
+        },
       ]),
   );
 }

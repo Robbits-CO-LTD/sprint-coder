@@ -58,6 +58,11 @@ export class EditArtifactStore {
   ) {}
 
   static async open(input: { rootPath: string; quotaBytes: number }): Promise<EditArtifactStore> {
+    if (process.platform === 'win32')
+      throw new EditArtifactError(
+        'UNSAFE_ARTIFACT',
+        'Windows artifact storage is unavailable until DACL verification is implemented',
+      );
     if (!Number.isSafeInteger(input.quotaBytes) || input.quotaBytes < 1)
       throw new EditArtifactError('INVALID_REQUEST', 'Artifact quota must be a positive integer');
     await mkdir(input.rootPath, { recursive: true, mode: 0o700 });
@@ -336,11 +341,7 @@ function sameReference(left: EditArtifactRef, right: EditArtifactRef): boolean {
 }
 
 function assertSafeArtifactStats(mode: number, nlink: number, isFile: boolean): void {
-  // Node does not implement owner/group/other permission distinctions on
-  // Windows, so its emulated mode bits cannot prove or disprove this POSIX
-  // invariant. Regular-file and single-link identity checks still apply.
-  const hasUnsafePosixPermissions = process.platform !== 'win32' && (mode & 0o022) !== 0;
-  if (!isFile || nlink !== 1 || hasUnsafePosixPermissions)
+  if (!isFile || nlink !== 1 || (mode & 0o022) !== 0)
     throw new EditArtifactError('UNSAFE_ARTIFACT', 'Artifact permissions or identity are unsafe');
 }
 
