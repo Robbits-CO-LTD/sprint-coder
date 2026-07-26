@@ -83,7 +83,7 @@ describe('defaultSocketPathFactory', () => {
   });
 });
 
-describe.skipIf(process.platform === 'win32')('TeamMcpBridge', () => {
+describe('TeamMcpBridge', () => {
   it('closes an unauthenticated connection after a bounded grace period', async () => {
     const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath(), 25);
     bridges.push(bridge);
@@ -234,15 +234,25 @@ describe.skipIf(process.platform === 'win32')('TeamMcpBridge', () => {
   });
 });
 
-describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows gate', () => {
-  it('fails closed until a user-scoped named-pipe DACL is enforced', async () => {
+describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () => {
+  it('serves authenticated requests through the user-scoped named pipe', async () => {
     const bridge = new TeamMcpBridge(
       fakeCoordinator(),
       defaultSocketPathFactory('C:\\ignored', 'win32'),
     );
     bridges.push(bridge);
-
-    await expect(bridge.ensureStarted()).resolves.toBeNull();
-    expect(bridge.socketPath).toBeNull();
+    const socketPath = await bridge.ensureStarted();
+    expect(socketPath).not.toBeNull();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-windows', { taskId: 'task-windows', token });
+    const response = await roundTrip(socketPath as string, {
+      token,
+      tool: '__authenticate__',
+      args: {},
+    });
+    expect(response.lines.map((line) => JSON.parse(line))).toContainEqual({
+      ok: true,
+      result: { authenticated: true },
+    });
   });
 });
