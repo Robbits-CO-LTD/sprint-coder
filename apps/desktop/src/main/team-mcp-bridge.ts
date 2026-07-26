@@ -20,6 +20,7 @@ import type { TeamCoordinator } from './team-coordinator';
 const MAX_SUN_PATH_BYTES = 100;
 const MAX_PENDING_REQUEST_BYTES = 1024 * 1024;
 const DEFAULT_AUTHENTICATION_TIMEOUT_MS = 5_000;
+const MAX_CONCURRENT_CONNECTIONS = 16;
 
 export function defaultSocketPathFactory(
   preferredDirectory: string,
@@ -84,6 +85,10 @@ export class TeamMcpBridge {
     return new Promise<string>((resolve, reject) => {
       const path = this.socketPathFactory();
       const namedPipe = isWindowsNamedPipe(path);
+      if (namedPipe)
+        throw new Error(
+          'Windows Team MCP IPC is unavailable until a user-scoped named-pipe DACL is enforced',
+        );
       if (!namedPipe && existsSync(path)) {
         try {
           unlinkSync(path);
@@ -92,19 +97,30 @@ export class TeamMcpBridge {
         }
       }
       const server = createServer((socket) => this.handleConnection(socket));
+      server.maxConnections = MAX_CONCURRENT_CONNECTIONS;
       server.once('error', (error) => reject(error as Error));
-      server.listen(path, () => {
-        if (!namedPipe) {
-          try {
-            chmodSync(path, 0o600);
-          } catch {
-            // best effort on platforms without POSIX file modes
+      server.listen(
+        {
+          path,
+          // Keep the Unix socket private by default. Windows named pipes are refused above because
+          // libuv creates them with the platform default DACL, which grants broader read access.
+          readableAll: false,
+          writableAll: false,
+          exclusive: true,
+        },
+        () => {
+          if (!namedPipe) {
+            try {
+              chmodSync(path, 0o600);
+            } catch {
+              // best effort on platforms without POSIX file modes
+            }
           }
-        }
-        this.server = server;
-        this.socketPathValue = path;
-        resolve(path);
-      });
+          this.server = server;
+          this.socketPathValue = path;
+          resolve(path);
+        },
+      );
     });
   }
 

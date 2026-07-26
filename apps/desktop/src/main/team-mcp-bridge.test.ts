@@ -83,7 +83,7 @@ describe('defaultSocketPathFactory', () => {
   });
 });
 
-describe('TeamMcpBridge', () => {
+describe.skipIf(process.platform === 'win32')('TeamMcpBridge', () => {
   it('closes an unauthenticated connection after a bounded grace period', async () => {
     const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath(), 25);
     bridges.push(bridge);
@@ -231,5 +231,18 @@ describe('TeamMcpBridge', () => {
     const first = await bridge.ensureStarted();
     const second = await bridge.ensureStarted();
     expect(first).toBe(second);
+  });
+});
+
+describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows gate', () => {
+  it('fails closed until a user-scoped named-pipe DACL is enforced', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+
+    await expect(bridge.ensureStarted()).resolves.toBeNull();
+    expect(bridge.socketPath).toBeNull();
   });
 });

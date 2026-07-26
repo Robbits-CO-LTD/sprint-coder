@@ -22,6 +22,13 @@ async function workspace(): Promise<string> {
   return root;
 }
 
+// Windows process identity comes from CIM and must be captured while the process is alive. Keep
+// successful fixtures alive long enough to cross that security boundary; genuinely shorter
+// commands intentionally fail closed until a spawn-time Job Object supervisor exists.
+function identifiableOnWindows(script: string): string {
+  return process.platform === 'win32' ? `${script}; setTimeout(() => {}, 5000)` : script;
+}
+
 describe('CommandRunner', () => {
   it('surfaces termination failure without waiting for a process close that may never arrive', async () => {
     const neverCloses = new Promise<never>(() => undefined);
@@ -64,7 +71,9 @@ describe('CommandRunner', () => {
       executable: process.execPath,
       argv: [
         '-e',
-        "process.stdout.write('one\\u001b[31m'); setTimeout(() => { process.stderr.write('two\\u001b]8;;x\\u0007'); setTimeout(() => process.stdout.write('three'), 20); }, 20)",
+        identifiableOnWindows(
+          "process.stdout.write('one\\u001b[31m'); setTimeout(() => { process.stderr.write('two\\u001b]8;;x\\u0007'); setTimeout(() => process.stdout.write('three'), 20); }, 20)",
+        ),
       ],
       cwd: '.',
     });
@@ -136,7 +145,7 @@ describe('CommandRunner', () => {
     const spec = await prepareExecutionSpec({
       workspacePath: root,
       executable: process.execPath,
-      argv: ['--version'],
+      argv: ['-e', identifiableOnWindows('process.stdout.write(process.version)')],
       cwd: '.',
     });
     let identity = '';
@@ -195,7 +204,7 @@ describe('CommandRunner', () => {
     const spec = await prepareExecutionSpec({
       workspacePath: root,
       executable: process.execPath,
-      argv: ['-e', `process.stdout.write('x'.repeat(${expectedBytes}))`],
+      argv: ['-e', identifiableOnWindows(`process.stdout.write('x'.repeat(${expectedBytes}))`)],
       cwd: '.',
     });
     let observedBytes = 0;

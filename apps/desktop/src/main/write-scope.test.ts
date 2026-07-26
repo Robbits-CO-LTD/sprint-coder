@@ -3,7 +3,7 @@ import { posix, win32 } from 'node:path';
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 
 const rel = (workspace: string, candidate: string): string | null =>
-  relativizeWorkspacePath(workspace, candidate, posix.resolve, posix.relative);
+  relativizeWorkspacePath(workspace, candidate, posix.resolve, posix.relative, posix.sep);
 
 describe('resolveWriteScope (issue #37)', () => {
   it('maps each preset to a scope only when a Workspace exists', () => {
