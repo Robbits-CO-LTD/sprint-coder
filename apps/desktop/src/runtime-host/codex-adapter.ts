@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError } from '@sprint-coder/contracts';
 import type { CodexModelOption, EffortOption, RuntimeWriteScope } from '@sprint-coder/contracts';
-import { ApprovalRequestedError, CodexJsonlNormalizer } from './codex-normalizer';
 import type {
   RuntimeCanonicalEvent,
   RuntimeContextFragment,
@@ -102,7 +101,6 @@ export class CodexRuntimeAdapter {
         scriptPath,
       };
     }
-    const normalizer = new CodexJsonlNormalizer();
     // No Workspace means the cwd is a throwaway temp directory, so a write scope there would
     // produce edits the user can never see. Main already refuses to send anything but 'read-only'
     // in that case; this is the adapter refusing independently, so the two would have to fail
@@ -130,10 +128,26 @@ export class CodexRuntimeAdapter {
     const control: ActiveProcess = { child, canceled: false, cleanup };
     this.active.set(turnId, control);
     accepted();
-    child.stdin.end(buildCodexPrompt(input, contextFragments, teamMcp?.guidance));
 
     let failed = false;
     let sawCompletion = false;
+    let nextRequestId = 1;
+    const pending = new Map<
+      number,
+      {
+        resolve: (result: unknown) => void;
+        reject: (error: Error) => void;
+      }
+    >();
+    const send = (method: string, params: unknown): Promise<unknown> =>
+      new Promise((resolve, reject) => {
+        const id = nextRequestId++;
+        pending.set(id, { resolve, reject });
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+      });
+    const sendResponse = (id: number | string, result: unknown): void => {
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
+    };
     const timeout = setTimeout(() => {
       if (!failed && !control.canceled) {
         failed = true;
@@ -145,25 +159,78 @@ export class CodexRuntimeAdapter {
     createInterface({ input: child.stdout }).on('line', (line) => {
       if (failed || control.canceled || line.trim() === '') return;
       try {
-        for (const event of normalizer.push(line)) {
-          if (event.type === 'completed') sawCompletion = true;
-          emit(event);
+        const message = JSON.parse(line) as Record<string, unknown>;
+        if (typeof message['id'] === 'number' && !('method' in message)) {
+          const request = pending.get(message['id']);
+          if (request !== undefined) {
+            pending.delete(message['id']);
+            if ('error' in message)
+              request.reject(new Error(appServerErrorMessage(message['error'])));
+            else request.resolve(message['result']);
+          }
+          return;
         }
-      } catch (error) {
+        if (
+          (typeof message['id'] === 'number' || typeof message['id'] === 'string') &&
+          typeof message['method'] === 'string'
+        ) {
+          respondToCodexRequest(message['method'], message['id'], sendResponse);
+          return;
+        }
+        handleCodexNotification(message, emit, () => {
+          sawCompletion = true;
+          child.stdin.end();
+        });
+      } catch {
         failed = true;
-        const approval = error instanceof ApprovalRequestedError;
         fail(
           publicError(
-            approval ? 'RUNTIME_FAILED' : 'RUNTIME_PROTOCOL_ERROR',
-            approval
-              ? 'Codex runtimeが予期しない承認を要求したため停止しました。'
-              : 'Codex runtimeの出力を解釈できませんでした。',
+            'RUNTIME_PROTOCOL_ERROR',
+            'Codex app-serverの出力を解釈できませんでした。',
             false,
           ),
         );
         void terminateProcessTree(child);
       }
     });
+    void (async () => {
+      try {
+        await send('initialize', {
+          clientInfo: { name: 'sprint-coder', title: 'Sprint Coder', version: '0.1.0' },
+          capabilities: {},
+        });
+        child.stdin.write(
+          `${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`,
+        );
+        const threadResult = asRecord(
+          await send('thread/start', {
+            cwd,
+            approvalPolicy: 'never',
+            sandbox: CODEX_SANDBOX_BY_SCOPE[effectiveScope],
+            ephemeral: true,
+            ...(model === 'auto' ? {} : { model }),
+          }),
+        );
+        const thread = asRecord(threadResult['thread']);
+        const threadId = requiredString(thread['id'], 'thread id');
+        emit({ type: 'thread', threadId });
+        await send('turn/start', {
+          threadId,
+          input: [
+            {
+              type: 'text',
+              text: buildCodexPrompt(input, contextFragments, teamMcp?.guidance),
+            },
+          ],
+          ...(effort === undefined || effort === '' ? {} : { effort }),
+        });
+      } catch {
+        if (failed || control.canceled) return;
+        failed = true;
+        fail(publicError('RUNTIME_FAILED', 'Codex app-serverを開始できませんでした。', true));
+        void terminateProcessTree(child);
+      }
+    })();
     // Drain diagnostics so the child cannot block, but never forward or retain provider output.
     child.stderr.resume();
     child.once('error', (error) => {
@@ -204,6 +271,100 @@ export class CodexRuntimeAdapter {
   dispose(): void {
     for (const [turnId] of this.active) this.cancel(turnId);
   }
+}
+
+function handleCodexNotification(
+  message: Record<string, unknown>,
+  emit: EmitEvent,
+  completed: () => void,
+): void {
+  const method = message['method'];
+  if (typeof method !== 'string') return;
+  const params = asRecord(message['params']);
+  if (method === 'item/agentMessage/delta') {
+    emit({
+      type: 'delta',
+      messageId: requiredString(params['itemId'], 'message id'),
+      delta: requiredString(params['delta'], 'message delta'),
+    });
+    return;
+  }
+  if (method === 'item/reasoning/textDelta' || method === 'item/reasoning/summaryTextDelta') {
+    emit({ type: 'reasoning', text: requiredString(params['delta'], 'reasoning delta') });
+    return;
+  }
+  if (method === 'item/completed') {
+    const item = asRecord(params['item']);
+    if (item['type'] === 'fileChange' && Array.isArray(item['changes'])) {
+      const changes = item['changes']
+        .map((change) => asRecord(change))
+        .filter(
+          (change) =>
+            typeof change['path'] === 'string' &&
+            (change['kind'] === 'add' ||
+              change['kind'] === 'update' ||
+              change['kind'] === 'delete'),
+        )
+        .map((change) => ({
+          path: change['path'] as string,
+          kind: change['kind'] as 'add' | 'update' | 'delete',
+        }));
+      if (changes.length > 0) emit({ type: 'fileChange', changes });
+    }
+    return;
+  }
+  if (method === 'turn/completed') {
+    const turn = asRecord(params['turn']);
+    if (turn['status'] !== 'completed')
+      throw new Error(`Codex turn failed with status ${String(turn['status'])}`);
+    emit({ type: 'completed' });
+    completed();
+  }
+}
+
+function respondToCodexRequest(
+  method: string,
+  id: number | string,
+  respond: (id: number | string, result: unknown) => void,
+): void {
+  if (
+    method === 'item/commandExecution/requestApproval' ||
+    method === 'item/fileChange/requestApproval' ||
+    method === 'execCommandApproval' ||
+    method === 'applyPatchApproval'
+  ) {
+    respond(id, { decision: 'decline' });
+    return;
+  }
+  if (method === 'mcpServer/elicitation/request') {
+    respond(id, { action: 'decline', content: null });
+    return;
+  }
+  if (method === 'item/permissions/requestApproval') {
+    respond(id, { permissions: {} });
+    return;
+  }
+  if (method === 'item/tool/requestUserInput') {
+    respond(id, { answers: {} });
+    return;
+  }
+  respond(id, { success: false, contentItems: [] });
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) throw new Error('Expected object');
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value === '') throw new Error(`Missing ${label}`);
+  return value;
+}
+
+function appServerErrorMessage(value: unknown): string {
+  if (typeof value !== 'object' || value === null) return 'Unknown app-server error';
+  const message = (value as Record<string, unknown>)['message'];
+  return typeof message === 'string' ? message : 'Unknown app-server error';
 }
 
 export function buildCodexPrompt(
@@ -263,20 +424,12 @@ const CODEX_SANDBOX_BY_SCOPE: Record<RuntimeWriteScope, string> = {
 export function buildCodexArgs(
   model: string,
   effort?: string,
-  writeScope: RuntimeWriteScope = 'read-only',
+  _writeScope: RuntimeWriteScope = 'read-only',
   teamMcp?: CodexTeamMcpProfile,
 ): string[] {
   return [
-    'exec',
-    '--json',
-    '--sandbox',
-    CODEX_SANDBOX_BY_SCOPE[writeScope],
-    '--ephemeral',
-    '--ignore-user-config',
-    '--ignore-rules',
-    '--skip-git-repo-check',
-    '--color',
-    'never',
+    'app-server',
+    '--stdio',
     // Stays "never" at every scope. `approval_policy` governs asking the *user* mid-turn, and
     // `codex exec` has no channel to ask on — verified: it is a one-shot stdin invocation, and
     // `on-request` in this mode simply stalls the tool rather than surfacing anything answerable.
@@ -317,8 +470,7 @@ export function buildCodexArgs(
           'mcp_servers.team.env_vars=["ELECTRON_RUN_AS_NODE","TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
         ]),
     ...(effort === undefined || effort === '' ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
-    ...(model === 'auto' ? [] : ['--model', model]),
-    '-',
+    ...(model === 'auto' ? [] : ['-c', `model="${model}"`]),
   ];
 }
 
