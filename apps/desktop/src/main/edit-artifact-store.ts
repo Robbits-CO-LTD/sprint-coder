@@ -359,11 +359,7 @@ function sameReference(left: EditArtifactRef, right: EditArtifactRef): boolean {
 }
 
 function assertSafeArtifactStats(mode: number, nlink: number, isFile: boolean): void {
-  if (
-    !isFile ||
-    nlink !== 1 ||
-    (process.platform !== 'win32' && (mode & 0o022) !== 0)
-  )
+  if (!isFile || nlink !== 1 || (process.platform !== 'win32' && (mode & 0o022) !== 0))
     throw new EditArtifactError('UNSAFE_ARTIFACT', 'Artifact permissions or identity are unsafe');
 }
 
