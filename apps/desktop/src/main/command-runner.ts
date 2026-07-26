@@ -223,6 +223,11 @@ export class CommandRunner {
         outputBytes: 0,
         truncated: false,
       };
+    if (windowsCommandExecutionUnavailable())
+      throw new CommandRunnerError(
+        'SPAWN_FAILED',
+        'Windows command execution is unavailable until spawn-time Job Object ownership is implemented',
+      );
 
     const executionId = randomUUID();
     const lease = randomUUID();
@@ -692,6 +697,10 @@ export class CommandRunner {
       return false;
     }
   }
+}
+
+function windowsCommandExecutionUnavailable(): boolean {
+  return process.platform === 'win32';
 }
 
 async function captureWindowsProcessTree(

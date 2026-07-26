@@ -13,6 +13,7 @@ import {
 } from '@sprint-coder/domain';
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
+import type { CommandRunnerError } from './command-runner';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { ToolBroker } from './tool-broker';
@@ -64,6 +65,8 @@ import {
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 const artifactIt = it.skipIf(process.platform === 'win32');
+const commandExecutionIt = it.skipIf(process.platform === 'win32');
+const windowsCommandGateIt = it.runIf(process.platform === 'win32');
 
 afterEach(() => {
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -4181,71 +4184,134 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
-    it('seals the exact command before authorization and commits output before publishing it', async () => {
-      const { persistence, path } = createPersistence();
-      const task = persistence.createTask();
-      const workspacePath = join(path, '..');
-      persistence.setWorkspace(task.id, workspacePath);
-      const started = startExecutingTurn(persistence, task.id);
-      const published: string[] = [];
-      let authorizedInput: unknown;
-      const broker = createDefaultToolBroker(
-        () => persistence.getPermissionPolicy(task.id).policyEpoch,
-        (request) => {
-          authorizedInput = request.input;
-          return { decision: 'allow', reason: 'integration_test' };
-        },
-        {
-          persistence,
-          publish: (event) => {
-            if (event.type === 'command.output') {
-              const replay = persistence.listCommandOutput(event.commandId);
-              expect(replay.at(-1)?.seq).toBe(event.outputSeq);
-            }
-            published.push(event.type);
+    commandExecutionIt(
+      'seals the exact command before authorization and commits output before publishing it',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = join(path, '..');
+        persistence.setWorkspace(task.id, workspacePath);
+        const started = startExecutingTurn(persistence, task.id);
+        const published: string[] = [];
+        let authorizedInput: unknown;
+        const broker = createDefaultToolBroker(
+          () => persistence.getPermissionPolicy(task.id).policyEpoch,
+          (request) => {
+            authorizedInput = request.input;
+            return { decision: 'allow', reason: 'integration_test' };
           },
-        },
-      );
-      startMockTurnCatalog(broker, {
-        taskId: task.id,
-        turnId: started.turnId,
-        workspaceId: 'workspace-1',
-        policyEpoch: 0,
-      });
-      const executable =
-        process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : '/usr/bin/printf';
-      const argv = process.platform === 'win32' ? ['where'] : ['command-ok\\n'];
-      const result = (await broker.dispatch({
-        taskId: task.id,
-        turnId: started.turnId,
-        callId: 'command-call-1',
-        providerName: 'run_command',
-        input: {
-          executable,
-          argv,
-          cwd: '.',
-          purpose: '変更の整合性を確認します',
-        },
-      })) as { exitCode: number; outputBytes: number };
+          {
+            persistence,
+            publish: (event) => {
+              if (event.type === 'command.output') {
+                const replay = persistence.listCommandOutput(event.commandId);
+                expect(replay.at(-1)?.seq).toBe(event.outputSeq);
+              }
+              published.push(event.type);
+            },
+          },
+        );
+        startMockTurnCatalog(broker, {
+          taskId: task.id,
+          turnId: started.turnId,
+          workspaceId: 'workspace-1',
+          policyEpoch: 0,
+        });
+        const executable = '/usr/bin/printf';
+        const argv = ['command-ok\\n'];
+        let result: { exitCode: number; outputBytes: number };
+        try {
+          result = (await broker.dispatch({
+            taskId: task.id,
+            turnId: started.turnId,
+            callId: 'command-call-1',
+            providerName: 'run_command',
+            input: {
+              executable,
+              argv,
+              cwd: '.',
+              purpose: '変更の整合性を確認します',
+            },
+          })) as { exitCode: number; outputBytes: number };
+        } catch (error) {
+          persistence.close();
+          throw error;
+        }
 
-      expect(result.exitCode).toBe(0);
-      expect(authorizedInput).toMatchObject({
-        absoluteExecutable: executable,
-        argv,
-        cwdIdentity: { canonicalPath: expect.any(String), identityDigest: expect.any(String) },
-        shell: 'none',
-      });
-      expect(published[0]).toBe('command.started');
-      expect(published.at(-1)).toBe('command.completed');
-      const commandEvent = persistence
-        .listEventsAfter(task.id, 0)
-        .find((event) => event.type === 'command.completed');
-      expect(commandEvent).toMatchObject({
-        type: 'command.completed',
-        command: { state: 'exited' },
-      });
-      persistence.close();
-    });
+        expect(result.exitCode).toBe(0);
+        expect(authorizedInput).toMatchObject({
+          absoluteExecutable: executable,
+          argv,
+          cwdIdentity: { canonicalPath: expect.any(String), identityDigest: expect.any(String) },
+          shell: 'none',
+        });
+        expect(published[0]).toBe('command.started');
+        expect(published.at(-1)).toBe('command.completed');
+        const commandEvent = persistence
+          .listEventsAfter(task.id, 0)
+          .find((event) => event.type === 'command.completed');
+        expect(commandEvent).toMatchObject({
+          type: 'command.completed',
+          command: { state: 'exited' },
+        });
+        persistence.close();
+      },
+    );
+
+    windowsCommandGateIt(
+      'fails the command tool before spawning while Windows Job Object ownership is unavailable',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = join(path, '..');
+        const marker = join(workspacePath, 'must-not-spawn');
+        persistence.setWorkspace(task.id, workspacePath);
+        const started = startExecutingTurn(persistence, task.id);
+        const published: string[] = [];
+        const broker = createDefaultToolBroker(
+          () => persistence.getPermissionPolicy(task.id).policyEpoch,
+          () => ({ decision: 'allow', reason: 'integration_test' }),
+          {
+            persistence,
+            publish: (event) => published.push(event.type),
+          },
+        );
+        startMockTurnCatalog(broker, {
+          taskId: task.id,
+          turnId: started.turnId,
+          workspaceId: 'workspace-1',
+          policyEpoch: 0,
+        });
+
+        await expect(
+          broker.dispatch({
+            taskId: task.id,
+            turnId: started.turnId,
+            callId: 'command-windows-gate',
+            providerName: 'run_command',
+            input: {
+              executable: process.execPath,
+              argv: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`],
+              cwd: '.',
+              purpose: 'Windows gate test',
+            },
+          }),
+        ).rejects.toMatchObject({
+          code: 'SPAWN_FAILED',
+          message: expect.stringContaining('Job Object'),
+        } satisfies Partial<CommandRunnerError>);
+        expect(existsSync(marker)).toBe(false);
+        expect(persistence.listCommands(task.id)).toEqual([
+          expect.objectContaining({
+            callId: 'command-windows-gate',
+            state: 'failed',
+            pid: null,
+          }),
+        ]);
+        expect(published).toEqual(['command.completed']);
+        persistence.close();
+      },
+    );
 
     it('terminalizes a prepared command when authorization is denied without failing the Turn', async () => {
       const { persistence, path } = createPersistence();
