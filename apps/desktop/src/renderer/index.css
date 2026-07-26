@@ -670,6 +670,7 @@ button {
 .timeline-scroll {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
   min-height: 0;
 }
 .timeline {
@@ -2001,7 +2002,10 @@ button {
 /* Worker nodes (demo/index.html lines 346-388) */
 .worker {
   position: absolute;
+  display: flex;
+  flex-direction: column;
   width: 480px;
+  max-height: 420px;
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: 14px;
@@ -2030,6 +2034,7 @@ button {
 }
 .w-head {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 10px;
   padding: 11px 15px;
@@ -2115,6 +2120,8 @@ button {
   flex-direction: column;
   gap: 9px;
   min-height: 96px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .w-line {
   font-size: 12.5px;
