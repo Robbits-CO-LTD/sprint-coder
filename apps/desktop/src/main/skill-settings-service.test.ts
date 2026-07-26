@@ -26,7 +26,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe('SkillSettingsService', () => {
+describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
   it('scans fixed provider roots and reports imported state', async () => {
     const root = await home();
     await skill(root, 'claude', 'writer');

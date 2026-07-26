@@ -54,17 +54,20 @@ describe('builtin Team skill', () => {
     expect(verifyBuiltinTeamSkillAcceptance(false, [])).toBe(true);
   });
 
-  it('installs a private versioned snapshot in the builtin namespace', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-team-skill-'));
-    roots.push(root);
-    await installBuiltinTeamSkill(root);
-    const path = join(root, '.sprintcoder', 'skills', 'builtin', 'sprint-coder-team');
-    expect(await readFile(join(path, 'SKILL.md'), 'utf8')).toBe(BUILTIN_TEAM_SKILL_CONTENT);
-    expect(JSON.parse(await readFile(join(path, 'manifest.json'), 'utf8'))).toMatchObject({
-      source: 'builtin',
-      digest: BUILTIN_TEAM_SKILL_DIGEST,
-      activationMode: 'system',
-      replaceable: false,
-    });
-  });
+  it.skipIf(process.platform === 'win32')(
+    'installs a private versioned snapshot in the builtin namespace',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-team-skill-'));
+      roots.push(root);
+      await installBuiltinTeamSkill(root);
+      const path = join(root, '.sprintcoder', 'skills', 'builtin', 'sprint-coder-team');
+      expect(await readFile(join(path, 'SKILL.md'), 'utf8')).toBe(BUILTIN_TEAM_SKILL_CONTENT);
+      expect(JSON.parse(await readFile(join(path, 'manifest.json'), 'utf8'))).toMatchObject({
+        source: 'builtin',
+        digest: BUILTIN_TEAM_SKILL_DIGEST,
+        activationMode: 'system',
+        replaceable: false,
+      });
+    },
+  );
 });

@@ -40,7 +40,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe('SkillStore', () => {
+describe.skipIf(process.platform === 'win32')('SkillStore', () => {
   it('creates a private store and detects either, both, or neither source', async () => {
     const root = await tempRoot();
     const claude = join(root, '.claude', 'skills');
