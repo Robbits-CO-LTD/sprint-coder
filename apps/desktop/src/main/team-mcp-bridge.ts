@@ -18,13 +18,15 @@ import type { TeamCoordinator } from './team-coordinator';
 // tried first; `os.tmpdir()` and the caller-provided (userData-derived) directory are fallbacks
 // for sandboxes where `/tmp` is not writable.
 const MAX_SUN_PATH_BYTES = 100;
+const MAX_PENDING_REQUEST_BYTES = 1024 * 1024;
+const DEFAULT_AUTHENTICATION_TIMEOUT_MS = 5_000;
 
 export function defaultSocketPathFactory(
   preferredDirectory: string,
   platform: NodeJS.Platform = process.platform,
 ): () => string {
   return () => {
-    const id = randomBytes(8).toString('hex');
+    const id = randomBytes(16).toString('hex');
     if (platform === 'win32') return `\\\\.\\pipe\\sc-team-${id}`;
 
     const candidates = [
@@ -56,6 +58,7 @@ export class TeamMcpBridge {
   constructor(
     private readonly coordinator: TeamCoordinator,
     private readonly socketPathFactory: () => string,
+    private readonly authenticationTimeoutMs = DEFAULT_AUTHENTICATION_TIMEOUT_MS,
   ) {}
 
   get socketPath(): string | null {
@@ -122,19 +125,36 @@ export class TeamMcpBridge {
 
   private handleConnection(socket: Socket): void {
     let buffer = '';
+    let authenticated = false;
+    const authenticationTimer = setTimeout(() => socket.destroy(), this.authenticationTimeoutMs);
+    authenticationTimer.unref();
+    const markAuthenticated = () => {
+      if (authenticated) return;
+      authenticated = true;
+      clearTimeout(authenticationTimer);
+    };
+    socket.once('close', () => clearTimeout(authenticationTimer));
     socket.on('data', (chunk: Buffer) => {
+      if (Buffer.byteLength(buffer, 'utf8') + chunk.byteLength > MAX_PENDING_REQUEST_BYTES) {
+        socket.destroy();
+        return;
+      }
       buffer += chunk.toString('utf8');
       let index: number;
       while ((index = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
-        if (line.trim() !== '') void this.handleLine(socket, line);
+        if (line.trim() !== '') void this.handleLine(socket, line, markAuthenticated);
       }
     });
     socket.on('error', () => socket.destroy());
   }
 
-  private async handleLine(socket: Socket, line: string): Promise<void> {
+  private async handleLine(
+    socket: Socket,
+    line: string,
+    markAuthenticated: () => void,
+  ): Promise<void> {
     let request: { token?: unknown; tool?: unknown; args?: unknown };
     try {
       request = JSON.parse(line) as typeof request;
@@ -149,8 +169,13 @@ export class TeamMcpBridge {
       socket.destroy();
       return;
     }
+    markAuthenticated();
     if (typeof request.tool !== 'string') {
       socket.write(`${JSON.stringify({ ok: false, error: 'invalid_tool' })}\n`);
+      return;
+    }
+    if (request.tool === '__authenticate__') {
+      socket.write(`${JSON.stringify({ ok: true, result: { authenticated: true } })}\n`);
       return;
     }
     const [turnId, registration] = found;

@@ -59,6 +59,10 @@ async function startHarness(): Promise<Harness> {
         buffer = buffer.slice(index + 1);
         if (line.trim() === '') continue;
         const request = JSON.parse(line) as { token: unknown; tool: unknown; args: unknown };
+        if (request.tool === '__authenticate__') {
+          socket.write(`${JSON.stringify({ ok: true, result: { authenticated: true } })}\n`);
+          continue;
+        }
         bridgeReceived.push(request);
         bridgeResponders.push((response) => socket.write(`${JSON.stringify(response)}\n`));
       }

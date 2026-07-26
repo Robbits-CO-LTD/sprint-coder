@@ -74,7 +74,7 @@ describe('defaultSocketPathFactory', () => {
 
   it('returns a named-pipe endpoint on Windows', () => {
     const factory = defaultSocketPathFactory('C:\\ignored', 'win32');
-    expect(factory()).toMatch(/^\\\\\.\\pipe\\sc-team-[0-9a-f]{16}$/);
+    expect(factory()).toMatch(/^\\\\\.\\pipe\\sc-team-[0-9a-f]{32}$/);
   });
 
   it('generates a fresh path on every call', () => {
@@ -84,6 +84,46 @@ describe('defaultSocketPathFactory', () => {
 });
 
 describe('TeamMcpBridge', () => {
+  it('closes an unauthenticated connection after a bounded grace period', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath(), 25);
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    expect(socketPath).not.toBeNull();
+
+    const socket = createConnection(socketPath as string);
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('connection was not closed')), 500);
+      socket.once('error', reject);
+      socket.once('close', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it('closes a connection whose pending request exceeds the input limit', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    expect(socketPath).not.toBeNull();
+
+    const socket = createConnection(socketPath as string);
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error('oversized connection was not closed')),
+        500,
+      );
+      socket.once('connect', () => socket.write(Buffer.alloc(1024 * 1024 + 1, 'x')));
+      socket.once('error', reject);
+      socket.once('close', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    expect(socket.destroyed).toBe(true);
+  });
+
   it('forwards a call authenticated with the registered token to executeTeamTool', async () => {
     // team_stop_worker (not team_hire_worker) deliberately: executeTeamTool's hire branch pauses
     // for HIRE_PACING_MS (production-default 1200ms, a deliberate anti-"instant burst" cadence —
