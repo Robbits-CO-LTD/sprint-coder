@@ -46,6 +46,7 @@ if (($only.FileSystemRights -band [System.Security.AccessControl.FileSystemRight
     [System.Security.AccessControl.FileSystemRights]::FullControl) {
   throw 'ACL does not grant the current user full control'
 }
+exit 0
 `;
 
 export async function secureWindowsPath(path: string, kind: 'directory' | 'file'): Promise<void> {
