@@ -12,15 +12,17 @@ export class ClaudeOutputError extends Error {}
 // normalizer treats an unexpected approval request as a fatal profile violation.
 export class ClaudeCapabilityViolationError extends Error {}
 
-// What the CLI's own session-init report is allowed to show. Defaults to the plain no-tools/
-// no-MCP profile every non-team turn uses; the Leader MCP profile (buildClaudeArgs' teamMcp
-// branch) is the one case that legitimately reports a non-empty tool/MCP surface, so it supplies
-// the exact fully-qualified tool names it expects instead.
-export type ClaudeExpectedCapabilities =
-  | Readonly<{ kind: 'none' }>
-  | Readonly<{ kind: 'team-mcp'; serverName: string; toolNames: readonly string[] }>;
+// What the CLI's own session-init report is allowed to show. The built-in set is exact for the
+// read-only/workspace-write profiles and intentionally open for Claude's `--tools default` full
+// profile. Team turns add one exact MCP server/tool surface to that built-in set.
+export type ClaudeExpectedCapabilities = Readonly<{
+  builtInTools: readonly string[] | 'default';
+  teamMcp?: Readonly<{ serverName: string; toolNames: readonly string[] }>;
+}>;
 
-const NO_CAPABILITIES: ClaudeExpectedCapabilities = { kind: 'none' };
+const READ_ONLY_CAPABILITIES: ClaudeExpectedCapabilities = {
+  builtInTools: ['Read', 'Glob', 'Grep'],
+};
 
 /** A single tool call's arguments past this size are not a file body worth streaming (issue #39). */
 const MAX_TOOL_ARGUMENT_BYTES = 1_048_576;
@@ -47,7 +49,7 @@ export class ClaudeJsonlNormalizer {
     { tool: string; buffer: string; path: string | null; sent: number; closed: boolean }
   >();
 
-  constructor(private readonly expected: ClaudeExpectedCapabilities = NO_CAPABILITIES) {}
+  constructor(private readonly expected: ClaudeExpectedCapabilities = READ_ONLY_CAPABILITIES) {}
 
   push(line: string): RuntimeCanonicalEvent[] {
     let value: unknown;
@@ -280,30 +282,51 @@ function assertExpectedCapabilities(
 ): void {
   const tools = value['tools'];
   const mcpServers = value['mcp_servers'];
-  if (expected.kind === 'none') {
-    if (
-      (Array.isArray(tools) && tools.length > 0) ||
-      (Array.isArray(mcpServers) && mcpServers.length > 0)
-    )
-      throw new ClaudeCapabilityViolationError(
-        'Claude session reported unexpected tool or MCP capability',
-      );
-    return;
-  }
-  const reportedTools = new Set(Array.isArray(tools) ? tools : []);
-  const expectedTools = new Set(expected.toolNames);
+  if (
+    !Array.isArray(tools) ||
+    tools.some((tool) => typeof tool !== 'string') ||
+    !Array.isArray(mcpServers)
+  )
+    throw new ClaudeCapabilityViolationError(
+      'Claude session reported malformed tool or MCP capabilities',
+    );
+
+  const reportedTools = new Set(tools as string[]);
+  const expectedMcpTools = new Set(expected.teamMcp?.toolNames ?? []);
+  const reportedMcpTools = new Set(
+    [...reportedTools].filter((tool) => tool.startsWith('mcp__')),
+  );
+  const reportedTeamServer =
+    mcpServers.length === 1 && isRecord(mcpServers[0]) ? mcpServers[0] : null;
+  const teamServerPending =
+    expected.teamMcp !== undefined &&
+    reportedTeamServer?.['name'] === expected.teamMcp.serverName &&
+    reportedTeamServer['status'] === 'pending';
+  const mcpToolsMatch = teamServerPending
+    ? reportedMcpTools.size === 0
+    : reportedMcpTools.size === expectedMcpTools.size &&
+      [...expectedMcpTools].every((name) => reportedMcpTools.has(name));
+  const expectedExactTools =
+    expected.builtInTools === 'default'
+      ? null
+      : new Set([
+          ...expected.builtInTools,
+          ...(teamServerPending ? [] : [...expectedMcpTools]),
+        ]);
   const toolsMatch =
-    reportedTools.size === expectedTools.size &&
-    [...expectedTools].every((name) => reportedTools.has(name));
+    mcpToolsMatch &&
+    (expectedExactTools === null ||
+      (reportedTools.size === expectedExactTools.size &&
+        [...expectedExactTools].every((name) => reportedTools.has(name))));
   const serversMatch =
-    Array.isArray(mcpServers) &&
-    mcpServers.length === 1 &&
-    isRecord(mcpServers[0]) &&
-    mcpServers[0]['name'] === expected.serverName &&
-    mcpServers[0]['status'] === 'connected';
+    expected.teamMcp === undefined
+      ? mcpServers.length === 0
+      : reportedTeamServer?.['name'] === expected.teamMcp.serverName &&
+        (reportedTeamServer['status'] === 'connected' ||
+          reportedTeamServer['status'] === 'pending');
   if (!toolsMatch || !serversMatch)
     throw new ClaudeCapabilityViolationError(
-      'Claude session reported unexpected tool or MCP capability for the team MCP profile',
+      'Claude session reported unexpected tool or MCP capability',
     );
 }
 

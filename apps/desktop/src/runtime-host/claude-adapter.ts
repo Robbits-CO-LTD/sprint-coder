@@ -172,12 +172,12 @@ export class ClaudeRuntimeAdapter {
       );
       teamMcpArgs = { configPath, guidance: teamMcp.guidance };
     }
-    const normalizer = new ClaudeJsonlNormalizer(
-      teamMcp === undefined ? undefined : teamMcpExpectedCapabilities(),
-    );
     // Same independent refusal as the Codex adapter: with no Workspace the cwd is a throwaway temp
     // directory, so nothing may be written there whatever Main asked for.
     const effectiveScope: RuntimeWriteScope = workspacePath === null ? 'read-only' : writeScope;
+    const normalizer = new ClaudeJsonlNormalizer(
+      claudeExpectedCapabilities(effectiveScope, teamMcp !== undefined),
+    );
     const child = spawn(
       'claude',
       buildClaudeArgs(model, teamMcpArgs, effort, effectiveScope, workspacePath),
@@ -284,11 +284,22 @@ const TEAM_MCP_TOOL_NAMES = [
   'team_stop_worker',
 ] as const;
 
-function teamMcpExpectedCapabilities(): ClaudeExpectedCapabilities {
+function claudeExpectedCapabilities(
+  writeScope: RuntimeWriteScope,
+  teamMcpEnabled: boolean,
+): ClaudeExpectedCapabilities {
   return {
-    kind: 'team-mcp',
-    serverName: TEAM_MCP_SERVER_NAME,
-    toolNames: TEAM_MCP_TOOL_NAMES.map((name) => `mcp__${TEAM_MCP_SERVER_NAME}__${name}`),
+    builtInTools: CLAUDE_TOOLS_BY_SCOPE[writeScope],
+    ...(teamMcpEnabled
+      ? {
+          teamMcp: {
+            serverName: TEAM_MCP_SERVER_NAME,
+            toolNames: TEAM_MCP_TOOL_NAMES.map(
+              (name) => `mcp__${TEAM_MCP_SERVER_NAME}__${name}`,
+            ),
+          },
+        }
+      : {}),
   };
 }
 
@@ -357,9 +368,19 @@ export function buildClaudePrompt(
  * workspace-write up because a code assistant that can edit but not run the test it just changed is
  * not usable; that is exactly the trade the label exists to disclose.
  */
-const CLAUDE_TOOLS_BY_SCOPE: Record<RuntimeWriteScope, string> = {
-  'read-only': 'Read,Glob,Grep',
-  'workspace-write': 'Read,Glob,Grep,Edit,Write,MultiEdit,NotebookEdit,Bash,TodoWrite',
+const CLAUDE_TOOLS_BY_SCOPE: Record<RuntimeWriteScope, readonly string[] | 'default'> = {
+  'read-only': ['Read', 'Glob', 'Grep'],
+  'workspace-write': [
+    'Read',
+    'Glob',
+    'Grep',
+    'Edit',
+    'Write',
+    'MultiEdit',
+    'NotebookEdit',
+    'Bash',
+    'TodoWrite',
+  ],
   full: 'default',
 };
 
@@ -376,7 +397,8 @@ export function buildClaudeArgs(
   writeScope: RuntimeWriteScope = 'read-only',
   workspacePath?: string | null,
 ): string[] {
-  const tools = CLAUDE_TOOLS_BY_SCOPE[writeScope];
+  const configuredTools = CLAUDE_TOOLS_BY_SCOPE[writeScope];
+  const tools = configuredTools === 'default' ? configuredTools : configuredTools.join(',');
   return [
     '-p',
     '--output-format',

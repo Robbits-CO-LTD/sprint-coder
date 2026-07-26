@@ -310,7 +310,7 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
 
 // --- Leader MCP guidance ----------------------------------------------------------------------
 //
-// Appended to the real Claude Leader's system prompt (via --append-system-prompt) only when
+// Appended to the real Codex/Claude Leader's prompt only when
 // SPRINT_CODER_LEADER_MCP=1 routes the turn through the MCP bridge instead of the deterministic
 // mock scenario. Concise and in Japanese to match the rest of the in-app leader/worker copy.
 export const LEADER_MCP_SYSTEM_PROMPT =

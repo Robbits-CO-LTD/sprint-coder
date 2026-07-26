@@ -1,3 +1,3 @@
-{"type":"system","subtype":"init","cwd":"/workspace","session_id":"session-2","tools":[],"mcp_servers":[],"model":"bogus-model","permissionMode":"plan","apiKeySource":"none"}
+{"type":"system","subtype":"init","cwd":"/workspace","session_id":"session-2","tools":["Glob","Grep","Read"],"mcp_servers":[],"model":"bogus-model","permissionMode":"manual","apiKeySource":"none"}
 {"type":"assistant","message":{"id":"msg-2","model":"<synthetic>","role":"assistant","type":"message","content":[{"type":"text","text":"There's an issue with the selected model."}],"error":"model_not_found"},"session_id":"session-2"}
 {"type":"result","is_error":true,"result":"There's an issue with the selected model.","session_id":"session-2","subtype":"success"}

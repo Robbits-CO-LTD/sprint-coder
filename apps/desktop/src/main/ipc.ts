@@ -1318,13 +1318,13 @@ export class IpcRouter {
     });
     const taskId = started.event.taskId;
     let kind = started.runtimeKind;
-    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Claude Leader drives team_* tools itself over
-    // the MCP bridge instead of the deterministic mock scenario. Gated to Claude only (Codex has
-    // no MCP profile yet). Team tools are offered on EVERY Claude turn so the model itself senses
+    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Codex/Claude Leader drives team_* tools itself
+    // over the MCP bridge instead of the deterministic mock scenario. Team tools are offered on
+    // every real-runtime turn so the model itself senses
     // when a request warrants a team (the guidance says to hire only when genuinely beneficial);
     // hiring auto-promotes the task and the renderer auto-opens the canvas, so "the AI decided a
     // team is needed" becomes visible without any keyword or button.
-    const wantsLeaderMcp = process.env['SPRINT_CODER_LEADER_MCP'] === '1' && kind === 'claude';
+    const wantsLeaderMcp = process.env['SPRINT_CODER_LEADER_MCP'] === '1' && kind !== 'mock';
     let teamMcp: RuntimeTeamMcpOption | undefined;
     if (wantsLeaderMcp) {
       teamMcp = this.registerLeaderMcp(started.turnId, taskId);
