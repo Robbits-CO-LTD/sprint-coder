@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { TurnEvent } from '@sprint-coder/contracts';
+import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient } from './persistence';
 import { TeamCoordinator } from './team-coordinator';
 import { MockRuntimeAdapter } from './runtime';
@@ -124,7 +125,7 @@ else
   describe('Deterministic mock team scenario Electron ABI bridge', () => {
     it('runs the team scenario integration suite with Electron', () => {
       const result = spawnSync(
-        join(process.cwd(), '../../node_modules/.bin/electron'),
+        electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
           'run',

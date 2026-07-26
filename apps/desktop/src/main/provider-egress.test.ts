@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { electronTestExecutablePath } from './electron-test-runtime';
 import { PermissionBroker } from './permission-broker';
 import { SqlitePersistenceClient } from './persistence';
 import { authorizeCodexProviderEgress, dispatchAfterCodexProviderEgress } from './provider-egress';
@@ -151,7 +152,7 @@ else
   describe('Codex provider egress Electron ABI bridge', () => {
     it('runs the provider egress suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
-        join(process.cwd(), '../../node_modules/.bin/electron'),
+        electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
           'run',

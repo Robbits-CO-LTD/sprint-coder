@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { teamDeliveryId, DEFAULT_TEAM_BUDGET_LIMITS } from '@sprint-coder/domain';
+import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 
 const cleanup: string[] = [];
@@ -462,7 +463,7 @@ else
   describe('team coordinator persistence Electron ABI bridge', () => {
     it('runs the Team coordinator SQLite suite with Electron', () => {
       const result = spawnSync(
-        join(process.cwd(), '../../node_modules/.bin/electron'),
+        electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
           'run',

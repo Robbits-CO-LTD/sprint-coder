@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
+import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient } from './persistence';
 
 // Phase 7 blocking subset: "DB migration、backup/restore、1万event projection復元".
@@ -107,7 +108,7 @@ describe('recovery suite Electron ABI bridge', () => {
   it('runs the corruption-recovery and projection-perf suites with the Electron Node ABI', () => {
     if (runsWithElectronAbi) return; // already inside the bridge run
     const result = spawnSync(
-      join(process.cwd(), '../../node_modules/.bin/electron'),
+      electronTestExecutablePath(),
       [
         join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
         'run',

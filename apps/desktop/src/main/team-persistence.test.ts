@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient } from './persistence';
 
 const cleanup: string[] = [];
@@ -153,7 +154,7 @@ else
   describe('team persistence Electron ABI bridge', () => {
     it('runs the Team SQLite suite with Electron', () => {
       const result = spawnSync(
-        join(process.cwd(), '../../node_modules/.bin/electron'),
+        electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
           'run',

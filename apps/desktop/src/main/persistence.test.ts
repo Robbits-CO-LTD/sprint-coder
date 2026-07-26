@@ -14,6 +14,7 @@ import {
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
+import { electronTestExecutablePath } from './electron-test-runtime';
 import { ToolBroker } from './tool-broker';
 import {
   AcceptanceEvidenceMissingError,
@@ -4659,7 +4660,7 @@ else
   describe('SqlitePersistenceClient v27 Electron ABI bridge', () => {
     it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
-        join(process.cwd(), '../../node_modules/.bin/electron'),
+        electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
           'run',
