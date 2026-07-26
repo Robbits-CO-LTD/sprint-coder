@@ -14,6 +14,7 @@ import {
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { redactSecrets } from './secret-redactor';
+import { secureWindowsPath, verifyWindowsPathAcl } from './windows-acl';
 
 const MAX_ARTIFACT_BYTES = 1024 * 1024;
 const artifactIdPattern = /^[a-f0-9]{64}$/;
@@ -58,19 +59,16 @@ export class EditArtifactStore {
   ) {}
 
   static async open(input: { rootPath: string; quotaBytes: number }): Promise<EditArtifactStore> {
-    if (process.platform === 'win32')
-      throw new EditArtifactError(
-        'UNSAFE_ARTIFACT',
-        'Windows artifact storage is unavailable until DACL verification is implemented',
-      );
     if (!Number.isSafeInteger(input.quotaBytes) || input.quotaBytes < 1)
       throw new EditArtifactError('INVALID_REQUEST', 'Artifact quota must be a positive integer');
     await mkdir(input.rootPath, { recursive: true, mode: 0o700 });
     const lexical = await lstat(input.rootPath);
     if (!lexical.isDirectory() || lexical.isSymbolicLink())
       throw new EditArtifactError('UNSAFE_ARTIFACT', 'Artifact root must be a real directory');
-    await chmod(input.rootPath, 0o700);
+    if (process.platform === 'win32') await secureAcl(input.rootPath, 'directory');
+    else await chmod(input.rootPath, 0o700);
     const rootPath = await realpath(input.rootPath);
+    if (process.platform === 'win32') await verifyAcl(rootPath, 'directory');
     const store = new EditArtifactStore(rootPath, input.quotaBytes);
     await store.removeOwnedTemps();
     return store;
@@ -112,6 +110,7 @@ export class EditArtifactStore {
 
   async read(reference: EditArtifactRef): Promise<Buffer> {
     validateEditArtifactReference(reference);
+    if (process.platform === 'win32') await verifyAcl(this.rootPath, 'directory');
     const manifest = await this.readManifest(reference.artifactId);
     if (!sameReference(manifest, reference))
       throw new EditArtifactError(
@@ -202,7 +201,9 @@ export class EditArtifactStore {
 
   private async openSafeFile(name: string): Promise<FileHandle> {
     try {
-      return await open(join(this.rootPath, name), constants.O_RDONLY | constants.O_NOFOLLOW);
+      const path = join(this.rootPath, name);
+      if (process.platform === 'win32') await verifyAcl(path, 'file');
+      return await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch {
       throw new EditArtifactError('ARTIFACT_NOT_FOUND', 'Edit artifact is unavailable');
     }
@@ -220,6 +221,7 @@ export class EditArtifactStore {
     } finally {
       await handle.close();
     }
+    if (process.platform === 'win32') await secureAcl(join(this.rootPath, name), 'file');
   }
 
   private async usedBytes(): Promise<number> {
@@ -262,6 +264,22 @@ export class EditArtifactStore {
     } finally {
       await directory.close();
     }
+  }
+}
+
+async function secureAcl(path: string, kind: 'directory' | 'file'): Promise<void> {
+  try {
+    await secureWindowsPath(path, kind);
+  } catch {
+    throw new EditArtifactError('UNSAFE_ARTIFACT', 'Artifact ACL could not be secured');
+  }
+}
+
+async function verifyAcl(path: string, kind: 'directory' | 'file'): Promise<void> {
+  try {
+    await verifyWindowsPathAcl(path, kind);
+  } catch {
+    throw new EditArtifactError('UNSAFE_ARTIFACT', 'Artifact ACL verification failed');
   }
 }
 
@@ -341,7 +359,11 @@ function sameReference(left: EditArtifactRef, right: EditArtifactRef): boolean {
 }
 
 function assertSafeArtifactStats(mode: number, nlink: number, isFile: boolean): void {
-  if (!isFile || nlink !== 1 || (mode & 0o022) !== 0)
+  if (
+    !isFile ||
+    nlink !== 1 ||
+    (process.platform !== 'win32' && (mode & 0o022) !== 0)
+  )
     throw new EditArtifactError('UNSAFE_ARTIFACT', 'Artifact permissions or identity are unsafe');
 }
 

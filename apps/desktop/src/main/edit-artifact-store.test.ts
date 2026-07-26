@@ -18,7 +18,7 @@ async function fixture(quotaBytes = 1024) {
   return { root, store };
 }
 
-describe.skipIf(process.platform === 'win32')('EditArtifactStore', () => {
+describe('EditArtifactStore', () => {
   it('durably stores exact bytes behind an opaque owner-bound manifest', async () => {
     const { root, store } = await fixture();
     const ref = await store.put({
@@ -99,24 +99,40 @@ describe.skipIf(process.platform === 'win32')('EditArtifactStore', () => {
     } satisfies Partial<EditArtifactError>);
   });
 
-  it('fails closed when artifact files become writable by other users', async () => {
-    const { root, store } = await fixture();
-    const ref = await store.put({
-      owner: { sagaId: 'saga-1', ordinal: 1, role: 'preimage' },
-      bytes: Buffer.from('before'),
-    });
-    await chmod(join(root, `${ref.artifactId}.bin`), 0o666);
-    await expect(store.read(ref)).rejects.toMatchObject({
-      code: 'UNSAFE_ARTIFACT',
-    } satisfies Partial<EditArtifactError>);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'fails closed when artifact files become writable by other users',
+    async () => {
+      const { root, store } = await fixture();
+      const ref = await store.put({
+        owner: { sagaId: 'saga-1', ordinal: 1, role: 'preimage' },
+        bytes: Buffer.from('before'),
+      });
+      await chmod(join(root, `${ref.artifactId}.bin`), 0o666);
+      await expect(store.read(ref)).rejects.toMatchObject({
+        code: 'UNSAFE_ARTIFACT',
+      } satisfies Partial<EditArtifactError>);
+    },
+  );
 });
 
-describe.runIf(process.platform === 'win32')('EditArtifactStore Windows gate', () => {
-  it('fails closed until Windows DACL verification is implemented', async () => {
-    await expect(
-      EditArtifactStore.open({ rootPath: 'C:\\unused', quotaBytes: 1024 }),
-    ).rejects.toMatchObject({
+describe.runIf(process.platform === 'win32')('EditArtifactStore Windows ACL', () => {
+  it('rejects an artifact after its DACL is broadened', async () => {
+    const { root, store } = await fixture();
+    const ref = await store.put({
+      owner: { sagaId: 'saga-windows', ordinal: 1, role: 'preimage' },
+      bytes: Buffer.from('before'),
+    });
+    const path = join(root, `${ref.artifactId}.bin`);
+    const { execFile } = await import('node:child_process');
+    await new Promise<void>((resolve, reject) =>
+      execFile(
+        'C:\\Windows\\System32\\icacls.exe',
+        [path, '/grant', '*S-1-1-0:R'],
+        { windowsHide: true },
+        (error) => (error === null ? resolve() : reject(error)),
+      ),
+    );
+    await expect(store.read(ref)).rejects.toMatchObject({
       code: 'UNSAFE_ARTIFACT',
     } satisfies Partial<EditArtifactError>);
   });

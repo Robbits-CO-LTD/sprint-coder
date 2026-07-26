@@ -9,17 +9,12 @@ describe('Codex runtime probe', () => {
     });
   });
 
-  it('selects the sandbox mode from the write scope, and defaults to read-only', () => {
-    // The sandbox mode is the entire boundary for Codex — `approval_policy` stays "never" at every
-    // scope because `codex exec` has no channel to ask on — so these three mappings are the feature.
-    const sandboxOf = (...args: Parameters<typeof buildCodexArgs>) => {
-      const argv = buildCodexArgs(...args);
-      return argv[argv.indexOf('--sandbox') + 1];
-    };
-    expect(sandboxOf('auto')).toBe('read-only');
-    expect(sandboxOf('auto', undefined, 'read-only')).toBe('read-only');
-    expect(sandboxOf('auto', undefined, 'workspace-write')).toBe('workspace-write');
-    expect(sandboxOf('auto', undefined, 'full')).toBe('danger-full-access');
+  it('uses the interactive app-server transport for every write scope', () => {
+    for (const scope of ['read-only', 'workspace-write', 'full'] as const)
+      expect(buildCodexArgs('auto', undefined, scope).slice(0, 2)).toEqual([
+        'app-server',
+        '--stdio',
+      ]);
   });
 
   it('never asks for approval, at any scope', () => {
@@ -31,25 +26,16 @@ describe('Codex runtime probe', () => {
 
   it('passes an explicit model without changing the immutable execution profile', () => {
     expect(buildCodexArgs('gpt-5.6-terra')).toEqual([
-      'exec',
-      '--json',
-      '--sandbox',
-      'read-only',
-      '--ephemeral',
-      '--ignore-user-config',
-      '--ignore-rules',
-      '--skip-git-repo-check',
-      '--color',
-      'never',
+      'app-server',
+      '--stdio',
       '-c',
       'approval_policy="never"',
       '-c',
       'shell_environment_policy.inherit="core"',
-      '--model',
-      'gpt-5.6-terra',
-      '-',
+      '-c',
+      'model="gpt-5.6-terra"',
     ]);
-    expect(buildCodexArgs('auto')).not.toContain('--model');
+    expect(buildCodexArgs('auto').some((arg) => arg.startsWith('model='))).toBe(false);
   });
 
   it('pins the per-turn Team MCP server through explicit config overrides', () => {
@@ -70,8 +56,7 @@ describe('Codex runtime probe', () => {
       'mcp_servers.team.env_vars=["ELECTRON_RUN_AS_NODE","TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
     );
     expect(args.join(' ')).not.toContain('turn-token');
-    expect(args).toContain('--ignore-user-config');
-    expect(args.at(-1)).toBe('-');
+    expect(args.slice(0, 2)).toEqual(['app-server', '--stdio']);
   });
 
   it('prepends Team guidance to the real Codex Leader prompt', () => {
@@ -91,8 +76,7 @@ describe('Codex runtime probe', () => {
     expect(args).toContain('model_reasoning_effort="xhigh"');
     expect(args).toContain('approval_policy="never"');
     expect(args).toContain('shell_environment_policy.inherit="core"');
-    expect(args.slice(0, 4)).toEqual(['exec', '--json', '--sandbox', 'read-only']);
-    expect(args.at(-1)).toBe('-');
+    expect(args.slice(0, 2)).toEqual(['app-server', '--stdio']);
   });
 
   it('omits the override entirely when no effort applies', () => {

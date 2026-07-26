@@ -18,6 +18,12 @@ import {
 } from './path-guard';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { createStreamingSecretRedactor } from './secret-redactor';
+import {
+  assignProcessToOwnedJob,
+  closeOwnedJob,
+  terminateOwnedJob,
+  WINDOWS_JOB_WRAPPER,
+} from './windows-process-job';
 
 export type CommandOutputChunk = Readonly<{
   seq: number;
@@ -157,6 +163,7 @@ type ActiveProcess = {
   settled: Promise<void>;
   resolveSettled: () => void;
   outcome: Promise<{ exitCode: number | null; signal: string | null }>;
+  windowsJobId?: string;
   windowsOwnedPids?: Promise<readonly Readonly<{ pid: number; processStartIdentity: string }>[]>;
 };
 
@@ -223,26 +230,25 @@ export class CommandRunner {
         outputBytes: 0,
         truncated: false,
       };
-    if (windowsCommandExecutionUnavailable())
-      throw new CommandRunnerError(
-        'SPAWN_FAILED',
-        'Windows command execution is unavailable until spawn-time Job Object ownership is implemented',
-      );
-
     const executionId = randomUUID();
     const lease = randomUUID();
     const startedAt = Date.now();
     options.beforeSpawn?.();
     let child: ChildProcess;
     try {
-      child = spawn(spec.absoluteExecutable, [...spec.argv], {
-        cwd: spec.cwdIdentity.canonicalPath,
-        env: buildEnvironment(spec.envDelta),
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: process.platform !== 'win32',
-        windowsHide: true,
-      });
+      const windows = process.platform === 'win32';
+      child = spawn(
+        windows ? process.execPath : spec.absoluteExecutable,
+        [...(windows ? ['-e', WINDOWS_JOB_WRAPPER] : spec.argv)],
+        {
+          cwd: spec.cwdIdentity.canonicalPath,
+          env: buildEnvironment(spec.envDelta),
+          shell: false,
+          stdio: [windows ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+          detached: !windows,
+          windowsHide: true,
+        },
+      );
     } catch (error) {
       throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
     }
@@ -255,6 +261,22 @@ export class CommandRunner {
     }
     if (child.pid === undefined)
       throw new CommandRunnerError('SPAWN_FAILED', 'Command process did not receive a PID');
+    if (process.platform === 'win32') {
+      try {
+        assignProcessToOwnedJob(child.pid, executionId);
+        child.stdin?.end(
+          JSON.stringify({
+            executable: spec.absoluteExecutable,
+            argv: [...spec.argv],
+            cwd: spec.cwdIdentity.canonicalPath,
+            env: buildEnvironment(spec.envDelta),
+          }),
+        );
+      } catch (error) {
+        child.kill();
+        throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
+      }
+    }
     let resolveSettled = (): void => undefined;
     const settled = new Promise<void>((resolve) => {
       resolveSettled = resolve;
@@ -268,6 +290,7 @@ export class CommandRunner {
       settled,
       resolveSettled,
       outcome: outcomePromise,
+      ...(process.platform === 'win32' ? { windowsJobId: executionId } : {}),
     };
     this.active.set(executionId, active);
     const bufferedOutput: { stream: 'stdout' | 'stderr'; data: Buffer }[] = [];
@@ -479,15 +502,7 @@ export class CommandRunner {
       if (canceled) return;
       canceled = true;
       termination = 'cooperative';
-      if (process.platform === 'win32')
-        active.windowsOwnedPids = (async () => {
-          try {
-            return await captureWindowsProcessTree(active.pid);
-          } finally {
-            await runTaskkill(active.pid, false).catch(() => undefined);
-          }
-        })();
-      else this.signalOwnedTree(executionId, lease, 'SIGTERM');
+      if (process.platform !== 'win32') this.signalOwnedTree(executionId, lease, 'SIGTERM');
       forcePromise = new Promise<void>((resolve) => {
         resolveForce = resolve;
       });
@@ -546,6 +561,7 @@ export class CommandRunner {
             await finalizeStreams();
           } finally {
             if (this.active.get(executionId) === active) this.active.delete(executionId);
+            if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
             active.resolveSettled();
           }
         };
@@ -558,7 +574,10 @@ export class CommandRunner {
       if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
       options.signal?.removeEventListener('abort', cancel);
       if (!retainActive && this.active.get(executionId) === active) this.active.delete(executionId);
-      if (!retainActive) active.resolveSettled();
+      if (!retainActive) {
+        if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
+        active.resolveSettled();
+      }
     }
   }
 
@@ -621,6 +640,7 @@ export class CommandRunner {
     }
     try {
       if (process.platform === 'win32') {
+        if (active.windowsJobId !== undefined) return terminateOwnedJob(active.windowsJobId);
         let descendants: readonly Readonly<{ pid: number; processStartIdentity: string }>[];
         try {
           descendants = await (active.windowsOwnedPids ?? captureWindowsProcessTree(active.pid));
@@ -664,7 +684,9 @@ export class CommandRunner {
 
   private async forceUnidentifiedProcess(active: ActiveProcess): Promise<void> {
     try {
-      if (process.platform === 'win32') await runTaskkill(active.pid, true);
+      if (process.platform === 'win32' && active.windowsJobId !== undefined)
+        terminateOwnedJob(active.windowsJobId);
+      else if (process.platform === 'win32') await runTaskkill(active.pid, true);
       else process.kill(-active.pid, 'SIGKILL');
       await waitWithTimeout(
         active.outcome,
@@ -681,6 +703,7 @@ export class CommandRunner {
   private retainUntilOutcome(executionId: string, active: ActiveProcess): void {
     const release = (): void => {
       if (this.active.get(executionId) === active) this.active.delete(executionId);
+      if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
       active.resolveSettled();
     };
     void active.outcome.then(release, release);
@@ -697,10 +720,6 @@ export class CommandRunner {
       return false;
     }
   }
-}
-
-function windowsCommandExecutionUnavailable(): boolean {
-  return process.platform === 'win32';
 }
 
 async function captureWindowsProcessTree(
