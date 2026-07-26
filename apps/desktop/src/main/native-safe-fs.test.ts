@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   loadNativeSafeFs,
@@ -1341,32 +1341,68 @@ describe('NativeSafeFs authority boundary', () => {
 
 describe('resolveNativeSafeFsAddonLocation (packaged addon path resolution)', () => {
   it('leaves the dev-relative path unchanged when not running from inside app.asar', () => {
-    const dirname = '/Users/dev/sprint-coder/apps/desktop/src/main';
+    const dirname = join(process.cwd(), 'fixtures', 'apps', 'desktop', 'src', 'main');
     const location = resolveNativeSafeFsAddonLocation(dirname);
     expect(location).toEqual({
-      addonPath:
-        '/Users/dev/sprint-coder/apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
+      addonPath: join(
+        process.cwd(),
+        'fixtures',
+        'apps',
+        'desktop',
+        'native-safe-fs',
+        'build',
+        'Release',
+        'sprint_coder_native_safe_fs.node',
+      ),
       loadedFromUnpacked: false,
     });
   });
 
   it('redirects into the app.asar.unpacked sibling when the bundle runs from inside app.asar', () => {
-    const dirname = '/Applications/Sprint Coder.app/Contents/Resources/app.asar/.vite/build';
+    const dirname = join(
+      process.cwd(),
+      'Applications',
+      'Sprint Coder.app',
+      'Contents',
+      'Resources',
+      'app.asar',
+      '.vite',
+      'build',
+    );
     const location = resolveNativeSafeFsAddonLocation(dirname);
     expect(location).toEqual({
-      addonPath:
-        '/Applications/Sprint Coder.app/Contents/Resources/app.asar.unpacked/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
+      addonPath: join(
+        process.cwd(),
+        'Applications',
+        'Sprint Coder.app',
+        'Contents',
+        'Resources',
+        'app.asar.unpacked',
+        'native-safe-fs',
+        'build',
+        'Release',
+        'sprint_coder_native_safe_fs.node',
+      ),
       loadedFromUnpacked: true,
     });
-    expect(location.addonPath).not.toContain('/app.asar/');
+    expect(location.addonPath).not.toContain(`${sep}app.asar${sep}`);
   });
 
   it('resolves the same packaged layout regardless of install location', () => {
-    const dirname = '/opt/example/app.asar/.vite/build';
+    const dirname = join(process.cwd(), 'opt', 'example', 'app.asar', '.vite', 'build');
     const location = resolveNativeSafeFsAddonLocation(dirname);
     expect(location.loadedFromUnpacked).toBe(true);
     expect(location.addonPath).toBe(
-      '/opt/example/app.asar.unpacked/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
+      join(
+        process.cwd(),
+        'opt',
+        'example',
+        'app.asar.unpacked',
+        'native-safe-fs',
+        'build',
+        'Release',
+        'sprint_coder_native_safe_fs.node',
+      ),
     );
   });
 
