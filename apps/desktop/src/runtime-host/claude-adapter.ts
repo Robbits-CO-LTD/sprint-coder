@@ -279,6 +279,9 @@ export class ClaudeRuntimeAdapter {
 const TEAM_MCP_SERVER_NAME = 'team';
 const TEAM_MCP_TOOL_NAMES = [
   'team_hire_worker',
+  'team_assign_task',
+  'team_get_status',
+  'team_wait_events',
   'team_send_to_worker',
   'team_wait_reports',
   'team_stop_worker',
@@ -294,9 +297,7 @@ function claudeExpectedCapabilities(
       ? {
           teamMcp: {
             serverName: TEAM_MCP_SERVER_NAME,
-            toolNames: TEAM_MCP_TOOL_NAMES.map(
-              (name) => `mcp__${TEAM_MCP_SERVER_NAME}__${name}`,
-            ),
+            toolNames: TEAM_MCP_TOOL_NAMES.map((name) => `mcp__${TEAM_MCP_SERVER_NAME}__${name}`),
           },
         }
       : {}),

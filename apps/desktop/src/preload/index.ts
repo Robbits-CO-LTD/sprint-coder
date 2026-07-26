@@ -24,6 +24,13 @@ import {
   runtimeCodexEffortSetInputSchema,
   runtimeSetInputSchema,
   runtimeSettingsSchema,
+  skillCandidateInputSchema,
+  skillEnabledInputSchema,
+  skillImportInputSchema,
+  skillImportResultSchema,
+  skillInstalledInputSchema,
+  skillPreviewResultSchema,
+  skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
   fileChangeRecordSchema,
@@ -276,6 +283,34 @@ const api: SprintCoderApi = {
     setCodexEffort: (effort) =>
       invoke(IPC_CHANNELS.settingsSetCodexEffort, runtimeCodexEffortSetInputSchema, z.undefined(), {
         effort,
+      }),
+    scanSkills: () =>
+      invoke(IPC_CHANNELS.settingsSkillsScan, emptyPayloadSchema, skillScanResultSchema, {}),
+    previewSkill: (provider, skillId) =>
+      invoke(
+        IPC_CHANNELS.settingsSkillsPreview,
+        skillCandidateInputSchema,
+        skillPreviewResultSchema,
+        { provider, skillId },
+      ),
+    importSkill: (previewId) =>
+      invoke(IPC_CHANNELS.settingsSkillsImport, skillImportInputSchema, skillImportResultSchema, {
+        previewId,
+      }),
+    updateSkill: (previewId) =>
+      invoke(IPC_CHANNELS.settingsSkillsUpdate, skillImportInputSchema, skillImportResultSchema, {
+        previewId,
+      }),
+    setSkillEnabled: (provider, skillId, enabled) =>
+      invoke(IPC_CHANNELS.settingsSkillsSetEnabled, skillEnabledInputSchema, z.undefined(), {
+        provider,
+        skillId,
+        enabled,
+      }),
+    removeSkill: (provider, skillId) =>
+      invoke(IPC_CHANNELS.settingsSkillsRemove, skillInstalledInputSchema, z.undefined(), {
+        provider,
+        skillId,
       }),
   },
   permissions: {

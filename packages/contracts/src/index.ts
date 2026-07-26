@@ -216,6 +216,9 @@ export const workerSummarySchema = z
     objective: z.string().nullable(),
     writeCapable: z.boolean(),
     currentActivity: z.string().nullable(),
+    engine: z.enum(['mock', 'codex', 'claude']),
+    liveOutput: z.string().max(20_000),
+    reasoningActive: z.boolean(),
     usage: teamUsageTotalsSchema,
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
@@ -283,6 +286,40 @@ export const workerCompletionSchema = z
   .strict();
 export type WorkerCompletion = z.infer<typeof workerCompletionSchema>;
 
+export const workerReportSchema = z
+  .object({
+    status: z.enum(['completed', 'blocked', 'needs_input', 'failed']),
+    summary: z.string().min(1).max(4_000),
+    findings: z
+      .array(
+        z
+          .object({
+            severity: z.enum(['high', 'medium', 'low']),
+            message: z.string().min(1).max(2_000),
+            file: z.string().min(1).max(1_024).optional(),
+          })
+          .strict(),
+      )
+      .max(100),
+    changedFiles: z.array(z.string().min(1).max(1_024)).max(200),
+    artifacts: workerCompletionSchema.shape.artifacts,
+    verification: workerCompletionSchema.shape.verification,
+    risks: workerCompletionSchema.shape.risks,
+    nextActions: z.array(z.string().min(1).max(1_000)).max(50),
+    doneEvidence: z
+      .array(
+        z
+          .object({
+            criterion: z.string().min(1).max(1_000),
+            evidence: z.string().min(1).max(4_000),
+          })
+          .strict(),
+      )
+      .max(50),
+  })
+  .strict();
+export type WorkerReport = z.infer<typeof workerReportSchema>;
+
 export const teamHireWorkerInputSchema = z
   .object({
     taskId: idSchema,
@@ -307,7 +344,11 @@ export const teamWorkerRefSchema = z.object({ taskId: idSchema, agentId: idSchem
 export type TeamWorkerRef = z.infer<typeof teamWorkerRefSchema>;
 
 export const teamEventSchema = z
-  .object({ type: z.literal('updated'), detail: teamDetailSchema })
+  .object({
+    type: z.literal('updated'),
+    seq: z.number().int().min(1),
+    detail: teamDetailSchema,
+  })
   .strict();
 export type TeamEvent = z.infer<typeof teamEventSchema>;
 
@@ -1140,6 +1181,81 @@ export const commandResultSchema = <T extends z.ZodType>(value: T) =>
   ]);
 
 export const emptyPayloadSchema = z.object({}).strict();
+export const skillProviderSchema = z.enum(['claude', 'agents']);
+export const skillIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/);
+export const skillCandidateSummarySchema = z
+  .object({
+    provider: skillProviderSchema,
+    skillId: skillIdSchema,
+    valid: z.boolean(),
+    problems: z.array(z.string().max(240)).max(16),
+    imported: z.boolean(),
+    enabled: z.boolean().nullable(),
+    updateAvailable: z.boolean(),
+  })
+  .strict();
+export const skillScanResultSchema = z
+  .object({
+    candidates: z.array(skillCandidateSummarySchema).max(512),
+    claudeDetected: z.number().int().nonnegative().max(512),
+    agentsDetected: z.number().int().nonnegative().max(512),
+    importedCount: z.number().int().nonnegative().max(512),
+    invalidCount: z.number().int().nonnegative().max(512),
+    installed: z
+      .array(
+        z
+          .object({
+            provider: skillProviderSchema,
+            skillId: skillIdSchema,
+            name: z.string().min(1).max(200),
+            enabled: z.boolean(),
+            sourceAvailable: z.boolean(),
+            updateAvailable: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(512),
+  })
+  .strict();
+export const skillCandidateInputSchema = z
+  .object({ provider: skillProviderSchema, skillId: skillIdSchema })
+  .strict();
+export const skillPreviewResultSchema = z
+  .object({
+    previewId: z.string().uuid(),
+    expiresAt: z.string().datetime(),
+    provider: skillProviderSchema,
+    skillId: skillIdSchema,
+    name: z.string().min(1).max(200),
+    description: z.string().min(1).max(2_000),
+    files: z.array(z.string().min(1).max(1_024)).max(256),
+    warnings: z.array(z.string().min(1).max(1_024)).max(256),
+  })
+  .strict();
+export const skillImportInputSchema = z.object({ previewId: z.string().uuid() }).strict();
+export const skillInstalledInputSchema = z
+  .object({ provider: skillProviderSchema, skillId: skillIdSchema })
+  .strict();
+export const skillEnabledInputSchema = skillInstalledInputSchema
+  .extend({ enabled: z.boolean() })
+  .strict();
+export const skillImportResultSchema = z
+  .object({
+    provider: skillProviderSchema,
+    skillId: skillIdSchema,
+    status: z.enum(['imported', 'already-imported']),
+    name: z.string().min(1).max(200),
+  })
+  .strict();
+export type SkillProvider = z.infer<typeof skillProviderSchema>;
+export type SkillCandidateSummary = z.infer<typeof skillCandidateSummarySchema>;
+export type SkillScanResult = z.infer<typeof skillScanResultSchema>;
+export type SkillPreviewResult = z.infer<typeof skillPreviewResultSchema>;
+export type SkillImportResult = z.infer<typeof skillImportResultSchema>;
 export const taskCreateInputSchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
@@ -1339,6 +1455,12 @@ export interface SprintCoderApi {
     /** Codex reasoning level. Rejects a level the selected model does not advertise (see
      * `effortOptionSchema`) — Codex fails the whole turn on an unsupported one. */
     setCodexEffort(effort: string): Promise<void>;
+    scanSkills(): Promise<SkillScanResult>;
+    previewSkill(provider: SkillProvider, skillId: string): Promise<SkillPreviewResult>;
+    importSkill(previewId: string): Promise<SkillImportResult>;
+    updateSkill(previewId: string): Promise<SkillImportResult>;
+    setSkillEnabled(provider: SkillProvider, skillId: string, enabled: boolean): Promise<void>;
+    removeSkill(provider: SkillProvider, skillId: string): Promise<void>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
@@ -1405,6 +1527,12 @@ export const IPC_CHANNELS = {
   settingsSetRuntime: 'sprint-coder:settings:set-runtime',
   settingsSetModel: 'sprint-coder:settings:set-model',
   settingsSetEffort: 'sprint-coder:settings:set-effort',
+  settingsSkillsScan: 'sprint-coder:settings:skills:scan',
+  settingsSkillsPreview: 'sprint-coder:settings:skills:preview',
+  settingsSkillsImport: 'sprint-coder:settings:skills:import',
+  settingsSkillsUpdate: 'sprint-coder:settings:skills:update',
+  settingsSkillsSetEnabled: 'sprint-coder:settings:skills:set-enabled',
+  settingsSkillsRemove: 'sprint-coder:settings:skills:remove',
   /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */
   reasoningEvent: 'sprint-coder:turns:reasoning',
   fileEditEvent: 'sprint-coder:turns:file-edit',

@@ -4,6 +4,7 @@ import { RuntimeHostClient } from './runtime-host';
 import {
   DeterministicTeamWorkerRuntime,
   type TeamWorkerRuntime,
+  type WorkerActivityEvent,
   type WorkerRuntimeResult,
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
@@ -13,8 +14,8 @@ import type { TeamEnvelope } from '@sprint-coder/domain';
 // Worker task runs one ephemeral, read-only/no-tools turn on a production runtime (Claude/Codex)
 // through the same UtilityProcess adapter boundary as chat turns — provider output never reaches
 // Main un-normalized. When no production runtime is selectable (probe failed, egress denied, or
-// the app runs on the mock runtime without any real CLI available) execution falls back to the
-// deterministic simulator so tests and offline use keep working.
+// the app runs on the mock runtime without any real CLI available) execution fails explicitly.
+// Production must never present simulated Worker output as a real Team report.
 
 type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex'; model: string }>;
 
@@ -30,16 +31,22 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     turnId: string,
     prompt: string,
   ) => boolean;
+  /** Explicit development/test opt-in. Production callers leave this false. */
+  allowSimulation?: boolean;
 }>;
 
 type PendingRun = {
   resolve: (finalText: string) => void;
   reject: (error: Error) => void;
   buffer: string[];
+  onEvent?: (event: WorkerActivityEvent) => void;
+  deltaBuffer: string[];
+  deltaTimer: NodeJS.Timeout | null;
+  reasoningActive: boolean;
 };
 
 export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
-  private readonly fallback = new DeterministicTeamWorkerRuntime();
+  private readonly simulator = new DeterministicTeamWorkerRuntime();
   private readonly clients = new Map<'claude' | 'codex', RuntimeHostClient>();
   private readonly pending = new Map<string, PendingRun>();
   private readonly activeByAgent = new Map<
@@ -56,8 +63,28 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       (_taskId, turnId, event) => {
         const run = this.pending.get(turnId);
         if (run === undefined) return;
-        if (event.type === 'delta') run.buffer.push(event.delta);
+        if (event.type === 'stage')
+          run.onEvent?.({
+            type: 'activity',
+            phase: event.stage,
+            label: stageLabel(event.stage),
+            at: new Date().toISOString(),
+          });
+        if (event.type === 'delta') {
+          run.buffer.push(event.delta);
+          run.deltaBuffer.push(event.delta);
+          if (run.deltaTimer === null) run.deltaTimer = setTimeout(() => flushDelta(run), 75);
+        }
+        if (event.type === 'reasoning' && !run.reasoningActive) {
+          run.reasoningActive = true;
+          run.onEvent?.({ type: 'reasoningPresence', active: true });
+        }
+        if (event.type === 'fileChange')
+          run.onEvent?.({ type: 'fileChange', changes: event.changes });
         if (event.type === 'completed') {
+          flushDelta(run);
+          if (run.reasoningActive) run.onEvent?.({ type: 'reasoningPresence', active: false });
+          run.onEvent?.({ type: 'completed' });
           this.pending.delete(turnId);
           run.resolve(run.buffer.join(''));
         }
@@ -65,6 +92,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       (_taskId, turnId, error) => {
         const run = this.pending.get(turnId);
         if (run === undefined) return;
+        flushDelta(run);
+        if (run.reasoningActive) run.onEvent?.({ type: 'reasoningPresence', active: false });
+        run.onEvent?.({ type: 'failed', error: error.userMessage });
         this.pending.delete(turnId);
         run.reject(new Error(error.userMessage));
       },
@@ -85,11 +115,15 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult> {
     const choice = this.deps.selectRuntime();
-    if (choice === null) return this.fallback.execute(input);
+    if (choice === null) {
+      if (this.deps.allowSimulation === true) return this.simulator.execute(input);
+      throw new Error('Real Team Worker runtime is unavailable');
+    }
     const capability = await this.client(choice.kind).probe();
-    if (!capability.available) return this.fallback.execute(input);
+    if (!capability.available) throw new Error(`${choice.kind} Team Worker runtime is unavailable`);
 
     const taskId = input.worker.taskId;
     const turnId = randomUUID();
@@ -103,13 +137,22 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       .filter((line) => line !== '')
       .join('\n');
     if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, prompt))
-      return this.fallback.execute(input);
+      throw new Error(`${choice.kind} Team Worker egress was denied`);
 
     const workspacePath = this.deps.workspaceFor(taskId);
     const startedAt = Date.now();
     const finalText = await new Promise<string>((resolve, reject) => {
-      this.pending.set(turnId, { resolve, reject, buffer: [] });
+      this.pending.set(turnId, {
+        resolve,
+        reject,
+        buffer: [],
+        ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
+        deltaBuffer: [],
+        deltaTimer: null,
+        reasoningActive: false,
+      });
       this.activeByAgent.set(input.worker.id, { kind: choice.kind, taskId, turnId });
+      input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
       this.client(choice.kind).start(
         taskId,
         turnId,
@@ -148,10 +191,12 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
 
   async stop(agentId: string): Promise<void> {
     const active = this.activeByAgent.get(agentId);
-    if (active === undefined) return this.fallback.stop(agentId);
+    if (active === undefined) return;
     this.client(active.kind).cancel(active.taskId, active.turnId);
     const run = this.pending.get(active.turnId);
     if (run !== undefined) {
+      flushDelta(run);
+      run.onEvent?.({ type: 'canceled', reason: 'Worker execution stopped' });
       this.pending.delete(active.turnId);
       run.reject(new Error('Worker execution stopped'));
     }
@@ -162,6 +207,25 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
   }
+}
+
+function flushDelta(run: PendingRun): void {
+  if (run.deltaTimer !== null) clearTimeout(run.deltaTimer);
+  run.deltaTimer = null;
+  if (run.deltaBuffer.length === 0) return;
+  run.onEvent?.({ type: 'outputDelta', text: run.deltaBuffer.join('') });
+  run.deltaBuffer.length = 0;
+}
+
+function stageLabel(stage: string): string {
+  const labels: Record<string, string> = {
+    understanding: '依頼を理解中',
+    planning: '計画中',
+    executing: '実行中',
+    waiting_approval: '承認待ち',
+    synthesizing: '報告を整理中',
+  };
+  return labels[stage] ?? stage;
 }
 
 /** Kind choice used by ipc: real workers follow the selected runtime; the mock runtime borrows

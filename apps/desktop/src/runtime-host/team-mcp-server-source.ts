@@ -42,6 +42,34 @@ const TOOLS = [
     },
   },
   {
+    name: 'team_assign_task',
+    description: 'Assign a formal task with explicit completion criteria to a hired Worker.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workerId: { type: 'string' },
+        objective: { type: 'string' },
+        doneCriteria: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 },
+      },
+      required: ['workerId', 'objective', 'doneCriteria'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_get_status',
+    description: 'Get the current Team, Worker, message, delivery, and budget snapshot.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'team_wait_events',
+    description: 'Wait for new terminal Worker reports after an optional sequence cursor.',
+    inputSchema: {
+      type: 'object',
+      properties: { cursor: { type: 'integer', minimum: 0 } },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'team_send_to_worker',
     description: 'Send a concrete task/instruction to an already-hired Worker.',
     inputSchema: {

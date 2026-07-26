@@ -91,6 +91,9 @@ describe('public contracts', () => {
     objective: 'Ship the feature',
     writeCapable: true,
     currentActivity: null,
+    engine: 'codex',
+    liveOutput: '',
+    reasoningActive: false,
     usage: teamUsage,
     createdAt: '2026-07-23T00:00:00.000Z',
     updatedAt: '2026-07-23T00:00:00.000Z',
@@ -232,7 +235,7 @@ describe('public contracts', () => {
 
   it('validates the team event shape and rejects unknown event types', () => {
     const detail = { team, workers: [worker], messages: [teamMessage], budgets: [budget] };
-    const event = { type: 'updated', detail };
+    const event = { type: 'updated', seq: 1, detail };
     expect(teamEventSchema.parse(event)).toMatchObject({ type: 'updated' });
     expect(() => teamEventSchema.parse({ ...event, type: 'deleted' })).toThrow();
     expect(() => teamEventSchema.parse({ ...event, unknown: true })).toThrow();

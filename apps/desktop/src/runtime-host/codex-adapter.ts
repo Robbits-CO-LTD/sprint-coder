@@ -302,6 +302,9 @@ export function buildCodexArgs(
           '-c',
           `mcp_servers.team.enabled_tools=${JSON.stringify([
             'team_hire_worker',
+            'team_assign_task',
+            'team_get_status',
+            'team_wait_events',
             'team_send_to_worker',
             'team_wait_reports',
             'team_stop_worker',

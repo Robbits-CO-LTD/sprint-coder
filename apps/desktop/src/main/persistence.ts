@@ -9,6 +9,7 @@ import {
   taskSummarySchema,
   turnEventSchema,
   turnSnapshotSchema,
+  workerReportSchema,
   type ChatMessage,
   type ApprovalDecision,
   type AutoPermissionDecision,
@@ -284,6 +285,7 @@ type AgentRow = {
   context_inheritance_policy: ContextInheritancePolicy | null;
   write_capable: number;
   current_activity: string | null;
+  runtime_kind: RuntimeKind;
   created_at: string;
   updated_at: string;
 };
@@ -330,6 +332,20 @@ type TeamMessageRow = {
   seq: number;
   state: TeamMessageState;
   content: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+type TeamTaskRow = {
+  id: string;
+  team_id: string;
+  message_id: string | null;
+  assignee_agent_id: string;
+  created_by_agent_id: string;
+  description: string;
+  status: TeamTaskRecord['status'];
+  done_criteria_json: string;
+  done_evidence_json: string;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -585,6 +601,19 @@ const workerWorktreeTransitions: Readonly<
   active: ['cleaned', 'quarantined'],
   cleaned: [],
   quarantined: [],
+};
+
+const teamTaskTransitions: Readonly<
+  Record<TeamTaskRecord['status'], readonly TeamTaskRecord['status'][]>
+> = {
+  created: ['assigned', 'canceled'],
+  assigned: ['running', 'failed', 'canceled'],
+  running: ['waiting', 'completed', 'blocked', 'failed', 'canceled'],
+  waiting: ['running', 'completed', 'blocked', 'failed', 'canceled'],
+  completed: [],
+  blocked: ['running', 'failed', 'canceled'],
+  failed: [],
+  canceled: [],
 };
 
 const TEAM_GLOBAL_LIMITS_SEED = JSON.stringify(DEFAULT_TEAM_BUDGET_LIMITS.global);
@@ -1612,6 +1641,62 @@ const migrations = [
       CREATE INDEX generated_images_task_idx ON generated_images(task_id, created_at, id);
     `,
   },
+  {
+    version: 33,
+    checksum: 'team-runtime-v33-tasks-activity-reports',
+    sql: `
+      CREATE TABLE team_tasks (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        message_id TEXT UNIQUE REFERENCES team_messages(id) ON DELETE SET NULL,
+        assignee_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        created_by_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        description TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (
+          status IN ('created', 'assigned', 'running', 'waiting', 'completed', 'blocked', 'failed', 'canceled')
+        ),
+        done_criteria_json TEXT NOT NULL,
+        done_evidence_json TEXT NOT NULL DEFAULT '[]',
+        blocked_reason TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX team_tasks_team_status_idx ON team_tasks(team_id, status, created_at);
+      CREATE INDEX team_tasks_assignee_idx ON team_tasks(assignee_agent_id, status);
+      CREATE TABLE team_activity_events (
+        id TEXT PRIMARY KEY,
+        team_task_id TEXT NOT NULL REFERENCES team_tasks(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        type TEXT NOT NULL CHECK (
+          type IN ('accepted', 'activity', 'fileChange', 'blocked', 'completed', 'failed', 'canceled')
+        ),
+        payload_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+      );
+      CREATE INDEX team_activity_events_task_idx
+        ON team_activity_events(team_task_id, recorded_at, id);
+      CREATE TABLE team_reports (
+        id TEXT PRIMARY KEY,
+        team_task_id TEXT NOT NULL UNIQUE REFERENCES team_tasks(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        status TEXT NOT NULL CHECK (status IN ('completed', 'blocked', 'needs_input', 'failed')),
+        report_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `,
+  },
+  {
+    version: 34,
+    checksum: 'team-spawn-slots-v34-release-concurrency-leases',
+    sql: `
+      UPDATE team_budget_reservations
+      SET state = 'released', revision = revision + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE kind = 'spawnSlots' AND state = 'settled';
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -1813,6 +1898,7 @@ export type AgentRecord = Readonly<{
   contextInheritancePolicy: ContextInheritancePolicy | null;
   writeCapable: boolean;
   currentActivity: string | null;
+  runtimeKind: RuntimeKind;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -1863,6 +1949,28 @@ export type TeamMessageRecord = Readonly<{
   createdAt: string;
   updatedAt: string;
 }>;
+export type TeamTaskRecord = Readonly<{
+  id: string;
+  teamId: string;
+  messageId: string | null;
+  assigneeAgentId: string;
+  createdByAgentId: string;
+  description: string;
+  status:
+    | 'created'
+    | 'assigned'
+    | 'running'
+    | 'waiting'
+    | 'completed'
+    | 'blocked'
+    | 'failed'
+    | 'canceled';
+  doneCriteria: readonly string[];
+  doneEvidence: readonly { criterion: string; evidence: string }[];
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}>;
 export type TeamSnapshot = Readonly<{
   team: TeamRecord;
   agents: readonly AgentRecord[];
@@ -1900,6 +2008,30 @@ export interface PersistenceClient {
     content: string;
   }): TeamMessageRecord;
   transitionTeamMessageState(messageId: string, to: TeamMessageState): TeamMessageRecord;
+  createTeamTask(input: {
+    teamId: string;
+    messageId: string;
+    assigneeAgentId: string;
+    createdByAgentId: string;
+    description: string;
+    doneCriteria: readonly string[];
+    now: string;
+  }): TeamTaskRecord;
+  transitionTeamTask(taskId: string, status: TeamTaskRecord['status'], now: string): TeamTaskRecord;
+  recordTeamActivity(input: {
+    teamTaskId: string;
+    agentId: string;
+    type: 'accepted' | 'activity' | 'fileChange' | 'blocked' | 'completed' | 'failed' | 'canceled';
+    payload: unknown;
+    now: string;
+  }): void;
+  completeTeamTaskWithReport(input: {
+    teamTaskId: string;
+    agentId: string;
+    report: unknown;
+    doneEvidence: readonly { criterion: string; evidence: string }[];
+    now: string;
+  }): TeamTaskRecord;
   reserveTeamBudget(input: {
     teamId: string;
     entries: readonly {
@@ -2689,8 +2821,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const task = this.getTaskRow(taskId);
     const row = this.db
       .prepare(
-        `SELECT * FROM agents
-         WHERE task_id = ? AND thread_id = ? AND kind = 'leader'`,
+        `SELECT a.*, t.runtime_kind FROM agents a
+         JOIN agent_threads t ON t.id = a.thread_id
+         WHERE a.task_id = ? AND a.thread_id = ? AND a.kind = 'leader'`,
       )
       .get(taskId, task.primary_thread_id) as AgentRow | undefined;
     if (row === undefined) throw new NotFoundError('Task leader not found');
@@ -2744,7 +2877,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const team = this.getTeam(teamId);
     const agents = (
       this.db
-        .prepare('SELECT * FROM agents WHERE team_id = ? ORDER BY kind, created_at, id')
+        .prepare(
+          `SELECT a.*, t.runtime_kind FROM agents a
+           JOIN agent_threads t ON t.id = a.thread_id
+           WHERE a.team_id = ? ORDER BY a.kind, a.created_at, a.id`,
+        )
         .all(teamId) as AgentRow[]
     ).map(toAgent);
     const messages = (
@@ -2911,6 +3048,135 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(randomUUID(), messageId, nextRevision, current.state, to, now);
       return this.getTeamMessage(messageId);
+    })();
+  }
+
+  createTeamTask(input: {
+    teamId: string;
+    messageId: string;
+    assigneeAgentId: string;
+    createdByAgentId: string;
+    description: string;
+    doneCriteria: readonly string[];
+    now: string;
+  }): TeamTaskRecord {
+    if (input.doneCriteria.length === 0 || input.doneCriteria.some((item) => item.trim() === ''))
+      throw new Error('Team task requires done criteria');
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO team_tasks(
+           id, team_id, message_id, assignee_agent_id, created_by_agent_id, description,
+           status, done_criteria_json, done_evidence_json, blocked_reason, started_at,
+           completed_at, revision, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, 'assigned', ?, '[]', NULL, NULL, NULL, 1, ?, ?)`,
+      )
+      .run(
+        id,
+        input.teamId,
+        input.messageId,
+        input.assigneeAgentId,
+        input.createdByAgentId,
+        input.description,
+        JSON.stringify(input.doneCriteria),
+        input.now,
+        input.now,
+      );
+    return this.getTeamTask(id);
+  }
+
+  transitionTeamTask(
+    taskId: string,
+    status: TeamTaskRecord['status'],
+    now: string,
+  ): TeamTaskRecord {
+    const current = this.getTeamTask(taskId);
+    if (current.status === status) return current;
+    if (!teamTaskTransitions[current.status].includes(status))
+      throw new Error(`Invalid team task transition: ${current.status} -> ${status}`);
+    const result = this.db
+      .prepare(
+        `UPDATE team_tasks SET status = ?, started_at = COALESCE(started_at, ?),
+           revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?`,
+      )
+      .run(status, status === 'running' ? now : null, now, taskId, current.revision);
+    if (result.changes !== 1) throw new TeamConflictError();
+    return this.getTeamTask(taskId);
+  }
+
+  recordTeamActivity(input: {
+    teamTaskId: string;
+    agentId: string;
+    type: 'accepted' | 'activity' | 'fileChange' | 'blocked' | 'completed' | 'failed' | 'canceled';
+    payload: unknown;
+    now: string;
+  }): void {
+    const task = this.getTeamTask(input.teamTaskId);
+    if (task.assigneeAgentId !== input.agentId)
+      throw new Error('Team activity agent does not match task assignee');
+    this.db
+      .prepare(
+        `INSERT INTO team_activity_events(
+           id, team_task_id, agent_id, type, payload_json, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        input.teamTaskId,
+        input.agentId,
+        input.type,
+        JSON.stringify(input.payload),
+        input.now,
+      );
+  }
+
+  completeTeamTaskWithReport(input: {
+    teamTaskId: string;
+    agentId: string;
+    report: unknown;
+    doneEvidence: readonly { criterion: string; evidence: string }[];
+    now: string;
+  }): TeamTaskRecord {
+    return this.db.transaction(() => {
+      const task = this.getTeamTask(input.teamTaskId);
+      if (task.assigneeAgentId !== input.agentId)
+        throw new Error('Worker report agent does not match task assignee');
+      const report = workerReportSchema.parse(input.report);
+      const terminalStatus =
+        report.status === 'completed'
+          ? 'completed'
+          : report.status === 'failed'
+            ? 'failed'
+            : 'blocked';
+      if (!teamTaskTransitions[task.status].includes(terminalStatus))
+        throw new Error(`Invalid team task transition: ${task.status} -> ${terminalStatus}`);
+      const evidence = new Map(input.doneEvidence.map((item) => [item.criterion, item.evidence]));
+      if (
+        terminalStatus === 'completed' &&
+        task.doneCriteria.some((criterion) => (evidence.get(criterion)?.trim().length ?? 0) === 0)
+      )
+        throw new Error('Completed team task requires evidence for every done criterion');
+      this.db
+        .prepare(
+          `INSERT INTO team_reports(
+             id, team_task_id, agent_id, status, report_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          randomUUID(),
+          task.id,
+          input.agentId,
+          report.status,
+          JSON.stringify(report),
+          input.now,
+        );
+      this.db
+        .prepare(
+          `UPDATE team_tasks SET status = ?, done_evidence_json = ?,
+             completed_at = ?, revision = revision + 1, updated_at = ? WHERE id = ?`,
+        )
+        .run(terminalStatus, JSON.stringify(input.doneEvidence), input.now, input.now, task.id);
+      return this.getTeamTask(task.id);
     })();
   }
 
@@ -3277,6 +3543,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(now);
       const threads = threadResult.changes;
+
+      this.db
+        .prepare(
+          `UPDATE team_tasks
+           SET status = 'failed', revision = revision + 1, updated_at = ?
+           WHERE status IN ('created', 'assigned', 'running', 'waiting', 'blocked')`,
+        )
+        .run(now);
 
       let deliveries = 0;
       const deliveryRows = this.db
@@ -7396,8 +7670,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   private getAgent(agentId: string): AgentRecord {
-    const row = this.db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as
-      AgentRow | undefined;
+    const row = this.db
+      .prepare(
+        `SELECT a.*, t.runtime_kind FROM agents a
+         JOIN agent_threads t ON t.id = a.thread_id WHERE a.id = ?`,
+      )
+      .get(agentId) as AgentRow | undefined;
     if (row === undefined) throw new NotFoundError('Agent not found');
     return toAgent(row);
   }
@@ -7407,6 +7685,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
       TeamMessageRow | undefined;
     if (row === undefined) throw new NotFoundError('Team message not found');
     return toTeamMessage(row);
+  }
+
+  private getTeamTask(taskId: string): TeamTaskRecord {
+    const row = this.db.prepare('SELECT * FROM team_tasks WHERE id = ?').get(taskId) as
+      TeamTaskRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team task not found');
+    return toTeamTask(row);
   }
 
   private getBudgetReservation(id: string): TeamBudgetReservationRecord {
@@ -7604,6 +7889,7 @@ function toAgent(row: AgentRow): AgentRecord {
     contextInheritancePolicy: row.context_inheritance_policy,
     writeCapable: row.write_capable === 1,
     currentActivity: row.current_activity,
+    runtimeKind: row.runtime_kind,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -7662,6 +7948,26 @@ function toTeamMessage(row: TeamMessageRow): TeamMessageRecord {
     seq: row.seq,
     state: row.state,
     content: row.content,
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toTeamTask(row: TeamTaskRow): TeamTaskRecord {
+  return {
+    id: row.id,
+    teamId: row.team_id,
+    messageId: row.message_id,
+    assigneeAgentId: row.assignee_agent_id,
+    createdByAgentId: row.created_by_agent_id,
+    description: row.description,
+    status: row.status,
+    doneCriteria: JSON.parse(row.done_criteria_json) as string[],
+    doneEvidence: JSON.parse(row.done_evidence_json) as {
+      criterion: string;
+      evidence: string;
+    }[],
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

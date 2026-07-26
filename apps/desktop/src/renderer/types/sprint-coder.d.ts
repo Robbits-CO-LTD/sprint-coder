@@ -378,6 +378,9 @@ export type WorkerSummary = {
   objective: string | null;
   writeCapable: boolean;
   currentActivity: string | null;
+  engine: 'mock' | 'codex' | 'claude';
+  liveOutput: string;
+  reasoningActive: boolean;
   usage: TeamUsageTotals;
   createdAt: string;
   updatedAt: string;
@@ -464,7 +467,7 @@ export interface SprintCoderApi {
     stopAll(taskId: string): Promise<TeamDetail>;
     subscribe(
       taskId: string,
-      listener: (event: { type: 'updated'; detail: TeamDetail }) => void,
+      listener: (event: { type: 'updated'; seq: number; detail: TeamDetail }) => void,
     ): () => void;
     getCanvasView(taskId: string): Promise<CanvasView | null>;
     saveCanvasView(input: CanvasViewSaveInput): Promise<CanvasViewSaveResult>;
@@ -527,6 +530,22 @@ export interface SprintCoderApi {
     setModel(model: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
     setCodexEffort(effort: string): Promise<void>;
+    scanSkills(): Promise<import('@sprint-coder/contracts').SkillScanResult>;
+    previewSkill(
+      provider: import('@sprint-coder/contracts').SkillProvider,
+      skillId: string,
+    ): Promise<import('@sprint-coder/contracts').SkillPreviewResult>;
+    importSkill(previewId: string): Promise<import('@sprint-coder/contracts').SkillImportResult>;
+    updateSkill(previewId: string): Promise<import('@sprint-coder/contracts').SkillImportResult>;
+    setSkillEnabled(
+      provider: import('@sprint-coder/contracts').SkillProvider,
+      skillId: string,
+      enabled: boolean,
+    ): Promise<void>;
+    removeSkill(
+      provider: import('@sprint-coder/contracts').SkillProvider,
+      skillId: string,
+    ): Promise<void>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;

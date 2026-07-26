@@ -1,4 +1,6 @@
-import type { Ref } from 'react';
+import { useEffect, useRef, useState, type Ref } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { TeamMessageSummary, WorkerSummary } from '../../types/sprint-coder';
 
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
@@ -49,11 +51,17 @@ export function WorkerNode({
 }) {
   const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
   const dotClass = statusDotClass(worker.state);
+  const historyRef = useRef<HTMLDivElement>(null);
+  const [followingLatest, setFollowingLatest] = useState(true);
 
   const relevant = messages
     .filter((m) => m.targetAgentId === worker.id || m.sourceAgentId === worker.id)
-    .sort((a, b) => a.seq - b.seq)
-    .slice(-4);
+    .sort((a, b) => a.seq - b.seq);
+
+  useEffect(() => {
+    const element = historyRef.current;
+    if (element !== null && followingLatest) element.scrollTop = element.scrollHeight;
+  }, [followingLatest, relevant.length, worker.currentActivity]);
 
   return (
     <div
@@ -76,7 +84,10 @@ export function WorkerNode({
         </div>
         <div className="role-line">
           <span className="role-name">{worker.role}</span>
-          <span className="role-sub">{worker.objective}</span>
+          <span className="role-sub">
+            {worker.engine === 'claude' ? 'Claude' : worker.engine === 'codex' ? 'Codex' : 'Mock'} ·{' '}
+            {worker.objective}
+          </span>
         </div>
         <span className={`w-status ${dotClass}`}>
           <span className="dot" aria-hidden="true" />
@@ -86,7 +97,18 @@ export function WorkerNode({
           停止
         </button>
       </div>
-      <div className="w-body">
+      <div className="w-activity" aria-live="polite">
+        {worker.currentActivity ?? (worker.state === 'done' ? '完了' : worker.state)}
+      </div>
+      <div
+        className="w-body"
+        ref={historyRef}
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          setFollowingLatest(element.scrollHeight - element.scrollTop - element.clientHeight < 32);
+        }}
+        aria-label={`${worker.role}の通信履歴`}
+      >
         {relevant.map((m) => {
           const incoming = m.targetAgentId === worker.id;
           return (
@@ -94,16 +116,64 @@ export function WorkerNode({
               <span className={`tag${incoming ? '' : ' out'}`}>
                 {incoming ? 'Leaderから' : '報告'}
               </span>
-              {incoming ? m.content : summarize(m.content)}
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                skipHtml
+                disallowedElements={['img']}
+                unwrapDisallowed
+              >
+                {incoming ? m.content : summarize(m.content)}
+              </ReactMarkdown>
             </div>
           );
         })}
+        {worker.liveOutput !== '' && (
+          <div className="w-line w-live-output">
+            <span className="tag">Live</span>
+            <pre>{worker.liveOutput}</pre>
+          </div>
+        )}
         {worker.state === 'busy' && (
           <div className="w-run">
             <span className="spinner" aria-hidden="true" />
-            <span>{worker.currentActivity ?? '実行中…'}</span>
+            <span>
+              {worker.currentActivity ?? (worker.reasoningActive ? '方針を検討中…' : '実行中…')}
+            </span>
           </div>
         )}
+      </div>
+      <div className="w-footer">
+        <time dateTime={worker.updatedAt}>
+          更新{' '}
+          {new Date(worker.updatedAt).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          })}
+        </time>
+        {!followingLatest && (
+          <button
+            type="button"
+            className="w-latest-btn"
+            onClick={() => {
+              const element = historyRef.current;
+              if (element !== null) element.scrollTop = element.scrollHeight;
+              setFollowingLatest(true);
+            }}
+          >
+            最新へ
+          </button>
+        )}
+        <details className="w-details">
+          <summary>詳細</summary>
+          <dl>
+            <dt>状態</dt>
+            <dd>{worker.state}</dd>
+            <dt>Thread</dt>
+            <dd>{worker.threadId}</dd>
+            <dt>Token</dt>
+            <dd>{worker.usage.tokens}</dd>
+          </dl>
+        </details>
       </div>
     </div>
   );

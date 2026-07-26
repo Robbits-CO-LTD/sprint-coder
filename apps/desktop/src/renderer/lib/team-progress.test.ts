@@ -2,11 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { TeamDetail, WorkerSummary } from '../types/sprint-coder';
 import { teamRunProgress } from './team-progress';
 
-function worker(
-  id: string,
-  role: string,
-  state: WorkerSummary['state'],
-): WorkerSummary {
+function worker(id: string, role: string, state: WorkerSummary['state']): WorkerSummary {
   return {
     id,
     teamId: 'team-1',
@@ -18,6 +14,9 @@ function worker(
     objective: 'objective',
     writeCapable: false,
     currentActivity: null,
+    engine: 'mock',
+    liveOutput: '',
+    reasoningActive: false,
     usage: { costCents: 0, tokens: 0, timeMs: 0, toolCalls: 0 },
     createdAt: '',
     updatedAt: '',

@@ -31,6 +31,7 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
   maxActiveStarts = 0;
   readonly stopped: string[] = [];
   spoofClaims = false;
+  completionStatus: 'succeeded' | 'failed' | 'partial' = 'succeeded';
 
   async start(_worker: AgentRecord): Promise<{ pid: null }> {
     this.activeStarts += 1;
@@ -52,7 +53,7 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
         targetAgentId: this.spoofClaims ? 'spoofed-worker' : input.envelope.targetAgentId,
       },
       completion: {
-        status: 'succeeded',
+        status: this.completionStatus,
         summary: `${input.worker.role}: ${input.content}`,
         artifacts: [],
         verification: [{ name: 'test-runtime', outcome: 'pass' }],
@@ -91,6 +92,12 @@ if (runsWithElectronAbi)
       );
       expect(runtime.maxActiveStarts).toBe(1);
       expect(workers.map(({ state }) => state)).toEqual(['ready', 'ready', 'ready']);
+      expect(workers.every(({ engine }) => engine === 'mock')).toBe(true);
+      expect(
+        persistence
+          .getTeamBudgetStatus(workers[0]!.teamId)
+          .find(({ scope, kind }) => scope === 'global' && kind === 'spawnSlots'),
+      ).toMatchObject({ committed: 0, reserved: 0 });
       await expect(
         coordinator.hireWorker({
           taskId: task.id,
@@ -109,7 +116,7 @@ if (runsWithElectronAbi)
         });
 
       const detail = coordinator.get(task.id);
-      expect(detail?.team.state).toBe('active');
+      expect(detail?.team.state).toBe('completed');
       expect(
         detail?.workers.filter(({ kind }) => kind === 'worker').map(({ state }) => state),
       ).toEqual(['done', 'done', 'done']);
@@ -147,6 +154,32 @@ if (runsWithElectronAbi)
       const detail = coordinator.get(task.id);
       expect(detail?.workers.find(({ id }) => id === worker.id)?.state).toBe('failed');
       expect(detail?.messages[0]?.deliveryState).toBe('failed');
+      persistence.close();
+    });
+
+    it('preserves a failed Worker report as failed instead of promoting it to completed', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask();
+      const runtime = new TestWorkerRuntime();
+      runtime.completionStatus = 'failed';
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reviewer',
+        objective: 'find a blocker',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+
+      await coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'report failure',
+      });
+
+      expect(coordinator.get(task.id)?.workers.find(({ id }) => id === worker.id)?.state).toBe(
+        'failed',
+      );
       persistence.close();
     });
 
@@ -205,6 +238,82 @@ if (runsWithElectronAbi)
       releaseExecute?.();
       await dispatch;
       expect(coordinator.hasBusyWorkers(task.id)).toBe(false);
+      persistence.close();
+    });
+
+    it('pushes accepted, stage, reasoning, and batched output into the live Worker snapshot', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask();
+      let releaseExecute: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        releaseExecute = resolve;
+      });
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          input.onEvent?.({ type: 'accepted', at: '2026-07-26T00:00:00.000Z' });
+          input.onEvent?.({
+            type: 'activity',
+            phase: 'planning',
+            label: '方針を検討中',
+            at: '2026-07-26T00:00:01.000Z',
+          });
+          input.onEvent?.({ type: 'reasoningPresence', active: true });
+          input.onEvent?.({ type: 'outputDelta', text: '途中出力' });
+          await gate;
+          input.onEvent?.({ type: 'completed' });
+          return {
+            claims: {
+              deliveryId: input.envelope.deliveryId,
+              sourceAgentId: input.envelope.sourceAgentId,
+              targetAgentId: input.envelope.targetAgentId,
+            },
+            completion: {
+              status: 'succeeded',
+              summary: '完了',
+              artifacts: [],
+              verification: [],
+              risks: [],
+            },
+          };
+        },
+        async stop() {},
+      };
+      const snapshots: ReturnType<TeamCoordinator['get']>[] = [];
+      const coordinator = new TeamCoordinator(persistence, runtime, (_taskId, detail) => {
+        snapshots.push(detail);
+      });
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'worker',
+        objective: 'stream',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+
+      const dispatch = coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'go',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const live = snapshots.at(-1)?.workers.find(({ id }) => id === worker.id);
+      expect(live).toMatchObject({
+        state: 'busy',
+        currentActivity: '方針を検討中',
+        reasoningActive: true,
+        liveOutput: '途中出力',
+      });
+
+      releaseExecute?.();
+      await dispatch;
+      expect(coordinator.get(task.id)?.workers.find(({ id }) => id === worker.id)).toMatchObject({
+        state: 'done',
+        reasoningActive: false,
+        liveOutput: '',
+      });
       persistence.close();
     });
 

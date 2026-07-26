@@ -63,7 +63,7 @@ describe('Codex runtime probe', () => {
     expect(args).toContain('mcp_servers.team.args=["/tmp/team-mcp-server.cjs"]');
     expect(args).toContain('mcp_servers.team.enabled=true');
     expect(args).toContain(
-      'mcp_servers.team.enabled_tools=["team_hire_worker","team_send_to_worker","team_wait_reports","team_stop_worker"]',
+      'mcp_servers.team.enabled_tools=["team_hire_worker","team_assign_task","team_get_status","team_wait_events","team_send_to_worker","team_wait_reports","team_stop_worker"]',
     );
     expect(args).toContain('mcp_servers.team.default_tools_approval_mode="approve"');
     expect(args).toContain(
