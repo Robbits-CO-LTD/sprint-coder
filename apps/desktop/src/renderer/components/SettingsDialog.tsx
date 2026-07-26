@@ -12,6 +12,7 @@ import {
   effortUnavailableReason,
 } from '../lib/runtime-labels';
 import type { RuntimeKind } from '../types/sprint-coder';
+import { SkillSettingsSection } from './SkillSettingsSection';
 
 // Settings dialog (issue #5). The sidebar's "設定" button had no onClick and was not disabled
 // either, so it looked pressable and did nothing — and no settings screen existed anywhere in the
@@ -203,6 +204,8 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                 })}
               </ul>
             </div>
+
+            <SkillSettingsSection active={open} />
           </>
         )}
       </div>

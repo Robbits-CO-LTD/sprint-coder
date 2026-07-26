@@ -27,6 +27,13 @@ export const LOD2_MAX_SCALE = 0.32;
 // "end" signal, unlike pointerup for a pan drag, so this is a plain quiet-period debounce.
 const WHEEL_SETTLE_MS = 260;
 
+export function preservesNestedScroll(target: EventTarget | null): boolean {
+  const element = target as { closest?: (selectors: string) => Element | null } | null;
+  return (
+    typeof element?.closest === 'function' && element.closest('.timeline-scroll, .w-body') !== null
+  );
+}
+
 export function useCamera(onSettle?: () => void) {
   const canvasRef = useRef<HTMLElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
@@ -242,6 +249,11 @@ export function useCamera(onSettle?: () => void) {
       if (wasDragging) onSettleRef.current?.();
     }
     function onWheel(e: WheelEvent) {
+      // The Leader timeline and Worker report body are scrollports inside the canvas. Let their
+      // native vertical scrolling win instead of turning the same wheel gesture into camera zoom.
+      // `overscroll-behavior: contain` on both scrollports prevents a gesture at either edge from
+      // chaining into the canvas or the surrounding app.
+      if (preservesNestedScroll(e.target)) return;
       e.preventDefault();
       claimUserOwnership(); // manual input: same ownership claim as a pan start, every tick
       const current = camRef.current;

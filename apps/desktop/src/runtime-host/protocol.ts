@@ -21,11 +21,10 @@ export type RuntimeContextFragment = Readonly<{
   content: string;
 }>;
 
-/** Additive, optional per-turn addendum: when present, the Claude adapter wires the real Leader
+/** Additive, optional per-turn addendum: when present, the Codex/Claude adapter wires the real Leader
  * up to team-mcp-bridge.ts (via an ephemeral MCP stdio server) instead of running the plain
  * no-tools profile. `socketPath`/`token` name the bridge connection; `guidance` is appended to the
- * turn's system prompt (see LEADER_MCP_SYSTEM_PROMPT in team-tools.ts). Ignored entirely by the
- * Codex adapter. */
+ * turn's prompt (see LEADER_MCP_SYSTEM_PROMPT in team-tools.ts). */
 export type RuntimeTeamMcpOption = Readonly<{
   socketPath: string;
   token: string;

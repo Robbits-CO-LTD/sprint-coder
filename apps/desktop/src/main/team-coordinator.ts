@@ -2,6 +2,7 @@ import {
   teamDetailSchema,
   teamMessageSummarySchema,
   workerCompletionSchema,
+  workerReportSchema,
   workerSummarySchema,
   type TeamDetail,
   type TeamHireWorkerInput,
@@ -42,6 +43,15 @@ export type WorkerRuntimeResult = Readonly<{
     toolCalls?: number;
   }>;
 }>;
+export type WorkerActivityEvent =
+  | { type: 'accepted'; at: string }
+  | { type: 'activity'; phase: string; label: string; at: string }
+  | { type: 'outputDelta'; text: string }
+  | { type: 'reasoningPresence'; active: boolean }
+  | { type: 'fileChange'; changes: { path: string; kind: 'add' | 'update' | 'delete' }[] }
+  | { type: 'completed' }
+  | { type: 'failed'; error: string }
+  | { type: 'canceled'; reason: string };
 
 export interface TeamWorkerRuntime {
   start(worker: AgentRecord): Promise<{ pid?: number | null }>;
@@ -49,6 +59,7 @@ export interface TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult>;
   stop(agentId: string): Promise<void>;
 }
@@ -64,8 +75,16 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult> {
-    return {
+    input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
+    input.onEvent?.({
+      type: 'activity',
+      phase: 'executing',
+      label: '依頼を処理中',
+      at: new Date().toISOString(),
+    });
+    const result = {
       claims: {
         deliveryId: input.envelope.deliveryId,
         sourceAgentId: input.envelope.sourceAgentId,
@@ -85,6 +104,8 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
         toolCalls: 0,
       },
     };
+    input.onEvent?.({ type: 'completed' });
+    return result;
   }
 
   registerProcess(agentId: string, pid: number): void {
@@ -107,6 +128,9 @@ const workerCeiling = Object.freeze({
   maxConcurrentWorkers: 0,
 });
 const MAX_WORKERS = 3;
+// Local Claude/Codex workers can spend well over ten seconds reasoning before they finish.
+// Keep the delivery boundary finite, but do not turn a healthy streaming run into a retry.
+const DEFAULT_WORKER_DELIVERY_TIMEOUT_MS = 120_000;
 const executionEstimate = Object.freeze({
   costCents: 100,
   tokens: 20_000,
@@ -116,14 +140,64 @@ const executionEstimate = Object.freeze({
 
 export class TeamCoordinator {
   private readonly queues = new Map<string, Promise<unknown>>();
+  private readonly transientWorkerActivity = new Map<
+    string,
+    { liveOutput: string; reasoningActive: boolean }
+  >();
 
   constructor(
     private readonly persistence: PersistenceClient,
     private readonly runtime: TeamWorkerRuntime = new DeterministicTeamWorkerRuntime(),
     private readonly publish: Publish = () => undefined,
     private readonly now: () => Date = () => new Date(),
-    private readonly deliveryTimeoutMs = 10_000,
+    private readonly deliveryTimeoutMs = DEFAULT_WORKER_DELIVERY_TIMEOUT_MS,
   ) {}
+
+  private handleWorkerActivity(
+    taskId: string,
+    teamId: string,
+    workerId: string,
+    teamTaskId: string,
+    event: WorkerActivityEvent,
+  ): void {
+    const terminal =
+      event.type === 'completed' || event.type === 'failed' || event.type === 'canceled';
+    const now = this.isoNow();
+    const transient = this.transientWorkerActivity.get(workerId) ?? {
+      liveOutput: '',
+      reasoningActive: false,
+    };
+    if (event.type === 'outputDelta')
+      transient.liveOutput = `${transient.liveOutput}${event.text}`.slice(-20_000);
+    if (event.type === 'reasoningPresence') transient.reasoningActive = event.active;
+    if (terminal) this.transientWorkerActivity.delete(workerId);
+    else this.transientWorkerActivity.set(workerId, transient);
+
+    if (event.type === 'accepted') {
+      this.persistence.transitionTeamTask(teamTaskId, 'running', now);
+      this.persistence.setWorkerCurrentActivity(workerId, '依頼を受理', now);
+    }
+    if (event.type === 'activity')
+      this.persistence.setWorkerCurrentActivity(workerId, event.label, now);
+    if (event.type === 'fileChange')
+      this.persistence.setWorkerCurrentActivity(
+        workerId,
+        `ファイル変更 ${event.changes.length}件`,
+        now,
+      );
+    if (event.type === 'outputDelta' || event.type === 'reasoningPresence') {
+      this.emit(taskId, teamId);
+      return;
+    }
+    this.persistence.recordTeamActivity({
+      teamTaskId,
+      agentId: workerId,
+      type: event.type,
+      payload: event,
+      now,
+    });
+    this.emit(taskId, teamId);
+  }
 
   get(taskId: string): TeamDetail | null {
     const team = this.persistence.getTeamByTask(taskId);
@@ -167,21 +241,24 @@ export class TeamCoordinator {
         parentCapabilityCeiling: workerCeiling,
         writeCapable: input.writeCapable,
       });
-      const reservations = this.persistence.reserveTeamBudget({
-        teamId: team.id,
-        entries: [
-          { scope: 'global', kind: 'spawnSlots', amount: 1 },
-          { scope: 'team', kind: 'spawnSlots', amount: 1 },
-        ],
-        purpose: `worker-spawn:${worker.id}`,
-        now: this.isoNow(),
-      });
+      let reservations: readonly TeamBudgetReservationRecord[] = [];
       try {
+        reservations = this.persistence.reserveTeamBudget({
+          teamId: team.id,
+          entries: [
+            { scope: 'global', kind: 'spawnSlots', amount: 1 },
+            { scope: 'team', kind: 'spawnSlots', amount: 1 },
+          ],
+          purpose: `worker-spawn:${worker.id}`,
+          now: this.isoNow(),
+        });
         let current = this.persistence.transitionWorkerState(worker.id, 'spawning');
         await this.runtime.start(current);
         current = this.persistence.transitionWorkerState(worker.id, 'ready');
         this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
-        this.persistence.settleTeamBudget({
+        // spawnSlots is a concurrency lease, not cumulative usage. Keeping it committed after
+        // startup permanently exhausts the global pool across otherwise completed Teams.
+        this.persistence.releaseTeamBudget({
           reservationIds: reservations.map(({ id }) => id),
           now: this.isoNow(),
         });
@@ -203,6 +280,15 @@ export class TeamCoordinator {
   }
 
   async sendToWorker(input: TeamSendMessageInput): Promise<TeamMessageSummary> {
+    return this.assignTask({
+      ...input,
+      doneCriteria: ['Workerが依頼に対する検証可能な報告を返す'],
+    });
+  }
+
+  async assignTask(
+    input: TeamSendMessageInput & { doneCriteria: readonly string[] },
+  ): Promise<TeamMessageSummary> {
     return this.enqueue(input.taskId, async () => {
       const team = this.persistence.getTeamByTask(input.taskId);
       if (team === null || team.state !== 'active') throw new Error('Team must be active');
@@ -224,6 +310,15 @@ export class TeamCoordinator {
         sourceAgentId: leader.id,
         targetAgentId: worker.id,
         content: input.content,
+      });
+      const teamTask = this.persistence.createTeamTask({
+        teamId: team.id,
+        messageId: message.id,
+        assigneeAgentId: worker.id,
+        createdByAgentId: leader.id,
+        description: input.content,
+        doneCriteria: input.doneCriteria,
+        now: this.isoNow(),
       });
       this.persistence.createTeamDelivery({ messageId: message.id, now: this.isoNow() });
       const reservations = this.persistence.reserveTeamBudget({
@@ -255,6 +350,7 @@ export class TeamCoordinator {
           message.id,
           message.seq,
           input.content,
+          teamTask.id,
         );
         this.persistence.transitionTeamMessageState(message.id, 'delivered');
         this.persistence.transitionTeamDelivery({
@@ -263,18 +359,48 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
         this.settleExecution(reservations, completion.usage);
-        this.persistence.transitionWorkerState(worker.id, 'done');
-        this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
         this.persistWorkerResult(team.id, worker, leader, completion.value);
+        const report = workerReportSchema.parse({
+          status: completion.value.status === 'succeeded' ? 'completed' : 'failed',
+          summary: completion.value.summary,
+          findings: [],
+          changedFiles: completion.value.artifacts.map((artifact) => artifact.reference),
+          artifacts: completion.value.artifacts,
+          verification: completion.value.verification,
+          risks: completion.value.risks,
+          nextActions: [],
+          doneEvidence: input.doneCriteria.map((criterion) => ({
+            criterion,
+            evidence: completion.value.summary,
+          })),
+        });
+        this.persistence.completeTeamTaskWithReport({
+          teamTaskId: teamTask.id,
+          agentId: worker.id,
+          report,
+          doneEvidence: input.doneCriteria.map((criterion) => ({
+            criterion,
+            evidence: completion.value.summary,
+          })),
+          now: this.isoNow(),
+        });
+        this.persistence.transitionWorkerState(
+          worker.id,
+          completion.value.status === 'succeeded' ? 'done' : 'failed',
+        );
+        this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
+        this.finalizeTeamIfWorkersTerminal(team.id);
         this.emit(input.taskId, team.id);
         return this.messageSummary(team.id, message.id);
       } catch (error) {
+        this.persistence.transitionTeamTask(teamTask.id, 'failed', this.isoNow());
         this.releaseReservations(reservations);
         const current = this.persistence
           .getTeamSnapshot(team.id)
           .agents.find(({ id }) => id === worker.id);
         if (current?.state === 'busy') this.persistence.transitionWorkerState(worker.id, 'failed');
         this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
+        this.finalizeTeamIfWorkersTerminal(team.id);
         const delivery = this.persistence.getTeamDelivery(message.id);
         if (delivery !== null && !['failed', 'acked'].includes(delivery.state))
           this.persistence.transitionTeamDelivery({
@@ -354,6 +480,7 @@ export class TeamCoordinator {
     messageId: string,
     seq: number,
     content: string,
+    teamTaskId: string,
   ): Promise<{ value: WorkerCompletion; usage: WorkerRuntimeResult['usage'] }> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= TEAM_DELIVERY_MAX_ATTEMPTS; attempt += 1) {
@@ -375,8 +502,18 @@ export class TeamCoordinator {
         issuedAt: this.isoNow(),
       });
       try {
+        // Enter running before invoking the runtime so adapters that do not emit the optional
+        // accepted event still follow the durable task lifecycle. An accepted event is then an
+        // idempotent acknowledgement, not the only source of truth for execution start.
+        this.persistence.transitionTeamTask(teamTaskId, 'running', this.isoNow());
         const result = await withTimeout(
-          this.runtime.execute({ worker, envelope, content }),
+          this.runtime.execute({
+            worker,
+            envelope,
+            content,
+            onEvent: (event) =>
+              this.handleWorkerActivity(leader.taskId, teamId, worker.id, teamTaskId, event),
+          }),
           this.deliveryTimeoutMs,
         );
         assertEnvelopeMatchesClaims(envelope, result.claims ?? {});
@@ -420,6 +557,23 @@ export class TeamCoordinator {
       to: 'acked',
       now: this.isoNow(),
     });
+  }
+
+  private finalizeTeamIfWorkersTerminal(teamId: string): void {
+    const snapshot = this.persistence.getTeamSnapshot(teamId);
+    const workers = snapshot.agents.filter(({ kind }) => kind === 'worker');
+    if (
+      snapshot.team.state !== 'active' ||
+      workers.length === 0 ||
+      workers.some(({ state }) => !['done', 'failed', 'stopped'].includes(state))
+    )
+      return;
+    if (workers.some(({ state }) => state === 'failed')) {
+      this.persistence.transitionTeamState(teamId, 'failed');
+      return;
+    }
+    this.persistence.transitionTeamState(teamId, 'winding_down');
+    this.persistence.transitionTeamState(teamId, 'completed');
   }
 
   private settleExecution(
@@ -472,6 +626,9 @@ export class TeamCoordinator {
       objective: agent.objective,
       writeCapable: agent.writeCapable,
       currentActivity: agent.currentActivity,
+      engine: agent.runtimeKind,
+      liveOutput: this.transientWorkerActivity.get(agent.id)?.liveOutput ?? '',
+      reasoningActive: this.transientWorkerActivity.get(agent.id)?.reasoningActive ?? false,
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt,
       usage:

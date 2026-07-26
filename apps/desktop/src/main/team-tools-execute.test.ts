@@ -13,6 +13,10 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
     sendToWorker: vi.fn(
       async () => ({ id: 'message-1', state: 'delivered', deliveryState: 'acked' }) as never,
     ),
+    assignTask: vi.fn(
+      async () => ({ id: 'message-2', state: 'delivered', deliveryState: 'acked' }) as never,
+    ),
+    get: vi.fn(() => null),
     listWorkerReports: vi.fn(() => []),
     hasBusyWorkers: vi.fn(() => false),
     stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
@@ -55,6 +59,29 @@ describe('executeTeamTool routing', () => {
     })) as { ok: false; message: string };
     expect(result.ok).toBe(false);
     expect(result.message).toContain('hard cap');
+  });
+
+  it('routes formal assignment, status, and cursor waits through the caller-bound Team', async () => {
+    const coordinator = fakeCoordinator();
+    const assigned = await executeTeamTool(coordinator, 'task-1', 'team_assign_task', {
+      workerId: 'worker-1',
+      objective: '実装する',
+      doneCriteria: ['targeted test passes'],
+    });
+    expect(coordinator.assignTask).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      targetAgentId: 'worker-1',
+      content: '実装する',
+      doneCriteria: ['targeted test passes'],
+    });
+    expect(assigned).toMatchObject({ ok: true, messageId: 'message-2' });
+
+    expect(await executeTeamTool(coordinator, 'task-1', 'team_get_status', {})).toEqual({
+      ok: true,
+      team: null,
+    });
+    await executeTeamTool(coordinator, 'task-1', 'team_wait_events', { cursor: 7 });
+    expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 7);
   });
 
   it('rejects a forged identity/taskId field in the wire args before TeamCoordinator ever sees it', async () => {

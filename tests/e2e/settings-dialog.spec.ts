@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
 // Issue #5: the sidebar's "設定" button had no onClick and was not disabled either, so it looked
@@ -11,6 +13,12 @@ test.describe('settings dialog', () => {
 
   test.beforeAll(() => {
     userDataDir = createUserDataDir('settings-dialog');
+    const skill = join(userDataDir, '.claude', 'skills', 'e2e-writer');
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      '---\nname: e2e-writer\ndescription: E2E fixture\n---\n',
+    );
   });
 
   test.afterAll(async () => {
@@ -122,5 +130,23 @@ test.describe('settings dialog', () => {
 
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('settings-dialog')).not.toBeVisible();
+  });
+
+  test('previews and imports a detected Skill using the typed settings bridge', async () => {
+    const page: Page = await firstWindow(app!);
+    await page.getByTestId('sidebar-settings-button').click();
+    await expect(page.getByRole('heading', { name: 'Skills' })).toBeVisible();
+    await expect(page.getByText('1件検出', { exact: true })).toBeVisible();
+
+    await page.getByRole('button', { name: '候補を選択' }).click();
+    const candidate = page.getByText('e2e-writer', { exact: true });
+    await expect(candidate).toBeVisible();
+    await candidate.locator('xpath=ancestor::label').locator('input').check();
+    await page.getByRole('button', { name: '内容を確認' }).click();
+    await expect(page.getByText(/含まれるファイル 1件/)).toBeVisible();
+    await page.getByRole('button', { name: '1件を読み込む' }).click();
+    await expect(page.getByText('読み込み済み', { exact: true })).toBeVisible();
+
+    await page.keyboard.press('Escape');
   });
 });

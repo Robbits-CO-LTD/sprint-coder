@@ -39,7 +39,12 @@ function SafeImage({ alt, src }: ComponentPropsWithoutRef<'img'>) {
   );
 }
 
-function PreBlock({ children, ...rest }: ComponentPropsWithoutRef<'pre'>) {
+type MarkdownElementProps<Tag extends 'pre' | 'table'> = ComponentPropsWithoutRef<Tag> & {
+  node?: unknown;
+};
+
+function PreBlock({ children, node, ...rest }: MarkdownElementProps<'pre'>) {
+  void node;
   const preRef = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
 
@@ -67,7 +72,16 @@ function PreBlock({ children, ...rest }: ComponentPropsWithoutRef<'pre'>) {
   );
 }
 
-const COMPONENTS = { a: SafeAnchor, pre: PreBlock, img: SafeImage };
+function TableBlock({ children, node, ...rest }: MarkdownElementProps<'table'>) {
+  void node;
+  return (
+    <div className="md-table-wrap">
+      <table {...rest}>{children}</table>
+    </div>
+  );
+}
+
+const COMPONENTS = { a: SafeAnchor, pre: PreBlock, img: SafeImage, table: TableBlock };
 
 export function Markdown({ content }: { content: string }) {
   return (

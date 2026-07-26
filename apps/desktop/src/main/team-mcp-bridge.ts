@@ -202,7 +202,7 @@ export class TeamMcpBridge {
         request.tool,
         request.args,
         {
-          longPoll: request.tool === 'team_wait_reports',
+          longPoll: request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
           waitReportsCursor: {
             read: () => registration.waitCursor,
             advance: (seq) => {

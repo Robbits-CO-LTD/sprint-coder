@@ -164,7 +164,7 @@ export function Timeline({ taskId }: { taskId: string }) {
             <div key={message.id} style={{ display: 'contents' }}>
               <MessageBubble author={message.author} content={message.content} />
               {showRunCardAfter && (
-                <RunCard turn={turn} onStop={() => void cancelActiveTurn(taskId)} />
+                <RunCard turn={turn} taskId={taskId} onStop={() => void cancelActiveTurn(taskId)} />
               )}
               {approvalRows.map((approval) => (
                 <ApprovalAuditRow key={approval.id} approval={approval} />

@@ -1,4 +1,4 @@
-// Source for the ephemeral MCP stdio server the Claude adapter hands the real Leader when
+// Source for the ephemeral MCP stdio server the Codex/Claude adapter hands the real Leader when
 // SPRINT_CODER_LEADER_MCP=1 routes a team-intent turn through team-mcp-bridge.ts instead of the
 // deterministic mock scenario (see ADR amendment + tasks/todo.md). This is exported as a plain
 // string — never as a file checked into the repo tree the CLI could stumble on — and written to
@@ -9,10 +9,8 @@
 //  - Self-contained CommonJS, zero npm dependencies (spawned via `process.execPath` +
 //    `ELECTRON_RUN_AS_NODE=1` — Electron's own Node, not a system Node install).
 //  - Hand-rolled JSON-RPC 2.0 over newline-delimited stdin/stdout. Verified directly against the
-//    installed Claude CLI (v2.1.218): `initialize` / `notifications/initialized` / `tools/list` /
-//    `tools/call` all round-trip correctly with one JSON object per line, no Content-Length
-//    framing — real MCP stdio transports (this one included) are newline-delimited JSON-RPC, not
-//    the LSP-style framing some other JSON-RPC transports use.
+//    installed Claude and Codex CLIs: `initialize` / `notifications/initialized` / `tools/list` /
+//    `tools/call` all round-trip correctly with one JSON object per line.
 //  - Forwards every `tools/call` verbatim to team-mcp-bridge.ts over the unix socket named by
 //    TEAM_BRIDGE_SOCKET, authenticating with TEAM_BRIDGE_TOKEN. It never talks to
 //    TeamCoordinator/persistence directly and holds no taskId of its own — the bridge is the only
@@ -40,6 +38,34 @@ const TOOLS = [
         writeCapable: { type: 'boolean' },
       },
       required: ['role', 'objective'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_assign_task',
+    description: 'Assign a formal task with explicit completion criteria to a hired Worker.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workerId: { type: 'string' },
+        objective: { type: 'string' },
+        doneCriteria: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 },
+      },
+      required: ['workerId', 'objective', 'doneCriteria'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_get_status',
+    description: 'Get the current Team, Worker, message, delivery, and budget snapshot.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'team_wait_events',
+    description: 'Wait for new terminal Worker reports after an optional sequence cursor.',
+    inputSchema: {
+      type: 'object',
+      properties: { cursor: { type: 'integer', minimum: 0 } },
       additionalProperties: false,
     },
   },

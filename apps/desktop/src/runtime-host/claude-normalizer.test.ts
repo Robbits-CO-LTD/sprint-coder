@@ -66,7 +66,16 @@ describe('ClaudeJsonlNormalizer', () => {
     expect(normalizer.push('{"type":"system","subtype":"post_turn_summary"}')).toEqual([]);
   });
 
-  it('treats a non-empty reported tool or MCP capability as a fatal profile violation', () => {
+  it('accepts the exact read-only tools reported by the real Claude CLI', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    expect(() =>
+      normalizer.push(
+        '{"type":"system","subtype":"init","tools":["Glob","Grep","Read"],"mcp_servers":[]}',
+      ),
+    ).not.toThrow();
+  });
+
+  it('treats a tool outside the expected read-only profile as a fatal profile violation', () => {
     const normalizer = new ClaudeJsonlNormalizer();
     expect(() =>
       normalizer.push('{"type":"system","subtype":"init","tools":["Bash"],"mcp_servers":[]}'),
@@ -76,7 +85,77 @@ describe('ClaudeJsonlNormalizer', () => {
   it('treats a non-empty mcp_servers report as a fatal profile violation', () => {
     const normalizer = new ClaudeJsonlNormalizer();
     expect(() =>
-      normalizer.push('{"type":"system","subtype":"init","tools":[],"mcp_servers":[{"name":"x"}]}'),
+      normalizer.push(
+        '{"type":"system","subtype":"init","tools":["Glob","Grep","Read"],"mcp_servers":[{"name":"x"}]}',
+      ),
+    ).toThrow(ClaudeCapabilityViolationError);
+  });
+
+  it('accepts the exact read-only plus Team MCP capability surface', () => {
+    const teamTools = [
+      'mcp__team__team_hire_worker',
+      'mcp__team__team_send_to_worker',
+      'mcp__team__team_wait_reports',
+      'mcp__team__team_stop_worker',
+    ];
+    const normalizer = new ClaudeJsonlNormalizer({
+      builtInTools: ['Read', 'Glob', 'Grep'],
+      teamMcp: { serverName: 'team', toolNames: teamTools },
+    });
+    expect(() =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'system',
+          subtype: 'init',
+          tools: ['Glob', 'Grep', 'Read', ...teamTools],
+          mcp_servers: [{ name: 'team', status: 'connected' }],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('accepts the real Claude CLI Team MCP initialization while the configured server is pending', () => {
+    const normalizer = new ClaudeJsonlNormalizer({
+      builtInTools: ['Read', 'Glob', 'Grep'],
+      teamMcp: {
+        serverName: 'team',
+        toolNames: [
+          'mcp__team__team_hire_worker',
+          'mcp__team__team_send_to_worker',
+          'mcp__team__team_wait_reports',
+          'mcp__team__team_stop_worker',
+        ],
+      },
+    });
+    expect(() =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'system',
+          subtype: 'init',
+          tools: ['Glob', 'Grep', 'Read'],
+          mcp_servers: [{ name: 'team', status: 'pending' }],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects an extra MCP tool even when the full built-in profile is allowed', () => {
+    const normalizer = new ClaudeJsonlNormalizer({
+      builtInTools: 'default',
+      teamMcp: {
+        serverName: 'team',
+        toolNames: ['mcp__team__team_hire_worker'],
+      },
+    });
+    expect(() =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'system',
+          subtype: 'init',
+          tools: ['Read', 'Bash', 'mcp__team__team_hire_worker', 'mcp__team__unexpected'],
+          mcp_servers: [{ name: 'team', status: 'connected' }],
+        }),
+      ),
     ).toThrow(ClaudeCapabilityViolationError);
   });
 
@@ -92,7 +171,9 @@ describe('ClaudeJsonlNormalizer', () => {
 
   it('does not emit a second completed event for a duplicate result', () => {
     const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push('{"type":"system","subtype":"init","tools":[],"mcp_servers":[]}');
+    normalizer.push(
+      '{"type":"system","subtype":"init","tools":["Glob","Grep","Read"],"mcp_servers":[]}',
+    );
     const first = normalizer.push('{"type":"result","is_error":false,"result":"ok"}');
     expect(first.at(-1)).toEqual({ type: 'completed' });
     const second = normalizer.push('{"type":"result","is_error":false,"result":"ok"}');

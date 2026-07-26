@@ -670,6 +670,7 @@ button {
 .timeline-scroll {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
   min-height: 0;
 }
 .timeline {
@@ -1553,6 +1554,10 @@ button {
 }
 
 /* ---------- Markdown content (FR-CHAT-07, §12.3) ---------- */
+.md-body {
+  min-width: 0;
+  white-space: normal;
+}
 .md-body p {
   margin: 0 0 10px;
 }
@@ -1577,6 +1582,22 @@ button {
   font-weight: 600;
   line-height: 1.4;
   margin: 14px 0 8px;
+  color: var(--text-primary);
+}
+.md-body h1 {
+  font-size: 20px;
+  letter-spacing: -0.02em;
+}
+.md-body h2 {
+  font-size: 17px;
+  letter-spacing: -0.01em;
+}
+.md-body h3 {
+  font-size: 15.5px;
+}
+.md-body h4 {
+  font-size: 14px;
+  color: var(--text-secondary);
 }
 .md-body h1:first-child,
 .md-body h2:first-child,
@@ -1636,6 +1657,10 @@ button {
   border-radius: 0;
   font-size: inherit;
 }
+.md-body strong {
+  color: var(--text-primary);
+  font-weight: 650;
+}
 .md-copy-btn {
   position: absolute;
   top: 8px;
@@ -1659,17 +1684,34 @@ button {
   color: var(--text-primary);
   border-color: rgba(115, 152, 246, 0.45);
 }
+.md-table-wrap {
+  width: 100%;
+  margin: 6px 0 12px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+}
 .md-body table {
   border-collapse: collapse;
   width: 100%;
-  margin: 6px 0 12px;
+  min-width: 520px;
   font-size: 13.5px;
 }
 .md-body th,
 .md-body td {
-  border: 1px solid var(--border-subtle);
-  padding: 6px 10px;
+  border-right: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 8px 10px;
   text-align: left;
+  vertical-align: top;
+}
+.md-body th:last-child,
+.md-body td:last-child {
+  border-right: 0;
+}
+.md-body tr:last-child td {
+  border-bottom: 0;
 }
 .md-body th {
   background: rgba(230, 233, 239, 0.04);
@@ -2001,7 +2043,10 @@ button {
 /* Worker nodes (demo/index.html lines 346-388) */
 .worker {
   position: absolute;
+  display: flex;
+  flex-direction: column;
   width: 480px;
+  height: 420px;
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: 14px;
@@ -2012,6 +2057,16 @@ button {
      the fade-in. Defaulting the base class to 0 would leave every already-existing Worker card
      invisible on re-entry into Team mode, since baseline cards never receive `.spawn`. */
   opacity: 1;
+}
+.w-activity {
+  flex: none;
+  padding: 7px 15px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .worker.spawn {
   animation: workerIn var(--t-spatial) var(--ease-spatial) forwards;
@@ -2030,6 +2085,7 @@ button {
 }
 .w-head {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 10px;
   padding: 11px 15px;
@@ -2114,12 +2170,69 @@ button {
   display: flex;
   flex-direction: column;
   gap: 9px;
-  min-height: 96px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .w-line {
   font-size: 12.5px;
   color: var(--text-secondary);
   animation: msgIn var(--t-quick) var(--ease-ui);
+}
+.w-line :where(p, pre, table) {
+  margin: 6px 0;
+  max-width: 100%;
+}
+.w-line :where(pre, table) {
+  overflow-x: auto;
+}
+.w-live-output pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+.w-line :where(a, code) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.w-footer {
+  flex: none;
+  min-height: 34px;
+  padding: 6px 15px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.w-latest-btn {
+  margin-left: auto;
+  color: var(--accent);
+}
+.w-details {
+  position: relative;
+}
+.w-details[open] dl {
+  position: absolute;
+  right: 0;
+  bottom: 22px;
+  width: 260px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+.w-details dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+}
+.w-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .w-line.msg-in {
   color: var(--text-primary);
@@ -3046,6 +3159,162 @@ button {
 .settings-missing {
   color: var(--danger);
   display: inline-flex;
+}
+
+.settings-skills {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+}
+.settings-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.settings-section-heading h3,
+.settings-section-heading p {
+  margin: 0;
+}
+.settings-section-heading h3 {
+  font-size: 13px;
+}
+.settings-section-heading p {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.settings-skill-counts {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+.settings-skill-counts > div,
+.settings-builtin-skill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.settings-skill-counts dt {
+  color: var(--text-secondary);
+}
+.settings-skill-counts dd {
+  margin: 0;
+}
+.settings-builtin-skill {
+  padding: 8px 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.settings-builtin-skill > span:first-child,
+.settings-skill-row > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.settings-builtin-skill small,
+.settings-skill-row small {
+  color: var(--text-secondary);
+}
+.settings-secondary-button,
+.settings-primary-button {
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 12px;
+}
+.settings-primary-button {
+  background: var(--accent);
+  border-color: transparent;
+  color: white;
+}
+.settings-secondary-button:disabled,
+.settings-primary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.settings-skill-toggle {
+  align-self: flex-start;
+}
+.settings-skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+.settings-skill-list legend {
+  padding: 0 0 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.settings-skill-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+.settings-skill-row:hover:not(.disabled) {
+  background: rgba(230, 233, 239, 0.05);
+}
+.settings-skill-row.disabled {
+  cursor: not-allowed;
+}
+.settings-skill-row.disabled input,
+.settings-skill-row.disabled strong {
+  opacity: 0.5;
+}
+.settings-skill-row input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+.settings-skill-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.settings-skill-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+.settings-installed-skills {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.settings-installed-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.settings-installed-row > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.settings-installed-row small {
+  color: var(--text-secondary);
+}
+.settings-danger-button {
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent);
+  border-radius: 7px;
+  padding: 6px 9px;
+  color: var(--danger);
+  font-size: 12px;
 }
 
 /* ---------- File changes (issue #37) ----------

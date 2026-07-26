@@ -52,6 +52,34 @@ describe('Codex runtime probe', () => {
     expect(buildCodexArgs('auto')).not.toContain('--model');
   });
 
+  it('pins the per-turn Team MCP server through explicit config overrides', () => {
+    const args = buildCodexArgs('auto', undefined, 'read-only', {
+      command: '/Applications/Electron.app/Contents/MacOS/Electron',
+      scriptPath: '/tmp/team-mcp-server.cjs',
+    });
+    expect(args).toContain(
+      'mcp_servers.team.command="/Applications/Electron.app/Contents/MacOS/Electron"',
+    );
+    expect(args).toContain('mcp_servers.team.args=["/tmp/team-mcp-server.cjs"]');
+    expect(args).toContain('mcp_servers.team.enabled=true');
+    expect(args).toContain(
+      'mcp_servers.team.enabled_tools=["team_hire_worker","team_assign_task","team_get_status","team_wait_events","team_send_to_worker","team_wait_reports","team_stop_worker"]',
+    );
+    expect(args).toContain('mcp_servers.team.default_tools_approval_mode="approve"');
+    expect(args).toContain(
+      'mcp_servers.team.env_vars=["ELECTRON_RUN_AS_NODE","TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
+    );
+    expect(args.join(' ')).not.toContain('turn-token');
+    expect(args).toContain('--ignore-user-config');
+    expect(args.at(-1)).toBe('-');
+  });
+
+  it('prepends Team guidance to the real Codex Leader prompt', () => {
+    expect(buildCodexPrompt('user request', [], 'team guidance')).toBe(
+      'team guidance\n\nuser request',
+    );
+  });
+
   // issue #6: there is no `--effort` flag, but `-c model_reasoning_effort=` works. The value is
   // TOML-quoted like the two existing overrides, since `-c` parses the value portion as TOML.
   it('passes the reasoning effort as a TOML-quoted config override', () => {

@@ -3,7 +3,7 @@ import type { ContextUsage, TurnEvent } from '@sprint-coder/contracts';
 
 export const CONTEXT_HARD_CAP_TOKENS = 32_000;
 export const CONTEXT_SYSTEM_PROMPT =
-  'You are the Sprint Coder task assistant. Follow the active task goal and conversation context.';
+  'あなたはSprint Coderの実行エージェントです。現在の依頼を最優先し、実際に観測したツール結果だけを使って簡潔かつ正確に回答してください。実行していないツール、存在しないWorker、届いていない報告を作ってはいけません。';
 
 export type ContextSource = 'system' | 'history' | 'goal' | 'compaction' | 'background';
 export type ContextTrust = 'system' | 'user' | 'assistant';

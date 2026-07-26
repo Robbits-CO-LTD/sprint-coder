@@ -108,7 +108,7 @@ async function startHarness(): Promise<Harness> {
 }
 
 describe('team-mcp-server-source (MCP stdio handshake)', () => {
-  it('responds to initialize, ignores notifications/initialized, and lists exactly the 4 team tools', async () => {
+  it('responds to initialize, ignores notifications/initialized, and lists the Team tools', async () => {
     const harness = await startHarness();
     harness.send({
       jsonrpc: '2.0',
@@ -132,7 +132,15 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     const listReply = await harness.nextMessage();
     const tools = (listReply['result'] as { tools: { name: string }[] }).tools;
     expect(tools.map((tool) => tool.name).sort()).toEqual(
-      ['team_hire_worker', 'team_send_to_worker', 'team_stop_worker', 'team_wait_reports'].sort(),
+      [
+        'team_hire_worker',
+        'team_assign_task',
+        'team_get_status',
+        'team_wait_events',
+        'team_send_to_worker',
+        'team_stop_worker',
+        'team_wait_reports',
+      ].sort(),
     );
     for (const tool of tools) expect(tool).toHaveProperty('inputSchema');
   });

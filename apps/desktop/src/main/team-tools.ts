@@ -20,6 +20,7 @@ import type { TeamCoordinator } from './team-coordinator';
 import { digestCanonical } from './context-compiler';
 import type { ToolTranscriptItem } from './context-compiler';
 import type { ModelSampler, ModelToolCall } from './intelligence-loop';
+import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
 
 const teamToolDefinition = (
   providerName: string,
@@ -73,6 +74,26 @@ export const TEAM_SEND_TO_WORKER_TOOL = teamToolDefinition(
   ['workerId', 'content'],
 );
 
+export const TEAM_ASSIGN_TASK_TOOL = teamToolDefinition(
+  'team_assign_task',
+  'assign-task',
+  {
+    workerId: { type: 'string' },
+    objective: { type: 'string' },
+    doneCriteria: { type: 'array', items: { type: 'string' } },
+  },
+  ['workerId', 'objective', 'doneCriteria'],
+);
+
+export const TEAM_GET_STATUS_TOOL = teamToolDefinition('team_get_status', 'get-status', {}, []);
+
+export const TEAM_WAIT_EVENTS_TOOL = teamToolDefinition(
+  'team_wait_events',
+  'wait-events',
+  { cursor: { type: 'integer' } },
+  [],
+);
+
 export const TEAM_WAIT_REPORTS_TOOL = teamToolDefinition(
   'team_wait_reports',
   'wait-reports',
@@ -89,6 +110,9 @@ export const TEAM_STOP_WORKER_TOOL = teamToolDefinition(
 
 export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
   TEAM_HIRE_WORKER_TOOL,
+  TEAM_ASSIGN_TASK_TOOL,
+  TEAM_GET_STATUS_TOOL,
+  TEAM_WAIT_EVENTS_TOOL,
   TEAM_SEND_TO_WORKER_TOOL,
   TEAM_WAIT_REPORTS_TOOL,
   TEAM_STOP_WORKER_TOOL,
@@ -112,11 +136,20 @@ const pacing = (): Promise<void> =>
     : new Promise((resolve) => setTimeout(resolve, HIRE_PACING_MS));
 
 export type TeamToolName =
-  'team_hire_worker' | 'team_send_to_worker' | 'team_wait_reports' | 'team_stop_worker';
+  | 'team_hire_worker'
+  | 'team_assign_task'
+  | 'team_get_status'
+  | 'team_wait_events'
+  | 'team_send_to_worker'
+  | 'team_wait_reports'
+  | 'team_stop_worker';
 
 export function isTeamToolName(value: unknown): value is TeamToolName {
   return (
     value === 'team_hire_worker' ||
+    value === 'team_assign_task' ||
+    value === 'team_get_status' ||
+    value === 'team_wait_events' ||
     value === 'team_send_to_worker' ||
     value === 'team_wait_reports' ||
     value === 'team_stop_worker'
@@ -142,6 +175,15 @@ const hireArgsSchema = z
 const sendArgsSchema = z
   .object({ workerId: z.string().min(1).max(128), content: z.string().min(1).max(20_000) })
   .strict();
+const assignArgsSchema = z
+  .object({
+    workerId: z.string().min(1).max(128),
+    objective: z.string().min(1).max(10_000),
+    doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(20),
+  })
+  .strict();
+const getStatusArgsSchema = z.object({}).strict();
+const waitEventsArgsSchema = z.object({ cursor: z.number().int().min(0).optional() }).strict();
 const waitArgsSchema = z.object({}).strict();
 const stopArgsSchema = z.object({ workerId: z.string().min(1).max(128) }).strict();
 
@@ -247,6 +289,39 @@ export async function executeTeamTool(
         return teamToolError(error);
       }
     }
+    case 'team_assign_task': {
+      const request = assignArgsSchema.parse(args);
+      try {
+        const message = await coordinator.assignTask({
+          taskId,
+          targetAgentId: request.workerId,
+          content: request.objective,
+          doneCriteria: request.doneCriteria,
+        });
+        return {
+          ok: true,
+          workerId: request.workerId,
+          messageId: message.id,
+          state: message.state,
+          deliveryState: message.deliveryState,
+        };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
+    case 'team_get_status': {
+      getStatusArgsSchema.parse(args);
+      return { ok: true, team: coordinator.get(taskId) };
+    }
+    case 'team_wait_events': {
+      const request = waitEventsArgsSchema.parse(args);
+      return executeWaitReports(coordinator, taskId, {
+        ...options,
+        ...(request.cursor === undefined
+          ? {}
+          : { waitReportsCursor: { read: () => request.cursor ?? 0, advance: () => undefined } }),
+      });
+    }
     case 'team_wait_reports': {
       waitArgsSchema.parse(args);
       return executeWaitReports(coordinator, taskId, options);
@@ -274,12 +349,35 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_hire_worker', input),
   });
+  broker.registerImplementation({
+    toolId: TEAM_ASSIGN_TASK_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_assign_task', input),
+  });
+  broker.registerImplementation({
+    toolId: TEAM_GET_STATUS_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_get_status', input),
+  });
 
   broker.registerImplementation({
     toolId: TEAM_SEND_TO_WORKER_TOOL.toolId,
     implementationKind: 'built-in',
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_send_to_worker', input),
+  });
+  broker.registerImplementation({
+    toolId: TEAM_WAIT_EVENTS_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_wait_events', input, {
+        waitReportsCursor: {
+          read: () => reportCursors.get(context) ?? 0,
+          advance: (seq) => reportCursors.set(context, seq),
+        },
+      }),
   });
 
   // Per-Turn read cursor: `context` is the exact same frozen object for every dispatch within one
@@ -310,11 +408,12 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
 
 // --- Leader MCP guidance ----------------------------------------------------------------------
 //
-// Appended to the real Claude Leader's system prompt (via --append-system-prompt) only when
+// Appended to the real Codex/Claude Leader's prompt only when
 // SPRINT_CODER_LEADER_MCP=1 routes the turn through the MCP bridge instead of the deterministic
 // mock scenario. Concise and in Japanese to match the rest of the in-app leader/worker copy.
-export const LEADER_MCP_SYSTEM_PROMPT =
-  'あなたはチームを編成できるLeaderでもあります。並行作業・複数観点・分担が本当に有益な依頼のときだけ、team_hire_workerで、ユーザーの依頼内容から役割と目的を自分で判断してWorkerを雇用してください（最大3人。タスクに本当に必要な人数だけでよく、少ない人数でも構いません）。次にteam_send_to_workerで各Workerへ具体的な作業を依頼し、team_wait_reportsで報告を待ってください（届いていなければ再度呼び出してよく、最大60秒待機します）。全員分の報告が揃ったら、それらの内容を統合した最終回答をユーザー向けに日本語で作成してください。単純な質問や小さな作業ではチームを作らず、直接回答してください。';
+/** Compatibility export for adapters while the authority-bearing copy travels as a context
+ * fragment. The content's source of truth is the versioned builtin skill, not this module. */
+export const LEADER_MCP_SYSTEM_PROMPT = BUILTIN_TEAM_SKILL_CONTENT;
 
 // --- Deterministic mock team scenario -------------------------------------------------------
 //
@@ -325,7 +424,8 @@ const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 
 // Natural team intent (「チームで進めて」「teamでお願い」…) auto-routes the turn into the team
 // orchestration path — the user should not need to know the fixture keyword or press ⬡ Team.
-const TEAM_INTENT = /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)/i;
+const TEAM_INTENT =
+  /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|\s)[1-3一二三]人(?:で|雇って|を雇)/i;
 
 export function isTeamScenarioInput(input: string): boolean {
   return TEAM_INTENT.test(input);

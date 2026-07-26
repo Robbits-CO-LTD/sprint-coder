@@ -285,6 +285,7 @@ export async function launchApp(
   const env = {
     ...process.env,
     SPRINT_CODER_USER_DATA_DIR: userDataDir,
+    SPRINT_CODER_SKILL_HOME: userDataDir,
     // Every spec asserts against the mock's fixed output, so a fresh profile must NOT adopt an
     // installed CLI (issue #50). Without this the suite runs against a real model on any machine
     // that has one — slowly, and at real cost.

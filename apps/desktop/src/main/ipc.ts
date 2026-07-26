@@ -41,6 +41,13 @@ import {
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeSettingsSchema,
+  skillCandidateInputSchema,
+  skillEnabledInputSchema,
+  skillImportInputSchema,
+  skillImportResultSchema,
+  skillInstalledInputSchema,
+  skillPreviewResultSchema,
+  skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
   generatedImageSchema,
@@ -103,6 +110,11 @@ import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
 import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
 import { openWorkspaceFileForEdit, saveWorkspaceFile } from './workspace-edit';
+import {
+  SkillSettingsError,
+  SkillSettingsService,
+  skillSettingsPublicError,
+} from './skill-settings-service';
 
 /** sha256 of nothing, used when a refusal has no file to hash. */
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
@@ -126,6 +138,14 @@ import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
 import { isTeamScenarioInput, LEADER_MCP_SYSTEM_PROMPT } from './team-tools';
+import {
+  attachBuiltinTeamSkill,
+  BUILTIN_TEAM_SKILL_AUDIT,
+  BUILTIN_TEAM_SKILL_FRAGMENT_ID,
+  installBuiltinTeamSkill,
+  verifyBuiltinTeamSkillAcceptance,
+  type TeamSkillResolutionAudit,
+} from './team-skill';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 
@@ -173,17 +193,24 @@ export class IpcRouter {
   private readonly autoReviewer = AutoReviewer.createProduction();
   private readonly teamCoordinator: TeamCoordinator;
   private readonly teamSubscriptions = new Set<string>();
+  private readonly teamEventSeqByTask = new Map<string, number>();
   private readonly teamMcpBridge: TeamMcpBridge;
+  private readonly skillSettings: SkillSettingsService;
+  private teamSkillReady = false;
+  private readonly teamSkillExpectedTurns = new Set<string>();
+  private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
   ) {
+    this.skillSettings = new SkillSettingsService({
+      homePath: process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'),
+    });
     this.teamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
-      // Real worker execution is opt-in (costs provider usage and breaks determinism): the mock
-      // runtime borrows Claude only under SPRINT_CODER_REAL_WORKERS=1. Probe failures inside the
-      // worker runtime still fall back to the deterministic simulator.
+      // Real worker execution is opt-in when the selected chat runtime is mock. Runtime probe or
+      // policy failures remain explicit and are never replaced with simulated Team output.
       selectRuntime: () =>
         chooseWorkerRuntime(
           this.persistence.getRuntime(),
@@ -208,16 +235,20 @@ export class IpcRouter {
           now: new Date().toISOString(),
         }).allowed;
       },
+      allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
     });
     this.teamCoordinator = new TeamCoordinator(
       persistence,
       this.teamWorkerRuntime,
       (taskId, detail) => {
-        if (this.teamSubscriptions.has(taskId) && !this.window.isDestroyed())
+        if (this.teamSubscriptions.has(taskId) && !this.window.isDestroyed()) {
+          const seq = (this.teamEventSeqByTask.get(taskId) ?? 0) + 1;
+          this.teamEventSeqByTask.set(taskId, seq);
           this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
             taskId,
-            event: teamEventSchema.parse({ type: 'updated', detail }),
+            event: teamEventSchema.parse({ type: 'updated', seq, detail }),
           });
+        }
       },
       undefined,
       // Real worker turns run a full provider CLI invocation; the deterministic 10s default is
@@ -346,6 +377,54 @@ export class IpcRouter {
           ),
         };
       },
+    );
+    this.handle(IPC_CHANNELS.settingsSkillsScan, emptyPayloadSchema, skillScanResultSchema, () =>
+      this.skillSettings.scan().catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
+      IPC_CHANNELS.settingsSkillsPreview,
+      skillCandidateInputSchema,
+      skillPreviewResultSchema,
+      (input, event) =>
+        this.skillSettings
+          .preview(event.sender.id, input.provider, input.skillId)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
+      IPC_CHANNELS.settingsSkillsImport,
+      skillImportInputSchema,
+      skillImportResultSchema,
+      (input, event) =>
+        this.skillSettings
+          .import(event.sender.id, input.previewId)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
+      IPC_CHANNELS.settingsSkillsUpdate,
+      skillImportInputSchema,
+      skillImportResultSchema,
+      (input, event) =>
+        this.skillSettings
+          .update(event.sender.id, input.previewId)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
+      IPC_CHANNELS.settingsSkillsSetEnabled,
+      skillEnabledInputSchema,
+      z.undefined(),
+      (input) =>
+        this.skillSettings
+          .setEnabled(input.provider, input.skillId, input.enabled)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
+      IPC_CHANNELS.settingsSkillsRemove,
+      skillInstalledInputSchema,
+      z.undefined(),
+      (input) =>
+        this.skillSettings
+          .remove(input.provider, input.skillId)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handleMutation(
       IPC_CHANNELS.settingsSetRuntime,
@@ -971,6 +1050,12 @@ export class IpcRouter {
     this.teamCoordinator.recoverOnStartup();
     await this.permissionBroker.drainPolicyEpochOutbox();
     if (process.env['SPRINT_CODER_LEADER_MCP'] === '1') await this.teamMcpBridge.ensureStarted();
+    try {
+      await installBuiltinTeamSkill(process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'));
+      this.teamSkillReady = true;
+    } catch {
+      this.teamSkillReady = false;
+    }
     await this.adoptInstalledRuntime();
   }
 
@@ -1318,13 +1403,23 @@ export class IpcRouter {
     });
     const taskId = started.event.taskId;
     let kind = started.runtimeKind;
-    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Claude Leader drives team_* tools itself over
-    // the MCP bridge instead of the deterministic mock scenario. Gated to Claude only (Codex has
-    // no MCP profile yet). Team tools are offered on EVERY Claude turn so the model itself senses
+    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Codex/Claude Leader drives team_* tools itself
+    // over the MCP bridge instead of the deterministic mock scenario. Team tools are offered on
+    // every real-runtime turn so the model itself senses
     // when a request warrants a team (the guidance says to hire only when genuinely beneficial);
     // hiring auto-promotes the task and the renderer auto-opens the canvas, so "the AI decided a
     // team is needed" becomes visible without any keyword or button.
-    const wantsLeaderMcp = process.env['SPRINT_CODER_LEADER_MCP'] === '1' && kind === 'claude';
+    const teamTurn = isTeamScenarioInput(started.text);
+    const wantsLeaderMcp =
+      process.env['SPRINT_CODER_LEADER_MCP'] === '1' && kind !== 'mock' && teamTurn;
+    if (wantsLeaderMcp && !this.teamSkillReady) {
+      this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
+        code: 'RUNTIME_FAILED',
+        userMessage: '組み込みTeam Skillを検証できないためTeamを開始できません。',
+        retryable: true,
+      });
+      return;
+    }
     let teamMcp: RuntimeTeamMcpOption | undefined;
     if (wantsLeaderMcp) {
       teamMcp = this.registerLeaderMcp(started.turnId, taskId);
@@ -1332,7 +1427,7 @@ export class IpcRouter {
       // deterministic mock leader every other Claude/Codex team turn already uses, rather than
       // silently running a real Claude turn with no team tools available at all.
       if (teamMcp === undefined) kind = 'mock';
-    } else if (kind !== 'mock' && isTeamScenarioInput(started.text)) {
+    } else if (kind !== 'mock' && teamTurn) {
       // Team intent without Leader MCP always runs the leader orchestration
       // (hire→dispatch→reports→synthesis): the production adapters are no-tools by default, so a
       // real-runtime leader cannot drive a team — the deterministic leader orchestrates while
@@ -1369,7 +1464,7 @@ export class IpcRouter {
     const workspacePath = turnWorkspace;
     const workspaceId =
       workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
-    const context = this.prepareContext(taskId, started.turnId);
+    const context = this.prepareContext(taskId, started.turnId, wantsLeaderMcp);
     // What this Turn may write (issue #37). Both inputs matter: the Access preset is the user's
     // choice, and the Workspace is what makes a write meaningful at all — without one the Runtime's
     // cwd is a throwaway temp directory, so an edit would land somewhere the user can never see.
@@ -1430,10 +1525,14 @@ export class IpcRouter {
     return { socketPath, token, guidance: LEADER_MCP_SYSTEM_PROMPT };
   }
 
-  private prepareContext(taskId: string, turnId: string): PreparedContext {
+  private prepareContext(taskId: string, turnId: string, teamSkill = false): PreparedContext {
     const prepared = this.persistence.prepareContext(taskId, turnId);
     for (const event of prepared.usageEvents) this.publish(event);
-    return prepared;
+    if (teamSkill) {
+      this.teamSkillExpectedTurns.add(turnId);
+      this.teamSkillResolutionByTurn.set(turnId, BUILTIN_TEAM_SKILL_AUDIT);
+    }
+    return attachBuiltinTeamSkill(prepared, taskId, teamSkill);
   }
 
   private acknowledgeRuntimeContext(
@@ -1441,6 +1540,18 @@ export class IpcRouter {
     turnId: string,
     acceptedFragmentIds: readonly string[],
   ): void {
+    const expectedTeamSkill = this.teamSkillExpectedTurns.delete(turnId);
+    if (!verifyBuiltinTeamSkillAcceptance(expectedTeamSkill, acceptedFragmentIds)) {
+      this.teamSkillResolutionByTurn.delete(turnId);
+      const runtime = this.turnRuntimes.get(turnId);
+      this.handleRuntimeFailure(runtime === 'claude' ? 'claude' : 'codex', taskId, turnId, {
+        code: 'RUNTIME_PROTOCOL_ERROR',
+        userMessage: 'Runtimeが組み込みTeam Skillを受理しませんでした。',
+        retryable: false,
+      });
+      return;
+    }
+    if (expectedTeamSkill && !acceptedFragmentIds.includes(BUILTIN_TEAM_SKILL_FRAGMENT_ID)) return;
     const accepted = new Set(acceptedFragmentIds);
     const backgroundIds = this.persistence
       .listBackgroundCompletions(taskId)
@@ -2047,6 +2158,17 @@ function toPublicError(error: unknown): PublicError {
     };
   if (error instanceof SecurityError)
     return { code: 'FORBIDDEN', userMessage: 'この操作は許可されていません。', retryable: false };
+  if (error instanceof SkillSettingsError)
+    return {
+      code:
+        error.code === 'PREVIEW_EXPIRED'
+          ? 'OPERATION_CONFLICT'
+          : error.code === 'NOT_FOUND'
+            ? 'NOT_FOUND'
+            : 'INVALID_REQUEST',
+      userMessage: error.message,
+      retryable: error.code === 'PREVIEW_EXPIRED' || error.code === 'SOURCE_CHANGED',
+    };
   if (error instanceof z.ZodError)
     return {
       code: 'INVALID_REQUEST',
