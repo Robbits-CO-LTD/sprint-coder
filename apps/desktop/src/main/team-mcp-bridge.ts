@@ -29,16 +29,16 @@ $name = $env:SPRINT_CODER_PIPE_NAME
 $port = [int]$env:SPRINT_CODER_PIPE_PORT
 $secret = $env:SPRINT_CODER_PIPE_SECRET
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$security = New-Object System.IO.Pipes.PipeSecurity
+$security = [System.IO.Pipes.PipeSecurity]::new()
 $security.SetOwner($sid)
-$rule = New-Object System.IO.Pipes.PipeAccessRule(
+$rule = [System.IO.Pipes.PipeAccessRule]::new(
   $sid,
   [System.IO.Pipes.PipeAccessRights]::FullControl,
   [System.Security.AccessControl.AccessControlType]::Allow
 )
 $security.SetAccessRule($rule)
 while ($true) {
-  $pipe = New-Object System.IO.Pipes.NamedPipeServerStream(
+  $pipe = [System.IO.Pipes.NamedPipeServerStream]::new(
     $name,
     [System.IO.Pipes.PipeDirection]::InOut,
     1,
@@ -56,7 +56,7 @@ while ($true) {
   if (-not $script:ready) { [Console]::Out.WriteLine('READY'); $script:ready = $true }
   try {
     $pipe.WaitForConnection()
-    $tcp = New-Object System.Net.Sockets.TcpClient
+    $tcp = [System.Net.Sockets.TcpClient]::new()
     $tcp.Connect('127.0.0.1', $port)
     $stream = $tcp.GetStream()
     $prefix = [System.Text.Encoding]::UTF8.GetBytes(
@@ -198,6 +198,9 @@ export class TeamMcpBridge {
           SystemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
           WINDIR: process.env['WINDIR'] ?? 'C:\\Windows',
           PATH: process.env['PATH'] ?? '',
+          TEMP: process.env['TEMP'] ?? '',
+          TMP: process.env['TMP'] ?? '',
+          USERPROFILE: process.env['USERPROFILE'] ?? '',
           SPRINT_CODER_PIPE_NAME: pipeName,
           SPRINT_CODER_PIPE_PORT: String(address.port),
           SPRINT_CODER_PIPE_SECRET: bridgeToken,

@@ -12,15 +12,15 @@ $operation = $env:SPRINT_CODER_ACL_OPERATION
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 if ($operation -eq 'secure') {
   if ($kind -eq 'directory') {
-    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl = [System.Security.AccessControl.DirectorySecurity]::new()
     $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
   } else {
-    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl = [System.Security.AccessControl.FileSecurity]::new()
     $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
   }
   $acl.SetOwner($sid)
   $acl.SetAccessRuleProtection($true, $false)
-  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+  $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
     $sid,
     [System.Security.AccessControl.FileSystemRights]::FullControl,
     $inheritance,
@@ -74,6 +74,9 @@ async function runAcl(
         SystemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
         WINDIR: process.env['WINDIR'] ?? 'C:\\Windows',
         PATH: process.env['PATH'] ?? '',
+        TEMP: process.env['TEMP'] ?? '',
+        TMP: process.env['TMP'] ?? '',
+        USERPROFILE: process.env['USERPROFILE'] ?? '',
         SPRINT_CODER_ACL_PATH: path,
         SPRINT_CODER_ACL_KIND: kind,
         SPRINT_CODER_ACL_OPERATION: operation,
