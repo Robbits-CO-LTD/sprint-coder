@@ -22,7 +22,7 @@ async function workspace(): Promise<string> {
   return root;
 }
 
-const executionIt = it.skipIf(process.platform === 'win32');
+const executionIt = it;
 
 describe('CommandRunner', () => {
   it('surfaces termination failure without waiting for a process close that may never arrive', async () => {
@@ -291,7 +291,7 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
-    'refuses Windows command execution before the dispatch boundary or spawn',
+    'runs a short-lived Windows command exactly once after the durable dispatch boundary',
     async () => {
       const root = await workspace();
       const marker = join(root, 'spawned');
@@ -309,12 +309,12 @@ describe('CommandRunner', () => {
             beforeSpawnCalled = true;
           },
         }),
-      ).rejects.toMatchObject({
-        code: 'SPAWN_FAILED',
-        message: expect.stringContaining('Job Object'),
-      } satisfies Partial<CommandRunnerError>);
-      expect(beforeSpawnCalled).toBe(false);
-      await expect(access(marker)).rejects.toThrow();
+      ).resolves.toMatchObject({ exitCode: 0, canceled: false });
+      expect(beforeSpawnCalled).toBe(true);
+      await expect(access(marker)).resolves.toBeUndefined();
+      expect(
+        await import('node:fs/promises').then(({ readFile }) => readFile(marker, 'utf8')),
+      ).toBe('yes');
     },
   );
 
