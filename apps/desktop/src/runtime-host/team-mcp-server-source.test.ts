@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:net';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -40,7 +41,10 @@ async function startHarness(): Promise<Harness> {
   const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-mcp-test-'));
   const scriptPath = join(directory, 'team-mcp-server.cjs');
   writeFileSync(scriptPath, TEAM_MCP_SERVER_SOURCE, { mode: 0o600 });
-  const socketPath = join(directory, 'bridge.sock');
+  const socketPath =
+    process.platform === 'win32'
+      ? `\\\\.\\pipe\\sc-team-mcp-test-${randomBytes(6).toString('hex')}`
+      : join(directory, 'bridge.sock');
   const token = 'test-bridge-token-0123456789';
 
   const bridgeReceived: { token: unknown; tool: unknown; args: unknown }[] = [];
@@ -55,6 +59,10 @@ async function startHarness(): Promise<Harness> {
         buffer = buffer.slice(index + 1);
         if (line.trim() === '') continue;
         const request = JSON.parse(line) as { token: unknown; tool: unknown; args: unknown };
+        if (request.tool === '__authenticate__') {
+          socket.write(`${JSON.stringify({ ok: true, result: { authenticated: true } })}\n`);
+          continue;
+        }
         bridgeReceived.push(request);
         bridgeResponders.push((response) => socket.write(`${JSON.stringify(response)}\n`));
       }

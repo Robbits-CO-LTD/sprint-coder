@@ -1,5 +1,5 @@
 import { watch, type FSWatcher } from 'node:fs';
-import { relative, sep } from 'node:path';
+import { isAbsolute, relative } from 'node:path';
 
 // Watches a Workspace for files a Runtime changes, so the UI can show contents the CLI never
 // reports (issue #39).
@@ -115,7 +115,7 @@ export function isWatchable(workspacePath: string, relativePath: string): boolea
   if (relativePath.length === 0 || relativePath.length > 1024) return false;
   // `fs.watch` reports paths relative to the watched root, but a rename can deliver an absolute one
   // on some platforms; normalise before judging it.
-  const normalized = relativePath.startsWith(sep)
+  const normalized = isAbsolute(relativePath)
     ? relative(workspacePath, relativePath)
     : relativePath;
   if (normalized.length === 0 || normalized.startsWith('..')) return false;

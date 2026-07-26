@@ -223,6 +223,11 @@ export class CommandRunner {
         outputBytes: 0,
         truncated: false,
       };
+    if (windowsCommandExecutionUnavailable())
+      throw new CommandRunnerError(
+        'SPAWN_FAILED',
+        'Windows command execution is unavailable until spawn-time Job Object ownership is implemented',
+      );
 
     const executionId = randomUUID();
     const lease = randomUUID();
@@ -265,6 +270,19 @@ export class CommandRunner {
       outcome: outcomePromise,
     };
     this.active.set(executionId, active);
+    const bufferedOutput: { stream: 'stdout' | 'stderr'; data: Buffer }[] = [];
+    let bufferedOutputBytes = 0;
+    let outputConsumer = (stream: 'stdout' | 'stderr', data: Buffer): void => {
+      const copy = Buffer.from(data);
+      bufferedOutput.push({ stream, data: copy });
+      bufferedOutputBytes += copy.byteLength;
+      if (bufferedOutputBytes >= this.maxBufferedBytes) {
+        child.stdout?.pause();
+        child.stderr?.pause();
+      }
+    };
+    child.stdout?.on('data', (data: Buffer) => outputConsumer('stdout', data));
+    child.stderr?.on('data', (data: Buffer) => outputConsumer('stderr', data));
     const processStartIdentity = await readProcessStartIdentity(child.pid);
     if (processStartIdentity === 'unavailable' || processStartIdentity.startsWith('unsupported:')) {
       try {
@@ -427,8 +445,14 @@ export class CommandRunner {
       const decoded = decoders[stream].write(data);
       queueText(stream, redactors[stream].write(sanitizers[stream].write(decoded)));
     };
-    child.stdout?.on('data', (data: Buffer) => ingest('stdout', data));
-    child.stderr?.on('data', (data: Buffer) => ingest('stderr', data));
+    outputConsumer = ingest;
+    for (const buffered of bufferedOutput) ingest(buffered.stream, buffered.data);
+    bufferedOutput.length = 0;
+    bufferedOutputBytes = 0;
+    if (pendingBytes < this.maxBufferedBytes) {
+      child.stdout?.resume();
+      child.stderr?.resume();
+    }
     let streamsFinalized = false;
     const finalizeStreams = async (): Promise<void> => {
       if (streamsFinalized) return;
@@ -675,6 +699,10 @@ export class CommandRunner {
   }
 }
 
+function windowsCommandExecutionUnavailable(): boolean {
+  return process.platform === 'win32';
+}
+
 async function captureWindowsProcessTree(
   rootPid: number,
 ): Promise<readonly Readonly<{ pid: number; processStartIdentity: string }>[]> {
@@ -734,7 +762,11 @@ async function queryWindowsProcesses(): Promise<ReadonlyMap<number, WindowsProce
       )
       .map((row) => [
         row.pid,
-        { pid: row.pid, parentPid: row.parentPid, processStartIdentity: row.identity },
+        {
+          pid: row.pid,
+          parentPid: row.parentPid,
+          processStartIdentity: row.identity,
+        },
       ]),
   );
 }

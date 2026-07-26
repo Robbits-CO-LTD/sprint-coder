@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { electronTestExecutablePath } from './electron-test-runtime';
 import { loadNativeSafeFs, nativeSafeFsAddonPath } from './native-safe-fs';
 import type { NativeSafeFs, NativeSafeFsSession } from './native-safe-fs';
 import { NativeSafeFsEditEffectBoundary } from './native-safe-fs-edit-boundary';
@@ -524,7 +525,7 @@ if (runsWithElectronAbi) {
   describe('EditSagaExecutor native integration Electron ABI bridge', () => {
     it('runs the full-stack Edit Saga integration suite with the bundled Electron Node ABI', () => {
       const result = spawnSync(
-        join(process.cwd(), '../../node_modules/.bin/electron'),
+        electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
           'run',

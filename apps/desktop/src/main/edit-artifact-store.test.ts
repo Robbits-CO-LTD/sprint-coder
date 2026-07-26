@@ -18,7 +18,7 @@ async function fixture(quotaBytes = 1024) {
   return { root, store };
 }
 
-describe('EditArtifactStore', () => {
+describe.skipIf(process.platform === 'win32')('EditArtifactStore', () => {
   it('durably stores exact bytes behind an opaque owner-bound manifest', async () => {
     const { root, store } = await fixture();
     const ref = await store.put({
@@ -107,6 +107,16 @@ describe('EditArtifactStore', () => {
     });
     await chmod(join(root, `${ref.artifactId}.bin`), 0o666);
     await expect(store.read(ref)).rejects.toMatchObject({
+      code: 'UNSAFE_ARTIFACT',
+    } satisfies Partial<EditArtifactError>);
+  });
+});
+
+describe.runIf(process.platform === 'win32')('EditArtifactStore Windows gate', () => {
+  it('fails closed until Windows DACL verification is implemented', async () => {
+    await expect(
+      EditArtifactStore.open({ rootPath: 'C:\\unused', quotaBytes: 1024 }),
+    ).rejects.toMatchObject({
       code: 'UNSAFE_ARTIFACT',
     } satisfies Partial<EditArtifactError>);
   });

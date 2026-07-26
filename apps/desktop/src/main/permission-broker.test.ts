@@ -1,5 +1,4 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -28,7 +27,7 @@ let request: PermissionRequest & {
 let ceiling: CapabilityCeiling;
 
 beforeAll(async () => {
-  testRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-main-permission-'));
+  testRoot = await mkdtemp(join(process.cwd(), '.sprint-coder-main-permission-'));
   selectedWorkspacePath = join(testRoot, 'workspace');
   await mkdir(join(selectedWorkspacePath, 'src'), { recursive: true });
   await writeFile(join(selectedWorkspacePath, 'src', 'app.ts'), 'safe');

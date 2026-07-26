@@ -76,12 +76,50 @@ let socketReady = null;
 const pending = [];
 let sockBuffer = '';
 
+function handleSocketData(chunk) {
+  sockBuffer += chunk.toString('utf8');
+  let idx;
+  while ((idx = sockBuffer.indexOf('\\n')) >= 0) {
+    const line = sockBuffer.slice(0, idx);
+    sockBuffer = sockBuffer.slice(idx + 1);
+    if (!line.trim()) continue;
+    const waiter = pending.shift();
+    if (!waiter) continue;
+    try {
+      waiter.resolve(JSON.parse(line));
+    } catch (error) {
+      waiter.reject(error);
+    }
+  }
+}
+
+function rejectPending(error) {
+  while (pending.length > 0) pending.shift().reject(error);
+}
+
 function connectSocket() {
   if (socketReady) return socketReady;
   socketReady = new Promise((resolve, reject) => {
     const s = net.createConnection(SOCKET_PATH);
-    s.once('connect', () => resolve(s));
-    s.once('error', (error) => reject(error));
+    s.on('data', handleSocketData);
+    s.once('connect', () => {
+      pending.push({
+        resolve: (response) => {
+          if (!response || response.ok !== true) {
+            reject(new Error('team bridge authentication failed'));
+            return;
+          }
+          resolve(s);
+        },
+        reject: reject,
+      });
+      s.write(JSON.stringify({ token: TOKEN, tool: '__authenticate__', args: {} }) + '\\n');
+    });
+    s.on('error', (error) => {
+      reject(error);
+      rejectPending(error);
+    });
+    s.on('close', () => rejectPending(new Error('team bridge connection closed')));
     socket = s;
   });
   return socketReady;
@@ -98,29 +136,7 @@ function callBridge(tool, args) {
 }
 
 if (SOCKET_PATH && TOKEN) {
-  connectSocket()
-    .then((sock) => {
-      sock.on('data', (chunk) => {
-        sockBuffer += chunk.toString('utf8');
-        let idx;
-        while ((idx = sockBuffer.indexOf('\\n')) >= 0) {
-          const line = sockBuffer.slice(0, idx);
-          sockBuffer = sockBuffer.slice(idx + 1);
-          if (!line.trim()) continue;
-          const waiter = pending.shift();
-          if (!waiter) continue;
-          try {
-            waiter.resolve(JSON.parse(line));
-          } catch (error) {
-            waiter.reject(error);
-          }
-        }
-      });
-      sock.on('close', () => {
-        while (pending.length > 0) pending.shift().reject(new Error('team bridge connection closed'));
-      });
-    })
-    .catch(() => {});
+  connectSocket().catch(() => {});
 }
 
 let stdinBuffer = '';

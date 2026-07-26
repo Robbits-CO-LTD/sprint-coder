@@ -278,14 +278,6 @@ function classifyWorkspacePath(workspacePath: string, resolvedPath: string): Pat
     absoluteParts.includes('program files (x86)')
   )
     return 'os-protected';
-  if (absoluteParts.includes('appdata')) return 'app-private';
-  if (
-    absoluteParts.includes('.git') ||
-    absoluteParts.includes('.codex') ||
-    absoluteParts.includes('.sprint-coder') ||
-    absoluteParts.includes('.sprint-coder-team')
-  )
-    return 'app-private';
   if (
     absoluteParts.includes('.ssh') ||
     absoluteParts.includes('.aws') ||
@@ -295,6 +287,14 @@ function classifyWorkspacePath(workspacePath: string, resolvedPath: string): Pat
     absoluteParts.includes('keychains')
   )
     return 'credential';
+  if (absoluteParts.includes('appdata')) return 'app-private';
+  if (
+    absoluteParts.includes('.git') ||
+    absoluteParts.includes('.codex') ||
+    absoluteParts.includes('.sprint-coder') ||
+    absoluteParts.includes('.sprint-coder-team')
+  )
+    return 'app-private';
   if (absoluteParts.includes('library') && absoluteParts.includes('application support'))
     return 'app-private';
   if (

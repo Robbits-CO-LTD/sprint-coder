@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { electronTestExecutablePath } from './electron-test-runtime';
 import type { AgentRecord } from './persistence';
 import { SqlitePersistenceClient } from './persistence';
 import {
@@ -239,7 +240,7 @@ else
   describe('TeamCoordinator Electron ABI bridge', () => {
     it('runs the TeamCoordinator integration suite with Electron', () => {
       const result = spawnSync(
-        join(process.cwd(), '../../node_modules/.bin/electron'),
+        electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
           'run',

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { link, mkdtemp, mkdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import {
   PathGuardError,
   canonicalizeResourcePath,
@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'sprint-coder-path-guard-'));
+  const root = await mkdtemp(join(process.cwd(), '.sprint-coder-path-guard-'));
   temporaryRoots.push(root);
   const workspace = join(root, 'workspace');
   const outside = join(root, 'outside');
@@ -244,9 +244,18 @@ describe('path guard', () => {
   });
 
   it('does not treat an OS root selected as a Workspace as ordinary Workspace content', async () => {
+    const windowsDirectory = process.env['WINDIR'];
+    const workspacePath =
+      process.platform === 'win32'
+        ? parse(windowsDirectory ?? process.cwd()).root
+        : parse(process.cwd()).root;
+    const targetPath =
+      process.platform === 'win32'
+        ? join(windowsDirectory ?? workspacePath, 'System32', 'drivers', 'etc', 'hosts')
+        : '/etc/hosts';
     const guard = await createPathGuard({
-      workspacePath: '/',
-      targetPath: '/etc/hosts',
+      workspacePath,
+      targetPath,
       operation: 'read',
     });
     expect(workspacePermissionResourceFromGuard(guard).classification).toBe('os-protected');

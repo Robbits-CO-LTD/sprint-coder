@@ -1,7 +1,5 @@
 import { createConnection } from 'node:net';
-import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import type { TeamCoordinator } from './team-coordinator';
@@ -25,8 +23,7 @@ afterEach(async () => {
 });
 
 function testSocketPath(): () => string {
-  const path = join(tmpdir(), `sc-team-bridge-test-${randomBytes(6).toString('hex')}.sock`);
-  return () => path;
+  return defaultSocketPathFactory(tmpdir());
 }
 
 /** Sends one line and collects every line the server writes back before the socket closes (or a
@@ -67,9 +64,17 @@ function roundTrip(
 
 describe('defaultSocketPathFactory', () => {
   it('only returns candidates whose byte length fits the platform sun_path limit', () => {
-    const factory = defaultSocketPathFactory('/some/long/looking/app-user-data/directory/path');
+    const factory = defaultSocketPathFactory(
+      '/some/long/looking/app-user-data/directory/path',
+      'darwin',
+    );
     const path = factory();
     expect(Buffer.byteLength(path, 'utf8')).toBeLessThanOrEqual(100);
+  });
+
+  it('returns a named-pipe endpoint on Windows', () => {
+    const factory = defaultSocketPathFactory('C:\\ignored', 'win32');
+    expect(factory()).toMatch(/^\\\\\.\\pipe\\sc-team-[0-9a-f]{32}$/);
   });
 
   it('generates a fresh path on every call', () => {
@@ -78,7 +83,47 @@ describe('defaultSocketPathFactory', () => {
   });
 });
 
-describe('TeamMcpBridge', () => {
+describe.skipIf(process.platform === 'win32')('TeamMcpBridge', () => {
+  it('closes an unauthenticated connection after a bounded grace period', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath(), 25);
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    expect(socketPath).not.toBeNull();
+
+    const socket = createConnection(socketPath as string);
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('connection was not closed')), 500);
+      socket.once('error', reject);
+      socket.once('close', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it('closes a connection whose pending request exceeds the input limit', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    expect(socketPath).not.toBeNull();
+
+    const socket = createConnection(socketPath as string);
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error('oversized connection was not closed')),
+        500,
+      );
+      socket.once('connect', () => socket.write(Buffer.alloc(1024 * 1024 + 1, 'x')));
+      socket.once('error', reject);
+      socket.once('close', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    expect(socket.destroyed).toBe(true);
+  });
+
   it('forwards a call authenticated with the registered token to executeTeamTool', async () => {
     // team_stop_worker (not team_hire_worker) deliberately: executeTeamTool's hire branch pauses
     // for HIRE_PACING_MS (production-default 1200ms, a deliberate anti-"instant burst" cadence —
@@ -186,5 +231,18 @@ describe('TeamMcpBridge', () => {
     const first = await bridge.ensureStarted();
     const second = await bridge.ensureStarted();
     expect(first).toBe(second);
+  });
+});
+
+describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows gate', () => {
+  it('fails closed until a user-scoped named-pipe DACL is enforced', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+
+    await expect(bridge.ensureStarted()).resolves.toBeNull();
+    expect(bridge.socketPath).toBeNull();
   });
 });

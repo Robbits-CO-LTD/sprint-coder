@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   codexGeneratedImagesRoot,
@@ -42,8 +42,9 @@ describe('codexGeneratedImagesRoot', () => {
 
 describe('resolveThreadImageDirectory', () => {
   it('resolves a thread id under the root', () => {
-    expect(resolveThreadImageDirectory('019f976e-45b1-7a60-bd4d-14374e766d9a', '/root')).toBe(
-      join('/root', '019f976e-45b1-7a60-bd4d-14374e766d9a'),
+    const root = resolve('generated-images-root');
+    expect(resolveThreadImageDirectory('019f976e-45b1-7a60-bd4d-14374e766d9a', root)).toBe(
+      join(root, '019f976e-45b1-7a60-bd4d-14374e766d9a'),
     );
   });
 
@@ -59,7 +60,10 @@ describe('resolveThreadImageDirectory', () => {
       '/absolute',
       '',
     ]) {
-      expect(resolveThreadImageDirectory(hostile, '/root'), hostile).toBeNull();
+      expect(
+        resolveThreadImageDirectory(hostile, resolve('generated-images-root')),
+        hostile,
+      ).toBeNull();
     }
   });
 });

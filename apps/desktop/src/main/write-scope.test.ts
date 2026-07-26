@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { relative, resolve } from 'node:path';
+import { posix, win32 } from 'node:path';
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 
 const rel = (workspace: string, candidate: string): string | null =>
-  relativizeWorkspacePath(workspace, candidate, resolve, relative);
+  relativizeWorkspacePath(workspace, candidate, posix.resolve, posix.relative, posix.sep);
 
 describe('resolveWriteScope (issue #37)', () => {
   it('maps each preset to a scope only when a Workspace exists', () => {
@@ -25,6 +25,22 @@ describe('resolveWriteScope (issue #37)', () => {
 describe('relativizeWorkspacePath (issue #37)', () => {
   it('returns a relative path for a file inside the Workspace', () => {
     expect(rel('/tmp/ws', '/tmp/ws/src/app.ts')).toBe('src/app.ts');
+  });
+
+  it('normalizes Windows separators for the cross-platform timeline contract', () => {
+    expect(
+      relativizeWorkspacePath(
+        'C:\\workspace',
+        'C:\\workspace\\src\\app.ts',
+        win32.resolve,
+        win32.relative,
+        win32.sep,
+      ),
+    ).toBe('src/app.ts');
+  });
+
+  it('preserves a backslash that is part of a valid POSIX file name', () => {
+    expect(rel('/tmp/ws', '/tmp/ws/foo\\bar.txt')).toBe('foo\\bar.txt');
   });
 
   it('rejects a path outside the Workspace, however it is spelled', () => {

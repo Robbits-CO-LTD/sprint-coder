@@ -58,6 +58,11 @@ export class EditArtifactStore {
   ) {}
 
   static async open(input: { rootPath: string; quotaBytes: number }): Promise<EditArtifactStore> {
+    if (process.platform === 'win32')
+      throw new EditArtifactError(
+        'UNSAFE_ARTIFACT',
+        'Windows artifact storage is unavailable until DACL verification is implemented',
+      );
     if (!Number.isSafeInteger(input.quotaBytes) || input.quotaBytes < 1)
       throw new EditArtifactError('INVALID_REQUEST', 'Artifact quota must be a positive integer');
     await mkdir(input.rootPath, { recursive: true, mode: 0o700 });
@@ -248,6 +253,9 @@ export class EditArtifactStore {
   }
 
   private async syncDirectory(): Promise<void> {
+    // Windows does not support fsync on directory handles through Node and
+    // returns EPERM. The artifact files themselves are synced before rename.
+    if (process.platform === 'win32') return;
     const directory = await open(this.rootPath, constants.O_RDONLY);
     try {
       await directory.sync();

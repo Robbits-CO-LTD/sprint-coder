@@ -1,6 +1,6 @@
 // Main-side bridge between the ephemeral MCP stdio server (runtime-host/team-mcp-server-source.ts,
 // spawned inside the real Claude CLI's own process tree) and TeamCoordinator. The MCP server never
-// talks to persistence/TeamCoordinator directly — it only ever knows a unix socket path and a
+// talks to persistence/TeamCoordinator directly — it only ever knows a local IPC endpoint and a
 // per-turn bearer token; this class is the sole thing that maps a validated token back to the
 // (taskId, turnId) it was issued for, so a tool call arriving over the wire can never spoof which
 // Task/Team it targets (see executeTeamTool in team-tools.ts, which this forwards into).
@@ -18,10 +18,18 @@ import type { TeamCoordinator } from './team-coordinator';
 // tried first; `os.tmpdir()` and the caller-provided (userData-derived) directory are fallbacks
 // for sandboxes where `/tmp` is not writable.
 const MAX_SUN_PATH_BYTES = 100;
+const MAX_PENDING_REQUEST_BYTES = 1024 * 1024;
+const DEFAULT_AUTHENTICATION_TIMEOUT_MS = 5_000;
+const MAX_CONCURRENT_CONNECTIONS = 16;
 
-export function defaultSocketPathFactory(preferredDirectory: string): () => string {
+export function defaultSocketPathFactory(
+  preferredDirectory: string,
+  platform: NodeJS.Platform = process.platform,
+): () => string {
   return () => {
-    const id = randomBytes(8).toString('hex');
+    const id = randomBytes(16).toString('hex');
+    if (platform === 'win32') return `\\\\.\\pipe\\sc-team-${id}`;
+
     const candidates = [
       join('/tmp', `sc-team-${id}.sock`),
       join(tmpdir(), `sc-team-${id}.sock`),
@@ -32,6 +40,10 @@ export function defaultSocketPathFactory(preferredDirectory: string): () => stri
       throw new Error('No socket path candidate fits the platform sun_path length limit');
     return chosen;
   };
+}
+
+function isWindowsNamedPipe(path: string): boolean {
+  return path.startsWith('\\\\.\\pipe\\') || path.startsWith('\\\\?\\pipe\\');
 }
 
 export type TeamMcpRegistration = Readonly<{ taskId: string; token: string }>;
@@ -47,6 +59,7 @@ export class TeamMcpBridge {
   constructor(
     private readonly coordinator: TeamCoordinator,
     private readonly socketPathFactory: () => string,
+    private readonly authenticationTimeoutMs = DEFAULT_AUTHENTICATION_TIMEOUT_MS,
   ) {}
 
   get socketPath(): string | null {
@@ -71,7 +84,12 @@ export class TeamMcpBridge {
   private start(): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const path = this.socketPathFactory();
-      if (existsSync(path)) {
+      const namedPipe = isWindowsNamedPipe(path);
+      if (namedPipe)
+        throw new Error(
+          'Windows Team MCP IPC is unavailable until a user-scoped named-pipe DACL is enforced',
+        );
+      if (!namedPipe && existsSync(path)) {
         try {
           unlinkSync(path);
         } catch {
@@ -79,17 +97,30 @@ export class TeamMcpBridge {
         }
       }
       const server = createServer((socket) => this.handleConnection(socket));
+      server.maxConnections = MAX_CONCURRENT_CONNECTIONS;
       server.once('error', (error) => reject(error as Error));
-      server.listen(path, () => {
-        try {
-          chmodSync(path, 0o600);
-        } catch {
-          // best effort on platforms without POSIX file modes
-        }
-        this.server = server;
-        this.socketPathValue = path;
-        resolve(path);
-      });
+      server.listen(
+        {
+          path,
+          // Keep the Unix socket private by default. Windows named pipes are refused above because
+          // libuv creates them with the platform default DACL, which grants broader read access.
+          readableAll: false,
+          writableAll: false,
+          exclusive: true,
+        },
+        () => {
+          if (!namedPipe) {
+            try {
+              chmodSync(path, 0o600);
+            } catch {
+              // best effort on platforms without POSIX file modes
+            }
+          }
+          this.server = server;
+          this.socketPathValue = path;
+          resolve(path);
+        },
+      );
     });
   }
 
@@ -110,19 +141,36 @@ export class TeamMcpBridge {
 
   private handleConnection(socket: Socket): void {
     let buffer = '';
+    let authenticated = false;
+    const authenticationTimer = setTimeout(() => socket.destroy(), this.authenticationTimeoutMs);
+    authenticationTimer.unref();
+    const markAuthenticated = () => {
+      if (authenticated) return;
+      authenticated = true;
+      clearTimeout(authenticationTimer);
+    };
+    socket.once('close', () => clearTimeout(authenticationTimer));
     socket.on('data', (chunk: Buffer) => {
+      if (Buffer.byteLength(buffer, 'utf8') + chunk.byteLength > MAX_PENDING_REQUEST_BYTES) {
+        socket.destroy();
+        return;
+      }
       buffer += chunk.toString('utf8');
       let index: number;
       while ((index = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
-        if (line.trim() !== '') void this.handleLine(socket, line);
+        if (line.trim() !== '') void this.handleLine(socket, line, markAuthenticated);
       }
     });
     socket.on('error', () => socket.destroy());
   }
 
-  private async handleLine(socket: Socket, line: string): Promise<void> {
+  private async handleLine(
+    socket: Socket,
+    line: string,
+    markAuthenticated: () => void,
+  ): Promise<void> {
     let request: { token?: unknown; tool?: unknown; args?: unknown };
     try {
       request = JSON.parse(line) as typeof request;
@@ -137,8 +185,13 @@ export class TeamMcpBridge {
       socket.destroy();
       return;
     }
+    markAuthenticated();
     if (typeof request.tool !== 'string') {
       socket.write(`${JSON.stringify({ ok: false, error: 'invalid_tool' })}\n`);
+      return;
+    }
+    if (request.tool === '__authenticate__') {
+      socket.write(`${JSON.stringify({ ok: true, result: { authenticated: true } })}\n`);
       return;
     }
     const [turnId, registration] = found;
@@ -192,7 +245,7 @@ export class TeamMcpBridge {
     this.socketPathValue = null;
     if (server === null) return;
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (socketPath !== null) {
+    if (socketPath !== null && !isWindowsNamedPipe(socketPath)) {
       try {
         unlinkSync(socketPath);
       } catch {
