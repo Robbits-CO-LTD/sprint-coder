@@ -989,6 +989,59 @@ export const workspaceSelectionSchema = z
   .nullable();
 export type WorkspaceSelection = z.infer<typeof workspaceSelectionSchema>;
 
+/* ---------- Projects (FR-PROJ) ----------
+ *
+ * A Project is a folder root the user works in, remembered across Tasks. The model is Codex's:
+ * `[projects."/abs/path"] trust_level = "trusted" | "untrusted"` in config.toml
+ * (.reference-repos/codex/codex-rs/config/src/config_toml.rs:563), where the canonical root path
+ * IS the key and the only thing stored against it is how far the user trusts work done there —
+ * which supplies the default approval posture for that folder
+ * (.reference-repos/codex/codex-rs/core/src/config/mod.rs:3574).
+ *
+ * Sprint Coder keeps that shape: a Project is created the moment a Workspace is picked, it is keyed
+ * by the canonical path, and it carries one setting. What it is NOT is a second grouping concept
+ * layered over Tasks — a Task still belongs to a Workspace, and the Project is what remembers the
+ * answer so the next Task in that folder does not ask again.
+ */
+
+/**
+ * Deliberately narrower than `AccessPreset`, which also has `full`.
+ *
+ * Full access is gated behind an explicit confirmation dialog before it can ever be applied (see
+ * the `permissionsSet` handler in main/ipc.ts). A stored per-folder default that could grant it
+ * would be a path to full access that never shows that dialog — the setting would silently widen
+ * every future Task in the folder. `ask` and `auto` both stay inside what a Task can reach without
+ * a confirmation, so they are the two a folder may pre-answer.
+ */
+export const projectDefaultAccessSchema = z.enum(['ask', 'auto']);
+export type ProjectDefaultAccess = z.infer<typeof projectDefaultAccessSchema>;
+
+export const projectSchema = z
+  .object({
+    id: idSchema,
+    /** Canonical absolute path. Unique — one Project per folder, as in Codex's config table. */
+    rootPath: z.string().min(1),
+    /** Display label, the path's basename at creation time. Derived in main so the renderer never
+     * has to parse a path whose separator convention is the host's, not its own. */
+    name: z.string().min(1).max(200),
+    defaultAccess: projectDefaultAccessSchema,
+    /** Non-archived Tasks currently bound to this root, so the settings list can say what forgetting
+     * a Project would affect. */
+    taskCount: z.number().int().nonnegative(),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type Project = z.infer<typeof projectSchema>;
+
+export const projectRefSchema = z.object({ projectId: idSchema }).strict();
+export type ProjectRef = z.infer<typeof projectRefSchema>;
+
+export const projectSetAccessInputSchema = z
+  .object({ projectId: idSchema, defaultAccess: projectDefaultAccessSchema })
+  .strict();
+export type ProjectSetAccessInput = z.infer<typeof projectSetAccessInputSchema>;
+
 export const publicErrorCodeSchema = z.enum([
   'NOT_FOUND',
   'TURN_ACTIVE',
@@ -1416,6 +1469,17 @@ export interface SprintCoderApi {
     get(taskId: string): Promise<WorkspaceSelection>;
     select(taskId: string): Promise<WorkspaceSelection>;
   };
+  projects: {
+    /** Every remembered folder root, most recently used first. */
+    list(): Promise<Project[]>;
+    /** Changes what a *future* Task in this folder starts at. Tasks already bound to it keep the
+     * preset they are running under — silently re-permissioning a live Task is not something a
+     * settings list should be able to do. */
+    setDefaultAccess(projectId: string, defaultAccess: ProjectDefaultAccess): Promise<Project>;
+    /** Drops the remembered folder. Tasks bound to it keep their Workspace and their current
+     * access; the next Task there simply starts from the built-in default again. */
+    forget(projectId: string): Promise<void>;
+  };
   reasoning: {
     /** Subscribes to the active Turn's reasoning stream. Returns an unsubscribe function. */
     subscribe(listener: (batch: ReasoningBatch) => void): () => void;
@@ -1523,6 +1587,9 @@ export const IPC_CHANNELS = {
   teamsSaveCanvasView: 'sprint-coder:teams:save-canvas-view',
   workspaceGet: 'sprint-coder:workspace:get',
   workspaceSelect: 'sprint-coder:workspace:select',
+  projectsList: 'sprint-coder:projects:list',
+  projectsSetAccess: 'sprint-coder:projects:set-access',
+  projectsForget: 'sprint-coder:projects:forget',
   settingsGetRuntime: 'sprint-coder:settings:get-runtime',
   settingsSetRuntime: 'sprint-coder:settings:set-runtime',
   settingsSetModel: 'sprint-coder:settings:set-model',

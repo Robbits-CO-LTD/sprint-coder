@@ -4408,6 +4408,7 @@ if (runsWithElectronAbi)
         { version: 32 },
         { version: 33 },
         { version: 34 },
+        { version: 35 },
       ]);
       const migratedTables = new Set(
         (
@@ -4729,6 +4730,59 @@ if (runsWithElectronAbi)
           revision: 1,
         });
         reopened.close();
+      });
+    });
+
+    // Projects (v35): remembered folder roots, keyed by path like Codex's [projects."/path"].
+    describe('projects', () => {
+      it('remembers a root once and keeps the access answer across re-binds', () => {
+        const { persistence } = createPersistence();
+        const first = persistence.rememberProject({ rootPath: '/repos/app', name: 'app' });
+        expect(first).toMatchObject({ rootPath: '/repos/app', name: 'app', defaultAccess: 'ask' });
+
+        persistence.setProjectDefaultAccess(first.id, 'auto');
+        // Re-binding the same folder is the common case (a second Task in the same repo). It must
+        // not reset the answer the user already gave for that folder — that is the entire reason
+        // the row exists.
+        const again = persistence.rememberProject({ rootPath: '/repos/app', name: 'app' });
+        expect(again.id).toBe(first.id);
+        expect(again.defaultAccess).toBe('auto');
+        expect(persistence.listProjects()).toHaveLength(1);
+      });
+
+      it('counts only the live Tasks bound to the root', () => {
+        const { persistence } = createPersistence();
+        const kept = persistence.createTask('kept');
+        const archived = persistence.createTask('archived');
+        const elsewhere = persistence.createTask('elsewhere');
+        persistence.setWorkspace(kept.id, '/repos/app');
+        persistence.setWorkspace(archived.id, '/repos/app');
+        persistence.setWorkspace(elsewhere.id, '/repos/other');
+        persistence.setArchived(archived.id, true);
+        persistence.rememberProject({ rootPath: '/repos/app', name: 'app' });
+
+        const [project] = persistence.listProjects();
+        expect(project?.taskCount).toBe(1);
+      });
+
+      it('forgetting a Project leaves the Tasks in that folder alone', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask('bound');
+        persistence.setWorkspace(task.id, '/repos/app');
+        const project = persistence.rememberProject({ rootPath: '/repos/app', name: 'app' });
+
+        persistence.forgetProject(project.id);
+
+        expect(persistence.listProjects()).toEqual([]);
+        // The Task keeps its Workspace: the binding lives on the Task, and dropping the remembered
+        // default must never unbind work that is already set up.
+        expect(persistence.getWorkspace(task.id)).toBe('/repos/app');
+      });
+
+      it('rejects an unknown project id rather than silently doing nothing', () => {
+        const { persistence } = createPersistence();
+        expect(() => persistence.setProjectDefaultAccess('missing', 'auto')).toThrow(NotFoundError);
+        expect(() => persistence.forgetProject('missing')).toThrow(NotFoundError);
       });
     });
   });

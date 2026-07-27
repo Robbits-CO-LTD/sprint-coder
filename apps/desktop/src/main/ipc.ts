@@ -80,6 +80,9 @@ import {
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
   workspaceSelectionSchema,
+  projectSchema,
+  projectRefSchema,
+  projectSetAccessInputSchema,
   type CommandEnvelope,
   type CommandResult,
   type AccessPreset,
@@ -91,7 +94,8 @@ import {
 import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
-import type { PersistenceClient, QueueTransition, StartedTurn } from './persistence';
+import type { PersistenceClient, ProjectRecord, QueueTransition, StartedTurn } from './persistence';
+import { projectAccessToApply } from './project-access';
 import { toApprovalAuditSummary, toApprovalSummary } from './persistence';
 import {
   CanvasViewConflictError,
@@ -855,7 +859,8 @@ export class IpcRouter {
         if (selectedPath === undefined)
           throw new Error('Directory selection did not include a path');
         const binding = await workspaceMutationBinding(selectedPath);
-        return this.persistence.executeOperation(
+        let appliedProjectAccess = false;
+        const value = this.persistence.executeOperation(
           principal,
           input.taskId,
           IPC_CHANNELS.workspaceSelect,
@@ -867,11 +872,39 @@ export class IpcRouter {
               workspaceKey: binding.workspaceKey,
               rootIdentityDigest: binding.rootIdentityDigest,
             });
+            // Binding a Workspace is what creates the Project, the same way working in a folder is
+            // what puts a `[projects."/path"]` entry in Codex's config. Doing it here rather than
+            // behind a separate "add project" action means the list is always the folders actually
+            // worked in, not a second thing to curate.
+            const project = this.persistence.rememberProject({
+              rootPath: binding.canonicalPath,
+              name: basename(binding.canonicalPath) || binding.canonicalPath,
+            });
+            appliedProjectAccess = this.applyProjectDefaultAccess(input.taskId, project);
             return workspaceValue(binding.canonicalPath);
           },
         );
+        // Same ordering as the permissionsSet handler: the epoch is written inside the transaction,
+        // and the Runtimes holding an older epoch are told about it afterwards.
+        if (appliedProjectAccess)
+          await this.permissionBroker.drainPolicyEpochOutbox().catch(() => undefined);
+        return value;
       },
     );
+
+    this.handle(IPC_CHANNELS.projectsList, emptyPayloadSchema, z.array(projectSchema), () =>
+      this.persistence.listProjects(),
+    );
+    this.handle(
+      IPC_CHANNELS.projectsSetAccess,
+      projectSetAccessInputSchema,
+      projectSchema,
+      (input) => this.persistence.setProjectDefaultAccess(input.projectId, input.defaultAccess),
+    );
+    this.handle(IPC_CHANNELS.projectsForget, projectRefSchema, z.undefined(), (input) => {
+      this.persistence.forgetProject(input.projectId);
+      return undefined;
+    });
 
     this.handleMutation(
       IPC_CHANNELS.turnsStart,
@@ -1185,6 +1218,24 @@ export class IpcRouter {
       ),
       executed: true,
     };
+  }
+
+  /**
+   * Seeds a Task's access preset from the Project it was just bound to. Returns whether anything
+   * was written, so the caller knows whether the policy-epoch outbox needs draining.
+   *
+   * The decision itself is `projectAccessToApply` (project-access.ts), where it can be tested
+   * without a live BrowserWindow.
+   */
+  private applyProjectDefaultAccess(taskId: string, project: ProjectRecord): boolean {
+    const current = this.persistence.getPermissionPolicy(taskId);
+    const preset = projectAccessToApply({
+      projectDefaultAccess: project.defaultAccess,
+      taskPolicyEpoch: current.policyEpoch,
+    });
+    if (preset === null) return false;
+    this.persistence.setAccessPreset(taskId, preset, current.policyEpoch);
+    return true;
   }
 
   private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {

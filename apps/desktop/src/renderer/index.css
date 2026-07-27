@@ -3546,6 +3546,90 @@ button {
   font-size: 11px;
   color: var(--text-secondary);
 }
+/* ---------- Project list (settings) ---------- */
+.settings-projects {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-project {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-app);
+}
+.settings-project-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-project-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-project-count {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.settings-project-forget {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui);
+}
+.settings-project-forget:hover {
+  background: var(--danger-wash);
+  color: var(--danger);
+}
+/* The path is the row's identity, so it wraps rather than eliding: a truncated middle is exactly
+   where two checkouts of the same repo differ. */
+.settings-project-path {
+  font: 10.5px/1.5 var(--font-mono);
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+.settings-project-access {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.settings-project-access .settings-radio {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 9px;
+  gap: 8px;
+  background: var(--bg-panel);
+}
+.settings-project-access .settings-radio.active {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+}
+.settings-project-access .settings-radio-title {
+  font-size: 12px;
+}
+.settings-project-access .settings-radio-desc {
+  font-size: 10.5px;
+}
+
 .settings-skill-row {
   display: flex;
   align-items: flex-start;

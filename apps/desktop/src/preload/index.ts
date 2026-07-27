@@ -69,6 +69,9 @@ import {
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
   workspaceSelectionSchema,
+  projectSchema,
+  projectRefSchema,
+  projectSetAccessInputSchema,
   type CommandEnvelope,
   type CommandResult,
   type SprintCoderApi,
@@ -204,6 +207,16 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.workspaceSelect, taskIdPayloadSchema, workspaceSelectionSchema, {
         taskId,
       }),
+  },
+  projects: {
+    list: () => invoke(IPC_CHANNELS.projectsList, emptyPayloadSchema, z.array(projectSchema), {}),
+    setDefaultAccess: (projectId, defaultAccess) =>
+      invoke(IPC_CHANNELS.projectsSetAccess, projectSetAccessInputSchema, projectSchema, {
+        projectId,
+        defaultAccess,
+      }),
+    forget: (projectId) =>
+      invoke(IPC_CHANNELS.projectsForget, projectRefSchema, z.undefined(), { projectId }),
   },
   reasoning: {
     // Push-only, and unfiltered by taskId here on purpose: the batch carries its own taskId/turnId

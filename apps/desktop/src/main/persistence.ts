@@ -27,6 +27,7 @@ import {
   type FileChangeRecord,
   type GeneratedImage,
   generatedImageSchema,
+  type ProjectDefaultAccess,
   type TaskSummary,
   type TeamBudgetStatus,
   type TeamUsageTotals,
@@ -242,6 +243,38 @@ function isPngBuffer(bytes: Buffer): boolean {
     bytes.byteLength > 8 &&
     bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
   );
+}
+
+type ProjectRow = {
+  id: string;
+  root_path: string;
+  name: string;
+  default_access: ProjectDefaultAccess;
+  created_at: string;
+  updated_at: string;
+  task_count: number;
+};
+
+export type ProjectRecord = {
+  id: string;
+  rootPath: string;
+  name: string;
+  defaultAccess: ProjectDefaultAccess;
+  taskCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function toProjectRecord(row: ProjectRow): ProjectRecord {
+  return {
+    id: row.id,
+    rootPath: row.root_path,
+    name: row.name,
+    defaultAccess: row.default_access,
+    taskCount: row.task_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 type TaskRow = {
@@ -1697,6 +1730,28 @@ const migrations = [
       WHERE kind = 'spawnSlots' AND state = 'settled';
     `,
   },
+  {
+    version: 35,
+    checksum: 'projects-v35-remembered-workspace-roots',
+    sql: `
+      -- Projects: remembered folder roots, modelled on Codex's [projects."/abs/path"] config table.
+      -- root_path is the identity (UNIQUE), exactly as the path is the key there; id exists only so
+      -- the IPC surface can reference a row without shipping a filesystem path as a handle.
+      --
+      -- No FK from tasks: a Task is bound to a *path* (tasks.workspace_path), and that binding has
+      -- to keep working whether or not a Project row exists for it. Forgetting a Project must not
+      -- cascade into the Tasks that happen to live in that folder.
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        root_path TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        default_access TEXT NOT NULL DEFAULT 'ask' CHECK (default_access IN ('ask', 'auto')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_projects_updated_at ON projects(updated_at DESC);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2102,6 +2157,13 @@ export interface PersistenceClient {
     taskId: string,
     binding: { path: string; workspaceKey: string; rootIdentityDigest: string },
   ): void;
+  /** Records (or touches) the Project for a folder root and returns it. Called when a Workspace is
+   * bound, which is the moment Codex's config gains a `[projects."/path"]` entry too. */
+  rememberProject(input: { rootPath: string; name: string }): ProjectRecord;
+  listProjects(): ProjectRecord[];
+  getProjectByRootPath(rootPath: string): ProjectRecord | null;
+  setProjectDefaultAccess(projectId: string, defaultAccess: ProjectDefaultAccess): ProjectRecord;
+  forgetProject(projectId: string): void;
   acquireMutationLease(input: {
     workspaceKey: string;
     rootIdentityDigest: string;
@@ -3759,6 +3821,74 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   getWorkspace(taskId: string): string | null {
     return this.getTaskRow(taskId).workspace_path;
+  }
+
+  /* ---------- Projects ----------
+   *
+   * Keyed by root_path, mirroring Codex's `[projects."/abs/path"]`. `rememberProject` is an upsert
+   * on that key and never overwrites `default_access`: the whole point of the row is to hold an
+   * answer the user gave once, so re-binding the same folder must not reset it. */
+
+  rememberProject(input: { rootPath: string; name: string }): ProjectRecord {
+    return this.db.transaction(() => {
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO projects(id, root_path, name, default_access, created_at, updated_at)
+           VALUES (?, ?, ?, 'ask', ?, ?)
+           ON CONFLICT(root_path) DO UPDATE SET updated_at = excluded.updated_at`,
+        )
+        .run(randomUUID(), input.rootPath, input.name, now, now);
+      const project = this.getProjectByRootPath(input.rootPath);
+      if (project === null) throw new Error('Project vanished within its own write transaction');
+      return project;
+    })();
+  }
+
+  listProjects(): ProjectRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT p.id, p.root_path, p.name, p.default_access, p.created_at, p.updated_at,
+                (SELECT COUNT(*) FROM tasks t
+                 WHERE t.workspace_path = p.root_path AND t.archived = 0) AS task_count
+         FROM projects p
+         ORDER BY p.updated_at DESC`,
+      )
+      .all() as ProjectRow[];
+    return rows.map(toProjectRecord);
+  }
+
+  getProjectByRootPath(rootPath: string): ProjectRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT p.id, p.root_path, p.name, p.default_access, p.created_at, p.updated_at,
+                (SELECT COUNT(*) FROM tasks t
+                 WHERE t.workspace_path = p.root_path AND t.archived = 0) AS task_count
+         FROM projects p
+         WHERE p.root_path = ?`,
+      )
+      .get(rootPath) as ProjectRow | undefined;
+    return row === undefined ? null : toProjectRecord(row);
+  }
+
+  setProjectDefaultAccess(projectId: string, defaultAccess: ProjectDefaultAccess): ProjectRecord {
+    return this.db.transaction(() => {
+      const changed = this.db
+        .prepare('UPDATE projects SET default_access = ?, updated_at = ? WHERE id = ?')
+        .run(defaultAccess, new Date().toISOString(), projectId).changes;
+      if (changed === 0) throw new NotFoundError(`Project ${projectId} was not found`);
+      const row = this.db.prepare('SELECT root_path FROM projects WHERE id = ?').get(projectId) as {
+        root_path: string;
+      };
+      const project = this.getProjectByRootPath(row.root_path);
+      if (project === null) throw new Error('Project vanished within its own write transaction');
+      return project;
+    })();
+  }
+
+  forgetProject(projectId: string): void {
+    const changed = this.db.prepare('DELETE FROM projects WHERE id = ?').run(projectId).changes;
+    if (changed === 0) throw new NotFoundError(`Project ${projectId} was not found`);
   }
 
   setWorkspace(taskId: string, path: string): void {

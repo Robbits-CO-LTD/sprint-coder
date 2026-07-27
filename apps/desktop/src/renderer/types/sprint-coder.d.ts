@@ -7,6 +7,18 @@
 // code must runtime-check `typeof window.sprintCoder?.x?.y === 'function'` before calling any v2-only
 // method and degrade gracefully when it is absent (see store/appStore.ts).
 
+export type ProjectDefaultAccess = 'ask' | 'auto';
+
+export type Project = {
+  id: string;
+  rootPath: string;
+  name: string;
+  defaultAccess: ProjectDefaultAccess;
+  taskCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type TaskSummary = {
   id: string;
   title: string;
@@ -475,6 +487,13 @@ export interface SprintCoderApi {
   workspace: {
     get(taskId: string): Promise<{ path: string; name: string } | null>;
     select(taskId: string): Promise<{ path: string; name: string } | null>;
+  };
+  /** Remembered folder roots. Optional, per this file's contract: an older backend does not carry
+   * it, and the settings section feature-detects rather than throwing during render. */
+  projects?: {
+    list(): Promise<Project[]>;
+    setDefaultAccess(projectId: string, defaultAccess: ProjectDefaultAccess): Promise<Project>;
+    forget(projectId: string): Promise<void>;
   };
   turns: {
     start(input: {
