@@ -198,11 +198,15 @@ describe('opacity-dimmed text usages (real text, not decorative)', () => {
     { selector: '.composer-input::placeholder', bg: 'bg-elevated', label: 'Composer placeholder' },
     { selector: '.tlv-timeline small', bg: 'bg-panel', label: 'List View timeline metadata' },
     {
+      // `.sb-search` is now a recessed field filled with --bg-app rather than an outline on the
+      // sidebar's own --bg-panel, so that is the surface this placeholder has to clear.
       selector: '.sb-search input::placeholder',
-      bg: 'bg-panel',
+      bg: 'bg-app',
       label: 'Sidebar search placeholder',
     },
-    { selector: '.cc-hint', bg: 'bg-app', label: 'Canvas keyboard-shortcut hint' },
+    // The hint now sits on its own --bg-panel plate rather than on a near-transparent tint of the
+    // canvas, so --bg-panel is the surface its dimmed text has to clear.
+    { selector: '.cc-hint', bg: 'bg-panel', label: 'Canvas keyboard-shortcut hint' },
   ];
 
   it.each(cases)('$label ($selector) meets 4.5:1 on --$bg after opacity', ({ selector, bg }) => {
