@@ -2,62 +2,51 @@
    Visual baseline: demo/index.html (§13 UI system). Chat layout only; Team/Canvas out of scope. */
 
 :root {
-  /* Cool-neutral palette (issue #14). Every token below that renders text or an essential UI
-     boundary is held to a measured threshold rather than an eyeballed one — see
-     lib/contrast.test.ts, which reads these values straight out of this file.
-
-     Four values differ from the palette as specified in the issue, because the specified ones did
-     not clear their own stated bar. Each was raised by the minimum amount that does (computed, not
-     guessed), keeping the intended hue:
-       --text-muted   #737D8C -> #929CAB  (was 3.03-4.46; body text needs 4.5:1 everywhere)
-       --border-strong #363D49 -> #6E7581 (was 1.16-1.70; an essential boundary needs 3:1)
-       --danger       #E06C75 -> #F07C85  (was 3.96 on --bg-selected)
-       --ai-accent    #9B8AFB -> #9C8BFC  (was 4.47 on --bg-selected)
-       --accent       #7297F5 -> #7398F6  (was 4.49 on --bg-selected — 0.01 short)
-     Raising the values rather than writing usage rules was the deliberate choice: a rule like
-     "never use --text-muted for body text" has to be remembered by every future change, whereas a
-     token that simply meets the bar cannot be misused. */
+  /* Warm-dark palette restored from the user-approved 59622a1 visual baseline. The original
+     atmosphere is preserved while the expanded token set added since that demo remains available
+     to newer features. Foregrounds and the essential border were lifted only where needed to keep
+     the renderer's WCAG 2.2 AA audit green. */
 
   /* Surfaces */
-  --bg-app: #111318;
-  --bg-sidebar: #15181e;
-  --bg-panel: #191c23;
-  --bg-elevated: #20242c;
-  --bg-hover: #262b35;
-  --bg-selected: #293348;
+  --bg-app: #12110f;
+  --bg-sidebar: #1b1a17;
+  --bg-panel: #1b1a17;
+  --bg-elevated: #24221e;
+  --bg-hover: #2c2924;
+  --bg-selected: #35291f;
 
   /* Text */
-  --text-primary: #e6e9ef;
-  --text-secondary: #a8b0be;
-  --text-muted: #929cab;
+  --text-primary: #f4efe6;
+  --text-secondary: #aaa49a;
+  --text-muted: #b8b1a7;
   /* Disabled text is exempt from WCAG 1.4.3, so this one keeps the specified value. Its use is
      confined to genuinely inactive controls; anything a user is expected to read uses
      --text-muted or above. */
-  --text-disabled: #515967;
+  --text-disabled: #625d55;
 
   /* Borders. --border-subtle is decorative separation only (1.01-1.33, nowhere near 3:1) and must
      never be the sole indicator of a control's bounds; --border-strong is the one to reach for when
      the boundary carries meaning. */
-  --border-subtle: #272c35;
-  --border-strong: #6e7581;
+  --border-subtle: #34312d;
+  --border-strong: #81796f;
 
   /* Brand / interaction */
-  --accent: #7398f6;
-  --accent-hover: #86a6fa;
+  --accent: #e39a62;
+  --accent-hover: #eda873;
   /* An accent-tinted *fill*, not a foreground. Its sanctioned text colour is --text-primary
      (9.48:1); accent-on-accent-muted is 4.10 and is not a pairing this palette offers. */
-  --accent-muted: #28385f;
-  --focus-ring: #7da2ff;
+  --accent-muted: #4a3022;
+  --focus-ring: #f0aa72;
 
   /* State */
-  --success: #61b88a;
-  --warning: #d3a653;
-  --danger: #f07c85;
-  --info: #6fa8dc;
+  --success: #79b58a;
+  --warning: #d5a85b;
+  --danger: #e8897c;
+  --info: #78a9c2;
 
   /* AI */
-  --ai-accent: #9c8bfc;
-  --ai-surface: #24213a;
+  --ai-accent: #c39bea;
+  --ai-surface: #2c2330;
 
   --ease-ui: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-spatial: cubic-bezier(0.22, 1, 0.36, 1);
@@ -1407,11 +1396,80 @@ button {
 }
 
 .composer {
+  position: relative;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: 14px;
   padding: 10px 12px 8px;
   transition: border-color var(--t-quick) var(--ease-ui);
+}
+.slash-command-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 7;
+  max-height: min(330px, 48vh);
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
+  animation: msgIn var(--t-quick) var(--ease-ui);
+}
+.slash-command-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 5px 9px 7px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+.slash-command-item {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+}
+.slash-command-item.selected {
+  background: var(--bg-selected);
+}
+.slash-command-item.unavailable {
+  cursor: not-allowed;
+}
+.slash-command-name {
+  color: var(--accent);
+  font: 12.5px/1.4 var(--font-mono);
+}
+.slash-command-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+.slash-command-label {
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.slash-command-description,
+.slash-command-empty {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.slash-command-item.unavailable .slash-command-name,
+.slash-command-item.unavailable .slash-command-label {
+  color: var(--text-secondary);
+}
+.slash-command-empty {
+  padding: 14px 10px;
+  text-align: center;
 }
 .composer:focus-within {
   border-color: rgba(115, 152, 246, 0.45);

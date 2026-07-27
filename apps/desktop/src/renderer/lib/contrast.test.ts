@@ -17,16 +17,9 @@ import type { RGB } from './contrast';
 // in index.css — computed from the real token values (not hand-copied numbers), so it regresses the
 // moment either side of a pair drifts.
 //
-// Rewritten for the cool-neutral palette (issue #14), which brought four new surfaces and four new
-// foregrounds. The classification below is the substance of the change, not the token renames:
-// the old palette had one bar (4.5:1 for everything) because every token happened to clear it,
-// whereas the new one has tokens whose *purpose* is a different bar. Each group states which bar it
-// is held to and why, so a future token cannot be added without answering that question.
-//
-// The palette as specified in the issue did not clear its own stated bars in four places; those
-// values were raised by the computed minimum (see the :root comment). No usage rules are relied on
-// for text — a token that meets the bar cannot be misused, whereas "do not use X for body text" has
-// to be remembered forever.
+// The current warm-dark palette restores the approved demo's atmosphere while retaining the
+// expanded surface/foreground system introduced later. Each group states which contrast bar it is
+// held to, so visual direction changes cannot silently weaken readability.
 
 const cssPath = join(__dirname, '..', 'index.css');
 const css = readFileSync(cssPath, 'utf8');
@@ -139,26 +132,6 @@ describe('design-token contrast audit (WCAG 2.2 AA)', () => {
     const disabled = contrastRatio(tokenRgb('text-disabled'), tokenRgb('bg-app'));
     const muted = contrastRatio(tokenRgb('text-muted'), tokenRgb('bg-app'));
     expect(disabled).toBeLessThan(muted);
-  });
-
-  // No warm residue: the old palette left 72 rgba()/hex literals derived from warm tokens, and a
-  // half-migrated file mixes temperatures in gradients and glows where no token audit would catch
-  // it. Asserted mechanically because it is exactly the kind of thing that gets missed by eye.
-  it('index.css contains no literal derived from the retired warm palette', () => {
-    const retired = [
-      '255, 244, 224', // old --text-primary #f4efe6
-      '227, 154, 98', // old --accent-primary #e39a62
-      '213, 168, 91', // old --state-warning #d5a85b (value happened to survive; the literal did not)
-      '217, 120, 107', // old --state-danger #d9786b
-      '121, 181, 138', // old --state-success #79b58a
-      '120, 169, 194', // old --accent-cool #78a9c2
-      '18, 17, 15', // old --bg-canvas #12110f
-      '#1b1a17', // old --bg-surface
-      '#17130c',
-    ];
-    for (const literal of retired) {
-      expect(css, `retired warm literal ${literal} still present`).not.toContain(literal);
-    }
   });
 
   it('no retired token name is still referenced', () => {
