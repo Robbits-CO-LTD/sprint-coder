@@ -94,23 +94,13 @@ export function TaskHeader({
             }
           }}
           aria-label="Task名を編集"
-          style={{
-            font: 'inherit',
-            fontWeight: 600,
-            fontSize: 14,
-            background: 'var(--bg-elevated)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: 6,
-            color: 'var(--text-primary)',
-            padding: '2px 8px',
-            minWidth: 160,
-          }}
+          className="task-title-input"
         />
       ) : (
         <button
           type="button"
           className="task-title"
-          style={{ border: 'none', background: 'none', cursor: 'text', padding: 0 }}
+          style={{ cursor: 'text' }}
           onClick={() => setEditing(true)}
           title="クリックしてTask名を変更"
         >

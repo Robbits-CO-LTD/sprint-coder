@@ -7,6 +7,14 @@ import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square, Target } from '../ico
 import { ComposerMenu } from './ComposerMenu';
 import { IMAGEGEN_PREFIX } from './imagegen';
 import type { ComposerMenuItem } from './ComposerMenu';
+import { SlashCommandMenu } from './SlashCommandMenu';
+import {
+  filterSlashCommands,
+  SLASH_COMMANDS,
+  slashCommandQuery,
+  type SlashCommand,
+  type SlashCommandId,
+} from './slash-commands';
 // Shared with the settings dialog (issue #5) so the same option can never be named two ways.
 import {
   EFFORT_DESC,
@@ -49,6 +57,9 @@ export function Composer({ taskId }: { taskId: string }) {
   const queueMessage = useAppStore((s) => s.queueMessage);
   const steerMessage = useAppStore((s) => s.steerMessage);
   const stopAndSend = useAppStore((s) => s.stopAndSend);
+  const createTask = useAppStore((s) => s.createTask);
+  const selectWorkspace = useAppStore((s) => s.selectWorkspace);
+  const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const sending = useAppStore((s) => s.sendingByTask[taskId]) ?? false;
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const queued = useAppStore((s) => s.queuedByTask[taskId]) ?? [];
@@ -64,6 +75,8 @@ export function Composer({ taskId }: { taskId: string }) {
   // Armed by the plus menu, consumed by the next send. One-shot rather than a mode, so a user who
   // opens the menu and changes their mind is not stuck generating images.
   const [imageRequested, setImageRequested] = useState(false);
+  const [slashSelection, setSlashSelection] = useState(0);
+  const [slashDismissedDraft, setSlashDismissedDraft] = useState<string | null>(null);
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
@@ -75,6 +88,28 @@ export function Composer({ taskId }: { taskId: string }) {
   // steering (STEER_UNSUPPORTED) — the Steer segment stays visible but disabled so the user
   // understands why, per FR-SET-03.
   const steerBlockedByRuntime = runtime.kind === 'codex' || runtime.kind === 'claude';
+  const slashQuery = slashCommandQuery(draft);
+  const slashCommands = slashQuery === null ? [] : filterSlashCommands(SLASH_COMMANDS, slashQuery);
+  const slashOpen = slashQuery !== null && draft !== slashDismissedDraft;
+  const activeSlashSelection = Math.min(slashSelection, Math.max(0, slashCommands.length - 1));
+  const goalSupported =
+    typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
+  const workspaceSupported =
+    typeof window !== 'undefined' && window.sprintCoder?.workspace !== undefined;
+  const teamSupported = typeof window !== 'undefined' && window.sprintCoder?.teams !== undefined;
+  const slashUnavailable: Partial<Record<SlashCommandId, string>> = {
+    ...(!goalSupported ? { goal: 'Goal編集に対応していません' } : {}),
+    ...(!workspaceSupported ? { workspace: 'Workspace選択に対応していません' } : {}),
+    ...(!teamSupported ? { team: 'Teamビューに対応していません' } : {}),
+    ...(runtime.kind === 'codex' && runtime.codexAvailable
+      ? {}
+      : {
+          image:
+            runtime.kind === 'codex'
+              ? 'Codex CLIが見つかりません'
+              : 'Codex Runtime選択時に画像生成を使えます',
+        }),
+  };
 
   // Reset the mode selector back to the default once the turn finishes (render-time adjustment
   // instead of an effect, per react-hooks/set-state-in-effect).
@@ -139,7 +174,52 @@ export function Composer({ taskId }: { taskId: string }) {
     }
   }
 
+  function runSlashCommand(command: SlashCommand) {
+    setDraft(taskId, '');
+    setSlashDismissedDraft(null);
+    switch (command.id) {
+      case 'new':
+        void createTask();
+        break;
+      case 'goal':
+        setGoalEditing(true);
+        break;
+      case 'team':
+        void toggleTeamView(taskId);
+        break;
+      case 'workspace':
+        void selectWorkspace(taskId);
+        break;
+      case 'image':
+        setImageRequested(true);
+        break;
+    }
+  }
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (slashOpen) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSlashDismissedDraft(draft);
+        return;
+      }
+      if (slashCommands.length > 0) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          const direction = e.key === 'ArrowDown' ? 1 : -1;
+          setSlashSelection(
+            (activeSlashSelection + direction + slashCommands.length) % slashCommands.length,
+          );
+          return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          const selected = slashCommands[activeSlashSelection];
+          if (selected && slashUnavailable[selected.id] === undefined) runSlashCommand(selected);
+          return;
+        }
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -153,6 +233,15 @@ export function Composer({ taskId }: { taskId: string }) {
         {goalEditing && <GoalEditor taskId={taskId} onDone={() => setGoalEditing(false)} />}
         <QueuedList items={queued} />
         <div className="composer">
+          {slashOpen && (
+            <SlashCommandMenu
+              commands={slashCommands}
+              selectedIndex={activeSlashSelection}
+              unavailable={slashUnavailable}
+              onHover={setSlashSelection}
+              onSelect={runSlashCommand}
+            />
+          )}
           <textarea
             ref={textareaRef}
             className="composer-input"
@@ -165,9 +254,20 @@ export function Composer({ taskId }: { taskId: string }) {
             }
             value={draft}
             disabled={sending}
-            onChange={(e) => setDraft(taskId, e.target.value)}
+            onChange={(e) => {
+              const nextDraft = e.target.value;
+              if (slashCommandQuery(nextDraft) !== slashQuery) setSlashSelection(0);
+              setDraft(taskId, nextDraft);
+            }}
             onKeyDown={handleKeyDown}
             aria-label="メッセージ入力"
+            aria-autocomplete="list"
+            aria-controls={slashOpen ? 'composer-slash-commands' : undefined}
+            aria-activedescendant={
+              slashOpen && slashCommands[activeSlashSelection]
+                ? `slash-command-${slashCommands[activeSlashSelection].id}`
+                : undefined
+            }
           />
           <div className="composer-row">
             <RuntimeChip />

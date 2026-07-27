@@ -17,16 +17,9 @@ import type { RGB } from './contrast';
 // in index.css — computed from the real token values (not hand-copied numbers), so it regresses the
 // moment either side of a pair drifts.
 //
-// Rewritten for the cool-neutral palette (issue #14), which brought four new surfaces and four new
-// foregrounds. The classification below is the substance of the change, not the token renames:
-// the old palette had one bar (4.5:1 for everything) because every token happened to clear it,
-// whereas the new one has tokens whose *purpose* is a different bar. Each group states which bar it
-// is held to and why, so a future token cannot be added without answering that question.
-//
-// The palette as specified in the issue did not clear its own stated bars in four places; those
-// values were raised by the computed minimum (see the :root comment). No usage rules are relied on
-// for text — a token that meets the bar cannot be misused, whereas "do not use X for body text" has
-// to be remembered forever.
+// The current warm-dark palette restores the approved demo's atmosphere while retaining the
+// expanded surface/foreground system introduced later. Each group states which contrast bar it is
+// held to, so visual direction changes cannot silently weaken readability.
 
 const cssPath = join(__dirname, '..', 'index.css');
 const css = readFileSync(cssPath, 'utf8');
@@ -141,26 +134,6 @@ describe('design-token contrast audit (WCAG 2.2 AA)', () => {
     expect(disabled).toBeLessThan(muted);
   });
 
-  // No warm residue: the old palette left 72 rgba()/hex literals derived from warm tokens, and a
-  // half-migrated file mixes temperatures in gradients and glows where no token audit would catch
-  // it. Asserted mechanically because it is exactly the kind of thing that gets missed by eye.
-  it('index.css contains no literal derived from the retired warm palette', () => {
-    const retired = [
-      '255, 244, 224', // old --text-primary #f4efe6
-      '227, 154, 98', // old --accent-primary #e39a62
-      '213, 168, 91', // old --state-warning #d5a85b (value happened to survive; the literal did not)
-      '217, 120, 107', // old --state-danger #d9786b
-      '121, 181, 138', // old --state-success #79b58a
-      '120, 169, 194', // old --accent-cool #78a9c2
-      '18, 17, 15', // old --bg-canvas #12110f
-      '#1b1a17', // old --bg-surface
-      '#17130c',
-    ];
-    for (const literal of retired) {
-      expect(css, `retired warm literal ${literal} still present`).not.toContain(literal);
-    }
-  });
-
   it('no retired token name is still referenced', () => {
     for (const retired of [
       'bg-canvas',
@@ -225,11 +198,15 @@ describe('opacity-dimmed text usages (real text, not decorative)', () => {
     { selector: '.composer-input::placeholder', bg: 'bg-elevated', label: 'Composer placeholder' },
     { selector: '.tlv-timeline small', bg: 'bg-panel', label: 'List View timeline metadata' },
     {
+      // `.sb-search` is now a recessed field filled with --bg-app rather than an outline on the
+      // sidebar's own --bg-panel, so that is the surface this placeholder has to clear.
       selector: '.sb-search input::placeholder',
-      bg: 'bg-panel',
+      bg: 'bg-app',
       label: 'Sidebar search placeholder',
     },
-    { selector: '.cc-hint', bg: 'bg-app', label: 'Canvas keyboard-shortcut hint' },
+    // The hint now sits on its own --bg-panel plate rather than on a near-transparent tint of the
+    // canvas, so --bg-panel is the surface its dimmed text has to clear.
+    { selector: '.cc-hint', bg: 'bg-panel', label: 'Canvas keyboard-shortcut hint' },
   ];
 
   it.each(cases)('$label ($selector) meets 4.5:1 on --$bg after opacity', ({ selector, bg }) => {

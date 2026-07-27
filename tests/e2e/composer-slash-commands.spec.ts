@@ -1,0 +1,63 @@
+import { expect, test } from '@playwright/test';
+import type { ElectronApplication } from '@playwright/test';
+import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
+
+test.describe('composer slash commands', () => {
+  let app: ElectronApplication | null = null;
+  let userDataDir: string;
+
+  test.beforeEach(async () => {
+    userDataDir = createUserDataDir('slash-commands');
+    app = await launchApp(userDataDir);
+  });
+
+  test.afterEach(async () => {
+    await closeApp(app);
+    removeUserDataDir(userDataDir);
+  });
+
+  test('filters, navigates, dismisses, and runs commands from the composer', async () => {
+    if (!app) throw new Error('app did not launch');
+    const page = await firstWindow(app);
+    await page.getByTestId('sidebar-new-task-button').click();
+    const textarea = page.getByTestId('composer-textarea');
+
+    await textarea.fill('/');
+    await expect(page.getByTestId('slash-command-menu')).toBeVisible();
+    await expect(page.getByTestId('slash-command-new')).toHaveAttribute('aria-selected', 'true');
+
+    await textarea.press('ArrowDown');
+    await expect(page.getByTestId('slash-command-goal')).toHaveAttribute('aria-selected', 'true');
+    await textarea.press('Enter');
+    await expect(page.getByTestId('composer-goal-input')).toBeFocused();
+    await page.getByTestId('composer-goal-input').press('Escape');
+    await expect(textarea).toHaveValue('');
+
+    await textarea.fill('/wor');
+    await expect(page.getByTestId('slash-command-workspace')).toBeVisible();
+    await expect(page.getByTestId('slash-command-team')).toHaveCount(0);
+
+    await textarea.press('Escape');
+    await expect(page.getByTestId('slash-command-menu')).toHaveCount(0);
+    await expect(textarea).toHaveValue('/wor');
+
+    await textarea.fill('/team');
+    await textarea.press('Tab');
+    await expect(page.getByTestId('team-list')).toBeVisible();
+    await expect(textarea).toHaveValue('');
+  });
+
+  test('does not send an unavailable command as a chat message', async () => {
+    if (!app) throw new Error('app did not launch');
+    const page = await firstWindow(app);
+    await page.getByTestId('sidebar-new-task-button').click();
+    const textarea = page.getByTestId('composer-textarea');
+
+    await textarea.fill('/image');
+    const image = page.getByTestId('slash-command-image');
+    await expect(image).toHaveAttribute('aria-disabled', 'true');
+    await textarea.press('Enter');
+    await expect(textarea).toHaveValue('/image');
+    await expect(page.getByTestId('slash-command-menu')).toBeVisible();
+  });
+});
