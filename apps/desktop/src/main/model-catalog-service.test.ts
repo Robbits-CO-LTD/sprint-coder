@@ -43,4 +43,24 @@ describe('ModelCatalogService', () => {
     expect(first.items).toHaveLength(25);
     expect(first.nextCursor).toBe('cursor:25');
   });
+
+  it('refreshes observation timestamps without rebuilding the search index', () => {
+    const service = new ModelCatalogService();
+    service.replaceCatalog([model(1)]);
+    service.replaceCatalog([
+      { ...model(1), availabilityCheckedAt: '2026-07-28T01:00:00.000Z' },
+    ]);
+    const result = service.query({
+      taskId: 'task-1',
+      text: '',
+      connectionIds: [],
+      providerIds: [],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 10,
+    });
+    expect(service.indexBuildCount).toBe(1);
+    expect(result.items[0]?.availabilityCheckedAt).toBe('2026-07-28T01:00:00.000Z');
+  });
 });

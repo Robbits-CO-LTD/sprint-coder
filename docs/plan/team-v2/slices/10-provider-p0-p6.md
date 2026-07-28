@@ -60,6 +60,19 @@ P1B-aは外部network、実Provider SDK、認証情報を扱わない。
 P2aでは生成API、Chat／Team配線、実API probeを行わない。実API smokeは全実装後のfinal gateへ
 留保する。
 
+## P3 completion
+
+- OpenRouter ConnectionのMain／Preload契約、Main-only secret、作成直後verificationを追加
+- `/models`の1000件超catalogを共通catalogへ変換し、価格とcapabilityの情報源を保持
+- Responses APIのstream、Tool Calling、Structured Output、usage／cost、取消、429を正規化
+- `X-OpenRouter-Metadata`を有効化し、requested model、Gateway、upstream、routingを分離
+- DB v48でChat TurnとTeam attemptの完全なexecution resolutionを永続化
+- catalog時刻更新だけでは検索indexを再構築しない
+- Chat／Team実行はP2で追加したProvider-neutral経路を再利用し、OpenRouter固有分岐を
+  TeamCoordinatorへ追加しない
+
+実API smoke、packaged E2E、再起動後のrouting履歴確認は全実装後のfinal gateへ留保する。
+
 ## Shared stop rule
 
 Sliceの受入条件がgreenになったら停止して証拠を報告する。隣接Provider、cleanup、将来の

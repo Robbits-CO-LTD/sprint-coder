@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import {
   openAIConnectionCreateInputSchema,
+  openRouterConnectionCreateInputSchema,
   type OpenAIConnectionCreateInput,
+  type OpenRouterConnectionCreateInput,
   type ProviderConnection,
 } from '@sprint-coder/contracts';
 import {
@@ -46,6 +48,42 @@ export class ProviderConnectionService {
       return this.repository.createProviderConnection({
         id: `openai:${this.id()}`,
         providerId: 'openai',
+        runtimeKind: 'official_api',
+        displayName: parsed.displayName,
+        enabled: true,
+        secretReference,
+        verification: {
+          status: 'unverified',
+          verifiedAt: null,
+          expiresAt: null,
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: 2,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    } catch (error) {
+      this.secrets.delete(secretReference);
+      throw error;
+    }
+  }
+
+  createOpenRouter(input: OpenRouterConnectionCreateInput): ProviderConnection {
+    const parsed = openRouterConnectionCreateInputSchema.parse(input);
+    const secretReference = this.secrets.put(
+      serializeOpenAICredential({ apiKey: parsed.apiKey }),
+    );
+    const timestamp = this.now().toISOString();
+    try {
+      return this.repository.createProviderConnection({
+        id: `openrouter:${this.id()}`,
+        providerId: 'openrouter',
         runtimeKind: 'official_api',
         displayName: parsed.displayName,
         enabled: true,

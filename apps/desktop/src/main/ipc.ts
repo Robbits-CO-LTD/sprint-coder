@@ -41,6 +41,7 @@ import {
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
   openAIConnectionCreateInputSchema,
+  openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
   connectionIdSchema,
   runtimeSetInputSchema,
@@ -177,6 +178,7 @@ import {
   OpenAIProviderClient,
   parseOpenAICredential,
 } from './openai-provider-client';
+import { OpenRouterCatalogClient } from './openrouter-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
 import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
 
@@ -256,6 +258,16 @@ export class IpcRouter {
       runtimeKind: 'official_api',
       providerId: 'openai',
       runtime: openAI,
+    });
+    const openRouter = new OpenRouterCatalogClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('OpenRouter Connection has no secret reference');
+      return parseOpenAICredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'openrouter',
+      runtime: openRouter,
     });
     this.providerVerification = new ProviderVerificationService(
       this.persistence,
@@ -587,6 +599,21 @@ export class IpcRouter {
           '',
           IPC_CHANNELS.providersCreateOpenAIConnection,
           () => this.providerConnections.createOpenAI(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateOpenRouterConnection,
+      openRouterConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateOpenRouterConnection,
+          () => this.providerConnections.createOpenRouter(input),
         ).value;
         return this.providerVerification.verify(created);
       },

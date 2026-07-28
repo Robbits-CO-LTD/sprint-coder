@@ -35,8 +35,18 @@ export class ModelCatalogService {
         `${right.connectionId}\0${right.modelId}`,
       ),
     );
-    const fingerprint = JSON.stringify(normalized);
-    if (fingerprint === this.fingerprint) return;
+    const fingerprint = JSON.stringify(normalized.map(stableCatalogIdentity));
+    if (fingerprint === this.fingerprint) {
+      const refreshed = new Map(
+        normalized.map((model) => [`${model.connectionId}\0${model.modelId}`, model]),
+      );
+      this.indexed = this.indexed.map((entry) => ({
+        ...entry,
+        model:
+          refreshed.get(`${entry.model.connectionId}\0${entry.model.modelId}`) ?? entry.model,
+      }));
+      return;
+    }
     this.fingerprint = fingerprint;
     this.indexed = normalized.map((model) => ({
       model,
@@ -73,4 +83,12 @@ export class ModelCatalogService {
       nextCursor: nextOffset < filtered.length ? `cursor:${nextOffset}` : null,
     };
   }
+}
+
+function stableCatalogIdentity(model: ProviderModel): unknown {
+  return JSON.parse(
+    JSON.stringify(model, (key, value: unknown) =>
+      key === 'availabilityCheckedAt' || key === 'observedAt' ? undefined : value,
+    ),
+  ) as unknown;
 }

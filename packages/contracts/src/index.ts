@@ -1231,6 +1231,15 @@ export const openAIConnectionCreateInputSchema = z
 export type OpenAIConnectionCreateInput = z.infer<
   typeof openAIConnectionCreateInputSchema
 >;
+export const openRouterConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+  })
+  .strict();
+export type OpenRouterConnectionCreateInput = z.infer<
+  typeof openRouterConnectionCreateInputSchema
+>;
 export const capabilitySourceSchema = z.enum([
   'provider_api',
   'official_curated',
@@ -1274,6 +1283,21 @@ export const providerModelSchema = z
     structuredOutput: catalogValueSchema(z.boolean()),
     multimodalInput: catalogValueSchema(z.boolean()),
     reasoning: catalogValueSchema(z.boolean()),
+    gateway: z
+      .object({
+        providerId: providerIdSchema,
+        upstreamProvider: catalogValueSchema(z.string().min(1).max(128)),
+      })
+      .strict()
+      .optional(),
+    pricing: z
+      .object({
+        promptPerToken: catalogValueSchema(z.string().min(1).max(64)),
+        completionPerToken: catalogValueSchema(z.string().min(1).max(64)),
+        currency: z.literal('USD'),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ProviderModel = z.infer<typeof providerModelSchema>;
@@ -1319,6 +1343,9 @@ export const executionResolutionSchema = z
   .object({
     resolvedProvider: providerIdSchema.nullable(),
     resolvedModel: z.string().min(1).max(128).nullable(),
+    gatewayProvider: providerIdSchema.nullable().optional(),
+    upstreamProvider: z.string().min(1).max(128).nullable().optional(),
+    routing: z.record(z.string(), z.json()).nullable().optional(),
   })
   .strict();
 export type ExecutionResolution = z.infer<typeof executionResolutionSchema>;
@@ -1908,6 +1935,9 @@ export interface SprintCoderApi {
   providers: {
     listConnections(): Promise<ProviderConnection[]>;
     createOpenAIConnection(input: OpenAIConnectionCreateInput): Promise<ProviderConnection>;
+    createOpenRouterConnection(
+      input: OpenRouterConnectionCreateInput,
+    ): Promise<ProviderConnection>;
     verifyConnection(connectionId: string): Promise<ProviderConnection>;
   };
   permissions: {
@@ -1996,6 +2026,8 @@ export const IPC_CHANNELS = {
   modelsSetSelection: 'sprint-coder:models:set-selection',
   providersListConnections: 'sprint-coder:providers:list-connections',
   providersCreateOpenAIConnection: 'sprint-coder:providers:create-openai-connection',
+  providersCreateOpenRouterConnection:
+    'sprint-coder:providers:create-openrouter-connection',
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',

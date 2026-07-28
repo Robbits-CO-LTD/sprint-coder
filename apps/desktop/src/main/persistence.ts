@@ -459,6 +459,7 @@ type TeamAttemptRow = {
   terminal_reason: string | null;
   resolved_provider: string | null;
   resolved_model: string | null;
+  resolution_json: string | null;
   provider_usage_json: string | null;
   created_at: string;
   started_at: string | null;
@@ -554,6 +555,7 @@ type TurnRow = {
   requested_model: string | null;
   resolved_provider: string | null;
   resolved_model: string | null;
+  resolution_json: string | null;
   provider_usage_json: string | null;
   created_at: string;
 };
@@ -2232,6 +2234,14 @@ const migrations = [
       ALTER TABLE team_attempts ADD COLUMN resolved_provider TEXT;
       ALTER TABLE team_attempts ADD COLUMN resolved_model TEXT;
       ALTER TABLE team_attempts ADD COLUMN provider_usage_json TEXT;
+    `,
+  },
+  {
+    version: 48,
+    checksum: 'provider-p3-v48-routing-resolution',
+    sql: `
+      ALTER TABLE turns ADD COLUMN resolution_json TEXT;
+      ALTER TABLE team_attempts ADD COLUMN resolution_json TEXT;
     `,
   },
 ];
@@ -4428,6 +4438,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         `UPDATE team_attempts
          SET resolved_provider = COALESCE(?, resolved_provider),
              resolved_model = COALESCE(?, resolved_model),
+             resolution_json = COALESCE(?, resolution_json),
              provider_usage_json = COALESCE(?, provider_usage_json),
              updated_at = ?
          WHERE id = ?`,
@@ -4435,6 +4446,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(
         parsedResolution?.resolvedProvider ?? null,
         parsedResolution?.resolvedModel ?? null,
+        parsedResolution === undefined ? null : JSON.stringify(parsedResolution),
         parsedUsage === undefined ? null : JSON.stringify(parsedUsage),
         new Date().toISOString(),
         attemptId,
@@ -8213,10 +8225,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const parsed = executionResolutionSchema.parse(resolution);
     const result = this.db
       .prepare(
-        `UPDATE turns SET resolved_provider = ?, resolved_model = ?, updated_at = ?
+        `UPDATE turns
+         SET resolved_provider = ?, resolved_model = ?, resolution_json = ?, updated_at = ?
          WHERE id = ? AND task_id = ?`,
       )
-      .run(parsed.resolvedProvider, parsed.resolvedModel, new Date().toISOString(), turnId, taskId);
+      .run(
+        parsed.resolvedProvider,
+        parsed.resolvedModel,
+        JSON.stringify(parsed),
+        new Date().toISOString(),
+        turnId,
+        taskId,
+      );
     if (result.changes !== 1) throw new NotFoundError('Turn not found');
     return this.getTurnModelIdentity(taskId, turnId);
   }
@@ -9744,10 +9764,13 @@ function toTurnModelIdentity(row: TurnRow): TurnModelIdentity {
         requestedProvider: row.requested_provider,
         requestedModel: row.requested_model,
       }) ?? modelSelectionForRuntime(row.runtime_kind, row.model),
-    resolution: {
-      resolvedProvider: row.resolved_provider,
-      resolvedModel: row.resolved_model,
-    },
+    resolution:
+      row.resolution_json === null
+        ? {
+            resolvedProvider: row.resolved_provider,
+            resolvedModel: row.resolved_model,
+          }
+        : executionResolutionSchema.parse(JSON.parse(row.resolution_json)),
   };
 }
 
@@ -9860,10 +9883,13 @@ function toTeamAttempt(row: TeamAttemptRow): TeamAttemptRecord {
     },
     providerCallOrdinal: row.provider_call_ordinal,
     terminalReason: row.terminal_reason,
-    resolution: {
-      resolvedProvider: row.resolved_provider,
-      resolvedModel: row.resolved_model,
-    },
+    resolution:
+      row.resolution_json === null
+        ? {
+            resolvedProvider: row.resolved_provider,
+            resolvedModel: row.resolved_model,
+          }
+        : executionResolutionSchema.parse(JSON.parse(row.resolution_json)),
     providerUsage:
       row.provider_usage_json === null
         ? null

@@ -24,6 +24,7 @@ import {
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
   openAIConnectionCreateInputSchema,
+  openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
   connectionIdSchema,
   runtimeModelSetInputSchema,
@@ -367,6 +368,13 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersCreateOpenAIConnection,
         openAIConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createOpenRouterConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateOpenRouterConnection,
+        openRouterConnectionCreateInputSchema,
         providerConnectionSchema,
         input,
       ),

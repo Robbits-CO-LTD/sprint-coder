@@ -75,4 +75,38 @@ describe('ProviderConnectionService', () => {
     ).toThrow('db failed');
     expect(deleted).toBe('provider-secret:00000000-0000-4000-8000-000000000001');
   });
+
+  it('creates an OpenRouter Connection with a Main-only secret reference', () => {
+    const stored: string[] = [];
+    const service = new ProviderConnectionService(
+      {
+        listProviderConnections: () => [],
+        createProviderConnection: (connection) => connection,
+      },
+      {
+        put: (secret) => {
+          stored.push(secret);
+          return 'provider-secret:00000000-0000-4000-8000-000000000003';
+        },
+        delete: () => undefined,
+      },
+      () => new Date('2026-07-28T00:00:00.000Z'),
+      () => 'connection-3',
+    );
+
+    const connection = service.createOpenRouter({
+      displayName: 'OpenRouter',
+      apiKey: 'openrouter-secret',
+    });
+
+    expect(connection).toMatchObject({
+      id: 'openrouter:connection-3',
+      providerId: 'openrouter',
+      runtimeKind: 'official_api',
+      secretReference: 'provider-secret:00000000-0000-4000-8000-000000000003',
+      rateLimit: { mode: 'auto', maxConcurrentRequests: 2 },
+    });
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toContain('openrouter-secret');
+  });
 });
