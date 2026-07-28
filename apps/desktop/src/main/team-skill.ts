@@ -13,6 +13,8 @@ description: Sprint Coderで実在するWorkerを安全に編成・監視する
 # Sprint Coder Team
 
 Team利用が明示された依頼では、必ずMCPサーバー \`team\` の実ツールを呼び出す。ツール名を文章へ書くだけで利用したことにしない。
+CodexやClaude自身のsubagent／Agent Teams機能、外部skill、別MCPを代替として使ってはいけない。
+\`team_list_models\`が実際に呼び出せない場合は、代替実行へ進まず「Sprint Coder Team MCPを利用できない」と報告して終了する。
 
 1. \`team_list_models\` で利用可能なConnection／modelとsource付き能力を確認する。作業に必要な能力でfilterし、unknownを0やfalseと解釈せず、model名やProvider名から適性を推測しない。
 2. \`team_hire_worker\` で重複しない役割のWorkerを必要人数だけ採用する。各作業に選んだconnection ID、provider ID、model IDを\`modelSelection\`へ、その選定根拠を\`modelSelectionReason\`へ必ず明示する。

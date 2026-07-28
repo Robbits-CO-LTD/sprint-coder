@@ -73,6 +73,7 @@ describe('Codex runtime probe', () => {
     );
     expect(args).toContain('mcp_servers.team.default_tools_approval_mode="approve"');
     expect(args).toContain('mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]');
+    expect(args).toContain('features.tool_search_always_defer_mcp_tools=false');
     expect(args.join(' ')).not.toContain('turn-token');
     expect(args.slice(0, 2)).toEqual(['app-server', '--stdio']);
   });

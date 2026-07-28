@@ -509,6 +509,11 @@ export function buildCodexArgs(
           'mcp_servers.team.startup_timeout_sec=10',
           '-c',
           'mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
+          // Codex normally defers MCP tools behind tool_search. Sprint Coder's reserved Team
+          // capability must be directly callable: the embedded Skill names the exact tools and
+          // must fail closed rather than drifting into an unrelated native subagent feature.
+          '-c',
+          'features.tool_search_always_defer_mcp_tools=false',
         ]),
     ...(effort === undefined || effort === '' ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
     ...(model === 'auto' ? [] : ['-c', `model="${model}"`]),

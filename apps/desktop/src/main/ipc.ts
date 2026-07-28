@@ -263,6 +263,7 @@ export class IpcRouter {
   private teamSkillReady = false;
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
+  private readonly teamRequiredTurns = new Set<string>();
 
   constructor(
     private readonly window: BrowserWindow,
@@ -427,7 +428,11 @@ export class IpcRouter {
       persistence,
       this.teamWorkerRuntime,
       (taskId, detail) => {
-        if (this.teamSubscriptions.has(taskId) && !this.window.isDestroyed()) {
+        if (
+          this.teamSubscriptions.has(taskId) &&
+          !this.window.isDestroyed() &&
+          !this.window.webContents.isDestroyed()
+        ) {
           const seq = (this.teamEventSeqByTask.get(taskId) ?? 0) + 1;
           this.teamEventSeqByTask.set(taskId, seq);
           this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
@@ -1638,6 +1643,9 @@ export class IpcRouter {
     // `turn.completed` and the timeline shows the image inside the Turn that produced it.
     this.ingestGeneratedImages(taskId, turnId);
     this.teamMcpBridge.unregister(turnId);
+    this.teamRequiredTurns.delete(turnId);
+    this.teamSkillExpectedTurns.delete(turnId);
+    this.teamSkillResolutionByTurn.delete(turnId);
     const resolvedModel = this.resolvedModelByTurn.get(turnId);
     const resolvedProvider = this.resolvedProviderByTurn.get(turnId);
     this.resolvedModelByTurn.delete(turnId);
@@ -1871,6 +1879,7 @@ export class IpcRouter {
         });
         return;
       }
+      this.teamRequiredTurns.add(started.turnId);
     } else if (kind !== 'mock' && teamTurn) {
       // Team intent without Leader MCP always runs the leader orchestration
       // (hire→dispatch→reports→synthesis): the production adapters are no-tools by default, so a
@@ -2140,6 +2149,9 @@ export class IpcRouter {
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
     this.teamMcpBridge.unregister(turnId);
+    this.teamRequiredTurns.delete(turnId);
+    this.teamSkillExpectedTurns.delete(turnId);
+    this.teamSkillResolutionByTurn.delete(turnId);
     if (kind === 'codex' || kind === 'claude') this.runtimeFor(kind).cancel(taskId, turnId);
     else if (kind === 'provider') {
       this.providerAbortByTurn.get(turnId)?.abort();
@@ -2390,6 +2402,21 @@ export class IpcRouter {
             source: 'stream',
           });
         else {
+          if (
+            shouldFailRequiredTeamTurn(
+              this.teamRequiredTurns.has(turnId),
+              this.teamCoordinator.get(taskId)?.workers.filter(({ kind }) => kind === 'worker')
+                .length ?? 0,
+            )
+          ) {
+            this.handleRuntimeFailure(kind, taskId, turnId, {
+              code: 'RUNTIME_PROTOCOL_ERROR',
+              userMessage:
+                'Team MCP Workerが1名も作成されませんでした。外部のsubagent機能へfallbackせず終了します。',
+              retryable: true,
+            });
+            return;
+          }
           if (runtimeEvent.resolvedModel !== undefined)
             this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
           this.finishAndAdvance(taskId, turnId, 'completed');
@@ -2501,7 +2528,7 @@ export class IpcRouter {
     options: { complete: boolean; source: 'stream' | 'disk' },
     baseline: string | null,
   ): void {
-    if (this.window.isDestroyed()) return;
+    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
     this.window.webContents.send(
       IPC_CHANNELS.fileEditEvent,
       fileEditFrameSchema.parse({
@@ -2577,7 +2604,7 @@ export class IpcRouter {
     let batcher = this.reasoningByTurn.get(turnId);
     if (batcher === undefined) {
       batcher = new ReasoningBatcher(({ text: batch, truncated }) => {
-        if (this.window.isDestroyed()) return;
+        if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
         this.window.webContents.send(
           IPC_CHANNELS.reasoningEvent,
           reasoningBatchSchema.parse({ taskId, turnId, text: batch, truncated }),
@@ -2644,7 +2671,7 @@ export class IpcRouter {
     errorCode: string | null;
     userMessage: string | null;
   }): void {
-    if (this.window.isDestroyed()) return;
+    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
     this.window.webContents.send(
       IPC_CHANNELS.runtimeStatusEvent,
       runtimeStatusSchema.parse(status),
@@ -2825,6 +2852,13 @@ export function shouldBlockProviderLeaderCompletion(
   hasUnfinishedTeamWork: boolean,
 ): boolean {
   return teamTurn && hasUnfinishedTeamWork;
+}
+
+export function shouldFailRequiredTeamTurn(
+  teamRequired: boolean,
+  workerCount: number,
+): boolean {
+  return teamRequired && workerCount === 0;
 }
 /**
  * A Codex reasoning level the selected model does not advertise.

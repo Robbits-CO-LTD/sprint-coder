@@ -53,6 +53,7 @@ import {
   invalidModelUserMessage,
   isTrustedIpcSender,
   shouldBlockProviderLeaderCompletion,
+  shouldFailRequiredTeamTurn,
 } from './ipc';
 
 describe('Provider Team completion and model errors', () => {
@@ -67,6 +68,12 @@ describe('Provider Team completion and model errors', () => {
     expect(shouldBlockProviderLeaderCompletion(true, true)).toBe(true);
     expect(shouldBlockProviderLeaderCompletion(true, false)).toBe(false);
     expect(shouldBlockProviderLeaderCompletion(false, true)).toBe(false);
+  });
+
+  it('fails closed when an explicit Team turn completes without creating a Worker', () => {
+    expect(shouldFailRequiredTeamTurn(true, 0)).toBe(true);
+    expect(shouldFailRequiredTeamTurn(true, 1)).toBe(false);
+    expect(shouldFailRequiredTeamTurn(false, 0)).toBe(false);
   });
 });
 
