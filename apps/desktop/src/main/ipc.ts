@@ -178,6 +178,7 @@ import {
   parseOpenAICredential,
 } from './openai-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
+import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -188,7 +189,7 @@ export class IpcRouter {
   private readonly mailbox = new TaskMailbox();
   private readonly mockRuntime: MockRuntimeAdapter;
   private readonly codexRuntime: RuntimeHostClient;
-  private readonly teamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
+  private readonly teamWorkerRuntime: ProviderAwareTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
   // The concrete model id the Claude CLI actually resolved for a turn (captured from the
@@ -264,7 +265,7 @@ export class IpcRouter {
     this.skillSettings = new SkillSettingsService({
       homePath: process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'),
     });
-    this.teamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
+    const cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
       // Real worker execution is opt-in when the selected chat runtime is mock. Runtime probe or
       // policy failures remain explicit and are never replaced with simulated Team output.
       selectRuntime: () =>
@@ -294,6 +295,24 @@ export class IpcRouter {
       teamMcpFor: (worker, turnId) => this.registerManagerMcp(turnId, worker.taskId, worker.id),
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
+    });
+    this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
+      fallback: cliTeamWorkerRuntime,
+      verification: this.providerVerification,
+      registry: this.providerRegistry,
+      getConnection: (connectionId) => this.persistence.getProviderConnection(connectionId),
+      authorizeEgress: ({ worker, executionId, providerId, prompt }) =>
+        authorizeOfficialApiProviderEgress(
+          {
+            broker: this.permissionBroker,
+            task: this.persistence.getTask(worker.taskId),
+            turnId: executionId,
+            prompt,
+            context: { fragments: [], usageEvents: [], compacted: false },
+            now: new Date().toISOString(),
+          },
+          providerId,
+        ).allowed,
     });
     this.teamCoordinator = new TeamCoordinator(
       persistence,

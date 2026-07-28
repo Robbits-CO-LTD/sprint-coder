@@ -36,6 +36,16 @@ const TOOLS = [
           enum: ['none', 'summary', 'selected_items', 'full_fork'],
         },
         writeCapable: { type: 'boolean' },
+        modelSelection: {
+          type: 'object',
+          properties: {
+            connectionId: { type: ['string', 'null'] },
+            requestedProvider: { type: ['string', 'null'] },
+            requestedModel: { type: ['string', 'null'] },
+          },
+          required: ['connectionId', 'requestedProvider', 'requestedModel'],
+          additionalProperties: false,
+        },
         managerPolicy: {
           type: 'object',
           properties: {

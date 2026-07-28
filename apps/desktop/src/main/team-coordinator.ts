@@ -11,6 +11,8 @@ import {
   type TeamActivitySummary,
   type TeamPolicyUpdateInput,
   type TeamSendMessageInput,
+  type ExecutionResolution,
+  type NormalizedProviderUsage,
   type WorkerCompletion,
   type WorkerSummary,
 } from '@sprint-coder/contracts';
@@ -58,6 +60,8 @@ export type WorkerRuntimeResult = Readonly<{
     timeMs?: number;
     toolCalls?: number;
   }>;
+  resolution?: ExecutionResolution;
+  providerUsage?: NormalizedProviderUsage;
 }>;
 
 export type TeamExecutionSubmission = Readonly<{
@@ -331,6 +335,9 @@ export class TeamCoordinator {
         contextInheritancePolicy: input.contextInheritancePolicy,
         parentCapabilityCeiling: childCeiling,
         writeCapable: input.writeCapable,
+        ...(input.modelSelection === undefined
+          ? {}
+          : { modelSelection: input.modelSelection }),
         parentAgentId: requester.id,
         canDelegate: childManagerPolicy !== null,
         managerPolicy: childManagerPolicy,
@@ -769,6 +776,12 @@ export class TeamCoordinator {
       });
       this.settleExecution(reservations, completion.usage);
       reservations = [];
+      if (completion.resolution !== undefined || completion.providerUsage !== undefined)
+        this.persistence.recordTeamAttemptProviderResult(
+          attempt.id,
+          completion.resolution,
+          completion.providerUsage,
+        );
       this.persistWorkerResult(
         input.teamId,
         worker,
@@ -1210,7 +1223,12 @@ export class TeamCoordinator {
     content: string,
     teamTaskId: string,
     executionId?: string,
-  ): Promise<{ value: WorkerCompletion; usage: WorkerRuntimeResult['usage'] }> {
+  ): Promise<{
+    value: WorkerCompletion;
+    usage: WorkerRuntimeResult['usage'];
+    resolution: WorkerRuntimeResult['resolution'];
+    providerUsage: WorkerRuntimeResult['providerUsage'];
+  }> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= TEAM_DELIVERY_MAX_ATTEMPTS; attempt += 1) {
       if (attempt === 1) {
@@ -1255,7 +1273,12 @@ export class TeamCoordinator {
           this.deliveryTimeoutMs,
         );
         assertEnvelopeMatchesClaims(envelope, result.claims ?? {});
-        return { value: workerCompletionSchema.parse(result.completion), usage: result.usage };
+        return {
+          value: workerCompletionSchema.parse(result.completion),
+          usage: result.usage,
+          resolution: result.resolution,
+          providerUsage: result.providerUsage,
+        };
       } catch (error) {
         lastError = error;
         this.persistence.transitionTeamDelivery({

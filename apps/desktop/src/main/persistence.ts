@@ -457,6 +457,9 @@ type TeamAttemptRow = {
   requested_model: string | null;
   provider_call_ordinal: number;
   terminal_reason: string | null;
+  resolved_provider: string | null;
+  resolved_model: string | null;
+  provider_usage_json: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -2222,6 +2225,15 @@ const migrations = [
       ALTER TABLE turns ADD COLUMN provider_usage_json TEXT;
     `,
   },
+  {
+    version: 47,
+    checksum: 'provider-p2-v47-team-attempt-result',
+    sql: `
+      ALTER TABLE team_attempts ADD COLUMN resolved_provider TEXT;
+      ALTER TABLE team_attempts ADD COLUMN resolved_model TEXT;
+      ALTER TABLE team_attempts ADD COLUMN provider_usage_json TEXT;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2542,6 +2554,8 @@ export type TeamAttemptRecord = Readonly<{
   modelSelection: ModelSelection;
   providerCallOrdinal: number;
   terminalReason: string | null;
+  resolution: ExecutionResolution;
+  providerUsage: NormalizedProviderUsage | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -2606,6 +2620,7 @@ export interface PersistenceClient {
     parentCapabilityCeiling: CapabilityCeiling;
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
+    modelSelection?: ModelSelection;
     writeCapable?: boolean;
     parentAgentId?: string;
     canDelegate?: boolean;
@@ -2646,6 +2661,11 @@ export interface PersistenceClient {
     terminalReason?: string | null;
   }): TeamAttemptRecord;
   recordTeamAttemptRateLimited(attemptId: string, now: string): TeamAttemptRecord;
+  recordTeamAttemptProviderResult(
+    attemptId: string,
+    resolution: ExecutionResolution | undefined,
+    usage: NormalizedProviderUsage | undefined,
+  ): TeamAttemptRecord;
   recoverInterruptedTeamExecutions(now: string): number;
   recordTeamV2Activity(input: {
     teamId: string;
@@ -3824,6 +3844,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     parentCapabilityCeiling: CapabilityCeiling;
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
+    modelSelection?: ModelSelection;
     writeCapable?: boolean;
     parentAgentId?: string;
     canDelegate?: boolean;
@@ -3857,8 +3878,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const now = new Date().toISOString();
       const threadId = randomUUID();
       const agentId = randomUUID();
-      const runtimeKind = input.runtimeKind ?? this.getRuntime();
-      const modelSelection = modelSelectionForRuntime(runtimeKind, this.getModel());
+      const modelSelection = input.modelSelection ?? parent.modelSelection;
+      const builtinRuntime = builtinRuntimeForModelSelection(modelSelection);
+      const runtimeKind =
+        input.runtimeKind ?? builtinRuntime?.runtimeKind ?? parent.runtimeKind;
       this.db
         .prepare(
           `INSERT INTO agent_threads(
@@ -4389,6 +4412,35 @@ export class SqlitePersistenceClient implements PersistenceClient {
       });
       return this.getTeamAttempt(attemptId);
     })();
+  }
+
+  recordTeamAttemptProviderResult(
+    attemptId: string,
+    resolution: ExecutionResolution | undefined,
+    usage: NormalizedProviderUsage | undefined,
+  ): TeamAttemptRecord {
+    const parsedResolution =
+      resolution === undefined ? undefined : executionResolutionSchema.parse(resolution);
+    const parsedUsage =
+      usage === undefined ? undefined : normalizedProviderUsageSchema.parse(usage);
+    const result = this.db
+      .prepare(
+        `UPDATE team_attempts
+         SET resolved_provider = COALESCE(?, resolved_provider),
+             resolved_model = COALESCE(?, resolved_model),
+             provider_usage_json = COALESCE(?, provider_usage_json),
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        parsedResolution?.resolvedProvider ?? null,
+        parsedResolution?.resolvedModel ?? null,
+        parsedUsage === undefined ? null : JSON.stringify(parsedUsage),
+        new Date().toISOString(),
+        attemptId,
+      );
+    if (result.changes !== 1) throw new NotFoundError('Team attempt not found');
+    return this.getTeamAttempt(attemptId);
   }
 
   recoverInterruptedTeamExecutions(now: string): number {
@@ -9808,6 +9860,14 @@ function toTeamAttempt(row: TeamAttemptRow): TeamAttemptRecord {
     },
     providerCallOrdinal: row.provider_call_ordinal,
     terminalReason: row.terminal_reason,
+    resolution: {
+      resolvedProvider: row.resolved_provider,
+      resolvedModel: row.resolved_model,
+    },
+    providerUsage:
+      row.provider_usage_json === null
+        ? null
+        : normalizedProviderUsageSchema.parse(JSON.parse(row.provider_usage_json)),
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,

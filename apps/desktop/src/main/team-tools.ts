@@ -8,7 +8,10 @@
 // only ever registered on the mock/intelligence-loop ToolBroker (createDefaultToolBroker's
 // optional `team` bundle), never on RuntimeHostClient's path.
 import { z } from 'zod';
-import { contextInheritancePolicySchema } from '@sprint-coder/contracts';
+import {
+  contextInheritancePolicySchema,
+  modelSelectionSchema,
+} from '@sprint-coder/contracts';
 import {
   createToolDefinition,
   createToolId,
@@ -63,6 +66,16 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
     objective: { type: 'string' },
     contextInheritancePolicy: { type: 'string' },
     writeCapable: { type: 'boolean' },
+    modelSelection: {
+      type: 'object',
+      properties: {
+        connectionId: { type: ['string', 'null'] },
+        requestedProvider: { type: ['string', 'null'] },
+        requestedModel: { type: ['string', 'null'] },
+      },
+      required: ['connectionId', 'requestedProvider', 'requestedModel'],
+      additionalProperties: false,
+    },
     managerPolicy: {
       type: 'object',
       properties: {
@@ -203,6 +216,7 @@ const hireArgsSchema = z
     objective: z.string().min(1).max(10_000),
     contextInheritancePolicy: contextInheritancePolicySchema.optional(),
     writeCapable: z.boolean().optional(),
+    modelSelection: modelSelectionSchema.optional(),
     managerPolicy: z
       .object({
         maxDirectChildren: z.number().int().positive().nullable().optional(),
@@ -316,6 +330,9 @@ export async function executeTeamTool(
           objective: request.objective,
           contextInheritancePolicy: request.contextInheritancePolicy ?? 'summary',
           writeCapable: request.writeCapable ?? false,
+          ...(request.modelSelection === undefined
+            ? {}
+            : { modelSelection: request.modelSelection }),
         };
         const worker =
           options.requesterAgentId === undefined

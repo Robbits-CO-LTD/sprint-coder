@@ -42,5 +42,5 @@ export function builtinRuntimeForModelSelection(
     return { runtimeKind: 'claude', model: parsed.requestedModel };
   if (parsed.connectionId === BUILTIN_CODEX_CONNECTION_ID && parsed.requestedProvider === 'openai')
     return { runtimeKind: 'codex', model: parsed.requestedModel };
-  throw new Error('Team v2 Core supports only built-in Claude and Codex Connections');
+  return null;
 }

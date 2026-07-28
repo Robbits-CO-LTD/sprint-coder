@@ -43,13 +43,13 @@ describe('connection identity', () => {
     });
   });
 
-  it('rejects an external Connection during Team v2 Core', () => {
-    expect(() =>
+  it('leaves an external Connection for the Provider Registry', () => {
+    expect(
       builtinRuntimeForModelSelection({
         connectionId: 'connection:openai-production',
         requestedProvider: 'openai',
         requestedModel: 'gpt-5.6',
       }),
-    ).toThrow('supports only built-in Claude and Codex Connections');
+    ).toBeNull();
   });
 });

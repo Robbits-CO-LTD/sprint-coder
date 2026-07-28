@@ -54,7 +54,8 @@ P1B-aは外部network、実Provider SDK、認証情報を扱わない。
 - P2c1: Registry、Connection作成／列挙／検証IPC、safeStorage、catalog／selection統合を完了
 - P2c2: Chat execution、provider-egress、context、stream、usage永続化、cancel、
   resolved provider／modelを完了
-- P2c3: Team Worker execution、release smoke
+- P2c3: Worker別model selection／親継承、Team Provider Worker、429 retry連携、
+  attempt resolution／usage永続化を完了。release smokeはfinal gateへ留保
 
 P2aでは生成API、Chat／Team配線、実API probeを行わない。実API smokeは全実装後のfinal gateへ
 留保する。

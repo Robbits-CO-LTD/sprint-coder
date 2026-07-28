@@ -436,6 +436,31 @@ export const workerReportSchema = z
   .strict();
 export type WorkerReport = z.infer<typeof workerReportSchema>;
 
+export const connectionIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+export const providerIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9][a-z0-9._-]*$/);
+export const modelSelectionSchema = z
+  .object({
+    connectionId: connectionIdSchema.nullable(),
+    requestedProvider: providerIdSchema.nullable(),
+    requestedModel: z.string().min(1).max(128).nullable(),
+  })
+  .strict()
+  .refine(
+    ({ connectionId, requestedProvider, requestedModel }) =>
+      (connectionId === null && requestedProvider === null && requestedModel === null) ||
+      (connectionId !== null && requestedProvider !== null && requestedModel !== null),
+    { message: 'Model selection identity must be either complete or entirely unknown' },
+  );
+export type ModelSelection = z.infer<typeof modelSelectionSchema>;
+
 export const teamHireWorkerInputSchema = z
   .object({
     taskId: idSchema,
@@ -443,6 +468,7 @@ export const teamHireWorkerInputSchema = z
     objective: z.string().min(1).max(10_000),
     contextInheritancePolicy: contextInheritancePolicySchema,
     writeCapable: z.boolean(),
+    modelSelection: modelSelectionSchema.optional(),
   })
   .strict();
 export type TeamHireWorkerInput = z.infer<typeof teamHireWorkerInputSchema>;
@@ -1142,16 +1168,6 @@ export const providerRuntimeKindSchema = z.enum([
   'mock',
 ]);
 export type ProviderRuntimeKind = z.infer<typeof providerRuntimeKindSchema>;
-export const connectionIdSchema = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[A-Za-z0-9._:-]+$/);
-export const providerIdSchema = z
-  .string()
-  .min(1)
-  .max(64)
-  .regex(/^[a-z0-9][a-z0-9._-]*$/);
 export const providerVerificationStatusSchema = z.enum([
   'not_required',
   'unverified',
@@ -1390,20 +1406,6 @@ export const providerExecutionRequestSchema = z
   })
   .strict();
 export type ProviderExecutionRequest = z.infer<typeof providerExecutionRequestSchema>;
-export const modelSelectionSchema = z
-  .object({
-    connectionId: connectionIdSchema.nullable(),
-    requestedProvider: providerIdSchema.nullable(),
-    requestedModel: z.string().min(1).max(128).nullable(),
-  })
-  .strict()
-  .refine(
-    ({ connectionId, requestedProvider, requestedModel }) =>
-      (connectionId === null && requestedProvider === null && requestedModel === null) ||
-      (connectionId !== null && requestedProvider !== null && requestedModel !== null),
-    { message: 'Model selection identity must be either complete or entirely unknown' },
-  );
-export type ModelSelection = z.infer<typeof modelSelectionSchema>;
 // Model id/option shape is provider-agnostic (Codex slugs and Claude aliases/full ids both fit
 // this format) and is kept under its original "codex" name for additive, non-breaking evolution.
 export const codexModelIdSchema = z
