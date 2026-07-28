@@ -141,7 +141,7 @@ export class ContextLedger {
     const reminder =
       reminderContent === null
         ? null
-        : makeFragment(taskId, 'background', 'system', reminderContent, now, null);
+        : makeFragment(taskId, 'background', 'assistant', reminderContent, now, null);
     const after = [
       system,
       ...(goal === null ? [] : [goal]),
