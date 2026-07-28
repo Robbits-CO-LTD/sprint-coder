@@ -62,7 +62,10 @@ Proof: deterministic Runtimeで8 parallel、depth、steer、crash／restart。
   Claude/Codex MCP tool公開。revised instructionがruntime開始時に解決されることをElectron ABIで検証。
 - B3b完了: running runtime停止、attempt 1 interrupted、同一execution IDのinstruction revisionと
   attempt 2再開、running cancel終端化。active slot終了後だけrequeueするScheduler境界を検証。
-- B3c次着手: 再起動queue rehydrate。
+- B3c完了: app restartでattempt 1を`interrupted/app_restart`、同一execution IDをqueueへ復元し、
+  attempt 2としてScheduler実行を再開。非終端executionを持たない従来Teamのpaused/stopped
+  recoveryは維持する。
+- B4次着手: Manager Runtimeのcaller-bound Team MCPと再委譲。
   Manager MCP caller bindingはRuntime接続Sliceで行い、model-controlled引数からAgent
   identityを受け取らない。
 

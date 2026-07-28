@@ -391,22 +391,17 @@ export class TeamCoordinator {
         now,
         queueReason: 'global_concurrency',
       });
-      this.executionScheduler.submit({
-        executionId: execution.id,
+      this.scheduleExecution({
+        taskId: input.taskId,
         teamId: team.id,
         teamLimit: team.policy.maxConcurrentExecutions,
-        run: () =>
-          this.runScheduledExecution({
-            taskId: input.taskId,
-            teamId: team.id,
-            leaderId: leader.id,
-            workerId: worker.id,
-            messageId: message.id,
-            messageSeq: message.seq,
-            teamTaskId: teamTask.id,
-            executionId: execution.id,
-            doneCriteria: input.doneCriteria,
-          }),
+        leaderId: leader.id,
+        workerId: worker.id,
+        messageId: message.id,
+        messageSeq: message.seq,
+        teamTaskId: teamTask.id,
+        executionId: execution.id,
+        doneCriteria: input.doneCriteria,
       });
       this.emit(input.taskId, team.id);
       return { executionId: queued.id, state: queued.state };
@@ -934,7 +929,67 @@ export class TeamCoordinator {
   }
 
   recoverOnStartup(): ReturnType<PersistenceClient['recoverTeamsOnStartup']> {
-    return this.persistence.recoverTeamsOnStartup(this.isoNow());
+    const recovered = this.persistence.recoverTeamsOnStartup(this.isoNow());
+    for (const task of this.persistence.listTasks()) {
+      const team = this.persistence.getTeamByTask(task.id);
+      if (team === null) continue;
+      for (const queued of this.persistence.listQueuedTeamExecutions(team.id)) {
+        const execution =
+          queued.state === 'queued'
+            ? queued
+            : this.persistence.transitionTeamExecution({
+                executionId: queued.id,
+                to: 'queued',
+                now: this.isoNow(),
+                queueReason: 'recovery',
+              });
+        const dispatch = this.persistence.getTeamExecutionDispatch(execution.id);
+        this.scheduleExecution({
+          taskId: task.id,
+          teamId: team.id,
+          teamLimit: team.policy.maxConcurrentExecutions,
+          leaderId: execution.createdByAgentId,
+          workerId: execution.assigneeAgentId,
+          messageId: dispatch.messageId,
+          messageSeq: dispatch.messageSeq,
+          teamTaskId: dispatch.teamTaskId,
+          executionId: execution.id,
+          doneCriteria: dispatch.doneCriteria,
+        });
+      }
+    }
+    return recovered;
+  }
+
+  private scheduleExecution(input: {
+    taskId: string;
+    teamId: string;
+    teamLimit: number;
+    leaderId: string;
+    workerId: string;
+    messageId: string;
+    messageSeq: number;
+    teamTaskId: string;
+    executionId: string;
+    doneCriteria: readonly string[];
+  }): void {
+    this.executionScheduler.submit({
+      executionId: input.executionId,
+      teamId: input.teamId,
+      teamLimit: input.teamLimit,
+      run: () =>
+        this.runScheduledExecution({
+          taskId: input.taskId,
+          teamId: input.teamId,
+          leaderId: input.leaderId,
+          workerId: input.workerId,
+          messageId: input.messageId,
+          messageSeq: input.messageSeq,
+          teamTaskId: input.teamTaskId,
+          executionId: input.executionId,
+          doneCriteria: input.doneCriteria,
+        }),
+    });
   }
 
   /** True while a durable execution is queued/running or a legacy dispatch is busy. */
@@ -963,7 +1018,16 @@ export class TeamCoordinator {
   ): Promise<{ value: WorkerCompletion; usage: WorkerRuntimeResult['usage'] }> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= TEAM_DELIVERY_MAX_ATTEMPTS; attempt += 1) {
-      if (attempt === 1) this.persistence.transitionTeamMessageState(messageId, 'dispatching');
+      if (attempt === 1) {
+        const message = this.persistence
+          .getTeamSnapshot(teamId)
+          .messages.find(({ id }) => id === messageId);
+        if (message === undefined) throw new Error('Team message not found');
+        if (message.state === 'persisted')
+          this.persistence.transitionTeamMessageState(messageId, 'dispatching');
+        else if (message.state !== 'dispatching')
+          throw new Error(`Team message cannot be dispatched from ${message.state}`);
+      }
       const delivery = this.persistence.transitionTeamDelivery({
         messageId,
         to: 'dispatched',

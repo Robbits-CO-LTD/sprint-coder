@@ -2311,6 +2311,12 @@ export type TeamV2ActivityRecord = Readonly<{
   payload: unknown;
   recordedAt: string;
 }>;
+export type TeamExecutionDispatchRecord = Readonly<{
+  messageId: string;
+  messageSeq: number;
+  teamTaskId: string;
+  doneCriteria: readonly string[];
+}>;
 export type TeamSnapshot = Readonly<{
   team: TeamRecord;
   agents: readonly AgentRecord[];
@@ -2357,6 +2363,7 @@ export interface PersistenceClient {
   getTeamExecution(executionId: string): TeamExecutionRecord;
   listTeamExecutions(teamId: string): readonly TeamExecutionRecord[];
   listQueuedTeamExecutions(teamId: string): readonly TeamExecutionRecord[];
+  getTeamExecutionDispatch(executionId: string): TeamExecutionDispatchRecord;
   transitionTeamExecution(input: {
     executionId: string;
     to: TeamExecutionState;
@@ -3666,6 +3673,35 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ).map((row) => this.toTeamExecution(row));
   }
 
+  getTeamExecutionDispatch(executionId: string): TeamExecutionDispatchRecord {
+    this.getTeamExecution(executionId);
+    const row = this.db
+      .prepare(
+        `SELECT m.id AS message_id, m.seq AS message_seq,
+                tt.id AS team_task_id, tt.done_criteria_json
+         FROM team_messages m
+         JOIN team_tasks tt ON tt.message_id = m.id
+         WHERE m.execution_id = ?
+         ORDER BY m.seq DESC
+         LIMIT 1`,
+      )
+      .get(executionId) as
+      | {
+          message_id: string;
+          message_seq: number;
+          team_task_id: string;
+          done_criteria_json: string;
+        }
+      | undefined;
+    if (row === undefined) throw new NotFoundError('Team execution dispatch not found');
+    return {
+      messageId: row.message_id,
+      messageSeq: row.message_seq,
+      teamTaskId: row.team_task_id,
+      doneCriteria: JSON.parse(row.done_criteria_json) as string[],
+    };
+  }
+
   transitionTeamExecution(input: {
     executionId: string;
     to: TeamExecutionState;
@@ -4618,6 +4654,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
     deliveries: number;
   } {
     return this.db.transaction(() => {
+      const recoverableTeamIds = new Set(
+        (
+          this.db
+            .prepare(
+              `SELECT DISTINCT team_id FROM team_executions
+               WHERE state IN ('assigned', 'queued', 'waiting_verification', 'waiting_rate_limit')`,
+            )
+            .all() as { team_id: string }[]
+        ).map(({ team_id }) => team_id),
+      );
+      const recoverableAssigneeIds = new Set(
+        (
+          this.db
+            .prepare(
+              `SELECT DISTINCT assignee_agent_id FROM team_executions
+               WHERE state IN ('assigned', 'queued', 'waiting_verification', 'waiting_rate_limit')`,
+            )
+            .all() as { assignee_agent_id: string }[]
+        ).map(({ assignee_agent_id }) => assignee_agent_id),
+      );
       let teams = 0;
       const teamRows = this.db
         .prepare(
@@ -4626,6 +4682,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .all() as { id: string; state: TeamState; revision: number }[];
       for (const team of teamRows) {
+        if (recoverableTeamIds.has(team.id)) continue;
         const to: TeamState = team.state === 'active' ? 'paused' : 'failed';
         transitionTeam(team.state, to);
         const result = this.db
@@ -4646,6 +4703,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .all() as { id: string; state: WorkerState }[];
       for (const worker of workerRows) {
+        if (recoverableAssigneeIds.has(worker.id)) {
+          if (worker.state === 'busy')
+            this.db
+              .prepare(`UPDATE agents SET state = 'waiting', updated_at = ? WHERE id = ?`)
+              .run(now, worker.id);
+          continue;
+        }
         transitionWorker(worker.state, 'stopped');
         const result = this.db
           .prepare(`UPDATE agents SET state = 'stopped', updated_at = ? WHERE id = ? AND state = ?`)
@@ -4665,7 +4729,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `UPDATE team_tasks
            SET status = 'failed', revision = revision + 1, updated_at = ?
-           WHERE status IN ('created', 'assigned', 'running', 'waiting', 'blocked')`,
+           WHERE status IN ('created', 'assigned', 'running', 'waiting', 'blocked')
+             AND NOT EXISTS (
+               SELECT 1
+               FROM team_messages m
+               JOIN team_executions e ON e.id = m.execution_id
+               WHERE m.id = team_tasks.message_id
+                 AND e.state IN (
+                   'assigned', 'queued', 'waiting_verification', 'waiting_rate_limit'
+                 )
+             )`,
         )
         .run(now);
 

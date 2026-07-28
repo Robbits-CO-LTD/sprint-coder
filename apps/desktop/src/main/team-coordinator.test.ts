@@ -462,6 +462,57 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('rehydrates an interrupted attempt into the Scheduler after app restart', async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-rehydrate-'));
+      cleanup.push(directory);
+      const path = join(directory, 'test.sqlite3');
+      const firstPersistence = new SqlitePersistenceClient(path);
+      const task = firstPersistence.createTask('Restart execution recovery');
+      const firstRuntime = new InterruptibleWorkerRuntime();
+      const firstCoordinator = new TeamCoordinator(firstPersistence, firstRuntime);
+      const worker = await firstCoordinator.hireWorker({
+        taskId: task.id,
+        role: 'recoverable',
+        objective: 'resume after restart',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      const submission = await firstCoordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'continue this exact instruction',
+        doneCriteria: ['runtime completes after restart'],
+      });
+      await waitFor(() => firstRuntime.contents.length === 1);
+      const firstAttempt = firstPersistence.listTeamAttempts(submission.executionId)[0];
+      expect(firstAttempt?.state).toBe('running');
+      firstPersistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('replacement-instance', '2026-07-28T12:00:00.000Z');
+      const secondRuntime = new InterruptibleWorkerRuntime();
+      const secondCoordinator = new TeamCoordinator(reopened, secondRuntime);
+      secondCoordinator.recoverOnStartup();
+      await waitFor(() => secondRuntime.contents.length === 1);
+
+      expect(reopened.getTeam(worker.teamId).state).toBe('active');
+      expect(reopened.listTeamAttempts(submission.executionId)).toMatchObject([
+        { id: firstAttempt?.id, ordinal: 1, state: 'interrupted', terminalReason: 'app_restart' },
+        { ordinal: 2, state: 'running', terminalReason: null },
+      ]);
+      expect(secondRuntime.contents[0]).toMatchObject({
+        agentId: worker.id,
+        content: 'continue this exact instruction',
+      });
+      secondRuntime.complete(worker.id);
+      await waitFor(() => reopened.getTeamExecution(submission.executionId).state === 'completed');
+      expect(reopened.listTeamAttempts(submission.executionId)).toMatchObject([
+        { ordinal: 1, state: 'interrupted' },
+        { ordinal: 2, state: 'completed' },
+      ]);
+      reopened.close();
+    });
+
     it('rejects runtime identity spoofing and fails the delivery closed', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask();
