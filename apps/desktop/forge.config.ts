@@ -3,6 +3,8 @@ import { MakerZIP } from '@electron-forge/maker-zip';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
+import { cpSync, mkdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
@@ -29,12 +31,45 @@ function shouldIgnoreFromPackage(file: string): boolean {
   return true;
 }
 
+const runtimeModuleFiles = [
+  ['better-sqlite3', 'package.json'],
+  ['better-sqlite3', 'lib'],
+  ['better-sqlite3', 'build', 'Release', 'better_sqlite3.node'],
+  ['bindings', 'package.json'],
+  ['bindings', 'bindings.js'],
+  ['file-uri-to-path', 'package.json'],
+  ['file-uri-to-path', 'index.js'],
+] as const;
+
+function copyHoistedRuntimeModules(buildPath: string): void {
+  const rootNodeModules = resolve(__dirname, '..', '..', 'node_modules');
+  const packagedNodeModules = join(buildPath, 'node_modules');
+  mkdirSync(packagedNodeModules, { recursive: true });
+
+  for (const parts of runtimeModuleFiles) {
+    const source = join(rootNodeModules, ...parts);
+    const destination = join(packagedNodeModules, ...parts);
+    mkdirSync(resolve(destination, '..'), { recursive: true });
+    cpSync(source, destination, { recursive: true });
+  }
+}
+
 const config: ForgeConfig = {
   packagerConfig: {
     // @electron/asar matches `unpack` against the full source filename with matchBase enabled.
-    // A relative path containing slashes therefore does not match; the exact basename does.
-    asar: { unpack: 'sprint_coder_native_safe_fs.node' },
+    // Native addons cannot be loaded from inside app.asar, so unpack only `.node` binaries.
+    asar: { unpack: '*.node' },
     ignore: shouldIgnoreFromPackage,
+    afterCopy: [
+      (buildPath, _electronVersion, _platform, _arch, done) => {
+        try {
+          copyHoistedRuntimeModules(buildPath);
+          done();
+        } catch (error) {
+          done(error instanceof Error ? error : new Error(String(error)));
+        }
+      },
+    ],
   },
   makers: [new MakerZIP({}, ['darwin', 'win32', 'linux'])],
   plugins: [
