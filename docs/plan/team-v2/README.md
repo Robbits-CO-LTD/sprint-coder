@@ -2,7 +2,8 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、Core C1a/C1b/C2a/C2b/C2c/C2d完了
+- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
+  Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -101,11 +102,12 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   C1bで同じTeam Activity componentをCanvas／Listへ接続した。queued／waitingでは理由、
   待機開始、Connection、待機順を明示し、running／terminalでも状態、Connection、指示を表示する。
 - Core C3aでCanvas／Listのengine接頭辞と安全なMarkdown message描画を統一し、
-  packaged parity E2Eをgreen化した。残るCore C GA blockerは、packaged axe harnessが
-  localhost script注入をproduction CSPに拒否される問題である。
+  packaged parity E2Eをgreen化した。C3bではproduction CSPを緩めずにPlaywright protocolから
+  axeを注入し、検出されたTeam execution labelのコントラストをWCAG AAへ修正した。
+  packaged axeはChat、Settings、Approval、3 Worker Teamの4件がgreen。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
-  永続履歴カードとして表示した。次はC2cでpackagedアプリ上の表示と再起動復元を固定する。
+  永続履歴カードとして表示した。
 - C2c初回E2Eで、packaged mock scenarioだけが旧同期sendを使い委譲監査を作らない差を検出した。
   C2dでmock Leaderもproductionと同じformal assign／async execution／wait経路へ移行した。
 - C2cはproduction packageで雇用3件・委譲3件を確認し、同一user-data DBで再起動した前後の

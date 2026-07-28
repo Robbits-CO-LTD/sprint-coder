@@ -91,8 +91,6 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
   色だけに依存せず表示する。Claude UI委託は1往復、7ファイル、586差分行で完了し、
   component 34件、renderer lib 197件、typecheck、lint、production package、packaged Team flow
   3件がgreen。
-- Core C後続blocker: axe E2Eのlocalhost注入とproduction CSPの不整合、Canvas／List間の既存
-  engine接頭辞差分を独立sub-Sliceで直す。
 - C2a完了: DB v40の監査イベントを重複保存せず、actor／subject role、execution status、
   queue reason、attempt ordinal、terminal reasonを持つ表示専用summaryへ正規化する。
   TeamDetailは新しい順の最新200件を時系列順で配信し、500件超でも新しい履歴が消えない
@@ -101,8 +99,6 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
   execution／attempt lifecycle、steer、報告、停止の全11 typeを日本語履歴カードとして表示する。
   Claude UI委託は1往復、5ファイル、581差分行で完了。component 18件、renderer 276件、
   typecheck、lint、production package、packaged Team flow 3件がgreen。
-- C2c次着手: packaged Chatで雇用・委譲カードを確認し、再起動後も同じactivity IDが
-  一度だけ復元されるE2Eを追加する。
 - C2d完了: C2c初回E2Eで検出したmock-only legacy dispatchを修正し、deterministic Leaderも
   `team_assign_task`でexecution IDを受け取り、必要な回数だけ`team_wait_reports`を行う。
   sampler unit 5件とElectron統合scenarioがgreenで、mockと実CLIの監査経路を一致させた。
@@ -112,3 +108,10 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
 - C3a完了: Listのengine／objective文字列とmessage Markdown rendererをCanvasと統一。
   Claude UI委託2往復、1ファイル、30追加／2削除で、typecheck、lint、format、
   packaged Canvas／List parity E2Eがgreen。
+- C3b完了: localhost script serverを廃止し、production CSPを変更せずPlaywright protocolから
+  local axe dependencyを注入する。axeが検出したTeam execution keyの3.79:1コントラストは、
+  既存`--text-secondary` tokenをopacityなしで使いWCAG AAへ修正した。Claude UI委託は
+  `claude-opus-5`で1ファイル・8差分行を生成し、報告生成前に委託予算へ到達したため、
+  メインAgentが差分レビューと全検証を実施した。format、lint、typecheck、production package、
+  packaged axe 4件がgreen。
+- 次着手: C4をbackend契約／IPCとClaude UIへ分割し、Team Policy settingsを追加する。

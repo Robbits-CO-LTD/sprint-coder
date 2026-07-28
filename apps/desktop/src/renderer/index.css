@@ -2348,8 +2348,14 @@ button {
 .team-exec-key {
   flex: none;
   width: 5.5em;
+  /* No `opacity` knock-down here: at 11.5px these labels are normal-size text, so WCAG 1.4.3 wants
+     4.5:1. Compositing --text-secondary at 0.75 turned #aaa49a into an effective #8c877e, which is
+     only 3.79:1 on the List variant's --neutral-wash-over---bg-elevated (#302e2a) and failed the
+     packaged axe run. The token at full strength is 5.48:1 there, 4.93:1 over the hovered row and
+     4.82:1 over the selected one, and 7.03:1 on the Canvas variant's --bg-panel. The key still
+     reads as the quieter half of the pair, since --text-secondary against the value's
+     --text-primary is the same rank the rest of the app uses (.w-activity, .team-activity-time). */
   color: var(--text-secondary);
-  opacity: 0.75;
 }
 .team-exec-value {
   min-width: 0;
