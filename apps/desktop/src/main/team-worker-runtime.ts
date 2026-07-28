@@ -9,6 +9,7 @@ import {
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
 import type { TeamEnvelope } from '@sprint-coder/domain';
+import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 
 // Real Worker execution (Phase 7 follow-up: "Team must work without mocks"). Each dispatched
 // Worker task runs one ephemeral, read-only/no-tools turn on a production runtime (Claude/Codex)
@@ -31,6 +32,8 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     turnId: string,
     prompt: string,
   ) => boolean;
+  teamMcpFor?: (worker: AgentRecord, turnId: string) => RuntimeTeamMcpOption | undefined;
+  releaseTeamMcp?: (turnId: string) => void;
   /** Explicit development/test opt-in. Production callers leave this false. */
   allowSimulation?: boolean;
 }>;
@@ -138,6 +141,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       .join('\n');
     if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, prompt))
       throw new Error(`${choice.kind} Team Worker egress was denied`);
+    const teamMcp =
+      input.worker.canDelegate === true ? this.deps.teamMcpFor?.(input.worker, turnId) : undefined;
+    if (input.worker.canDelegate === true && teamMcp === undefined)
+      throw new Error('Manager Team MCP is unavailable');
 
     const workspacePath = this.deps.workspaceFor(taskId);
     const startedAt = Date.now();
@@ -160,10 +167,13 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         workspacePath,
         choice.model,
         this.deps.catalogFor(choice.kind, workspacePath) as never,
+        undefined,
+        teamMcp,
       );
     }).finally(() => {
       this.pending.delete(turnId);
       this.activeByAgent.delete(input.worker.id);
+      if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
     });
 
     const summary = finalText.trim() === '' ? '(空の応答)' : finalText.trim();

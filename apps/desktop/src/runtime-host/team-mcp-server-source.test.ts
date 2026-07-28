@@ -130,7 +130,11 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
 
     harness.send({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const listReply = await harness.nextMessage();
-    const tools = (listReply['result'] as { tools: { name: string }[] }).tools;
+    const tools = (
+      listReply['result'] as {
+        tools: { name: string; inputSchema: Record<string, unknown> }[];
+      }
+    ).tools;
     expect(tools.map((tool) => tool.name).sort()).toEqual(
       [
         'team_hire_worker',
@@ -145,6 +149,18 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
       ].sort(),
     );
     for (const tool of tools) expect(tool).toHaveProperty('inputSchema');
+    expect(
+      (
+        tools.find(({ name }) => name === 'team_hire_worker')?.inputSchema['properties'] as Record<
+          string,
+          unknown
+        >
+      )['managerPolicy'],
+    ).toMatchObject({
+      type: 'object',
+      required: ['maxDelegationDepth', 'allowManagerChildren'],
+      additionalProperties: false,
+    });
   });
 
   it('forwards tools/call to the bridge socket with the configured token and relays a success result', async () => {

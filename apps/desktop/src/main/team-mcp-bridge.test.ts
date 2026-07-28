@@ -7,10 +7,12 @@ import type { TeamCoordinator } from './team-coordinator';
 function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordinator {
   return {
     hireWorker: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
+    hireWorkerAs: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
     sendToWorker: vi.fn(async () => {
       throw new Error('not used in this test');
     }),
     listWorkerReports: vi.fn(() => []),
+    assignTaskAs: vi.fn(async () => ({ executionId: 'execution-1', state: 'queued' }) as never),
     hasBusyWorkers: vi.fn(() => false),
     stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
     ...overrides,
@@ -152,6 +154,38 @@ describe('TeamMcpBridge', () => {
     expect(response.ok).toBe(true);
     expect(response.result.workerId).toBe('worker-1');
     expect(coordinator.stopWorker).toHaveBeenCalledWith('task-1', 'worker-1');
+  });
+
+  it('binds Manager authority to the registered token rather than request arguments', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-manager', {
+      taskId: 'task-1',
+      token,
+      requesterAgentId: 'manager-1',
+    });
+
+    const { lines } = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_assign_task',
+      args: { workerId: 'worker-1', objective: '実装する', doneCriteria: ['完了'] },
+    });
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { executionId: 'execution-1', state: 'queued' },
+    });
+    expect(coordinator.assignTaskAs).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        targetAgentId: 'worker-1',
+        content: '実装する',
+        doneCriteria: ['完了'],
+      },
+      'manager-1',
+    );
   });
 
   it('closes the connection without responding to an unknown token', async () => {

@@ -36,6 +36,16 @@ const TOOLS = [
           enum: ['none', 'summary', 'selected_items', 'full_fork'],
         },
         writeCapable: { type: 'boolean' },
+        managerPolicy: {
+          type: 'object',
+          properties: {
+            maxDirectChildren: { type: 'integer', minimum: 1 },
+            maxDelegationDepth: { type: 'integer', minimum: 1, maximum: 4 },
+            allowManagerChildren: { type: 'boolean' },
+          },
+          required: ['maxDelegationDepth', 'allowManagerChildren'],
+          additionalProperties: false,
+        },
       },
       required: ['role', 'objective'],
       additionalProperties: false,

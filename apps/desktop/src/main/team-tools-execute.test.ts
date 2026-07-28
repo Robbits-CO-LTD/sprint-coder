@@ -10,15 +10,13 @@ import type { TeamCoordinator } from './team-coordinator';
 function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordinator {
   return {
     hireWorker: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
+    hireWorkerAs: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
     sendToWorker: vi.fn(
       async () => ({ id: 'message-1', state: 'delivered', deliveryState: 'acked' }) as never,
     ),
-    assignTask: vi.fn(
-      async () => ({ executionId: 'execution-2', state: 'queued' }) as never,
-    ),
-    steerExecution: vi.fn(
-      async () => ({ executionId: 'execution-2', state: 'queued' }) as never,
-    ),
+    assignTask: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
+    assignTaskAs: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
+    steerExecution: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
     cancelExecution: vi.fn(
       async () => ({ executionId: 'execution-2', state: 'canceled' }) as never,
     ),
@@ -43,13 +41,16 @@ describe('executeTeamTool routing', () => {
       role: '調査',
       objective: '調べる',
     });
-    expect(coordinator.hireWorker).toHaveBeenCalledWith({
-      taskId: 'task-1',
-      role: '調査',
-      objective: '調べる',
-      contextInheritancePolicy: 'summary',
-      writeCapable: false,
-    });
+    expect(coordinator.hireWorker).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        role: '調査',
+        objective: '調べる',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      },
+      null,
+    );
     expect(result).toMatchObject({ ok: true, workerId: 'worker-1' });
   });
 
@@ -92,20 +93,134 @@ describe('executeTeamTool routing', () => {
       'task-1',
       'execution-2',
       'add the regression test',
+      null,
     );
     expect(
       await executeTeamTool(coordinator, 'task-1', 'team_cancel_execution', {
         executionId: 'execution-2',
       }),
     ).toMatchObject({ ok: true, executionId: 'execution-2', state: 'canceled' });
-    expect(coordinator.cancelExecution).toHaveBeenCalledWith('task-1', 'execution-2');
+    expect(coordinator.cancelExecution).toHaveBeenCalledWith('task-1', 'execution-2', null);
 
     expect(await executeTeamTool(coordinator, 'task-1', 'team_get_status', {})).toEqual({
       ok: true,
       team: null,
     });
     await executeTeamTool(coordinator, 'task-1', 'team_wait_events', { cursor: 7 });
-    expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 7);
+    expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 7, undefined);
+  });
+
+  it('routes Manager tools with only the caller identity bound to the MCP registration', async () => {
+    const coordinator = fakeCoordinator();
+    const options = { requesterAgentId: 'manager-1' };
+    const managerPolicy = {
+      maxDirectChildren: 2,
+      maxDelegationDepth: 3,
+      allowManagerChildren: false,
+    };
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      { role: '実装担当', objective: '実装する', managerPolicy },
+      options,
+    );
+    expect(coordinator.hireWorkerAs).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        role: '実装担当',
+        objective: '実装する',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      },
+      'manager-1',
+      managerPolicy,
+    );
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_assign_task',
+      { workerId: 'worker-1', objective: '実装する', doneCriteria: ['完了'] },
+      options,
+    );
+    expect(coordinator.assignTaskAs).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        targetAgentId: 'worker-1',
+        content: '実装する',
+        doneCriteria: ['完了'],
+      },
+      'manager-1',
+    );
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_steer_execution',
+      { executionId: 'execution-2', instruction: '修正する' },
+      options,
+    );
+    expect(coordinator.steerExecution).toHaveBeenCalledWith(
+      'task-1',
+      'execution-2',
+      '修正する',
+      'manager-1',
+    );
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_cancel_execution',
+      { executionId: 'execution-2' },
+      options,
+    );
+    expect(coordinator.cancelExecution).toHaveBeenCalledWith('task-1', 'execution-2', 'manager-1');
+
+    await executeTeamTool(coordinator, 'task-1', 'team_wait_reports', {}, options);
+    expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 0, 'manager-1');
+  });
+
+  it('rejects Manager identity forgery and Manager-only legacy control calls', async () => {
+    const coordinator = fakeCoordinator();
+    const options = { requesterAgentId: 'manager-1' };
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_task',
+        {
+          workerId: 'worker-1',
+          objective: '実装する',
+          doneCriteria: [],
+          requesterAgentId: 'forged-manager',
+        },
+        options,
+      ),
+    ).rejects.toThrow();
+    expect(coordinator.assignTaskAs).not.toHaveBeenCalled();
+
+    expect(
+      await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_send_to_worker',
+        { workerId: 'worker-1', content: 'legacy direct call' },
+        options,
+      ),
+    ).toMatchObject({ ok: false });
+    expect(
+      await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_stop_worker',
+        { workerId: 'worker-1' },
+        options,
+      ),
+    ).toMatchObject({ ok: false });
+    expect(coordinator.sendToWorker).not.toHaveBeenCalled();
+    expect(coordinator.stopWorker).not.toHaveBeenCalled();
   });
 
   it('rejects a forged identity/taskId field in the wire args before TeamCoordinator ever sees it', async () => {

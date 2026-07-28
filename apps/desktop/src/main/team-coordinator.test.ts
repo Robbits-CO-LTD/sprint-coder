@@ -247,6 +247,13 @@ if (runsWithElectronAbi)
         },
         manager.id,
       );
+      const sibling = await coordinator.hireWorker({
+        taskId: task.id,
+        role: '別部門',
+        objective: '別の作業をする',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
 
       expect(manager).toMatchObject({
         parentAgentId: team.leaderAgentId,
@@ -270,6 +277,39 @@ if (runsWithElectronAbi)
           child.id,
         ),
       ).rejects.toThrow('Only a Manager with canDelegate');
+      const submission = await coordinator.assignTaskAs(
+        {
+          taskId: task.id,
+          targetAgentId: child.id,
+          content: 'Managerからの正式な依頼',
+          doneCriteria: ['結果をManagerへ報告する'],
+        },
+        manager.id,
+      );
+      expect(persistence.getTeamExecution(submission.executionId)).toMatchObject({
+        createdByAgentId: manager.id,
+        assigneeAgentId: child.id,
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+      );
+      expect(coordinator.listWorkerReports(task.id, 0, manager.id)).toEqual([
+        expect.objectContaining({
+          sourceAgentId: child.id,
+          targetAgentId: manager.id,
+        }),
+      ]);
+      await expect(
+        coordinator.assignTaskAs(
+          {
+            taskId: task.id,
+            targetAgentId: sibling.id,
+            content: '別部門へ越権する',
+            doneCriteria: [],
+          },
+          manager.id,
+        ),
+      ).rejects.toThrow('direct child');
       persistence.close();
     });
 
@@ -315,9 +355,7 @@ if (runsWithElectronAbi)
       await waitFor(() => runtime.releases.length === 2 && runtime.activeExecutions === 2);
       for (const release of runtime.releases.splice(0)) release();
       await waitFor(() =>
-        persistence
-          .listTeamExecutions(teamId)
-          .every(({ state }) => state === 'completed'),
+        persistence.listTeamExecutions(teamId).every(({ state }) => state === 'completed'),
       );
       expect(
         persistence
@@ -434,8 +472,7 @@ if (runsWithElectronAbi)
         coordinator.steerExecution(task.id, steered.executionId, 'revised-running'),
       ).resolves.toMatchObject({ executionId: steered.executionId, state: 'queued' });
       await waitFor(
-        () =>
-          runtime.contents.filter(({ agentId }) => agentId === steeredWorker.id).length === 2,
+        () => runtime.contents.filter(({ agentId }) => agentId === steeredWorker.id).length === 2,
       );
       await expect(
         coordinator.cancelExecution(task.id, canceled.executionId),
@@ -449,7 +486,9 @@ if (runsWithElectronAbi)
         { ordinal: 1, state: 'canceled', terminalReason: 'user_canceled' },
       ]);
       expect(
-        runtime.contents.filter(({ agentId }) => agentId === steeredWorker.id).map(({ content }) => content),
+        runtime.contents
+          .filter(({ agentId }) => agentId === steeredWorker.id)
+          .map(({ content }) => content),
       ).toEqual(['initial-steered', 'revised-running']);
 
       runtime.complete(steeredWorker.id);

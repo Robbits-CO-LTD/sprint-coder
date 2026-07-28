@@ -65,9 +65,10 @@ Proof: deterministic Runtimeで8 parallel、depth、steer、crash／restart。
 - B3c完了: app restartでattempt 1を`interrupted/app_restart`、同一execution IDをqueueへ復元し、
   attempt 2としてScheduler実行を再開。非終端executionを持たない従来Teamのpaused/stopped
   recoveryは維持する。
-- B4次着手: Manager Runtimeのcaller-bound Team MCPと再委譲。
-  Manager MCP caller bindingはRuntime接続Sliceで行い、model-controlled引数からAgent
-  identityを受け取らない。
+- B4完了: `canDelegate`を持つ実Claude／Codex Manager RuntimeだけへTeam MCPを渡し、
+  token registrationへAgent IDを固定する。Managerは直下Agentのhire／assignと、自分が
+  作成したexecutionのsteer／cancelだけを実行できる。model-controlled引数によるidentity
+  偽装、legacy direct send／arbitrary stopはfail closedとし、Runtime終了時にtokenを破棄する。
 
 ## Core C — User experience and GA
 

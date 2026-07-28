@@ -137,7 +137,11 @@ import { createStreamingSecretRedactor } from './secret-redactor';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
-import { isTeamScenarioInput, LEADER_MCP_SYSTEM_PROMPT } from './team-tools';
+import {
+  isTeamScenarioInput,
+  LEADER_MCP_SYSTEM_PROMPT,
+  MANAGER_MCP_SYSTEM_PROMPT,
+} from './team-tools';
 import {
   attachBuiltinTeamSkill,
   BUILTIN_TEAM_SKILL_AUDIT,
@@ -235,6 +239,8 @@ export class IpcRouter {
           now: new Date().toISOString(),
         }).allowed;
       },
+      teamMcpFor: (worker, turnId) => this.registerManagerMcp(turnId, worker.taskId, worker.id),
+      releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
     });
     this.teamCoordinator = new TeamCoordinator(
@@ -1049,7 +1055,7 @@ export class IpcRouter {
   async initialize(): Promise<void> {
     this.teamCoordinator.recoverOnStartup();
     await this.permissionBroker.drainPolicyEpochOutbox();
-    if (process.env['SPRINT_CODER_LEADER_MCP'] === '1') await this.teamMcpBridge.ensureStarted();
+    await this.teamMcpBridge.ensureStarted();
     try {
       await installBuiltinTeamSkill(process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'));
       this.teamSkillReady = true;
@@ -1530,6 +1536,18 @@ export class IpcRouter {
     const token = TeamMcpBridge.generateToken();
     this.teamMcpBridge.register(turnId, { taskId, token });
     return { socketPath, token, guidance: LEADER_MCP_SYSTEM_PROMPT };
+  }
+
+  private registerManagerMcp(
+    turnId: string,
+    taskId: string,
+    requesterAgentId: string,
+  ): RuntimeTeamMcpOption | undefined {
+    const socketPath = this.teamMcpBridge.socketPath;
+    if (socketPath === null) return undefined;
+    const token = TeamMcpBridge.generateToken();
+    this.teamMcpBridge.register(turnId, { taskId, token, requesterAgentId });
+    return { socketPath, token, guidance: MANAGER_MCP_SYSTEM_PROMPT };
   }
 
   private prepareContext(taskId: string, turnId: string, teamSkill = false): PreparedContext {

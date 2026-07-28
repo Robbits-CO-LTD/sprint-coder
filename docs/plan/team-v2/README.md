@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c完了
+- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -87,8 +87,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   Taskの明示selectionはcanonical repositoryへ保存され、未設定Taskは旧global Picker設定を読む。
 - Teamの旧Worker上限3は撤廃済み。Coordinatorは永続化されたAgent ID、Manager Policy、
   parent/depthに基づく深度4までの再委譲境界を持つ。Canvas／Listは可変人数を表示し、
-  5 Workerのpackaged E2Eがgreen。Manager RuntimeのMCP caller bindingは後続Core Bで接続する。
-- `spawnSlots: 8`はWorker起動時の予算leaseであり、AI実行の8並列Schedulerではない。
+  5 Workerのpackaged E2Eがgreen。Manager RuntimeにはAgent IDをtoken registrationへ固定した
+  Team MCPを渡し、直下Agentのhire／assignと自分が作成したexecutionのsteer／cancelだけを許可する。
+- `spawnSlots: 8`とは別に、AI executionをglobal最大8件で動かすSchedulerを実装済み。
 - Provider Connection、外部API Adapter、Secret Storage、API rate-limit Scheduler、feature flag基盤は
   未実装。
 - `01-multi-provider-addendum.md`の原文は未提供である。原文を創作せず、提供されるまで
@@ -96,8 +97,8 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Slice 0のRoot Cause Confirmed Gateは完了した。Team unitは26 passed／1 skipped、
   packaged Team E2Eは3 passedで、productionのNode inspector fuseが無効のまま一時test bundle
   だけをPlaywrightで検査する。
-- 次はCore B4として、Manager Runtimeへcaller-bound Team MCPを渡し、管理職による再委譲を
-  実runtime経路へ接続する。
+- 次はCore C1として、Team Activity Cardと永続execution状態を接続し、
+  queued／running／terminalの状態と理由をユーザーへ表示する。
 
 ## 完成判定
 

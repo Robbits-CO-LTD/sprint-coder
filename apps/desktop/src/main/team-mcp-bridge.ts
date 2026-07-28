@@ -98,7 +98,11 @@ function isWindowsNamedPipe(path: string): boolean {
   return path.startsWith('\\\\.\\pipe\\') || path.startsWith('\\\\?\\pipe\\');
 }
 
-export type TeamMcpRegistration = Readonly<{ taskId: string; token: string }>;
+export type TeamMcpRegistration = Readonly<{
+  taskId: string;
+  token: string;
+  requesterAgentId?: string;
+}>;
 
 type Registered = TeamMcpRegistration & { waitCursor: number };
 
@@ -306,6 +310,9 @@ export class TeamMcpBridge {
         request.tool,
         request.args,
         {
+          ...(registration.requesterAgentId === undefined
+            ? {}
+            : { requesterAgentId: registration.requesterAgentId }),
           longPoll: request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
           waitReportsCursor: {
             read: () => registration.waitCursor,

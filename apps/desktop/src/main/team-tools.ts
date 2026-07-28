@@ -63,6 +63,16 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
     objective: { type: 'string' },
     contextInheritancePolicy: { type: 'string' },
     writeCapable: { type: 'boolean' },
+    managerPolicy: {
+      type: 'object',
+      properties: {
+        maxDirectChildren: { type: 'integer' },
+        maxDelegationDepth: { type: 'integer' },
+        allowManagerChildren: { type: 'boolean' },
+      },
+      required: ['maxDelegationDepth', 'allowManagerChildren'],
+      additionalProperties: false,
+    },
   },
   ['role', 'objective'],
 );
@@ -193,6 +203,14 @@ const hireArgsSchema = z
     objective: z.string().min(1).max(10_000),
     contextInheritancePolicy: contextInheritancePolicySchema.optional(),
     writeCapable: z.boolean().optional(),
+    managerPolicy: z
+      .object({
+        maxDirectChildren: z.number().int().positive().nullable().optional(),
+        maxDelegationDepth: z.number().int().min(1).max(4),
+        allowManagerChildren: z.boolean(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 const sendArgsSchema = z
@@ -211,9 +229,7 @@ const steerExecutionArgsSchema = z
     instruction: z.string().min(1).max(100_000),
   })
   .strict();
-const cancelExecutionArgsSchema = z
-  .object({ executionId: z.string().min(1).max(128) })
-  .strict();
+const cancelExecutionArgsSchema = z.object({ executionId: z.string().min(1).max(128) }).strict();
 const getStatusArgsSchema = z.object({}).strict();
 const waitEventsArgsSchema = z.object({ cursor: z.number().int().min(0).optional() }).strict();
 const waitArgsSchema = z.object({}).strict();
@@ -225,6 +241,8 @@ export type TeamWaitReportsCursor = Readonly<{
 }>;
 
 export type ExecuteTeamToolOptions = Readonly<{
+  /** Trusted caller identity supplied by the token registration, never by model arguments. */
+  requesterAgentId?: string;
   /** Long-poll team_wait_reports instead of returning immediately (real Leader over MCP). The
    * mock ToolBroker path always omits this (or passes false) to keep its synchronous,
    * replay-since-cursor semantics exactly as tested. */
@@ -260,7 +278,7 @@ async function executeWaitReports(
   const intervalMs = options.longPollIntervalMs ?? DEFAULT_LONG_POLL_INTERVAL_MS;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const reports = coordinator.listWorkerReports(taskId, after);
+    const reports = coordinator.listWorkerReports(taskId, after, options.requesterAgentId);
     if (reports.length > 0) {
       cursor?.advance(Math.max(after, ...reports.map((report) => report.seq)));
       return { ok: true, reports: reports.map(reportPayload) };
@@ -292,13 +310,34 @@ export async function executeTeamTool(
       const request = hireArgsSchema.parse(args);
       await pacing();
       try {
-        const worker = await coordinator.hireWorker({
+        const hireInput = {
           taskId,
           role: request.role,
           objective: request.objective,
           contextInheritancePolicy: request.contextInheritancePolicy ?? 'summary',
           writeCapable: request.writeCapable ?? false,
-        });
+        };
+        const worker =
+          options.requesterAgentId === undefined
+            ? await coordinator.hireWorker(
+                hireInput,
+                request.managerPolicy === undefined
+                  ? null
+                  : {
+                      ...request.managerPolicy,
+                      maxDirectChildren: request.managerPolicy.maxDirectChildren ?? null,
+                    },
+              )
+            : await coordinator.hireWorkerAs(
+                hireInput,
+                options.requesterAgentId,
+                request.managerPolicy === undefined
+                  ? null
+                  : {
+                      ...request.managerPolicy,
+                      maxDirectChildren: request.managerPolicy.maxDirectChildren ?? null,
+                    },
+              );
         return { ok: true, workerId: worker.id, role: worker.role, state: worker.state };
       } catch (error) {
         return teamToolError(error);
@@ -307,6 +346,8 @@ export async function executeTeamTool(
     case 'team_send_to_worker': {
       const request = sendArgsSchema.parse(args);
       try {
+        if (options.requesterAgentId !== undefined)
+          throw new Error('Manager must use team_assign_task for child work');
         const message = await coordinator.sendToWorker({
           taskId,
           targetAgentId: request.workerId,
@@ -326,12 +367,16 @@ export async function executeTeamTool(
     case 'team_assign_task': {
       const request = assignArgsSchema.parse(args);
       try {
-        const execution = await coordinator.assignTask({
+        const assignInput = {
           taskId,
           targetAgentId: request.workerId,
           content: request.objective,
           doneCriteria: request.doneCriteria,
-        });
+        };
+        const execution =
+          options.requesterAgentId === undefined
+            ? await coordinator.assignTask(assignInput)
+            : await coordinator.assignTaskAs(assignInput, options.requesterAgentId);
         return {
           ok: true,
           workerId: request.workerId,
@@ -349,6 +394,7 @@ export async function executeTeamTool(
           taskId,
           request.executionId,
           request.instruction,
+          options.requesterAgentId ?? null,
         );
         return { ok: true, executionId: execution.executionId, state: execution.state };
       } catch (error) {
@@ -358,7 +404,11 @@ export async function executeTeamTool(
     case 'team_cancel_execution': {
       const request = cancelExecutionArgsSchema.parse(args);
       try {
-        const execution = await coordinator.cancelExecution(taskId, request.executionId);
+        const execution = await coordinator.cancelExecution(
+          taskId,
+          request.executionId,
+          options.requesterAgentId ?? null,
+        );
         return { ok: true, executionId: execution.executionId, state: execution.state };
       } catch (error) {
         return teamToolError(error);
@@ -384,6 +434,10 @@ export async function executeTeamTool(
     case 'team_stop_worker': {
       const request = stopArgsSchema.parse(args);
       try {
+        if (options.requesterAgentId !== undefined)
+          throw new Error(
+            'Manager must cancel its execution instead of stopping arbitrary Workers',
+          );
         const worker = await coordinator.stopWorker(taskId, request.workerId);
         return { ok: true, workerId: worker.id, state: worker.state };
       } catch (error) {
@@ -481,6 +535,12 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
 /** Compatibility export for adapters while the authority-bearing copy travels as a context
  * fragment. The content's source of truth is the versioned builtin skill, not this module. */
 export const LEADER_MCP_SYSTEM_PROMPT = BUILTIN_TEAM_SKILL_CONTENT;
+export const MANAGER_MCP_SYSTEM_PROMPT = `${BUILTIN_TEAM_SKILL_CONTENT}
+
+あなたはTeamのManagerです。team_hire_workerで自分の直下Agentだけを雇用し、
+team_assign_taskで直下Agentへ正式taskを割り当ててください。requester identityを引数へ
+追加しないでください。権限はMCP tokenへ固定されています。
+`;
 
 // --- Deterministic mock team scenario -------------------------------------------------------
 //

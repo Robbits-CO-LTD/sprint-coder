@@ -221,20 +221,30 @@ export class TeamCoordinator {
   /** Read-only replay for the team_wait_reports Leader tool: sendToWorker already persists the
    * Worker→Leader report synchronously (see persistWorkerResult below), so this just filters
    * messages targeting the Leader by seq watermark — it never mutates Team/Worker state. */
-  listWorkerReports(taskId: string, afterSeq: number): readonly TeamMessageSummary[] {
+  listWorkerReports(
+    taskId: string,
+    afterSeq: number,
+    targetAgentId?: string,
+  ): readonly TeamMessageSummary[] {
     const team = this.persistence.getTeamByTask(taskId);
     if (team === null) return [];
     const snapshot = this.persistence.getTeamSnapshot(team.id);
-    const leader = snapshot.agents.find(({ kind }) => kind === 'leader');
-    if (leader === undefined) return [];
+    const target =
+      targetAgentId === undefined
+        ? snapshot.agents.find(({ kind }) => kind === 'leader')
+        : snapshot.agents.find(({ id }) => id === targetAgentId);
+    if (target === undefined) return [];
     return snapshot.messages
-      .filter((message) => message.targetAgentId === leader.id && message.seq > afterSeq)
+      .filter((message) => message.targetAgentId === target.id && message.seq > afterSeq)
       .sort((left, right) => left.seq - right.seq)
       .map((message) => this.messageSummaryFromSnapshot(snapshot, message.id));
   }
 
-  async hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary> {
-    return this.hireWorkerWithAuthority(input, null, null);
+  async hireWorker(
+    input: TeamHireWorkerInput,
+    childManagerPolicy: ManagerPolicy | null = null,
+  ): Promise<WorkerSummary> {
+    return this.hireWorkerWithAuthority(input, null, childManagerPolicy);
   }
 
   async hireWorkerAs(
@@ -334,15 +344,37 @@ export class TeamCoordinator {
   async assignTask(
     input: TeamSendMessageInput & { doneCriteria: readonly string[] },
   ): Promise<TeamExecutionSubmission> {
+    return this.assignTaskWithAuthority(input, null);
+  }
+
+  async assignTaskAs(
+    input: TeamSendMessageInput & { doneCriteria: readonly string[] },
+    requesterAgentId: string,
+  ): Promise<TeamExecutionSubmission> {
+    return this.assignTaskWithAuthority(input, requesterAgentId);
+  }
+
+  private async assignTaskWithAuthority(
+    input: TeamSendMessageInput & { doneCriteria: readonly string[] },
+    requesterAgentId: string | null,
+  ): Promise<TeamExecutionSubmission> {
     return this.enqueue(input.taskId, async () => {
       const team = this.persistence.getTeamByTask(input.taskId);
       if (team === null || team.state !== 'active') throw new Error('Team must be active');
       const snapshot = this.persistence.getTeamSnapshot(team.id);
-      const leader = snapshot.agents.find(({ kind }) => kind === 'leader');
+      const requester = snapshot.agents.find(
+        ({ id }) => id === (requesterAgentId ?? team.leaderAgentId),
+      );
       const worker = snapshot.agents.find(
         ({ id, kind }) => id === input.targetAgentId && kind === 'worker',
       );
-      if (leader === undefined || worker === undefined) throw new Error('Worker not found');
+      if (requester === undefined || worker === undefined) throw new Error('Worker not found');
+      if (requesterAgentId !== null) {
+        if (!requester.canDelegate || requester.managerPolicy === null)
+          throw new Error('Only a Manager may assign child executions');
+        if (worker.parentAgentId !== requester.id)
+          throw new Error('Manager may only assign executions to direct child Agents');
+      }
       if (!['ready', 'waiting'].includes(worker.state)) throw new Error('Worker is not ready');
       if (
         this.persistence
@@ -364,13 +396,13 @@ export class TeamCoordinator {
       const execution = this.persistence.createTeamExecution({
         teamId: team.id,
         assigneeAgentId: worker.id,
-        createdByAgentId: leader.id,
+        createdByAgentId: requester.id,
         instruction: input.content,
         now,
       });
       const message = this.persistence.createTeamMessage({
         teamId: team.id,
-        sourceAgentId: leader.id,
+        sourceAgentId: requester.id,
         targetAgentId: worker.id,
         content: input.content,
         executionId: execution.id,
@@ -379,7 +411,7 @@ export class TeamCoordinator {
         teamId: team.id,
         messageId: message.id,
         assigneeAgentId: worker.id,
-        createdByAgentId: leader.id,
+        createdByAgentId: requester.id,
         description: input.content,
         doneCriteria: input.doneCriteria,
         now,
@@ -395,7 +427,7 @@ export class TeamCoordinator {
         taskId: input.taskId,
         teamId: team.id,
         teamLimit: team.policy.maxConcurrentExecutions,
-        leaderId: leader.id,
+        leaderId: requester.id,
         workerId: worker.id,
         messageId: message.id,
         messageSeq: message.seq,
@@ -412,12 +444,15 @@ export class TeamCoordinator {
     taskId: string,
     executionId: string,
     instruction: string,
+    requesterAgentId: string | null = null,
   ): Promise<TeamExecutionSubmission> {
     return this.enqueue(taskId, async () => {
       const team = this.persistence.getTeamByTask(taskId);
       if (team === null) throw new Error('Team not found');
       const execution = this.persistence.getTeamExecution(executionId);
       if (execution.teamId !== team.id) throw new Error('Execution does not belong to Task Team');
+      if (requesterAgentId !== null && execution.createdByAgentId !== requesterAgentId)
+        throw new Error('Manager may only steer executions it assigned');
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'steer', instruction);
       const leader = this.persistence.getTaskLeader(taskId);
@@ -432,12 +467,18 @@ export class TeamCoordinator {
     });
   }
 
-  async cancelExecution(taskId: string, executionId: string): Promise<TeamExecutionSubmission> {
+  async cancelExecution(
+    taskId: string,
+    executionId: string,
+    requesterAgentId: string | null = null,
+  ): Promise<TeamExecutionSubmission> {
     return this.enqueue(taskId, async () => {
       const team = this.persistence.getTeamByTask(taskId);
       if (team === null) throw new Error('Team not found');
       const execution = this.persistence.getTeamExecution(executionId);
       if (execution.teamId !== team.id) throw new Error('Execution does not belong to Task Team');
+      if (requesterAgentId !== null && execution.createdByAgentId !== requesterAgentId)
+        throw new Error('Manager may only cancel executions it assigned');
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'cancel', null);
       if (!this.executionScheduler.cancelQueued(execution.id))
@@ -1038,7 +1079,7 @@ export class TeamCoordinator {
         messageId,
         sourceAgentId: leader.id,
         targetAgentId: worker.id,
-        sourceKind: 'leader',
+        sourceKind: leader.kind,
         targetKind: 'worker',
         seq,
         attempt: delivery.attempt,
@@ -1069,8 +1110,7 @@ export class TeamCoordinator {
           now: this.isoNow(),
           error: error instanceof Error ? error.message : 'worker timeout',
         });
-        if (executionId !== undefined && this.executionInterruptions.has(executionId))
-          break;
+        if (executionId !== undefined && this.executionInterruptions.has(executionId)) break;
         if (attempt === TEAM_DELIVERY_MAX_ATTEMPTS) break;
       }
     }
