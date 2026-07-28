@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { CapabilityCeiling } from './permission';
-import { assertLeaderRoutedMessage } from './team';
+import { assertTeamMessageAllowed } from './team';
 
 export const budgetScopes = ['global', 'team', 'worker'] as const;
 export type BudgetScope = (typeof budgetScopes)[number];
@@ -214,9 +214,11 @@ export type TeamEnvelope = Readonly<{
 }>;
 
 export function buildTeamEnvelope(input: Omit<TeamEnvelope, 'deliveryId'>): TeamEnvelope {
-  assertLeaderRoutedMessage(input.sourceKind, input.targetKind);
-  if (input.sourceAgentId === input.targetAgentId)
-    throw new Error('Team envelope source and target agents must differ');
+  assertTeamMessageAllowed({
+    source: { id: input.sourceAgentId, kind: input.sourceKind },
+    target: { id: input.targetAgentId, kind: input.targetKind },
+    allowWorkerDirectMessages: true,
+  });
   if (!Number.isSafeInteger(input.seq) || input.seq <= 0) throw new Error('Invalid envelope seq');
   if (!Number.isSafeInteger(input.attempt) || input.attempt < 1)
     throw new Error('Invalid envelope attempt');

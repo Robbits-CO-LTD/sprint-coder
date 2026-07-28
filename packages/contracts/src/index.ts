@@ -259,6 +259,8 @@ export const teamMessageSummarySchema = z
     seq: z.number().int().min(1),
     state: teamMessageStateSchema,
     content: z.string(),
+    executionId: idSchema.nullable(),
+    attemptId: idSchema.nullable(),
     deliveryState: teamDeliveryStateSchema.nullable(),
     attempt: z.number().int().min(0),
     createdAt: timestampSchema,

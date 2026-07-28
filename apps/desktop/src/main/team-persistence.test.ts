@@ -330,7 +330,7 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('persists ordered leader-routed delivery and rejects direct Worker messages', () => {
+    it('persists direct Worker message audit links and enforces Team Policy', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
       const team = persistence.promoteTaskToTeam(task.id);
@@ -352,14 +352,53 @@ if (runsWithElectronAbi)
       });
       persistence.transitionTeamState(team.id, 'active');
 
+      const execution = persistence.createTeamExecution({
+        teamId: team.id,
+        assigneeAgentId: firstWorker.id,
+        createdByAgentId: leader.id,
+        instruction: 'Implement.',
+        now: '2026-07-28T12:00:00.000Z',
+      });
+      persistence.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'queued',
+        now: '2026-07-28T12:00:01.000Z',
+        queueReason: 'global_concurrency',
+      });
+      persistence.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'running',
+        now: '2026-07-28T12:00:02.000Z',
+      });
+      const attempt = persistence.createTeamAttempt(execution.id, '2026-07-28T12:00:02.000Z');
+      const direct = persistence.createTeamMessage({
+        teamId: team.id,
+        sourceAgentId: firstWorker.id,
+        targetAgentId: secondWorker.id,
+        content: 'Please review this execution.',
+        executionId: execution.id,
+        attemptId: attempt.id,
+      });
+      expect(direct).toMatchObject({
+        seq: 1,
+        executionId: execution.id,
+        attemptId: attempt.id,
+      });
+
+      const currentTeam = persistence.getTeam(team.id);
+      persistence.updateTeamPolicy(
+        team.id,
+        { ...currentTeam.policy, allowWorkerDirectMessages: false },
+        currentTeam.revision,
+      );
       expect(() =>
         persistence.createTeamMessage({
           teamId: team.id,
           sourceAgentId: firstWorker.id,
           targetAgentId: secondWorker.id,
-          content: 'Direct message',
+          content: 'This direct message is disabled.',
         }),
-      ).toThrow('must be routed between the leader and a worker');
+      ).toThrow('Team Policy forbids');
 
       const first = persistence.createTeamMessage({
         teamId: team.id,
@@ -373,7 +412,7 @@ if (runsWithElectronAbi)
         targetAgentId: leader.id,
         content: 'Review complete.',
       });
-      expect([first.seq, second.seq]).toEqual([1, 2]);
+      expect([first.seq, second.seq]).toEqual([2, 3]);
       expect(persistence.transitionTeamMessageState(first.id, 'dispatching').state).toBe(
         'dispatching',
       );
@@ -388,8 +427,15 @@ if (runsWithElectronAbi)
 
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.getTeamSnapshot(team.id).messages).toMatchObject([
-        { id: first.id, seq: 1, state: 'acknowledged' },
-        { id: second.id, seq: 2, state: 'persisted' },
+        {
+          id: direct.id,
+          seq: 1,
+          state: 'persisted',
+          executionId: execution.id,
+          attemptId: attempt.id,
+        },
+        { id: first.id, seq: 2, state: 'acknowledged' },
+        { id: second.id, seq: 3, state: 'persisted' },
       ]);
       reopened.close();
     });

@@ -270,15 +270,18 @@ describe('team envelope', () => {
     );
   });
 
-  it('rejects leader-to-leader and worker-to-worker routing', () => {
+  it('rejects leader-to-leader routing and permits a Worker direct envelope', () => {
     expect(() =>
       buildTeamEnvelope({ ...base, sourceKind: 'leader', targetKind: 'leader' }),
-    ).toThrow('must be routed between the leader and a worker');
+    ).toThrow('multiple Leaders');
+    expect(
+      buildTeamEnvelope({ ...base, sourceKind: 'worker', targetKind: 'worker' }),
+    ).toMatchObject({ sourceKind: 'worker', targetKind: 'worker' });
   });
 
   it('rejects a source and target that are the same agent', () => {
     expect(() => buildTeamEnvelope({ ...base, targetAgentId: base.sourceAgentId })).toThrow(
-      'source and target agents must differ',
+      'source and target Agents must differ',
     );
   });
 

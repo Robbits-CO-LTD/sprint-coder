@@ -665,6 +665,8 @@ export class TeamCoordinator {
       seq: message.seq,
       state: message.state,
       content: message.content,
+      executionId: message.executionId,
+      attemptId: message.attemptId,
       createdAt: message.createdAt,
       updatedAt: message.updatedAt,
       sourceKind: source.kind,

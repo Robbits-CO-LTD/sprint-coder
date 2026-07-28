@@ -146,6 +146,8 @@ describe('public contracts', () => {
     seq: 1,
     state: 'delivered',
     content: 'status update',
+    executionId: null,
+    attemptId: null,
     deliveryState: 'acked',
     attempt: 1,
     createdAt: '2026-07-23T00:00:00.000Z',

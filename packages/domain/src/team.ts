@@ -128,12 +128,21 @@ export function transitionTeamMessage(
   return to;
 }
 
-export function assertLeaderRoutedMessage(
-  sourceRole: 'leader' | 'worker',
-  targetRole: 'leader' | 'worker',
-): void {
-  if (sourceRole === targetRole)
-    throw new Error('Team messages must be routed between the leader and a worker');
+export function assertTeamMessageAllowed(input: {
+  source: { id: string; kind: 'leader' | 'worker' };
+  target: { id: string; kind: 'leader' | 'worker' };
+  allowWorkerDirectMessages: boolean;
+}): void {
+  if (input.source.id === input.target.id)
+    throw new Error('Team message source and target Agents must differ');
+  if (input.source.kind === 'leader' && input.target.kind === 'leader')
+    throw new Error('A Team cannot message between multiple Leaders');
+  if (
+    input.source.kind === 'worker' &&
+    input.target.kind === 'worker' &&
+    !input.allowWorkerDirectMessages
+  )
+    throw new Error('Team Policy forbids Worker direct messages');
 }
 
 export function assertWorkerPersistenceInput(input: {

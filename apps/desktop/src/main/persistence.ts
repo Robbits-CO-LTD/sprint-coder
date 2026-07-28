@@ -69,7 +69,7 @@ import {
   type BackgroundCompletionState,
   type BackgroundEpochs,
   type BackgroundWakePolicy,
-  assertLeaderRoutedMessage,
+  assertTeamMessageAllowed,
   assertDelegationAllowed,
   assertManagerPolicy,
   assertTeamPolicy,
@@ -364,6 +364,8 @@ type TeamMessageRow = {
   seq: number;
   state: TeamMessageState;
   content: string;
+  execution_id: string | null;
+  attempt_id: string | null;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -1907,6 +1909,18 @@ const migrations = [
         ON team_attempts(state, updated_at, id);
     `,
   },
+  {
+    version: 39,
+    checksum: 'team-v2-core-v39-direct-message-audit-links',
+    sql: `
+      ALTER TABLE team_messages
+        ADD COLUMN execution_id TEXT REFERENCES team_executions(id) ON DELETE SET NULL;
+      ALTER TABLE team_messages
+        ADD COLUMN attempt_id TEXT REFERENCES team_attempts(id) ON DELETE SET NULL;
+      CREATE INDEX team_messages_execution_idx
+        ON team_messages(execution_id, attempt_id, seq);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2173,6 +2187,8 @@ export type TeamMessageRecord = Readonly<{
   seq: number;
   state: TeamMessageState;
   content: string;
+  executionId: string | null;
+  attemptId: string | null;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -2304,6 +2320,8 @@ export interface PersistenceClient {
     sourceAgentId: string;
     targetAgentId: string;
     content: string;
+    executionId?: string;
+    attemptId?: string;
   }): TeamMessageRecord;
   transitionTeamMessageState(messageId: string, to: TeamMessageState): TeamMessageRecord;
   createTeamTask(input: {
@@ -3769,6 +3787,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     sourceAgentId: string;
     targetAgentId: string;
     content: string;
+    executionId?: string;
+    attemptId?: string;
   }): TeamMessageRecord {
     if (input.content.length < 1 || input.content.length > 100_000)
       throw new Error('Invalid team message content');
@@ -3779,7 +3799,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const target = this.getAgent(input.targetAgentId);
       if (source.teamId !== team.id || target.teamId !== team.id)
         throw new Error('Team message agent is not an active member');
-      assertLeaderRoutedMessage(source.kind, target.kind);
+      assertTeamMessageAllowed({
+        source,
+        target,
+        allowWorkerDirectMessages: team.policy.allowWorkerDirectMessages,
+      });
+      const execution =
+        input.executionId === undefined ? null : this.getTeamExecution(input.executionId);
+      if (execution !== null && execution.teamId !== team.id)
+        throw new Error('Message execution must belong to the same Team');
+      const attempt = input.attemptId === undefined ? null : this.getTeamAttempt(input.attemptId);
+      if (attempt !== null && execution === null)
+        throw new Error('Message attempt requires an execution');
+      if (attempt !== null && attempt.executionId !== execution?.id)
+        throw new Error('Message attempt must belong to the linked execution');
       const now = new Date().toISOString();
       const id = randomUUID();
       const nextSeq = (
@@ -3792,10 +3825,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `INSERT INTO team_messages(
              id, team_id, source_agent_id, target_agent_id, seq, state, content,
-             revision, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, 'persisted', ?, 1, ?, ?)`,
+             execution_id, attempt_id, revision, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, 'persisted', ?, ?, ?, 1, ?, ?)`,
         )
-        .run(id, team.id, source.id, target.id, nextSeq, input.content, now, now);
+        .run(
+          id,
+          team.id,
+          source.id,
+          target.id,
+          nextSeq,
+          input.content,
+          execution?.id ?? null,
+          attempt?.id ?? null,
+          now,
+          now,
+        );
       const insertEvent = this.db.prepare(
         `INSERT INTO team_message_events(
            id, message_id, revision, from_state, to_state, recorded_at
@@ -8868,6 +8912,8 @@ function toTeamMessage(row: TeamMessageRow): TeamMessageRecord {
     seq: row.seq,
     state: row.state,
     content: row.content,
+    executionId: row.execution_id,
+    attemptId: row.attempt_id,
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

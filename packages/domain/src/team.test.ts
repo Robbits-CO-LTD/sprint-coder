@@ -3,8 +3,8 @@ import {
   DEFAULT_MANAGER_POLICY,
   DEFAULT_TEAM_POLICY,
   assertDelegationAllowed,
-  assertLeaderRoutedMessage,
   assertManagerPolicy,
+  assertTeamMessageAllowed,
   assertTeamPolicy,
   assertWorkerPersistenceInput,
   transitionTeam,
@@ -38,15 +38,22 @@ describe('team domain', () => {
     );
   });
 
-  it('rejects worker-to-worker and leader-to-leader messages', () => {
-    expect(() => assertLeaderRoutedMessage('worker', 'worker')).toThrow(
-      'must be routed between the leader and a worker',
-    );
-    expect(() => assertLeaderRoutedMessage('leader', 'leader')).toThrow(
-      'must be routed between the leader and a worker',
-    );
-    expect(() => assertLeaderRoutedMessage('leader', 'worker')).not.toThrow();
-    expect(() => assertLeaderRoutedMessage('worker', 'leader')).not.toThrow();
+  it('allows Worker direct messages only when Team Policy permits them', () => {
+    const source = { id: 'worker-1', kind: 'worker' } as const;
+    const target = { id: 'worker-2', kind: 'worker' } as const;
+    expect(() =>
+      assertTeamMessageAllowed({ source, target, allowWorkerDirectMessages: true }),
+    ).not.toThrow();
+    expect(() =>
+      assertTeamMessageAllowed({ source, target, allowWorkerDirectMessages: false }),
+    ).toThrow('Team Policy forbids');
+    expect(() =>
+      assertTeamMessageAllowed({
+        source,
+        target: source,
+        allowWorkerDirectMessages: true,
+      }),
+    ).toThrow('must differ');
   });
 
   it('validates the persisted worker policy without spawning a runtime', () => {
