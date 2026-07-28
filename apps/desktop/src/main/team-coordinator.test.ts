@@ -303,6 +303,26 @@ if (runsWithElectronAbi)
           connectionId: null,
         }),
       ]);
+      expect(coordinator.get(task.id)?.activities).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'worker_hired',
+            actorRole: '部長',
+            subjectRole: '実装担当',
+          }),
+          expect.objectContaining({
+            type: 'task_assigned',
+            actorRole: '部長',
+            subjectRole: '実装担当',
+            executionId: submission.executionId,
+          }),
+          expect.objectContaining({
+            type: 'execution_finished',
+            subjectRole: '実装担当',
+            status: 'completed',
+          }),
+        ]),
+      );
       expect(coordinator.listWorkerReports(task.id, 0, manager.id)).toEqual([
         expect.objectContaining({
           sourceAgentId: child.id,

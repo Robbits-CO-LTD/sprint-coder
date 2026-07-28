@@ -309,12 +309,55 @@ export const teamExecutionSummarySchema = z
   .strict();
 export type TeamExecutionSummary = z.infer<typeof teamExecutionSummarySchema>;
 
+export const teamActivitySummarySchema = z
+  .object({
+    id: idSchema,
+    teamId: idSchema,
+    seq: z.number().int().min(1),
+    type: z.enum([
+      'worker_hired',
+      'task_assigned',
+      'execution_queued',
+      'execution_waiting',
+      'execution_started',
+      'execution_finished',
+      'steered',
+      'attempt_started',
+      'attempt_finished',
+      'worker_reported',
+      'worker_stopped',
+    ]),
+    actorAgentId: idSchema.nullable(),
+    actorRole: z.string().min(1).nullable(),
+    subjectAgentId: idSchema.nullable(),
+    subjectRole: z.string().min(1).nullable(),
+    executionId: idSchema.nullable(),
+    attemptId: idSchema.nullable(),
+    status: z.string().min(1).max(64).nullable(),
+    queueReason: z
+      .enum([
+        'global_concurrency',
+        'connection_concurrency',
+        'verification',
+        'rate_limit',
+        'budget',
+        'recovery',
+      ])
+      .nullable(),
+    attemptOrdinal: z.number().int().min(1).nullable(),
+    terminalReason: z.string().min(1).max(128).nullable(),
+    recordedAt: timestampSchema,
+  })
+  .strict();
+export type TeamActivitySummary = z.infer<typeof teamActivitySummarySchema>;
+
 export const teamDetailSchema = z
   .object({
     team: teamSummarySchema,
     workers: z.array(workerSummarySchema),
     messages: z.array(teamMessageSummarySchema),
     executions: z.array(teamExecutionSummarySchema),
+    activities: z.array(teamActivitySummarySchema),
     budgets: z.array(teamBudgetStatusSchema),
   })
   .strict();

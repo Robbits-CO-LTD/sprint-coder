@@ -55,6 +55,7 @@ function detail(
       updatedAt: '',
     })),
     executions: [],
+    activities: [],
     budgets: [],
   };
 }

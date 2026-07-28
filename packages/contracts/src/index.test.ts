@@ -11,6 +11,7 @@ import {
   runtimeSettingsSchema,
   taskRenameInputSchema,
   teamBudgetStatusSchema,
+  teamActivitySummarySchema,
   teamDetailSchema,
   teamExecutionSummarySchema,
   teamEventSchema,
@@ -190,6 +191,23 @@ describe('public contracts', () => {
     completedAt: null,
     updatedAt: '2026-07-23T00:00:00.000Z',
   } as const;
+  const teamActivity = {
+    id: 'activity-1',
+    teamId: 'team-1',
+    seq: 1,
+    type: 'worker_hired',
+    actorAgentId: 'leader-1',
+    actorRole: 'Leader',
+    subjectAgentId: 'worker-1',
+    subjectRole: 'implementer',
+    executionId: null,
+    attemptId: null,
+    status: null,
+    queueReason: null,
+    attemptOrdinal: null,
+    terminalReason: null,
+    recordedAt: '2026-07-23T00:00:00.000Z',
+  } as const;
 
   it('validates worker summaries and rejects unknown worker states or extra fields', () => {
     expect(workerSummarySchema.parse(worker)).toMatchObject({ id: 'worker-1', state: 'ready' });
@@ -227,12 +245,23 @@ describe('public contracts', () => {
     ).toThrow();
   });
 
-  it('validates a team detail aggregate of workers, messages, executions, and budgets', () => {
+  it('validates normalized durable Team activity summaries', () => {
+    expect(teamActivitySummarySchema.parse(teamActivity)).toMatchObject({
+      type: 'worker_hired',
+      subjectRole: 'implementer',
+    });
+    expect(() =>
+      teamActivitySummarySchema.parse({ ...teamActivity, queueReason: 'provider_guess' }),
+    ).toThrow();
+  });
+
+  it('validates a team detail aggregate of workers, messages, executions, activities, and budgets', () => {
     const detail = {
       team,
       workers: [worker],
       messages: [teamMessage],
       executions: [execution],
+      activities: [teamActivity],
       budgets: [budget],
     };
     expect(teamDetailSchema.parse(detail)).toMatchObject({ team: { id: 'team-1' } });
@@ -318,6 +347,7 @@ describe('public contracts', () => {
       workers: [worker],
       messages: [teamMessage],
       executions: [execution],
+      activities: [teamActivity],
       budgets: [budget],
     };
     const event = { type: 'updated', seq: 1, detail };

@@ -433,11 +433,47 @@ export type TeamExecutionSummary = {
   completedAt: string | null;
   updatedAt: string;
 };
+export type TeamActivitySummary = {
+  id: string;
+  teamId: string;
+  seq: number;
+  type:
+    | 'worker_hired'
+    | 'task_assigned'
+    | 'execution_queued'
+    | 'execution_waiting'
+    | 'execution_started'
+    | 'execution_finished'
+    | 'steered'
+    | 'attempt_started'
+    | 'attempt_finished'
+    | 'worker_reported'
+    | 'worker_stopped';
+  actorAgentId: string | null;
+  actorRole: string | null;
+  subjectAgentId: string | null;
+  subjectRole: string | null;
+  executionId: string | null;
+  attemptId: string | null;
+  status: string | null;
+  queueReason:
+    | 'global_concurrency'
+    | 'connection_concurrency'
+    | 'verification'
+    | 'rate_limit'
+    | 'budget'
+    | 'recovery'
+    | null;
+  attemptOrdinal: number | null;
+  terminalReason: string | null;
+  recordedAt: string;
+};
 export type TeamDetail = {
   team: TeamSummary;
   workers: WorkerSummary[];
   messages: TeamMessageSummary[];
   executions: TeamExecutionSummary[];
+  activities: TeamActivitySummary[];
   budgets: {
     scope: 'global' | 'team' | 'worker';
     kind: 'costCents' | 'tokens' | 'timeMs' | 'toolCalls' | 'spawnSlots';

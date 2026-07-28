@@ -124,6 +124,10 @@ if (runsWithElectronAbi)
         actorAgentId: leader.id,
         subjectAgentId: worker.id,
       });
+      expect(reopened.listLatestTeamV2Activity(team.id, 2)).toMatchObject([
+        { seq: 5, type: 'execution_queued' },
+        { seq: 6, type: 'steered' },
+      ]);
       reopened.close();
     });
 

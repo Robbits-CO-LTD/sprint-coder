@@ -1,5 +1,6 @@
 import {
   teamDetailSchema,
+  teamActivitySummarySchema,
   teamMessageSummarySchema,
   workerCompletionSchema,
   workerReportSchema,
@@ -7,6 +8,7 @@ import {
   type TeamDetail,
   type TeamHireWorkerInput,
   type TeamMessageSummary,
+  type TeamActivitySummary,
   type TeamSendMessageInput,
   type WorkerCompletion,
   type WorkerSummary,
@@ -28,6 +30,7 @@ import type {
   PersistenceClient,
   TeamBudgetReservationRecord,
   TeamSnapshot,
+  TeamV2ActivityRecord,
 } from './persistence';
 
 export type WorkerRuntimeResult = Readonly<{
@@ -1220,7 +1223,65 @@ export class TeamCoordinator {
         completedAt: execution.completedAt,
         updatedAt: execution.updatedAt,
       })),
+      activities: this.persistence
+        .listLatestTeamV2Activity(teamId, 200)
+        .map((activity) => this.activitySummary(snapshot, activity)),
       budgets: this.persistence.getTeamBudgetStatus(teamId),
+    });
+  }
+
+  private activitySummary(
+    snapshot: TeamSnapshot,
+    activity: TeamV2ActivityRecord,
+  ): TeamActivitySummary {
+    const payload =
+      typeof activity.payload === 'object' && activity.payload !== null
+        ? (activity.payload as Record<string, unknown>)
+        : {};
+    const statusCandidate =
+      typeof payload['to'] === 'string'
+        ? payload['to']
+        : typeof payload['state'] === 'string'
+          ? payload['state']
+          : null;
+    const queueReasonCandidate =
+      typeof payload['queueReason'] === 'string' ? payload['queueReason'] : null;
+    const queueReasons = new Set([
+      'global_concurrency',
+      'connection_concurrency',
+      'verification',
+      'rate_limit',
+      'budget',
+      'recovery',
+    ]);
+    const actor = snapshot.agents.find(({ id }) => id === activity.actorAgentId);
+    const subject = snapshot.agents.find(({ id }) => id === activity.subjectAgentId);
+    return teamActivitySummarySchema.parse({
+      id: activity.id,
+      teamId: activity.teamId,
+      seq: activity.seq,
+      type: activity.type,
+      actorAgentId: activity.actorAgentId,
+      actorRole: actor?.role ?? null,
+      subjectAgentId: activity.subjectAgentId,
+      subjectRole: subject?.role ?? null,
+      executionId: activity.executionId,
+      attemptId: activity.attemptId,
+      status: statusCandidate !== null && statusCandidate.length <= 64 ? statusCandidate : null,
+      queueReason: queueReasons.has(queueReasonCandidate ?? '') ? queueReasonCandidate : null,
+      attemptOrdinal:
+        typeof payload['ordinal'] === 'number' &&
+        Number.isSafeInteger(payload['ordinal']) &&
+        payload['ordinal'] >= 1
+          ? payload['ordinal']
+          : null,
+      terminalReason:
+        typeof payload['terminalReason'] === 'string' &&
+        payload['terminalReason'].length >= 1 &&
+        payload['terminalReason'].length <= 128
+          ? payload['terminalReason']
+          : null,
+      recordedAt: activity.recordedAt,
     });
   }
 

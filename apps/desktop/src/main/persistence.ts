@@ -2402,6 +2402,7 @@ export interface PersistenceClient {
     afterSeq?: number,
     limit?: number,
   ): readonly TeamV2ActivityRecord[];
+  listLatestTeamV2Activity(teamId: string, limit?: number): readonly TeamV2ActivityRecord[];
   setWorkerCurrentActivity(agentId: string, activity: string | null, now: string): AgentRecord;
   createTeamMessage(input: {
     teamId: string;
@@ -4108,6 +4109,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
            WHERE team_id = ? AND seq > ? ORDER BY seq LIMIT ?`,
         )
         .all(teamId, afterSeq, limit) as TeamV2ActivityRow[]
+    ).map(toTeamV2Activity);
+  }
+
+  listLatestTeamV2Activity(teamId: string, limit = 100): readonly TeamV2ActivityRecord[] {
+    this.getTeam(teamId);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+      throw new Error('Invalid Team activity page size');
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM (
+             SELECT * FROM team_v2_activity_events
+             WHERE team_id = ? ORDER BY seq DESC LIMIT ?
+           ) ORDER BY seq`,
+        )
+        .all(teamId, limit) as TeamV2ActivityRow[]
     ).map(toTeamV2Activity);
   }
 

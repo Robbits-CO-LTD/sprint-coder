@@ -93,3 +93,8 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
   3件がgreen。
 - Core C後続blocker: axe E2Eのlocalhost注入とproduction CSPの不整合、Canvas／List間の既存
   engine接頭辞差分を独立sub-Sliceで直す。
+- C2a完了: DB v40の監査イベントを重複保存せず、actor／subject role、execution status、
+  queue reason、attempt ordinal、terminal reasonを持つ表示専用summaryへ正規化する。
+  TeamDetailは新しい順の最新200件を時系列順で配信し、500件超でも新しい履歴が消えない
+  `listLatestTeamV2Activity`を永続化境界へ追加した。
+- C2b次着手: C2a summaryをChat timelineへ履歴カードとして表示する。
