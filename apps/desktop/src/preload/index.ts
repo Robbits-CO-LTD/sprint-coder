@@ -19,10 +19,15 @@ import {
   emptyPayloadSchema,
   permissionSetInputSchema,
   permissionSettingsSchema,
+  modelCatalogQueryInputSchema,
+  modelCatalogQueryResultSchema,
+  modelCatalogSelectionSetInputSchema,
+  modelSelectionSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeSetInputSchema,
+  runtimeSettingsGetInputSchema,
   runtimeSettingsSchema,
   skillCandidateInputSchema,
   skillEnabledInputSchema,
@@ -269,12 +274,27 @@ const api: SprintCoderApi = {
       }),
   },
   settings: {
-    getRuntime: () =>
-      invoke(IPC_CHANNELS.settingsGetRuntime, emptyPayloadSchema, runtimeSettingsSchema, {}),
-    setRuntime: (kind) =>
-      invoke(IPC_CHANNELS.settingsSetRuntime, runtimeSetInputSchema, z.undefined(), { kind }),
-    setModel: (model) =>
-      invoke(IPC_CHANNELS.settingsSetModel, runtimeModelSetInputSchema, z.undefined(), { model }),
+    getRuntime: (taskId) =>
+      invoke(
+        IPC_CHANNELS.settingsGetRuntime,
+        runtimeSettingsGetInputSchema,
+        runtimeSettingsSchema,
+        taskId === undefined ? {} : { taskId },
+      ),
+    setRuntime: (kind, taskId) =>
+      invoke(
+        IPC_CHANNELS.settingsSetRuntime,
+        runtimeSetInputSchema,
+        z.undefined(),
+        taskId === undefined ? { kind } : { kind, taskId },
+      ),
+    setModel: (model, taskId) =>
+      invoke(
+        IPC_CHANNELS.settingsSetModel,
+        runtimeModelSetInputSchema,
+        z.undefined(),
+        taskId === undefined ? { model } : { model, taskId },
+      ),
     setEffort: (effort) =>
       invoke(IPC_CHANNELS.settingsSetEffort, runtimeEffortSetInputSchema, z.undefined(), {
         effort,
@@ -315,6 +335,22 @@ const api: SprintCoderApi = {
         provider,
         skillId,
       }),
+  },
+  models: {
+    query: (input) =>
+      invoke(
+        IPC_CHANNELS.modelsCatalogQuery,
+        modelCatalogQueryInputSchema,
+        modelCatalogQueryResultSchema,
+        input,
+      ),
+    setSelection: (taskId, selection) =>
+      invoke(
+        IPC_CHANNELS.modelsSetSelection,
+        modelCatalogSelectionSetInputSchema,
+        modelSelectionSchema,
+        { taskId, selection },
+      ),
   },
   permissions: {
     get: (taskId) =>

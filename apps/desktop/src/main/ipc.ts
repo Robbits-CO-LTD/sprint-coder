@@ -36,7 +36,12 @@ import {
   type FileChange,
   permissionSetInputSchema,
   permissionSettingsSchema,
+  modelCatalogQueryInputSchema,
+  modelCatalogQueryResultSchema,
+  modelCatalogSelectionSetInputSchema,
+  modelSelectionSchema,
   runtimeSetInputSchema,
+  runtimeSettingsGetInputSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
@@ -85,6 +90,7 @@ import {
   type CommandResult,
   type AccessPreset,
   type CodexModelOption,
+  type ProviderModel,
   type PublicError,
   type RuntimeKind,
   type TurnEvent,
@@ -153,6 +159,11 @@ import {
 } from './team-skill';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
+import { ModelCatalogService } from './model-catalog-service';
+import {
+  builtinRuntimeForModelSelection,
+  modelSelectionForRuntime,
+} from './connection-identity';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -201,6 +212,7 @@ export class IpcRouter {
   private readonly teamEventSeqByTask = new Map<string, number>();
   private readonly teamMcpBridge: TeamMcpBridge;
   private readonly skillSettings: SkillSettingsService;
+  private readonly modelCatalog = new ModelCatalogService();
   private teamSkillReady = false;
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
@@ -353,16 +365,22 @@ export class IpcRouter {
     }));
     this.handle(
       IPC_CHANNELS.settingsGetRuntime,
-      emptyPayloadSchema,
+      runtimeSettingsGetInputSchema,
       runtimeSettingsSchema,
-      async () => {
+      async (input) => {
         const [codexCapability, claudeCapability] = await Promise.all([
           this.codexRuntime.probe(),
           this.claudeRuntime.probe(),
         ]);
-        const kind = this.persistence.getRuntime();
+        const taskSelection =
+          input.taskId === undefined
+            ? null
+            : this.persistence.getTaskModelSelection(input.taskId);
+        const taskRuntime =
+          taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+        const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
         const activeCapability = kind === 'claude' ? claudeCapability : codexCapability;
-        const storedModel = this.persistence.getModel();
+        const storedModel = taskRuntime?.model ?? this.persistence.getModel();
         const model = activeCapability.models.some(({ id }) => id === storedModel)
           ? storedModel
           : 'auto';
@@ -433,6 +451,66 @@ export class IpcRouter {
           .remove(input.provider, input.skillId)
           .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
+    this.handle(
+      IPC_CHANNELS.modelsCatalogQuery,
+      modelCatalogQueryInputSchema,
+      modelCatalogQueryResultSchema,
+      async (input) => {
+        const [codexCapability, claudeCapability] = await Promise.all([
+          this.codexRuntime.probe(),
+          this.claudeRuntime.probe(),
+        ]);
+        const checkedAt = new Date().toISOString();
+        this.modelCatalog.replaceCatalog([
+          ...providerModelsForBuiltin(
+            'builtin:codex-cli',
+            'openai',
+            codexCapability.models,
+            codexCapability.available,
+            checkedAt,
+          ),
+          ...providerModelsForBuiltin(
+            'builtin:claude-cli',
+            'anthropic',
+            claudeCapability.models,
+            claudeCapability.available,
+            checkedAt,
+          ),
+        ]);
+        const result = this.modelCatalog.query(input);
+        const runtimeKind = this.persistence.getRuntime();
+        const selection =
+          this.persistence.getTaskModelSelection(input.taskId) ??
+          modelSelectionForRuntime(runtimeKind, this.persistence.getModel());
+        return {
+          ...result,
+          selection,
+          multiProviderModelPickerV2:
+            process.env['SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2'] === '1',
+        };
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.modelsSetSelection,
+      modelCatalogSelectionSetInputSchema,
+      modelSelectionSchema,
+      async (input, event, envelope) => {
+        const runtime = builtinRuntimeForModelSelection(input.selection);
+        if (runtime === null) throw new InvalidModelError('codex');
+        const capability = await this.runtimeFor(runtime.runtimeKind).probe();
+        if (!capability.available) throw new RuntimeUnavailableError(runtime.runtimeKind);
+        if (!capability.models.some(({ id }) => id === runtime.model))
+          throw new InvalidModelError(runtime.runtimeKind);
+        return this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.modelsSetSelection, () => {
+          this.persistence.setRuntime(runtime.runtimeKind);
+          this.persistence.setModel(runtime.model);
+          return (
+            this.persistence.setTaskModelSelection(input.taskId, input.selection) ??
+            input.selection
+          );
+        }).value;
+      },
+    );
     this.handleMutation(
       IPC_CHANNELS.settingsSetRuntime,
       runtimeSetInputSchema,
@@ -442,8 +520,19 @@ export class IpcRouter {
           const capability = await this.runtimeFor(input.kind).probe();
           if (!capability.available) throw new RuntimeUnavailableError(input.kind);
         }
-        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetRuntime, () =>
-          this.persistence.setRuntime(input.kind),
+        return this.runMutation(
+          event,
+          envelope,
+          input.taskId ?? '',
+          IPC_CHANNELS.settingsSetRuntime,
+          () => {
+            this.persistence.setRuntime(input.kind);
+            if (input.taskId !== undefined)
+              this.persistence.setTaskModelSelection(
+                input.taskId,
+                modelSelectionForRuntime(input.kind, this.persistence.getModel()),
+              );
+          },
         ).value;
       },
     );
@@ -455,14 +544,27 @@ export class IpcRouter {
         // Model membership is validated against the currently *active* Runtime kind's own
         // capability list — Codex and Claude have disjoint model spaces (Main-side scoping per
         // the ADR), so a Codex model id can never leak into a Claude turn or vice versa.
-        const kind = this.persistence.getRuntime();
+        const taskSelection =
+          input.taskId === undefined
+            ? null
+            : this.persistence.getTaskModelSelection(input.taskId);
+        const taskRuntime =
+          taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+        const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
         const runtimeKind = kind === 'claude' ? 'claude' : 'codex';
         const capability = await this.runtimeFor(runtimeKind).probe();
         if (!capability.available) throw new RuntimeUnavailableError(runtimeKind);
         if (!capability.models.some(({ id }) => id === input.model))
           throw new InvalidModelError(runtimeKind);
-        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () => {
+        return this.runMutation(event, envelope, input.taskId ?? '', IPC_CHANNELS.settingsSetModel, () => {
+          if (this.persistence.getRuntime() !== runtimeKind)
+            this.persistence.setRuntime(runtimeKind);
           this.persistence.setModel(input.model);
+          if (input.taskId !== undefined)
+            this.persistence.setTaskModelSelection(
+              input.taskId,
+              modelSelectionForRuntime(runtimeKind, input.model),
+            );
           // Models advertise different reasoning levels, so a model change can strand the stored
           // Codex level (Sol advertises `ultra`, GPT-5.5 does not). Re-clamp and persist here so
           // the synchronous turn dispatch can trust `getCodexEffort()` without a probe — leaving
@@ -2061,6 +2163,30 @@ function sortValue(value: unknown): unknown {
     );
   }
   return value;
+}
+
+function providerModelsForBuiltin(
+  connectionId: string,
+  providerId: string,
+  models: readonly CodexModelOption[],
+  available: boolean,
+  checkedAt: string,
+): ProviderModel[] {
+  const unknown = { value: null, source: 'unknown' as const };
+  return models.map((model) => ({
+    connectionId,
+    providerId,
+    modelId: model.id,
+    displayName: model.displayName,
+    available,
+    availabilityCheckedAt: checkedAt,
+    contextWindow: unknown,
+    maxOutputTokens: unknown,
+    toolCalling: unknown,
+    structuredOutput: unknown,
+    multimodalInput: unknown,
+    reasoning: unknown,
+  }));
 }
 
 function getRequestId(raw: unknown): string {

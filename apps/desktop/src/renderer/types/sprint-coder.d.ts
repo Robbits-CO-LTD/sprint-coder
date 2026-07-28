@@ -590,7 +590,7 @@ export interface SprintCoderApi {
   /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
    * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
   settings: {
-    getRuntime(): Promise<{
+    getRuntime(taskId?: string): Promise<{
       kind: RuntimeKind;
       codexAvailable: boolean;
       claudeAvailable: boolean;
@@ -601,8 +601,8 @@ export interface SprintCoderApi {
        * '' means no override (the `auto` model sentinel, or a model publishing no set). */
       codexEffort: string;
     }>;
-    setRuntime(kind: RuntimeKind): Promise<void>;
-    setModel(model: string): Promise<void>;
+    setRuntime(kind: RuntimeKind, taskId?: string): Promise<void>;
+    setModel(model: string, taskId?: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
     setCodexEffort(effort: string): Promise<void>;
     scanSkills(): Promise<import('@sprint-coder/contracts').SkillScanResult>;
@@ -621,6 +621,15 @@ export interface SprintCoderApi {
       provider: import('@sprint-coder/contracts').SkillProvider,
       skillId: string,
     ): Promise<void>;
+  };
+  models: {
+    query(
+      input: import('@sprint-coder/contracts').ModelCatalogQueryInput,
+    ): Promise<import('@sprint-coder/contracts').ModelCatalogQueryResult>;
+    setSelection(
+      taskId: string,
+      selection: import('@sprint-coder/contracts').ModelSelection,
+    ): Promise<import('@sprint-coder/contracts').ModelSelection>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;

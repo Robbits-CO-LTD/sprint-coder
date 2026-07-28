@@ -1466,11 +1466,62 @@ export const runtimeSettingsSchema = z
   })
   .strict();
 export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;
-export const runtimeSetInputSchema = z.object({ kind: runtimeKindSchema }).strict();
-export const runtimeModelSetInputSchema = z.object({ model: codexModelIdSchema }).strict();
+export const runtimeSettingsGetInputSchema = z
+  .object({ taskId: idSchema.optional() })
+  .strict();
+export const runtimeSetInputSchema = z
+  .object({ kind: runtimeKindSchema, taskId: idSchema.optional() })
+  .strict();
+export const runtimeModelSetInputSchema = z
+  .object({ model: codexModelIdSchema, taskId: idSchema.optional() })
+  .strict();
 export const runtimeEffortSetInputSchema = z.object({ effort: claudeEffortSchema }).strict();
 export const runtimeCodexEffortSetInputSchema = z
   .object({ effort: effortOptionSchema.shape.id })
+  .strict();
+export const modelCatalogCapabilitySchema = z.enum([
+  'toolCalling',
+  'structuredOutput',
+  'multimodalInput',
+  'reasoning',
+]);
+export type ModelCatalogCapability = z.infer<typeof modelCatalogCapabilitySchema>;
+export const modelCatalogQueryInputSchema = z
+  .object({
+    taskId: idSchema,
+    text: z.string().max(200).default(''),
+    connectionIds: z.array(connectionIdSchema).max(32).default([]),
+    providerIds: z.array(providerIdSchema).max(32).default([]),
+    capabilities: z.array(modelCatalogCapabilitySchema).max(4).default([]),
+    availableOnly: z.boolean().default(true),
+    cursor: z
+      .string()
+      .regex(/^cursor:[0-9]+$/)
+      .nullable()
+      .default(null),
+    limit: z.number().int().min(1).max(100).default(50),
+  })
+  .strict();
+export type ModelCatalogQueryInput = z.infer<typeof modelCatalogQueryInputSchema>;
+export const modelCatalogQueryResultSchema = z
+  .object({
+    revision: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+    items: z.array(providerModelSchema).max(100),
+    nextCursor: z
+      .string()
+      .regex(/^cursor:[0-9]+$/)
+      .nullable(),
+    selection: modelSelectionSchema,
+    multiProviderModelPickerV2: z.boolean(),
+  })
+  .strict();
+export type ModelCatalogQueryResult = z.infer<typeof modelCatalogQueryResultSchema>;
+export const modelCatalogSelectionSetInputSchema = z
+  .object({
+    taskId: idSchema,
+    selection: modelSelectionSchema,
+  })
   .strict();
 
 export const accessPresetSchema = z.enum(['ask', 'auto', 'full']);
@@ -1790,9 +1841,9 @@ export interface SprintCoderApi {
     read(imageId: string): Promise<{ id: string; mimeType: 'image/png'; base64: string }>;
   };
   settings: {
-    getRuntime(): Promise<RuntimeSettings>;
-    setRuntime(kind: RuntimeKind): Promise<void>;
-    setModel(model: string): Promise<void>;
+    getRuntime(taskId?: string): Promise<RuntimeSettings>;
+    setRuntime(kind: RuntimeKind, taskId?: string): Promise<void>;
+    setModel(model: string, taskId?: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
     /** Codex reasoning level. Rejects a level the selected model does not advertise (see
      * `effortOptionSchema`) — Codex fails the whole turn on an unsupported one. */
@@ -1803,6 +1854,10 @@ export interface SprintCoderApi {
     updateSkill(previewId: string): Promise<SkillImportResult>;
     setSkillEnabled(provider: SkillProvider, skillId: string, enabled: boolean): Promise<void>;
     removeSkill(provider: SkillProvider, skillId: string): Promise<void>;
+  };
+  models: {
+    query(input: ModelCatalogQueryInput): Promise<ModelCatalogQueryResult>;
+    setSelection(taskId: string, selection: ModelSelection): Promise<ModelSelection>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
@@ -1886,6 +1941,8 @@ export const IPC_CHANNELS = {
   filesSave: 'sprint-coder:files:save',
   imagesRead: 'sprint-coder:images:read',
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
+  modelsCatalogQuery: 'sprint-coder:models:catalog-query',
+  modelsSetSelection: 'sprint-coder:models:set-selection',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',
