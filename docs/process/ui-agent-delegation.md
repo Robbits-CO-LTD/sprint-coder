@@ -4,9 +4,7 @@
 
 ## Single source of model configuration
 
-```text
-UI_DELEGATION_MODEL=claude-opus-5
-```
+正本は[`ui-agent-delegation.env`](ui-agent-delegation.env)の`UI_DELEGATION_MODEL`とする。
 
 UI委託で具体的なmodel IDを使用するのはこの設定だけとする。計画文書、prompt template、
 script、CIへmodel IDを複製しない。model変更時はこの設定だけを更新する。
@@ -16,6 +14,7 @@ script、CIへmodel IDを複製しない。model変更時はこの設定だけ�
 UI Trackの設計・実装はClaude CLIの非対話実行へSlice単位で委託する。
 
 ```bash
+source docs/process/ui-agent-delegation.env
 claude -p --model "$UI_DELEGATION_MODEL"
 ```
 
@@ -30,6 +29,10 @@ UI委託を開始できませんでした。
 理由：UI_DELEGATION_MODEL に指定されたモデルを現在のClaude Runtimeで利用できません。
 ```
 
+`--permission-mode plan`は内部探索Agentが別modelを使用し得るため、model固定のUI委託では使わない。
+読み取り専用委託は`dontAsk`とRead／Grepのallowlistを使い、Agent／Taskを明示的に禁止する。
+完了結果の`modelUsage`に`UI_DELEGATION_MODEL`以外が含まれる場合、その委託結果を採用しない。
+
 ## Preflight
 
 - Claude CLIがPATH上に存在
@@ -41,6 +44,10 @@ UI委託を開始できませんでした。
 - 実secretや実ユーザーデータがprompt／fixtureにない
 
 preflightの結果、CLI version、model、exit status、実費を記録する。成功出力へsecretを含めない。
+
+2026-07-28のU0ではCLI 2.1.218、設定model、exit 0を確認した。最小probe実費は$0.092194。
+初回U0はPlan modeの内部探索で設定外modelが使われ、$3上限で報告なし終了したため不採用とした。
+Agent／Taskを禁止した再実行は設定modelだけを使用し、$0.859953、変更0で完了した。
 
 ## Delegation scope
 

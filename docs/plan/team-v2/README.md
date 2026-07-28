@@ -4,7 +4,8 @@
 - 状態: planning
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
-  P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b完了
+  P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b、
+  UI U0完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約

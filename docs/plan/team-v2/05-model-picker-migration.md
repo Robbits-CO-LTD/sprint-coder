@@ -9,6 +9,10 @@ Turn snapshot、restart、Team selection、keyboard、accessibility、packaged t
 現状はglobal selectionで、Runtime model listは最大32件、全件同期renderである。新Pickerは
 この制約を引き継がない。
 
+U0調査では、P1AのTask／Agent canonical selectionへRendererから到達するIPCがなく、旧Pickerが
+global `runtime` stateだけを読むことも確認した。Composer menuにはArrow／roving focus／
+focus restoreがなく、Settings native selectを含め両方がcatalog全件を同期renderする。
+
 ## Catalog client contract
 
 PickerはRuntime kind、CLI Adapter、Provider SDKを読まない。Main-owned `ModelCatalogClient`の
