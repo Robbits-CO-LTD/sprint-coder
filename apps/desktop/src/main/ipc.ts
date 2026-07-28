@@ -92,6 +92,7 @@ import {
   type CommandEnvelope,
   type CommandResult,
   type AccessPreset,
+  type CanonicalProviderEvent,
   type CodexModelOption,
   type ProviderModel,
   type PublicError,
@@ -139,6 +140,7 @@ import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lea
 import {
   authorizeClaudeProviderEgress,
   authorizeCodexProviderEgress,
+  authorizeOfficialApiProviderEgress,
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
 } from './provider-egress';
@@ -179,6 +181,7 @@ import { ProviderConnectionService } from './provider-connection-service';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
+type ActiveRuntimeKind = RuntimeKind | 'provider';
 
 export class IpcRouter {
   private readonly ports = new Set<PortBinding>();
@@ -187,12 +190,14 @@ export class IpcRouter {
   private readonly codexRuntime: RuntimeHostClient;
   private readonly teamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
-  private readonly turnRuntimes = new Map<string, RuntimeKind>();
+  private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
   // The concrete model id the Claude CLI actually resolved for a turn (captured from the
   // stream-json `system/init` event by ClaudeJsonlNormalizer), keyed by turnId until
   // finishAndAdvance persists it as execution resolution and folds it into the outgoing
   // `turn.completed` event.
   private readonly resolvedModelByTurn = new Map<string, string>();
+  private readonly resolvedProviderByTurn = new Map<string, string>();
+  private readonly providerAbortByTurn = new Map<string, AbortController>();
   // One reasoning batcher per active turn (issue #17). Keyed by turnId and disposed in
   // finishAndAdvance, so a turn cannot leave a timer behind.
   private readonly reasoningByTurn = new Map<string, ReasoningBatcher>();
@@ -1147,7 +1152,11 @@ export class IpcRouter {
       z.undefined(),
       (input, event, envelope) => {
         const activeRuntimeKind = this.turnRuntimes.get(input.expectedTurnId);
-        if (activeRuntimeKind === 'codex' || activeRuntimeKind === 'claude')
+        if (
+          activeRuntimeKind === 'codex' ||
+          activeRuntimeKind === 'claude' ||
+          activeRuntimeKind === 'provider'
+        )
           throw new SteerUnsupportedError();
         const result = this.runMutation(
           event,
@@ -1423,7 +1432,7 @@ export class IpcRouter {
       if (key.startsWith(`${turnId}\u0000`)) this.fileEditByKey.delete(key);
     // Back to idle on a clean finish. A failure already pushed its own `failed` status with the
     // reason attached (see handleRuntimeFailure), and must not be overwritten by an idle here.
-    if (kind !== undefined && state === 'completed')
+    if (kind !== undefined && kind !== 'provider' && state === 'completed')
       this.pushRuntimeStatus({
         kind,
         state: 'idle',
@@ -1436,12 +1445,13 @@ export class IpcRouter {
     this.ingestGeneratedImages(taskId, turnId);
     this.teamMcpBridge.unregister(turnId);
     const resolvedModel = this.resolvedModelByTurn.get(turnId);
+    const resolvedProvider = this.resolvedProviderByTurn.get(turnId);
     this.resolvedModelByTurn.delete(turnId);
+    this.resolvedProviderByTurn.delete(turnId);
     if (resolvedModel !== undefined)
       this.persistence.recordTurnResolution(taskId, turnId, {
-        // The CLI reports the concrete model, but not a canonical provider id. Keep provider
-        // resolution unknown rather than inferring it from the selected Connection.
-        resolvedProvider: null,
+        // CLI Runtimes do not report a canonical provider. Official API Runtimes do.
+        resolvedProvider: resolvedProvider ?? null,
         resolvedModel,
       });
     const event = this.persistence.completeTurn(taskId, turnId, state);
@@ -1621,14 +1631,23 @@ export class IpcRouter {
   }
 
   private startSelectedRuntime(started: StartedTurn): void {
+    const taskId = started.event.taskId;
+    const externalConnectionId =
+      builtinRuntimeForModelSelection(started.modelSelection) === null
+        ? started.modelSelection.connectionId
+        : null;
+    if (externalConnectionId !== null && !isTeamScenarioInput(started.text)) {
+      this.turnRuntimes.set(started.turnId, 'provider');
+      void this.startProviderTurn(started, externalConnectionId);
+      return;
+    }
     this.pushRuntimeStatus({
       kind: started.runtimeKind,
       state: 'running',
-      taskId: started.event.taskId,
+      taskId,
       errorCode: null,
       userMessage: null,
     });
-    const taskId = started.event.taskId;
     let kind = started.runtimeKind;
     // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Codex/Claude Leader drives team_* tools itself
     // over the MCP bridge instead of the deterministic mock scenario. Team tools are offered on
@@ -1818,7 +1837,141 @@ export class IpcRouter {
     this.turnRuntimes.delete(turnId);
     this.teamMcpBridge.unregister(turnId);
     if (kind === 'codex' || kind === 'claude') this.runtimeFor(kind).cancel(taskId, turnId);
+    else if (kind === 'provider') {
+      this.providerAbortByTurn.get(turnId)?.abort();
+      this.providerAbortByTurn.delete(turnId);
+      const identity = this.persistence.getTurnModelIdentity(taskId, turnId);
+      if (identity.selection.connectionId !== null) {
+        const connection = this.persistence.getProviderConnection(
+          identity.selection.connectionId,
+        );
+        await this.providerRegistry.resolve(connection).cancel(turnId);
+      }
+    }
     else await this.mockRuntime.cancel(turnId);
+  }
+
+  private async startProviderTurn(started: StartedTurn, connectionId: string): Promise<void> {
+    const taskId = started.event.taskId;
+    const controller = new AbortController();
+    this.providerAbortByTurn.set(started.turnId, controller);
+    let completed = false;
+    let synthesizing = false;
+    const messageId = randomUUID();
+    try {
+      const connection = await this.providerVerification.requireVerifiedForExecution(
+        connectionId,
+        controller.signal,
+      );
+      const modelId = started.modelSelection.requestedModel;
+      if (
+        modelId === null ||
+        connection.providerId !== started.modelSelection.requestedProvider
+      )
+        throw new Error('Provider Turn model selection is invalid');
+      const context = this.prepareContext(taskId, started.turnId);
+      const egress = authorizeOfficialApiProviderEgress(
+        {
+          broker: this.permissionBroker,
+          task: this.persistence.getTask(taskId),
+          turnId: started.turnId,
+          prompt: started.text,
+          context,
+          now: new Date().toISOString(),
+        },
+        connection.providerId,
+      );
+      if (!egress.allowed) throw new Error('Provider egress was denied by policy');
+      await this.mailbox.run(taskId, () => {
+        if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+        this.publish(
+          this.persistence.changeStage(taskId, started.turnId, 'understanding'),
+        );
+        this.publish(this.persistence.changeStage(taskId, started.turnId, 'planning'));
+        this.publish(this.persistence.changeStage(taskId, started.turnId, 'executing'));
+      });
+      const runtime = this.providerRegistry.resolve(connection);
+      for await (const providerEvent of runtime.execute(
+        connection,
+        {
+          executionId: started.turnId,
+          connectionId,
+          modelId,
+          messages: context.fragments.map((fragment) => ({
+            role: fragment.trust,
+            content: fragment.content,
+          })),
+        },
+        controller.signal,
+      )) {
+        if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+        await this.mailbox.run(taskId, () => {
+          if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+          if (providerEvent.type === 'reasoning_delta') {
+            this.pushReasoning(taskId, started.turnId, providerEvent.text);
+            return;
+          }
+          if (providerEvent.type === 'output_delta') {
+            if (!synthesizing) {
+              synthesizing = true;
+              this.publish(
+                this.persistence.changeStage(taskId, started.turnId, 'synthesizing'),
+              );
+            }
+            this.publish(
+              this.persistence.appendDelta(
+                taskId,
+                started.turnId,
+                messageId,
+                providerEvent.text,
+              ),
+            );
+            return;
+          }
+          this.applyProviderTurnEvent(taskId, started.turnId, providerEvent);
+          if (providerEvent.type === 'completed') completed = true;
+        });
+      }
+      if (!completed) throw new Error('Provider stream ended without a completion event');
+      await this.mailbox.run(taskId, () => {
+        if (this.turnRuntimes.get(started.turnId) === 'provider')
+          this.finishAndAdvance(taskId, started.turnId, 'completed');
+      });
+    } catch {
+      if (
+        controller.signal.aborted ||
+        this.turnRuntimes.get(started.turnId) !== 'provider'
+      )
+        return;
+      await this.mailbox.run(taskId, () => {
+        if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+        this.finishAndAdvance(taskId, started.turnId, 'failed');
+      });
+    } finally {
+      if (this.providerAbortByTurn.get(started.turnId) === controller)
+        this.providerAbortByTurn.delete(started.turnId);
+    }
+  }
+
+  private applyProviderTurnEvent(
+    taskId: string,
+    turnId: string,
+    event: CanonicalProviderEvent,
+  ): void {
+    if (event.type === 'resolution') {
+      if (event.resolution.resolvedProvider !== null)
+        this.resolvedProviderByTurn.set(turnId, event.resolution.resolvedProvider);
+      if (event.resolution.resolvedModel !== null)
+        this.resolvedModelByTurn.set(turnId, event.resolution.resolvedModel);
+      return;
+    }
+    if (event.type === 'usage') {
+      this.persistence.recordTurnProviderUsage(taskId, turnId, event.usage);
+      return;
+    }
+    if (event.type === 'tool_call')
+      throw new Error('Provider requested a tool that is not available for this Turn');
+    if (event.type === 'error') throw new Error(event.error.message);
   }
 
   private handleRuntimeEvent(

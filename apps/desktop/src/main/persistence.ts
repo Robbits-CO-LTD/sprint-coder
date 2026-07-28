@@ -8,6 +8,7 @@ import {
   commandSummarySchema,
   executionResolutionSchema,
   modelSelectionSchema,
+  normalizedProviderUsageSchema,
   providerConnectionSchema,
   taskSummarySchema,
   turnEventSchema,
@@ -25,6 +26,7 @@ import {
   type ContextUsage,
   type ExecutionResolution,
   type ModelSelection,
+  type NormalizedProviderUsage,
   type ProviderConnection,
   type ProviderRuntimeKind,
   type QueuedInput,
@@ -549,6 +551,7 @@ type TurnRow = {
   requested_model: string | null;
   resolved_provider: string | null;
   resolved_model: string | null;
+  provider_usage_json: string | null;
   created_at: string;
 };
 type QueueRow = { ordinal: number; payload_json: string };
@@ -2212,6 +2215,13 @@ const migrations = [
       WHERE runtime_kind = 'builtin_cli';
     `,
   },
+  {
+    version: 46,
+    checksum: 'provider-p2-v46-turn-usage',
+    sql: `
+      ALTER TABLE turns ADD COLUMN provider_usage_json TEXT;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3007,6 +3017,12 @@ export interface PersistenceClient {
     turnId: string,
     resolution: ExecutionResolution,
   ): TurnModelIdentity;
+  recordTurnProviderUsage(
+    taskId: string,
+    turnId: string,
+    usage: NormalizedProviderUsage,
+  ): NormalizedProviderUsage;
+  getTurnProviderUsage(taskId: string, turnId: string): NormalizedProviderUsage | null;
   queueInput(
     taskId: string,
     text: string,
@@ -8151,6 +8167,29 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(parsed.resolvedProvider, parsed.resolvedModel, new Date().toISOString(), turnId, taskId);
     if (result.changes !== 1) throw new NotFoundError('Turn not found');
     return this.getTurnModelIdentity(taskId, turnId);
+  }
+
+  recordTurnProviderUsage(
+    taskId: string,
+    turnId: string,
+    usage: NormalizedProviderUsage,
+  ): NormalizedProviderUsage {
+    const parsed = normalizedProviderUsageSchema.parse(usage);
+    const result = this.db
+      .prepare(
+        `UPDATE turns SET provider_usage_json = ?, updated_at = ?
+         WHERE id = ? AND task_id = ?`,
+      )
+      .run(JSON.stringify(parsed), new Date().toISOString(), turnId, taskId);
+    if (result.changes !== 1) throw new NotFoundError('Turn not found');
+    return parsed;
+  }
+
+  getTurnProviderUsage(taskId: string, turnId: string): NormalizedProviderUsage | null {
+    const row = this.getTurn(taskId, turnId);
+    return row.provider_usage_json === null
+      ? null
+      : normalizedProviderUsageSchema.parse(JSON.parse(row.provider_usage_json));
   }
 
   queueInput(

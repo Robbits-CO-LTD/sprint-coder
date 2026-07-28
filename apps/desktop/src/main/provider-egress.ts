@@ -57,6 +57,18 @@ export function authorizeClaudeProviderEgress(input: ProviderEgressInput): Provi
   );
 }
 
+export function authorizeOfficialApiProviderEgress(
+  input: ProviderEgressInput,
+  providerId: string,
+): ProviderEgressDecision {
+  return authorizeProviderEgress(
+    input,
+    providerId,
+    `official-api:${providerId}`,
+    `${providerId}_official_api_egress`,
+  );
+}
+
 function authorizeProviderEgress(
   input: ProviderEgressInput,
   providerId: string,
