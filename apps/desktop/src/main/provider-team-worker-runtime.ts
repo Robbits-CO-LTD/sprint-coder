@@ -17,6 +17,7 @@ import type {
   WorkerRuntimeResult,
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
+import type { PreparedContext } from './context-ledger';
 
 export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   fallback: TeamWorkerRuntime;
@@ -29,6 +30,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     providerId: string;
     prompt: string;
   }): boolean;
+  contextFor?: (worker: AgentRecord) => PreparedContext;
   managerGuidance: string;
   managerTools: readonly ProviderTool[];
   workerGuidance: string;
@@ -87,6 +89,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)
       throw new Error('Provider Worker Connection does not match its requested Provider');
     const executionId = input.envelope.deliveryId;
+    if (input.worker.writeCapable)
+      throw new Error(
+        'External API Worker cannot write to the workspace; select a built-in CLI Connection',
+      );
     const prompt = workerPrompt(input.worker, input.content);
     if (
       !this.deps.authorizeEgress({
@@ -128,8 +134,18 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         modelCatalogQueried = true;
       },
     };
+    const inheritedContext = this.deps.contextFor?.(input.worker).fragments ?? [];
     const messages: ProviderExecutionRequest['messages'] = [
       ...(availableTools.length > 0 ? [{ role: 'system' as const, content: toolGuidance }] : []),
+      ...inheritedContext.map((fragment) => ({
+        role:
+          fragment.source === 'system'
+            ? ('system' as const)
+            : fragment.trust === 'assistant'
+              ? ('assistant' as const)
+              : ('user' as const),
+        content: `[継承コンテキスト:${fragment.source}]\n${fragment.content}`,
+      })),
       { role: 'user', content: prompt },
     ];
     input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
@@ -329,6 +345,8 @@ function workerPrompt(worker: AgentRecord, content: string): string {
     `あなたのAgent ID: ${worker.id}`,
     `親Agent ID: ${worker.parentAgentId ?? 'Leader'}`,
     worker.objective === null ? '' : `目的: ${worker.objective}`,
+    `Context継承: ${worker.contextInheritancePolicy}`,
+    'Workspace書き込み: 公式API Workerでは利用不可',
     '以下の依頼を実行し、結果を日本語で簡潔に報告してください。',
     '',
     `依頼: ${content}`,

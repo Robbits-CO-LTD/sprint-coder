@@ -2722,6 +2722,7 @@ export interface PersistenceClient {
     doneCriteria: readonly string[];
     now: string;
   }): TeamTaskRecord;
+  getTeamTask(taskId: string): TeamTaskRecord;
   transitionTeamTask(taskId: string, status: TeamTaskRecord['status'], now: string): TeamTaskRecord;
   recordTeamActivity(input: {
     teamTaskId: string;
@@ -4903,16 +4904,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
       );
       for (const entry of input.entries) {
         const agentId = entry.scope === 'worker' ? (entry.agentId ?? null) : null;
-        const cap = this.budgetCap(team, globalLimits, entry.scope, entry.kind);
-        const totals = this.budgetTotals(entry.scope, entry.kind, team.id, agentId);
-        assertReservationWithinCap({
-          scope: entry.scope,
-          kind: entry.kind,
-          cap,
-          committed: totals.committed,
-          reserved: totals.reserved,
-          requested: entry.amount,
-        });
+        if (team.policy.budgetMode !== 'unlimited') {
+          const cap = this.budgetCap(team, globalLimits, entry.scope, entry.kind);
+          const totals = this.budgetTotals(entry.scope, entry.kind, team.id, agentId);
+          assertReservationWithinCap({
+            scope: entry.scope,
+            kind: entry.kind,
+            cap,
+            committed: totals.committed,
+            reserved: totals.reserved,
+            requested: entry.amount,
+          });
+        }
         const id = randomUUID();
         insert.run(
           id,
@@ -9519,7 +9522,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toTeamMessage(row);
   }
 
-  private getTeamTask(taskId: string): TeamTaskRecord {
+  getTeamTask(taskId: string): TeamTaskRecord {
     const row = this.db.prepare('SELECT * FROM team_tasks WHERE id = ?').get(taskId) as
       TeamTaskRow | undefined;
     if (row === undefined) throw new NotFoundError('Team task not found');

@@ -16,6 +16,7 @@ Team利用が明示された依頼では、必ずMCPサーバー \`team\` の実
 
 1. \`team_list_models\` で利用可能なConnection／modelとsource付き能力を確認する。作業に必要な能力でfilterし、unknownを0やfalseと解釈せず、model名やProvider名から適性を推測しない。
 2. \`team_hire_worker\` で重複しない役割のWorkerを必要人数だけ採用する。各作業に選んだconnection ID、provider ID、model IDを\`modelSelection\`へ、その選定根拠を\`modelSelectionReason\`へ必ず明示する。
+   Managerを採用する場合、\`managerPolicy.maxDelegationDepth\`は追加段数ではなくLeader=0とするTeam全体の絶対深度である。depth 1のManagerに直下Workerを雇わせるなら2以上を指定する。
 3. \`team_assign_task\` で各Workerへobjective、scope、nonGoals、doneCriteria、targetPaths、constraintsを含む正式taskを割り当て、返されたexecution IDを記録する。queuedは失敗ではない。
 4. 実行中は \`team_get_status\` を繰り返してcurrentActivity、liveOutput、階層、待機理由を監視する。scope逸脱、誤った実装、重複作業を見つけた時点で、完了を待たず \`team_steer_execution\` を呼ぶ。
 5. \`team_wait_reports\` を繰り返し、記録した全execution IDについてaccepted、queued、runningではなく終端reportが届くまで待つ。

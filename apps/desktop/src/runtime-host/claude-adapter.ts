@@ -199,13 +199,14 @@ export class ClaudeRuntimeAdapter {
 
     let failed = false;
     let sawCompletion = false;
+    const effectiveTimeoutMs = teamMcp === undefined ? this.timeoutMs : 60 * 60_000;
     const timeout = setTimeout(() => {
       if (!failed && !control.canceled) {
         failed = true;
         fail(publicError('RUNTIME_TIMEOUT', 'Claude runtimeがタイムアウトしました。', true));
       }
       void terminateProcessTree(child);
-    }, this.timeoutMs);
+    }, effectiveTimeoutMs);
 
     createInterface({ input: child.stdout }).on('line', (line) => {
       if (failed || control.canceled || line.trim() === '') return;

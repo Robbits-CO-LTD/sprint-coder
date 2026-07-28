@@ -369,7 +369,15 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
       listWorkerReports: vi.fn(() => {
         calls += 1;
         return calls >= 3
-          ? [{ sourceAgentId: 'worker-1', seq: 1, content: '{"status":"succeeded"}' }]
+          ? [
+              {
+                sourceAgentId: 'worker-1',
+                seq: 1,
+                content: '{"status":"succeeded"}',
+                executionId: 'execution-1',
+                attemptId: 'attempt-1',
+              },
+            ]
           : [];
       }) as never,
     });
@@ -386,7 +394,11 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
     )) as { ok: true; reports: readonly { workerId: string }[] };
     expect(result.ok).toBe(true);
     expect(result.reports).toHaveLength(1);
-    expect(result.reports[0]?.workerId).toBe('worker-1');
+    expect(result.reports[0]).toMatchObject({
+      workerId: 'worker-1',
+      executionId: 'execution-1',
+      attemptId: 'attempt-1',
+    });
     expect(calls).toBeGreaterThanOrEqual(3);
   });
 

@@ -252,6 +252,64 @@ export class TeamCoordinator {
     return team === null ? null : this.detail(team.id);
   }
 
+  /** Authority-scoped status for Manager/Worker runtimes. A caller may inspect itself, its
+   * ancestor chain, and (for Managers) its own subtree; sibling branches and their messages,
+   * instructions, activities, and budgets stay hidden. */
+  getForAgent(taskId: string, requesterAgentId: string): TeamDetail | null {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) return null;
+    const snapshot = this.persistence.getTeamSnapshot(team.id);
+    const requester = snapshot.agents.find(({ id }) => id === requesterAgentId);
+    if (requester === undefined) throw new Error('Requesting Agent not found in Team');
+    const visibleAgentIds = new Set([requester.id]);
+
+    let ancestor = requester;
+    while (ancestor.parentAgentId !== null) {
+      const parent = snapshot.agents.find(({ id }) => id === ancestor.parentAgentId);
+      if (parent === undefined) break;
+      visibleAgentIds.add(parent.id);
+      ancestor = parent;
+    }
+    if (requester.canDelegate) {
+      const subtreeAgentIds = new Set([requester.id]);
+      let expanded = true;
+      while (expanded) {
+        expanded = false;
+        for (const agent of snapshot.agents) {
+          if (
+            agent.parentAgentId !== null &&
+            subtreeAgentIds.has(agent.parentAgentId) &&
+            !subtreeAgentIds.has(agent.id)
+          ) {
+            subtreeAgentIds.add(agent.id);
+            expanded = true;
+          }
+        }
+      }
+      for (const agentId of subtreeAgentIds) visibleAgentIds.add(agentId);
+    }
+
+    const detail = this.detail(team.id);
+    return teamDetailSchema.parse({
+      ...detail,
+      workers: detail.workers.filter(({ id }) => visibleAgentIds.has(id)),
+      messages: detail.messages.filter(
+        ({ sourceAgentId, targetAgentId }) =>
+          visibleAgentIds.has(sourceAgentId) && visibleAgentIds.has(targetAgentId),
+      ),
+      executions: detail.executions.filter(
+        ({ assigneeAgentId, createdByAgentId }) =>
+          visibleAgentIds.has(assigneeAgentId) && visibleAgentIds.has(createdByAgentId),
+      ),
+      activities: detail.activities.filter(
+        ({ actorAgentId, subjectAgentId }) =>
+          (actorAgentId === null || visibleAgentIds.has(actorAgentId)) &&
+          (subjectAgentId === null || visibleAgentIds.has(subjectAgentId)),
+      ),
+      budgets: [],
+    });
+  }
+
   async updatePolicy(input: TeamPolicyUpdateInput): Promise<TeamDetail> {
     return this.enqueue(input.taskId, async () => {
       const team = this.persistence.getTeamByTask(input.taskId);
@@ -263,9 +321,9 @@ export class TeamCoordinator {
     });
   }
 
-  /** Read-only replay for the team_wait_reports Leader tool: sendToWorker already persists the
-   * Worker→Leader report synchronously (see persistWorkerResult below), so this just filters
-   * messages targeting the Leader by seq watermark — it never mutates Team/Worker state. */
+  /** Read-only replay for the team_wait_reports Leader tool. Normal Agent chat must never satisfy
+   * a report wait: v2 reports are tied to a terminal execution/attempt, while the legacy path is
+   * accepted only when its payload validates as a WorkerCompletion. */
   listWorkerReports(
     taskId: string,
     afterSeq: number,
@@ -280,7 +338,12 @@ export class TeamCoordinator {
         : snapshot.agents.find(({ id }) => id === targetAgentId);
     if (target === undefined) return [];
     return snapshot.messages
-      .filter((message) => message.targetAgentId === target.id && message.seq > afterSeq)
+      .filter(
+        (message) =>
+          message.targetAgentId === target.id &&
+          message.seq > afterSeq &&
+          this.isTerminalWorkerReport(message),
+      )
       .sort((left, right) => left.seq - right.seq)
       .map((message) => this.messageSummaryFromSnapshot(snapshot, message.id));
   }
@@ -379,6 +442,10 @@ export class TeamCoordinator {
         throw new Error('Team does not accept new workers');
 
       const childDepth = requester.depth + 1;
+      if (childManagerPolicy !== null && childManagerPolicy.maxDelegationDepth <= childDepth)
+        throw new Error(
+          `Manager maxDelegationDepth is an absolute Team depth and must be greater than the new Manager depth ${childDepth}; use at least ${childDepth + 1}`,
+        );
       const childCeiling =
         childManagerPolicy === null
           ? leafWorkerCeiling
@@ -846,14 +913,6 @@ export class TeamCoordinator {
           completion.resolution,
           completion.providerUsage,
         );
-      this.persistWorkerResult(
-        input.teamId,
-        worker,
-        leader,
-        completion.value,
-        input.executionId,
-        attempt.id,
-      );
       const report = workerReportSchema.parse({
         status: completion.value.status === 'succeeded' ? 'completed' : 'failed',
         summary: completion.value.summary,
@@ -888,6 +947,14 @@ export class TeamCoordinator {
         to: completion.value.status === 'succeeded' ? 'completed' : 'failed',
         now: this.isoNow(),
       });
+      this.persistWorkerResult(
+        input.teamId,
+        worker,
+        leader,
+        completion.value,
+        input.executionId,
+        attempt.id,
+      );
       this.persistence.transitionWorkerState(
         worker.id,
         completion.value.status === 'succeeded' ? 'done' : 'failed',
@@ -911,7 +978,37 @@ export class TeamCoordinator {
         this.requeueRateLimitedExecution(input, attemptId, worker, error)
       )
         return;
-      this.persistence.transitionTeamTask(input.teamTaskId, 'failed', this.isoNow());
+      const failureSummary = (
+        error instanceof Error ? error.message : 'Worker runtime failed'
+      ).slice(0, 4_000);
+      const failureCompletion = workerCompletionSchema.parse({
+        status: 'failed',
+        summary: failureSummary,
+        artifacts: [],
+        verification: [
+          { name: 'worker-runtime', outcome: 'fail', detail: failureSummary.slice(0, 2_000) },
+        ],
+        risks: [failureSummary.slice(0, 500)],
+      });
+      const failureReport = workerReportSchema.parse({
+        status: 'failed',
+        summary: failureSummary,
+        findings: [],
+        changedFiles: [],
+        artifacts: [],
+        verification: failureCompletion.verification,
+        risks: failureCompletion.risks,
+        nextActions: [],
+        doneEvidence: [],
+      });
+      if (this.persistence.getTeamTask(input.teamTaskId).status === 'running')
+        this.persistence.completeTeamTaskWithReport({
+          teamTaskId: input.teamTaskId,
+          agentId: worker.id,
+          report: failureReport,
+          doneEvidence: [],
+          now: this.isoNow(),
+        });
       if (attemptId !== null) {
         const attempt = this.persistence.getTeamAttempt(attemptId);
         if (!['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state))
@@ -930,6 +1027,15 @@ export class TeamCoordinator {
           to: 'failed',
           now: this.isoNow(),
         });
+      if (attemptId !== null)
+        this.persistWorkerResult(
+          input.teamId,
+          worker,
+          leader,
+          failureCompletion,
+          input.executionId,
+          attemptId,
+        );
       const current = this.persistence
         .getTeamSnapshot(input.teamId)
         .agents.find(({ id }) => id === worker.id);
@@ -1293,6 +1399,24 @@ export class TeamCoordinator {
     return snapshot.agents.some(({ kind, state }) => kind === 'worker' && state === 'busy');
   }
 
+  /** Completion gate for a Team Leader. A hired Worker that was never assigned is unfinished too:
+   * the Leader must formally assign it, stop it, or wait for its execution to become terminal. */
+  hasUnfinishedTeamWork(taskId: string): boolean {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) return false;
+    if (
+      this.persistence
+        .listTeamExecutions(team.id)
+        .some(({ state }) => !['completed', 'failed', 'canceled'].includes(state))
+    )
+      return true;
+    return this.persistence
+      .getTeamSnapshot(team.id)
+      .agents.some(
+        ({ kind, state }) => kind === 'worker' && !['done', 'failed', 'stopped'].includes(state),
+      );
+  }
+
   private async dispatchWithRetry(
     teamId: string,
     leader: AgentRecord,
@@ -1402,6 +1526,25 @@ export class TeamCoordinator {
       to: 'acked',
       now: this.isoNow(),
     });
+  }
+
+  private isTerminalWorkerReport(message: TeamSnapshot['messages'][number]): boolean {
+    if (message.executionId === null || message.attemptId === null) {
+      try {
+        return workerCompletionSchema.safeParse(JSON.parse(message.content)).success;
+      } catch {
+        return false;
+      }
+    }
+    const execution = this.persistence.getTeamExecution(message.executionId);
+    const attempt = this.persistence.getTeamAttempt(message.attemptId);
+    return (
+      execution.assigneeAgentId === message.sourceAgentId &&
+      execution.createdByAgentId === message.targetAgentId &&
+      attempt.executionId === execution.id &&
+      ['completed', 'failed', 'canceled'].includes(execution.state) &&
+      ['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state)
+    );
   }
 
   private finalizeTeamIfWorkersTerminal(teamId: string): void {

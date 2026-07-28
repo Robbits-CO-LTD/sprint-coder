@@ -29,7 +29,11 @@ vi.mock('./runtime-host', () => ({
   },
 }));
 
-import { RuntimeHostTeamWorkerRuntime } from './team-worker-runtime';
+import {
+  RuntimeHostTeamWorkerRuntime,
+  buildInheritedWorkerContext,
+  type TeamWorkerRuntimeDeps,
+} from './team-worker-runtime';
 
 function worker(canDelegate: boolean): AgentRecord {
   return {
@@ -79,6 +83,8 @@ function runtime(
   overrides: {
     teamMcpFor?: () => { socketPath: string; token: string; guidance: string } | undefined;
     releaseTeamMcp?: (turnId: string) => void;
+    contextFor?: TeamWorkerRuntimeDeps['contextFor'];
+    writeScopeFor?: TeamWorkerRuntimeDeps['writeScopeFor'];
   } = {},
 ): RuntimeHostTeamWorkerRuntime {
   return new RuntimeHostTeamWorkerRuntime({
@@ -86,11 +92,76 @@ function runtime(
     workspaceFor: () => '/workspace',
     catalogFor: () => ({ tools: [] }),
     authorizeEgress: () => true,
-    ...overrides,
+    ...(overrides.teamMcpFor === undefined ? {} : { teamMcpFor: overrides.teamMcpFor }),
+    ...(overrides.releaseTeamMcp === undefined
+      ? {}
+      : { releaseTeamMcp: overrides.releaseTeamMcp }),
+    ...(overrides.contextFor === undefined ? {} : { contextFor: overrides.contextFor }),
+    ...(overrides.writeScopeFor === undefined
+      ? {}
+      : { writeScopeFor: overrides.writeScopeFor }),
   });
 }
 
 describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
+  it('applies inherited context and write capability to the CLI turn', async () => {
+    runtimeHostMock.starts.length = 0;
+    const writableWorker = {
+      ...worker(false),
+      contextInheritancePolicy: 'full_fork' as const,
+      writeCapable: true,
+    };
+    const inherited = buildInheritedWorkerContext(writableWorker, [
+      {
+        id: 'message-1',
+        taskId: writableWorker.taskId,
+        turnId: 'turn-1',
+        author: 'user',
+        content: '親Taskの要件',
+        createdAt: '2026-07-28T00:00:00.000Z',
+      },
+    ]);
+    const subject = runtime({
+      contextFor: () => inherited,
+      writeScopeFor: () => 'workspace-write',
+    });
+
+    await subject.execute({
+      worker: writableWorker,
+      envelope: { ...envelope, targetAgentId: writableWorker.id },
+      content: '実装する',
+    });
+
+    expect(runtimeHostMock.starts[0]?.[6]).toEqual(inherited);
+    expect(runtimeHostMock.starts[0]?.[9]).toBe('workspace-write');
+    expect(runtimeHostMock.starts[0]?.[2]).toContain('Workspace書き込み: 許可範囲内で可');
+  });
+
+  it('does not inherit context for none or unselected selected_items', () => {
+    const messages = [
+      {
+        id: 'message-1',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        author: 'user' as const,
+        content: 'secret parent context',
+        createdAt: '2026-07-28T00:00:00.000Z',
+      },
+    ];
+    expect(
+      buildInheritedWorkerContext(
+        { ...worker(false), contextInheritancePolicy: 'none' },
+        messages,
+      ).fragments,
+    ).toEqual([]);
+    expect(
+      buildInheritedWorkerContext(
+        { ...worker(false), contextInheritancePolicy: 'selected_items' },
+        messages,
+      ).fragments,
+    ).toEqual([]);
+  });
+
   it('passes a caller-bound MCP only to a Manager and releases it after the turn', async () => {
     runtimeHostMock.starts.length = 0;
     const releaseTeamMcp = vi.fn();

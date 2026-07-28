@@ -117,6 +117,29 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('keeps accounting reservations without enforcing caps in unlimited mode', () => {
+      const { persistence } = createPersistence();
+      const { teamId } = buildActiveTeam(persistence);
+      const team = persistence.getTeam(teamId);
+      persistence.updateTeamPolicy(
+        teamId,
+        { ...team.policy, budgetMode: 'unlimited' },
+        team.revision,
+      );
+
+      const amount = DEFAULT_TEAM_BUDGET_LIMITS.team.costCents + 1_000_000;
+      expect(
+        persistence.reserveTeamBudget({
+          teamId,
+          entries: [{ scope: 'team', kind: 'costCents', amount }],
+          purpose: 'unlimited work',
+          now: '2026-07-23T00:00:00.000Z',
+        }),
+      ).toMatchObject([{ amount, state: 'reserved' }]);
+      expect(statusFor(persistence, teamId, 'team', 'costCents').reserved).toBe(amount);
+      persistence.close();
+    });
+
     it('rolls back every entry when a later entry in the batch violates its cap', () => {
       const { persistence } = createPersistence();
       const { teamId } = buildActiveTeam(persistence);

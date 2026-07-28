@@ -161,7 +161,11 @@ import { createStreamingSecretRedactor } from './secret-redactor';
 import { secureLogger } from './secure-logger';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
-import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
+import {
+  RuntimeHostTeamWorkerRuntime,
+  buildInheritedWorkerContext,
+  chooseWorkerRuntime,
+} from './team-worker-runtime';
 import {
   isTeamScenarioInput,
   LEADER_MCP_SYSTEM_PROMPT,
@@ -371,6 +375,15 @@ export class IpcRouter {
           now: new Date().toISOString(),
         }).allowed;
       },
+      contextFor: (worker) =>
+        buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId)),
+      writeScopeFor: (worker, workspacePath) =>
+        worker.writeCapable
+          ? resolveWriteScope(
+              this.persistence.getPermissionPolicy(worker.taskId).preset,
+              workspacePath,
+            )
+          : 'read-only',
       teamMcpFor: (worker, turnId) =>
         worker.canDelegate
           ? this.registerManagerMcp(turnId, worker.taskId, worker.id)
@@ -395,6 +408,8 @@ export class IpcRouter {
           },
           providerId,
         ).allowed,
+      contextFor: (worker) =>
+        buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId)),
       managerGuidance: MANAGER_MCP_SYSTEM_PROMPT,
       managerTools: MANAGER_PROVIDER_TOOLS,
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
@@ -761,17 +776,17 @@ export class IpcRouter {
         const runtime = builtinRuntimeForModelSelection(input.selection);
         if (runtime === null) {
           if (input.selection.connectionId === null || input.selection.requestedModel === null)
-            throw new InvalidModelError('codex');
+            throw new InvalidModelError('provider');
           const connection = await this.providerVerification.requireVerifiedForExecution(
             input.selection.connectionId,
           );
           if (connection.providerId !== input.selection.requestedProvider || !connection.enabled)
-            throw new InvalidModelError('codex');
+            throw new InvalidModelError('provider');
           const models = await this.providerRegistry
             .resolve(connection)
             .listModels(connection, new AbortController().signal);
           if (!models.some(({ modelId }) => modelId === input.selection.requestedModel))
-            throw new InvalidModelError('codex');
+            throw new InvalidModelError('provider');
         } else {
           const capability = await this.runtimeFor(runtime.runtimeKind).probe();
           if (!capability.available) throw new RuntimeUnavailableError(runtime.runtimeKind);
@@ -1848,10 +1863,14 @@ export class IpcRouter {
     let teamMcp: RuntimeTeamMcpOption | undefined;
     if (wantsLeaderMcp) {
       teamMcp = this.registerLeaderMcp(started.turnId, taskId);
-      // Bridge failed to start on this platform (e.g. socket bind failure): degrade to the same
-      // deterministic mock leader every other Claude/Codex team turn already uses, rather than
-      // silently running a real Claude turn with no team tools available at all.
-      if (teamMcp === undefined) kind = 'mock';
+      if (teamMcp === undefined) {
+        this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage: 'Team MCPへ接続できないためTeamを開始できません。',
+          retryable: true,
+        });
+        return;
+      }
     } else if (kind !== 'mock' && teamTurn) {
       // Team intent without Leader MCP always runs the leader orchestration
       // (hire→dispatch→reports→synthesis): the production adapters are no-tools by default, so a
@@ -2252,6 +2271,21 @@ export class IpcRouter {
           });
         }
         if (!roundCompleted) throw new Error('Provider stream ended without a completion event');
+        if (
+          roundToolCalls.length === 0 &&
+          shouldBlockProviderLeaderCompletion(
+            teamTurn,
+            this.teamCoordinator.hasUnfinishedTeamWork(taskId),
+          )
+        ) {
+          messages.push({ role: 'assistant', content: roundOutput.join('') });
+          messages.push({
+            role: 'system',
+            content:
+              'Teamには未終端のWorkerまたはexecutionがあります。最終回答へ進まず、team_get_statusとteam_wait_reportsを使って終端状態を確認し、未割当Workerは正式に割り当てるか停止してください。',
+          });
+          continue;
+        }
         if (roundToolCalls.length === 0) {
           finished = true;
           break;
@@ -2775,9 +2809,22 @@ export function clampCodexEffort(
 }
 
 class InvalidModelError extends Error {
-  constructor(readonly kind: 'codex' | 'claude' = 'codex') {
+  constructor(readonly kind: 'codex' | 'claude' | 'provider' = 'codex') {
     super();
   }
+}
+
+export function invalidModelUserMessage(kind: 'codex' | 'claude' | 'provider'): string {
+  if (kind === 'claude') return '選択したモデルは現在のClaude CLIで利用できません。';
+  if (kind === 'provider') return '選択したモデルは現在のProvider Connectionで利用できません。';
+  return '選択したモデルは現在のCodex CLIで利用できません。';
+}
+
+export function shouldBlockProviderLeaderCompletion(
+  teamTurn: boolean,
+  hasUnfinishedTeamWork: boolean,
+): boolean {
+  return teamTurn && hasUnfinishedTeamWork;
 }
 /**
  * A Codex reasoning level the selected model does not advertise.
@@ -2919,10 +2966,7 @@ function toPublicError(error: unknown): PublicError {
   if (error instanceof InvalidModelError)
     return {
       code: 'INVALID_REQUEST',
-      userMessage:
-        error.kind === 'claude'
-          ? '選択したモデルは現在のClaude CLIで利用できません。'
-          : '選択したモデルは現在のCodex CLIで利用できません。',
+      userMessage: invalidModelUserMessage(error.kind),
       retryable: false,
     };
   if (error instanceof InvalidEffortError)

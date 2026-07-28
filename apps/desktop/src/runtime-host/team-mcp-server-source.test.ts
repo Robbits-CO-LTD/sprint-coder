@@ -146,6 +146,7 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
       )['managerPolicy'],
     ).toMatchObject({
       type: 'object',
+      description: expect.stringContaining('absolute Team depth'),
       required: ['maxDelegationDepth', 'allowManagerChildren'],
       additionalProperties: false,
     });

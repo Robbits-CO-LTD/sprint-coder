@@ -25,6 +25,7 @@ describe('builtin Team skill', () => {
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_send_message');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_read_messages');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_hire_worker');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('Leader=0とするTeam全体の絶対深度');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_get_status');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_steer_execution');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('liveOutput');

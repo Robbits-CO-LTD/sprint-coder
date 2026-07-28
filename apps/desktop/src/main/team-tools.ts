@@ -195,11 +195,13 @@ export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
 const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
   team_list_models:
     '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。',
-  team_hire_worker: '自分の直下にWorkerまたはManagerを雇用します。',
+  team_hire_worker:
+    '自分の直下にWorkerまたはManagerを雇用します。ManagerのmaxDelegationDepthはLeader=0とする絶対深度で、追加段数ではありません。',
   team_assign_task: '自分の直下Workerへtaskを割り当て、execution IDを返します。',
   team_steer_execution: '自分の配下で実行中または待機中のexecutionへ修正指示を送ります。',
   team_cancel_execution: '自分の配下のexecutionを取り消します。',
-  team_get_status: '現在のTeam階層、Agent、execution、待機状態を取得します。',
+  team_get_status:
+    '現在のTeam階層、Agent、execution、待機状態を取得します。Manager/Workerには権限内の祖先・自分の配下だけが返ります。',
   team_wait_events: '指定cursor以降の配下Worker報告を取得します。',
   team_wait_reports: '配下Workerの新しい完了報告を待ちます。',
   team_send_message: '同じTeamのAgentへ監査される直接messageを送信します。',
@@ -416,8 +418,20 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function reportPayload(report: { sourceAgentId: string; seq: number; content: string }) {
-  return { workerId: report.sourceAgentId, seq: report.seq, content: report.content };
+function reportPayload(report: {
+  sourceAgentId: string;
+  seq: number;
+  content: string;
+  executionId: string | null;
+  attemptId: string | null;
+}) {
+  return {
+    workerId: report.sourceAgentId,
+    seq: report.seq,
+    content: report.content,
+    executionId: report.executionId,
+    attemptId: report.attemptId,
+  };
 }
 
 async function executeWaitReports(
@@ -650,7 +664,13 @@ export async function executeTeamTool(
     }
     case 'team_get_status': {
       getStatusArgsSchema.parse(args);
-      return { ok: true, team: coordinator.get(taskId) };
+      return {
+        ok: true,
+        team:
+          options.requesterAgentId === undefined
+            ? coordinator.get(taskId)
+            : coordinator.getForAgent(taskId, options.requesterAgentId),
+      };
     }
     case 'team_wait_events': {
       const request = waitEventsArgsSchema.parse(args);
@@ -776,12 +796,16 @@ team_assign_taskで直下Agentへ正式taskを割り当ててください。requ
 追加しないでください。作業開始時、配下の待機中、最終報告前にteam_read_messagesを確認し、
 必要な情報はteam_send_messageで同じTeamのAgentへ共有してください。配下Agentの終端reportを
 確認・統合したら、必ず自分の親Agentへ結果をteam_send_messageで報告してください。
+managerPolicy.maxDelegationDepthは追加段数ではなくLeader=0とする絶対深度です。depth 1のManagerが
+直下Workerを雇うには2以上を指定してください。budgetのworker spawnSlotsは雇用権限ではなく、
+雇用可否はTeam Policyと自分のManager Policyで判断してください。
 権限はMCP tokenへ固定されています。
 `;
 export const WORKER_MCP_SYSTEM_PROMPT = `あなたはTeamのWorkerです。
 作業開始時と最終報告前、長い作業では区切りごとにteam_read_messagesで自分宛てのmessageを確認し、
-他Agentとの情報共有が必要な場合はteam_get_statusで永続Agent IDを確認してから
-team_send_messageを使ってください。taskIdや送信元identityを引数へ追加しないでください。
+他Agentとの情報共有には親から渡された永続Agent IDを使ってteam_send_messageを呼び出してください。
+team_get_statusには自分の権限範囲だけが表示されます。宛先IDが不明なら親へ確認してください。
+taskIdや送信元identityを引数へ追加しないでください。
 権限はMCP tokenへ固定されています。Team管理ツールを呼び出してはいけません。
 `;
 

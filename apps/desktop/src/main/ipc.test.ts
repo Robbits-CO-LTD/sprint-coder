@@ -48,7 +48,27 @@ import {
   turnSubscriptionInputSchema,
   xAIConnectionCreateInputSchema,
 } from '@sprint-coder/contracts';
-import { clampCodexEffort, isTrustedIpcSender } from './ipc';
+import {
+  clampCodexEffort,
+  invalidModelUserMessage,
+  isTrustedIpcSender,
+  shouldBlockProviderLeaderCompletion,
+} from './ipc';
+
+describe('Provider Team completion and model errors', () => {
+  it('does not mislabel an external Provider model error as a Codex CLI error', () => {
+    expect(invalidModelUserMessage('provider')).toBe(
+      '選択したモデルは現在のProvider Connectionで利用できません。',
+    );
+    expect(invalidModelUserMessage('provider')).not.toContain('Codex CLI');
+  });
+
+  it('blocks only Team Leader completion while Team work remains unfinished', () => {
+    expect(shouldBlockProviderLeaderCompletion(true, true)).toBe(true);
+    expect(shouldBlockProviderLeaderCompletion(true, false)).toBe(false);
+    expect(shouldBlockProviderLeaderCompletion(false, true)).toBe(false);
+  });
+});
 
 // Adversarial IPC hardening (Phase 7, IMPLEMENTATION_PLAN §10.4, NFR-SEC-03). Two independent
 // properties are proven here without needing a live BrowserWindow/WebContents:

@@ -87,10 +87,12 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
   });
 
   it('runs an external Worker and returns normalized identity and usage', async () => {
+    const requests: unknown[] = [];
     const runtime: ProviderRuntime = {
       verify: vi.fn(),
       listModels: vi.fn(),
-      async *execute() {
+      async *execute(_connection, request) {
+        requests.push(request);
         yield { type: 'output_delta', text: '調査完了' };
         yield {
           type: 'resolution',
@@ -127,6 +129,22 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       registry,
       getConnection: () => connection,
       authorizeEgress: () => true,
+      contextFor: () => ({
+        fragments: [
+          {
+            id: 'team-context-summary:worker-1',
+            taskId: 'task-1',
+            source: 'compaction',
+            trust: 'assistant',
+            tokenEstimate: 4,
+            content: '親Taskの要約',
+            createdAt: '2026-07-28T00:00:00.000Z',
+            messageId: null,
+          },
+        ],
+        usageEvents: [],
+        compacted: true,
+      }),
       managerGuidance: 'manager guidance',
       managerTools: [],
       workerGuidance: 'worker guidance',
@@ -148,6 +166,37 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     });
     expect(result.providerUsage).toMatchObject({ inputTokens: 10, outputTokens: 4 });
     expect(result.usage).toMatchObject({ costCents: 1, tokens: 14, toolCalls: 0 });
+    expect(requests[0]).toMatchObject({
+      messages: [
+        { role: 'assistant', content: '[継承コンテキスト:compaction]\n親Taskの要約' },
+        expect.objectContaining({ role: 'user' }),
+      ],
+    });
+  });
+
+  it('fails closed instead of pretending an external API Worker can write', async () => {
+    const adapter = new ProviderAwareTeamWorkerRuntime({
+      fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },
+      verification: {
+        requireVerifiedForExecution: async () => connection,
+      } as unknown as ProviderVerificationService,
+      registry: new MainProviderRegistry(),
+      getConnection: () => connection,
+      authorizeEgress: () => true,
+      managerGuidance: 'manager',
+      managerTools: [],
+      workerGuidance: 'worker',
+      workerTools: [],
+      executeManagerTool: vi.fn(),
+    });
+
+    await expect(
+      adapter.execute({
+        worker: { ...providerWorker(), writeCapable: true },
+        envelope,
+        content: 'ファイルを変更する',
+      }),
+    ).rejects.toThrow('External API Worker cannot write');
   });
 
   it('lets an external API Manager execute coordinator-bound Team tools and continue', async () => {

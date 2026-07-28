@@ -307,6 +307,22 @@ if (runsWithElectronAbi)
         depth: 2,
         canDelegate: false,
       });
+      await coordinator.sendAgentMessageAs(
+        task.id,
+        sibling.id,
+        team.leaderAgentId,
+        '別部門だけの非公開メッセージ',
+      );
+      const childView = coordinator.getForAgent(task.id, child.id);
+      expect(childView?.workers.map(({ id }) => id)).toEqual(
+        expect.arrayContaining([team.leaderAgentId, manager.id, child.id]),
+      );
+      expect(childView?.workers.map(({ id }) => id)).not.toContain(sibling.id);
+      expect(childView?.messages).toEqual([]);
+      expect(childView?.budgets).toEqual([]);
+      expect(coordinator.getForAgent(task.id, manager.id)?.workers.map(({ id }) => id)).not.toContain(
+        sibling.id,
+      );
       await expect(
         coordinator.hireWorkerAs(
           {
@@ -371,6 +387,14 @@ if (runsWithElectronAbi)
           targetAgentId: manager.id,
         }),
       ]);
+      await coordinator.sendAgentMessageAs(
+        task.id,
+        child.id,
+        manager.id,
+        'これは通常連絡であり終端reportではない',
+      );
+      const terminalReportSeq = coordinator.listWorkerReports(task.id, 0, manager.id)[0]?.seq ?? 0;
+      expect(coordinator.listWorkerReports(task.id, terminalReportSeq, manager.id)).toEqual([]);
       await expect(
         coordinator.assignTaskAs(
           {
@@ -382,6 +406,35 @@ if (runsWithElectronAbi)
           manager.id,
         ),
       ).rejects.toThrow('direct child');
+      persistence.close();
+    });
+
+    it('rejects a Manager policy that cannot reach any child depth', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Manager absolute delegation depth');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const team = persistence.promoteTaskToTeam(task.id);
+
+      await expect(
+        coordinator.hireWorkerAs(
+          {
+            taskId: task.id,
+            role: '調査部長',
+            objective: '直属Workerへ再委譲する',
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          },
+          team.leaderAgentId,
+          {
+            maxDirectChildren: 2,
+            maxDelegationDepth: 1,
+            allowManagerChildren: false,
+          },
+        ),
+      ).rejects.toThrow(
+        'maxDelegationDepth is an absolute Team depth and must be greater than the new Manager depth 1',
+      );
+      expect(persistence.getTeamSnapshot(team.id).agents).toHaveLength(1);
       persistence.close();
     });
 
@@ -555,6 +608,52 @@ if (runsWithElectronAbi)
       runtime.releases.shift()?.();
       await waitFor(() => persistence.getTeamExecution(first.executionId).state === 'completed');
       expect(runtime.contents).toEqual(['running']);
+      persistence.close();
+    });
+
+    it('persists a terminal, identity-bound report when a scheduled runtime fails', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Runtime failure report');
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          throw new Error('deliberate runtime failure');
+        },
+        async stop() {},
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'failing worker',
+        objective: 'prove failure reporting',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'fail now',
+        doneCriteria: ['never satisfied'],
+      });
+
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+      );
+      const attempt = persistence.listTeamAttempts(submission.executionId)[0];
+      const reports = coordinator.listWorkerReports(task.id, 0);
+      expect(attempt).toMatchObject({ state: 'failed', terminalReason: 'runtime_failure' });
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({
+        sourceAgentId: worker.id,
+        executionId: submission.executionId,
+        attemptId: attempt?.id,
+      });
+      expect(JSON.parse(reports[0]!.content)).toMatchObject({
+        status: 'failed',
+        summary: 'deliberate runtime failure',
+      });
       persistence.close();
     });
 

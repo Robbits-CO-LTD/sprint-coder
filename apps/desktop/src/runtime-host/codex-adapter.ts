@@ -156,13 +156,14 @@ export class CodexRuntimeAdapter {
     const sendResponse = (id: number | string, result: unknown): void => {
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
     };
+    const effectiveTimeoutMs = teamMcp === undefined ? this.timeoutMs : 60 * 60_000;
     const timeout = setTimeout(() => {
       if (!failed && !control.canceled) {
         failed = true;
         fail(publicError('RUNTIME_TIMEOUT', 'Codex runtimeがタイムアウトしました。', true));
       }
       void terminateProcessTree(child);
-    }, this.timeoutMs);
+    }, effectiveTimeoutMs);
 
     createInterface({ input: child.stdout }).on('line', (line) => {
       if (failed || control.canceled || line.trim() === '') return;

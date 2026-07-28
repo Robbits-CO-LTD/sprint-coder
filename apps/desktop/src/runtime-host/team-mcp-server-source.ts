@@ -91,9 +91,17 @@ const TOOLS = [
         },
         managerPolicy: {
           type: 'object',
+          description:
+            'Include only when hiring a Manager. maxDelegationDepth is the absolute Team depth, not an additional-level count: Leader=0, its Manager=1, and that Manager needs at least 2 to hire a direct child.',
           properties: {
             maxDirectChildren: { type: 'integer', minimum: 1 },
-            maxDelegationDepth: { type: 'integer', minimum: 1, maximum: 4 },
+            maxDelegationDepth: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 4,
+              description:
+                'Absolute deepest Agent depth this Manager may create. It must be greater than the new Manager own depth.',
+            },
             allowManagerChildren: { type: 'boolean' },
           },
           required: ['maxDelegationDepth', 'allowManagerChildren'],
@@ -143,7 +151,7 @@ const TOOLS = [
   },
   {
     name: 'team_get_status',
-    description: 'Get the current Team, Worker, message, delivery, and budget snapshot.',
+    description: 'Get the current authority-scoped Team snapshot. Manager and Worker callers cannot inspect sibling branches.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
