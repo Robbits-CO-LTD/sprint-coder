@@ -645,6 +645,9 @@ export interface SprintCoderApi {
     createGeminiConnection(
       input: import('@sprint-coder/contracts').GeminiConnectionCreateInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createXAIConnection(
+      input: import('@sprint-coder/contracts').XAIConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
     verifyConnection(
       connectionId: string,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;

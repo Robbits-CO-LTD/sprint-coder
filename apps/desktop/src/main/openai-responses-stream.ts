@@ -4,6 +4,7 @@ export async function* normalizeOpenAIResponsesStream(
   body: ReadableStream<Uint8Array>,
   providerId: string,
   requestedModel: string,
+  options: Readonly<{ costTicksPerUsd?: number }> = {},
 ): AsyncIterable<CanonicalProviderEvent> {
   for await (const value of readServerSentJson(body)) {
     const event = asRecord(value);
@@ -55,7 +56,10 @@ export async function* normalizeOpenAIResponsesStream(
           cacheReadTokens: integerOrNull(inputDetails?.cached_tokens),
           cacheWriteTokens: null,
           reasoningTokens: integerOrNull(outputDetails?.reasoning_tokens),
-          providerCost: null,
+          providerCost: providerCost(
+            usage?.cost_in_usd_ticks,
+            options.costTicksPerUsd,
+          ),
           source: 'provider_api',
         },
       };
@@ -139,4 +143,20 @@ function integerOrNull(value: unknown): number | null {
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value.slice(0, 128) : null;
+}
+
+function providerCost(
+  ticks: unknown,
+  ticksPerUsd: number | undefined,
+): { amount: number; currency: 'USD' } | null {
+  if (
+    ticksPerUsd === undefined ||
+    !Number.isFinite(ticksPerUsd) ||
+    ticksPerUsd <= 0 ||
+    typeof ticks !== 'number' ||
+    !Number.isFinite(ticks) ||
+    ticks < 0
+  )
+    return null;
+  return { amount: ticks / ticksPerUsd, currency: 'USD' };
 }

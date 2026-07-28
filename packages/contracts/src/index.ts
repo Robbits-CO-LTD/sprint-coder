@@ -1250,6 +1250,15 @@ export const geminiConnectionCreateInputSchema = z
 export type GeminiConnectionCreateInput = z.infer<
   typeof geminiConnectionCreateInputSchema
 >;
+export const xAIConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+  })
+  .strict();
+export type XAIConnectionCreateInput = z.infer<
+  typeof xAIConnectionCreateInputSchema
+>;
 export const capabilitySourceSchema = z.enum(['provider_api', 'official_curated', 'unknown']);
 export type CapabilitySource = z.infer<typeof capabilitySourceSchema>;
 export type CatalogValue<T> = Readonly<{
@@ -1962,6 +1971,7 @@ export interface SprintCoderApi {
     createGeminiConnection(
       input: GeminiConnectionCreateInput,
     ): Promise<ProviderConnection>;
+    createXAIConnection(input: XAIConnectionCreateInput): Promise<ProviderConnection>;
     verifyConnection(connectionId: string): Promise<ProviderConnection>;
   };
   permissions: {
@@ -2053,6 +2063,7 @@ export const IPC_CHANNELS = {
   providersCreateOpenRouterConnection: 'sprint-coder:providers:create-openrouter-connection',
   providersCreateAnthropicConnection: 'sprint-coder:providers:create-anthropic-connection',
   providersCreateGeminiConnection: 'sprint-coder:providers:create-gemini-connection',
+  providersCreateXAIConnection: 'sprint-coder:providers:create-xai-connection',
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',

@@ -96,6 +96,17 @@ P5aではModels APIが公開しないtool／structured／multimodal能力をモ�
 `unknown`にする。P5bも既存text-only Chat／Team経路との後方互換を維持する。
 実API smokeとpackaged E2Eはfinal gateへ留保する。
 
+## P6 completion
+
+- xAI API Connection、Main-only secret、Bearer認証、無料catalog verificationを追加
+- `/models`と`/language-models`を統合し、Grokのcontext、input modalities、価格を保持
+- OpenAI互換Responses request／SSE helperを再利用し、xAI固有Adapterを独立登録
+- `cost_in_usd_ticks`を公式の`10^10 ticks = 1 USD`で実課金額へ正規化
+- 429、permission、not found、5xx、cancellationをcanonical errorへ変換
+- reasoning／tool／structured能力はモデル名から推測せず、APIが公開しない値を`unknown`に維持
+
+実API smokeとpackaged E2Eはfinal gateへ留保する。
+
 ## Shared stop rule
 
 Sliceの受入条件がgreenになったら停止して証拠を報告する。隣接Provider、cleanup、将来の

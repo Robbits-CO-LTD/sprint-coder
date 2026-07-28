@@ -147,7 +147,7 @@ export class OpenAIProviderClient implements ProviderRuntime {
       const response = await this.authenticatedFetch(connection, '/responses', controller.signal, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(openAIResponseRequest(parsed)),
+          body: JSON.stringify(openAICompatibleResponseRequest(parsed)),
       });
       if (!response.ok) {
         const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
@@ -254,7 +254,9 @@ function isOpenAIModelList(value: unknown): value is OpenAIModelList {
   );
 }
 
-function openAIResponseRequest(request: ProviderExecutionRequest): Record<string, unknown> {
+export function openAICompatibleResponseRequest(
+  request: ProviderExecutionRequest,
+): Record<string, unknown> {
   return {
     model: request.modelId,
     stream: true,

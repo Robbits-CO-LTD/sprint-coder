@@ -83,6 +83,7 @@ import {
   workerSummarySchema,
   turnCancelInputSchema,
   turnEventSchema,
+  xAIConnectionCreateInputSchema,
   turnQueueInputSchema,
   turnQueueResultSchema,
   turnSnapshotSchema,
@@ -180,6 +181,7 @@ import {
   GeminiProviderClient,
   parseGeminiCredential,
 } from './gemini-provider-client';
+import { XAIProviderClient, parseXAICredential } from './xai-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
 import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
 
@@ -291,6 +293,16 @@ export class IpcRouter {
       runtimeKind: 'official_api',
       providerId: 'google',
       runtime: gemini,
+    });
+    const xai = new XAIProviderClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('xAI Connection has no secret reference');
+      return parseXAICredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'xai',
+      runtime: xai,
     });
     this.providerVerification = new ProviderVerificationService(
       this.persistence,
@@ -665,6 +677,21 @@ export class IpcRouter {
           '',
           IPC_CHANNELS.providersCreateGeminiConnection,
           () => this.providerConnections.createGemini(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateXAIConnection,
+      xAIConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateXAIConnection,
+          () => this.providerConnections.createXAI(input),
         ).value;
         return this.providerVerification.verify(created);
       },

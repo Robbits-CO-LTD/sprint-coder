@@ -72,6 +72,7 @@ import {
   workerSummarySchema,
   turnCancelInputSchema,
   turnEventSchema,
+  xAIConnectionCreateInputSchema,
   turnQueueInputSchema,
   turnQueueResultSchema,
   turnSnapshotSchema,
@@ -391,6 +392,13 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersCreateGeminiConnection,
         geminiConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createXAIConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateXAIConnection,
+        xAIConnectionCreateInputSchema,
         providerConnectionSchema,
         input,
       ),
