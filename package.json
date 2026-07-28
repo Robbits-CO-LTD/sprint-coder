@@ -14,6 +14,7 @@
     "build:native-safe-fs:test": "node build-native-safe-fs.mjs --test",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "test:provider-smoke": "vitest run apps/desktop/src/main/provider-release-smoke.test.ts",
     "lint": "eslint \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\"",
     "lint:fix": "eslint \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\" --fix",
     "format": "prettier --write \"apps/*/src/**/*.{ts,tsx,css}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",

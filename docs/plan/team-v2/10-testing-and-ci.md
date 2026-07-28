@@ -59,6 +59,12 @@ accessibility treeを検査する。
 実API smokeはsecret付きの保護されたrelease jobまたはローカルrelease gateで行い、fork PRへ
 secretを渡さない。生成tokenを最小化し、実費を報告する。
 
+実行ハーネスは`provider-release-smoke.test.ts`、保護workflowは`provider-smoke.yml`とする。
+通常のunit testでは外部通信せず、`SPRINT_CODER_PROVIDER_SMOKE=1`の明示時だけ有効になる。
+`SPRINT_CODER_PROVIDER_SMOKE_REQUIRED`へ列挙したProviderは、secretやsmoke modelがなければ
+skipではなくfailedとする。各Providerはverification、catalog、実streaming、resolution、
+usage、completionを個別に検証し、secretを含まないJSON evidenceを出力する。
+
 ## Packaged and Computer Use
 
 - 3OS CIでtypecheck、lint、unit、package smoke

@@ -43,7 +43,10 @@ C1を拡大せず、将来Sliceへ分離する。
   最小verification probeを使用する。NIMのcustom Base URL、CloudflareのAccount IDもProfile宣言で
   generic UIへ現れる。5社に専用Adapterやgeneric Runtime内のProvider名分岐は追加していない。
   対象52件、contracts 29件、対象lintがgreen
-- C2b: Provider別の実API smoke resultと費用をfinal gateで記録し、Pack B GAを判定する
+- C2b: Provider別のopt-in実API smoke harnessと保護workflowを追加。required指定時はsecret／model
+  不足をfailedとし、verification、catalog、実streaming、resolution、usage、completionを
+  Provider別JSON evidenceへ記録する。資格情報を用いたPack B実行と費用記録はfinal gateで行い、
+  それまではPack B GAと判定しない
 
 ## Independence
 
