@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { ModelSelection } from '@sprint-coder/contracts';
 import type {
   AccessPreset,
   AutoPermissionDecision,
@@ -75,6 +76,26 @@ export type CommandCardState = Readonly<{
   command: CommandSummary;
   tail: CommandTailProjection;
 }>;
+
+/**
+ * What the Composer needs to decide *which* model picker to show, and what the V2 one starts from
+ * (UI slice U1b).
+ *
+ * Deliberately small: the catalog itself is never mirrored here. `models.query` is Main-owned,
+ * paged and filtered, and holding its pages in the store would make the renderer the second place
+ * a 1000+ model catalog lives — the picker keeps its own page window instead and this state only
+ * carries the two facts that outlive the popup being open.
+ */
+export type ModelPickerState = {
+  /** The Task the two fields below were resolved for. */
+  taskId: string | null;
+  /** `multiProviderModelPickerV2` as Main reported it. `null` while unresolved — the Composer keeps
+   * the legacy chip until this is explicitly `true`, so an in-flight (or never-arriving) answer
+   * degrades to today's UI rather than to an empty one. */
+  enabled: boolean | null;
+  /** Main's canonical selection for the Task. Null when Main has not answered yet. */
+  selection: ModelSelection | null;
+};
 
 // Re-exported so existing importers keep working; the definitions moved to lib/stages.ts to break
 // the cycle with lib/turn-progress.ts (issue #16).
@@ -159,6 +180,9 @@ type AppState = {
    * backend hasn't wired the `settings` API yet — see `loadRuntime`). */
   runtime: RuntimeState;
 
+  /** Flag + canonical selection for the multi-provider Model Picker (UI slice U1b). */
+  modelPicker: ModelPickerState;
+
   /** Whether any reasoning has arrived for a turn (issue #17). Only a boolean and a truncation flag
    * live in the store — the text itself stays in lib/reasoning-buffer.ts, because putting it here
    * would make every fragment a store update and every update a re-render of every subscriber. */
@@ -179,6 +203,8 @@ type AppState = {
 
   init(): Promise<void>;
   loadRuntime(): Promise<void>;
+  loadModelPicker(taskId: string): Promise<void>;
+  setModelSelection(taskId: string, selection: ModelSelection): Promise<void>;
   acknowledgeRecovery(): void;
   setRuntime(kind: RuntimeKind): Promise<void>;
   setModel(model: string): Promise<void>;
@@ -311,6 +337,18 @@ async function loadPermission(
   } catch {
     // Non-fatal: keep the deny-by-default Ask preset while task data remains usable.
   }
+}
+
+/** Re-reads the canonical selection after a *legacy* Runtime/Model write (UI slice U1b).
+ *
+ * Both surfaces can be on screen at once — the Settings dialog's native model select and the V2
+ * picker in the Composer — and Main derives one from the other, so a legacy write silently moves
+ * what the V2 picker should be showing as selected. No-ops before a Task is selected, because there
+ * is no per-Task selection to re-read yet. */
+async function refreshModelPicker(get: () => AppState): Promise<void> {
+  const taskId = get().selectedTaskId;
+  if (taskId === null) return;
+  await get().loadModelPicker(taskId);
 }
 
 function subscribeToTask(
@@ -687,6 +725,7 @@ export const useAppStore = create<AppState>((set, get) => {
       effort: 'medium',
       codexEffort: '',
     },
+    modelPicker: { taskId: null, enabled: null, selection: null },
     reasoningSeenByTurn: {},
     recovery: null,
     recoveryAcknowledged: false,
@@ -770,14 +809,81 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ recoveryAcknowledged: true });
     },
 
+    // Every legacy runtime read/write below carries the selected Task id (UI slice U1b). Main
+    // resolves that against the same per-Task canonical model selection the V2 picker writes
+    // through `models.setSelection`, so the old chips and the new one cannot drift into two
+    // different notions of "the model this Task uses" — a Task-less call would read and write the
+    // global fallback instead. The id is taken from the store rather than added to each action's
+    // signature so the callers that predate this (SettingsDialog, the Composer chips) get the
+    // canonical behaviour without changing.
     async loadRuntime() {
       if (!window.sprintCoder || typeof window.sprintCoder.settings?.getRuntime !== 'function')
         return;
+      const taskId = get().selectedTaskId;
       try {
-        const runtime = await window.sprintCoder.settings.getRuntime();
+        const runtime = await window.sprintCoder.settings.getRuntime(taskId ?? undefined);
+        // A slow answer for a Task the user has already left would overwrite the newer one.
+        if (get().selectedTaskId !== taskId) return;
         set({ runtime });
       } catch {
         // Non-fatal: keep the last-known (or default) runtime state.
+      }
+    },
+
+    /** Resolves the Model Picker flag and Main's canonical selection for `taskId`.
+     *
+     * Uses the smallest possible catalog query (one row) — the answer this needs is the envelope,
+     * not the page. The picker fetches real pages itself, and only while it is open. */
+    async loadModelPicker(taskId: string) {
+      if (!window.sprintCoder || typeof window.sprintCoder.models?.query !== 'function') {
+        // No `models` API at all: the Composer must keep the legacy chip forever, not wait.
+        set({ modelPicker: { taskId, enabled: false, selection: null } });
+        return;
+      }
+      try {
+        const result = await window.sprintCoder.models.query({
+          taskId,
+          text: '',
+          connectionIds: [],
+          providerIds: [],
+          capabilities: [],
+          availableOnly: true,
+          cursor: null,
+          limit: 1,
+        });
+        if (get().selectedTaskId !== taskId) return;
+        set({
+          modelPicker: {
+            taskId,
+            enabled: result.multiProviderModelPickerV2,
+            selection: result.selection,
+          },
+        });
+      } catch {
+        // A failed probe degrades to the legacy chip rather than to no picker at all.
+        if (get().selectedTaskId !== taskId) return;
+        set({ modelPicker: { taskId, enabled: false, selection: null } });
+      }
+    },
+
+    /** Writes the canonical per-Task model selection (UI slice U1b).
+     *
+     * Optimistic like the other selectors here, and followed by `loadRuntime()` so the legacy
+     * Runtime/Effort chips reflect the same choice — Main derives the built-in runtime kind and
+     * model from the selection, so leaving them stale would show two answers at once. */
+    async setModelSelection(taskId: string, selection: ModelSelection) {
+      if (!window.sprintCoder || typeof window.sprintCoder.models?.setSelection !== 'function')
+        return;
+      const previous = get().modelPicker;
+      set({ modelPicker: { taskId, enabled: previous.enabled, selection } });
+      try {
+        const saved = await window.sprintCoder.models.setSelection(taskId, selection);
+        if (get().selectedTaskId === taskId)
+          set({ modelPicker: { taskId, enabled: previous.enabled, selection: saved } });
+        await get().loadRuntime();
+      } catch (err) {
+        set({ modelPicker: previous });
+        set({ error: describeError(err) });
       }
     },
 
@@ -788,8 +894,9 @@ export const useAppStore = create<AppState>((set, get) => {
       if (previous.kind === kind) return;
       set({ runtime: { ...previous, kind } });
       try {
-        await window.sprintCoder.settings.setRuntime(kind);
+        await window.sprintCoder.settings.setRuntime(kind, get().selectedTaskId ?? undefined);
         await get().loadRuntime();
+        await refreshModelPicker(get);
       } catch (err) {
         set({ runtime: previous });
         const code = errorCode(err);
@@ -812,8 +919,9 @@ export const useAppStore = create<AppState>((set, get) => {
       if (previous.model === model || !previous.models.some(({ id }) => id === model)) return;
       set({ runtime: { ...previous, model } });
       try {
-        await window.sprintCoder.settings.setModel(model);
+        await window.sprintCoder.settings.setModel(model, get().selectedTaskId ?? undefined);
         await get().loadRuntime();
+        await refreshModelPicker(get);
       } catch (err) {
         set({ runtime: previous });
         set({ error: describeError(err) });
@@ -956,6 +1064,10 @@ export const useAppStore = create<AppState>((set, get) => {
       void restoreDraft(taskId, apply, get);
       void loadWorkspace(taskId, apply, get);
       void loadPermission(taskId, apply, get);
+      // The model selection is per-Task (UI slice U1b), so both the legacy chips' source and the
+      // V2 picker's flag/selection have to be re-read on every switch — not just at init.
+      void get().loadRuntime();
+      void get().loadModelPicker(taskId);
       // Fetched alongside the other per-task reads rather than reconstructed from replayed events:
       // metadata only, so this stays cheap even for a Task with many images (issue #11).
       // Read rather than replayed: the event port only carries events newer than the snapshot's

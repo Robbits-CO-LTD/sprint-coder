@@ -5,7 +5,7 @@
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
   P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b、
-  UI U0/U1a完了
+  UI U0/U1a/U1b完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -151,7 +151,10 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   上限到達時のterminal reasonは`rate_limited`になる。
 - UI U1aでMain-owned catalog query、revision単位index、opaque cursor paging、
   Task canonical selection set、`multiProviderModelPickerV2` flagをIPC契約へ追加した。
-  旧runtime get/setもtask-aware入力を受けられるため、U1bで両Pickerを同じselectionへ接続できる。
+  旧runtime get/setもtask-aware入力を受けられるため、両Pickerは同じselectionへ接続される。
+- UI U1bでflag ON時だけ使う共通Pickerを追加した。Rendererはcatalog query interfaceだけを読み、
+  Main側検索／cursor paging、常時virtualization、keyboard、ARIA、focus復元、不明値表示に対応した。
+  flag OFFまたはAPI不在時は旧Pickerを維持する。全体E2Eは全実装後のfinal gateへ留保する。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。

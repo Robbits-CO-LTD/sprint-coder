@@ -1753,6 +1753,90 @@ button {
   cursor: not-allowed;
   opacity: 0.45;
 }
+/* ---------- Multi-provider Model Picker (UI slice U1b) ----------
+   Sits on `.runtime-menu` so it inherits the existing popup's surface, radius, shadow and entry
+   animation — the picker is a bigger menu, not a new visual idiom. Only what windowing actually
+   requires is added: a fixed row height, and a scrollport whose own height is the constant the
+   arithmetic in lib/model-picker-virtualization.ts uses. */
+.model-picker-v2 {
+  min-width: 340px;
+  max-width: min(420px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mpv2-search {
+  width: 100%;
+  padding: 6px 9px;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+}
+.mpv2-search::placeholder {
+  color: var(--text-secondary);
+}
+.mpv2-count {
+  padding: 0 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.mpv2-list {
+  overflow-y: auto;
+  /* `overflow-anchor` off: the browser's scroll anchoring picks a mounted row to hold still, and
+     under windowing that row can be unmounted by the very re-render the scroll caused — which
+     reads as the list jumping while paging. */
+  overflow-anchor: none;
+}
+/* The one hard requirement of the windowing scheme: every row is exactly MODEL_ROW_HEIGHT_PX tall,
+   so a row's offset is its index times a constant and no row has to be measured. `box-sizing`
+   keeps padding inside that height; the meta line is clipped rather than allowed to wrap. */
+.mpv2-row {
+  box-sizing: border-box;
+  height: 46px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  padding: 4px 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.mpv2-row.active {
+  background: var(--bg-hover);
+}
+.mpv2-row.selected {
+  background: var(--bg-selected);
+}
+.mpv2-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mpv2-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mpv2-empty,
+.mpv2-more {
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The global squash below already flattens the inherited `msgIn`, but the picker states this for
+     itself: its only motion is the popup entrance, and the popup is fully legible without it. */
+  .model-picker-v2 {
+    animation: none;
+  }
+}
 .runtime-menu-title {
   font-size: 12.5px;
   font-weight: 600;

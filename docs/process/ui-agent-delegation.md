@@ -49,6 +49,12 @@ preflightの結果、CLI version、model、exit status、実費を記録する�
 初回U0はPlan modeの内部探索で設定外modelが使われ、$3上限で報告なし終了したため不採用とした。
 Agent／Taskを禁止した再実行は設定modelだけを使用し、$0.859953、変更0で完了した。
 
+同日のU1bはAgent／Taskとfallbackを禁止し、設定model自身だけへ最大6fileを委託した。
+第1往復は$5上限、第2往復は$3上限で完了report前に停止したため、どちらも自動の完了判定には
+使わなかった。生成差分はメインAgentがreviewし、第2往復までの合計差分が1000行以内であること、
+対象外fileがないこと、desktop typecheck、対象file lint、virtualization unit 17件のgreenを
+確認してU1bを受理した。full suite、E2E、packaged確認は全実装後のfinal gateへ留保した。
+
 ## Delegation scope
 
 - Provider settings

@@ -5,6 +5,7 @@ import type { RuntimeState } from '../../store/appStore';
 import { ContextBar } from './ContextBar';
 import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square, Target } from '../icons';
 import { ComposerMenu } from './ComposerMenu';
+import { ModelPickerV2 } from '../ModelPickerV2';
 import { IMAGEGEN_PREFIX } from './imagegen';
 import type { ComposerMenuItem } from './ComposerMenu';
 import { SlashCommandMenu } from './SlashCommandMenu';
@@ -66,6 +67,13 @@ export function Composer({ taskId }: { taskId: string }) {
   const toast = useAppStore((s) => s.toast);
   const dismissToast = useAppStore((s) => s.dismissToast);
   const runtime = useAppStore((s) => s.runtime);
+  // The V2 Model Picker replaces the legacy chip only once Main has answered `true` for *this*
+  // Task (UI slice U1b). `enabled === null` (unresolved, in flight, or a backend without the
+  // `models` API) and a stale answer for the previous Task both keep the legacy chip, so the flag
+  // being off — or the query never arriving — is indistinguishable from today's UI.
+  const modelPickerV2 = useAppStore(
+    (s) => s.modelPicker.enabled === true && s.modelPicker.taskId === taskId,
+  );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [sendMode, setSendMode] = useState<SendMode>('queue');
   const [wasTurnActive, setWasTurnActive] = useState(false);
@@ -271,7 +279,11 @@ export function Composer({ taskId }: { taskId: string }) {
           />
           <div className="composer-row">
             <RuntimeChip />
-            <ModelChip />
+            {/* Keyed by Task: the picker's local state (the open popup, the typed search, the
+                loaded page window, the display name of the row just chosen) all belong to one
+                Task, so switching Tasks remounts it rather than adjusting that state during
+                render. */}
+            {modelPickerV2 ? <ModelPickerV2 key={taskId} taskId={taskId} /> : <ModelChip />}
             <EffortChip />
             <PlusMenu
               taskId={taskId}
