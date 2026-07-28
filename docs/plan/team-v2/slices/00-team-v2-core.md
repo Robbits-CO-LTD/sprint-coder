@@ -49,8 +49,12 @@ Proof: deterministic Runtimeで8 parallel、depth、steer、crash／restart。
 
 - B1a完了: 旧3 Worker hard cap撤廃、5 Worker雇用回帰、明示的かつcaller-boundな
   `requesterAgentId`を受けるCoordinator境界、Manager Policyに基づく子Agent登録。
-- B1b次着手: 可変人数Canvas／List表示。Manager MCP caller bindingはRuntime接続Sliceで行い、
-  model-controlled引数からAgent identityを受け取らない。
+- B1b完了: 可変人数Canvas／List表示、先頭3配置互換、4人目以降の決定的配置、
+  10 Worker pure geometry test、5 Worker packaged E2E。UI実装は規定どおり
+  `UI_DELEGATION_MODEL`を使うClaude CLIへ委託し、メインAgentが差分とtestを再検証した。
+- B2次着手: global実8並列Schedulerと、完了を待たずexecution IDを返すassign境界。
+  Manager MCP caller bindingはRuntime接続Sliceで行い、model-controlled引数からAgent
+  identityを受け取らない。
 
 ## Core C — User experience and GA
 

@@ -3,7 +3,6 @@ import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
 
-const MAX_WORKERS = 3;
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
 
 // Team List View (Slice 6.1 item 4): an accessible ALTERNATE projection of the exact same store
@@ -82,7 +81,10 @@ export function TeamListView({
         <h2 id="team-list-title" className="team-title">
           {task.title}
         </h2>
-        <span className="team-status-chip">{`${detail.team.state} · Worker ${workers.length}/${MAX_WORKERS}`}</span>
+        {/* Same wording as TeamCanvas's chip (the a11y list/canvas parity spec compares the two
+            verbatim) and, like it, no denominator: the Worker count is dynamic — see the note on
+            TeamCanvas's `liveText`. */}
+        <span className="team-status-chip">{`${detail.team.state} · Worker ${workers.length}人`}</span>
         <button
           type="button"
           className="team-view-toggle-btn"
@@ -103,7 +105,7 @@ export function TeamListView({
         </button>
       </header>
       <div aria-live="polite" className="visually-hidden">
-        {`Team status: ${detail.team.state}, workers ${workers.length} of ${MAX_WORKERS}`}
+        {`Team status: ${detail.team.state}, workers ${workers.length}`}
       </div>
 
       <div className="tlv-body">

@@ -74,7 +74,7 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
     // createTeamScenarioSampler final text).
     await expect(page.getByText('以上の報告を統合した結論です。')).toBeVisible({ timeout: 20_000 });
 
-    await expect(page.getByText('completed · Worker 3/3')).toBeVisible();
+    await expect(page.getByText('completed · Worker 3人')).toBeVisible();
     await expect(page.getByTestId('team-stop-all')).toBeDisabled();
   });
 
@@ -117,7 +117,7 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
       restartApp = await launchApp(restartDir);
       page = await firstWindow(restartApp);
       await page.getByTestId('team-toggle').click();
-      await expect(page.getByText('paused · Worker 1/3')).toBeVisible();
+      await expect(page.getByText('paused · Worker 1人')).toBeVisible();
       await expect(page.locator('.team-status')).toHaveText('stopped');
     } finally {
       await closeApp(restartApp);

@@ -13,7 +13,13 @@ import { WorkerNode } from './WorkerNode';
 import { useCamera } from './useCamera';
 import type { CamState, Rect } from './useCamera';
 import { sendCable } from './cables';
-import { findFreePosition } from './placement';
+import {
+  LEADER_RECT,
+  PLACEMENT_MARGIN,
+  WORKER_SIZE,
+  findFreePosition,
+  workerSlotFor,
+} from './placement';
 import { ArrowLeft, List } from '../icons';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
@@ -24,23 +30,9 @@ import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sp
 // and the cable overlay between them. Camera state lives in refs (useCamera) so pan/zoom stays
 // smooth.
 
-const LEADER_RECT: Rect = { x: 0, y: 0, w: 720, h: 620 };
-const WORKER_SLOTS: readonly Rect[] = [
-  { x: 960, y: -70, w: 480, h: 260 },
-  { x: 1000, y: 420, w: 480, h: 260 },
-  { x: 440, y: 760, w: 480, h: 260 },
-];
-const MAX_WORKERS = WORKER_SLOTS.length;
-// Fixed card footprint (Slice 6.3 item 1) — every WORKER_SLOTS entry uses this same w/h, so a new
-// Worker's placement can be collision-checked before it has ever mounted.
-const WORKER_SIZE = { w: 480, h: 260 };
-const PLACEMENT_MARGIN = 40;
-
-function slotFor(index: number): { x: number; y: number } {
-  const clamped = Math.max(0, Math.min(index, WORKER_SLOTS.length - 1));
-  const slot = WORKER_SLOTS[clamped];
-  return slot ? { x: slot.x, y: slot.y } : { x: 0, y: 0 };
-}
+// Node geometry and the per-index default slot live in ./placement (pure, unit-tested) — a Team is
+// no longer capped at three Workers, so `workerSlotFor` has to answer for any index, not just the
+// three hand-placed ones.
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -275,7 +267,7 @@ export function TeamCanvas({
       // any of them has actually landed in `workerElsRef` — `reservedPositionsRef` covers that.
       if (!nodePositionsRef.current[workerId]) {
         const index = workers.findIndex((w) => w.id === workerId);
-        const defaultPos = slotFor(Math.max(0, index));
+        const defaultPos = workerSlotFor(index);
         const occupied = collectPlacementRects();
         const resolved = findFreePosition(defaultPos, WORKER_SIZE, occupied, PLACEMENT_MARGIN);
         reservedPositionsRef.current.set(workerId, resolved);
@@ -556,7 +548,7 @@ export function TeamCanvas({
       const agentId = card?.dataset.agentId;
       if (!card || !agentId) return;
       const index = workers.findIndex((w) => w.id === agentId);
-      const current = nodePositionsRef.current[agentId] ?? slotFor(Math.max(0, index));
+      const current = nodePositionsRef.current[agentId] ?? workerSlotFor(index);
       nodeDraggingRef.current = {
         agentId,
         pointerId: e.pointerId,
@@ -885,10 +877,13 @@ export function TeamCanvas({
 
   // Deliberately worded differently from the visible `.team-status-chip` text below: Playwright's
   // getByText() is a substring match, so an aria-live region carrying the *exact same* string
-  // would make `getByText('<state> · Worker N/3')` resolve to two elements (chip + live region).
+  // would make `getByText('<state> · Worker N人')` resolve to two elements (chip + live region).
+  // No denominator on either side (Team v2 B1b): a Team's Worker count is dynamic, so any fixed
+  // "/N" would be wrong — and the Team Policy's execution cap of 8 is a concurrency limit, not a
+  // Worker headcount limit, so it must not stand in as one either.
   const selectionText = selectedNodeId ? `選択: ${describeNode(selectedNodeId)}` : '';
   const liveText = detail
-    ? `Team status: ${detail.team.state}, workers ${workerCount} of ${MAX_WORKERS}${
+    ? `Team status: ${detail.team.state}, workers ${workerCount}${
         selectionText ? `. ${selectionText}` : ''
       }`
     : '';
@@ -915,7 +910,7 @@ export function TeamCanvas({
                   this anchor only reserves the slot; see App.tsx's morph orchestration. */}
               <div className="leader-anchor" ref={leaderAnchorRef} />
               {workers.map((worker, index) => {
-                const pos = nodePositions[worker.id] ?? slotFor(index);
+                const pos = nodePositions[worker.id] ?? workerSlotFor(index);
                 return (
                   <WorkerNode
                     key={worker.id}
@@ -1017,7 +1012,7 @@ function TeamHeaderOverlay({
       </button>
       <span className="team-title">{task.title}</span>
       <span className="team-badge">Team · {workerCount} workers</span>
-      <span className="team-status-chip">{`${detail.team.state} · Worker ${workerCount}/${MAX_WORKERS}`}</span>
+      <span className="team-status-chip">{`${detail.team.state} · Worker ${workerCount}人`}</span>
       <button
         type="button"
         className="team-view-toggle-btn"

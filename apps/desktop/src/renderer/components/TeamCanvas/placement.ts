@@ -12,6 +12,53 @@ const FALLBACK_STEP_Y = 300;
 const DEFAULT_MARGIN = 40;
 const MAX_FALLBACK_STEPS = 32;
 
+// --- Fixed node geometry (Team v2 B1b) ---
+//
+// Lives here rather than in TeamCanvas.tsx so the whole default-slot layout is pure, DOM-free and
+// provable in a unit test. TeamCanvas imports these as its single source of truth.
+
+export const LEADER_RECT: Rect = { x: 0, y: 0, w: 720, h: 620 };
+// Fixed card footprint — every default slot uses this same w/h, so a new Worker's placement can be
+// collision-checked before it has ever mounted.
+export const WORKER_SIZE = { w: 480, h: 260 };
+export const PLACEMENT_MARGIN = 40;
+
+// The original three hand-placed Worker slots (demo/index.html §Team mode) — kept verbatim so the
+// first three cards of any Team still land exactly where they always have.
+const WORKER_SLOTS: readonly { x: number; y: number }[] = [
+  { x: 960, y: -70 },
+  { x: 1000, y: 420 },
+  { x: 440, y: 760 },
+];
+
+// Overflow grid for the 4th Worker onward: a Team is no longer capped at 3, so every further index
+// needs a deterministic slot of its own. Two rects count as clear when their origins differ by at
+// least `w + margin` (520) horizontally OR `h + margin` (300) vertically, so:
+//   - the column/row steps below (560 / 340) exceed those thresholds with headroom, making every
+//     pair of grid cells mutually clear;
+//   - the grid's first row (y = 1160) sits 400 below the lowest fixed slot origin (y = 760) and
+//     1160 below the Leader's, so no grid cell can collide with a fixed slot or the Leader either.
+// Rows grow without bound, so the layout stays unique for any Worker count.
+const GRID_ORIGIN_X = 0;
+const GRID_ORIGIN_Y = 1160;
+const GRID_STEP_X = 560;
+const GRID_STEP_Y = 340;
+const GRID_COLUMNS = 4;
+
+/** Default (pre-drag, pre-restore) position for the Worker at `index` in creation order. */
+export function workerSlotFor(index: number): { x: number; y: number } {
+  const i = Number.isFinite(index) && index > 0 ? Math.floor(index) : 0;
+  const fixed = WORKER_SLOTS[i];
+  if (fixed) return { x: fixed.x, y: fixed.y };
+  const overflow = i - WORKER_SLOTS.length;
+  const column = overflow % GRID_COLUMNS;
+  const row = Math.floor(overflow / GRID_COLUMNS);
+  return {
+    x: GRID_ORIGIN_X + column * GRID_STEP_X,
+    y: GRID_ORIGIN_Y + row * GRID_STEP_Y,
+  };
+}
+
 export function rectsOverlap(a: Rect, b: Rect, margin = DEFAULT_MARGIN): boolean {
   return (
     a.x < b.x + b.w + margin &&

@@ -76,6 +76,55 @@ async function setLod(page: Page, target: '1' | '2'): Promise<void> {
 }
 
 test.describe('Phase 6 Slice 6.1: Canvas base', () => {
+  test('renders five Workers at distinct non-overlapping positions in Canvas and List', async () => {
+    const userDataDir = createUserDataDir('canvas-layout-five-workers');
+    let app: ElectronApplication | null = null;
+    try {
+      app = await launchApp(userDataDir);
+      const page = await firstWindow(app);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await page.getByTestId('team-toggle').click();
+
+      for (const role of ['調査', '設計', '実装', 'レビュー', '検証']) {
+        // eslint-disable-next-line no-await-in-loop
+        await hireWorker(page, role, `${role}を担当する`);
+      }
+
+      const cards = page.getByTestId('team-worker');
+      await expect(cards).toHaveCount(5);
+      await expect(page.getByText('active · Worker 5人')).toBeVisible();
+      const rects = await cards.evaluateAll((workers) =>
+        workers.map((worker) => {
+          const element = worker as HTMLElement;
+          return {
+            x: Number.parseFloat(element.style.left),
+            y: Number.parseFloat(element.style.top),
+            w: 480,
+            h: 260,
+          };
+        }),
+      );
+      expect(new Set(rects.map(({ x, y }) => `${x},${y}`)).size).toBe(5);
+      for (let left = 0; left < rects.length; left += 1) {
+        for (let right = left + 1; right < rects.length; right += 1) {
+          const a = rects[left]!;
+          const b = rects[right]!;
+          expect(
+            a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y,
+          ).toBe(false);
+        }
+      }
+
+      await page.getByTestId('team-view-toggle').click();
+      await expect(page.locator('.team-list-view')).toBeVisible();
+      await expect(page.getByTestId('team-worker')).toHaveCount(5);
+      await expect(page.getByText('active · Worker 5人')).toBeVisible();
+    } finally {
+      await closeApp(app);
+      removeUserDataDir(userDataDir);
+    }
+  });
+
   test('persists a dragged node position and camera across restart, and LOD hides Worker body', async () => {
     const userDataDir = createUserDataDir('canvas-layout-persist');
     let app: ElectronApplication | null = null;

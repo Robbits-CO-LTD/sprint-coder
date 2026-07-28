@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { findFreePosition, rectsOverlap } from './placement';
+import {
+  LEADER_RECT,
+  PLACEMENT_MARGIN,
+  WORKER_SIZE,
+  findFreePosition,
+  rectsOverlap,
+  workerSlotFor,
+} from './placement';
 import type { Rect } from './useCamera';
 
 const SIZE = { w: 480, h: 260 };
@@ -21,6 +28,47 @@ describe('rectsOverlap', () => {
     const a: Rect = { x: 0, y: 0, w: 100, h: 100 };
     const b: Rect = { x: 110, y: 0, w: 100, h: 100 }; // 10px gap, margin 40
     expect(rectsOverlap(a, b, 40)).toBe(true);
+  });
+});
+
+describe('workerSlotFor', () => {
+  it('keeps the original three fixed slots for the first three Workers', () => {
+    expect(workerSlotFor(0)).toEqual({ x: 960, y: -70 });
+    expect(workerSlotFor(1)).toEqual({ x: 1000, y: 420 });
+    expect(workerSlotFor(2)).toEqual({ x: 440, y: 760 });
+  });
+
+  it('is deterministic — an index always maps to the same slot', () => {
+    for (const index of [0, 3, 7, 9, 25]) {
+      expect(workerSlotFor(index)).toEqual(workerSlotFor(index));
+    }
+  });
+
+  it('falls back to the first slot for a negative or non-finite index', () => {
+    expect(workerSlotFor(-1)).toEqual(workerSlotFor(0));
+    expect(workerSlotFor(Number.NaN)).toEqual(workerSlotFor(0));
+  });
+
+  it('gives 10 Workers 10 distinct positions', () => {
+    const positions = Array.from({ length: 10 }, (_, i) => workerSlotFor(i));
+    const keys = new Set(positions.map((p) => `${p.x},${p.y}`));
+    expect(keys.size).toBe(10);
+  });
+
+  it('places 10 Workers without any card collision (each other or the Leader)', () => {
+    const rects: Rect[] = Array.from({ length: 10 }, (_, i) => ({
+      ...workerSlotFor(i),
+      ...WORKER_SIZE,
+    }));
+    for (let i = 0; i < rects.length; i += 1) {
+      expect(rectsOverlap(rects[i]!, LEADER_RECT, PLACEMENT_MARGIN)).toBe(false);
+      for (let j = i + 1; j < rects.length; j += 1) {
+        expect(
+          rectsOverlap(rects[i]!, rects[j]!, PLACEMENT_MARGIN),
+          `Worker ${i} collides with Worker ${j}`,
+        ).toBe(false);
+      }
+    }
   });
 });
 
