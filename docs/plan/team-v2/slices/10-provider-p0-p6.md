@@ -39,7 +39,8 @@ P1A-aでは実Provider API、Secret Storage、Scheduler変更を行わない。
 - P1B-b1: secure logger、sink側強制redaction、production `no-console`を完了
 - P1B-b2: safeStorage adapter、Main-only encrypted blob、DB secret referenceを完了
 - P1B-b3: 24時間TTL、3秒preflight、built-in除外を含むconnection verificationを完了
-- P1B-c: global 8枠へConnection admissionを統合
+- P1B-c1: Connection token bucket、concurrency、round-robin、aging domainを完了
+- P1B-c2: global 8枠への統合、永続wait reason、429再投入
 
 P1B-aは外部network、実Provider SDK、認証情報を扱わない。
 

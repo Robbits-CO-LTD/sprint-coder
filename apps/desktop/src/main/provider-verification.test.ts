@@ -24,6 +24,13 @@ function externalConnection(): ProviderConnection {
       expiresAt: null,
       message: null,
     },
+    rateLimit: {
+      mode: 'auto',
+      maxConcurrentRequests: 2,
+      requestsPerMinute: null,
+      tokensPerMinute: null,
+      lastObservedRateLimitHeaders: null,
+    },
     createdAt: '2026-07-28T00:00:00.000Z',
     updatedAt: '2026-07-28T00:00:00.000Z',
   };

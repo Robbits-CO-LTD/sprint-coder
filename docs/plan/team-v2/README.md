@@ -4,7 +4,7 @@
 - 状態: planning
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
-  P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3完了
+  P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -84,7 +84,7 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 
 ## 現在地とblocker
 
-- 現行DB migrationはv44。`provider_connections`をconnection domainの正本として追加し、
+- 現行DB migrationはv45。`provider_connections`をconnection domainの正本として追加し、
   安定IDの`builtin:claude-cli`と`builtin:codex-cli`をseedした。新規Claude／Codex Turn・Agentはbuilt-in connection IDと
   requested model identityを保存し、Runtimeが返したresolved modelを別フィールドへ保存する。
   Taskの明示selectionはcanonical repositoryへ保存され、未設定Taskは旧global Picker設定を読む。
@@ -138,6 +138,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Provider P1B-b3でDB v44へverification stateを追加した。外部Connectionは24時間TTLと
   3秒preflightを通るまで新規実行を開始せず、timeoutはinvalid credentialsへ分類しない。
   built-in CLIは`not_required`で既存実行をblockしない。
+- Provider P1B-c1でDB v45へConnection rate-limit設定を追加し、concurrency／RPM／TPM、
+  Connection間round-robin、Connection内Team round-robin、待機agingを扱うadmission controllerを
+  実装した。built-in CLIは`bypass`である。Team Scheduler統合と429再投入はc2で行う。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。

@@ -311,6 +311,11 @@ type ProviderConnectionRow = {
   verified_at: string | null;
   verification_expires_at: string | null;
   verification_message: string | null;
+  rate_limit_mode: 'bypass' | 'auto' | 'manual';
+  max_concurrent_requests: number | null;
+  requests_per_minute: number | null;
+  tokens_per_minute: number | null;
+  last_observed_rate_limit_headers_json: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -2181,6 +2186,29 @@ const migrations = [
       ALTER TABLE provider_connections ADD COLUMN verification_message TEXT;
       UPDATE provider_connections
       SET verification_status = 'not_required'
+      WHERE runtime_kind = 'builtin_cli';
+    `,
+  },
+  {
+    version: 45,
+    checksum: 'provider-p1b-v45-connection-rate-limits',
+    sql: `
+      ALTER TABLE provider_connections
+        ADD COLUMN rate_limit_mode TEXT NOT NULL DEFAULT 'auto'
+        CHECK (rate_limit_mode IN ('bypass', 'auto', 'manual'));
+      ALTER TABLE provider_connections
+        ADD COLUMN max_concurrent_requests INTEGER DEFAULT 2
+        CHECK (max_concurrent_requests IS NULL OR max_concurrent_requests >= 1);
+      ALTER TABLE provider_connections
+        ADD COLUMN requests_per_minute INTEGER
+        CHECK (requests_per_minute IS NULL OR requests_per_minute >= 1);
+      ALTER TABLE provider_connections
+        ADD COLUMN tokens_per_minute INTEGER
+        CHECK (tokens_per_minute IS NULL OR tokens_per_minute >= 1);
+      ALTER TABLE provider_connections ADD COLUMN last_observed_rate_limit_headers_json TEXT;
+      UPDATE provider_connections
+      SET rate_limit_mode = 'bypass', max_concurrent_requests = NULL,
+          requests_per_minute = NULL, tokens_per_minute = NULL
       WHERE runtime_kind = 'builtin_cli';
     `,
   },
@@ -9489,6 +9517,16 @@ function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {
       verifiedAt: row.verified_at,
       expiresAt: row.verification_expires_at,
       message: row.verification_message,
+    },
+    rateLimit: {
+      mode: row.rate_limit_mode,
+      maxConcurrentRequests: row.max_concurrent_requests,
+      requestsPerMinute: row.requests_per_minute,
+      tokensPerMinute: row.tokens_per_minute,
+      lastObservedRateLimitHeaders:
+        row.last_observed_rate_limit_headers_json === null
+          ? null
+          : (JSON.parse(row.last_observed_rate_limit_headers_json) as Record<string, string>),
     },
     createdAt: row.created_at,
     updatedAt: row.updated_at,

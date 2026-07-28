@@ -15,6 +15,13 @@ const connection: ProviderConnection = {
     expiresAt: null,
     message: null,
   },
+  rateLimit: {
+    mode: 'bypass',
+    maxConcurrentRequests: null,
+    requestsPerMinute: null,
+    tokensPerMinute: null,
+    lastObservedRateLimitHeaders: null,
+  },
   createdAt: '2026-07-28T00:00:00.000Z',
   updatedAt: '2026-07-28T00:00:00.000Z',
 };

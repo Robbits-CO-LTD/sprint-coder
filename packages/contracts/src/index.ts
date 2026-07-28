@@ -1172,6 +1172,18 @@ export const providerConnectionVerificationSchema = z
 export type ProviderConnectionVerification = z.infer<
   typeof providerConnectionVerificationSchema
 >;
+export const providerRateLimitModeSchema = z.enum(['bypass', 'auto', 'manual']);
+export type ProviderRateLimitMode = z.infer<typeof providerRateLimitModeSchema>;
+export const providerConnectionRateLimitSchema = z
+  .object({
+    mode: providerRateLimitModeSchema,
+    maxConcurrentRequests: z.number().int().positive().nullable(),
+    requestsPerMinute: z.number().int().positive().nullable(),
+    tokensPerMinute: z.number().int().positive().nullable(),
+    lastObservedRateLimitHeaders: z.record(z.string(), z.string().max(256)).nullable(),
+  })
+  .strict();
+export type ProviderConnectionRateLimit = z.infer<typeof providerConnectionRateLimitSchema>;
 export const providerConnectionSchema = z
   .object({
     id: connectionIdSchema,
@@ -1186,6 +1198,7 @@ export const providerConnectionSchema = z
       )
       .nullable(),
     verification: providerConnectionVerificationSchema,
+    rateLimit: providerConnectionRateLimitSchema,
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })
