@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ApprovalSummary,
   AutoPermissionDecision,
   ChatMessage,
+  TeamActivitySummary,
 } from '../../types/sprint-coder';
 import { useAppStore } from '../../store/appStore';
 import { isPinnedToBottom } from '../../lib/scroll-follow';
+import { groupActivitiesByMessage } from '../../lib/team-activity-display';
+import { TeamActivityCard } from '../TeamActivityCard';
 import { ArrowDown } from '../icons';
 import { MessageBubble } from '../MessageBubble';
 import { RunCard } from '../RunCard';
@@ -25,6 +28,7 @@ const NO_COMMANDS: ReturnType<typeof useAppStore.getState>['commandsByTask'][str
 const NO_AUTO_DECISIONS: AutoPermissionDecision[] = [];
 const NO_IMAGES: ReturnType<typeof useAppStore.getState>['imagesByTask'][string] = [];
 const NO_FILE_CHANGES: ReturnType<typeof useAppStore.getState>['fileChangesByTask'][string] = [];
+const NO_ACTIVITIES: TeamActivitySummary[] = [];
 
 export function Timeline({ taskId }: { taskId: string }) {
   const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? NO_MESSAGES;
@@ -41,6 +45,16 @@ export function Timeline({ taskId }: { taskId: string }) {
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
   const resolveApproval = useAppStore((s) => s.resolveApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Persisted Team history (Core C2b), slotted into the gaps between messages by `recordedAt` so
+  // "誰を雇い、誰に任せたか" reads in the same column as the conversation. Message order and every
+  // per-message card association below stay exactly as they were; a task with no Team activity
+  // gets the shared empty grouping and renders the timeline it rendered before.
+  const activities = useAppStore((s) => s.teamByTask[taskId])?.activities ?? NO_ACTIVITIES;
+  const activityGroups = useMemo(
+    () => groupActivitiesByMessage(messages, activities),
+    [messages, activities],
+  );
 
   const isActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
@@ -89,9 +103,10 @@ export function Timeline({ taskId }: { taskId: string }) {
     turn?.stage,
     turn?.streamingContent,
     turn?.status,
+    activityGroups,
   ]);
 
-  const isEmpty = messages.length === 0 && !turn;
+  const isEmpty = messages.length === 0 && !turn && activityGroups.leading.length === 0;
 
   return (
     <div
@@ -117,6 +132,10 @@ export function Timeline({ taskId }: { taskId: string }) {
             </div>
           </div>
         )}
+
+        {activityGroups.leading.map((activity) => (
+          <TeamActivityCard key={activity.id} activity={activity} />
+        ))}
 
         {messages.map((message) => {
           const showRunCardAfter =
@@ -183,6 +202,9 @@ export function Timeline({ taskId }: { taskId: string }) {
               ))}
               {imageRequestUnfulfilled && <MissingGeneratedImageNotice />}
               {turnDiff?.turnId === message.turnId && <TurnDiffCard diff={turnDiff} />}
+              {(activityGroups.byMessageId[message.id] ?? []).map((activity) => (
+                <TeamActivityCard key={activity.id} activity={activity} />
+              ))}
             </div>
           );
         })}

@@ -97,4 +97,9 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
   queue reason、attempt ordinal、terminal reasonを持つ表示専用summaryへ正規化する。
   TeamDetailは新しい順の最新200件を時系列順で配信し、500件超でも新しい履歴が消えない
   `listLatestTeamV2Activity`を永続化境界へ追加した。
-- C2b次着手: C2a summaryをChat timelineへ履歴カードとして表示する。
+- C2b完了: C2a summaryをChat message間へ`recordedAt`順で差し込み、雇用、委譲、queue、
+  execution／attempt lifecycle、steer、報告、停止の全11 typeを日本語履歴カードとして表示する。
+  Claude UI委託は1往復、5ファイル、581差分行で完了。component 18件、renderer 276件、
+  typecheck、lint、production package、packaged Team flow 3件がgreen。
+- C2c次着手: packaged Chatで雇用・委譲カードを確認し、再起動後も同じactivity IDが
+  一度だけ復元されるE2Eを追加する。

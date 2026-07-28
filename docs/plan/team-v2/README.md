@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、Core C1a/C1b/C2a完了
+- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、Core C1a/C1b/C2a/C2b完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -103,9 +103,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Core C GA blocker: packaged axe harnessがlocalhost script注入をproduction CSPに拒否される。
   また既存List parity testはCanvasだけがengine接頭辞をobjectiveへ含める差分で失敗する。
   どちらもC1bのexecution表示とは独立した後続sub-Sliceで解消する。
-- Core C2aでDB v40の監査イベントを、Agent role、execution status、queue reason、
-  attempt、terminal reasonを含む表示専用Team Activity summaryへ正規化した。
-  次はC2bとして、雇用・委譲・execution lifecycleをChatへ履歴カードとして表示する。
+- Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
+  C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
+  永続履歴カードとして表示した。次はC2cでpackagedアプリ上の表示と再起動復元を固定する。
 
 ## 完成判定
 
