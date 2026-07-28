@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState, type Ref } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { TeamMessageSummary, WorkerSummary } from '../../types/sprint-coder';
+import type {
+  TeamExecutionSummary,
+  TeamMessageSummary,
+  WorkerSummary,
+} from '../../types/sprint-coder';
+import { TeamExecutionStatus } from '../TeamExecutionStatus';
 
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
 
@@ -33,6 +38,7 @@ export function WorkerNode({
   x,
   y,
   messages,
+  execution,
   teamBusy,
   selected = false,
   onStop,
@@ -42,6 +48,9 @@ export function WorkerNode({
   x: number;
   y: number;
   messages: TeamMessageSummary[];
+  /** Newest persisted execution row for this Worker, or null when it has none (Core C1b). The
+   * card below is derived purely from it — `worker.state` never stands in for it. */
+  execution: TeamExecutionSummary | null;
   teamBusy: boolean;
   /** Keyboard-navigation selection ring (Slice 6.1 canvas keyboard nav) — a plain visual/aria
    * prop; the selection index itself lives in TeamCanvas. */
@@ -100,6 +109,7 @@ export function WorkerNode({
       <div className="w-activity" aria-live="polite">
         {worker.currentActivity ?? (worker.state === 'done' ? '完了' : worker.state)}
       </div>
+      <TeamExecutionStatus execution={execution} variant="canvas" />
       <div
         className="w-body"
         ref={historyRef}

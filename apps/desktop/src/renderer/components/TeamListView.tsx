@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
+import { TeamExecutionStatus } from './TeamExecutionStatus';
+import { latestExecutionForWorker } from '../lib/team-execution-display';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
 
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
@@ -146,6 +148,11 @@ export function TeamListView({
                 <p className="tlv-activity">
                   現在: {worker.currentActivity ?? (worker.state === 'done' ? '完了' : '待機')}
                 </p>
+                {/* Same component, same helper, same facts as the Canvas's Worker card. */}
+                <TeamExecutionStatus
+                  execution={latestExecutionForWorker(detail.executions, worker.id)}
+                  variant="list"
+                />
                 <dl className="tlv-usage">
                   <div>
                     <dt>Tokens</dt>

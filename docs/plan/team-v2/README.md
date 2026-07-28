@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、Core C1a完了
+- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、Core C1a/C1b完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -97,9 +97,13 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Slice 0のRoot Cause Confirmed Gateは完了した。Team unitは26 passed／1 skipped、
   packaged Team E2Eは3 passedで、productionのNode inspector fuseが無効のまま一時test bundle
   だけをPlaywrightで検査する。
-- Core C1aで表示専用のTeam execution summaryをMain→Preload→Renderer契約へ追加した。
-  次はCore C1bとして、この契約をTeam Activity Card／Canvas／Listへ表示し、
-  queued／running／terminalの状態と理由をユーザーへ伝える。
+- Core C1aで表示専用のTeam execution summaryをMain→Preload→Renderer契約へ追加し、
+  C1bで同じTeam Activity componentをCanvas／Listへ接続した。queued／waitingでは理由、
+  待機開始、Connection、待機順を明示し、running／terminalでも状態、Connection、指示を表示する。
+- Core C GA blocker: packaged axe harnessがlocalhost script注入をproduction CSPに拒否される。
+  また既存List parity testはCanvasだけがengine接頭辞をobjectiveへ含める差分で失敗する。
+  どちらもC1bのexecution表示とは独立した後続sub-Sliceで解消する。
+- 次はCore C2として、雇用・委譲・execution lifecycleをChatへ永続Team Activity eventとして表示する。
 
 ## 完成判定
 

@@ -2317,6 +2317,54 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Team Activity Card (Core C1b) — the persisted execution row, rendered identically on the Canvas
+   Worker card and in the List. Purely typographic: every state is legible as words, so nothing
+   here relies on colour to carry meaning, and nothing animates (there is no new motion for
+   `prefers-reduced-motion` to suppress). */
+.team-exec {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+.team-exec-canvas {
+  flex: none;
+  padding: 7px 15px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.team-exec-list {
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--neutral-wash);
+}
+.team-exec-row {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+}
+.team-exec-key {
+  flex: none;
+  width: 5.5em;
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+.team-exec-value {
+  min-width: 0;
+  color: var(--text-primary);
+}
+.team-exec-wait .team-exec-value {
+  /* Queue facts stay on one wrapped block rather than being clipped — the reason, the wait start
+     and the queue position are the whole point of the waiting states. */
+  white-space: normal;
+}
+.team-exec-instruction {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .worker.spawn {
   animation: workerIn var(--t-spatial) var(--ease-spatial) forwards;
 }

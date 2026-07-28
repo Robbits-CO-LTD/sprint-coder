@@ -21,6 +21,7 @@ import {
   workerSlotFor,
 } from './placement';
 import { ArrowLeft, List } from '../icons';
+import { latestExecutionForWorker } from '../../lib/team-execution-display';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
 // Team Canvas: the spatial "promoted chat" experience from demo/index.html (§Team mode,
@@ -918,6 +919,7 @@ export function TeamCanvas({
                     x={pos.x}
                     y={pos.y}
                     messages={detail.messages}
+                    execution={latestExecutionForWorker(detail.executions, worker.id)}
                     teamBusy={teamBusy}
                     selected={selectedNodeId === worker.id}
                     onStop={() => void stopTeamWorker(task.id, worker.id)}

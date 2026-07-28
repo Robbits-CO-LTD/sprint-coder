@@ -86,5 +86,10 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
 - C1a完了: 永続executionから、state、queue reason／ordinal、Connection／requested model、
   instruction preview、各timestampを500文字上限の表示専用summaryへ射影し、
   Main→Preload→Rendererの`TeamDetail`契約で配信する。DB変更とUI推測は行わない。
-- C1b次着手: C1aの共通契約だけを使い、Activity Card／Canvas／Listへ待機・実行・終端状態、
-  待機理由、待機開始時刻または経過時間、Connection名を表示する。
+- C1b完了: C1aの共通契約だけを使う再利用可能なActivity componentをCanvas／Listへ接続。
+  全8 execution state、全6 queue reason、待機開始、待機順、Connection、instruction previewを
+  色だけに依存せず表示する。Claude UI委託は1往復、7ファイル、586差分行で完了し、
+  component 34件、renderer lib 197件、typecheck、lint、production package、packaged Team flow
+  3件がgreen。
+- Core C後続blocker: axe E2Eのlocalhost注入とproduction CSPの不整合、Canvas／List間の既存
+  engine接頭辞差分を独立sub-Sliceで直す。
