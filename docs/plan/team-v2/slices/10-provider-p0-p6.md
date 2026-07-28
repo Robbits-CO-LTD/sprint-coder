@@ -51,7 +51,9 @@ P1B-aは外部network、実Provider SDK、認証情報を扱わない。
   model discovery、credentials／temporary／network分類を完了
 - P2b: Responses API、SSE stream、Tool Calling、Structured Output、usage normalization、
   resolved model、429 event、cancellationを完了
-- P2c: Registry、Chat／Team execution、cancel、resolved model、release smoke
+- P2c1: Registry、Connection作成／列挙／検証IPC、safeStorage、catalog／selection統合を完了
+- P2c2: Chat execution、cancel、resolved model
+- P2c3: Team Worker execution、release smoke
 
 P2aでは生成API、Chat／Team配線、実API probeを行わない。実API smokeは全実装後のfinal gateへ
 留保する。

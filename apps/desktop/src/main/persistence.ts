@@ -2567,6 +2567,7 @@ export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executo
 export interface PersistenceClient {
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
+  createProviderConnection(connection: ProviderConnection): ProviderConnection;
   setProviderConnectionSecretReference(
     connectionId: string,
     secretReference: string | null,
@@ -3216,6 +3217,43 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .get(connectionId) as ProviderConnectionRow | undefined;
     if (row === undefined) throw new NotFoundError('Provider connection not found');
     return toProviderConnection(row);
+  }
+
+  createProviderConnection(connection: ProviderConnection): ProviderConnection {
+    const parsed = providerConnectionSchema.parse(connection);
+    if (parsed.runtimeKind === 'builtin_cli')
+      throw new Error('Built-in Provider Connections are migration-owned');
+    this.db
+      .prepare(
+        `INSERT INTO provider_connections(
+           id, provider_id, runtime_kind, display_name, enabled, secret_reference,
+           verification_status, verified_at, verification_expires_at, verification_message,
+           rate_limit_mode, max_concurrent_requests, requests_per_minute, tokens_per_minute,
+           last_observed_rate_limit_headers_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        parsed.id,
+        parsed.providerId,
+        parsed.runtimeKind,
+        parsed.displayName,
+        parsed.enabled ? 1 : 0,
+        parsed.secretReference,
+        parsed.verification.status,
+        parsed.verification.verifiedAt,
+        parsed.verification.expiresAt,
+        parsed.verification.message,
+        parsed.rateLimit.mode,
+        parsed.rateLimit.maxConcurrentRequests,
+        parsed.rateLimit.requestsPerMinute,
+        parsed.rateLimit.tokensPerMinute,
+        parsed.rateLimit.lastObservedRateLimitHeaders === null
+          ? null
+          : JSON.stringify(parsed.rateLimit.lastObservedRateLimitHeaders),
+        parsed.createdAt,
+        parsed.updatedAt,
+      );
+    return this.getProviderConnection(parsed.id);
   }
 
   setProviderConnectionSecretReference(

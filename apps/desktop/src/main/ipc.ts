@@ -8,7 +8,7 @@ import {
   type MessagePortMain,
 } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, relative as relativePath, resolve as resolvePath } from 'node:path';
+import { basename, join, relative as relativePath, resolve as resolvePath } from 'node:path';
 import { workspaceMutationBinding } from './path-guard';
 import { z } from 'zod';
 import {
@@ -40,6 +40,9 @@ import {
   modelCatalogQueryResultSchema,
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
+  openAIConnectionCreateInputSchema,
+  providerConnectionSchema,
+  connectionIdSchema,
   runtimeSetInputSchema,
   runtimeSettingsGetInputSchema,
   runtimeModelSetInputSchema,
@@ -164,6 +167,15 @@ import {
   builtinRuntimeForModelSelection,
   modelSelectionForRuntime,
 } from './connection-identity';
+import { ProviderSecretStorage } from './provider-secret-storage';
+import { ElectronProviderSecretCipher } from './electron-provider-secret-cipher';
+import { MainProviderRegistry } from './provider-runtime';
+import { ProviderVerificationService } from './provider-verification';
+import {
+  OpenAIProviderClient,
+  parseOpenAICredential,
+} from './openai-provider-client';
+import { ProviderConnectionService } from './provider-connection-service';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -213,6 +225,9 @@ export class IpcRouter {
   private readonly teamMcpBridge: TeamMcpBridge;
   private readonly skillSettings: SkillSettingsService;
   private readonly modelCatalog = new ModelCatalogService();
+  private readonly providerRegistry = new MainProviderRegistry();
+  private readonly providerVerification: ProviderVerificationService;
+  private readonly providerConnections: ProviderConnectionService;
   private teamSkillReady = false;
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
@@ -222,6 +237,25 @@ export class IpcRouter {
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
   ) {
+    const providerSecrets = new ProviderSecretStorage(
+      join(app.getPath('userData'), 'provider-secrets'),
+      new ElectronProviderSecretCipher(),
+    );
+    const openAI = new OpenAIProviderClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('OpenAI Connection has no secret reference');
+      return parseOpenAICredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'openai',
+      runtime: openAI,
+    });
+    this.providerVerification = new ProviderVerificationService(
+      this.persistence,
+      this.providerRegistry,
+    );
+    this.providerConnections = new ProviderConnectionService(this.persistence, providerSecrets);
     this.skillSettings = new SkillSettingsService({
       homePath: process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'),
     });
@@ -461,6 +495,27 @@ export class IpcRouter {
           this.claudeRuntime.probe(),
         ]);
         const checkedAt = new Date().toISOString();
+        const externalResults = await Promise.allSettled(
+          this.providerConnections
+            .list()
+            .filter(
+              (connection) =>
+                connection.enabled &&
+                connection.runtimeKind !== 'builtin_cli' &&
+                connection.secretReference !== null,
+            )
+            .map(async (connection) => {
+              const verified = await this.providerVerification.requireVerifiedForExecution(
+                connection.id,
+              );
+              return this.providerRegistry
+                .resolve(verified)
+                .listModels(verified, new AbortController().signal);
+            }),
+        );
+        const externalModels = externalResults.flatMap((result) =>
+          result.status === 'fulfilled' ? [...result.value] : [],
+        );
         this.modelCatalog.replaceCatalog([
           ...providerModelsForBuiltin(
             'builtin:codex-cli',
@@ -476,6 +531,7 @@ export class IpcRouter {
             claudeCapability.available,
             checkedAt,
           ),
+          ...externalModels,
         ]);
         const result = this.modelCatalog.query(input);
         const runtimeKind = this.persistence.getRuntime();
@@ -490,20 +546,69 @@ export class IpcRouter {
         };
       },
     );
+    this.handle(
+      IPC_CHANNELS.providersListConnections,
+      emptyPayloadSchema,
+      z.array(providerConnectionSchema),
+      () => [...this.providerConnections.list()],
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateOpenAIConnection,
+      openAIConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateOpenAIConnection,
+          () => this.providerConnections.createOpenAI(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.providersVerifyConnection,
+      z.object({ connectionId: connectionIdSchema }).strict(),
+      providerConnectionSchema,
+      (input) =>
+        this.providerVerification.verify(
+          this.persistence.getProviderConnection(input.connectionId),
+        ),
+    );
     this.handleMutation(
       IPC_CHANNELS.modelsSetSelection,
       modelCatalogSelectionSetInputSchema,
       modelSelectionSchema,
       async (input, event, envelope) => {
         const runtime = builtinRuntimeForModelSelection(input.selection);
-        if (runtime === null) throw new InvalidModelError('codex');
-        const capability = await this.runtimeFor(runtime.runtimeKind).probe();
-        if (!capability.available) throw new RuntimeUnavailableError(runtime.runtimeKind);
-        if (!capability.models.some(({ id }) => id === runtime.model))
-          throw new InvalidModelError(runtime.runtimeKind);
+        if (runtime === null) {
+          if (input.selection.connectionId === null || input.selection.requestedModel === null)
+            throw new InvalidModelError('codex');
+          const connection = await this.providerVerification.requireVerifiedForExecution(
+            input.selection.connectionId,
+          );
+          if (
+            connection.providerId !== input.selection.requestedProvider ||
+            !connection.enabled
+          )
+            throw new InvalidModelError('codex');
+          const models = await this.providerRegistry
+            .resolve(connection)
+            .listModels(connection, new AbortController().signal);
+          if (!models.some(({ modelId }) => modelId === input.selection.requestedModel))
+            throw new InvalidModelError('codex');
+        } else {
+          const capability = await this.runtimeFor(runtime.runtimeKind).probe();
+          if (!capability.available) throw new RuntimeUnavailableError(runtime.runtimeKind);
+          if (!capability.models.some(({ id }) => id === runtime.model))
+            throw new InvalidModelError(runtime.runtimeKind);
+        }
         return this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.modelsSetSelection, () => {
-          this.persistence.setRuntime(runtime.runtimeKind);
-          this.persistence.setModel(runtime.model);
+          if (runtime !== null) {
+            this.persistence.setRuntime(runtime.runtimeKind);
+            this.persistence.setModel(runtime.model);
+          }
           return (
             this.persistence.setTaskModelSelection(input.taskId, input.selection) ??
             input.selection

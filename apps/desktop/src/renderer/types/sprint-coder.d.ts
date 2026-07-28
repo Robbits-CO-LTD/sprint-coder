@@ -631,6 +631,15 @@ export interface SprintCoderApi {
       selection: import('@sprint-coder/contracts').ModelSelection,
     ): Promise<import('@sprint-coder/contracts').ModelSelection>;
   };
+  providers: {
+    listConnections(): Promise<import('@sprint-coder/contracts').ProviderConnection[]>;
+    createOpenAIConnection(
+      input: import('@sprint-coder/contracts').OpenAIConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    verifyConnection(
+      connectionId: string,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+  };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
     listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;

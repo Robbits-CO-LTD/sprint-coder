@@ -23,6 +23,9 @@ import {
   modelCatalogQueryResultSchema,
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
+  openAIConnectionCreateInputSchema,
+  providerConnectionSchema,
+  connectionIdSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
@@ -350,6 +353,29 @@ const api: SprintCoderApi = {
         modelCatalogSelectionSetInputSchema,
         modelSelectionSchema,
         { taskId, selection },
+      ),
+  },
+  providers: {
+    listConnections: () =>
+      invoke(
+        IPC_CHANNELS.providersListConnections,
+        emptyPayloadSchema,
+        z.array(providerConnectionSchema),
+        {},
+      ),
+    createOpenAIConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateOpenAIConnection,
+        openAIConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    verifyConnection: (connectionId) =>
+      invoke(
+        IPC_CHANNELS.providersVerifyConnection,
+        z.object({ connectionId: connectionIdSchema }).strict(),
+        providerConnectionSchema,
+        { connectionId },
       ),
   },
   permissions: {

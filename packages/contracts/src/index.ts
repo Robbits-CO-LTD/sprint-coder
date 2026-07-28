@@ -1204,6 +1204,17 @@ export const providerConnectionSchema = z
   })
   .strict();
 export type ProviderConnection = z.infer<typeof providerConnectionSchema>;
+export const openAIConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+    organizationId: z.string().trim().min(1).max(128).optional(),
+    projectId: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict();
+export type OpenAIConnectionCreateInput = z.infer<
+  typeof openAIConnectionCreateInputSchema
+>;
 export const capabilitySourceSchema = z.enum([
   'provider_api',
   'official_curated',
@@ -1892,6 +1903,11 @@ export interface SprintCoderApi {
     query(input: ModelCatalogQueryInput): Promise<ModelCatalogQueryResult>;
     setSelection(taskId: string, selection: ModelSelection): Promise<ModelSelection>;
   };
+  providers: {
+    listConnections(): Promise<ProviderConnection[]>;
+    createOpenAIConnection(input: OpenAIConnectionCreateInput): Promise<ProviderConnection>;
+    verifyConnection(connectionId: string): Promise<ProviderConnection>;
+  };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
     listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;
@@ -1976,6 +1992,9 @@ export const IPC_CHANNELS = {
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
   modelsCatalogQuery: 'sprint-coder:models:catalog-query',
   modelsSetSelection: 'sprint-coder:models:set-selection',
+  providersListConnections: 'sprint-coder:providers:list-connections',
+  providersCreateOpenAIConnection: 'sprint-coder:providers:create-openai-connection',
+  providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

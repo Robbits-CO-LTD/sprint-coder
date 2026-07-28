@@ -22,6 +22,30 @@ export type OpenAICredentialResolver = (
   connection: ProviderConnection,
 ) => OpenAICredential | Promise<OpenAICredential>;
 
+export function serializeOpenAICredential(credential: OpenAICredential): string {
+  if (credential.apiKey.trim().length === 0) throw new Error('OpenAI API key is missing');
+  return JSON.stringify(credential);
+}
+
+export function parseOpenAICredential(value: string): OpenAICredential {
+  const parsed: unknown = JSON.parse(value);
+  if (parsed === null || typeof parsed !== 'object') throw new Error('OpenAI credential is invalid');
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.apiKey !== 'string' || record.apiKey.trim().length === 0)
+    throw new Error('OpenAI API key is missing');
+  if (record.organizationId !== undefined && typeof record.organizationId !== 'string')
+    throw new Error('OpenAI organization ID is invalid');
+  if (record.projectId !== undefined && typeof record.projectId !== 'string')
+    throw new Error('OpenAI project ID is invalid');
+  return {
+    apiKey: record.apiKey,
+    ...(typeof record.organizationId === 'string'
+      ? { organizationId: record.organizationId }
+      : {}),
+    ...(typeof record.projectId === 'string' ? { projectId: record.projectId } : {}),
+  };
+}
+
 export type ProviderFetch = (
   input: string | URL | Request,
   init?: RequestInit,
