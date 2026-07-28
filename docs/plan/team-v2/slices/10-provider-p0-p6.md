@@ -49,7 +49,8 @@ P1B-aは外部network、実Provider SDK、認証情報を扱わない。
 
 - P2a: Main-only credential resolver、OpenAI auth header、`GET /v1/models`による無料verification、
   model discovery、credentials／temporary／network分類を完了
-- P2b: Responses API、stream、Tool Calling、Structured Output、usage normalization
+- P2b: Responses API、SSE stream、Tool Calling、Structured Output、usage normalization、
+  resolved model、429 event、cancellationを完了
 - P2c: Registry、Chat／Team execution、cancel、resolved model、release smoke
 
 P2aでは生成API、Chat／Team配線、実API probeを行わない。実API smokeは全実装後のfinal gateへ

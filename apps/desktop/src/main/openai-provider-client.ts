@@ -1,5 +1,13 @@
-import type { ProviderConnection, ProviderModel } from '@sprint-coder/contracts';
-import type { ProviderVerificationResult } from './provider-runtime';
+import {
+  providerExecutionRequestSchema,
+  type CanonicalProviderEvent,
+  type NormalizedProviderError,
+  type ProviderConnection,
+  type ProviderExecutionRequest,
+  type ProviderModel,
+} from '@sprint-coder/contracts';
+import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
+import { normalizeOpenAIResponsesStream } from './openai-responses-stream';
 
 const OPENAI_API_BASE_URL = 'https://api.openai.com/v1';
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -27,7 +35,9 @@ type OpenAIModelList = Readonly<{
   }>[];
 }>;
 
-export class OpenAIProviderClient {
+export class OpenAIProviderClient implements ProviderRuntime {
+  private readonly executions = new Map<string, AbortController>();
+
   constructor(
     private readonly resolveCredential: OpenAICredentialResolver,
     private readonly providerFetch: ProviderFetch = fetch,
@@ -96,29 +106,103 @@ export class OpenAIProviderClient {
       }));
   }
 
+  async *execute(
+    connection: ProviderConnection,
+    request: ProviderExecutionRequest,
+    signal: AbortSignal,
+  ): AsyncIterable<CanonicalProviderEvent> {
+    assertOpenAIConnection(connection);
+    const parsed = providerExecutionRequestSchema.parse(request);
+    if (parsed.connectionId !== connection.id)
+      throw new Error('Execution Connection does not match the OpenAI API Connection');
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    this.executions.set(parsed.executionId, controller);
+    try {
+      const response = await this.authenticatedFetch(connection, '/responses', controller.signal, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(openAIResponseRequest(parsed)),
+      });
+      if (!response.ok) {
+        const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
+        if (response.status === 429)
+          yield { type: 'rate_limit', retryAfterMs, observedAt: this.now().toISOString() };
+        yield { type: 'error', error: normalizeHttpError(response.status, retryAfterMs) };
+        return;
+      }
+      if (response.body === null) {
+        yield {
+          type: 'error',
+          error: {
+            category: 'provider_unavailable',
+            message: 'OpenAI API returned an empty stream',
+            retryable: true,
+            retryAfterMs: null,
+            providerCode: null,
+          },
+        };
+        return;
+      }
+      yield* normalizeOpenAIResponsesStream(
+        response.body,
+        connection.providerId,
+        parsed.modelId,
+      );
+    } catch {
+      yield {
+        type: 'error',
+        error: {
+          category: controller.signal.aborted ? 'canceled' : 'network',
+          message: controller.signal.aborted
+            ? 'OpenAI execution was canceled'
+            : 'OpenAI API could not be reached',
+          retryable: !controller.signal.aborted,
+          retryAfterMs: null,
+          providerCode: null,
+        },
+      };
+    } finally {
+      signal.removeEventListener('abort', abort);
+      if (this.executions.get(parsed.executionId) === controller)
+        this.executions.delete(parsed.executionId);
+    }
+  }
+
+  async cancel(executionId: string): Promise<void> {
+    this.executions.get(executionId)?.abort();
+  }
+
   private async fetchModels(
     connection: ProviderConnection,
     signal: AbortSignal,
   ): Promise<OpenAIModelList> {
     assertOpenAIConnection(connection);
-    const credential = await this.resolveCredential(connection);
-    if (credential.apiKey.trim().length === 0) throw new Error('OpenAI API key is missing');
-    const headers = new Headers({
-      Accept: 'application/json',
-      Authorization: `Bearer ${credential.apiKey}`,
-    });
-    if (credential.organizationId !== undefined)
-      headers.set('OpenAI-Organization', credential.organizationId);
-    if (credential.projectId !== undefined) headers.set('OpenAI-Project', credential.projectId);
-    const response = await this.providerFetch(`${OPENAI_API_BASE_URL}/models`, {
+    const response = await this.authenticatedFetch(connection, '/models', signal, {
       method: 'GET',
-      headers,
-      signal,
+      headers: { Accept: 'application/json' },
     });
     if (!response.ok) throw new OpenAIHttpError(response.status);
     const value: unknown = await response.json();
     if (!isOpenAIModelList(value)) throw new Error('OpenAI model catalog response is invalid');
     return value;
+  }
+
+  private async authenticatedFetch(
+    connection: ProviderConnection,
+    path: string,
+    signal: AbortSignal,
+    init: RequestInit,
+  ): Promise<Response> {
+    const credential = await this.resolveCredential(connection);
+    if (credential.apiKey.trim().length === 0) throw new Error('OpenAI API key is missing');
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', `Bearer ${credential.apiKey}`);
+    if (credential.organizationId !== undefined)
+      headers.set('OpenAI-Organization', credential.organizationId);
+    if (credential.projectId !== undefined) headers.set('OpenAI-Project', credential.projectId);
+    return this.providerFetch(`${OPENAI_API_BASE_URL}${path}`, { ...init, headers, signal });
   }
 }
 
@@ -144,4 +228,97 @@ function isOpenAIModelList(value: unknown): value is OpenAIModelList {
       (item as Record<string, unknown>).object === 'model' &&
       typeof (item as Record<string, unknown>).id === 'string',
   );
+}
+
+function openAIResponseRequest(request: ProviderExecutionRequest): Record<string, unknown> {
+  return {
+    model: request.modelId,
+    stream: true,
+    store: false,
+    input: request.messages.map((message) =>
+      message.role === 'tool'
+        ? {
+            type: 'function_call_output',
+            call_id: message.toolCallId,
+            output: message.content,
+          }
+        : { role: message.role, content: message.content },
+    ),
+    ...(request.tools === undefined
+      ? {}
+      : {
+          tools: request.tools.map((tool) => ({
+            type: 'function',
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.inputSchema,
+            strict: true,
+          })),
+        }),
+    ...(request.structuredOutput === undefined
+      ? {}
+      : {
+          text: {
+            format: {
+              type: 'json_schema',
+              name: request.structuredOutput.name,
+              schema: request.structuredOutput.schema,
+              strict: request.structuredOutput.strict,
+            },
+          },
+        }),
+  };
+}
+
+function normalizeHttpError(status: number, retryAfterMs: number | null): NormalizedProviderError {
+  if (status === 401 || status === 403)
+    return {
+      category: 'credentials',
+      message: 'OpenAI API credentials were rejected',
+      retryable: false,
+      retryAfterMs: null,
+      providerCode: `http_${status}`,
+    };
+  if (status === 404)
+    return {
+      category: 'not_found',
+      message: 'The requested OpenAI model or resource was not found',
+      retryable: false,
+      retryAfterMs: null,
+      providerCode: 'http_404',
+    };
+  if (status === 429)
+    return {
+      category: 'rate_limited',
+      message: 'OpenAI API rate limit reached',
+      retryable: true,
+      retryAfterMs,
+      providerCode: 'http_429',
+    };
+  if (status === 408)
+    return {
+      category: 'timeout',
+      message: 'OpenAI API request timed out',
+      retryable: true,
+      retryAfterMs: null,
+      providerCode: 'http_408',
+    };
+  return {
+    category: status >= 500 ? 'provider_unavailable' : 'invalid_request',
+    message:
+      status >= 500
+        ? 'OpenAI API is temporarily unavailable'
+        : 'OpenAI API rejected the request',
+    retryable: status >= 500,
+    retryAfterMs: null,
+    providerCode: `http_${status}`,
+  };
+}
+
+function retryAfter(value: string | null, now: Date): number | null {
+  if (value === null) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1_000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - now.getTime()) : null;
 }

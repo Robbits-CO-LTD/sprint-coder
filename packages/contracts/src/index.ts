@@ -1328,6 +1328,22 @@ export const canonicalProviderEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('error'), error: normalizedProviderErrorSchema }).strict(),
 ]);
 export type CanonicalProviderEvent = z.infer<typeof canonicalProviderEventSchema>;
+export const providerToolSchema = z
+  .object({
+    name: z.string().min(1).max(256),
+    description: z.string().min(1).max(2_000),
+    inputSchema: z.json(),
+  })
+  .strict();
+export type ProviderTool = z.infer<typeof providerToolSchema>;
+export const providerStructuredOutputSchema = z
+  .object({
+    name: z.string().min(1).max(64),
+    schema: z.json(),
+    strict: z.boolean(),
+  })
+  .strict();
+export type ProviderStructuredOutput = z.infer<typeof providerStructuredOutputSchema>;
 export const providerExecutionRequestSchema = z
   .object({
     executionId: z.string().min(1).max(256),
@@ -1339,10 +1355,27 @@ export const providerExecutionRequestSchema = z
           .object({
             role: z.enum(['system', 'user', 'assistant', 'tool']),
             content: z.string(),
+            toolCallId: z.string().min(1).max(256).optional(),
           })
-          .strict(),
+          .strict()
+          .superRefine((message, context) => {
+            if (message.role === 'tool' && message.toolCallId === undefined)
+              context.addIssue({
+                code: 'custom',
+                path: ['toolCallId'],
+                message: 'Tool result messages require toolCallId',
+              });
+            if (message.role !== 'tool' && message.toolCallId !== undefined)
+              context.addIssue({
+                code: 'custom',
+                path: ['toolCallId'],
+                message: 'toolCallId is only valid for tool result messages',
+              });
+          }),
       )
       .min(1),
+    tools: z.array(providerToolSchema).max(128).optional(),
+    structuredOutput: providerStructuredOutputSchema.optional(),
   })
   .strict();
 export type ProviderExecutionRequest = z.infer<typeof providerExecutionRequestSchema>;
