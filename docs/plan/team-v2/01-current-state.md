@@ -70,11 +70,12 @@ Provider Registry／Runtime、API rate admission、Secret Storage、共通Model 
 
 ## Persistence
 
-- 最新schemaはv43。v41は`provider_connections`と安定したbuilt-in Claude／Codex Connectionを
+- 最新schemaはv44。v41は`provider_connections`と安定したbuilt-in Claude／Codex Connectionを
   追加し、v42はpre-v35 built-in identityをbackfillし、v43はsecret reference列を追加する。
+  v44はverification status／TTL時刻／安全な表示messageを永続化する。
   migrationはchecksum検査、migrationごとのtransaction、適用前backup、
   `foreign_key_check`を持つ (`persistence.ts:2872-3003`)。
-- 既存migration testはv1→v43をコード内生成DBで検査するが、計画指定の独立DB fixture群は
+- 既存migration testはv1→v44をコード内生成DBで検査するが、計画指定の独立DB fixture群は
   まだ存在しない。P1Aでfixtureを追加する。
 - legacy列は削除しない。P1Aはdual-readとunknown legacy runtime表示を追加し、cleanupは別Sliceにする。
 

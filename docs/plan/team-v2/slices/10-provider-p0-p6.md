@@ -38,7 +38,7 @@ P1A-aでは実Provider API、Secret Storage、Scheduler変更を行わない。
   capability schema、Mock Runtimeを完了
 - P1B-b1: secure logger、sink側強制redaction、production `no-console`を完了
 - P1B-b2: safeStorage adapter、Main-only encrypted blob、DB secret referenceを完了
-- P1B-b3: connection verification
+- P1B-b3: 24時間TTL、3秒preflight、built-in除外を含むconnection verificationを完了
 - P1B-c: global 8枠へConnection admissionを統合
 
 P1B-aは外部network、実Provider SDK、認証情報を扱わない。

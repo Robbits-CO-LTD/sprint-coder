@@ -9,6 +9,12 @@ const connection: ProviderConnection = {
   displayName: 'Mock',
   enabled: true,
   secretReference: null,
+  verification: {
+    status: 'not_required',
+    verifiedAt: null,
+    expiresAt: null,
+    message: null,
+  },
   createdAt: '2026-07-28T00:00:00.000Z',
   updatedAt: '2026-07-28T00:00:00.000Z',
 };

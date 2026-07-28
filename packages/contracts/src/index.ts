@@ -1152,6 +1152,26 @@ export const providerIdSchema = z
   .min(1)
   .max(64)
   .regex(/^[a-z0-9][a-z0-9._-]*$/);
+export const providerVerificationStatusSchema = z.enum([
+  'not_required',
+  'unverified',
+  'verified',
+  'verification_expired',
+  'invalid_credentials',
+  'unavailable',
+]);
+export type ProviderVerificationStatus = z.infer<typeof providerVerificationStatusSchema>;
+export const providerConnectionVerificationSchema = z
+  .object({
+    status: providerVerificationStatusSchema,
+    verifiedAt: timestampSchema.nullable(),
+    expiresAt: timestampSchema.nullable(),
+    message: z.string().min(1).max(500).nullable(),
+  })
+  .strict();
+export type ProviderConnectionVerification = z.infer<
+  typeof providerConnectionVerificationSchema
+>;
 export const providerConnectionSchema = z
   .object({
     id: connectionIdSchema,
@@ -1165,6 +1185,7 @@ export const providerConnectionSchema = z
         /^provider-secret:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
       )
       .nullable(),
+    verification: providerConnectionVerificationSchema,
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })

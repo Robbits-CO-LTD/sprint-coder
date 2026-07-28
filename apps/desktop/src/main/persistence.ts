@@ -301,6 +301,16 @@ type ProviderConnectionRow = {
   display_name: string;
   enabled: number;
   secret_reference: string | null;
+  verification_status:
+    | 'not_required'
+    | 'unverified'
+    | 'verified'
+    | 'verification_expired'
+    | 'invalid_credentials'
+    | 'unavailable';
+  verified_at: string | null;
+  verification_expires_at: string | null;
+  verification_message: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -2156,6 +2166,24 @@ const migrations = [
       ALTER TABLE provider_connections ADD COLUMN secret_reference TEXT;
     `,
   },
+  {
+    version: 44,
+    checksum: 'provider-p1b-v44-connection-verification',
+    sql: `
+      ALTER TABLE provider_connections
+        ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (verification_status IN (
+          'not_required', 'unverified', 'verified', 'verification_expired',
+          'invalid_credentials', 'unavailable'
+        ));
+      ALTER TABLE provider_connections ADD COLUMN verified_at TEXT;
+      ALTER TABLE provider_connections ADD COLUMN verification_expires_at TEXT;
+      ALTER TABLE provider_connections ADD COLUMN verification_message TEXT;
+      UPDATE provider_connections
+      SET verification_status = 'not_required'
+      WHERE runtime_kind = 'builtin_cli';
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2514,6 +2542,10 @@ export interface PersistenceClient {
   setProviderConnectionSecretReference(
     connectionId: string,
     secretReference: string | null,
+  ): ProviderConnection;
+  updateProviderConnectionVerification(
+    connectionId: string,
+    verification: ProviderConnection['verification'],
   ): ProviderConnection;
   listTasks(): TaskSummary[];
   getTask(taskId: string): TaskSummary;
@@ -3171,10 +3203,39 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const result = this.db
       .prepare(
         `UPDATE provider_connections
-         SET secret_reference = ?, updated_at = ?
+         SET secret_reference = ?,
+             verification_status = CASE
+               WHEN runtime_kind = 'builtin_cli' THEN 'not_required'
+               ELSE 'unverified'
+             END,
+             verified_at = NULL, verification_expires_at = NULL, verification_message = NULL,
+             updated_at = ?
          WHERE id = ?`,
       )
       .run(secretReference, new Date().toISOString(), connectionId);
+    if (result.changes !== 1) throw new NotFoundError('Provider connection not found');
+    return this.getProviderConnection(connectionId);
+  }
+
+  updateProviderConnectionVerification(
+    connectionId: string,
+    verification: ProviderConnection['verification'],
+  ): ProviderConnection {
+    const result = this.db
+      .prepare(
+        `UPDATE provider_connections
+         SET verification_status = ?, verified_at = ?, verification_expires_at = ?,
+             verification_message = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        verification.status,
+        verification.verifiedAt,
+        verification.expiresAt,
+        verification.message,
+        new Date().toISOString(),
+        connectionId,
+      );
     if (result.changes !== 1) throw new NotFoundError('Provider connection not found');
     return this.getProviderConnection(connectionId);
   }
@@ -9423,6 +9484,12 @@ function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {
     displayName: row.display_name,
     enabled: row.enabled === 1,
     secretReference: row.secret_reference,
+    verification: {
+      status: row.verification_status,
+      verifiedAt: row.verified_at,
+      expiresAt: row.verification_expires_at,
+      message: row.verification_message,
+    },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
