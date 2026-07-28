@@ -82,6 +82,7 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - [Testing and CI](10-testing-and-ci.md)
 - [Risks and rollback](11-risks-and-rollback.md)
 - [Acceptance gates](12-acceptance-gates.md)
+- [2026-07-29 local final gate evidence](evidence/2026-07-29-local-final-gate.md)
 - [ADR index](adrs/README.md)
 - [UI Agent delegation process](../../process/ui-agent-delegation.md)
 
@@ -243,6 +244,11 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   C2dでmock Leaderもproductionと同じformal assign／async execution／wait経路へ移行した。
 - C2cはproduction packageで雇用3件・委譲3件を確認し、同一user-data DBで再起動した前後の
   全activity ID集合が一致し、各IDがDOMへ一度だけ表示されることを検証済み。
+- 2026-07-29の最終Computer Useで、実Codex Leader→Manager→leaf 2名の3 Worker階層、
+  leaf 2件の並列実行、双方向message、identity-bound report、Leader統合、再起動復元を確認した。
+  別の実CLI scenarioではrunning executionをsteerし、attempt 1の`interrupted/steered`、
+  attempt 2の`completed`、修正後reportを確認した。検出した誤った「配信失敗」表示と
+  macOS終了時のheadless Main残留を修正し、production packageの正常終了まで再確認した。
 
 ## 完成判定
 

@@ -94,6 +94,11 @@ usage、completionを個別に検証し、secretを含まないJSON evidenceを�
 未実行は3OS CI、Windows／Linux package、資格情報がないProviderの実API smokeである。
 これらをgreenと記録しない。
 
+2026-07-29の追加Computer Useと最終hardening結果は
+[evidence report](evidence/2026-07-29-local-final-gate.md)へ記録する。これは実装中の
+全体suite再実行ではなく、最終gateで未取得だったrunning steer／再起動／正常終了の実機証拠と、
+そこで検出した2件のtargeted regression testである。
+
 ## Existing failing baseline
 
 Team unitの2失敗とTeam E2Eの3 timeoutはSlice 0でRoot Cause Confirmed Gateを通す。test timeout延長、
