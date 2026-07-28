@@ -9,9 +9,7 @@ import {
   assertDeliveryRetryAllowed,
   assertEnvelopeMatchesClaims,
   assertReservationWithinCap,
-  assertSpawnAuthority,
   assertTeamMessageRate,
-  assertWorkerCeilingForbidsSpawn,
   buildTeamEnvelope,
   teamDeliveryId,
   transitionBudgetReservation,
@@ -136,24 +134,6 @@ describe('team budget domain', () => {
         requested: 1.5,
       }),
     ).toThrow('Invalid requested amount');
-  });
-});
-
-describe('spawn authority', () => {
-  it('forbids workers from requesting spawns', () => {
-    expect(() => assertSpawnAuthority('worker')).toThrow(
-      'Workers cannot spawn sub-workers: max worker depth is 1',
-    );
-    expect(() => assertSpawnAuthority('leader')).not.toThrow();
-  });
-
-  it('requires worker capability ceilings to forbid further spawning', () => {
-    expect(() =>
-      assertWorkerCeilingForbidsSpawn({ entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 }),
-    ).not.toThrow();
-    expect(() =>
-      assertWorkerCeilingForbidsSpawn({ entries: [], maxWorkerDepth: 1, maxConcurrentWorkers: 0 }),
-    ).toThrow('maxWorkerDepth must be 0');
   });
 });
 

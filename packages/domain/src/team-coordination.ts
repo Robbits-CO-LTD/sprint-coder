@@ -103,18 +103,6 @@ export function assertReservationWithinCap(input: {
     throw new TeamBudgetExceededError(input);
 }
 
-export function assertSpawnAuthority(requesterKind: 'leader' | 'worker'): void {
-  if (requesterKind === 'worker')
-    throw new Error('Workers cannot spawn sub-workers: max worker depth is 1');
-}
-
-export function assertWorkerCeilingForbidsSpawn(ceiling: CapabilityCeiling): void {
-  if (ceiling.maxWorkerDepth !== 0)
-    throw new Error(
-      'Worker capability ceilings must forbid further spawning (maxWorkerDepth must be 0)',
-    );
-}
-
 export const TEAM_MESSAGE_RATE_LIMIT = { limit: 30, windowMs: 60000 } as const;
 
 export class TeamMessageRateLimitError extends Error {

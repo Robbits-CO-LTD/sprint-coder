@@ -13,12 +13,11 @@ import {
 } from '@sprint-coder/contracts';
 import {
   assertEnvelopeMatchesClaims,
-  assertSpawnAuthority,
   assertTeamMessageRate,
-  assertWorkerCeilingForbidsSpawn,
   buildTeamEnvelope,
   TEAM_DELIVERY_MAX_ATTEMPTS,
   TEAM_MESSAGE_RATE_LIMIT,
+  type ManagerPolicy,
   type TeamEnvelope,
 } from '@sprint-coder/domain';
 import { killProcessTree } from './process-tree';
@@ -122,12 +121,11 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
 
 type Publish = (taskId: string, detail: TeamDetail) => void;
 
-const workerCeiling = Object.freeze({
+const leafWorkerCeiling = Object.freeze({
   entries: Object.freeze([]),
   maxWorkerDepth: 0,
   maxConcurrentWorkers: 0,
 });
-const MAX_WORKERS = 3;
 // Local Claude/Codex workers can spend well over ten seconds reasoning before they finish.
 // Keep the delivery boundary finite, but do not turn a healthy streaming run into a retry.
 const DEFAULT_WORKER_DELIVERY_TIMEOUT_MS = 120_000;
@@ -220,26 +218,57 @@ export class TeamCoordinator {
   }
 
   async hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary> {
+    return this.hireWorkerWithAuthority(input, null, null);
+  }
+
+  async hireWorkerAs(
+    input: TeamHireWorkerInput,
+    requesterAgentId: string,
+    childManagerPolicy: ManagerPolicy | null = null,
+  ): Promise<WorkerSummary> {
+    return this.hireWorkerWithAuthority(input, requesterAgentId, childManagerPolicy);
+  }
+
+  private async hireWorkerWithAuthority(
+    input: TeamHireWorkerInput,
+    requesterAgentId: string | null,
+    childManagerPolicy: ManagerPolicy | null,
+  ): Promise<WorkerSummary> {
     return this.enqueue(input.taskId, async () => {
-      assertSpawnAuthority('leader');
-      assertWorkerCeilingForbidsSpawn(workerCeiling);
       let team = this.persistence.getTeamByTask(input.taskId);
       if (team === null) team = this.persistence.promoteTaskToTeam(input.taskId);
       const before = this.persistence.getTeamSnapshot(team.id);
-      const workers = before.agents.filter(({ kind }) => kind === 'worker');
-      if (workers.length >= MAX_WORKERS)
-        throw new Error(`Team worker hard cap exceeded: ${MAX_WORKERS}`);
+      const effectiveRequesterId = requesterAgentId ?? team.leaderAgentId;
+      const requester = before.agents.find(({ id }) => id === effectiveRequesterId);
+      if (requester === undefined) throw new Error('Hiring Agent not found in Team');
       if (team.state === 'draft') team = this.persistence.transitionTeamState(team.id, 'forming');
       if (!['forming', 'active', 'paused'].includes(team.state))
         throw new Error('Team does not accept new workers');
 
+      const childDepth = requester.depth + 1;
+      const childCeiling =
+        childManagerPolicy === null
+          ? leafWorkerCeiling
+          : Object.freeze({
+              entries: Object.freeze([]),
+              maxWorkerDepth: Math.max(
+                0,
+                Math.min(team.policy.maxAgentDepth, childManagerPolicy.maxDelegationDepth) -
+                  childDepth,
+              ),
+              maxConcurrentWorkers:
+                childManagerPolicy.maxDirectChildren ?? team.policy.maxConcurrentExecutions,
+            });
       const worker = this.persistence.registerTeamWorker({
         teamId: team.id,
         role: input.role,
         objective: input.objective,
         contextInheritancePolicy: input.contextInheritancePolicy,
-        parentCapabilityCeiling: workerCeiling,
+        parentCapabilityCeiling: childCeiling,
         writeCapable: input.writeCapable,
+        parentAgentId: requester.id,
+        canDelegate: childManagerPolicy !== null,
+        managerPolicy: childManagerPolicy,
       });
       let reservations: readonly TeamBudgetReservationRecord[] = [];
       try {

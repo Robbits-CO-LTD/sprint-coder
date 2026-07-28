@@ -70,7 +70,7 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
 
 if (runsWithElectronAbi)
   describe('TeamCoordinator', () => {
-    it('starts exactly three Workers sequentially and returns each result to the Leader', async () => {
+    it('starts five Workers sequentially and returns each result to the Leader', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Team');
       const runtime = new TestWorkerRuntime();
@@ -80,7 +80,7 @@ if (runsWithElectronAbi)
       });
 
       const workers = await Promise.all(
-        ['implementer', 'reviewer', 'verifier'].map((role) =>
+        ['researcher', 'implementer', 'reviewer', 'verifier', 'documenter'].map((role) =>
           coordinator.hireWorker({
             taskId: task.id,
             role,
@@ -91,23 +91,19 @@ if (runsWithElectronAbi)
         ),
       );
       expect(runtime.maxActiveStarts).toBe(1);
-      expect(workers.map(({ state }) => state)).toEqual(['ready', 'ready', 'ready']);
+      expect(workers.map(({ state }) => state)).toEqual([
+        'ready',
+        'ready',
+        'ready',
+        'ready',
+        'ready',
+      ]);
       expect(workers.every(({ engine }) => engine === 'mock')).toBe(true);
       expect(
         persistence
           .getTeamBudgetStatus(workers[0]!.teamId)
           .find(({ scope, kind }) => scope === 'global' && kind === 'spawnSlots'),
       ).toMatchObject({ committed: 0, reserved: 0 });
-      await expect(
-        coordinator.hireWorker({
-          taskId: task.id,
-          role: 'fourth',
-          objective: 'must fail',
-          contextInheritancePolicy: 'none',
-          writeCapable: false,
-        }),
-      ).rejects.toThrow('hard cap');
-
       for (const worker of workers)
         await coordinator.sendToWorker({
           taskId: task.id,
@@ -119,14 +115,71 @@ if (runsWithElectronAbi)
       expect(detail?.team.state).toBe('completed');
       expect(
         detail?.workers.filter(({ kind }) => kind === 'worker').map(({ state }) => state),
-      ).toEqual(['done', 'done', 'done']);
-      expect(detail?.messages).toHaveLength(6);
+      ).toEqual(['done', 'done', 'done', 'done', 'done']);
+      expect(detail?.messages).toHaveLength(10);
       expect(
         detail?.messages.filter(
           ({ sourceKind, targetKind }) => sourceKind === 'worker' && targetKind === 'leader',
         ),
-      ).toHaveLength(3);
+      ).toHaveLength(5);
       expect(events.length).toBeGreaterThanOrEqual(6);
+      persistence.close();
+    });
+
+    it('allows an explicitly identified Manager to hire a child within persisted policy', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Manager delegation');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const team = persistence.promoteTaskToTeam(task.id);
+
+      const manager = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: '部長',
+          objective: '実装部門を管理する',
+          contextInheritancePolicy: 'summary',
+          writeCapable: false,
+        },
+        team.leaderAgentId,
+        {
+          maxDirectChildren: 2,
+          maxDelegationDepth: 3,
+          allowManagerChildren: false,
+        },
+      );
+      const child = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: '実装担当',
+          objective: '機能を実装する',
+          contextInheritancePolicy: 'selected_items',
+          writeCapable: true,
+        },
+        manager.id,
+      );
+
+      expect(manager).toMatchObject({
+        parentAgentId: team.leaderAgentId,
+        depth: 1,
+        canDelegate: true,
+      });
+      expect(child).toMatchObject({
+        parentAgentId: manager.id,
+        depth: 2,
+        canDelegate: false,
+      });
+      await expect(
+        coordinator.hireWorkerAs(
+          {
+            taskId: task.id,
+            role: '偽Manager',
+            objective: '許可なく再委譲する',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          },
+          child.id,
+        ),
+      ).rejects.toThrow('Only a Manager with canDelegate');
       persistence.close();
     });
 

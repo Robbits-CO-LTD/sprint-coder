@@ -1,7 +1,7 @@
 // Leader team tools (FR-TEAM-06/13, IMPLEMENTATION_PLAN Slice 5.2): the Leader hires and
 // dispatches Workers via tool use during its own Turn instead of the user driving teams.* IPC
 // directly. Every tool forwards to TeamCoordinator, which remains the sole issuer of
-// source/target envelopes and the sole enforcer of the max-3 cap, budget reservations, and the
+// source/target envelopes and the sole enforcer of hierarchy policy, budget reservations, and the
 // Team/Worker state machines — this file never mutates Team state on its own.
 //
 // Real Codex/Claude runtimes stay no-tools for now (see runtime-host.ts): these definitions are
@@ -244,7 +244,9 @@ async function executeWaitReports(
  * Leader's tool calls. `taskId` always comes from the caller's own trusted binding (ToolBroker's
  * ToolExecutionContext, or the bridge's per-turn registration) — it is never read from `args` —
  * so a tool call can never spoof which Task/Team it targets, let alone the source/target agent
- * identity inside it (TeamCoordinator resolves the Leader/Worker itself). */
+ * identity inside it (this Leader-only entry point lets TeamCoordinator resolve the Leader).
+ * Manager runtimes use a separate caller-bound entry point; they never provide their identity in
+ * model-controlled arguments. */
 export async function executeTeamTool(
   coordinator: TeamCoordinator,
   taskId: string,

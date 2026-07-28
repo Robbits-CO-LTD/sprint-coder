@@ -5,8 +5,7 @@ import { defineConfig } from 'vitest/config';
 // Vitest's default 5s per-test timeout is written for pure unit tests. A large part of this
 // suite is not that: specs open real SQLite databases, spawn child processes, and drive the
 // ToolBroker end to end. On a 2-CPU GitHub runner those routinely take longer than 5s while
-// still being perfectly healthy — `Leader team tools > maps the coordinator hard cap to a
-// tool-result error instead of throwing` (four sequential hires through the broker) timed out
+// still being perfectly healthy — Team tool tests that start several sequential workers timed out
 // in CI while passing locally in well under a second.
 //
 // Raising the ceiling does not weaken any assertion; it only stops the runner from calling a

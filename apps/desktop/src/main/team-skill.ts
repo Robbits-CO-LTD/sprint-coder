@@ -20,7 +20,7 @@ Team利用が明示された依頼では、必ずMCPサーバー \`team\` の実
 4. 実際に届いたreportだけを統合する。存在しないWorker、未着report、行われていない議論を生成しない。
 5. blocked、needs_input、failed、canceledをcompletedへ読み替えない。
 
-人数指定は最大3人の範囲で守る。Team MCP、Skill、digest、context fragmentの検証に失敗した場合は、Teamを使ったように振る舞わずfail closedにする。
+人数指定を守り、必要以上に採用しない。Team MCP、Skill、digest、context fragmentの検証に失敗した場合は、Teamを使ったように振る舞わずfail closedにする。
 `;
 export const BUILTIN_TEAM_SKILL_DIGEST = createHash('sha256')
   .update(BUILTIN_TEAM_SKILL_CONTENT)

@@ -45,6 +45,13 @@ Proof: pure domain state-machine testとpersistence integration。
 
 Proof: deterministic Runtimeで8 parallel、depth、steer、crash／restart。
 
+進捗:
+
+- B1a完了: 旧3 Worker hard cap撤廃、5 Worker雇用回帰、明示的かつcaller-boundな
+  `requesterAgentId`を受けるCoordinator境界、Manager Policyに基づく子Agent登録。
+- B1b次着手: 可変人数Canvas／List表示。Manager MCP caller bindingはRuntime接続Sliceで行い、
+  model-controlled引数からAgent identityを受け取らない。
+
 ## Core C — User experience and GA
 
 - Agent／Activity Card
