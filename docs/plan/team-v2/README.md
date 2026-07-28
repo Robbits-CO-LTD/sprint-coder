@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: 文書改訂。製品実装は未着手
+- 現在地: Team Slice 0完了。Core A1 connection identity完了、Core A2着手前
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -82,15 +82,19 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 
 ## 現在地とblocker
 
-- 現行DB migrationはv34。
+- 現行DB migrationはv35。新規Claude／Codex Turn・Agentはbuilt-in connection IDと
+  requested model identityを保存し、Runtimeが返したresolved modelを別フィールドへ保存する。
 - TeamはWorker上限3、task単位のPromise queueによる直列実行、深度1である。
 - `spawnSlots: 8`はWorker起動時の予算leaseであり、AI実行の8並列Schedulerではない。
 - Provider Connection、外部API Adapter、Secret Storage、API rate-limit Scheduler、feature flag基盤は
   未実装。
 - `01-multi-provider-addendum.md`の原文は未提供である。原文を創作せず、提供されるまで
   [blocker placeholder](instructions/01-multi-provider-addendum.md)として扱う。
-- 既存Team unitにはテスト起動path由来の2失敗、Team E2Eには3 timeoutがある。Slice 0で
-  Root Cause Confirmed Gateを通す。
+- Slice 0のRoot Cause Confirmed Gateは完了した。Team unitは26 passed／1 skipped、
+  packaged Team E2Eは3 passedで、productionのNode inspector fuseが無効のまま一時test bundle
+  だけをPlaywrightで検査する。
+- 次はCore A2として、Task／Agentのcanonical selection repositoryと階層・Policy domainを
+  独立sub-Sliceへ分けて実装する。
 
 ## 完成判定
 

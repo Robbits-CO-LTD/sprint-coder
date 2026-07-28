@@ -1019,6 +1019,37 @@ export type PublicError = z.infer<typeof publicErrorSchema>;
 
 export const runtimeKindSchema = z.enum(['mock', 'codex', 'claude']);
 export type RuntimeKind = z.infer<typeof runtimeKindSchema>;
+export const connectionIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+export const providerIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9][a-z0-9._-]*$/);
+export const modelSelectionSchema = z
+  .object({
+    connectionId: connectionIdSchema.nullable(),
+    requestedProvider: providerIdSchema.nullable(),
+    requestedModel: z.string().min(1).max(128).nullable(),
+  })
+  .strict()
+  .refine(
+    ({ connectionId, requestedProvider, requestedModel }) =>
+      (connectionId === null && requestedProvider === null && requestedModel === null) ||
+      (connectionId !== null && requestedProvider !== null && requestedModel !== null),
+    { message: 'Model selection identity must be either complete or entirely unknown' },
+  );
+export type ModelSelection = z.infer<typeof modelSelectionSchema>;
+export const executionResolutionSchema = z
+  .object({
+    resolvedProvider: providerIdSchema.nullable(),
+    resolvedModel: z.string().min(1).max(128).nullable(),
+  })
+  .strict();
+export type ExecutionResolution = z.infer<typeof executionResolutionSchema>;
 // Model id/option shape is provider-agnostic (Codex slugs and Claude aliases/full ids both fit
 // this format) and is kept under its original "codex" name for additive, non-breaking evolution.
 export const codexModelIdSchema = z

@@ -4408,7 +4408,31 @@ if (runsWithElectronAbi)
         { version: 32 },
         { version: 33 },
         { version: 34 },
+        { version: 35 },
       ]);
+      for (const [table, columns] of [
+        [
+          'turns',
+          [
+            'connection_id',
+            'requested_provider',
+            'requested_model',
+            'resolved_provider',
+            'resolved_model',
+          ],
+        ],
+        ['agent_threads', ['connection_id', 'requested_provider', 'requested_model']],
+        ['agents', ['connection_id', 'requested_provider', 'requested_model']],
+      ] as const) {
+        const actual = new Set(
+          (
+            migrated.prepare(`PRAGMA table_info(${table})`).all() as {
+              name: string;
+            }[]
+          ).map(({ name }) => name),
+        );
+        for (const column of columns) expect(actual.has(column)).toBe(true);
+      }
       const migratedTables = new Set(
         (
           migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {

@@ -6,6 +6,7 @@ import {
   chatMessageSchema,
   approvalSummarySchema,
   commandSummarySchema,
+  executionResolutionSchema,
   taskSummarySchema,
   turnEventSchema,
   turnSnapshotSchema,
@@ -20,6 +21,8 @@ import {
   type CommandSummary,
   type CommandOutputPage,
   type ContextUsage,
+  type ExecutionResolution,
+  type ModelSelection,
   type QueuedInput,
   type RuntimeKind,
   type DatabaseRecovery,
@@ -99,6 +102,7 @@ import {
 } from './context-ledger';
 import { redactSecrets } from './secret-redactor';
 import { deriveTaskTitle } from './task-title';
+import { modelSelectionForRuntime } from './connection-identity';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
 import {
   legacyMutationWorkspaceKey,
@@ -286,6 +290,9 @@ type AgentRow = {
   write_capable: number;
   current_activity: string | null;
   runtime_kind: RuntimeKind;
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -408,6 +415,11 @@ type TurnRow = {
   assistant_message_id: string | null;
   runtime_kind: RuntimeKind;
   model: string;
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
+  resolved_provider: string | null;
+  resolved_model: string | null;
   created_at: string;
 };
 type QueueRow = { ordinal: number; payload_json: string };
@@ -1697,6 +1709,25 @@ const migrations = [
       WHERE kind = 'spawnSlots' AND state = 'settled';
     `,
   },
+  {
+    version: 35,
+    checksum: 'team-v2-core-v35-connection-model-identity',
+    sql: `
+      ALTER TABLE turns ADD COLUMN connection_id TEXT;
+      ALTER TABLE turns ADD COLUMN requested_provider TEXT;
+      ALTER TABLE turns ADD COLUMN requested_model TEXT;
+      ALTER TABLE turns ADD COLUMN resolved_provider TEXT;
+      ALTER TABLE turns ADD COLUMN resolved_model TEXT;
+
+      ALTER TABLE agent_threads ADD COLUMN connection_id TEXT;
+      ALTER TABLE agent_threads ADD COLUMN requested_provider TEXT;
+      ALTER TABLE agent_threads ADD COLUMN requested_model TEXT;
+
+      ALTER TABLE agents ADD COLUMN connection_id TEXT;
+      ALTER TABLE agents ADD COLUMN requested_provider TEXT;
+      ALTER TABLE agents ADD COLUMN requested_model TEXT;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -1831,6 +1862,7 @@ export type StartedTurn = {
   text: string;
   runtimeKind: RuntimeKind;
   model: string;
+  modelSelection: ModelSelection;
   event: TurnEvent;
   /** Present only when this Turn's message triggered automatic naming (issue #4), so the caller
    * can push the new title to the renderer without a dedicated event. */
@@ -1899,8 +1931,13 @@ export type AgentRecord = Readonly<{
   writeCapable: boolean;
   currentActivity: string | null;
   runtimeKind: RuntimeKind;
+  modelSelection: ModelSelection;
   createdAt: string;
   updatedAt: string;
+}>;
+export type TurnModelIdentity = Readonly<{
+  selection: ModelSelection;
+  resolution: ExecutionResolution;
 }>;
 export type TeamBudgetReservationRecord = Readonly<{
   id: string;
@@ -2346,6 +2383,12 @@ export interface PersistenceClient {
   listRecoverableNativeMutationIntents(): readonly NativeMutationIntentSnapshot[];
   listMessages(taskId: string): ChatMessage[];
   startTurn(taskId: string, text: string): StartedTurn;
+  getTurnModelIdentity(taskId: string, turnId: string): TurnModelIdentity;
+  recordTurnResolution(
+    taskId: string,
+    turnId: string,
+    resolution: ExecutionResolution,
+  ): TurnModelIdentity;
   queueInput(
     taskId: string,
     text: string,
@@ -2772,6 +2815,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const now = new Date().toISOString();
     const primaryThreadId = randomUUID();
     const leaderAgentId = randomUUID();
+    const runtimeKind = this.getRuntime();
+    const modelSelection = modelSelectionForRuntime(runtimeKind, this.getModel());
     // An explicit title is the caller's choice and must survive the first message, so it is
     // recorded as 'manual'. Only the placeholder is eligible for auto-naming (issue #4).
     const titleSource = title === undefined ? 'default' : 'manual';
@@ -2798,18 +2843,40 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare(
           `INSERT INTO agent_threads(
-             id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
-           ) VALUES (?, ?, ?, 'active', NULL, 0, ?, ?)`,
+             id, task_id, runtime_kind, state, active_turn_id, revision,
+             connection_id, requested_provider, requested_model, created_at, updated_at
+           ) VALUES (?, ?, ?, 'active', NULL, 0, ?, ?, ?, ?, ?)`,
         )
-        .run(primaryThreadId, task.id, this.getRuntime(), now, now);
+        .run(
+          primaryThreadId,
+          task.id,
+          runtimeKind,
+          modelSelection.connectionId,
+          modelSelection.requestedProvider,
+          modelSelection.requestedModel,
+          now,
+          now,
+        );
       this.db
         .prepare(
           `INSERT INTO agents(
              id, team_id, thread_id, task_id, kind, role, state, objective,
-             parent_capability_ceiling_json, context_inheritance_policy, created_at, updated_at
-           ) VALUES (?, NULL, ?, ?, 'leader', 'leader', 'ready', NULL, NULL, NULL, ?, ?)`,
+             parent_capability_ceiling_json, context_inheritance_policy,
+             connection_id, requested_provider, requested_model, created_at, updated_at
+           ) VALUES (
+             ?, NULL, ?, ?, 'leader', 'leader', 'ready', NULL, NULL, NULL, ?, ?, ?, ?, ?
+           )`,
         )
-        .run(leaderAgentId, primaryThreadId, task.id, now, now);
+        .run(
+          leaderAgentId,
+          primaryThreadId,
+          task.id,
+          modelSelection.connectionId,
+          modelSelection.requestedProvider,
+          modelSelection.requestedModel,
+          now,
+          now,
+        );
       this.db
         .prepare('UPDATE tasks SET primary_thread_id = ? WHERE id = ?')
         .run(primaryThreadId, task.id);
@@ -2933,20 +3000,32 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const now = new Date().toISOString();
       const threadId = randomUUID();
       const agentId = randomUUID();
+      const runtimeKind = input.runtimeKind ?? this.getRuntime();
+      const modelSelection = modelSelectionForRuntime(runtimeKind, this.getModel());
       this.db
         .prepare(
           `INSERT INTO agent_threads(
-             id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
-           ) VALUES (?, ?, ?, 'idle', NULL, 0, ?, ?)`,
+             id, task_id, runtime_kind, state, active_turn_id, revision,
+             connection_id, requested_provider, requested_model, created_at, updated_at
+           ) VALUES (?, ?, ?, 'idle', NULL, 0, ?, ?, ?, ?, ?)`,
         )
-        .run(threadId, team.taskId, input.runtimeKind ?? this.getRuntime(), now, now);
+        .run(
+          threadId,
+          team.taskId,
+          runtimeKind,
+          modelSelection.connectionId,
+          modelSelection.requestedProvider,
+          modelSelection.requestedModel,
+          now,
+          now,
+        );
       this.db
         .prepare(
           `INSERT INTO agents(
              id, team_id, thread_id, task_id, kind, role, state, objective,
              parent_capability_ceiling_json, context_inheritance_policy,
-             write_capable, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?, ?)`,
+             write_capable, connection_id, requested_provider, requested_model, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           agentId,
@@ -2958,6 +3037,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
           JSON.stringify(input.parentCapabilityCeiling),
           input.contextInheritancePolicy,
           input.writeCapable === true ? 1 : 0,
+          modelSelection.connectionId,
+          modelSelection.requestedProvider,
+          modelSelection.requestedModel,
           now,
           now,
         );
@@ -6546,6 +6628,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  getTurnModelIdentity(taskId: string, turnId: string): TurnModelIdentity {
+    return toTurnModelIdentity(this.getTurn(taskId, turnId));
+  }
+
+  recordTurnResolution(
+    taskId: string,
+    turnId: string,
+    resolution: ExecutionResolution,
+  ): TurnModelIdentity {
+    const parsed = executionResolutionSchema.parse(resolution);
+    const result = this.db
+      .prepare(
+        `UPDATE turns SET resolved_provider = ?, resolved_model = ?, updated_at = ?
+         WHERE id = ? AND task_id = ?`,
+      )
+      .run(parsed.resolvedProvider, parsed.resolvedModel, new Date().toISOString(), turnId, taskId);
+    if (result.changes !== 1) throw new NotFoundError('Turn not found');
+    return this.getTurnModelIdentity(taskId, turnId);
+  }
+
   queueInput(
     taskId: string,
     text: string,
@@ -7068,6 +7170,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const turnId = randomUUID();
     const runtimeKind = this.getRuntime();
     const model = this.getModel();
+    const modelSelection = modelSelectionForRuntime(runtimeKind, model);
     const userMessage = chatMessageSchema.parse({
       id: randomUUID(),
       taskId,
@@ -7084,10 +7187,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare(
         `INSERT INTO turns(
-          id, task_id, user_message_id, state, seq, runtime_kind, model, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+          id, task_id, user_message_id, state, seq, runtime_kind, model,
+          connection_id, requested_provider, requested_model, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(turnId, taskId, userMessage.id, 'queued', runtimeKind, model, now, now);
+      .run(
+        turnId,
+        taskId,
+        userMessage.id,
+        'queued',
+        runtimeKind,
+        model,
+        modelSelection.connectionId,
+        modelSelection.requestedProvider,
+        modelSelection.requestedModel,
+        now,
+        now,
+      );
     this.insertAcceptanceContract(
       createInitialAcceptanceContract({
         taskId,
@@ -7105,6 +7221,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       text,
       runtimeKind,
       model,
+      modelSelection,
       event,
       ...(renamedTask === null ? {} : { renamedTask }),
     };
@@ -7890,8 +8007,27 @@ function toAgent(row: AgentRow): AgentRecord {
     writeCapable: row.write_capable === 1,
     currentActivity: row.current_activity,
     runtimeKind: row.runtime_kind,
+    modelSelection: {
+      connectionId: row.connection_id,
+      requestedProvider: row.requested_provider,
+      requestedModel: row.requested_model,
+    },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toTurnModelIdentity(row: TurnRow): TurnModelIdentity {
+  return {
+    selection: {
+      connectionId: row.connection_id,
+      requestedProvider: row.requested_provider,
+      requestedModel: row.requested_model,
+    },
+    resolution: {
+      resolvedProvider: row.resolved_provider,
+      resolvedModel: row.resolved_model,
+    },
   };
 }
 

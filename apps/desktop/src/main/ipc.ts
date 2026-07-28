@@ -162,8 +162,8 @@ export class IpcRouter {
   private readonly turnRuntimes = new Map<string, RuntimeKind>();
   // The concrete model id the Claude CLI actually resolved for a turn (captured from the
   // stream-json `system/init` event by ClaudeJsonlNormalizer), keyed by turnId until
-  // finishAndAdvance folds it into the outgoing `turn.completed` event. Not persisted — see the
-  // `resolvedModel` doc comment on turnEventSchema.
+  // finishAndAdvance persists it as execution resolution and folds it into the outgoing
+  // `turn.completed` event.
   private readonly resolvedModelByTurn = new Map<string, string>();
   // One reasoning batcher per active turn (issue #17). Keyed by turnId and disposed in
   // finishAndAdvance, so a turn cannot leave a timer behind.
@@ -1215,9 +1215,16 @@ export class IpcRouter {
     // `turn.completed` and the timeline shows the image inside the Turn that produced it.
     this.ingestGeneratedImages(taskId, turnId);
     this.teamMcpBridge.unregister(turnId);
-    const event = this.persistence.completeTurn(taskId, turnId, state);
     const resolvedModel = this.resolvedModelByTurn.get(turnId);
     this.resolvedModelByTurn.delete(turnId);
+    if (resolvedModel !== undefined)
+      this.persistence.recordTurnResolution(taskId, turnId, {
+        // The CLI reports the concrete model, but not a canonical provider id. Keep provider
+        // resolution unknown rather than inferring it from the selected Connection.
+        resolvedProvider: null,
+        resolvedModel,
+      });
+    const event = this.persistence.completeTurn(taskId, turnId, state);
     this.publish(
       event.type === 'turn.completed' && resolvedModel !== undefined
         ? { ...event, resolvedModel }

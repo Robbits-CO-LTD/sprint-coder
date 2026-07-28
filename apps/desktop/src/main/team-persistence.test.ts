@@ -86,6 +86,56 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('persists built-in Connection selection and observed model resolution additively', () => {
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('claude');
+      persistence.setModel('claude-opus-5');
+      const task = persistence.createTask();
+      const leader = persistence.getTaskLeader(task.id);
+      expect(leader.modelSelection).toEqual({
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-opus-5',
+      });
+
+      const team = persistence.promoteTaskToTeam(task.id);
+      const worker = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'researcher',
+        objective: 'Research the bounded slice.',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+      });
+      expect(worker.modelSelection).toEqual(leader.modelSelection);
+
+      const started = persistence.startTurn(task.id, 'record model identity');
+      expect(started.modelSelection).toEqual(leader.modelSelection);
+      expect(
+        persistence.recordTurnResolution(task.id, started.turnId, {
+          resolvedProvider: null,
+          resolvedModel: 'claude-opus-5-20260715',
+        }),
+      ).toEqual({
+        selection: leader.modelSelection,
+        resolution: {
+          resolvedProvider: null,
+          resolvedModel: 'claude-opus-5-20260715',
+        },
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTaskLeader(task.id).modelSelection).toEqual(leader.modelSelection);
+      expect(reopened.getTurnModelIdentity(task.id, started.turnId)).toEqual({
+        selection: leader.modelSelection,
+        resolution: {
+          resolvedProvider: null,
+          resolvedModel: 'claude-opus-5-20260715',
+        },
+      });
+      reopened.close();
+    });
+
     it('persists ordered leader-routed delivery and rejects direct Worker messages', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();

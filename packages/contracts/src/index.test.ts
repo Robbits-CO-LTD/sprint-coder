@@ -3,6 +3,8 @@ import * as contracts from './index';
 import {
   claudeEffortSchema,
   commandEnvelopeSchema,
+  executionResolutionSchema,
+  modelSelectionSchema,
   permissionSettingsSchema,
   permissionSetInputSchema,
   publicErrorSchema,
@@ -52,6 +54,29 @@ const pendingApproval = {
 } as const;
 
 describe('public contracts', () => {
+  it('keeps requested selection separate from observed execution resolution', () => {
+    expect(
+      modelSelectionSchema.parse({
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-opus-5',
+      }),
+    ).toMatchObject({ connectionId: 'builtin:claude-cli' });
+    expect(
+      executionResolutionSchema.parse({
+        resolvedProvider: null,
+        resolvedModel: 'claude-opus-5-20260715',
+      }),
+    ).toMatchObject({ resolvedProvider: null });
+    expect(() =>
+      modelSelectionSchema.parse({
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: null,
+        requestedModel: 'gpt-5.6-sol',
+      }),
+    ).toThrow();
+  });
+
   it('validates the bounded Team promotion result', () => {
     expect(
       teamSummarySchema.parse({
