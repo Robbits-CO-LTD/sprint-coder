@@ -170,6 +170,7 @@ import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { ModelCatalogService } from './model-catalog-service';
 import { builtinRuntimeForModelSelection, modelSelectionForRuntime } from './connection-identity';
+import { multiProviderModelPickerV2Enabled } from './feature-flags';
 import { ProviderSecretStorage } from './provider-secret-storage';
 import { ElectronProviderSecretCipher } from './electron-provider-secret-cipher';
 import { MainProviderRegistry } from './provider-runtime';
@@ -610,8 +611,7 @@ export class IpcRouter {
         return {
           ...result,
           selection,
-          multiProviderModelPickerV2:
-            process.env['SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2'] === '1',
+          multiProviderModelPickerV2: multiProviderModelPickerV2Enabled(),
         };
       },
     );

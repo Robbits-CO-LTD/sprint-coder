@@ -5,7 +5,7 @@
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
   P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b、
-  UI U0/U1a/U1b/U1c/U2a、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5、P6完了
+  UI U0/U1a/U1b/U1c/U2a/U3a、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5、P6完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -163,6 +163,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   同一Taskへ戻ったときの古い応答、失敗したselection writeのrollback、canonical selection変更後の
   stale表示名をTask IDと単調tokenで防ぐ。純粋unit 15件と対象lintはgreen。Chat／Team／restart／
   packagedのparity E2Eは全実装後のfinal gateへ留保する。
+- UI U3aでV2 Pickerを既定ONにした。`SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2=0`を
+  明示した場合だけ旧Pickerへ戻るため、U4まで即時rollback経路を維持する。flag unit 3件と
+  対象lintはgreen。U3の完成判定はfinal gateの3OS／packaged／a11y／全E2Eまで保留する。
 - Provider P2aでMain-only credential resolver、OpenAI API認証header、無料のmodel listによる
   接続確認とcatalog discoveryを追加した。401／403、一時障害、network errorを区別し、
   APIが返さないcapabilityは`unknown`を維持する。
