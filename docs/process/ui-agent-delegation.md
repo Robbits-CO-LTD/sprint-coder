@@ -64,6 +64,13 @@ Secret Storageを誤解させる説明と、Connection間でverificationを同�
 component test 24件、対象file lint、`git diff --check`のgreenを確認してU1cを受理した。
 full suite、E2E、packaged確認は全実装後のfinal gateへ留保した。
 
+同日のU2aは設定model自身だけへ最大6fileを委託し、1往復、実費$2.832971で完了reportを得た。
+`modelUsage`は設定modelだけで、Agent／Task、fallback、permission denialは0件だった。
+メインAgentは5file・1000差分行未満、backend変更0を確認し、Task切替、stale response、
+Task-safe rollback、canonical変更後の表示名をreviewした。純粋unit 15件と対象file lintはgreen。
+desktop typecheckは変更箇所ではなく既知のVite二重依存type errorだけで停止した。
+Chat／Team／restart／packaged parityは全実装後のfinal gateへ留保した。
+
 ## Delegation scope
 
 - Provider settings

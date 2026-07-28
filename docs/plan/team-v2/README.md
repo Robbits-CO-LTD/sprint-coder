@@ -5,7 +5,7 @@
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
   P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b、
-  UI U0/U1a/U1b/U1c、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5、P6完了
+  UI U0/U1a/U1b/U1c/U2a、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5、P6完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -159,6 +159,10 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   OpenAI／OpenRouter／Anthropic／Gemini／xAIの追加、接続状態、再確認、Main-only Secret Storageの
   境界を表示する。Rendererはsecret referenceやbackendの生messageを表示せず、同時verificationを
   UIで防ぐ。component test 24件、対象lint、diff checkはgreenで、全体E2Eはfinal gateへ留保する。
+- UI U2aで旧Runtime／Model PickerとV2 Pickerの非同期parityを修正した。Task切替後の遅延応答、
+  同一Taskへ戻ったときの古い応答、失敗したselection writeのrollback、canonical selection変更後の
+  stale表示名をTask IDと単調tokenで防ぐ。純粋unit 15件と対象lintはgreen。Chat／Team／restart／
+  packagedのparity E2Eは全実装後のfinal gateへ留保する。
 - Provider P2aでMain-only credential resolver、OpenAI API認証header、無料のmodel listによる
   接続確認とcatalog discoveryを追加した。401／403、一時障害、network errorを区別し、
   APIが返さないcapabilityは`unknown`を維持する。

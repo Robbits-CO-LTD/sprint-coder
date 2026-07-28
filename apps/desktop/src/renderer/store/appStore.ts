@@ -29,6 +29,12 @@ import { advanceStageIndex } from '../lib/turn-progress';
 import { appendReasoning, pruneReasoning } from '../lib/reasoning-buffer';
 import { applyFileEditFrame, clearFileEdits } from '../lib/file-edit-buffer';
 import {
+  canApplyOptimisticSelection,
+  rollbackModelPicker,
+  shouldApplyModelPickerAnswer,
+  type ModelPickerSnapshot,
+} from '../lib/model-picker-parity';
+import {
   appendCommandOutput,
   projectCommandTail,
   type CommandTailProjection,
@@ -77,25 +83,10 @@ export type CommandCardState = Readonly<{
   tail: CommandTailProjection;
 }>;
 
-/**
- * What the Composer needs to decide *which* model picker to show, and what the V2 one starts from
- * (UI slice U1b).
- *
- * Deliberately small: the catalog itself is never mirrored here. `models.query` is Main-owned,
- * paged and filtered, and holding its pages in the store would make the renderer the second place
- * a 1000+ model catalog lives — the picker keeps its own page window instead and this state only
- * carries the two facts that outlive the popup being open.
- */
-export type ModelPickerState = {
-  /** The Task the two fields below were resolved for. */
-  taskId: string | null;
-  /** `multiProviderModelPickerV2` as Main reported it. `null` while unresolved — the Composer keeps
-   * the legacy chip until this is explicitly `true`, so an in-flight (or never-arriving) answer
-   * degrades to today's UI rather than to an empty one. */
-  enabled: boolean | null;
-  /** Main's canonical selection for the Task. Null when Main has not answered yet. */
-  selection: ModelSelection | null;
-};
+/** The Model Picker slice's shape (UI slice U1b). Declared in lib/model-picker-parity.ts alongside
+ * the staleness rules that operate on it, so the picker and the store cannot disagree about what a
+ * snapshot means; re-exported here because this is where callers already look for it. */
+export type ModelPickerState = ModelPickerSnapshot;
 
 // Re-exported so existing importers keep working; the definitions moved to lib/stages.ts to break
 // the cycle with lib/turn-progress.ts (issue #16).
@@ -338,6 +329,15 @@ async function loadPermission(
     // Non-fatal: keep the deny-by-default Ask preset while task data remains usable.
   }
 }
+
+/** Hands out a start-order token to every canonical-selection read and write (UI slice U2).
+ *
+ * The `models` calls are plain promises with no ordering guarantee of their own, and three things
+ * race for the same one-slot snapshot: the per-Task read on switch, the re-read after a legacy
+ * Runtime/Model write, and the V2 picker's own write. Comparing the token an answer was issued
+ * under against the newest one issued makes "an older intent must not land on a newer one"
+ * decidable without the callers knowing about each other. */
+let modelPickerToken = 0;
 
 /** Re-reads the canonical selection after a *legacy* Runtime/Model write (UI slice U1b).
  *
@@ -835,11 +835,21 @@ export const useAppStore = create<AppState>((set, get) => {
      * Uses the smallest possible catalog query (one row) — the answer this needs is the envelope,
      * not the page. The picker fetches real pages itself, and only while it is open. */
     async loadModelPicker(taskId: string) {
+      // Claimed before the call so a read started earlier can no longer win, even on the
+      // synchronous path below.
+      const token = (modelPickerToken += 1);
       if (!window.sprintCoder || typeof window.sprintCoder.models?.query !== 'function') {
         // No `models` API at all: the Composer must keep the legacy chip forever, not wait.
         set({ modelPicker: { taskId, enabled: false, selection: null } });
         return;
       }
+      const applies = () =>
+        shouldApplyModelPickerAnswer({
+          requestTaskId: taskId,
+          requestToken: token,
+          currentTaskId: get().selectedTaskId,
+          latestToken: modelPickerToken,
+        });
       try {
         const result = await window.sprintCoder.models.query({
           taskId,
@@ -851,7 +861,9 @@ export const useAppStore = create<AppState>((set, get) => {
           cursor: null,
           limit: 1,
         });
-        if (get().selectedTaskId !== taskId) return;
+        // Stale two ways: the Task moved on, or a newer read/write was started while this was in
+        // flight — a read that predates the user's latest choice would silently undo it.
+        if (!applies()) return;
         set({
           modelPicker: {
             taskId,
@@ -861,7 +873,7 @@ export const useAppStore = create<AppState>((set, get) => {
         });
       } catch {
         // A failed probe degrades to the legacy chip rather than to no picker at all.
-        if (get().selectedTaskId !== taskId) return;
+        if (!applies()) return;
         set({ modelPicker: { taskId, enabled: false, selection: null } });
       }
     },
@@ -875,14 +887,41 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!window.sprintCoder || typeof window.sprintCoder.models?.setSelection !== 'function')
         return;
       const previous = get().modelPicker;
-      set({ modelPicker: { taskId, enabled: previous.enabled, selection } });
+      // A write is an intent too, so it takes a token: an in-flight read issued before it must not
+      // land afterwards and undo the choice the user just made.
+      const token = (modelPickerToken += 1);
+      // Optimistic only against this Task's own snapshot — writing it over another Task's would
+      // have to invent that Task's `enabled`, and guessing there swaps the whole picker.
+      if (canApplyOptimisticSelection(previous, taskId))
+        set({ modelPicker: { taskId, enabled: previous.enabled, selection } });
       try {
         const saved = await window.sprintCoder.models.setSelection(taskId, selection);
-        if (get().selectedTaskId === taskId)
-          set({ modelPicker: { taskId, enabled: previous.enabled, selection: saved } });
+        if (
+          shouldApplyModelPickerAnswer({
+            requestTaskId: taskId,
+            requestToken: token,
+            currentTaskId: get().selectedTaskId,
+            latestToken: modelPickerToken,
+          })
+        )
+          // `enabled` is re-read rather than reused from `previous`: a read may have resolved the
+          // flag while this write was in flight, and reinstating the older value would flip the
+          // Composer back to the legacy chip for no reason.
+          set({ modelPicker: { taskId, enabled: get().modelPicker.enabled, selection: saved } });
         await get().loadRuntime();
       } catch (err) {
-        set({ modelPicker: previous });
+        // Task-safe: only undoes this write, and only while the store still holds it. A rejection
+        // that arrives after the user switched Tasks must not restore the old Task's snapshot over
+        // the new one — that would strand the Composer on another Task's selection (or on its
+        // `enabled`, dropping it back to the legacy chip).
+        set({
+          modelPicker: rollbackModelPicker({
+            current: get().modelPicker,
+            previous,
+            taskId,
+            attempted: selection,
+          }),
+        });
         set({ error: describeError(err) });
       }
     },

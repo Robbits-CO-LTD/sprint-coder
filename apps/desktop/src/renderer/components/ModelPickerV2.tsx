@@ -3,6 +3,11 @@ import type { KeyboardEvent } from 'react';
 import type { ModelCatalogQueryResult, ModelSelection, ProviderModel } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import {
+  resolveTriggerLabel,
+  selectionForTask,
+  type ChosenModel,
+} from '../lib/model-picker-parity';
+import {
   MODEL_LIST_OVERSCAN_ROWS,
   MODEL_LIST_VIEWPORT_PX,
   MODEL_PAGE_PREFETCH_ROWS,
@@ -88,7 +93,11 @@ function describeModel(model: ProviderModel): string {
 }
 
 export function ModelPickerV2({ taskId }: { taskId: string }) {
-  const selection = useAppStore((s) => s.modelPicker.selection);
+  // Scoped to this Task, not just read off the slot: the store holds one canonical selection at a
+  // time, so between a Task switch and that Task's answer arriving the slot still describes the
+  // Task the user left. Ticking a row — or labelling the trigger — from that would attribute
+  // another Task's model to this one (Team v2 UI slice U2).
+  const selection = useAppStore((s) => selectionForTask(s.modelPicker, taskId));
   const setModelSelection = useAppStore((s) => s.setModelSelection);
 
   const [open, setOpen] = useState(false);
@@ -99,10 +108,11 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   const [failed, setFailed] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
-  // The display name of the row the user picked, so the trigger can show a name rather than an id
-  // between the write and the next time the catalog is queried. Null falls back to the id, which is
-  // the only thing `ModelSelection` actually carries.
-  const [chosenLabel, setChosenLabel] = useState<string | null>(null);
+  // The row the user picked, so the trigger can show a name rather than an id between the write and
+  // the next time the catalog is queried. Its identity is kept with the name so the name can be
+  // disowned as soon as the canonical selection points somewhere else — a local label is a display
+  // convenience, never a second answer to "which model is this Task on".
+  const [chosen, setChosen] = useState<ChosenModel | null>(null);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -291,7 +301,11 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   }, [open]);
 
   function choose(model: ProviderModel) {
-    setChosenLabel(model.displayName);
+    setChosen({
+      connectionId: model.connectionId,
+      requestedModel: model.modelId,
+      displayName: model.displayName,
+    });
     close(true);
     void setModelSelection(taskId, {
       connectionId: model.connectionId,
@@ -318,7 +332,10 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     }
   }
 
-  const triggerLabel = chosenLabel ?? selection?.requestedModel ?? '自動';
+  // Reads through the canonical selection every render, so an external change — a legacy
+  // Runtime/Model write, a Main answer that normalised the request, a rejected write rolled back —
+  // takes the local name with it instead of leaving the trigger asserting the old choice.
+  const triggerLabel = resolveTriggerLabel(selection, chosen);
   const countMessage = failed
     ? 'モデル一覧を取得できませんでした'
     : loading && page.items.length === 0

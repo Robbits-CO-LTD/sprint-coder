@@ -6,6 +6,7 @@ import { ContextBar } from './ContextBar';
 import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square, Target } from '../icons';
 import { ComposerMenu } from './ComposerMenu';
 import { ModelPickerV2 } from '../ModelPickerV2';
+import { isModelPickerV2Active } from '../../lib/model-picker-parity';
 import { IMAGEGEN_PREFIX } from './imagegen';
 import type { ComposerMenuItem } from './ComposerMenu';
 import { SlashCommandMenu } from './SlashCommandMenu';
@@ -71,9 +72,7 @@ export function Composer({ taskId }: { taskId: string }) {
   // Task (UI slice U1b). `enabled === null` (unresolved, in flight, or a backend without the
   // `models` API) and a stale answer for the previous Task both keep the legacy chip, so the flag
   // being off — or the query never arriving — is indistinguishable from today's UI.
-  const modelPickerV2 = useAppStore(
-    (s) => s.modelPicker.enabled === true && s.modelPicker.taskId === taskId,
-  );
+  const modelPickerV2 = useAppStore((s) => isModelPickerV2Active(s.modelPicker, taskId));
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [sendMode, setSendMode] = useState<SendMode>('queue');
   const [wasTurnActive, setWasTurnActive] = useState(false);
