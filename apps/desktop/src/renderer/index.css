@@ -3872,6 +3872,113 @@ button {
   font-size: 12px;
 }
 
+/* ---------- Provider Connections (Team v2 U1c) ----------
+   Same quiet register as the Skills block above it: a divider, a heading row, then rows that read
+   as data rather than as controls. Everything here is a native control, so keyboard order, the
+   global :focus-visible ring, and the disabled affordances all come for free. */
+.settings-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+}
+.settings-connection-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+}
+.settings-connection-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12.5px;
+}
+.settings-connection-card:last-child {
+  border-bottom: none;
+}
+.settings-connection-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.settings-connection-main small {
+  color: var(--text-secondary);
+}
+/* Text-toned, not filled: the state is a fact about the Connection, not a call to act on it. */
+.settings-connection-badge {
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-xs);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.settings-connection-badge.tone-muted {
+  color: var(--text-secondary);
+}
+.settings-connection-badge.tone-ok {
+  color: var(--success);
+}
+.settings-connection-badge.tone-warn {
+  color: var(--warning);
+}
+.settings-connection-badge.tone-danger {
+  color: var(--danger);
+  border-color: var(--danger-line);
+}
+.settings-provider-form .settings-group {
+  gap: 10px;
+  border: none;
+}
+.settings-text-input {
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  transition: border-color var(--t-quick) var(--ease-ui);
+}
+.settings-text-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.settings-key-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.settings-key-row .settings-secondary-button {
+  flex: none;
+}
+.settings-provider-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.settings-provider-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The only motion in this section is the input's border tint on focus; the focus ring already
+     carries that meaning without moving anything. */
+  .settings-text-input {
+    transition: none;
+  }
+}
+
 /* ---------- File changes (issue #37) ----------
    One card per Runtime tool call that wrote files, plus the Inspector's tail of the same data.
    Deliberately quiet: an edit is normal in this app, so the card marks the boundary and gets out of

@@ -5,7 +5,7 @@
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
   P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b、
-  UI U0/U1a/U1b、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5、P6完了
+  UI U0/U1a/U1b/U1c、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5、P6完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -95,8 +95,8 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   Team MCPを渡し、直下Agentのhire／assignと自分が作成したexecutionのsteer／cancelだけを許可する。
 - `spawnSlots: 8`とは別に、AI executionをglobal最大8件で動かすSchedulerを実装済み。
 - Provider Connectionの最小domainとbuilt-in永続化はP1A-a、pre-v35 built-in identity backfillと
-  history dual-readはP1A-bで実装済み。独立fixture群はP1A-c、外部API Adapter、Secret Storage、API rate-limit Scheduler、
-  feature flag基盤は後続Sliceであり未実装。
+  history dual-readはP1A-bで実装済み。独立fixture群はP1A-cへ留保した。外部API Adapter、
+  Secret Storage、API rate-limit Scheduler、feature flag基盤はP1B〜P6で実装済み。
 - `01-multi-provider-addendum.md`の原文は未提供である。原文を創作せず、提供されるまで
   [blocker placeholder](instructions/01-multi-provider-addendum.md)として扱う。
 - Slice 0のRoot Cause Confirmed Gateは完了した。Team unitは26 passed／1 skipped、
@@ -155,6 +155,10 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - UI U1bでflag ON時だけ使う共通Pickerを追加した。Rendererはcatalog query interfaceだけを読み、
   Main側検索／cursor paging、常時virtualization、keyboard、ARIA、focus復元、不明値表示に対応した。
   flag OFFまたはAPI不在時は旧Pickerを維持する。全体E2Eは全実装後のfinal gateへ留保する。
+- UI U1cでSettingsへProvider Connection管理を統合した。built-in CLIと外部APIを明確に区別し、
+  OpenAI／OpenRouter／Anthropic／Gemini／xAIの追加、接続状態、再確認、Main-only Secret Storageの
+  境界を表示する。Rendererはsecret referenceやbackendの生messageを表示せず、同時verificationを
+  UIで防ぐ。component test 24件、対象lint、diff checkはgreenで、全体E2Eはfinal gateへ留保する。
 - Provider P2aでMain-only credential resolver、OpenAI API認証header、無料のmodel listによる
   接続確認とcatalog discoveryを追加した。401／403、一時障害、network errorを区別し、
   APIが返さないcapabilityは`unknown`を維持する。

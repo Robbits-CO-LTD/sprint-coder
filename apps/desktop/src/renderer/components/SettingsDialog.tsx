@@ -12,6 +12,7 @@ import {
   effortUnavailableReason,
 } from '../lib/runtime-labels';
 import type { RuntimeKind } from '../types/sprint-coder';
+import { ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
 
 // Settings dialog (issue #5). The sidebar's "設定" button had no onClick and was not disabled
@@ -204,6 +205,9 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
                 })}
               </ul>
             </div>
+
+            {/* Unmounting clears the renderer-local plaintext credential state. */}
+            {open && <ProviderSettingsSection active={open} />}
 
             <SkillSettingsSection active={open} />
           </>

@@ -55,6 +55,15 @@ Agent／Taskを禁止した再実行は設定modelだけを使用し、$0.859953
 対象外fileがないこと、desktop typecheck、対象file lint、virtualization unit 17件のgreenを
 確認してU1bを受理した。full suite、E2E、packaged確認は全実装後のfinal gateへ留保した。
 
+同日のU1cもAgent／Taskとfallbackを禁止し、設定model自身だけへ最大4fileを委託した。
+第1往復はCLIが許可外commandの確認待ちになったため中断し、差分0、実費$2.712297で不採用とした。
+第2往復は完了reportまで到達し、実費$2.8390755でSettings統合を生成した。メインAgentのreviewで
+Secret Storageを誤解させる説明と、Connection間でverificationを同時開始できる問題を発見した。
+第3往復はその2点を修正し、実費$2.016907だったが、予算上限により最終report前に終了した。
+メインAgentが差分を直接reviewし、冗長commentだけを削って4file・1000差分行未満へ戻したうえで、
+component test 24件、対象file lint、`git diff --check`のgreenを確認してU1cを受理した。
+full suite、E2E、packaged確認は全実装後のfinal gateへ留保した。
+
 ## Delegation scope
 
 - Provider settings
