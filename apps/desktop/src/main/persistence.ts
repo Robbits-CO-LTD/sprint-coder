@@ -427,6 +427,32 @@ type TeamAttemptRow = {
   finished_at: string | null;
   updated_at: string;
 };
+export const teamV2ActivityTypes = [
+  'worker_hired',
+  'task_assigned',
+  'execution_queued',
+  'execution_waiting',
+  'execution_started',
+  'execution_finished',
+  'steered',
+  'attempt_started',
+  'attempt_finished',
+  'worker_reported',
+  'worker_stopped',
+] as const;
+export type TeamV2ActivityType = (typeof teamV2ActivityTypes)[number];
+type TeamV2ActivityRow = {
+  id: string;
+  team_id: string;
+  seq: number;
+  type: TeamV2ActivityType;
+  actor_agent_id: string | null;
+  subject_agent_id: string | null;
+  execution_id: string | null;
+  attempt_id: string | null;
+  payload_json: string;
+  recorded_at: string;
+};
 type BackgroundActivityRow = {
   id: string;
   task_id: string;
@@ -1921,6 +1947,33 @@ const migrations = [
         ON team_messages(execution_id, attempt_id, seq);
     `,
   },
+  {
+    version: 40,
+    checksum: 'team-v2-core-v40-activity-timeline',
+    sql: `
+      CREATE TABLE team_v2_activity_events (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL CHECK (seq >= 1),
+        type TEXT NOT NULL CHECK (type IN (
+          'worker_hired', 'task_assigned', 'execution_queued', 'execution_waiting',
+          'execution_started', 'execution_finished', 'steered', 'attempt_started',
+          'attempt_finished', 'worker_reported', 'worker_stopped'
+        )),
+        actor_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        subject_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        execution_id TEXT REFERENCES team_executions(id) ON DELETE SET NULL,
+        attempt_id TEXT REFERENCES team_attempts(id) ON DELETE SET NULL,
+        payload_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        UNIQUE(team_id, seq)
+      );
+      CREATE INDEX team_v2_activity_timeline_idx
+        ON team_v2_activity_events(team_id, seq);
+      CREATE INDEX team_v2_activity_execution_idx
+        ON team_v2_activity_events(execution_id, attempt_id, seq);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2246,6 +2299,18 @@ export type TeamAttemptRecord = Readonly<{
   finishedAt: string | null;
   updatedAt: string;
 }>;
+export type TeamV2ActivityRecord = Readonly<{
+  id: string;
+  teamId: string;
+  seq: number;
+  type: TeamV2ActivityType;
+  actorAgentId: string | null;
+  subjectAgentId: string | null;
+  executionId: string | null;
+  attemptId: string | null;
+  payload: unknown;
+  recordedAt: string;
+}>;
 export type TeamSnapshot = Readonly<{
   team: TeamRecord;
   agents: readonly AgentRecord[];
@@ -2314,6 +2379,21 @@ export interface PersistenceClient {
     terminalReason?: string | null;
   }): TeamAttemptRecord;
   recoverInterruptedTeamExecutions(now: string): number;
+  recordTeamV2Activity(input: {
+    teamId: string;
+    type: TeamV2ActivityType;
+    actorAgentId?: string | null;
+    subjectAgentId?: string | null;
+    executionId?: string | null;
+    attemptId?: string | null;
+    payload: unknown;
+    now: string;
+  }): TeamV2ActivityRecord;
+  listTeamV2Activity(
+    teamId: string,
+    afterSeq?: number,
+    limit?: number,
+  ): readonly TeamV2ActivityRecord[];
   setWorkerCurrentActivity(agentId: string, activity: string | null, now: string): AgentRecord;
   createTeamMessage(input: {
     teamId: string;
@@ -3452,6 +3532,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
            VALUES (?, ?, 'worker', ?, NULL)`,
         )
         .run(team.id, agentId, now);
+      this.recordTeamV2Activity({
+        teamId: team.id,
+        type: 'worker_hired',
+        actorAgentId: parent.id,
+        subjectAgentId: agentId,
+        payload: {
+          role: input.role.trim(),
+          depth,
+          canDelegate,
+          modelSelection,
+        },
+        now,
+      });
       return this.getAgent(agentId);
     })();
   }
@@ -3461,10 +3554,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const current = this.getAgent(agentId);
       if (current.kind !== 'worker') throw new Error('Leader lifecycle is owned by the Team');
       transitionWorker(current.state, to);
+      const now = new Date().toISOString();
       const result = this.db
         .prepare('UPDATE agents SET state = ?, updated_at = ? WHERE id = ? AND state = ?')
-        .run(to, new Date().toISOString(), agentId, current.state);
+        .run(to, now, agentId, current.state);
       if (result.changes !== 1) throw new TeamConflictError();
+      if (to === 'stopped' && current.teamId !== null)
+        this.recordTeamV2Activity({
+          teamId: current.teamId,
+          type: 'worker_stopped',
+          subjectAgentId: current.id,
+          payload: { from: current.state, to },
+          now,
+        });
       return this.getAgent(agentId);
     })();
   }
@@ -3517,6 +3619,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
            ) VALUES (?, 1, ?, ?, 'initial', ?)`,
         )
         .run(id, instruction.content, creator.id, input.now);
+      this.recordTeamV2Activity({
+        teamId: team.id,
+        type: 'task_assigned',
+        actorAgentId: creator.id,
+        subjectAgentId: assignee.id,
+        executionId: id,
+        payload: {
+          instructionRevision: instruction.revision,
+          modelSelection: assignee.modelSelection,
+        },
+        now: input.now,
+      });
       return this.getTeamExecution(id);
     })();
   }
@@ -3617,7 +3731,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
           current.revision,
         );
       if (updated.changes !== 1) throw new TeamConflictError();
-      return this.getTeamExecution(current.id);
+      const next = this.getTeamExecution(current.id);
+      const type =
+        input.to === 'queued'
+          ? 'execution_queued'
+          : ['waiting_verification', 'waiting_rate_limit'].includes(input.to)
+            ? 'execution_waiting'
+            : input.to === 'running'
+              ? 'execution_started'
+              : 'execution_finished';
+      this.recordTeamV2Activity({
+        teamId: next.teamId,
+        type,
+        subjectAgentId: next.assigneeAgentId,
+        executionId: next.id,
+        payload: { from: current.state, to: next.state, queueReason: next.queueReason },
+        now: input.now,
+      });
+      return next;
     })();
   }
 
@@ -3653,7 +3784,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(next.revision, input.now, current.id, current.revision);
       if (updated.changes !== 1) throw new TeamConflictError();
-      return this.getTeamExecution(current.id);
+      const revised = this.getTeamExecution(current.id);
+      this.recordTeamV2Activity({
+        teamId: revised.teamId,
+        type: 'steered',
+        actorAgentId: creator.id,
+        subjectAgentId: revised.assigneeAgentId,
+        executionId: revised.id,
+        payload: { instructionRevision: revised.instruction.revision },
+        now: input.now,
+      });
+      return revised;
     })();
   }
 
@@ -3753,7 +3894,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
           current.state,
         );
       if (updated.changes !== 1) throw new TeamConflictError();
-      return this.getTeamAttempt(current.id);
+      const next = this.getTeamAttempt(current.id);
+      if (input.to === 'running' || terminal) {
+        const execution = this.getTeamExecution(next.executionId);
+        this.recordTeamV2Activity({
+          teamId: execution.teamId,
+          type: input.to === 'running' ? 'attempt_started' : 'attempt_finished',
+          subjectAgentId: execution.assigneeAgentId,
+          executionId: execution.id,
+          attemptId: next.id,
+          payload: {
+            ordinal: next.ordinal,
+            state: next.state,
+            terminalReason: next.terminalReason,
+          },
+          now: input.now,
+        });
+      }
+      return next;
     })();
   }
 
@@ -3780,6 +3938,97 @@ export class SqlitePersistenceClient implements PersistenceClient {
       }
       return running.length;
     })();
+  }
+
+  recordTeamV2Activity(input: {
+    teamId: string;
+    type: TeamV2ActivityType;
+    actorAgentId?: string | null;
+    subjectAgentId?: string | null;
+    executionId?: string | null;
+    attemptId?: string | null;
+    payload: unknown;
+    now: string;
+  }): TeamV2ActivityRecord {
+    return this.db.transaction(() => this.recordTeamV2ActivityInTransaction(input))();
+  }
+
+  private recordTeamV2ActivityInTransaction(input: {
+    teamId: string;
+    type: TeamV2ActivityType;
+    actorAgentId?: string | null;
+    subjectAgentId?: string | null;
+    executionId?: string | null;
+    attemptId?: string | null;
+    payload: unknown;
+    now: string;
+  }): TeamV2ActivityRecord {
+    this.getTeam(input.teamId);
+    if (!teamV2ActivityTypes.includes(input.type)) throw new Error('Invalid Team activity type');
+    for (const agentId of [input.actorAgentId, input.subjectAgentId]) {
+      if (agentId === undefined || agentId === null) continue;
+      if (this.getAgent(agentId).teamId !== input.teamId)
+        throw new Error('Team activity Agent must belong to the same Team');
+    }
+    const execution =
+      input.executionId === undefined || input.executionId === null
+        ? null
+        : this.getTeamExecution(input.executionId);
+    if (execution !== null && execution.teamId !== input.teamId)
+      throw new Error('Team activity execution must belong to the same Team');
+    const attempt =
+      input.attemptId === undefined || input.attemptId === null
+        ? null
+        : this.getTeamAttempt(input.attemptId);
+    if (attempt !== null && (execution === null || attempt.executionId !== execution.id))
+      throw new Error('Team activity attempt requires its execution');
+    const payloadJson = JSON.stringify(input.payload);
+    if (payloadJson === undefined)
+      throw new Error('Team activity payload must be JSON serializable');
+    const seq = (
+      this.db
+        .prepare(
+          'SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM team_v2_activity_events WHERE team_id = ?',
+        )
+        .get(input.teamId) as { seq: number }
+    ).seq;
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO team_v2_activity_events(
+           id, team_id, seq, type, actor_agent_id, subject_agent_id,
+           execution_id, attempt_id, payload_json, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.teamId,
+        seq,
+        input.type,
+        input.actorAgentId ?? null,
+        input.subjectAgentId ?? null,
+        execution?.id ?? null,
+        attempt?.id ?? null,
+        payloadJson,
+        input.now,
+      );
+    return this.getTeamV2Activity(id);
+  }
+
+  listTeamV2Activity(teamId: string, afterSeq = 0, limit = 100): readonly TeamV2ActivityRecord[] {
+    this.getTeam(teamId);
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0)
+      throw new Error('Invalid Team activity cursor');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+      throw new Error('Invalid Team activity page size');
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM team_v2_activity_events
+           WHERE team_id = ? AND seq > ? ORDER BY seq LIMIT ?`,
+        )
+        .all(teamId, afterSeq, limit) as TeamV2ActivityRow[]
+    ).map(toTeamV2Activity);
   }
 
   createTeamMessage(input: {
@@ -8595,6 +8844,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toTeamTask(row);
   }
 
+  private getTeamV2Activity(activityId: string): TeamV2ActivityRecord {
+    const row = this.db
+      .prepare('SELECT * FROM team_v2_activity_events WHERE id = ?')
+      .get(activityId) as TeamV2ActivityRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team activity not found');
+    return toTeamV2Activity(row);
+  }
+
   private toTeamExecution(row: TeamExecutionRow): TeamExecutionRecord {
     const instruction = this.db
       .prepare(
@@ -8958,6 +9215,21 @@ function toTeamAttempt(row: TeamAttemptRow): TeamAttemptRecord {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toTeamV2Activity(row: TeamV2ActivityRow): TeamV2ActivityRecord {
+  return {
+    id: row.id,
+    teamId: row.team_id,
+    seq: row.seq,
+    type: row.type,
+    actorAgentId: row.actor_agent_id,
+    subjectAgentId: row.subject_agent_id,
+    executionId: row.execution_id,
+    attemptId: row.attempt_id,
+    payload: JSON.parse(row.payload_json) as unknown,
+    recordedAt: row.recorded_at,
   };
 }
 

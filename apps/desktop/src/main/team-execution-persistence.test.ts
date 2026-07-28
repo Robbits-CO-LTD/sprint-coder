@@ -109,6 +109,21 @@ if (runsWithElectronAbi)
           instructionRevision: 2,
         },
       ]);
+      const firstPage = reopened.listTeamV2Activity(team.id, 0, 3);
+      const secondPage = reopened.listTeamV2Activity(team.id, firstPage.at(-1)?.seq ?? 0, 10);
+      expect([...firstPage, ...secondPage].map(({ seq, type }) => ({ seq, type }))).toEqual([
+        { seq: 1, type: 'worker_hired' },
+        { seq: 2, type: 'task_assigned' },
+        { seq: 3, type: 'task_assigned' },
+        { seq: 4, type: 'execution_queued' },
+        { seq: 5, type: 'execution_queued' },
+        { seq: 6, type: 'steered' },
+      ]);
+      expect([...firstPage, ...secondPage].at(-1)).toMatchObject({
+        executionId: execution.id,
+        actorAgentId: leader.id,
+        subjectAgentId: worker.id,
+      });
       reopened.close();
     });
 

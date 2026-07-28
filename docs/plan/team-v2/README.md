@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0完了。Core A1-A4、Core A5a direct message audit完了
+- 現在地: Team Slice 0完了。Team v2 Core A domain/persistence完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -82,7 +82,7 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 
 ## 現在地とblocker
 
-- 現行DB migrationはv39。新規Claude／Codex Turn・Agentはbuilt-in connection IDと
+- 現行DB migrationはv40。新規Claude／Codex Turn・Agentはbuilt-in connection IDと
   requested model identityを保存し、Runtimeが返したresolved modelを別フィールドへ保存する。
   Taskの明示selectionはcanonical repositoryへ保存され、未設定Taskは旧global Picker設定を読む。
 - TeamはWorker上限3、task単位のPromise queueによる直列実行、深度1である。
@@ -94,7 +94,7 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Slice 0のRoot Cause Confirmed Gateは完了した。Team unitは26 passed／1 skipped、
   packaged Team E2Eは3 passedで、productionのNode inspector fuseが無効のまま一時test bundle
   だけをPlaywrightで検査する。
-- 次はCore A5bとして、execution／attemptを基準にTeam activity event projectionを実装する。
+- 次はCore B1として、dynamic hireとManager delegationをCoordinator／tool境界へ接続する。
 
 ## 完成判定
 
