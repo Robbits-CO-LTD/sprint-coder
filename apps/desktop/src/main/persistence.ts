@@ -77,6 +77,11 @@ import {
   transitionTeam,
   transitionTeamMessage,
   transitionWorker,
+  createExecutionInstruction,
+  nextTeamAttemptOrdinal,
+  reviseQueuedExecutionInstruction,
+  transitionTeamAttempt,
+  transitionTeamExecution,
   DEFAULT_TEAM_BUDGET_LIMITS,
   DEFAULT_MANAGER_POLICY,
   DEFAULT_TEAM_POLICY,
@@ -97,6 +102,10 @@ import {
   type TeamMessageState,
   type TeamState,
   type TeamPolicy,
+  type TeamAttemptState,
+  type TeamExecutionState,
+  type TeamQueueReason,
+  type ExecutionInstruction,
   type WorkerState,
 } from '@sprint-coder/domain';
 import {
@@ -371,6 +380,49 @@ type TeamTaskRow = {
   done_evidence_json: string;
   revision: number;
   created_at: string;
+  updated_at: string;
+};
+type TeamExecutionRow = {
+  id: string;
+  team_id: string;
+  assignee_agent_id: string;
+  created_by_agent_id: string;
+  state: TeamExecutionState;
+  instruction_revision: number;
+  queue_ordinal: number | null;
+  queue_reason: TeamQueueReason | null;
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
+  revision: number;
+  assigned_at: string;
+  queued_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+};
+type TeamInstructionRow = {
+  execution_id: string;
+  revision: number;
+  content: string;
+  created_by_agent_id: string;
+  reason: 'initial' | 'steer';
+  created_at: string;
+};
+type TeamAttemptRow = {
+  id: string;
+  execution_id: string;
+  ordinal: number;
+  state: TeamAttemptState;
+  instruction_revision: number;
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
+  provider_call_ordinal: number;
+  terminal_reason: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
   updated_at: string;
 };
 type BackgroundActivityRow = {
@@ -1782,6 +1834,79 @@ const migrations = [
         ON agents(team_id, parent_agent_id, depth, created_at, id);
     `,
   },
+  {
+    version: 38,
+    checksum: 'team-v2-core-v38-execution-attempt-queue',
+    sql: `
+      CREATE TABLE team_executions (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        assignee_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        created_by_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        state TEXT NOT NULL CHECK (state IN (
+          'assigned', 'queued', 'waiting_verification', 'waiting_rate_limit',
+          'running', 'completed', 'failed', 'canceled'
+        )),
+        instruction_revision INTEGER NOT NULL DEFAULT 1 CHECK (instruction_revision >= 1),
+        queue_ordinal INTEGER,
+        queue_reason TEXT CHECK (
+          queue_reason IS NULL OR queue_reason IN (
+            'global_concurrency', 'connection_concurrency', 'verification',
+            'rate_limit', 'budget', 'recovery'
+          )
+        ),
+        connection_id TEXT,
+        requested_provider TEXT,
+        requested_model TEXT,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        assigned_at TEXT NOT NULL,
+        queued_at TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        updated_at TEXT NOT NULL,
+        UNIQUE(team_id, queue_ordinal)
+      );
+      CREATE INDEX team_executions_queue_idx
+        ON team_executions(state, queue_ordinal, queued_at, id);
+      CREATE INDEX team_executions_assignee_idx
+        ON team_executions(assignee_agent_id, state, assigned_at, id);
+
+      CREATE TABLE team_execution_instructions (
+        execution_id TEXT NOT NULL REFERENCES team_executions(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        content TEXT NOT NULL,
+        created_by_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        reason TEXT NOT NULL CHECK (reason IN ('initial', 'steer')),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(execution_id, revision)
+      );
+
+      CREATE TABLE team_attempts (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL REFERENCES team_executions(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+        state TEXT NOT NULL CHECK (state IN (
+          'created', 'waiting_verification', 'waiting_rate_limit', 'running',
+          'completed', 'failed', 'canceled', 'interrupted'
+        )),
+        instruction_revision INTEGER NOT NULL CHECK (instruction_revision >= 1),
+        connection_id TEXT,
+        requested_provider TEXT,
+        requested_model TEXT,
+        provider_call_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (provider_call_ordinal >= 0),
+        terminal_reason TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        updated_at TEXT NOT NULL,
+        UNIQUE(execution_id, ordinal)
+      );
+      CREATE INDEX team_attempts_execution_idx
+        ON team_attempts(execution_id, ordinal);
+      CREATE INDEX team_attempts_active_idx
+        ON team_attempts(state, updated_at, id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2074,6 +2199,37 @@ export type TeamTaskRecord = Readonly<{
   createdAt: string;
   updatedAt: string;
 }>;
+export type TeamExecutionRecord = Readonly<{
+  id: string;
+  teamId: string;
+  assigneeAgentId: string;
+  createdByAgentId: string;
+  state: TeamExecutionState;
+  instruction: ExecutionInstruction;
+  queueOrdinal: number | null;
+  queueReason: TeamQueueReason | null;
+  modelSelection: ModelSelection;
+  revision: number;
+  assignedAt: string;
+  queuedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+}>;
+export type TeamAttemptRecord = Readonly<{
+  id: string;
+  executionId: string;
+  ordinal: number;
+  state: TeamAttemptState;
+  instructionRevision: number;
+  modelSelection: ModelSelection;
+  providerCallOrdinal: number;
+  terminalReason: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+}>;
 export type TeamSnapshot = Readonly<{
   team: TeamRecord;
   agents: readonly AgentRecord[];
@@ -2110,6 +2266,38 @@ export interface PersistenceClient {
     managerPolicy?: ManagerPolicy | null;
   }): AgentRecord;
   transitionWorkerState(agentId: string, to: WorkerState): AgentRecord;
+  createTeamExecution(input: {
+    teamId: string;
+    assigneeAgentId: string;
+    createdByAgentId: string;
+    instruction: string;
+    now: string;
+  }): TeamExecutionRecord;
+  getTeamExecution(executionId: string): TeamExecutionRecord;
+  listTeamExecutions(teamId: string): readonly TeamExecutionRecord[];
+  listQueuedTeamExecutions(teamId: string): readonly TeamExecutionRecord[];
+  transitionTeamExecution(input: {
+    executionId: string;
+    to: TeamExecutionState;
+    now: string;
+    queueReason?: TeamQueueReason | null;
+  }): TeamExecutionRecord;
+  reviseQueuedTeamExecution(input: {
+    executionId: string;
+    createdByAgentId: string;
+    instruction: string;
+    now: string;
+  }): TeamExecutionRecord;
+  createTeamAttempt(executionId: string, now: string): TeamAttemptRecord;
+  getTeamAttempt(attemptId: string): TeamAttemptRecord;
+  listTeamAttempts(executionId: string): readonly TeamAttemptRecord[];
+  transitionTeamAttempt(input: {
+    attemptId: string;
+    to: TeamAttemptState;
+    now: string;
+    terminalReason?: string | null;
+  }): TeamAttemptRecord;
+  recoverInterruptedTeamExecutions(now: string): number;
   setWorkerCurrentActivity(agentId: string, activity: string | null, now: string): AgentRecord;
   createTeamMessage(input: {
     teamId: string;
@@ -3260,6 +3448,319 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .run(to, new Date().toISOString(), agentId, current.state);
       if (result.changes !== 1) throw new TeamConflictError();
       return this.getAgent(agentId);
+    })();
+  }
+
+  createTeamExecution(input: {
+    teamId: string;
+    assigneeAgentId: string;
+    createdByAgentId: string;
+    instruction: string;
+    now: string;
+  }): TeamExecutionRecord {
+    const instruction = createExecutionInstruction(input.instruction, input.now);
+    return this.db.transaction(() => {
+      const team = this.getTeam(input.teamId);
+      if (!['forming', 'active', 'paused'].includes(team.state))
+        throw new Error('Team does not accept executions');
+      const assignee = this.getAgent(input.assigneeAgentId);
+      const creator = this.getAgent(input.createdByAgentId);
+      if (assignee.teamId !== team.id || creator.teamId !== team.id)
+        throw new Error('Execution Agents must belong to the same Team');
+      if (['done', 'failed', 'stopped'].includes(assignee.state))
+        throw new Error('A terminal Agent cannot receive an execution');
+      const id = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO team_executions(
+             id, team_id, assignee_agent_id, created_by_agent_id, state,
+             instruction_revision, queue_ordinal, queue_reason,
+             connection_id, requested_provider, requested_model,
+             revision, assigned_at, queued_at, started_at, completed_at, updated_at
+           ) VALUES (
+             ?, ?, ?, ?, 'assigned', 1, NULL, NULL, ?, ?, ?, 1, ?, NULL, NULL, NULL, ?
+           )`,
+        )
+        .run(
+          id,
+          team.id,
+          assignee.id,
+          creator.id,
+          assignee.modelSelection.connectionId,
+          assignee.modelSelection.requestedProvider,
+          assignee.modelSelection.requestedModel,
+          input.now,
+          input.now,
+        );
+      this.db
+        .prepare(
+          `INSERT INTO team_execution_instructions(
+             execution_id, revision, content, created_by_agent_id, reason, created_at
+           ) VALUES (?, 1, ?, ?, 'initial', ?)`,
+        )
+        .run(id, instruction.content, creator.id, input.now);
+      return this.getTeamExecution(id);
+    })();
+  }
+
+  getTeamExecution(executionId: string): TeamExecutionRecord {
+    const row = this.db.prepare('SELECT * FROM team_executions WHERE id = ?').get(executionId) as
+      TeamExecutionRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team execution not found');
+    return this.toTeamExecution(row);
+  }
+
+  listTeamExecutions(teamId: string): readonly TeamExecutionRecord[] {
+    this.getTeam(teamId);
+    return (
+      this.db
+        .prepare('SELECT * FROM team_executions WHERE team_id = ? ORDER BY assigned_at, id')
+        .all(teamId) as TeamExecutionRow[]
+    ).map((row) => this.toTeamExecution(row));
+  }
+
+  listQueuedTeamExecutions(teamId: string): readonly TeamExecutionRecord[] {
+    this.getTeam(teamId);
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM team_executions
+           WHERE team_id = ?
+             AND state IN ('queued', 'waiting_verification', 'waiting_rate_limit')
+           ORDER BY queue_ordinal, queued_at, id`,
+        )
+        .all(teamId) as TeamExecutionRow[]
+    ).map((row) => this.toTeamExecution(row));
+  }
+
+  transitionTeamExecution(input: {
+    executionId: string;
+    to: TeamExecutionState;
+    now: string;
+    queueReason?: TeamQueueReason | null;
+  }): TeamExecutionRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamExecution(input.executionId);
+      if (current.state === input.to) return current;
+      transitionTeamExecution(current.state, input.to);
+      const queueReason =
+        input.to === 'waiting_verification'
+          ? 'verification'
+          : input.to === 'waiting_rate_limit'
+            ? 'rate_limit'
+            : (input.queueReason ?? null);
+      if (input.to === 'queued' && queueReason === null)
+        throw new Error('A queued execution requires a queue reason');
+      if (
+        !['queued', 'waiting_verification', 'waiting_rate_limit'].includes(input.to) &&
+        queueReason !== null
+      )
+        throw new Error('A non-queued execution cannot retain a queue reason');
+      let queueOrdinal = current.queueOrdinal;
+      if (
+        queueOrdinal === null &&
+        ['queued', 'waiting_verification', 'waiting_rate_limit'].includes(input.to)
+      )
+        queueOrdinal = (
+          this.db
+            .prepare(
+              `SELECT COALESCE(MAX(queue_ordinal), 0) + 1 AS ordinal
+               FROM team_executions WHERE team_id = ?`,
+            )
+            .get(current.teamId) as { ordinal: number }
+        ).ordinal;
+      const terminal = ['completed', 'failed', 'canceled'].includes(input.to);
+      const updated = this.db
+        .prepare(
+          `UPDATE team_executions
+           SET state = ?, queue_ordinal = ?, queue_reason = ?,
+               queued_at = CASE
+                 WHEN ? IN ('queued', 'waiting_verification', 'waiting_rate_limit')
+                   THEN COALESCE(queued_at, ?)
+                 ELSE queued_at
+               END,
+               started_at = CASE WHEN ? = 'running' THEN COALESCE(started_at, ?) ELSE started_at END,
+               completed_at = CASE WHEN ? = 1 THEN ? ELSE completed_at END,
+               revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(
+          input.to,
+          queueOrdinal,
+          queueReason,
+          input.to,
+          input.now,
+          input.to,
+          input.now,
+          terminal ? 1 : 0,
+          input.now,
+          input.now,
+          current.id,
+          current.revision,
+        );
+      if (updated.changes !== 1) throw new TeamConflictError();
+      return this.getTeamExecution(current.id);
+    })();
+  }
+
+  reviseQueuedTeamExecution(input: {
+    executionId: string;
+    createdByAgentId: string;
+    instruction: string;
+    now: string;
+  }): TeamExecutionRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamExecution(input.executionId);
+      const creator = this.getAgent(input.createdByAgentId);
+      if (creator.teamId !== current.teamId)
+        throw new Error('Instruction author must belong to the execution Team');
+      const next = reviseQueuedExecutionInstruction({
+        executionState: current.state,
+        current: current.instruction,
+        content: input.instruction,
+        updatedAt: input.now,
+      });
+      this.db
+        .prepare(
+          `INSERT INTO team_execution_instructions(
+             execution_id, revision, content, created_by_agent_id, reason, created_at
+           ) VALUES (?, ?, ?, ?, 'steer', ?)`,
+        )
+        .run(current.id, next.revision, next.content, creator.id, input.now);
+      const updated = this.db
+        .prepare(
+          `UPDATE team_executions
+           SET instruction_revision = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(next.revision, input.now, current.id, current.revision);
+      if (updated.changes !== 1) throw new TeamConflictError();
+      return this.getTeamExecution(current.id);
+    })();
+  }
+
+  createTeamAttempt(executionId: string, now: string): TeamAttemptRecord {
+    return this.db.transaction(() => {
+      const execution = this.getTeamExecution(executionId);
+      if (execution.state !== 'running')
+        throw new Error('A Team attempt requires a running execution');
+      const existing = this.listTeamAttempts(execution.id);
+      if (
+        existing.some(
+          ({ state }) => !['completed', 'failed', 'canceled', 'interrupted'].includes(state),
+        )
+      )
+        throw new Error('Execution already has an active attempt');
+      const ordinal = nextTeamAttemptOrdinal(existing.map((attempt) => attempt.ordinal));
+      const id = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO team_attempts(
+             id, execution_id, ordinal, state, instruction_revision,
+             connection_id, requested_provider, requested_model,
+             provider_call_ordinal, terminal_reason, created_at, started_at, finished_at, updated_at
+           ) VALUES (?, ?, ?, 'created', ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          id,
+          execution.id,
+          ordinal,
+          execution.instruction.revision,
+          execution.modelSelection.connectionId,
+          execution.modelSelection.requestedProvider,
+          execution.modelSelection.requestedModel,
+          now,
+          now,
+        );
+      return this.getTeamAttempt(id);
+    })();
+  }
+
+  getTeamAttempt(attemptId: string): TeamAttemptRecord {
+    const row = this.db.prepare('SELECT * FROM team_attempts WHERE id = ?').get(attemptId) as
+      TeamAttemptRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team attempt not found');
+    return toTeamAttempt(row);
+  }
+
+  listTeamAttempts(executionId: string): readonly TeamAttemptRecord[] {
+    this.getTeamExecution(executionId);
+    return (
+      this.db
+        .prepare('SELECT * FROM team_attempts WHERE execution_id = ? ORDER BY ordinal')
+        .all(executionId) as TeamAttemptRow[]
+    ).map(toTeamAttempt);
+  }
+
+  transitionTeamAttempt(input: {
+    attemptId: string;
+    to: TeamAttemptState;
+    now: string;
+    terminalReason?: string | null;
+  }): TeamAttemptRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamAttempt(input.attemptId);
+      if (current.state === input.to) return current;
+      transitionTeamAttempt(current.state, input.to);
+      const terminal = ['completed', 'failed', 'canceled', 'interrupted'].includes(input.to);
+      const terminalReason = input.terminalReason ?? null;
+      if (
+        terminal &&
+        input.to !== 'completed' &&
+        (terminalReason === null || terminalReason.trim() === '')
+      )
+        throw new Error('A terminal Team attempt requires a reason');
+      if (input.to === 'completed' && terminalReason !== null)
+        throw new Error('A completed Team attempt cannot have a failure reason');
+      if (!terminal && terminalReason !== null)
+        throw new Error('An active Team attempt cannot have a terminal reason');
+      const updated = this.db
+        .prepare(
+          `UPDATE team_attempts
+           SET state = ?, terminal_reason = ?,
+               started_at = CASE WHEN ? = 'running' THEN COALESCE(started_at, ?) ELSE started_at END,
+               finished_at = CASE WHEN ? = 1 THEN ? ELSE finished_at END,
+               updated_at = ?
+           WHERE id = ? AND state = ?`,
+        )
+        .run(
+          input.to,
+          terminalReason,
+          input.to,
+          input.now,
+          terminal ? 1 : 0,
+          input.now,
+          input.now,
+          current.id,
+          current.state,
+        );
+      if (updated.changes !== 1) throw new TeamConflictError();
+      return this.getTeamAttempt(current.id);
+    })();
+  }
+
+  recoverInterruptedTeamExecutions(now: string): number {
+    return this.db.transaction(() => {
+      const running = this.db
+        .prepare("SELECT id, execution_id FROM team_attempts WHERE state = 'running'")
+        .all() as { id: string; execution_id: string }[];
+      for (const attempt of running) {
+        this.transitionTeamAttempt({
+          attemptId: attempt.id,
+          to: 'interrupted',
+          now,
+          terminalReason: 'app_restart',
+        });
+        const execution = this.getTeamExecution(attempt.execution_id);
+        if (execution.state === 'running')
+          this.transitionTeamExecution({
+            executionId: execution.id,
+            to: 'queued',
+            now,
+            queueReason: 'recovery',
+          });
+      }
+      return running.length;
     })();
   }
 
@@ -5866,6 +6367,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // Retained rather than discarded: the count is the only evidence a user has that a Turn they
       // left running was reaped by a crash, and the SurfaceFooter reports it (issue #9).
       this.startupInterruptedTurns = this.interruptActiveTurns();
+      this.recoverInterruptedTeamExecutions(now);
       return quarantines;
     })();
   }
@@ -8049,6 +8551,42 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toTeamTask(row);
   }
 
+  private toTeamExecution(row: TeamExecutionRow): TeamExecutionRecord {
+    const instruction = this.db
+      .prepare(
+        `SELECT * FROM team_execution_instructions
+         WHERE execution_id = ? AND revision = ?`,
+      )
+      .get(row.id, row.instruction_revision) as TeamInstructionRow | undefined;
+    if (instruction === undefined)
+      throw new Error('Team execution instruction revision is missing');
+    return {
+      id: row.id,
+      teamId: row.team_id,
+      assigneeAgentId: row.assignee_agent_id,
+      createdByAgentId: row.created_by_agent_id,
+      state: row.state,
+      instruction: {
+        revision: instruction.revision,
+        content: instruction.content,
+        updatedAt: instruction.created_at,
+      },
+      queueOrdinal: row.queue_ordinal,
+      queueReason: row.queue_reason,
+      modelSelection: {
+        connectionId: row.connection_id,
+        requestedProvider: row.requested_provider,
+        requestedModel: row.requested_model,
+      },
+      revision: row.revision,
+      assignedAt: row.assigned_at,
+      queuedAt: row.queued_at,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
   private getBudgetReservation(id: string): TeamBudgetReservationRecord {
     const row = this.db.prepare('SELECT * FROM team_budget_reservations WHERE id = ?').get(id) as
       TeamBudgetReservationRow | undefined;
@@ -8352,6 +8890,27 @@ function toTeamTask(row: TeamTaskRow): TeamTaskRecord {
     }[],
     revision: row.revision,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toTeamAttempt(row: TeamAttemptRow): TeamAttemptRecord {
+  return {
+    id: row.id,
+    executionId: row.execution_id,
+    ordinal: row.ordinal,
+    state: row.state,
+    instructionRevision: row.instruction_revision,
+    modelSelection: {
+      connectionId: row.connection_id,
+      requestedProvider: row.requested_provider,
+      requestedModel: row.requested_model,
+    },
+    providerCallOrdinal: row.provider_call_ordinal,
+    terminalReason: row.terminal_reason,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
     updatedAt: row.updated_at,
   };
 }

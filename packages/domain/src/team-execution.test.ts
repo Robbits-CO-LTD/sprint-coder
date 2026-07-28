@@ -22,6 +22,7 @@ describe('Team execution domain', () => {
   it('keeps waiting states outside running and supports recovery back to queue', () => {
     expect(transitionTeamExecution('queued', 'waiting_verification')).toBe('waiting_verification');
     expect(transitionTeamExecution('queued', 'waiting_rate_limit')).toBe('waiting_rate_limit');
+    expect(transitionTeamExecution('running', 'waiting_rate_limit')).toBe('waiting_rate_limit');
     expect(transitionTeamExecution('running', 'queued')).toBe('queued');
   });
 

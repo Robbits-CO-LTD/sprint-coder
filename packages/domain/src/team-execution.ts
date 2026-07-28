@@ -22,6 +22,16 @@ export const teamAttemptStates = [
 ] as const;
 export type TeamAttemptState = (typeof teamAttemptStates)[number];
 
+export const teamQueueReasons = [
+  'global_concurrency',
+  'connection_concurrency',
+  'verification',
+  'rate_limit',
+  'budget',
+  'recovery',
+] as const;
+export type TeamQueueReason = (typeof teamQueueReasons)[number];
+
 export type ExecutionInstruction = Readonly<{
   revision: number;
   content: string;
@@ -33,7 +43,7 @@ const executionTransitions: Readonly<Record<TeamExecutionState, readonly TeamExe
   queued: ['waiting_verification', 'waiting_rate_limit', 'running', 'canceled'],
   waiting_verification: ['queued', 'running', 'failed', 'canceled'],
   waiting_rate_limit: ['queued', 'running', 'failed', 'canceled'],
-  running: ['queued', 'completed', 'failed', 'canceled'],
+  running: ['queued', 'waiting_rate_limit', 'completed', 'failed', 'canceled'],
   completed: [],
   failed: [],
   canceled: [],

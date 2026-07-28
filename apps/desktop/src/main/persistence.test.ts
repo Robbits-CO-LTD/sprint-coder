@@ -4411,6 +4411,7 @@ if (runsWithElectronAbi)
         { version: 35 },
         { version: 36 },
         { version: 37 },
+        { version: 38 },
       ]);
       for (const [table, columns] of [
         [
@@ -4462,6 +4463,9 @@ if (runsWithElectronAbi)
         'team_delivery_events',
         'worker_worktrees',
         'canvas_views',
+        'team_executions',
+        'team_execution_instructions',
+        'team_attempts',
       ])
         expect(migratedTables.has(table)).toBe(true);
       expect(
