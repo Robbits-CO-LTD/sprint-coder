@@ -224,7 +224,8 @@ export function useCamera(onSettle?: () => void) {
         target.closest('.surface--node') ||
         target.closest('.worker') ||
         target.closest('.team-header-overlay') ||
-        target.closest('.team-canvas-controls')
+        target.closest('.team-canvas-controls') ||
+        target.closest('.team-policy-dialog')
       )
         return;
       claimUserOwnership(); // manual input: cancels any in-flight system animation, keeps the view

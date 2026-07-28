@@ -2678,7 +2678,8 @@ button {
   cursor: grab;
 }
 
-.team-view-toggle-btn {
+.team-view-toggle-btn,
+.team-policy-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2689,7 +2690,8 @@ button {
   border-radius: var(--r-sm);
   flex: none;
 }
-.team-view-toggle-btn:hover {
+.team-view-toggle-btn:hover,
+.team-policy-btn:hover {
   color: var(--text-primary);
   border-color: color-mix(in srgb, var(--text-primary) 20%, transparent);
 }
@@ -3230,6 +3232,69 @@ button {
 }
 .settings-dialog[open] {
   animation: settingsIn var(--t-standard) var(--ease-ui);
+}
+
+/* Team Policy reuses the settings form controls below, but has its own native top-layer dialog so
+   Canvas and List can mount the same editor without coupling it to the global Runtime settings. */
+.team-policy-dialog {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  padding: 0;
+  width: min(540px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 48px));
+  box-shadow: var(--shadow-3);
+}
+.team-policy-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+.team-policy-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 20px 22px;
+  overflow-y: auto;
+  max-height: inherit;
+}
+.team-policy-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.team-policy-header h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.team-policy-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.team-policy-actions .settings-hint {
+  margin-right: auto;
+}
+.team-policy-error {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-sm);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+@media (max-width: 560px) {
+  .team-policy-actions {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .team-policy-actions .settings-hint {
+    width: 100%;
+  }
 }
 @keyframes settingsIn {
   from {

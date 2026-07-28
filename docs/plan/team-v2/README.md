@@ -3,7 +3,7 @@
 - 計画版: v2
 - 状態: planning
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
-  Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a完了
+  Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -107,6 +107,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   packaged axeはChat、Settings、Approval、3 Worker Teamの4件がgreen。
 - Core C4aで既存Team Policy永続化をRendererから安全に更新するoptimistic revision付きの
   Main／Preload IPC契約を追加した。更新後はcanonical TeamDetailを返し購読者へ通知する。
+- Core C4bでCanvas／List共通のTeam Policy dialogを追加した。4項目を編集でき、成功時は
+  canonical detailへ置換し、revision conflict時はdialogを維持して警告する。packaged E2Eは
+  両view、keyboard／focus、競合、axeを含めgreen。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。

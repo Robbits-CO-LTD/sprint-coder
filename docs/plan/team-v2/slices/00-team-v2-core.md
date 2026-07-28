@@ -118,4 +118,11 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
   `expectedRevision`を受ける厳格な更新contractをMain／Preloadへ追加。CoordinatorのTask別直列化内で
   更新し、canonical TeamDetailを返して購読者へ通知する。contracts 27件、IPC 403件、
   Coordinator Electron ABI 12件、typecheck、lintがgreen。DB migrationは不要。
-- 次着手: C4bでC4a contractだけを使うTeam Policy settings UIをClaude Opus 5へ委託する。
+- C4b完了: Canvas／Listの両headerから同じnative dialogを開き、最大depth 1–4、同時実行1–8、
+  Worker間通信、budget modeを完全なpolicyとしてC4a contractへ保存する。成功時だけcanonical
+  TeamDetailへ置換し、stale revision／既存階層違反はdialogを閉じず`role=alert`で再読込導線を
+  示す。Claude Opus 5へ規定どおり委託し、3往復上限で共有dialog、store、List接続まで作成。
+  メインAgentが未完のCanvas／CSS接続と、Canvas pan／Escapeがtop-layer dialog入力を奪う問題を
+  補完・修正した。総差分は1000行未満。renderer 276件、typecheck、lint、production package、
+  Canvas／List、keyboard／focus、成功／競合、axeを含むfocused packaged E2Eがgreen。
+- 次着手: C5で実Claude CLI／Codex CLIのpackaged Team execution証拠とCore GA残件を監査する。

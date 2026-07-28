@@ -1,9 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
+import { TeamPolicyDialog, TeamPolicyTrigger } from './TeamPolicyDialog';
 import { latestExecutionForWorker } from '../lib/team-execution-display';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
 
@@ -46,6 +47,9 @@ export function TeamListView({
   const stopTeamWorker = useAppStore((state) => state.stopTeamWorker);
   const stopAllTeamWorkers = useAppStore((state) => state.stopAllTeamWorkers);
   const sectionRef = useRef<HTMLElement>(null);
+  // Open state is local to the view, not the store: the dialog is a modal task (open, adjust,
+  // close), and each view owns its own instance of the SAME component — see TeamPolicyDialog.tsx.
+  const [policyOpen, setPolicyOpen] = useState(false);
 
   // Mount-time focus (a11y fix, Phase 7 / NFR-A11Y-02), mirroring TeamCanvas's own mount-focus
   // fix: switching from Canvas to List view (the "List表示" button, itself INSIDE TeamCanvas)
@@ -107,6 +111,7 @@ export function TeamListView({
         >
           <LayoutGrid size={14} /> Canvas表示
         </button>
+        <TeamPolicyTrigger onOpen={() => setPolicyOpen(true)} />
         <button
           type="button"
           className="team-stop-all-btn"
@@ -243,6 +248,15 @@ export function TeamListView({
           )}
         </div>
       </div>
+
+      {policyOpen && (
+        <TeamPolicyDialog
+          open
+          taskId={task.id}
+          detail={detail}
+          onClose={() => setPolicyOpen(false)}
+        />
+      )}
     </section>
   );
 }

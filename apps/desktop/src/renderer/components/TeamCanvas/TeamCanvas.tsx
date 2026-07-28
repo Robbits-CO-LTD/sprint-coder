@@ -21,6 +21,7 @@ import {
   workerSlotFor,
 } from './placement';
 import { ArrowLeft, List } from '../icons';
+import { TeamPolicyDialog, TeamPolicyTrigger } from '../TeamPolicyDialog';
 import { latestExecutionForWorker } from '../../lib/team-execution-display';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
@@ -96,6 +97,7 @@ export function TeamCanvas({
   const teamBusy = useAppStore((s) => s.teamBusy);
   const stopTeamWorker = useAppStore((s) => s.stopTeamWorker);
   const stopAllTeamWorkers = useAppStore((s) => s.stopAllTeamWorkers);
+  const [policyOpen, setPolicyOpen] = useState(false);
 
   // Stable indirection into the (not-yet-defined-at-this-point) autosave scheduler, so it can be
   // passed into useCamera() before `scheduleSave` itself exists — see the `useEffect` near
@@ -813,6 +815,7 @@ export function TeamCanvas({
     if (!canvas) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== 'Escape') return;
+      if ((e.target as HTMLElement).closest('.team-policy-dialog')) return;
       e.preventDefault();
       canvasRef.current?.focus({ preventScroll: true });
     }
@@ -822,6 +825,7 @@ export function TeamCanvas({
 
   const handleCanvasKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLElement>) => {
+      if ((e.target as HTMLElement).closest('.team-policy-dialog')) return;
       if (e.key === 'Escape') {
         // Native-DOM Escape handling above already covers every case (including from inside the
         // portaled composer); this branch just avoids a double `.preventDefault()`/no-op re-run
@@ -951,6 +955,7 @@ export function TeamCanvas({
             onBack={onRequestExit}
             onStopAll={() => void stopAllTeamWorkers(task.id)}
             onSwitchToListView={onSwitchToListView}
+            onOpenPolicy={() => setPolicyOpen(true)}
           />
 
           <CanvasControlsOverlay
@@ -986,6 +991,14 @@ export function TeamCanvas({
       <div aria-live="polite" className="visually-hidden" data-testid="team-cable-announcer">
         {cableAnnouncement}
       </div>
+      {detail && policyOpen && (
+        <TeamPolicyDialog
+          open={policyOpen}
+          taskId={task.id}
+          detail={detail}
+          onClose={() => setPolicyOpen(false)}
+        />
+      )}
     </section>
   );
 }
@@ -998,6 +1011,7 @@ function TeamHeaderOverlay({
   onBack,
   onStopAll,
   onSwitchToListView,
+  onOpenPolicy,
 }: {
   task: TaskSummary;
   detail: TeamDetail;
@@ -1006,6 +1020,7 @@ function TeamHeaderOverlay({
   onBack: () => void;
   onStopAll: () => void;
   onSwitchToListView: () => void;
+  onOpenPolicy: () => void;
 }) {
   return (
     <div className="team-header-overlay">
@@ -1024,6 +1039,7 @@ function TeamHeaderOverlay({
       >
         <List size={14} /> List表示
       </button>
+      <TeamPolicyTrigger onOpen={onOpenPolicy} />
       <button
         type="button"
         className="team-stop-all-btn"

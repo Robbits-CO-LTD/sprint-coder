@@ -95,6 +95,18 @@ function finalStateLabel(status: TurnStatus): string {
   }
 }
 
+/** The Team policy record, mirroring `teamPolicySchema` in packages/contracts (Team v2 Core C4b).
+ *
+ * Spelled out here rather than imported from the renderer's ambient `TeamSummary`, which does not
+ * describe the field's shape — and declared in the store, not in the dialog that edits it, so the
+ * component can import it as a type without the store ever depending on a component. */
+export type TeamPolicyValues = {
+  maxAgentDepth: number;
+  maxConcurrentExecutions: number;
+  allowWorkerDirectMessages: boolean;
+  budgetMode: 'bounded' | 'unlimited';
+};
+
 type AppState = {
   sprintCoderAvailable: boolean;
   initialized: boolean;
@@ -190,6 +202,16 @@ type AppState = {
   // user override.
   stopTeamWorker(taskId: string, agentId: string): Promise<void>;
   stopAllTeamWorkers(taskId: string): Promise<void>;
+  /** Writes the whole policy under an optimistic-concurrency check (Team v2 Core C4b).
+   *
+   * Resolves rather than throws, and reports the failure to the CALLER instead of the global
+   * `error` banner: the only caller is a modal form that has to stay open, keep the user's edits
+   * and show the reason inline. A rejected save writes nothing to `teamByTask`. */
+  updateTeamPolicy(
+    taskId: string,
+    policy: TeamPolicyValues,
+    expectedRevision: number,
+  ): Promise<{ ok: true } | { ok: false; message: string }>;
   setDraft(taskId: string, text: string): void;
   startTurn(taskId: string, text: string): Promise<void>;
   queueMessage(taskId: string, text: string): Promise<void>;
@@ -1233,6 +1255,36 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ error: describeError(err) });
       } finally {
         set({ teamBusy: false });
+      }
+    },
+
+    async updateTeamPolicy(
+      taskId: string,
+      policy: TeamPolicyValues,
+      expectedRevision: number,
+    ): Promise<{ ok: true } | { ok: false; message: string }> {
+      if (typeof window.sprintCoder?.teams?.updatePolicy !== 'function')
+        return { ok: false, message: 'この環境ではTeamのポリシーを変更できません。' };
+      try {
+        // `updatePolicy` returns the canonical TeamDetail, revision already bumped — so the store
+        // takes the BACKEND's version wholesale rather than merging the form's values into the
+        // detail it already had. There is no path here that writes a value the backend did not
+        // confirm, which is what keeps the next save's `expectedRevision` honest.
+        const detail = await window.sprintCoder.teams.updatePolicy({
+          taskId,
+          policy,
+          expectedRevision,
+        });
+        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
+        return { ok: true };
+      } catch (err) {
+        // Stale revision and invalid hierarchy both land here. The backend's own message names
+        // which one it was; the added sentence is the recovery step, because "何番目の版" is not
+        // something a user can act on by itself.
+        return {
+          ok: false,
+          message: `保存できませんでした: ${describeError(err)} — Teamの状態が変わっている可能性があります。いったん閉じて最新の内容を読み込んでから、もう一度お試しください。`,
+        };
       }
     },
 
