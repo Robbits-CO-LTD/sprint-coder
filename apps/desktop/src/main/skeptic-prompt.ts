@@ -142,7 +142,8 @@ function line(value: string): string {
  * block cannot be closed early and the rest read as instructions.
  */
 function fence(content: string): string {
-  return [FENCE, content.replaceAll(FENCE, FENCE.slice(1)), FENCE].join('\n');
+  const escaped = content.replace(/~{3,}/g, (run) => Array.from(run).join('\u200b'));
+  return [FENCE, escaped, FENCE].join('\n');
 }
 
 /** Bounded by codepoint so a cut never lands inside a surrogate pair. */

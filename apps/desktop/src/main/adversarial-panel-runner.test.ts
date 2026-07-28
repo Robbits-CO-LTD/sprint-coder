@@ -49,6 +49,24 @@ describe('extracting a verdict from what a model actually returns', () => {
     expect(extractJsonObject(answer)).toEqual({ refuted: true });
   });
 
+  it('prefers the concluding fenced object over a fenced draft', () => {
+    const answer = [
+      'Draft:',
+      '```json',
+      '{"refuted": false}',
+      '```',
+      'Final answer:',
+      '```json',
+      '{"refuted": true}',
+      '```',
+    ].join('\n');
+    expect(extractJsonObject(answer)).toEqual({ refuted: true });
+  });
+
+  it('returns from an unterminated fence with a long whitespace header', () => {
+    expect(extractJsonObject(`\`\`\`json${' '.repeat(30_000)}`)).toBeNull();
+  }, 2_000);
+
   it('is not fooled by a brace inside a string value', () => {
     const answer = '{"detail": "the handler drops `}` on the floor", "refuted": true}';
     expect(extractJsonObject(answer)).toEqual({

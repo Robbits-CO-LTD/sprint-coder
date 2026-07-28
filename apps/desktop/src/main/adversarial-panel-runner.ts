@@ -168,9 +168,31 @@ function tryParseObject(candidate: string): Record<string, unknown> | null {
 }
 
 function fencedBlocks(text: string): readonly string[] {
-  return [...text.matchAll(/```(?:json|jsonc)?\s*\n?([\s\S]*?)```/gi)]
-    .map((match) => (match[1] ?? '').trim())
-    .filter((block) => block.length <= MAX_VERDICT_CHARS);
+  const blocks: string[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const opening = text.indexOf('```', cursor);
+    if (opening < 0) break;
+
+    let contentStart = opening + 3;
+    const language = text.slice(contentStart, contentStart + 5).toLowerCase();
+    if (language === 'jsonc') contentStart += 5;
+    else if (language.startsWith('json')) contentStart += 4;
+    while (isFenceHeaderWhitespace(text[contentStart])) contentStart += 1;
+
+    const closing = text.indexOf('```', contentStart);
+    if (closing < 0) break;
+    if (closing - contentStart <= MAX_VERDICT_CHARS) {
+      blocks.push(text.slice(contentStart, closing).trim());
+      if (blocks.length > MAX_SPANS) blocks.shift();
+    }
+    cursor = closing + 3;
+  }
+  return blocks.reverse();
+}
+
+function isFenceHeaderWhitespace(character: string | undefined): boolean {
+  return character === ' ' || character === '\t' || character === '\r' || character === '\n';
 }
 
 /**
