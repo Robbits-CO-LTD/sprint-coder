@@ -6,7 +6,7 @@
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
   P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b、
   UI U0/U1a/U1b/U1c/U2a/U3a、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5、P6、
-  Compatibility C1a/C1b1/C1b2完了
+  Compatibility C1a/C1b1/C1b2/C2a完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -211,6 +211,11 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   hard-codeせず、全Profileをgeneric createへ送る。Profile一覧だけが失敗しても既存5 Providerを
   維持し、選択中Profileが一覧から消えた場合はAPI key等を消去して未選択表示とし、固定Providerへの
   誤dispatchを遮断する。対象component test 38件とlintはgreen。実API smokeはfinal gateへ留保する。
+- Compatibility C2aでMoonshot／MiniMax／Zhipu／NVIDIA NIM／Cloudflare Workers AIを
+  Profile設定として追加した。Moonshot／MiniMax／NIMは公式model API、Zhipu／Cloudflareは
+  公式curated catalogと最小1 token probeを使用する。NIMはHTTPSまたはloopbackのcustom Base URL、
+  CloudflareはAccount IDをProfile宣言から要求する。5社ともgeneric Runtime／UIを再利用し、
+  専用Adapterはない。対象52件、contracts 29件、対象lintはgreen。実API smokeはfinal gateへ留保する。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。

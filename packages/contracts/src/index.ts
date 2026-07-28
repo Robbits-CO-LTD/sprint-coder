@@ -1285,7 +1285,18 @@ export const providerProfileSchema = z
     baseUrl: z.string().url().max(2_048),
     baseUrlConfigurable: z.boolean(),
     protocol: providerProfileProtocolSchema,
-    modelsPath: z.string().startsWith('/').max(256),
+    modelsPath: z.string().startsWith('/').max(256).nullable(),
+    curatedModels: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(256),
+            displayName: z.string().min(1).max(256),
+          })
+          .strict(),
+      )
+      .max(500),
+    verificationModel: z.string().min(1).max(256).nullable(),
     authentication: z
       .object({
         headerName: z.string().min(1).max(128),
@@ -1297,7 +1308,17 @@ export const providerProfileSchema = z
     sourceReference: z.string().url().max(2_048),
     reviewedAt: timestampSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((profile, context) => {
+    if (
+      profile.modelsPath === null &&
+      (profile.curatedModels.length === 0 || profile.verificationModel === null)
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'A curated Profile requires models and a verification model',
+      });
+  });
 export type ProviderProfile = z.infer<typeof providerProfileSchema>;
 export const providerProfileConnectionCreateInputSchema = z
   .object({

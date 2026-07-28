@@ -99,6 +99,8 @@ describe('public contracts', () => {
         baseUrlConfigurable: false,
         protocol: 'chat_completions',
         modelsPath: '/models',
+        curatedModels: [],
+        verificationModel: null,
         authentication: { headerName: 'Authorization', scheme: 'Bearer' },
         requiredCredentialFields: [],
         errorOverrides: [

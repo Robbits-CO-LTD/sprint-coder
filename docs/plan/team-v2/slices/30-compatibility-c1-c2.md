@@ -36,6 +36,15 @@ C1を拡大せず、将来Sliceへ分離する。
 原則は設定データとconformance testだけを追加する。失敗時はProfile、共通protocol extension、
 将来専用Adapter、保留のいずれかをADRで選ぶ。
 
+### C2 progress
+
+- C2a: Moonshot／MiniMax／Zhipu／NVIDIA NIM／Cloudflare Workers AIのProfile設定を完了。
+  Moonshot／MiniMax／NIMは`/models`、Zhipu／Cloudflareは公式curated catalogと1 tokenの
+  最小verification probeを使用する。NIMのcustom Base URL、CloudflareのAccount IDもProfile宣言で
+  generic UIへ現れる。5社に専用Adapterやgeneric Runtime内のProvider名分岐は追加していない。
+  対象52件、contracts 29件、対象lintがgreen
+- C2b: Provider別の実API smoke resultと費用をfinal gateで記録し、Pack B GAを判定する
+
 ## Independence
 
 C1／C2はMulti-Provider Initial GAの完成条件に含めない。C2はC1の完成条件にも含めない。

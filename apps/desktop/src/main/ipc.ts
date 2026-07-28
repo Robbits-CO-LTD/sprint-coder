@@ -188,7 +188,7 @@ import { XAIProviderClient, parseXAICredential } from './xai-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
 import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
 import { MainProviderProfileRegistry, parseOpenAICompatibleCredential } from './provider-profile';
-import { PACK_A_PROVIDER_PROFILES } from './bundled-provider-profiles';
+import { BUNDLED_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { OpenAICompatibleProviderClient } from './openai-compatible-provider-client';
 
 type InvokeEvent = IpcMainInvokeEvent;
@@ -259,7 +259,7 @@ export class IpcRouter {
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),
     );
-    for (const profile of PACK_A_PROVIDER_PROFILES) this.providerProfiles.register(profile);
+    for (const profile of BUNDLED_PROVIDER_PROFILES) this.providerProfiles.register(profile);
     const compatible = new OpenAICompatibleProviderClient(
       this.providerProfiles,
       (connection) => {

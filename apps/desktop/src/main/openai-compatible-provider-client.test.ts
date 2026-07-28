@@ -17,6 +17,8 @@ const profile: ProviderProfile = {
   baseUrlConfigurable: false,
   protocol: 'chat_completions',
   modelsPath: '/models',
+  curatedModels: [],
+  verificationModel: null,
   authentication: { headerName: 'Authorization', scheme: 'Bearer' },
   requiredCredentialFields: [],
   errorOverrides: [],
@@ -239,6 +241,63 @@ describe('OpenAICompatibleProviderClient', () => {
     expect(events).toMatchObject([
       { type: 'rate_limit', retryAfterMs: 2_000 },
       { type: 'error', error: { category: 'rate_limited', retryable: true } },
+    ]);
+  });
+
+  it('uses a declared minimal probe and curated catalog when no free model list exists', async () => {
+    const curated: ProviderProfile = {
+      ...profile,
+      id: 'curated',
+      modelsPath: null,
+      curatedModels: [{ id: 'curated-model', displayName: 'Curated Model' }],
+      verificationModel: 'curated-model',
+    };
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(curated);
+    const curatedConnection: ProviderConnection = {
+      ...connection,
+      id: 'curated:connection',
+      providerId: 'curated',
+    };
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const client = new OpenAICompatibleProviderClient(
+      profiles,
+      () => ({ apiKey: 'test-key' }),
+      async (input, init) => {
+        requests.push({
+          url: String(input),
+          body: init?.body === undefined ? null : JSON.parse(String(init.body)),
+        });
+        return new Response(JSON.stringify({ choices: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+      () => new Date('2026-07-28T00:00:00.000Z'),
+    );
+
+    await expect(
+      client.verify(curatedConnection, new AbortController().signal),
+    ).resolves.toMatchObject({ status: 'verified' });
+    await expect(
+      client.listModels(curatedConnection, new AbortController().signal),
+    ).resolves.toMatchObject([
+      {
+        modelId: 'curated-model',
+        displayName: 'Curated Model',
+        toolCalling: { value: null, source: 'unknown' },
+      },
+    ]);
+    expect(requests).toEqual([
+      {
+        url: 'https://api.example.com/v1/chat/completions',
+        body: {
+          model: 'curated-model',
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 1,
+          stream: false,
+        },
+      },
     ]);
   });
 });

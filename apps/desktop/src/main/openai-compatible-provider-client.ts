@@ -40,7 +40,10 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
   ): Promise<ProviderVerificationResult> {
     const checkedAt = this.now();
     try {
-      await this.fetchModels(connection, signal);
+      const profile = this.profiles.get(connection.providerId);
+      if (profile.modelsPath === null)
+        await this.verifyWithMinimalGeneration(connection, profile, signal);
+      else await this.fetchModels(connection, signal);
       return {
         status: 'verified',
         verifiedAt: checkedAt.toISOString(),
@@ -75,16 +78,32 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     connection: ProviderConnection,
     signal: AbortSignal,
   ): Promise<readonly ProviderModel[]> {
+    assertCompatibleConnection(connection);
+    const profile = this.profiles.get(connection.providerId);
+    if (profile.modelsPath === null)
+      return this.catalogModels(connection, profile.curatedModels);
     const response = await this.fetchModels(connection, signal);
+    return this.catalogModels(connection, response.data);
+  }
+
+  private catalogModels(
+    connection: ProviderConnection,
+    models: readonly Readonly<{
+      id: string;
+      displayName?: string;
+      context_window?: number;
+      max_completion_tokens?: number;
+    }>[],
+  ): readonly ProviderModel[] {
     const checkedAt = this.now().toISOString();
     const unknown = { value: null, source: 'unknown' } as const;
-    return response.data
+    return models
       .filter((model) => model.id.length > 0 && model.id.length <= 256)
       .map((model) => ({
         connectionId: connection.id,
         providerId: connection.providerId,
         modelId: model.id,
-        displayName: model.id,
+        displayName: model.displayName ?? model.id,
         available: true,
         availabilityCheckedAt: checkedAt,
         contextWindow:
@@ -206,6 +225,8 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
   ): Promise<CompatibleModelList> {
     assertCompatibleConnection(connection);
     const profile = this.profiles.get(connection.providerId);
+    if (profile.modelsPath === null)
+      throw new Error(`Provider Profile ${profile.id} uses a curated model catalog`);
     const response = await this.authenticatedFetch(
       connection,
       profile,
@@ -221,6 +242,43 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     if (!isCompatibleModelList(value))
       throw new Error('OpenAI-compatible model catalog response is invalid');
     return value;
+  }
+
+  private async verifyWithMinimalGeneration(
+    connection: ProviderConnection,
+    profile: ProviderProfile,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (profile.verificationModel === null)
+      throw new Error(`Provider Profile ${profile.id} has no verification model`);
+    const response = await this.authenticatedFetch(
+      connection,
+      profile,
+      profile.protocol === 'responses' ? '/responses' : '/chat/completions',
+      signal,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          profile.protocol === 'responses'
+            ? {
+                model: profile.verificationModel,
+                input: 'ping',
+                max_output_tokens: 1,
+                stream: false,
+                store: false,
+              }
+            : {
+                model: profile.verificationModel,
+                messages: [{ role: 'user', content: 'ping' }],
+                max_tokens: 1,
+                stream: false,
+              },
+        ),
+      },
+    );
+    if (!response.ok) throw new CompatibleHttpError(response.status);
+    await response.body?.cancel();
   }
 
   private async authenticatedFetch(
