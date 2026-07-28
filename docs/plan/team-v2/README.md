@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0完了。Core A1 connection identity、Core A2 canonical selection repository完了
+- 現在地: Team Slice 0完了。Core A1/A2、Core A3a hierarchy/Policy domain完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -94,7 +94,7 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Slice 0のRoot Cause Confirmed Gateは完了した。Team unitは26 passed／1 skipped、
   packaged Team E2Eは3 passedで、productionのNode inspector fuseが無効のまま一時test bundle
   だけをPlaywrightで検査する。
-- 次はCore A3として、階層・Team Policy domainを独立sub-Sliceへ分けて実装する。
+- 次はCore A3bとして、階層・Team Policyをv37 DB migrationとrestart projectionへ永続化する。
 
 ## 完成判定
 
