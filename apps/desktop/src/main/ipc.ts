@@ -65,6 +65,7 @@ import {
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
+  teamPolicyUpdateInputSchema,
   teamSendMessageInputSchema,
   teamSummarySchema,
   teamWorkerRefSchema,
@@ -773,6 +774,12 @@ export class IpcRouter {
     );
     this.handle(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), (input) =>
       this.teamCoordinator.get(input.taskId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsUpdatePolicy,
+      teamPolicyUpdateInputSchema,
+      teamDetailSchema,
+      (input) => this.teamCoordinator.updatePolicy(input),
     );
     // hireWorker/sendToWorker IPC handlers remain wired for the current UI, but the primary path
     // is now the Leader's own tool use during its Turn (team_hire_worker/team_send_to_worker in

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import type { AgentRecord } from './persistence';
-import { SqlitePersistenceClient } from './persistence';
+import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import {
   TeamCoordinator,
   type TeamWorkerRuntime,
@@ -160,6 +160,48 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 
 if (runsWithElectronAbi)
   describe('TeamCoordinator', () => {
+    it('updates Team Policy with optimistic revision and publishes canonical detail', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Team Policy');
+      const team = persistence.promoteTaskToTeam(task.id);
+      const published: ReturnType<TeamCoordinator['get']>[] = [];
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        (_taskId, detail) => {
+          published.push(detail);
+        },
+      );
+      const policy = {
+        ...team.policy,
+        maxAgentDepth: 3,
+        maxConcurrentExecutions: 5,
+        allowWorkerDirectMessages: false,
+        budgetMode: 'unlimited' as const,
+      };
+
+      const detail = await coordinator.updatePolicy({
+        taskId: task.id,
+        policy,
+        expectedRevision: team.revision,
+      });
+
+      expect(detail.team).toMatchObject({ policy, revision: team.revision + 1 });
+      expect(published.at(-1)?.team).toMatchObject({
+        id: team.id,
+        policy,
+        revision: team.revision + 1,
+      });
+      await expect(
+        coordinator.updatePolicy({
+          taskId: task.id,
+          policy: team.policy,
+          expectedRevision: team.revision,
+        }),
+      ).rejects.toBeInstanceOf(TeamConflictError);
+      persistence.close();
+    });
+
     it('starts five Workers sequentially and returns each result to the Leader', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Team');

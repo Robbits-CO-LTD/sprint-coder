@@ -114,4 +114,8 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
   `claude-opus-5`で1ファイル・8差分行を生成し、報告生成前に委託予算へ到達したため、
   メインAgentが差分レビューと全検証を実施した。format、lint、typecheck、production package、
   packaged axe 4件がgreen。
-- 次着手: C4をbackend契約／IPCとClaude UIへ分割し、Team Policy settingsを追加する。
+- C4a完了: 既存Team Policy domain／SQLite transactionを再利用し、`taskId`、完全なpolicy、
+  `expectedRevision`を受ける厳格な更新contractをMain／Preloadへ追加。CoordinatorのTask別直列化内で
+  更新し、canonical TeamDetailを返して購読者へ通知する。contracts 27件、IPC 403件、
+  Coordinator Electron ABI 12件、typecheck、lintがgreen。DB migrationは不要。
+- 次着手: C4bでC4a contractだけを使うTeam Policy settings UIをClaude Opus 5へ委託する。

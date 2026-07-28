@@ -521,6 +521,11 @@ export interface SprintCoderApi {
   teams: {
     promote(taskId: string): Promise<TeamSummary>;
     get(taskId: string): Promise<TeamDetail | null>;
+    updatePolicy(input: {
+      taskId: string;
+      policy: TeamSummary['policy'];
+      expectedRevision: number;
+    }): Promise<TeamDetail>;
     hireWorker(input: {
       taskId: string;
       role: string;

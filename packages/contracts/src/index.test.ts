@@ -17,6 +17,7 @@ import {
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
+  teamPolicyUpdateInputSchema,
   teamSendMessageInputSchema,
   teamSummarySchema,
   teamWorkerRefSchema,
@@ -62,6 +63,30 @@ describe('public contracts', () => {
     allowWorkerDirectMessages: true,
     budgetMode: 'bounded',
   } as const;
+
+  it('validates optimistic Team Policy updates', () => {
+    expect(
+      teamPolicyUpdateInputSchema.parse({
+        taskId: 'task-1',
+        policy: teamPolicy,
+        expectedRevision: 3,
+      }),
+    ).toEqual({ taskId: 'task-1', policy: teamPolicy, expectedRevision: 3 });
+    expect(() =>
+      teamPolicyUpdateInputSchema.parse({
+        taskId: 'task-1',
+        policy: { ...teamPolicy, maxConcurrentExecutions: 9 },
+        expectedRevision: 3,
+      }),
+    ).toThrow();
+    expect(() =>
+      teamPolicyUpdateInputSchema.parse({
+        taskId: 'task-1',
+        policy: teamPolicy,
+        expectedRevision: -1,
+      }),
+    ).toThrow();
+  });
 
   it('keeps requested selection separate from observed execution resolution', () => {
     expect(

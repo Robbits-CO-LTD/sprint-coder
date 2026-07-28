@@ -54,6 +54,7 @@ import {
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
+  teamPolicyUpdateInputSchema,
   teamSendMessageInputSchema,
   teamSummarySchema,
   teamWorkerRefSchema,
@@ -160,6 +161,8 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.teamsPromote, taskIdPayloadSchema, teamSummarySchema, { taskId }),
     get: (taskId) =>
       invoke(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), { taskId }),
+    updatePolicy: (input) =>
+      invoke(IPC_CHANNELS.teamsUpdatePolicy, teamPolicyUpdateInputSchema, teamDetailSchema, input),
     hireWorker: (input) =>
       invoke(IPC_CHANNELS.teamsHireWorker, teamHireWorkerInputSchema, workerSummarySchema, input),
     sendToWorker: (input) =>

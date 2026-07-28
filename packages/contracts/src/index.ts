@@ -147,6 +147,14 @@ export const teamPolicySchema = z
   })
   .strict();
 export type TeamPolicy = z.infer<typeof teamPolicySchema>;
+export const teamPolicyUpdateInputSchema = z
+  .object({
+    taskId: idSchema,
+    policy: teamPolicySchema,
+    expectedRevision: z.number().int().nonnegative(),
+  })
+  .strict();
+export type TeamPolicyUpdateInput = z.infer<typeof teamPolicyUpdateInputSchema>;
 export const managerPolicySchema = z
   .object({
     maxDirectChildren: z.number().int().positive().nullable(),
@@ -1543,6 +1551,7 @@ export interface SprintCoderApi {
   teams: {
     promote(taskId: string): Promise<TeamSummary>;
     get(taskId: string): Promise<TeamDetail | null>;
+    updatePolicy(input: TeamPolicyUpdateInput): Promise<TeamDetail>;
     hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary>;
     sendToWorker(input: TeamSendMessageInput): Promise<TeamMessageSummary>;
     stopWorker(input: TeamWorkerRef): Promise<WorkerSummary>;
@@ -1651,6 +1660,7 @@ export const IPC_CHANNELS = {
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
   teamsPromote: 'sprint-coder:teams:promote',
   teamsGet: 'sprint-coder:teams:get',
+  teamsUpdatePolicy: 'sprint-coder:teams:update-policy',
   teamsHireWorker: 'sprint-coder:teams:hire-worker',
   teamsSend: 'sprint-coder:teams:send',
   teamsStopWorker: 'sprint-coder:teams:stop-worker',

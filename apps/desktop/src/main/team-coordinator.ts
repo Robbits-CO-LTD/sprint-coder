@@ -9,6 +9,7 @@ import {
   type TeamHireWorkerInput,
   type TeamMessageSummary,
   type TeamActivitySummary,
+  type TeamPolicyUpdateInput,
   type TeamSendMessageInput,
   type WorkerCompletion,
   type WorkerSummary,
@@ -219,6 +220,17 @@ export class TeamCoordinator {
   get(taskId: string): TeamDetail | null {
     const team = this.persistence.getTeamByTask(taskId);
     return team === null ? null : this.detail(team.id);
+  }
+
+  async updatePolicy(input: TeamPolicyUpdateInput): Promise<TeamDetail> {
+    return this.enqueue(input.taskId, async () => {
+      const team = this.persistence.getTeamByTask(input.taskId);
+      if (team === null) throw new Error('Team not found for Task');
+      this.persistence.updateTeamPolicy(team.id, input.policy, input.expectedRevision);
+      const detail = this.detail(team.id);
+      this.publish(input.taskId, detail);
+      return detail;
+    });
   }
 
   /** Read-only replay for the team_wait_reports Leader tool: sendToWorker already persists the
