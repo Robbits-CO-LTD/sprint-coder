@@ -213,6 +213,8 @@ export function toolValueMatchesSchema(schema: JsonValue, value: unknown): boole
   if (type === 'array') {
     if (!Array.isArray(value)) return false;
     const items = record['items'];
+    const minItems = record['minItems'];
+    if (typeof minItems === 'number' && value.length < minItems) return false;
     return items === undefined || value.every((item) => toolValueMatchesSchema(items, item));
   }
   if (type !== 'object' || typeof value !== 'object' || value === null || Array.isArray(value))
@@ -490,7 +492,14 @@ function validateSupportedSchema(schema: JsonValue, label: string): void {
   if (typeof schema !== 'object' || schema === null || Array.isArray(schema))
     throw new Error(`Invalid ${label}: schema must be an object`);
   const record = schema as Record<string, JsonValue>;
-  const allowedKeys = new Set(['type', 'properties', 'required', 'additionalProperties', 'items']);
+  const allowedKeys = new Set([
+    'type',
+    'properties',
+    'required',
+    'additionalProperties',
+    'items',
+    'minItems',
+  ]);
   if (Object.keys(record).some((key) => !allowedKeys.has(key)))
     throw new Error(`Invalid ${label}: unsupported schema keyword`);
   if (
@@ -517,9 +526,17 @@ function validateSupportedSchema(schema: JsonValue, label: string): void {
       throw new Error(`Invalid ${label}: required property has no schema`);
   }
   if (record['type'] === 'array') {
+    const minItems = record['minItems'];
     if (record['items'] === undefined)
       throw new Error(`Invalid ${label}: array items are required`);
+    if (
+      minItems !== undefined &&
+      (typeof minItems !== 'number' || !Number.isSafeInteger(minItems) || minItems < 0)
+    )
+      throw new Error(`Invalid ${label}: malformed array schema`);
     validateSupportedSchema(record['items'], label);
+  } else if (record['minItems'] !== undefined) {
+    throw new Error(`Invalid ${label}: minItems requires an array schema`);
   }
 }
 

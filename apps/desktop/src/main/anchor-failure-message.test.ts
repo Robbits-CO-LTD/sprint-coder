@@ -60,7 +60,7 @@ describe('telling a model why its edit did not apply', () => {
       { oldText: '  return input + 1;', newText: 'a' },
       { oldText: 'function gamma() {}', newText: 'b' },
     ]);
-    expect(message.startsWith('Edit 1 did not apply:')).toBe(true);
+    expect(message.startsWith('edits[1] did not apply:')).toBe(true);
   });
 
   it.each([

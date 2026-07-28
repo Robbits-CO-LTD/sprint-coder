@@ -143,6 +143,35 @@ describe('anchor failure recovery', () => {
     });
   });
 
+  it('does not treat a whitespace-only anchor as a normalized match for the empty string', async () => {
+    const failure = await anchorFailure(SOURCE, [{ oldText: '   ', newText: 'x' }]);
+    expect(failure.recovery).toEqual({
+      editIndex: 0,
+      cause: 'absent',
+      occurrences: [],
+      nearest: null,
+    });
+  });
+
+  it('includes leading blank lines in the reusable drifted region', async () => {
+    const failure = await anchorFailure(SOURCE, [
+      { oldText: '\nfunction beta(input) {\n  return input - 2;\n}', newText: 'x' },
+    ]);
+    expect(failure.recovery).toMatchObject({
+      cause: 'drifted',
+      nearest: {
+        line: 4,
+        text: '\nfunction beta(input) {\n  return input * 2;\n}',
+      },
+    });
+  });
+
+  it('diagnoses long non-trailing whitespace runs without pathological backtracking', async () => {
+    const content = `${' '.repeat(50_000)}x\n`;
+    const failure = await anchorFailure(content, [{ oldText: 'not present', newText: 'x' }]);
+    expect(failure.recovery?.cause).toBe('absent');
+  }, 2_000);
+
   it('reports absent rather than pointing at one of many identical opening lines', async () => {
     const content = `${Array.from({ length: 12 }, () => 'x = 1;').join('\n')}\n`;
     const failure = await anchorFailure(content, [

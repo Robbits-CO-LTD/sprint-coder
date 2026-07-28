@@ -18,7 +18,7 @@ export function describeAnchorFailure(error: PatchValidationError): string | nul
   const recovery = error.recovery;
   if (recovery === null) return null;
   return [
-    `Edit ${recovery.editIndex} did not apply: ${headline(recovery)}`,
+    `edits[${recovery.editIndex}] did not apply: ${headline(recovery)}`,
     ...body(recovery),
   ].join('\n');
 }

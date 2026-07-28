@@ -39,12 +39,22 @@ async function harness(content = SOURCE) {
 }
 
 describe('the agent edit tool', () => {
-  it('declares itself as a high-risk workspace write needing that capability', () => {
+  it('declares both capabilities used by its read-before-write behavior', () => {
     expect(WORKSPACE_PATCH_TOOL.kind).toBe('fileWrite');
     expect(WORKSPACE_PATCH_TOOL.sideEffect).toBe('write');
     expect(WORKSPACE_PATCH_TOOL.risk).toBe('high');
-    expect(WORKSPACE_PATCH_TOOL.requiredCapabilities).toEqual(['workspace.write']);
+    expect(WORKSPACE_PATCH_TOOL.requiredCapabilities).toEqual([
+      'workspace.read',
+      'workspace.write',
+    ]);
     expect(WORKSPACE_PATCH_TOOL.workspaceBinding.kind).toBe('any');
+  });
+
+  it('publishes the same non-empty edit constraint that execution enforces', () => {
+    const schema = WORKSPACE_PATCH_TOOL.inputSchema as {
+      properties: { edits: { minItems?: number } };
+    };
+    expect(schema.properties.edits.minItems).toBe(1);
   });
 
   it('hands a validated plan to the Saga rather than writing anything itself', async () => {

@@ -201,6 +201,19 @@ describe('Tool Registry domain', () => {
     expect(toolValueMatchesSchema(schema, { value: Number.NaN })).toBe(false);
   });
 
+  it('validates and enforces minItems only for array schemas', () => {
+    const schema = { type: 'array', minItems: 1, items: { type: 'string' } } as const;
+    expect(() => definition({ inputSchema: schema })).not.toThrow();
+    expect(toolValueMatchesSchema(schema, [])).toBe(false);
+    expect(toolValueMatchesSchema(schema, ['x'])).toBe(true);
+    for (const inputSchema of [
+      { type: 'array', minItems: -1, items: { type: 'string' } },
+      { type: 'array', minItems: 1.5, items: { type: 'string' } },
+      { type: 'string', minItems: 1 },
+    ])
+      expect(() => definition({ inputSchema })).toThrow();
+  });
+
   it('rejects duplicate ToolIds and ambiguous equal-priority provider names', () => {
     const duplicateRegistry = new ToolRegistry();
     const tool = definition();

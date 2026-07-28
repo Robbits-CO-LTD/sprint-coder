@@ -35,6 +35,7 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
       path: { type: 'string' },
       edits: {
         type: 'array',
+        minItems: 1,
         items: {
           type: 'object',
           properties: { oldText: { type: 'string' }, newText: { type: 'string' } },
@@ -49,7 +50,7 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
   outputSchema: { type: 'object' },
   sideEffect: 'write',
   risk: 'high',
-  requiredCapabilities: ['workspace.write'],
+  requiredCapabilities: ['workspace.read', 'workspace.write'],
   executionTarget: 'main',
   implementationKind: 'built-in',
   priority: 10,

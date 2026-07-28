@@ -318,6 +318,10 @@ function describeMissingAnchor(content: string, anchor: string, editIndex: numbe
     nearest: null,
   });
 
+  // Normalizing a blank-only anchor produces the empty string, and every string includes `''`.
+  // Such an anchor has no locator and must not be reported as a whitespace near-match.
+  if (anchor.trim().length === 0) return miss('absent');
+
   if (content.length <= MAX_NORMALIZATION_PROBE_CHARS) {
     if (stripCarriageReturns(content).includes(stripCarriageReturns(anchor)))
       return miss('line_ending');
@@ -327,10 +331,9 @@ function describeMissingAnchor(content: string, anchor: string, editIndex: numbe
   }
 
   // The opening line locates the region. A blank-only anchor has nothing to locate with.
-  const opening = anchor
-    .split('\n')
-    .find((line) => line.trim().length > 0)
-    ?.trim();
+  const anchorLines = anchor.split('\n');
+  const leadingBlankLines = anchorLines.findIndex((line) => line.trim().length > 0);
+  const opening = anchorLines[leadingBlankLines]?.trim();
   if (opening === undefined) return miss('absent');
 
   const found = occurrencesOf(content, opening);
@@ -349,7 +352,7 @@ function describeMissingAnchor(content: string, anchor: string, editIndex: numbe
     editIndex,
     cause: 'drifted',
     occurrences: found.lines,
-    nearest: regionAt(content, line, anchor.split('\n').length),
+    nearest: regionAt(content, Math.max(1, line - leadingBlankLines), anchorLines.length),
   };
 }
 
@@ -480,7 +483,23 @@ function stripCarriageReturns(value: string): string {
 }
 
 function stripTrailingSpaces(value: string): string {
-  return value.replace(/[ \t]+$/gm, '');
+  const chunks: string[] = [];
+  let lineStart = 0;
+  for (let index = 0; index <= value.length; index += 1) {
+    if (index < value.length && value.charCodeAt(index) !== 10 /* \n */) continue;
+    const hasCarriageReturn = index > lineStart && value.charCodeAt(index - 1) === 13; /* \r */
+    let end = hasCarriageReturn ? index - 1 : index;
+    while (
+      end > lineStart &&
+      (value.charCodeAt(end - 1) === 32 /* space */ || value.charCodeAt(end - 1) === 9) /* tab */
+    )
+      end -= 1;
+    chunks.push(value.slice(lineStart, end));
+    if (hasCarriageReturn) chunks.push('\r');
+    if (index < value.length) chunks.push('\n');
+    lineStart = index + 1;
+  }
+  return chunks.join('');
 }
 
 function stripIndentation(value: string): string {
