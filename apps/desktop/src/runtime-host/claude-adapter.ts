@@ -15,6 +15,7 @@ import type {
   RuntimeContextFragment,
   RuntimeTeamMcpOption,
 } from './protocol';
+import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 
 type ActiveProcess = {
@@ -158,10 +159,9 @@ export class ClaudeRuntimeAdapter {
           mcpServers: {
             team: {
               type: 'stdio',
-              command: process.execPath,
+              command: teamMcpNodeCommand(),
               args: [scriptPath],
               env: {
-                ELECTRON_RUN_AS_NODE: '1',
                 TEAM_BRIDGE_SOCKET: teamMcp.socketPath,
                 TEAM_BRIDGE_TOKEN: teamMcp.token,
               },

@@ -24,10 +24,18 @@ describe('builtin Team skill', () => {
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_hire_worker');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_wait_reports');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('未着report');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('全execution ID');
   });
 
   it('recognizes explicit Team and worker-count intent without activating ordinary turns', () => {
-    for (const input of ['チームで進めて', 'Teamでお願い', '2人雇って調査して'])
+    for (const input of [
+      'チームで進めて',
+      'Teamでお願い',
+      '2人雇って調査して',
+      '数学と実装の観点を2人体制で並行に検討して',
+      '5人で作業して',
+      '八人でレビューして',
+    ])
       expect(isTeamScenarioInput(input), input).toBe(true);
     for (const input of ['簡単に説明して', '一人称を直して', 'teamworkについて説明して'])
       expect(isTeamScenarioInput(input), input).toBe(false);

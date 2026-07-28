@@ -3,7 +3,7 @@
 - 計画版: v2
 - 状態: planning
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
-  Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b完了
+  Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -110,6 +110,11 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Core C4bでCanvas／List共通のTeam Policy dialogを追加した。4項目を編集でき、成功時は
   canonical detailへ置換し、revision conflict時はdialogを維持して警告する。packaged E2Eは
   両view、keyboard／focus、競合、axeを含めgreen。
+- Core C5aでpackaged Electronの`RunAsNode=false`とTeam MCP server起動方式の不整合を修正した。
+  production fuseを緩めず、既存CLIと同じPATH上のNodeで一時stdio serverを起動する。実Claude
+  LeaderがTeamを自動展開し、数学／実装の2件の実Worker報告を受信・統合するpackaged E2Eが
+  40.9秒でgreen。Team intentは1–8人と「N人体制」を認識し、全executionの終端report待ちも
+  組み込みSkillとE2Eへ明記した。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。

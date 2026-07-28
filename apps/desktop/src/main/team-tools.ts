@@ -552,7 +552,7 @@ const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 // Natural team intent (「チームで進めて」「teamでお願い」…) auto-routes the turn into the team
 // orchestration path — the user should not need to know the fixture keyword or press ⬡ Team.
 const TEAM_INTENT =
-  /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|\s)[1-3一二三]人(?:で|雇って|を雇)/i;
+  /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^0-9０-９一二三四五六七八九十])[1-8一二三四五六七八]人(?:(?:体制)?で|雇って|を雇)/i;
 
 export function isTeamScenarioInput(input: string): boolean {
   return TEAM_INTENT.test(input);

@@ -125,4 +125,9 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
   メインAgentが未完のCanvas／CSS接続と、Canvas pan／Escapeがtop-layer dialog入力を奪う問題を
   補完・修正した。総差分は1000行未満。renderer 276件、typecheck、lint、production package、
   Canvas／List、keyboard／focus、成功／競合、axeを含むfocused packaged E2Eがgreen。
-- 次着手: C5で実Claude CLI／Codex CLIのpackaged Team execution証拠とCore GA残件を監査する。
+- C5a完了: production packageの`RunAsNode=false` fuseと、Electron executableをNodeとして
+  Team MCP serverへ使う旧実装の不整合を解消した。fuseは無効のまま維持し、Claude／Codexの
+  一時stdio serverだけをPATH上の`node`／`node.exe`で起動する。packaged実Claude Leaderが
+  Teamを自動展開し、数学／実装の2件の実Worker reportを受信・統合するE2Eが40.9秒でgreen。
+  1–8人の人数表現、「N人体制」、全execution IDの終端report待ちを回帰条件へ追加した。
+- 次着手: C5bで実Codex CLIのpackaged Team executionを検証し、Core GA残件を監査する。

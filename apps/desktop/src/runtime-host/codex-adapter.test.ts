@@ -40,12 +40,10 @@ describe('Codex runtime probe', () => {
 
   it('pins the per-turn Team MCP server through explicit config overrides', () => {
     const args = buildCodexArgs('auto', undefined, 'read-only', {
-      command: '/Applications/Electron.app/Contents/MacOS/Electron',
+      command: 'node',
       scriptPath: '/tmp/team-mcp-server.cjs',
     });
-    expect(args).toContain(
-      'mcp_servers.team.command="/Applications/Electron.app/Contents/MacOS/Electron"',
-    );
+    expect(args).toContain('mcp_servers.team.command="node"');
     expect(args).toContain('mcp_servers.team.args=["/tmp/team-mcp-server.cjs"]');
     expect(args).toContain('mcp_servers.team.enabled=true');
     expect(args).toContain(
@@ -53,7 +51,7 @@ describe('Codex runtime probe', () => {
     );
     expect(args).toContain('mcp_servers.team.default_tools_approval_mode="approve"');
     expect(args).toContain(
-      'mcp_servers.team.env_vars=["ELECTRON_RUN_AS_NODE","TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
+      'mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
     );
     expect(args.join(' ')).not.toContain('turn-token');
     expect(args.slice(0, 2)).toEqual(['app-server', '--stdio']);

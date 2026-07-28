@@ -10,6 +10,7 @@ import type {
   RuntimeContextFragment,
   RuntimeTeamMcpOption,
 } from './protocol';
+import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 
 type ActiveProcess = {
@@ -97,7 +98,7 @@ export class CodexRuntimeAdapter {
       const scriptPath = join(teamMcpDirectory, 'team-mcp-server.cjs');
       writeFileSync(scriptPath, TEAM_MCP_SERVER_SOURCE, { mode: 0o600 });
       teamMcpProfile = {
-        command: process.execPath,
+        command: teamMcpNodeCommand(),
         scriptPath,
       };
     }
@@ -113,7 +114,6 @@ export class CodexRuntimeAdapter {
         ...(teamMcp === undefined
           ? {}
           : {
-              ELECTRON_RUN_AS_NODE: '1',
               TEAM_BRIDGE_SOCKET: teamMcp.socketPath,
               TEAM_BRIDGE_TOKEN: teamMcp.token,
             }),
@@ -469,7 +469,7 @@ export function buildCodexArgs(
           '-c',
           'mcp_servers.team.startup_timeout_sec=10',
           '-c',
-          'mcp_servers.team.env_vars=["ELECTRON_RUN_AS_NODE","TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
+          'mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
         ]),
     ...(effort === undefined || effort === '' ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
     ...(model === 'auto' ? [] : ['-c', `model="${model}"`]),
