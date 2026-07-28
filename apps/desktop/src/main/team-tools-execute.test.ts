@@ -14,7 +14,7 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
       async () => ({ id: 'message-1', state: 'delivered', deliveryState: 'acked' }) as never,
     ),
     assignTask: vi.fn(
-      async () => ({ id: 'message-2', state: 'delivered', deliveryState: 'acked' }) as never,
+      async () => ({ executionId: 'execution-2', state: 'queued' }) as never,
     ),
     get: vi.fn(() => null),
     listWorkerReports: vi.fn(() => []),
@@ -74,7 +74,7 @@ describe('executeTeamTool routing', () => {
       content: '実装する',
       doneCriteria: ['targeted test passes'],
     });
-    expect(assigned).toMatchObject({ ok: true, messageId: 'message-2' });
+    expect(assigned).toMatchObject({ ok: true, executionId: 'execution-2', state: 'queued' });
 
     expect(await executeTeamTool(coordinator, 'task-1', 'team_get_status', {})).toEqual({
       ok: true,

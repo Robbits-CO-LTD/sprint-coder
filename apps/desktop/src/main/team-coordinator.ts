@@ -18,9 +18,11 @@ import {
   TEAM_DELIVERY_MAX_ATTEMPTS,
   TEAM_MESSAGE_RATE_LIMIT,
   type ManagerPolicy,
+  type TeamExecutionState,
   type TeamEnvelope,
 } from '@sprint-coder/domain';
 import { killProcessTree } from './process-tree';
+import { TeamExecutionScheduler } from './team-execution-scheduler';
 import type {
   AgentRecord,
   PersistenceClient,
@@ -41,6 +43,11 @@ export type WorkerRuntimeResult = Readonly<{
     timeMs?: number;
     toolCalls?: number;
   }>;
+}>;
+
+export type TeamExecutionSubmission = Readonly<{
+  executionId: string;
+  state: TeamExecutionState;
 }>;
 export type WorkerActivityEvent =
   | { type: 'accepted'; at: string }
@@ -149,6 +156,7 @@ export class TeamCoordinator {
     private readonly publish: Publish = () => undefined,
     private readonly now: () => Date = () => new Date(),
     private readonly deliveryTimeoutMs = DEFAULT_WORKER_DELIVERY_TIMEOUT_MS,
+    private readonly executionScheduler = new TeamExecutionScheduler(),
   ) {}
 
   private handleWorkerActivity(
@@ -309,13 +317,96 @@ export class TeamCoordinator {
   }
 
   async sendToWorker(input: TeamSendMessageInput): Promise<TeamMessageSummary> {
-    return this.assignTask({
+    return this.executeLegacyTask({
       ...input,
       doneCriteria: ['Workerが依頼に対する検証可能な報告を返す'],
     });
   }
 
   async assignTask(
+    input: TeamSendMessageInput & { doneCriteria: readonly string[] },
+  ): Promise<TeamExecutionSubmission> {
+    return this.enqueue(input.taskId, async () => {
+      const team = this.persistence.getTeamByTask(input.taskId);
+      if (team === null || team.state !== 'active') throw new Error('Team must be active');
+      const snapshot = this.persistence.getTeamSnapshot(team.id);
+      const leader = snapshot.agents.find(({ kind }) => kind === 'leader');
+      const worker = snapshot.agents.find(
+        ({ id, kind }) => id === input.targetAgentId && kind === 'worker',
+      );
+      if (leader === undefined || worker === undefined) throw new Error('Worker not found');
+      if (!['ready', 'waiting'].includes(worker.state)) throw new Error('Worker is not ready');
+      if (
+        this.persistence
+          .listTeamExecutions(team.id)
+          .some(
+            (execution) =>
+              execution.assigneeAgentId === worker.id &&
+              !['completed', 'failed', 'canceled'].includes(execution.state),
+          )
+      )
+        throw new Error('Worker already has a pending execution');
+      const since = new Date(this.now().getTime() - TEAM_MESSAGE_RATE_LIMIT.windowMs).toISOString();
+      assertTeamMessageRate({
+        recentCount: this.persistence.countRecentTeamMessages(team.id, since),
+        ...TEAM_MESSAGE_RATE_LIMIT,
+      });
+
+      const now = this.isoNow();
+      const execution = this.persistence.createTeamExecution({
+        teamId: team.id,
+        assigneeAgentId: worker.id,
+        createdByAgentId: leader.id,
+        instruction: input.content,
+        now,
+      });
+      const message = this.persistence.createTeamMessage({
+        teamId: team.id,
+        sourceAgentId: leader.id,
+        targetAgentId: worker.id,
+        content: input.content,
+        executionId: execution.id,
+      });
+      const teamTask = this.persistence.createTeamTask({
+        teamId: team.id,
+        messageId: message.id,
+        assigneeAgentId: worker.id,
+        createdByAgentId: leader.id,
+        description: input.content,
+        doneCriteria: input.doneCriteria,
+        now,
+      });
+      this.persistence.createTeamDelivery({ messageId: message.id, now });
+      const queued = this.persistence.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'queued',
+        now,
+        queueReason: 'global_concurrency',
+      });
+      this.executionScheduler.submit({
+        executionId: execution.id,
+        teamId: team.id,
+        teamLimit: team.policy.maxConcurrentExecutions,
+        run: () =>
+          this.runScheduledExecution({
+            taskId: input.taskId,
+            teamId: team.id,
+            leaderId: leader.id,
+            workerId: worker.id,
+            messageId: message.id,
+            messageSeq: message.seq,
+            teamTaskId: teamTask.id,
+            executionId: execution.id,
+            content: input.content,
+            doneCriteria: input.doneCriteria,
+          }),
+      });
+      this.emit(input.taskId, team.id);
+      return { executionId: queued.id, state: queued.state };
+    });
+  }
+
+  private async executeLegacyTask(
     input: TeamSendMessageInput & { doneCriteria: readonly string[] },
   ): Promise<TeamMessageSummary> {
     return this.enqueue(input.taskId, async () => {
@@ -444,6 +535,164 @@ export class TeamCoordinator {
     });
   }
 
+  private async runScheduledExecution(input: {
+    taskId: string;
+    teamId: string;
+    leaderId: string;
+    workerId: string;
+    messageId: string;
+    messageSeq: number;
+    teamTaskId: string;
+    executionId: string;
+    content: string;
+    doneCriteria: readonly string[];
+  }): Promise<void> {
+    const snapshot = this.persistence.getTeamSnapshot(input.teamId);
+    const leader = snapshot.agents.find(({ id }) => id === input.leaderId);
+    const worker = snapshot.agents.find(({ id }) => id === input.workerId);
+    if (leader === undefined || worker === undefined) throw new Error('Execution Agent not found');
+    let attemptId: string | null = null;
+    let reservations: readonly TeamBudgetReservationRecord[] = [];
+    try {
+      this.persistence.transitionTeamExecution({
+        executionId: input.executionId,
+        to: 'running',
+        now: this.isoNow(),
+      });
+      let attempt = this.persistence.createTeamAttempt(input.executionId, this.isoNow());
+      attempt = this.persistence.transitionTeamAttempt({
+        attemptId: attempt.id,
+        to: 'running',
+        now: this.isoNow(),
+      });
+      attemptId = attempt.id;
+      reservations = this.persistence.reserveTeamBudget({
+        teamId: input.teamId,
+        entries: [
+          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
+            scope: 'team' as const,
+            kind: kind as keyof typeof executionEstimate,
+            amount,
+          })),
+          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
+            scope: 'worker' as const,
+            kind: kind as keyof typeof executionEstimate,
+            amount,
+            agentId: worker.id,
+          })),
+        ],
+        purpose: `team-execution:${input.executionId}`,
+        now: this.isoNow(),
+      });
+      this.persistence.transitionWorkerState(worker.id, 'busy');
+      this.persistence.setWorkerCurrentActivity(worker.id, input.content, this.isoNow());
+      this.emit(input.taskId, input.teamId);
+
+      const completion = await this.dispatchWithRetry(
+        input.teamId,
+        leader,
+        worker,
+        input.messageId,
+        input.messageSeq,
+        input.content,
+        input.teamTaskId,
+      );
+      this.persistence.transitionTeamMessageState(input.messageId, 'delivered');
+      this.persistence.transitionTeamDelivery({
+        messageId: input.messageId,
+        to: 'acked',
+        now: this.isoNow(),
+      });
+      this.settleExecution(reservations, completion.usage);
+      reservations = [];
+      this.persistWorkerResult(
+        input.teamId,
+        worker,
+        leader,
+        completion.value,
+        input.executionId,
+        attempt.id,
+      );
+      const report = workerReportSchema.parse({
+        status: completion.value.status === 'succeeded' ? 'completed' : 'failed',
+        summary: completion.value.summary,
+        findings: [],
+        changedFiles: completion.value.artifacts.map((artifact) => artifact.reference),
+        artifacts: completion.value.artifacts,
+        verification: completion.value.verification,
+        risks: completion.value.risks,
+        nextActions: [],
+        doneEvidence: input.doneCriteria.map((criterion) => ({
+          criterion,
+          evidence: completion.value.summary,
+        })),
+      });
+      this.persistence.completeTeamTaskWithReport({
+        teamTaskId: input.teamTaskId,
+        agentId: worker.id,
+        report,
+        doneEvidence: input.doneCriteria.map((criterion) => ({
+          criterion,
+          evidence: completion.value.summary,
+        })),
+        now: this.isoNow(),
+      });
+      this.persistence.transitionTeamAttempt({
+        attemptId: attempt.id,
+        to: 'completed',
+        now: this.isoNow(),
+      });
+      this.persistence.transitionTeamExecution({
+        executionId: input.executionId,
+        to: completion.value.status === 'succeeded' ? 'completed' : 'failed',
+        now: this.isoNow(),
+      });
+      this.persistence.transitionWorkerState(
+        worker.id,
+        completion.value.status === 'succeeded' ? 'done' : 'failed',
+      );
+      this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
+      this.finalizeTeamIfWorkersTerminal(input.teamId);
+      this.emit(input.taskId, input.teamId);
+    } catch (error) {
+      this.releaseReservations(reservations);
+      this.persistence.transitionTeamTask(input.teamTaskId, 'failed', this.isoNow());
+      if (attemptId !== null) {
+        const attempt = this.persistence.getTeamAttempt(attemptId);
+        if (!['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state))
+          this.persistence.transitionTeamAttempt({
+            attemptId,
+            to: 'failed',
+            now: this.isoNow(),
+            terminalReason: 'runtime_failure',
+          });
+      }
+      const execution = this.persistence.getTeamExecution(input.executionId);
+      if (!['completed', 'failed', 'canceled'].includes(execution.state))
+        this.persistence.transitionTeamExecution({
+          executionId: execution.id,
+          to: 'failed',
+          now: this.isoNow(),
+        });
+      const current = this.persistence
+        .getTeamSnapshot(input.teamId)
+        .agents.find(({ id }) => id === worker.id);
+      if (current?.state === 'busy') this.persistence.transitionWorkerState(worker.id, 'failed');
+      this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
+      const delivery = this.persistence.getTeamDelivery(input.messageId);
+      if (delivery !== null && !['failed', 'acked'].includes(delivery.state))
+        this.persistence.transitionTeamDelivery({
+          messageId: input.messageId,
+          to: 'failed',
+          now: this.isoNow(),
+          error: error instanceof Error ? error.message : 'worker failure',
+        });
+      this.finalizeTeamIfWorkersTerminal(input.teamId);
+      this.emit(input.taskId, input.teamId);
+      throw error;
+    }
+  }
+
   async stopWorker(taskId: string, agentId: string): Promise<WorkerSummary> {
     return this.enqueue(taskId, async () => {
       const team = this.persistence.getTeamByTask(taskId);
@@ -491,13 +740,16 @@ export class TeamCoordinator {
     return this.persistence.recoverTeamsOnStartup(this.isoNow());
   }
 
-  /** True while at least one Worker is mid-dispatch (sendToWorker sets 'busy' before running the
-   * Worker runtime and clears it in both the success and failure paths). Used by
-   * team_wait_reports' long-poll (team-tools.ts) to decide whether it is still worth waiting for
-   * more reports or whether every dispatched Worker has already settled. */
+  /** True while a durable execution is queued/running or a legacy dispatch is busy. */
   hasBusyWorkers(taskId: string): boolean {
     const team = this.persistence.getTeamByTask(taskId);
     if (team === null) return false;
+    if (
+      this.persistence
+        .listTeamExecutions(team.id)
+        .some(({ state }) => !['completed', 'failed', 'canceled'].includes(state))
+    )
+      return true;
     const snapshot = this.persistence.getTeamSnapshot(team.id);
     return snapshot.agents.some(({ kind, state }) => kind === 'worker' && state === 'busy');
   }
@@ -566,12 +818,16 @@ export class TeamCoordinator {
     worker: AgentRecord,
     leader: AgentRecord,
     completion: WorkerCompletion,
+    executionId?: string,
+    attemptId?: string,
   ): void {
     const result = this.persistence.createTeamMessage({
       teamId,
       sourceAgentId: worker.id,
       targetAgentId: leader.id,
       content: JSON.stringify(completion),
+      ...(executionId === undefined ? {} : { executionId }),
+      ...(attemptId === undefined ? {} : { attemptId }),
     });
     this.persistence.createTeamDelivery({ messageId: result.id, now: this.isoNow() });
     this.persistence.transitionTeamMessageState(result.id, 'dispatching');

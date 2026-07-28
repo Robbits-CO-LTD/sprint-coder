@@ -294,7 +294,7 @@ export async function executeTeamTool(
     case 'team_assign_task': {
       const request = assignArgsSchema.parse(args);
       try {
-        const message = await coordinator.assignTask({
+        const execution = await coordinator.assignTask({
           taskId,
           targetAgentId: request.workerId,
           content: request.objective,
@@ -303,9 +303,8 @@ export async function executeTeamTool(
         return {
           ok: true,
           workerId: request.workerId,
-          messageId: message.id,
-          state: message.state,
-          deliveryState: message.deliveryState,
+          executionId: execution.executionId,
+          state: execution.state,
         };
       } catch (error) {
         return teamToolError(error);

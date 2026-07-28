@@ -15,8 +15,8 @@ description: Sprint Coderで実在するWorkerを安全に編成・監視する
 Team利用が明示された依頼では、必ずMCPサーバー \`team\` の実ツールを呼び出す。ツール名を文章へ書くだけで利用したことにしない。
 
 1. \`team_hire_worker\` で重複しない役割のWorkerを必要人数だけ採用する。
-2. 各Workerへobjective、scope、nonGoals、doneCriteria、targetPaths、constraintsを含む正式taskを割り当てる。
-3. \`team_wait_reports\` でacceptedやrunningではなく終端reportを待つ。
+2. \`team_assign_task\` で各Workerへobjective、scope、nonGoals、doneCriteria、targetPaths、constraintsを含む正式taskを割り当て、返されたexecution IDを記録する。queuedは失敗ではない。
+3. \`team_wait_reports\` でaccepted、queued、runningではなく終端reportを待つ。
 4. 実際に届いたreportだけを統合する。存在しないWorker、未着report、行われていない議論を生成しない。
 5. blocked、needs_input、failed、canceledをcompletedへ読み替えない。
 

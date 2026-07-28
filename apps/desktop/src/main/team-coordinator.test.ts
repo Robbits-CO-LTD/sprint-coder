@@ -68,6 +68,46 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
   }
 }
 
+class BlockingWorkerRuntime extends TestWorkerRuntime {
+  activeExecutions = 0;
+  maxActiveExecutions = 0;
+  readonly releases: Array<() => void> = [];
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+  }): Promise<WorkerRuntimeResult> {
+    this.activeExecutions += 1;
+    this.maxActiveExecutions = Math.max(this.maxActiveExecutions, this.activeExecutions);
+    await new Promise<void>((resolve) => this.releases.push(resolve));
+    this.activeExecutions -= 1;
+    return {
+      claims: {
+        deliveryId: input.envelope.deliveryId,
+        sourceAgentId: input.envelope.sourceAgentId,
+        targetAgentId: input.envelope.targetAgentId,
+      },
+      completion: {
+        status: 'succeeded',
+        summary: `${input.worker.role}: ${input.content}`,
+        artifacts: [],
+        verification: [{ name: 'blocking-runtime', outcome: 'pass' }],
+        risks: [],
+      },
+      usage: { costCents: 1, tokens: 2, timeMs: 3, toolCalls: 4 },
+    };
+  }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 if (runsWithElectronAbi)
   describe('TeamCoordinator', () => {
     it('starts five Workers sequentially and returns each result to the Leader', async () => {
@@ -180,6 +220,65 @@ if (runsWithElectronAbi)
           child.id,
         ),
       ).rejects.toThrow('Only a Manager with canDelegate');
+      persistence.close();
+    });
+
+    it('returns durable execution IDs before completion and runs at most eight in parallel', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Eight parallel executions');
+      const runtime = new BlockingWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const workers = [];
+      for (let index = 0; index < 10; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker-${index}`,
+            objective: `objective-${index}`,
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          }),
+        );
+
+      const submissions = await Promise.all(
+        workers.map((worker) =>
+          coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: `execute-${worker.role}`,
+            doneCriteria: ['runtime completes'],
+          }),
+        ),
+      );
+      expect(new Set(submissions.map(({ executionId }) => executionId)).size).toBe(10);
+      await waitFor(() => runtime.activeExecutions === 8);
+      expect(runtime.maxActiveExecutions).toBe(8);
+      const teamId = workers[0]!.teamId;
+      expect(
+        persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'running'),
+      ).toHaveLength(8);
+      expect(
+        persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
+      ).toHaveLength(2);
+
+      for (const release of runtime.releases.splice(0, 8)) release();
+      await waitFor(() => runtime.releases.length === 2 && runtime.activeExecutions === 2);
+      for (const release of runtime.releases.splice(0)) release();
+      await waitFor(() =>
+        persistence
+          .listTeamExecutions(teamId)
+          .every(({ state }) => state === 'completed'),
+      );
+      expect(
+        persistence
+          .listTeamExecutions(teamId)
+          .every((execution) => persistence.listTeamAttempts(execution.id).length === 1),
+      ).toBe(true);
+      expect(
+        persistence
+          .getTeamSnapshot(teamId)
+          .messages.filter(({ executionId }) => executionId !== null),
+      ).toHaveLength(20);
       persistence.close();
     });
 

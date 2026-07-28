@@ -54,7 +54,11 @@ Proof: deterministic Runtimeで8 parallel、depth、steer、crash／restart。
   `UI_DELEGATION_MODEL`を使うClaude CLIへ委託し、メインAgentが差分とtestを再検証した。
 - B2a完了: global最大8、Team Policy別上限、FIFO、失敗時枠解放を担うCore admission
   schedulerとdeferred job unit test。
-- B2b次着手: 永続executionをSchedulerへ接続し、完了を待たずexecution IDを返すassign境界。
+- B2b完了: 永続execution/message/task/deliveryをSchedulerへ接続し、formal
+  `team_assign_task`が完了を待たずexecution IDを返す。global 8 running／2 queued、
+  attempt、message link、失敗時枠解放をElectron ABIで検証。旧IPC `sendToWorker`は
+  後方互換の同期経路として維持する。
+- B3次着手: queued/running steer、queued/running cancel、再起動queue rehydrate。
   Manager MCP caller bindingはRuntime接続Sliceで行い、model-controlled引数からAgent
   identityを受け取らない。
 
