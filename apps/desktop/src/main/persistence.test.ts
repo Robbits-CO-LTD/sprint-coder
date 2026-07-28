@@ -4410,6 +4410,7 @@ if (runsWithElectronAbi)
         { version: 34 },
         { version: 35 },
         { version: 36 },
+        { version: 37 },
       ]);
       for (const [table, columns] of [
         [
@@ -4423,8 +4424,20 @@ if (runsWithElectronAbi)
           ],
         ],
         ['agent_threads', ['connection_id', 'requested_provider', 'requested_model']],
-        ['agents', ['connection_id', 'requested_provider', 'requested_model']],
+        [
+          'agents',
+          [
+            'connection_id',
+            'requested_provider',
+            'requested_model',
+            'parent_agent_id',
+            'depth',
+            'can_delegate',
+            'manager_policy_json',
+          ],
+        ],
         ['tasks', ['connection_id', 'requested_provider', 'requested_model']],
+        ['teams', ['policy_json']],
       ] as const) {
         const actual = new Set(
           (

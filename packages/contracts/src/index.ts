@@ -138,6 +138,23 @@ export const teamStateSchema = z.enum([
   'completed',
   'failed',
 ]);
+export const teamPolicySchema = z
+  .object({
+    maxAgentDepth: z.number().int().min(1).max(4),
+    maxConcurrentExecutions: z.number().int().min(1).max(8),
+    allowWorkerDirectMessages: z.boolean(),
+    budgetMode: z.enum(['bounded', 'unlimited']),
+  })
+  .strict();
+export type TeamPolicy = z.infer<typeof teamPolicySchema>;
+export const managerPolicySchema = z
+  .object({
+    maxDirectChildren: z.number().int().positive().nullable(),
+    maxDelegationDepth: z.number().int().min(1).max(4),
+    allowManagerChildren: z.boolean(),
+  })
+  .strict();
+export type ManagerPolicy = z.infer<typeof managerPolicySchema>;
 export const teamSummarySchema = z
   .object({
     id: idSchema,
@@ -145,6 +162,7 @@ export const teamSummarySchema = z
     state: teamStateSchema,
     leaderAgentId: idSchema,
     budget: z.record(z.string(), z.json()),
+    policy: teamPolicySchema,
     revision: z.number().int().nonnegative(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
@@ -217,6 +235,10 @@ export const workerSummarySchema = z
     writeCapable: z.boolean(),
     currentActivity: z.string().nullable(),
     engine: z.enum(['mock', 'codex', 'claude']),
+    parentAgentId: idSchema.nullable(),
+    depth: z.number().int().min(0).max(4),
+    canDelegate: z.boolean(),
+    managerPolicy: managerPolicySchema.nullable(),
     liveOutput: z.string().max(20_000),
     reasoningActive: z.boolean(),
     usage: teamUsageTotalsSchema,

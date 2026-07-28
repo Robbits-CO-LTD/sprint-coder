@@ -70,11 +70,16 @@ import {
   type BackgroundEpochs,
   type BackgroundWakePolicy,
   assertLeaderRoutedMessage,
+  assertDelegationAllowed,
+  assertManagerPolicy,
+  assertTeamPolicy,
   assertWorkerPersistenceInput,
   transitionTeam,
   transitionTeamMessage,
   transitionWorker,
   DEFAULT_TEAM_BUDGET_LIMITS,
+  DEFAULT_MANAGER_POLICY,
+  DEFAULT_TEAM_POLICY,
   assertReservationWithinCap,
   transitionBudgetReservation,
   assertDeliveryRetryAllowed,
@@ -88,8 +93,10 @@ import {
   type TeamDeliveryState,
   type CapabilityCeiling,
   type ContextInheritancePolicy,
+  type ManagerPolicy,
   type TeamMessageState,
   type TeamState,
+  type TeamPolicy,
   type WorkerState,
 } from '@sprint-coder/domain';
 import {
@@ -276,6 +283,7 @@ type TeamRow = {
   state: TeamState;
   leader_agent_id: string;
   budget_json: string;
+  policy_json: string;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -297,6 +305,10 @@ type AgentRow = {
   connection_id: string | null;
   requested_provider: string | null;
   requested_model: string | null;
+  parent_agent_id: string | null;
+  depth: number;
+  can_delegate: number;
+  manager_policy_json: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -637,6 +649,8 @@ const TEAM_BUDGET_STRUCTURED_SEED = JSON.stringify({
   team: DEFAULT_TEAM_BUDGET_LIMITS.team,
   worker: DEFAULT_TEAM_BUDGET_LIMITS.worker,
 });
+const TEAM_POLICY_SEED = JSON.stringify(DEFAULT_TEAM_POLICY);
+const MANAGER_POLICY_SEED = JSON.stringify(DEFAULT_MANAGER_POLICY);
 
 const migrations = [
   {
@@ -1741,6 +1755,33 @@ const migrations = [
       ALTER TABLE tasks ADD COLUMN requested_model TEXT;
     `,
   },
+  {
+    version: 37,
+    checksum: 'team-v2-core-v37-hierarchy-team-policy',
+    sql: `
+      ALTER TABLE teams ADD COLUMN policy_json TEXT NOT NULL DEFAULT '${TEAM_POLICY_SEED}';
+
+      ALTER TABLE agents ADD COLUMN parent_agent_id TEXT REFERENCES agents(id) ON DELETE RESTRICT;
+      ALTER TABLE agents ADD COLUMN depth INTEGER NOT NULL DEFAULT 0
+        CHECK (depth BETWEEN 0 AND 4);
+      ALTER TABLE agents ADD COLUMN can_delegate INTEGER NOT NULL DEFAULT 0
+        CHECK (can_delegate IN (0, 1));
+      ALTER TABLE agents ADD COLUMN manager_policy_json TEXT;
+
+      UPDATE agents
+      SET can_delegate = 1, manager_policy_json = '${MANAGER_POLICY_SEED}'
+      WHERE kind = 'leader';
+      UPDATE agents
+      SET parent_agent_id = (
+            SELECT teams.leader_agent_id FROM teams WHERE teams.id = agents.team_id
+          ),
+          depth = 1
+      WHERE kind = 'worker';
+
+      CREATE INDEX agents_parent_idx
+        ON agents(team_id, parent_agent_id, depth, created_at, id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -1920,12 +1961,20 @@ export type BackgroundCompletionRecord = Readonly<{
   attachedAt: string | null;
   runtimeAckedAt: string | null;
 }>;
+type PersistedJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly PersistedJsonValue[]
+  | Readonly<{ [key: string]: PersistedJsonValue }>;
 export type TeamRecord = Readonly<{
   id: string;
   taskId: string;
   state: TeamState;
   leaderAgentId: string;
-  budget: Readonly<Record<string, unknown>>;
+  budget: Readonly<Record<string, PersistedJsonValue>>;
+  policy: TeamPolicy;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -1945,6 +1994,10 @@ export type AgentRecord = Readonly<{
   currentActivity: string | null;
   runtimeKind: RuntimeKind;
   modelSelection: ModelSelection;
+  parentAgentId: string | null;
+  depth: number;
+  canDelegate: boolean;
+  managerPolicy: ManagerPolicy | null;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -2043,6 +2096,7 @@ export interface PersistenceClient {
   getTeamByTask(taskId: string): TeamRecord | null;
   getTeamSnapshot(teamId: string): TeamSnapshot;
   transitionTeamState(teamId: string, to: TeamState): TeamRecord;
+  updateTeamPolicy(teamId: string, policy: TeamPolicy, expectedRevision: number): TeamRecord;
   registerTeamWorker(input: {
     teamId: string;
     role: string;
@@ -2051,6 +2105,9 @@ export interface PersistenceClient {
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
     writeCapable?: boolean;
+    parentAgentId?: string;
+    canDelegate?: boolean;
+    managerPolicy?: ManagerPolicy | null;
   }): AgentRecord;
   transitionWorkerState(agentId: string, to: WorkerState): AgentRecord;
   setWorkerCurrentActivity(agentId: string, activity: string | null, now: string): AgentRecord;
@@ -2878,9 +2935,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
           `INSERT INTO agents(
              id, team_id, thread_id, task_id, kind, role, state, objective,
              parent_capability_ceiling_json, context_inheritance_policy,
-             connection_id, requested_provider, requested_model, created_at, updated_at
+             connection_id, requested_provider, requested_model,
+             parent_agent_id, depth, can_delegate, manager_policy_json, created_at, updated_at
            ) VALUES (
-             ?, NULL, ?, ?, 'leader', 'leader', 'ready', NULL, NULL, NULL, ?, ?, ?, ?, ?
+             ?, NULL, ?, ?, 'leader', 'leader', 'ready', NULL, NULL, NULL, ?, ?, ?,
+             NULL, 0, 1, ?, ?, ?
            )`,
         )
         .run(
@@ -2890,6 +2949,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           modelSelection.connectionId,
           modelSelection.requestedProvider,
           modelSelection.requestedModel,
+          MANAGER_POLICY_SEED,
           now,
           now,
         );
@@ -2979,10 +3039,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare(
           `INSERT INTO teams(
-             id, task_id, state, leader_agent_id, budget_json, revision, created_at, updated_at
-           ) VALUES (?, ?, 'draft', ?, ?, 0, ?, ?)`,
+             id, task_id, state, leader_agent_id, budget_json, policy_json,
+             revision, created_at, updated_at
+           ) VALUES (?, ?, 'draft', ?, ?, ?, 0, ?, ?)`,
         )
-        .run(teamId, taskId, leader.id, TEAM_BUDGET_STRUCTURED_SEED, now, now);
+        .run(teamId, taskId, leader.id, TEAM_BUDGET_STRUCTURED_SEED, TEAM_POLICY_SEED, now, now);
       const assigned = this.db
         .prepare('UPDATE agents SET team_id = ?, updated_at = ? WHERE id = ? AND team_id IS NULL')
         .run(teamId, now, leader.id);
@@ -3017,7 +3078,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `SELECT a.*, t.runtime_kind FROM agents a
            JOIN agent_threads t ON t.id = a.thread_id
-           WHERE a.team_id = ? ORDER BY a.kind, a.created_at, a.id`,
+           WHERE a.team_id = ? ORDER BY a.depth, a.created_at, a.id`,
         )
         .all(teamId) as AgentRow[]
     ).map(toAgent);
@@ -3053,6 +3114,42 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  updateTeamPolicy(teamId: string, policy: TeamPolicy, expectedRevision: number): TeamRecord {
+    const parsed = assertTeamPolicy(policy);
+    return this.db.transaction(() => {
+      const current = this.getTeam(teamId);
+      if (current.revision !== expectedRevision) throw new TeamConflictError();
+      const agents = this.getTeamSnapshot(teamId).agents;
+      if (agents.some(({ depth }) => depth > parsed.maxAgentDepth))
+        throw new Error('Team Policy cannot exclude an existing Agent depth');
+      const now = new Date().toISOString();
+      for (const agent of agents) {
+        if (agent.managerPolicy === null) continue;
+        const managerPolicy = {
+          ...agent.managerPolicy,
+          maxDelegationDepth: Math.min(
+            agent.managerPolicy.maxDelegationDepth,
+            parsed.maxAgentDepth,
+          ),
+        };
+        assertManagerPolicy(managerPolicy, parsed);
+        if (managerPolicy.maxDelegationDepth !== agent.managerPolicy.maxDelegationDepth)
+          this.db
+            .prepare('UPDATE agents SET manager_policy_json = ?, updated_at = ? WHERE id = ?')
+            .run(JSON.stringify(managerPolicy), now, agent.id);
+      }
+      const updated = this.db
+        .prepare(
+          `UPDATE teams
+           SET policy_json = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(JSON.stringify(parsed), now, teamId, expectedRevision);
+      if (updated.changes !== 1) throw new TeamConflictError();
+      return this.getTeam(teamId);
+    })();
+  }
+
   registerTeamWorker(input: {
     teamId: string;
     role: string;
@@ -3061,12 +3158,35 @@ export class SqlitePersistenceClient implements PersistenceClient {
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
     writeCapable?: boolean;
+    parentAgentId?: string;
+    canDelegate?: boolean;
+    managerPolicy?: ManagerPolicy | null;
   }): AgentRecord {
     assertWorkerPersistenceInput(input);
     return this.db.transaction(() => {
       const team = this.getTeam(input.teamId);
       if (!['draft', 'forming', 'active', 'paused'].includes(team.state))
         throw new Error('Team does not accept new workers');
+      const parent = this.getAgent(input.parentAgentId ?? team.leaderAgentId);
+      if (parent.teamId !== team.id) throw new Error('Parent Agent must belong to the same Team');
+      if (['done', 'failed', 'stopped'].includes(parent.state))
+        throw new Error('A terminal Agent cannot hire child Agents');
+      const directChildCount = (
+        this.db
+          .prepare('SELECT COUNT(*) AS count FROM agents WHERE team_id = ? AND parent_agent_id = ?')
+          .get(team.id, parent.id) as { count: number }
+      ).count;
+      const canDelegate = input.canDelegate === true;
+      const managerPolicy = input.managerPolicy ?? null;
+      if (canDelegate !== (managerPolicy !== null))
+        throw new Error('A delegating Agent requires an explicit Manager Policy');
+      if (managerPolicy !== null) assertManagerPolicy(managerPolicy, team.policy);
+      const depth = assertDelegationAllowed({
+        requester: parent,
+        requestedChildCanDelegate: canDelegate,
+        directChildCount,
+        teamPolicy: team.policy,
+      });
       const now = new Date().toISOString();
       const threadId = randomUUID();
       const agentId = randomUUID();
@@ -3094,8 +3214,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
           `INSERT INTO agents(
              id, team_id, thread_id, task_id, kind, role, state, objective,
              parent_capability_ceiling_json, context_inheritance_policy,
-             write_capable, connection_id, requested_provider, requested_model, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             write_capable, connection_id, requested_provider, requested_model,
+             parent_agent_id, depth, can_delegate, manager_policy_json, created_at, updated_at
+           ) VALUES (
+             ?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           )`,
         )
         .run(
           agentId,
@@ -3110,6 +3233,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
           modelSelection.connectionId,
           modelSelection.requestedProvider,
           modelSelection.requestedModel,
+          parent.id,
+          depth,
+          canDelegate ? 1 : 0,
+          managerPolicy === null ? null : JSON.stringify(managerPolicy),
           now,
           now,
         );
@@ -8093,7 +8220,8 @@ function toTeam(row: TeamRow): TeamRecord {
     taskId: row.task_id,
     state: row.state,
     leaderAgentId: row.leader_agent_id,
-    budget: JSON.parse(row.budget_json) as Record<string, unknown>,
+    budget: JSON.parse(row.budget_json) as Record<string, PersistedJsonValue>,
+    policy: assertTeamPolicy(JSON.parse(row.policy_json) as TeamPolicy),
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -8123,6 +8251,13 @@ function toAgent(row: AgentRow): AgentRecord {
       requestedProvider: row.requested_provider,
       requestedModel: row.requested_model,
     },
+    parentAgentId: row.parent_agent_id,
+    depth: row.depth,
+    canDelegate: row.can_delegate === 1,
+    managerPolicy:
+      row.manager_policy_json === null
+        ? null
+        : (JSON.parse(row.manager_policy_json) as ManagerPolicy),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

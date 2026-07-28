@@ -54,6 +54,13 @@ const pendingApproval = {
 } as const;
 
 describe('public contracts', () => {
+  const teamPolicy = {
+    maxAgentDepth: 4,
+    maxConcurrentExecutions: 8,
+    allowWorkerDirectMessages: true,
+    budgetMode: 'bounded',
+  } as const;
+
   it('keeps requested selection separate from observed execution resolution', () => {
     expect(
       modelSelectionSchema.parse({
@@ -85,6 +92,7 @@ describe('public contracts', () => {
         state: 'draft',
         leaderAgentId: 'agent-1',
         budget: {},
+        policy: teamPolicy,
         revision: 0,
         createdAt: '2026-07-23T00:00:00.000Z',
         updatedAt: '2026-07-23T00:00:00.000Z',
@@ -97,6 +105,7 @@ describe('public contracts', () => {
         state: 'running',
         leaderAgentId: 'agent-1',
         budget: {},
+        policy: teamPolicy,
         revision: 0,
         createdAt: '2026-07-23T00:00:00.000Z',
         updatedAt: '2026-07-23T00:00:00.000Z',
@@ -117,6 +126,10 @@ describe('public contracts', () => {
     writeCapable: true,
     currentActivity: null,
     engine: 'codex',
+    parentAgentId: 'leader-1',
+    depth: 1,
+    canDelegate: false,
+    managerPolicy: null,
     liveOutput: '',
     reasoningActive: false,
     usage: teamUsage,
@@ -144,6 +157,7 @@ describe('public contracts', () => {
     state: 'active',
     leaderAgentId: 'leader-1',
     budget: {},
+    policy: teamPolicy,
     revision: 1,
     createdAt: '2026-07-23T00:00:00.000Z',
     updatedAt: '2026-07-23T00:00:00.000Z',

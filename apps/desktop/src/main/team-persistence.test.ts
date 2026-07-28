@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
-import { SqlitePersistenceClient } from './persistence';
+import { SqlitePersistenceClient, TeamConflictError } from './persistence';
+import { DEFAULT_MANAGER_POLICY, DEFAULT_TEAM_POLICY } from '@sprint-coder/domain';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -40,11 +41,16 @@ if (runsWithElectronAbi)
         taskId: task.id,
         leaderAgentId: leaderBefore.id,
         state: 'draft',
+        policy: DEFAULT_TEAM_POLICY,
       });
       expect(persistence.getTaskLeader(task.id)).toMatchObject({
         id: leaderBefore.id,
         threadId: leaderBefore.threadId,
         teamId: team.id,
+        parentAgentId: null,
+        depth: 0,
+        canDelegate: true,
+        managerPolicy: DEFAULT_MANAGER_POLICY,
       });
       persistence.close();
 
@@ -52,6 +58,112 @@ if (runsWithElectronAbi)
       expect(reopened.getTeamByTask(task.id)).toEqual(team);
       expect(reopened.getTaskLeader(task.id).id).toBe(leaderBefore.id);
       reopened.close();
+    });
+
+    it('persists a Manager hierarchy through depth 4 and rejects depth 5', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const team = persistence.promoteTaskToTeam(task.id);
+      let parent = persistence.getTaskLeader(task.id);
+      const hierarchy = [parent];
+      const managerCeiling = {
+        entries: [],
+        maxWorkerDepth: 4,
+        maxConcurrentWorkers: 8,
+      } as const;
+      for (let depth = 1; depth <= 4; depth += 1) {
+        parent = persistence.registerTeamWorker({
+          teamId: team.id,
+          parentAgentId: parent.id,
+          role: `manager-${depth}`,
+          objective: `Manage depth ${depth}.`,
+          parentCapabilityCeiling: managerCeiling,
+          contextInheritancePolicy: 'summary',
+          canDelegate: true,
+          managerPolicy: DEFAULT_MANAGER_POLICY,
+        });
+        expect(parent.depth).toBe(depth);
+        hierarchy.push(parent);
+      }
+      expect(() =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          parentAgentId: parent.id,
+          role: 'too-deep',
+          objective: 'Must be rejected.',
+          parentCapabilityCeiling: managerCeiling,
+          contextInheritancePolicy: 'summary',
+        }),
+      ).toThrow('depth exceeds 4');
+
+      const leaf = persistence.registerTeamWorker({
+        teamId: team.id,
+        parentAgentId: hierarchy[0]!.id,
+        role: 'leaf',
+        objective: 'Cannot delegate.',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+      });
+      expect(() =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          parentAgentId: leaf.id,
+          role: 'forbidden-child',
+          objective: 'Must be rejected.',
+          parentCapabilityCeiling: emptyCeiling,
+          contextInheritancePolicy: 'summary',
+        }),
+      ).toThrow('Only a Manager');
+      persistence.transitionWorkerState(hierarchy[1]!.id, 'stopped');
+      expect(() =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          parentAgentId: hierarchy[1]!.id,
+          role: 'terminal-parent-child',
+          objective: 'Must be rejected.',
+          parentCapabilityCeiling: emptyCeiling,
+          contextInheritancePolicy: 'summary',
+        }),
+      ).toThrow('terminal Agent');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(
+        reopened
+          .getTeamSnapshot(team.id)
+          .agents.filter(({ id }) => hierarchy.some((agent) => agent.id === id))
+          .map(({ depth, parentAgentId, canDelegate }) => ({
+            depth,
+            parentAgentId,
+            canDelegate,
+          })),
+      ).toEqual(
+        hierarchy.map((agent) => ({
+          depth: agent.depth,
+          parentAgentId: agent.parentAgentId,
+          canDelegate: true,
+        })),
+      );
+      reopened.close();
+    });
+
+    it('updates Team Policy with optimistic concurrency and preserves valid hierarchy', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const team = persistence.promoteTaskToTeam(task.id);
+      const updatedPolicy = {
+        ...DEFAULT_TEAM_POLICY,
+        maxAgentDepth: 3,
+        maxConcurrentExecutions: 6,
+        allowWorkerDirectMessages: false,
+      } as const;
+      const updated = persistence.updateTeamPolicy(team.id, updatedPolicy, team.revision);
+      expect(updated).toMatchObject({ policy: updatedPolicy, revision: team.revision + 1 });
+      expect(persistence.getTaskLeader(task.id).managerPolicy?.maxDelegationDepth).toBe(3);
+      expect(() =>
+        persistence.updateTeamPolicy(team.id, DEFAULT_TEAM_POLICY, team.revision),
+      ).toThrow(TeamConflictError);
+      persistence.close();
     });
 
     it('stores a Worker as an Agent, AgentThread, and TeamMembership policy record', () => {
