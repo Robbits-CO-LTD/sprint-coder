@@ -12,6 +12,7 @@ import {
   taskRenameInputSchema,
   teamBudgetStatusSchema,
   teamDetailSchema,
+  teamExecutionSummarySchema,
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
@@ -171,6 +172,24 @@ describe('public contracts', () => {
     committed: 100,
     reserved: 0,
   } as const;
+  const execution = {
+    id: 'execution-1',
+    teamId: 'team-1',
+    assigneeAgentId: 'worker-1',
+    createdByAgentId: 'leader-1',
+    state: 'queued',
+    instructionPreview: 'status update',
+    instructionRevision: 1,
+    queueOrdinal: 1,
+    queueReason: 'global_concurrency',
+    connectionId: 'builtin:claude-cli',
+    requestedModel: 'claude-opus-5',
+    assignedAt: '2026-07-23T00:00:00.000Z',
+    queuedAt: '2026-07-23T00:00:00.000Z',
+    startedAt: null,
+    completedAt: null,
+    updatedAt: '2026-07-23T00:00:00.000Z',
+  } as const;
 
   it('validates worker summaries and rejects unknown worker states or extra fields', () => {
     expect(workerSummarySchema.parse(worker)).toMatchObject({ id: 'worker-1', state: 'ready' });
@@ -195,8 +214,27 @@ describe('public contracts', () => {
     expect(() => teamBudgetStatusSchema.parse({ ...budget, cap: -1 })).toThrow();
   });
 
-  it('validates a team detail aggregate of workers, messages, and budgets', () => {
-    const detail = { team, workers: [worker], messages: [teamMessage], budgets: [budget] };
+  it('validates bounded execution summaries for the Team activity surface', () => {
+    expect(teamExecutionSummarySchema.parse(execution)).toMatchObject({
+      state: 'queued',
+      queueReason: 'global_concurrency',
+    });
+    expect(() =>
+      teamExecutionSummarySchema.parse({ ...execution, instructionPreview: 'x'.repeat(501) }),
+    ).toThrow();
+    expect(() =>
+      teamExecutionSummarySchema.parse({ ...execution, queueReason: 'provider_guess' }),
+    ).toThrow();
+  });
+
+  it('validates a team detail aggregate of workers, messages, executions, and budgets', () => {
+    const detail = {
+      team,
+      workers: [worker],
+      messages: [teamMessage],
+      executions: [execution],
+      budgets: [budget],
+    };
     expect(teamDetailSchema.parse(detail)).toMatchObject({ team: { id: 'team-1' } });
     expect(() => teamDetailSchema.parse({ ...detail, unknown: true })).toThrow();
   });
@@ -275,7 +313,13 @@ describe('public contracts', () => {
   });
 
   it('validates the team event shape and rejects unknown event types', () => {
-    const detail = { team, workers: [worker], messages: [teamMessage], budgets: [budget] };
+    const detail = {
+      team,
+      workers: [worker],
+      messages: [teamMessage],
+      executions: [execution],
+      budgets: [budget],
+    };
     const event = { type: 'updated', seq: 1, detail };
     expect(teamEventSchema.parse(event)).toMatchObject({ type: 'updated' });
     expect(() => teamEventSchema.parse({ ...event, type: 'deleted' })).toThrow();

@@ -80,3 +80,11 @@ Proof: deterministic Runtimeで8 parallel、depth、steer、crash／restart。
 - Claude CLI／Codex CLI packaged execution
 
 Proof: component、keyboard、accessibility、Playwright、packaged Computer Use evidence。
+
+進捗:
+
+- C1a完了: 永続executionから、state、queue reason／ordinal、Connection／requested model、
+  instruction preview、各timestampを500文字上限の表示専用summaryへ射影し、
+  Main→Preload→Rendererの`TeamDetail`契約で配信する。DB変更とUI推測は行わない。
+- C1b次着手: C1aの共通契約だけを使い、Activity Card／Canvas／Listへ待機・実行・終端状態、
+  待機理由、待機開始時刻または経過時間、Connection名を表示する。

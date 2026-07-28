@@ -54,6 +54,7 @@ function detail(
       createdAt: '',
       updatedAt: '',
     })),
+    executions: [],
     budgets: [],
   };
 }

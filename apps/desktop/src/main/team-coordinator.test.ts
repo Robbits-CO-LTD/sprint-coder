@@ -293,6 +293,16 @@ if (runsWithElectronAbi)
       await waitFor(
         () => persistence.getTeamExecution(submission.executionId).state === 'completed',
       );
+      expect(coordinator.get(task.id)?.executions).toEqual([
+        expect.objectContaining({
+          id: submission.executionId,
+          assigneeAgentId: child.id,
+          createdByAgentId: manager.id,
+          state: 'completed',
+          instructionPreview: 'Managerからの正式な依頼',
+          connectionId: null,
+        }),
+      ]);
       expect(coordinator.listWorkerReports(task.id, 0, manager.id)).toEqual([
         expect.objectContaining({
           sourceAgentId: child.id,

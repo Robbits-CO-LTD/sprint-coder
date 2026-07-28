@@ -1199,6 +1199,27 @@ export class TeamCoordinator {
       messages: snapshot.messages.map((message) =>
         this.messageSummaryFromSnapshot(snapshot, message.id),
       ),
+      executions: this.persistence.listTeamExecutions(teamId).map((execution) => ({
+        id: execution.id,
+        teamId: execution.teamId,
+        assigneeAgentId: execution.assigneeAgentId,
+        createdByAgentId: execution.createdByAgentId,
+        state: execution.state,
+        instructionPreview:
+          execution.instruction.content.length <= 500
+            ? execution.instruction.content
+            : `${execution.instruction.content.slice(0, 499)}…`,
+        instructionRevision: execution.instruction.revision,
+        queueOrdinal: execution.queueOrdinal,
+        queueReason: execution.queueReason,
+        connectionId: execution.modelSelection.connectionId,
+        requestedModel: execution.modelSelection.requestedModel,
+        assignedAt: execution.assignedAt,
+        queuedAt: execution.queuedAt,
+        startedAt: execution.startedAt,
+        completedAt: execution.completedAt,
+        updatedAt: execution.updatedAt,
+      })),
       budgets: this.persistence.getTeamBudgetStatus(teamId),
     });
   }

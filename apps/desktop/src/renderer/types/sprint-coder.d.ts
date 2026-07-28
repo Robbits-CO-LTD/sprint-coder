@@ -400,10 +400,44 @@ export type TeamMessageSummary = {
   createdAt: string;
   updatedAt: string;
 };
+export type TeamExecutionSummary = {
+  id: string;
+  teamId: string;
+  assigneeAgentId: string;
+  createdByAgentId: string;
+  state:
+    | 'assigned'
+    | 'queued'
+    | 'waiting_verification'
+    | 'waiting_rate_limit'
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'canceled';
+  instructionPreview: string;
+  instructionRevision: number;
+  queueOrdinal: number | null;
+  queueReason:
+    | 'global_concurrency'
+    | 'connection_concurrency'
+    | 'verification'
+    | 'rate_limit'
+    | 'budget'
+    | 'recovery'
+    | null;
+  connectionId: string | null;
+  requestedModel: string | null;
+  assignedAt: string;
+  queuedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+};
 export type TeamDetail = {
   team: TeamSummary;
   workers: WorkerSummary[];
   messages: TeamMessageSummary[];
+  executions: TeamExecutionSummary[];
   budgets: {
     scope: 'global' | 'team' | 'worker';
     kind: 'costCents' | 'tokens' | 'timeMs' | 'toolCalls' | 'spawnSlots';

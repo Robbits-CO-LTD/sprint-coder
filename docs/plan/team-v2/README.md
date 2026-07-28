@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4完了
+- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、Core C1a完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -97,8 +97,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Slice 0のRoot Cause Confirmed Gateは完了した。Team unitは26 passed／1 skipped、
   packaged Team E2Eは3 passedで、productionのNode inspector fuseが無効のまま一時test bundle
   だけをPlaywrightで検査する。
-- 次はCore C1として、Team Activity Cardと永続execution状態を接続し、
-  queued／running／terminalの状態と理由をユーザーへ表示する。
+- Core C1aで表示専用のTeam execution summaryをMain→Preload→Renderer契約へ追加した。
+  次はCore C1bとして、この契約をTeam Activity Card／Canvas／Listへ表示し、
+  queued／running／terminalの状態と理由をユーザーへ伝える。
 
 ## 完成判定
 
