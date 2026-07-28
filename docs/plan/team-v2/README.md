@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0、Core A、Core B1a/B1b完了
+- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -96,7 +96,8 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Slice 0のRoot Cause Confirmed Gateは完了した。Team unitは26 passed／1 skipped、
   packaged Team E2Eは3 passedで、productionのNode inspector fuseが無効のまま一時test bundle
   だけをPlaywrightで検査する。
-- 次はCore B2として、execution Schedulerのglobal実8並列と非同期assign境界を接続する。
+- 次はCore B2bとして、永続executionをglobal 8枠Schedulerへ接続し、assignがexecution IDを
+  即時返す境界へ移行する。
 
 ## 完成判定
 
