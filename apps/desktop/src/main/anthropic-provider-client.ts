@@ -266,7 +266,24 @@ function anthropicMessageRequest(request: ProviderExecutionRequest): Record<stri
                 },
               ],
             }
-          : { role: message.role, content: message.content },
+          : {
+              role: message.role,
+              content:
+                message.inlineImages === undefined ||
+                message.inlineImages.length === 0
+                  ? message.content
+                  : [
+                      { type: 'text', text: message.content },
+                      ...message.inlineImages.map((image) => ({
+                        type: 'image',
+                        source: {
+                          type: 'base64',
+                          media_type: image.mimeType,
+                          data: image.base64,
+                        },
+                      })),
+                    ],
+            },
       ),
     ...(request.tools === undefined
       ? {}

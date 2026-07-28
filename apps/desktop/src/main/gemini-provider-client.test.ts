@@ -91,7 +91,20 @@ describe('GeminiProviderClient', () => {
         );
         expect(JSON.parse(String(init?.body))).toMatchObject({
           systemInstruction: { parts: [{ text: 'be concise' }] },
-          contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: 'hello' },
+                {
+                  inlineData: {
+                    mimeType: 'image/png',
+                    data: 'aGVsbG8=',
+                  },
+                },
+              ],
+            },
+          ],
           tools: [
             {
               functionDeclarations: [
@@ -123,7 +136,11 @@ describe('GeminiProviderClient', () => {
         modelId: 'gemini-3.6-pro',
         messages: [
           { role: 'system', content: 'be concise' },
-          { role: 'user', content: 'hello' },
+          {
+            role: 'user',
+            content: 'hello',
+            inlineImages: [{ mimeType: 'image/png', base64: 'aGVsbG8=' }],
+          },
         ],
         tools: [
           {

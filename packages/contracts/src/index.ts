@@ -1400,6 +1400,17 @@ export const providerStructuredOutputSchema = z
   })
   .strict();
 export type ProviderStructuredOutput = z.infer<typeof providerStructuredOutputSchema>;
+export const providerInlineImageSchema = z
+  .object({
+    mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+    base64: z
+      .string()
+      .min(1)
+      .max(16 * 1024 * 1024)
+      .regex(/^[A-Za-z0-9+/]+={0,2}$/),
+  })
+  .strict();
+export type ProviderInlineImage = z.infer<typeof providerInlineImageSchema>;
 export const providerExecutionRequestSchema = z
   .object({
     executionId: z.string().min(1).max(256),
@@ -1412,6 +1423,7 @@ export const providerExecutionRequestSchema = z
             role: z.enum(['system', 'user', 'assistant', 'tool']),
             content: z.string(),
             toolCallId: z.string().min(1).max(256).optional(),
+            inlineImages: z.array(providerInlineImageSchema).max(8).optional(),
           })
           .strict()
           .superRefine((message, context) => {
@@ -1426,6 +1438,16 @@ export const providerExecutionRequestSchema = z
                 code: 'custom',
                 path: ['toolCallId'],
                 message: 'toolCallId is only valid for tool result messages',
+              });
+            if (
+              message.role !== 'user' &&
+              message.inlineImages !== undefined &&
+              message.inlineImages.length > 0
+            )
+              context.addIssue({
+                code: 'custom',
+                path: ['inlineImages'],
+                message: 'Inline images are only valid on user messages',
               });
           }),
       )

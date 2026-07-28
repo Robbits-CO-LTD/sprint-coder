@@ -296,7 +296,15 @@ function geminiGenerateRequest(
             }
           : {
               role: message.role === 'assistant' ? 'model' : 'user',
-              parts: [{ text: message.content }],
+              parts: [
+                { text: message.content },
+                ...(message.inlineImages ?? []).map((image) => ({
+                  inlineData: {
+                    mimeType: image.mimeType,
+                    data: image.base64,
+                  },
+                })),
+              ],
             },
       ),
     ...(request.tools === undefined

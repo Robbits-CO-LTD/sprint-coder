@@ -89,10 +89,11 @@ P2aでは生成API、Chat／Team配線、実API probeを行わない。実API sm
 - P5a: Google Gemini API Connection、Main-only secret、Models API pagination、
   `streamGenerateContent` SSE、function call、structured output、thinking、usage、
   cancellation、429 normalizationを完了
-- P5b: 共通message contractのmultimodal inputとGemini `inlineData`変換
+- P5b: 共通message contractの上限付きinline image、Gemini `inlineData`、Anthropic
+  base64 image、OpenAI系`input_image`変換を完了
 
 P5aではModels APIが公開しないtool／structured／multimodal能力をモデル名から推測せず
-`unknown`にする。P5bは既存text-only Chat／Team経路を壊さない独立変更として実装する。
+`unknown`にする。P5bも既存text-only Chat／Team経路との後方互換を維持する。
 実API smokeとpackaged E2Eはfinal gateへ留保する。
 
 ## Shared stop rule

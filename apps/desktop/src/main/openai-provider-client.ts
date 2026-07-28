@@ -266,7 +266,20 @@ function openAIResponseRequest(request: ProviderExecutionRequest): Record<string
             call_id: message.toolCallId,
             output: message.content,
           }
-        : { role: message.role, content: message.content },
+        : {
+            role: message.role,
+            content:
+              message.inlineImages === undefined ||
+              message.inlineImages.length === 0
+                ? message.content
+                : [
+                    { type: 'input_text', text: message.content },
+                    ...message.inlineImages.map((image) => ({
+                      type: 'input_image',
+                      image_url: `data:${image.mimeType};base64,${image.base64}`,
+                    })),
+                  ],
+          },
     ),
     ...(request.tools === undefined
       ? {}
