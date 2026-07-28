@@ -100,9 +100,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Core C1aで表示専用のTeam execution summaryをMain→Preload→Renderer契約へ追加し、
   C1bで同じTeam Activity componentをCanvas／Listへ接続した。queued／waitingでは理由、
   待機開始、Connection、待機順を明示し、running／terminalでも状態、Connection、指示を表示する。
-- Core C GA blocker: packaged axe harnessがlocalhost script注入をproduction CSPに拒否される。
-  また既存List parity testはCanvasだけがengine接頭辞をobjectiveへ含める差分で失敗する。
-  どちらもC1bのexecution表示とは独立した後続sub-Sliceで解消する。
+- Core C3aでCanvas／Listのengine接頭辞と安全なMarkdown message描画を統一し、
+  packaged parity E2Eをgreen化した。残るCore C GA blockerは、packaged axe harnessが
+  localhost script注入をproduction CSPに拒否される問題である。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。次はC2cでpackagedアプリ上の表示と再起動復元を固定する。

@@ -109,3 +109,6 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
 - C2c完了: Activity Cardへ永続監査IDを公開し、production packageで雇用3件・委譲3件の
   日本語履歴を確認。同一user-data DBの再起動前後で全activity ID集合が完全一致し、
   重複表示0件のpackaged E2Eがgreen。
+- C3a完了: Listのengine／objective文字列とmessage Markdown rendererをCanvasと統一。
+  Claude UI委託2往復、1ファイル、30追加／2削除で、typecheck、lint、format、
+  packaged Canvas／List parity E2Eがgreen。

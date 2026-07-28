@@ -1,4 +1,6 @@
 import { useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
@@ -6,6 +8,15 @@ import { latestExecutionForWorker } from '../lib/team-execution-display';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
 
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
+
+// The engine labels the Canvas's Worker card shows in `.role-sub` (WorkerNode.tsx). Keyed off the
+// union rather than WorkerNode's ternary chain so a new engine is a type error here, not a silent
+// "Mock".
+const ENGINE_LABELS: Record<WorkerSummary['engine'], string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  mock: 'Mock',
+};
 
 // Team List View (Slice 6.1 item 4): an accessible ALTERNATE projection of the exact same store
 // selectors/actions the Canvas uses (see TeamCanvas.tsx) — not a simplified or read-only variant.
@@ -144,7 +155,12 @@ export function TeamListView({
                     停止
                   </button>
                 </div>
-                <p className="tlv-objective">{worker.objective}</p>
+                {/* Same text the Canvas renders in `.role-sub` — the a11y list/canvas parity spec
+                    diffs the two innerTexts verbatim. A null objective renders as nothing on both
+                    sides ("Claude ·"), so there is no placeholder to invent here. */}
+                <p className="tlv-objective">
+                  {ENGINE_LABELS[worker.engine]} · {worker.objective}
+                </p>
                 <p className="tlv-activity">
                   現在: {worker.currentActivity ?? (worker.state === 'done' ? '完了' : '待機')}
                 </p>
@@ -176,7 +192,19 @@ export function TeamListView({
                           <span className={`tag${incoming ? '' : ' out'}`}>
                             {incoming ? 'Leaderから' : '報告'}
                           </span>
-                          {incoming ? m.content : summarize(m.content)}
+                          {/* Same renderer/options as WorkerNode.tsx, deliberately: the parity
+                              spec diffs innerText, and plain text here collapsed the block break
+                              the Canvas's Markdown <p> produces ("Leaderから本文" vs
+                              "Leaderから\n\n本文"). `.w-line :where(p, …)` styles both alike, and
+                              raw HTML/images stay out of the DOM exactly as on the Canvas. */}
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            skipHtml
+                            disallowedElements={['img']}
+                            unwrapDisallowed
+                          >
+                            {incoming ? m.content : summarize(m.content)}
+                          </ReactMarkdown>
                         </li>
                       );
                     })}
