@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ProviderConnection, ProviderVerificationStatus } from '@sprint-coder/contracts';
+import type {
+  ProviderConnection,
+  ProviderProfile,
+  ProviderVerificationStatus,
+} from '@sprint-coder/contracts';
 
 // Plaintext credentials remain here only until Main accepts them into Secret Storage.
 // Raw provider errors and secret references are never rendered.
@@ -12,6 +16,20 @@ function providerApi(): ProvidersApi | null {
   if (typeof window === 'undefined') return null;
   const api = window.sprintCoder?.providers;
   return typeof api?.listConnections === 'function' ? api : null;
+}
+
+/** Both loaders are `async` so that a synchronous throw also arrives as a rejection, which is what
+ * the `Promise.allSettled` in `refresh` reads. */
+async function loadConnections(api: ProvidersApi): Promise<ProviderConnection[]> {
+  return api.listConnections();
+}
+
+/** A build of Main that never wired the Profile IPC has no Profiles to offer. That is an empty
+ * list rather than a failure: there is nothing for the user to retry, and the fixed official
+ * Providers below are unaffected either way. */
+async function loadProfiles(api: ProvidersApi): Promise<ProviderProfile[]> {
+  if (typeof api.listProfiles !== 'function') return [];
+  return api.listProfiles();
 }
 
 export const VERIFICATION_LABEL: Record<ProviderVerificationStatus, string> = {
@@ -35,6 +53,14 @@ export const VERIFICATION_TONE: Record<ProviderVerificationStatus, string> = {
 export const LIST_ERROR = 'Connection一覧を取得できませんでした。再読み込みしてください。';
 export const CREATE_ERROR = 'Connectionを追加できませんでした。入力内容を確認してください。';
 export const VERIFY_ERROR = '検証を実行できませんでした。時間をおいて再試行してください。';
+// A Profile listing failure is not fatal: the fixed Providers below still work, so this is a
+// warning beside the picker rather than the section's error alert.
+export const PROFILE_LIST_WARNING =
+  'Provider Profileの一覧を取得できませんでした。公式Providerはこのまま追加できます。';
+// Said out loud because the alternative is a silent one: a Profile that leaves the listing would
+// otherwise leave the form pointing at its fixed Provider, holding the key typed for the other one.
+export const PROFILE_UNAVAILABLE_NOTICE =
+  '選択していたProvider Profileは利用できなくなりました。入力したAPIキーなどは消去しました。Providerを選び直してください。';
 export const UNSUPPORTED_TEXT = 'この環境ではProvider設定APIが利用できません。';
 export const LOADING_TEXT = 'Connectionを読み込んでいます。';
 export const EMPTY_TEXT = '利用できるConnectionはまだありません。';
@@ -55,21 +81,128 @@ export const PROVIDER_FORM_OPTIONS = [
 
 export type ProviderFormKey = (typeof PROVIDER_FORM_OPTIONS)[number]['key'];
 
+/** Profiles are Main's data, not the Renderer's: this screen knows only what a Profile declares
+ * about itself, never which company is behind it. The one <select> carries both kinds of choice,
+ * so Profile options are namespaced against a Profile id that matches a fixed key. */
+export const PROFILE_OPTION_PREFIX = 'profile:';
+export const PROFILE_GROUP_LABEL = 'Provider Profile（OpenAI互換）';
+export const BASE_URL_HINT = '空欄のままにすると、Providerの既定のエンドポイントを使用します。';
+
+/** The picker's value while the selected Profile is gone: not a choice anyone can make, only the
+ * current value of a disabled <option>, so the select never reads as a Provider the user did not
+ * pick. Outside the Profile namespace and unlike every fixed key, so `applyProviderSelection`
+ * turns it away like any other value no listing offered. */
+export const PROFILE_UNAVAILABLE_VALUE = 'profile-unavailable';
+export const PROFILE_UNAVAILABLE_OPTION_LABEL = 'Provider未選択';
+export const PROFILE_WARNING_ID = 'settings-provider-profile-warning';
+export const SELECTION_UNAVAILABLE_ID = 'settings-provider-unavailable';
+
 export type ProviderFormValues = {
+  /** Read only while `profileId` is null. */
   provider: ProviderFormKey;
+  /** A Main-provided Profile picked from `listProfiles`; null selects a fixed Provider. */
+  profileId: string | null;
   displayName: string;
   apiKey: string;
   organizationId: string;
   projectId: string;
+  baseUrl: string;
+  accountId: string;
 };
 
 const EMPTY_FORM: ProviderFormValues = {
   provider: 'openai',
+  profileId: null,
   displayName: '',
   apiKey: '',
   organizationId: '',
   projectId: '',
+  baseUrl: '',
+  accountId: '',
 };
+
+/** The Profile behind the current selection: null both when a fixed Provider is selected and when
+ * the selected Profile has left the listing. A null alone therefore does not mean "fixed Provider"
+ * — every caller that could act on it asks `isProviderSelectionUnavailable` first. */
+export function selectedProviderProfile(
+  form: ProviderFormValues,
+  profiles: readonly ProviderProfile[],
+): ProviderProfile | null {
+  if (form.profileId === null) return null;
+  return profiles.find((profile) => profile.id === form.profileId) ?? null;
+}
+
+/** A Profile the user picked that the current listing no longer offers. Reading such a selection as
+ * the form's fixed `provider` would arm a create nobody asked for — normally OpenAI, carrying the
+ * key typed for the Provider that vanished — so it is held as unavailable instead, and everything
+ * downstream refuses until the user picks again. `profiles` defaults to empty so that the refusal
+ * is what a caller gets by omission: without a listing, no Profile can resolve. */
+export function isProviderSelectionUnavailable(
+  form: ProviderFormValues,
+  profiles: readonly ProviderProfile[] = [],
+): boolean {
+  return form.profileId !== null && selectedProviderProfile(form, profiles) === null;
+}
+
+export function providerSelectValue(
+  form: ProviderFormValues,
+  profiles: readonly ProviderProfile[],
+): string {
+  if (isProviderSelectionUnavailable(form, profiles)) return PROFILE_UNAVAILABLE_VALUE;
+  const profile = selectedProviderProfile(form, profiles);
+  return profile === null ? form.provider : `${PROFILE_OPTION_PREFIX}${profile.id}`;
+}
+
+/** The picker points at whichever notices are on screen, in the order they are rendered; an absent
+ * attribute beats one aimed at an element that is not there. */
+export function providerSelectDescribedBy(state: {
+  profilesFailed: boolean;
+  selectionUnavailable: boolean;
+}): string | undefined {
+  const ids = [
+    state.selectionUnavailable ? SELECTION_UNAVAILABLE_ID : null,
+    state.profilesFailed ? PROFILE_WARNING_ID : null,
+  ].filter((id): id is string => id !== null);
+  return ids.length === 0 ? undefined : ids.join(' ');
+}
+
+/** Accepts only a known fixed key or a listed Profile id, so a stale <option> cannot leave an
+ * unknown Provider in the form. Switching clears the per-Profile fields: a Base URL or Account ID
+ * typed for one Provider must never travel to the next one. */
+export function applyProviderSelection(
+  form: ProviderFormValues,
+  value: string,
+  profiles: readonly ProviderProfile[],
+): ProviderFormValues {
+  if (value.startsWith(PROFILE_OPTION_PREFIX)) {
+    const profileId = value.slice(PROFILE_OPTION_PREFIX.length);
+    if (!profiles.some((profile) => profile.id === profileId)) return form;
+    return { ...form, profileId, baseUrl: '', accountId: '' };
+  }
+  const option = PROVIDER_FORM_OPTIONS.find((candidate) => candidate.key === value);
+  if (option === undefined) return form;
+  return { ...form, provider: option.key, profileId: null, baseUrl: '', accountId: '' };
+}
+
+/** Run against a listing that came back successfully. What the user typed for a Provider that has
+ * just been withdrawn is dropped — key first — so none of it can be reused by whichever Provider is
+ * picked next. The unresolvable selection itself is kept on purpose: it is what the picker shows as
+ * unavailable and what keeps submit blocked, rather than quietly landing on a fixed Provider. The
+ * display name is neither a credential nor Provider-specific, so it survives. Returns the same
+ * object when there is nothing to clear. */
+export function clearUnavailableProfileInput(
+  form: ProviderFormValues,
+  profiles: readonly ProviderProfile[],
+): ProviderFormValues {
+  if (!isProviderSelectionUnavailable(form, profiles)) return form;
+  return { ...form, apiKey: '', organizationId: '', projectId: '', baseUrl: '', accountId: '' };
+}
+
+/** A declared credential field has no default, so the form collects it instead of letting Main
+ * reject the call. Base URL stays optional: blank means the Profile's own endpoint. */
+export function profileRequiresAccountId(profile: ProviderProfile | null): boolean {
+  return profile !== null && profile.requiredCredentialFields.includes('account_id');
+}
 
 /** A Connection whose credentials Main can re-check. Built-in CLIs authenticate themselves. */
 export function isExternalConnection(connection: ProviderConnection): boolean {
@@ -116,18 +249,52 @@ export function isSectionBusy(state: {
 }
 
 /** `busy` is the whole section's in-flight state, not just this form's: a create issued while a
- * list reload or a verification is still running would resolve into a list about to be replaced. */
-export function canSubmitProviderForm(form: ProviderFormValues, busy: boolean): boolean {
-  return !busy && form.displayName.trim() !== '' && form.apiKey !== '';
+ * list reload or a verification is still running would resolve into a list about to be replaced.
+ * The Profile is resolved here from the listing rather than accepted ready-made, so a selection the
+ * listing has dropped blocks submit instead of arriving as an innocent-looking null. */
+export function canSubmitProviderForm(
+  form: ProviderFormValues,
+  busy: boolean,
+  profiles: readonly ProviderProfile[] = [],
+): boolean {
+  if (busy || form.displayName.trim() === '' || form.apiKey === '') return false;
+  if (isProviderSelectionUnavailable(form, profiles)) return false;
+  return (
+    !profileRequiresAccountId(selectedProviderProfile(form, profiles)) ||
+    form.accountId.trim() !== ''
+  );
 }
 
-/** Dispatches to the per-provider create method. Optional fields are omitted, never sent empty. */
+/** Dispatches to the per-provider create method. Optional fields are omitted, never sent empty.
+ * Every Profile goes through the single generic API, so adding a Provider to Pack A stays a Main
+ * change: there is no company-specific branch here to extend. */
 export async function createConnection(
   api: ProvidersApi,
   form: ProviderFormValues,
+  profiles: readonly ProviderProfile[] = [],
 ): Promise<ProviderConnection> {
+  // The last gate, after the disabled submit: a withdrawn Profile has no create of its own and
+  // must not fall through to the fixed Provider still sitting in the form. Rejecting reaches the
+  // caller as the section's generic create error; this text is never rendered.
+  if (isProviderSelectionUnavailable(form, profiles)) {
+    throw new Error('the selected provider profile is no longer available');
+  }
+  const profile = selectedProviderProfile(form, profiles);
   const displayName = form.displayName.trim();
   const apiKey = form.apiKey;
+  if (profile !== null) {
+    const baseUrl = form.baseUrl.trim();
+    const accountId = form.accountId.trim();
+    return api.createProfileConnection({
+      profileId: profile.id,
+      displayName,
+      apiKey,
+      // Only what this Profile declares it takes. The input contract is strict, and a field the
+      // Provider has no concept of would be rejected outright.
+      ...(profile.baseUrlConfigurable && baseUrl !== '' ? { baseUrl } : {}),
+      ...(profileRequiresAccountId(profile) && accountId !== '' ? { accountId } : {}),
+    });
+  }
   switch (form.provider) {
     case 'openai': {
       const organizationId = form.organizationId.trim();
@@ -203,6 +370,8 @@ export function ProviderConnectionCard({
 
 export function ProviderSettingsSection({ active }: { active: boolean }) {
   const [connections, setConnections] = useState<ProviderConnection[] | null>(null);
+  const [profiles, setProfiles] = useState<readonly ProviderProfile[]>([]);
+  const [profilesFailed, setProfilesFailed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [supported, setSupported] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -213,8 +382,18 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
   const [submitting, setSubmitting] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const generation = useRef(0);
+  const mounted = useRef(true);
 
   const busy = isSectionBusy({ loading, submitting, verifyingId });
+  const selectedProfile = selectedProviderProfile(form, profiles);
+  const selectionUnavailable = isProviderSelectionUnavailable(form, profiles);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // A failed initial load waits for the explicit retry button instead of looping.
   useEffect(() => {
@@ -232,18 +411,36 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     setLoading(true);
     setLoadFailed(false);
     setError(null);
-    try {
-      const result = await api.listConnections();
-      if (request !== generation.current) return;
-      setConnections(result);
-      setStatus(`${result.length}件のConnectionを読み込みました。`);
-    } catch {
-      if (request !== generation.current) return;
+    setProfilesFailed(false);
+    // Settled independently: a Profile listing that fails must not take the fixed official
+    // Providers down with it, and neither list may be waited on by the other.
+    const [connectionResult, profileResult] = await Promise.allSettled([
+      loadConnections(api),
+      loadProfiles(api),
+    ]);
+    // A response from a superseded reload — or one that lands after this section is gone — is
+    // dropped whole, so it can never overwrite the newer state that replaced it.
+    if (request !== generation.current || !mounted.current) return;
+    if (profileResult.status === 'fulfilled') {
+      const listedProfiles = profileResult.value;
+      setProfiles(listedProfiles);
+      // Only a listing that actually arrived may retire a selection. Whatever was typed for a
+      // Provider this list no longer offers is dropped here; the selection stays unresolvable, so
+      // the picker shows it as unavailable and submit waits for the user to choose.
+      setForm((current) => clearUnavailableProfileInput(current, listedProfiles));
+    } else {
+      // The last good list is kept rather than emptied: dropping it would silently move a user
+      // who had a Profile selected back onto a fixed Provider, mid-form. The warning says so.
+      setProfilesFailed(true);
+    }
+    if (connectionResult.status === 'fulfilled') {
+      setConnections(connectionResult.value);
+      setStatus(`${connectionResult.value.length}件のConnectionを読み込みました。`);
+    } else {
       setError(LIST_ERROR);
       setLoadFailed(true);
-    } finally {
-      if (request === generation.current) setLoading(false);
     }
+    setLoading(false);
   }
 
   async function retryVerification(connection: ProviderConnection): Promise<void> {
@@ -274,13 +471,18 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
       setSupported(false);
       return;
     }
-    if (!canSubmitProviderForm(form, busy)) return;
+    if (!canSubmitProviderForm(form, busy, profiles)) return;
     setSubmitting(true);
     setError(null);
     try {
-      const created = await createConnection(api, form);
-      // Main now owns the encrypted secret; clear the renderer copy immediately.
-      setForm({ ...EMPTY_FORM, provider: form.provider });
+      const created = await createConnection(api, form, profiles);
+      // Main now owns the encrypted secret; clear the renderer copy immediately. Only the
+      // Provider choice survives, so adding a second Connection to the same one stays quick.
+      setForm((current) => ({
+        ...EMPTY_FORM,
+        provider: current.provider,
+        profileId: current.profileId,
+      }));
       setShowKey(false);
       setConnections((current) => upsertConnection(current ?? [], created));
       setStatus(
@@ -293,7 +495,12 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     }
   }
 
-  const selected = PROVIDER_FORM_OPTIONS.find((option) => option.key === form.provider);
+  // No fixed Provider is selected while a withdrawn Profile is: its scoped fields would be the
+  // clearest possible claim that OpenAI is chosen, which is exactly what is not true here.
+  const fixedOption =
+    selectedProfile === null && !selectionUnavailable
+      ? PROVIDER_FORM_OPTIONS.find((option) => option.key === form.provider)
+      : undefined;
   const listed = connections ?? [];
 
   return (
@@ -365,21 +572,64 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
                 <select
                   id="settings-provider-kind"
                   data-testid="settings-provider-kind"
-                  value={form.provider}
+                  value={providerSelectValue(form, profiles)}
+                  aria-describedby={providerSelectDescribedBy({
+                    profilesFailed,
+                    selectionUnavailable,
+                  })}
                   onChange={(e) =>
-                    setForm((current) => ({
-                      ...current,
-                      provider: e.target.value as ProviderFormKey,
-                    }))
+                    setForm((current) => applyProviderSelection(current, e.target.value, profiles))
                   }
                 >
+                  {/* Present only as the current value of a withdrawn selection, and disabled: it
+                      is not offered as a choice, it just stops the picker from displaying a
+                      Provider the user never picked. */}
+                  {selectionUnavailable && (
+                    <option value={PROFILE_UNAVAILABLE_VALUE} disabled>
+                      {PROFILE_UNAVAILABLE_OPTION_LABEL}
+                    </option>
+                  )}
                   {PROVIDER_FORM_OPTIONS.map((option) => (
                     <option key={option.key} value={option.key}>
                       {option.label}
                     </option>
                   ))}
+                  {/* Whatever Main lists, in Main's order. The Renderer names no Provider of its
+                      own, so a Pack that gains or loses one needs no change here. */}
+                  {profiles.length > 0 && (
+                    <optgroup label={PROFILE_GROUP_LABEL}>
+                      {profiles.map((profile) => (
+                        <option key={profile.id} value={`${PROFILE_OPTION_PREFIX}${profile.id}`}>
+                          {profile.displayName}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </label>
+
+              {/* Announced on arrival: the selection changed underneath the user, and only they
+                  can resolve it. Submit stays disabled until they do. */}
+              {selectionUnavailable && (
+                <p
+                  className="settings-provider-error"
+                  id={SELECTION_UNAVAILABLE_ID}
+                  data-testid={SELECTION_UNAVAILABLE_ID}
+                  role="alert"
+                >
+                  {PROFILE_UNAVAILABLE_NOTICE}
+                </p>
+              )}
+
+              {profilesFailed && (
+                <p
+                  className="settings-hint"
+                  id={PROFILE_WARNING_ID}
+                  data-testid={PROFILE_WARNING_ID}
+                >
+                  {PROFILE_LIST_WARNING}
+                </p>
+              )}
 
               <label className="settings-field" htmlFor="settings-provider-name">
                 <span className="settings-field-label">表示名</span>
@@ -426,7 +676,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
                 <p className="settings-hint">{KEY_BOUNDARY_HINT}</p>
               </div>
 
-              {selected?.scoped === true && (
+              {fixedOption?.scoped === true && (
                 <>
                   <label className="settings-field" htmlFor="settings-provider-org">
                     <span className="settings-field-label">Organization ID（任意）</span>
@@ -459,12 +709,51 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
                 </>
               )}
 
+              {/* Each extra field is asked for only where the selected Profile declares it.
+                  Nothing is inferred from the Provider's identity. */}
+              {selectedProfile?.baseUrlConfigurable === true && (
+                <label className="settings-field" htmlFor="settings-provider-base-url">
+                  <span className="settings-field-label">Base URL（任意）</span>
+                  <input
+                    id="settings-provider-base-url"
+                    data-testid="settings-provider-base-url"
+                    type="url"
+                    className="settings-text-input"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={selectedProfile.baseUrl}
+                    value={form.baseUrl}
+                    onChange={(e) => setForm((current) => ({ ...current, baseUrl: e.target.value }))}
+                  />
+                  <span className="settings-hint">{BASE_URL_HINT}</span>
+                </label>
+              )}
+
+              {profileRequiresAccountId(selectedProfile) && (
+                <label className="settings-field" htmlFor="settings-provider-account-id">
+                  <span className="settings-field-label">Account ID（必須）</span>
+                  <input
+                    id="settings-provider-account-id"
+                    data-testid="settings-provider-account-id"
+                    type="text"
+                    className="settings-text-input"
+                    autoComplete="off"
+                    spellCheck={false}
+                    required
+                    value={form.accountId}
+                    onChange={(e) =>
+                      setForm((current) => ({ ...current, accountId: e.target.value }))
+                    }
+                  />
+                </label>
+              )}
+
               <div className="settings-provider-actions">
                 <button
                   type="submit"
                   className="settings-primary-button"
                   data-testid="settings-provider-submit"
-                  disabled={!canSubmitProviderForm(form, busy)}
+                  disabled={!canSubmitProviderForm(form, busy, profiles)}
                 >
                   {submitting ? '追加中' : '追加して検証'}
                 </button>

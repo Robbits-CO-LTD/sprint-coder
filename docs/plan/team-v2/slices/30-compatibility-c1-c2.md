@@ -20,8 +20,10 @@ C1を拡大せず、将来Sliceへ分離する。
 - C1b1: Mistral／DeepSeek／GroqCloudの公式Profile、Profile一覧、generic Connection作成、
   Registry統合を完了。3社は専用Adapterを持たず、同じ`openai_compatible` Runtimeを使用する。
   対象10件、contracts 29件、対象lintがgreen
-- C1b2: 設定UIへProfile一覧を追加する。fixture conformanceを先に通し、実API smokeは
-  final gateへ留保する
+- C1b2: 設定UIへMain-owned Profile一覧を追加。RendererはPack A IDを持たず、generic create、
+  optional Base URL、required Account IDをProfile宣言だけから表示する。Profile一覧の部分失敗、
+  stale Profile選択のfail-closed、secret field消去を含むcomponent test 38件と対象lintがgreen。
+  実API smokeはfinal gateへ留保する
 
 ## C2 — Pack B
 

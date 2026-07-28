@@ -71,6 +71,14 @@ Task-safe rollback、canonical変更後の表示名をreviewした。純粋unit 
 desktop typecheckは変更箇所ではなく既知のVite二重依存type errorだけで停止した。
 Chat／Team／restart／packaged parityは全実装後のfinal gateへ留保した。
 
+同日のCompatibility C1b2は設定model自身だけへ最大3fileを委託した。第1往復は実費
+$3.0452085、第2往復は$2.5247585で、どちらも設定modelだけを使用したが予算上限により
+完了report前に停止した。第1往復の差分をメインAgentがreviewし、選択中Profileが一覧から消えた
+とき固定Providerへ誤dispatchし得る問題を発見した。第2往復で未選択表示、credential消去、
+submit／dispatchのfail-closedを追加した。メインAgentが2file・1000差分行未満、Pack A IDの
+hard-codeなし、backend変更0を確認し、component test 38件と対象lintのgreenを得て受理した。
+実API smokeとpackaged操作は全実装後のfinal gateへ留保した。
+
 ## Delegation scope
 
 - Provider settings
