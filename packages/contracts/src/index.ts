@@ -1259,6 +1259,46 @@ export const xAIConnectionCreateInputSchema = z
 export type XAIConnectionCreateInput = z.infer<
   typeof xAIConnectionCreateInputSchema
 >;
+export const providerProfileProtocolSchema = z.enum(['chat_completions', 'responses']);
+export type ProviderProfileProtocol = z.infer<typeof providerProfileProtocolSchema>;
+export const providerProfileErrorOverrideSchema = z
+  .object({
+    status: z.number().int().min(400).max(599),
+    category: z.enum([
+      'credentials',
+      'not_found',
+      'rate_limited',
+      'timeout',
+      'network',
+      'canceled',
+      'invalid_request',
+      'provider_unavailable',
+      'internal',
+    ]),
+    retryable: z.boolean(),
+  })
+  .strict();
+export const providerProfileSchema = z
+  .object({
+    id: providerIdSchema,
+    displayName: z.string().min(1).max(100),
+    baseUrl: z.string().url().max(2_048),
+    baseUrlConfigurable: z.boolean(),
+    protocol: providerProfileProtocolSchema,
+    modelsPath: z.string().startsWith('/').max(256),
+    authentication: z
+      .object({
+        headerName: z.string().min(1).max(128),
+        scheme: z.string().max(64),
+      })
+      .strict(),
+    requiredCredentialFields: z.array(z.enum(['account_id'])).max(8),
+    errorOverrides: z.array(providerProfileErrorOverrideSchema).max(32),
+    sourceReference: z.string().url().max(2_048),
+    reviewedAt: timestampSchema,
+  })
+  .strict();
+export type ProviderProfile = z.infer<typeof providerProfileSchema>;
 export const capabilitySourceSchema = z.enum(['provider_api', 'official_curated', 'unknown']);
 export type CapabilitySource = z.infer<typeof capabilitySourceSchema>;
 export type CatalogValue<T> = Readonly<{

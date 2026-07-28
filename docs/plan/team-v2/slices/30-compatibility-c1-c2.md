@@ -10,6 +10,16 @@
 Profileだけで対応できる場合は1つのreview可能なPack PRにまとめる。専用Adapterが必要になっても
 C1を拡大せず、将来Sliceへ分離する。
 
+### C1 progress
+
+- C1a: `ProviderProfile` schema、Profile Registry、generic OpenAI-compatible Runtime、
+  Chat Completions SSE conformance parserを完了。ProfileはBase URL、変更可否、auth header、
+  protocol、model path、credential要件、error override、公式sourceを宣言する。model APIが
+  返したcontext／output上限だけを`provider_api`として採用し、能力は推測せず`unknown`を維持する。
+  contracts 29件、conformance 4件、対象lintがgreen
+- C1b: Mistral／DeepSeek／GroqCloudの公式Profile、Connection作成、Registry統合、UIを追加する。
+  fixture conformanceを先に通し、実API smokeはfinal gateへ留保する
+
 ## C2 — Pack B
 
 - Moonshot

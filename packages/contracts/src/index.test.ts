@@ -5,6 +5,7 @@ import {
   commandEnvelopeSchema,
   executionResolutionSchema,
   modelSelectionSchema,
+  providerProfileSchema,
   permissionSettingsSchema,
   permissionSetInputSchema,
   providerConnectionSchema,
@@ -87,6 +88,26 @@ describe('public contracts', () => {
         expectedRevision: -1,
       }),
     ).toThrow();
+  });
+
+  it('validates a declarative OpenAI-compatible Provider Profile', () => {
+    expect(
+      providerProfileSchema.parse({
+        id: 'example',
+        displayName: 'Example API',
+        baseUrl: 'https://api.example.com/v1',
+        baseUrlConfigurable: false,
+        protocol: 'chat_completions',
+        modelsPath: '/models',
+        authentication: { headerName: 'Authorization', scheme: 'Bearer' },
+        requiredCredentialFields: [],
+        errorOverrides: [
+          { status: 429, category: 'rate_limited', retryable: true },
+        ],
+        sourceReference: 'https://docs.example.com/openai-compatibility',
+        reviewedAt: '2026-07-28T00:00:00.000Z',
+      }),
+    ).toMatchObject({ id: 'example', protocol: 'chat_completions' });
   });
 
   it('keeps requested selection separate from observed execution resolution', () => {
