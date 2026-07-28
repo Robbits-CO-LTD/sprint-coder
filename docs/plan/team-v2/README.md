@@ -4,7 +4,7 @@
 - 状態: planning
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
-  P1A-a/P1A-b完了
+  P1A-a/P1A-b、P1B-a完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -128,6 +128,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Provider P1A-bでDB v42を追加し、legacy Turnの`runtime_kind/model`、Agent thread、Taskの
   最新Turnまたは旧runtime別設定からbuilt-in requested identityをbackfillした。resolved modelは
   推測せず、Turn／Agentの読み込みはlegacy列へfallbackする。
+- Provider P1B-aでProvider-neutralなRuntime／Registry契約、canonical event、
+  normalized error／usage、Capability Catalog schema、決定的Mock Runtimeを追加した。
+  認証、Secret、外部通信、Scheduler、UIは後続へ分離している。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。

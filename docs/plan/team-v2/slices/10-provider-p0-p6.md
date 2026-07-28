@@ -32,6 +32,15 @@ P0は2026-07-28にdocs-onlyで完了した。
 
 P1A-aでは実Provider API、Secret Storage、Scheduler変更を行わない。
 
+## P1B progress
+
+- P1B-a: Provider Runtime／Registry interface、canonical event、error／usage normalization、
+  capability schema、Mock Runtimeを完了
+- P1B-b: connection verification、Secret Storage、secure logger
+- P1B-c: global 8枠へConnection admissionを統合
+
+P1B-aは外部network、実Provider SDK、認証情報を扱わない。
+
 ## Shared stop rule
 
 Sliceの受入条件がgreenになったら停止して証拠を報告する。隣接Provider、cleanup、将来の

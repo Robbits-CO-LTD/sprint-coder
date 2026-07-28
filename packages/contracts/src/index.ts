@@ -1164,6 +1164,148 @@ export const providerConnectionSchema = z
   })
   .strict();
 export type ProviderConnection = z.infer<typeof providerConnectionSchema>;
+export const capabilitySourceSchema = z.enum([
+  'provider_api',
+  'official_curated',
+  'unknown',
+]);
+export type CapabilitySource = z.infer<typeof capabilitySourceSchema>;
+export type CatalogValue<T> = Readonly<{
+  value: T | null;
+  source: CapabilitySource;
+  sourceReference?: string;
+  observedAt?: string;
+}>;
+export function catalogValueSchema<T extends z.ZodType>(
+  valueSchema: T,
+): z.ZodObject<{
+  value: z.ZodNullable<T>;
+  source: typeof capabilitySourceSchema;
+  sourceReference: z.ZodOptional<z.ZodString>;
+  observedAt: z.ZodOptional<typeof timestampSchema>;
+}> {
+  return z
+    .object({
+      value: valueSchema.nullable(),
+      source: capabilitySourceSchema,
+      sourceReference: z.string().min(1).max(2_048).optional(),
+      observedAt: timestampSchema.optional(),
+    })
+    .strict();
+}
+export const providerModelSchema = z
+  .object({
+    connectionId: connectionIdSchema,
+    providerId: providerIdSchema,
+    modelId: z.string().min(1).max(256),
+    displayName: z.string().min(1).max(256),
+    available: z.boolean(),
+    availabilityCheckedAt: timestampSchema,
+    contextWindow: catalogValueSchema(z.number().int().positive()),
+    maxOutputTokens: catalogValueSchema(z.number().int().positive()),
+    toolCalling: catalogValueSchema(z.boolean()),
+    structuredOutput: catalogValueSchema(z.boolean()),
+    multimodalInput: catalogValueSchema(z.boolean()),
+    reasoning: catalogValueSchema(z.boolean()),
+  })
+  .strict();
+export type ProviderModel = z.infer<typeof providerModelSchema>;
+export const normalizedProviderUsageSchema = z
+  .object({
+    inputTokens: z.number().int().nonnegative().nullable(),
+    outputTokens: z.number().int().nonnegative().nullable(),
+    cacheReadTokens: z.number().int().nonnegative().nullable(),
+    cacheWriteTokens: z.number().int().nonnegative().nullable(),
+    reasoningTokens: z.number().int().nonnegative().nullable(),
+    providerCost: z
+      .object({
+        amount: z.number().nonnegative(),
+        currency: z.string().regex(/^[A-Z]{3}$/),
+      })
+      .strict()
+      .nullable(),
+    source: z.enum(['provider_api', 'runtime_observed', 'unknown']),
+  })
+  .strict();
+export type NormalizedProviderUsage = z.infer<typeof normalizedProviderUsageSchema>;
+export const normalizedProviderErrorSchema = z
+  .object({
+    category: z.enum([
+      'credentials',
+      'not_found',
+      'rate_limited',
+      'timeout',
+      'network',
+      'canceled',
+      'invalid_request',
+      'provider_unavailable',
+      'internal',
+    ]),
+    message: z.string().min(1).max(1_000),
+    retryable: z.boolean(),
+    retryAfterMs: z.number().int().nonnegative().nullable(),
+    providerCode: z.string().min(1).max(128).nullable(),
+  })
+  .strict();
+export type NormalizedProviderError = z.infer<typeof normalizedProviderErrorSchema>;
+export const executionResolutionSchema = z
+  .object({
+    resolvedProvider: providerIdSchema.nullable(),
+    resolvedModel: z.string().min(1).max(128).nullable(),
+  })
+  .strict();
+export type ExecutionResolution = z.infer<typeof executionResolutionSchema>;
+export const canonicalProviderEventSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('output_delta'), text: z.string() }).strict(),
+  z.object({ type: z.literal('reasoning_delta'), text: z.string() }).strict(),
+  z
+    .object({
+      type: z.literal('tool_call'),
+      callId: z.string().min(1).max(256),
+      name: z.string().min(1).max(256),
+      input: z.json(),
+    })
+    .strict(),
+  z
+    .object({ type: z.literal('usage'), usage: normalizedProviderUsageSchema })
+    .strict(),
+  z
+    .object({ type: z.literal('resolution'), resolution: executionResolutionSchema })
+    .strict(),
+  z
+    .object({
+      type: z.literal('rate_limit'),
+      retryAfterMs: z.number().int().nonnegative().nullable(),
+      observedAt: timestampSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('completed'),
+      stopReason: z.string().min(1).max(256).nullable(),
+    })
+    .strict(),
+  z.object({ type: z.literal('error'), error: normalizedProviderErrorSchema }).strict(),
+]);
+export type CanonicalProviderEvent = z.infer<typeof canonicalProviderEventSchema>;
+export const providerExecutionRequestSchema = z
+  .object({
+    executionId: z.string().min(1).max(256),
+    connectionId: connectionIdSchema,
+    modelId: z.string().min(1).max(256),
+    messages: z
+      .array(
+        z
+          .object({
+            role: z.enum(['system', 'user', 'assistant', 'tool']),
+            content: z.string(),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict();
+export type ProviderExecutionRequest = z.infer<typeof providerExecutionRequestSchema>;
 export const modelSelectionSchema = z
   .object({
     connectionId: connectionIdSchema.nullable(),
@@ -1178,13 +1320,6 @@ export const modelSelectionSchema = z
     { message: 'Model selection identity must be either complete or entirely unknown' },
   );
 export type ModelSelection = z.infer<typeof modelSelectionSchema>;
-export const executionResolutionSchema = z
-  .object({
-    resolvedProvider: providerIdSchema.nullable(),
-    resolvedModel: z.string().min(1).max(128).nullable(),
-  })
-  .strict();
-export type ExecutionResolution = z.infer<typeof executionResolutionSchema>;
 // Model id/option shape is provider-agnostic (Codex slugs and Claude aliases/full ids both fit
 // this format) and is kept under its original "codex" name for additive, non-breaking evolution.
 export const codexModelIdSchema = z
