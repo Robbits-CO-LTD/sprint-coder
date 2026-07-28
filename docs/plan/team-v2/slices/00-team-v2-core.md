@@ -103,3 +103,6 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
   typecheck、lint、production package、packaged Team flow 3件がgreen。
 - C2c次着手: packaged Chatで雇用・委譲カードを確認し、再起動後も同じactivity IDが
   一度だけ復元されるE2Eを追加する。
+- C2d完了: C2c初回E2Eで検出したmock-only legacy dispatchを修正し、deterministic Leaderも
+  `team_assign_task`でexecution IDを受け取り、必要な回数だけ`team_wait_reports`を行う。
+  sampler unit 5件とElectron統合scenarioがgreenで、mockと実CLIの監査経路を一致させた。

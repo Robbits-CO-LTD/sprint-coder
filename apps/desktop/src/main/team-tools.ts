@@ -600,15 +600,15 @@ function teamCallId(kind: string, input: string, key: string, index: number): st
   return `team-${kind}-${index}-${digestCanonical({ input, kind, key }).slice(0, 12)}`;
 }
 
-/** A fully deterministic mock Leader turn: hire 調査/実装/レビュー, dispatch a task derived from
- * the user message to each, wait for their (simulated, synchronous) reports, then synthesize a
+/** A fully deterministic mock Leader turn: hire 調査/実装/レビュー, formally assign a task derived
+ * from the user message to each, wait for their reports, then synthesize a
  * final answer. Mirrors createDeterministicMockSampler's shape but drives the multi-step
- * hire → send → wait → answer flow instead of a single mock tool call. */
+ * hire → assign → wait → answer flow instead of a single mock tool call. */
 export function createTeamScenarioSampler(input: string): ModelSampler {
   const excerpt = input.replace(/\s+/g, ' ').trim().slice(0, 160);
   return ({ transcript }) => {
     const hires = callResults(transcript, 'team_hire_worker');
-    const sends = callResults(transcript, 'team_send_to_worker');
+    const assignments = callResults(transcript, 'team_assign_task');
     const waits = callResults(transcript, 'team_wait_reports');
 
     if (hires.length === 0)
@@ -621,27 +621,40 @@ export function createTeamScenarioSampler(input: string): ModelSampler {
         })),
       };
 
-    if (sends.length === 0) {
+    if (assignments.length === 0) {
       const calls: ModelToolCall[] = [];
       hires.forEach(({ arguments: args, result }, index) => {
         const workerId = asRecord(result)?.workerId;
         const role = asRecord(args)?.role;
         if (typeof workerId !== 'string' || typeof role !== 'string') return;
         calls.push({
-          callId: teamCallId('send', input, workerId, index),
-          toolName: 'team_send_to_worker',
-          arguments: { workerId, content: `${role}として「${excerpt}」に対応してください。` },
+          callId: teamCallId('assign', input, workerId, index),
+          toolName: 'team_assign_task',
+          arguments: {
+            workerId,
+            objective: `${role}として「${excerpt}」に対応してください。`,
+            doneCriteria: ['検証可能な結果をLeaderへ報告する'],
+          },
         });
       });
       return { kind: 'tool-calls', calls };
     }
 
-    if (waits.length === 0)
+    const reports = waits.flatMap(({ result }) => {
+      const value = asRecord(result)?.reports;
+      return Array.isArray(value) ? value : [];
+    });
+    const reportedWorkerIds = new Set(
+      reports
+        .map((entry) => asRecord(entry)?.workerId)
+        .filter((workerId): workerId is string => typeof workerId === 'string'),
+    );
+    if (reportedWorkerIds.size < hires.length)
       return {
         kind: 'tool-calls',
         calls: [
           {
-            callId: teamCallId('wait', input, 'reports', 0),
+            callId: teamCallId('wait', input, 'reports', waits.length),
             toolName: 'team_wait_reports',
             arguments: {},
           },
@@ -655,10 +668,6 @@ export function createTeamScenarioSampler(input: string): ModelSampler {
       if (typeof workerId === 'string' && typeof role === 'string')
         roleByWorkerId.set(workerId, role);
     }
-    const latestWait = waits.at(-1);
-    const reports = Array.isArray(asRecord(latestWait?.result)?.reports)
-      ? (asRecord(latestWait?.result)?.reports as unknown[])
-      : [];
     const lines = reports.map((entry) => {
       const record = asRecord(entry);
       const workerId = typeof record?.workerId === 'string' ? record.workerId : '';

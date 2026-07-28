@@ -67,7 +67,7 @@ describe('createTeamScenarioSampler', () => {
     expect(again.calls.map((call) => call.callId)).toEqual(sample.calls.map((call) => call.callId));
   });
 
-  it('dispatches to each hired worker once all three hires resolved', async () => {
+  it('formally assigns each hired worker once all three hires resolved', async () => {
     const sampler = createTeamScenarioSampler(INPUT);
     const transcript: ToolTranscriptItem[] = [
       toolCall('hire-1', 'team_hire_worker', { role: '調査', objective: 'x' }),
@@ -91,23 +91,29 @@ describe('createTeamScenarioSampler', () => {
     });
     if (sample.kind !== 'tool-calls') throw new Error('expected tool-calls');
     expect(sample.calls).toHaveLength(3);
-    expect(sample.calls.every((call) => call.toolName === 'team_send_to_worker')).toBe(true);
+    expect(sample.calls.every((call) => call.toolName === 'team_assign_task')).toBe(true);
     expect(sample.calls.map((call) => (call.arguments as { workerId: string }).workerId)).toEqual([
       'w-research',
       'w-impl',
       'w-review',
     ]);
-    for (const call of sample.calls)
-      expect((call.arguments as { content: string }).content.length).toBeGreaterThan(0);
+    for (const call of sample.calls) {
+      expect((call.arguments as { objective: string }).objective.length).toBeGreaterThan(0);
+      expect((call.arguments as { doneCriteria: string[] }).doneCriteria).toHaveLength(1);
+    }
   });
 
-  it('waits for reports once all three Workers were sent to', async () => {
+  it('waits for reports once Workers were formally assigned', async () => {
     const sampler = createTeamScenarioSampler(INPUT);
     const transcript: ToolTranscriptItem[] = [
       toolCall('hire-1', 'team_hire_worker', { role: '調査', objective: 'x' }),
       toolResult('hire-1', { ok: true, workerId: 'w1', role: '調査', state: 'ready' }),
-      toolCall('send-1', 'team_send_to_worker', { workerId: 'w1', content: 'go' }),
-      toolResult('send-1', { ok: true, workerId: 'w1', messageId: 'm1', state: 'delivered' }),
+      toolCall('assign-1', 'team_assign_task', {
+        workerId: 'w1',
+        objective: 'go',
+        doneCriteria: ['done'],
+      }),
+      toolResult('assign-1', { ok: true, workerId: 'w1', executionId: 'e1', state: 'queued' }),
     ];
     const sample = await sampler({
       stepOrdinal: 3,
@@ -135,12 +141,24 @@ describe('createTeamScenarioSampler', () => {
       toolResult('hire-2', { ok: true, workerId: 'w-impl', role: '実装', state: 'ready' }),
       toolCall('hire-3', 'team_hire_worker', { role: 'レビュー', objective: 'x' }),
       toolResult('hire-3', { ok: true, workerId: 'w-review', role: 'レビュー', state: 'ready' }),
-      toolCall('send-1', 'team_send_to_worker', { workerId: 'w-research', content: 'go' }),
-      toolResult('send-1', { ok: true }),
-      toolCall('send-2', 'team_send_to_worker', { workerId: 'w-impl', content: 'go' }),
-      toolResult('send-2', { ok: true }),
-      toolCall('send-3', 'team_send_to_worker', { workerId: 'w-review', content: 'go' }),
-      toolResult('send-3', { ok: true }),
+      toolCall('assign-1', 'team_assign_task', {
+        workerId: 'w-research',
+        objective: 'go',
+        doneCriteria: ['done'],
+      }),
+      toolResult('assign-1', { ok: true }),
+      toolCall('assign-2', 'team_assign_task', {
+        workerId: 'w-impl',
+        objective: 'go',
+        doneCriteria: ['done'],
+      }),
+      toolResult('assign-2', { ok: true }),
+      toolCall('assign-3', 'team_assign_task', {
+        workerId: 'w-review',
+        objective: 'go',
+        doneCriteria: ['done'],
+      }),
+      toolResult('assign-3', { ok: true }),
       toolCall('wait-1', 'team_wait_reports', {}),
       toolResult('wait-1', {
         ok: true,
