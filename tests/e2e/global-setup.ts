@@ -1,10 +1,14 @@
-import { execSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DESKTOP_ROOT,
   OUT_DIR,
   ensureDevServerReady,
+  isPackagedAvailable,
+  preparePackagedAppForPlaywright,
+  removeUserDataDir,
+  REPO_ROOT,
   resolveE2EMode,
   stopDevServer,
 } from './helpers';
@@ -23,6 +27,10 @@ import type { DevServerHandle } from './helpers';
  *    down once the whole suite finishes.
  */
 const STAMP_FILE = join(OUT_DIR, '.e2e-package-stamp');
+const DESKTOP_MANIFEST = JSON.parse(readFileSync(join(DESKTOP_ROOT, 'package.json'), 'utf8')) as {
+  name: string;
+  version: string;
+};
 
 const WATCHED_ROOTS = [
   join(DESKTOP_ROOT, 'src'),
@@ -48,10 +56,26 @@ function newestMtimeMs(path: string): number {
 }
 
 function isPackageStale(): boolean {
-  if (!existsSync(OUT_DIR) || !existsSync(STAMP_FILE)) return true;
-  const stampMs = statSync(STAMP_FILE).mtimeMs;
+  if (!existsSync(OUT_DIR) || !existsSync(STAMP_FILE) || !isPackagedAvailable()) return true;
+  let stamp: {
+    schemaVersion: number;
+    packageName: string;
+    packageVersion: string;
+    sourceMtimeMs: number;
+  };
+  try {
+    stamp = JSON.parse(readFileSync(STAMP_FILE, 'utf8')) as typeof stamp;
+  } catch {
+    return true;
+  }
+  if (
+    stamp.schemaVersion !== 1 ||
+    stamp.packageName !== DESKTOP_MANIFEST.name ||
+    stamp.packageVersion !== DESKTOP_MANIFEST.version
+  )
+    return true;
   const newestSourceMs = Math.max(...WATCHED_ROOTS.map(newestMtimeMs));
-  return newestSourceMs > stampMs;
+  return newestSourceMs > stamp.sourceMtimeMs;
 }
 
 function packageIfStale(): void {
@@ -61,22 +85,52 @@ function packageIfStale(): void {
   }
 
   console.log('[e2e globalSetup] Packaging sprint-coder (electron-forge package)...');
-  execSync('npx electron-forge package', {
-    cwd: DESKTOP_ROOT,
-    stdio: 'inherit',
-    timeout: 10 * 60 * 1000, // packaging can take a few minutes on a cold cache
-  });
-
-  if (!existsSync(OUT_DIR)) {
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  if (nodeMajor !== 22) {
     throw new Error(
-      `electron-forge package reported success but ${OUT_DIR} was not created. This has been ` +
-        "confirmed to be an environment/toolchain bug (@electron/packager's zip extraction of " +
-        'the Electron binary hangs deterministically on the electron.icns entry, independent ' +
-        'of Node version) rather than an application bug. Use SPRINT_CODER_E2E_MODE=dev to run E2E ' +
-        'against `npm start` instead.',
+      `Packaged E2E requires Node 22 (current: ${process.versions.node}). ` +
+        'Use the repository .nvmrc before running Playwright.',
     );
   }
-  writeFileSync(STAMP_FILE, new Date().toISOString());
+  execFileSync(
+    process.execPath,
+    [
+      join(
+        REPO_ROOT,
+        'node_modules',
+        '@electron-forge',
+        'cli',
+        'dist',
+        'electron-forge-package.js',
+      ),
+    ],
+    {
+      cwd: DESKTOP_ROOT,
+      stdio: 'inherit',
+      timeout: 10 * 60 * 1000, // packaging can take a few minutes on a cold cache
+    },
+  );
+
+  if (!isPackagedAvailable()) {
+    throw new Error(
+      `electron-forge package reported success but no executable was created under ${OUT_DIR}.`,
+    );
+  }
+  const sourceMtimeMs = Math.max(...WATCHED_ROOTS.map(newestMtimeMs));
+  writeFileSync(
+    STAMP_FILE,
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        packageName: DESKTOP_MANIFEST.name,
+        packageVersion: DESKTOP_MANIFEST.version,
+        sourceMtimeMs,
+        packagedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+  );
   console.log('[e2e globalSetup] Packaging complete.');
 }
 
@@ -86,8 +140,11 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 
   if (mode === 'packaged') {
     packageIfStale();
+    const prepared = await preparePackagedAppForPlaywright();
+    process.env['SPRINT_CODER_E2E_EXECUTABLE_PATH'] = prepared.executablePath;
     return async () => {
-      /* nothing spawned in packaged mode — each test owns/closes its own process */
+      delete process.env['SPRINT_CODER_E2E_EXECUTABLE_PATH'];
+      removeUserDataDir(prepared.temporaryRoot);
     };
   }
 

@@ -1,19 +1,25 @@
 import { _electron as electron } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
+import { flipFuses, FuseV1Options, FuseVersion, getCurrentFuseWire } from '@electron/fuses';
 import type { ChildProcess } from 'node:child_process';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 
 /**
  * sprint-coder Electron E2E launch helpers.
  *
  * `npm start` on its own is a dev-server launch and was never meant to be driven directly by
- * E2E — but in this environment `electron-forge package` cannot produce a usable build at all
- * (confirmed: @electron/packager's zip extraction of the Electron binary hangs deterministically
- * on the electron.icns entry, independent of Node version — reproduced under both Node 26 and
- * Electron's bundled Node 22). So two launch modes are supported:
+ * E2E. Two launch modes are supported:
  *
  *  - "packaged": launches the electron-forge packaged app under apps/desktop/out/** (original,
  *    preferred path — used automatically wherever packaging actually works, e.g. future CI).
@@ -37,6 +43,7 @@ export const DEV_SERVER_CANDIDATE_URLS = [
 ];
 
 export type E2EMode = 'packaged' | 'dev';
+export type PreparedPackagedApp = { executablePath: string; temporaryRoot: string };
 
 /**
  * `out/` 配下のpackaged app実行ファイルをOSに応じて自動検出する。
@@ -44,6 +51,14 @@ export type E2EMode = 'packaged' | 'dev';
  * 変化しうるため、ディレクトリ内容を実際に走査して決定する。
  */
 export function findPackagedExecutable(): string {
+  const preparedExecutable = process.env['SPRINT_CODER_E2E_EXECUTABLE_PATH'];
+  if (preparedExecutable !== undefined) {
+    if (!existsSync(preparedExecutable)) {
+      throw new Error(`Prepared E2E executable not found at ${preparedExecutable}.`);
+    }
+    return preparedExecutable;
+  }
+
   if (!existsSync(OUT_DIR)) {
     throw new Error(`Packaged app not found at ${OUT_DIR}.`);
   }
@@ -90,6 +105,61 @@ export function findPackagedExecutable(): string {
   );
   if (!candidate) throw new Error(`No executable found in ${packDir}.`);
   return join(packDir, candidate.name);
+}
+
+function packageRootForExecutable(executablePath: string): string {
+  if (process.platform !== 'darwin') return dirname(executablePath);
+  const marker = '.app/';
+  const markerIndex = executablePath.indexOf(marker);
+  if (markerIndex === -1) {
+    throw new Error(`macOS packaged executable is not inside an .app bundle: ${executablePath}`);
+  }
+  return executablePath.slice(0, markerIndex + '.app'.length);
+}
+
+export async function preparePackagedAppForPlaywright(): Promise<PreparedPackagedApp> {
+  const sourceExecutable = findPackagedExecutable();
+  const sourceRoot = packageRootForExecutable(sourceExecutable);
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-playwright-package-'));
+  const targetRoot = join(temporaryRoot, basename(sourceRoot));
+  if (process.platform === 'darwin') {
+    // macOS app frameworks use nested symlinks. The platform copier preserves them without
+    // redirecting a copied framework link back into the signed production bundle.
+    execFileSync('cp', ['-R', sourceRoot, targetRoot]);
+  } else {
+    cpSync(sourceRoot, targetRoot, { recursive: true, verbatimSymlinks: true });
+  }
+  const targetExecutable = join(targetRoot, relative(sourceRoot, sourceExecutable));
+  const sourceFuseTarget = process.platform === 'darwin' ? sourceRoot : sourceExecutable;
+  const targetFuseTarget = process.platform === 'darwin' ? targetRoot : targetExecutable;
+  const productionFuses = await getCurrentFuseWire(sourceFuseTarget);
+  const productionInspectState = productionFuses[FuseV1Options.EnableNodeCliInspectArguments];
+
+  // Production must stay non-inspectable. Playwright receives a temporary copy with only the
+  // Node inspector fuse changed; all other production fuses and the source bundle stay intact.
+  if (productionInspectState !== 48) {
+    removeUserDataDir(temporaryRoot);
+    throw new Error('Production package unexpectedly enables Node CLI inspect arguments.');
+  }
+  try {
+    await flipFuses(targetFuseTarget, {
+      version: FuseVersion.V1,
+      [FuseV1Options.EnableNodeCliInspectArguments]: true,
+      resetAdHocDarwinSignature: process.platform === 'darwin',
+    });
+  } catch (error) {
+    removeUserDataDir(temporaryRoot);
+    throw error;
+  }
+  const productionFusesAfter = await getCurrentFuseWire(sourceFuseTarget);
+  if (
+    productionFusesAfter[FuseV1Options.EnableNodeCliInspectArguments] !== productionInspectState
+  ) {
+    removeUserDataDir(temporaryRoot);
+    throw new Error('Preparing the E2E package mutated the production fuse wire.');
+  }
+
+  return { executablePath: targetExecutable, temporaryRoot };
 }
 
 export function isPackagedAvailable(): boolean {
@@ -290,6 +360,9 @@ export async function launchApp(
     // installed CLI (issue #50). Without this the suite runs against a real model on any machine
     // that has one — slowly, and at real cost.
     SPRINT_CODER_RUNTIME_ADOPT: '0',
+    // Team golden paths assert deterministic Worker reports. Production remains fail-closed:
+    // simulated workers are enabled only inside this isolated E2E process.
+    SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS: '1',
   };
 
   if (mode === 'packaged') {
@@ -318,9 +391,23 @@ export async function firstWindow(app: ElectronApplication): Promise<Page> {
  * each test owns its own isolated userData dir/process. */
 export async function closeApp(app: ElectronApplication | null | undefined): Promise<void> {
   if (!app) return;
+  const child = app.process();
+  const gracefulClose = app.close().then(
+    () => undefined,
+    () => undefined,
+  );
+  const closedGracefully = await Promise.race([
+    gracefulClose.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 3_000)),
+  ]);
+  if (closedGracefully || child.exitCode !== null) return;
+
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  child.kill('SIGKILL');
+  await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
   try {
-    await app.close();
+    await gracefulClose;
   } catch {
-    // Already closed/crashed — nothing further to do.
+    // Already force-closed.
   }
 }
