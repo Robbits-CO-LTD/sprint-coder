@@ -151,6 +151,44 @@ describe('provider connections', () => {
     ]);
     reopened.close();
   });
+
+  it('backfills legacy built-in identity without inferring resolved model', () => {
+    const { persistence, path } = createPersistence();
+    persistence.setRuntime('codex');
+    persistence.setModel('gpt-5.6-sol');
+    const task = persistence.createTask('legacy codex task');
+    const turn = persistence.startTurn(task.id, 'legacy identity');
+    persistence.close();
+
+    const legacy = new Database(path);
+    legacy.exec(`
+      UPDATE tasks
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      UPDATE turns
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL,
+          resolved_provider = NULL, resolved_model = NULL;
+      UPDATE agent_threads
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      UPDATE agents
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      DELETE FROM schema_migrations WHERE version = 42;
+    `);
+    legacy.close();
+
+    const migrated = new SqlitePersistenceClient(path);
+    const selection = {
+      connectionId: 'builtin:codex-cli',
+      requestedProvider: 'openai',
+      requestedModel: 'gpt-5.6-sol',
+    };
+    expect(migrated.getTaskModelSelection(task.id)).toEqual(selection);
+    expect(migrated.getTaskLeader(task.id).modelSelection).toEqual(selection);
+    expect(migrated.getTurnModelIdentity(task.id, turn.turnId)).toEqual({
+      selection,
+      resolution: { resolvedProvider: null, resolvedModel: null },
+    });
+    migrated.close();
+  });
 });
 
 class PersistenceTestArtifacts implements EditArtifactRepository {
@@ -4453,6 +4491,7 @@ if (runsWithElectronAbi)
         { version: 39 },
         { version: 40 },
         { version: 41 },
+        { version: 42 },
       ]);
       for (const [table, columns] of [
         [

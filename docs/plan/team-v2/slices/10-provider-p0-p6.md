@@ -27,7 +27,7 @@ P0は2026-07-28にdocs-onlyで完了した。
 
 - P1A-a: 共通`ProviderConnection`契約、DB v41、built-in CLI 2件の安定ID seed、
   persistence list/getを完了
-- P1A-b: pre-v35 legacy rowのbackfillとdual-read
+- P1A-b: DB v42によるpre-v35 legacy rowのbackfillとTurn／Agent dual-readを完了
 - P1A-c: 指定DB fixture、再起動復元、旧／新Picker互換、CLI並列維持の証拠
 
 P1A-aでは実Provider API、Secret Storage、Scheduler変更を行わない。

@@ -2018,6 +2018,136 @@ const migrations = [
          strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
     `,
   },
+  {
+    version: 42,
+    checksum: 'provider-p1a-v42-legacy-builtin-identity-backfill',
+    sql: `
+      UPDATE turns
+      SET connection_id = CASE runtime_kind
+            WHEN 'claude' THEN '${BUILTIN_CLAUDE_CONNECTION_ID}'
+            WHEN 'codex' THEN '${BUILTIN_CODEX_CONNECTION_ID}'
+          END,
+          requested_provider = CASE runtime_kind
+            WHEN 'claude' THEN 'anthropic'
+            WHEN 'codex' THEN 'openai'
+          END,
+          requested_model = model
+      WHERE runtime_kind IN ('claude', 'codex')
+        AND (connection_id IS NULL OR requested_provider IS NULL OR requested_model IS NULL);
+
+      UPDATE agent_threads
+      SET connection_id = CASE runtime_kind
+            WHEN 'claude' THEN '${BUILTIN_CLAUDE_CONNECTION_ID}'
+            WHEN 'codex' THEN '${BUILTIN_CODEX_CONNECTION_ID}'
+          END,
+          requested_provider = CASE runtime_kind
+            WHEN 'claude' THEN 'anthropic'
+            WHEN 'codex' THEN 'openai'
+          END,
+          requested_model = COALESCE(
+            (
+              SELECT turns.model
+              FROM turns
+              WHERE turns.task_id = agent_threads.task_id
+                AND turns.runtime_kind = agent_threads.runtime_kind
+              ORDER BY turns.created_at DESC, turns.rowid DESC
+              LIMIT 1
+            ),
+            (
+              SELECT settings.value
+              FROM settings
+              WHERE settings.key = CASE agent_threads.runtime_kind
+                WHEN 'claude' THEN 'runtime.claude.model'
+                ELSE 'runtime.codex.model'
+              END
+            ),
+            'auto'
+          )
+      WHERE runtime_kind IN ('claude', 'codex')
+        AND (connection_id IS NULL OR requested_provider IS NULL OR requested_model IS NULL);
+
+      UPDATE agents
+      SET connection_id = (
+            SELECT agent_threads.connection_id
+            FROM agent_threads
+            WHERE agent_threads.id = agents.thread_id
+          ),
+          requested_provider = (
+            SELECT agent_threads.requested_provider
+            FROM agent_threads
+            WHERE agent_threads.id = agents.thread_id
+          ),
+          requested_model = (
+            SELECT agent_threads.requested_model
+            FROM agent_threads
+            WHERE agent_threads.id = agents.thread_id
+          )
+      WHERE EXISTS (
+        SELECT 1
+        FROM agent_threads
+        WHERE agent_threads.id = agents.thread_id
+          AND agent_threads.runtime_kind IN ('claude', 'codex')
+      )
+        AND (connection_id IS NULL OR requested_provider IS NULL OR requested_model IS NULL);
+
+      UPDATE tasks
+      SET connection_id = (
+            SELECT turns.connection_id
+            FROM turns
+            WHERE turns.task_id = tasks.id AND turns.connection_id IS NOT NULL
+            ORDER BY turns.created_at DESC, turns.rowid DESC
+            LIMIT 1
+          ),
+          requested_provider = (
+            SELECT turns.requested_provider
+            FROM turns
+            WHERE turns.task_id = tasks.id AND turns.connection_id IS NOT NULL
+            ORDER BY turns.created_at DESC, turns.rowid DESC
+            LIMIT 1
+          ),
+          requested_model = (
+            SELECT turns.requested_model
+            FROM turns
+            WHERE turns.task_id = tasks.id AND turns.connection_id IS NOT NULL
+            ORDER BY turns.created_at DESC, turns.rowid DESC
+            LIMIT 1
+          )
+      WHERE connection_id IS NULL
+        AND EXISTS (
+          SELECT 1 FROM turns
+          WHERE turns.task_id = tasks.id AND turns.connection_id IS NOT NULL
+        );
+
+      UPDATE tasks
+      SET connection_id = CASE (
+            SELECT value FROM settings WHERE key = 'runtime.kind'
+          )
+            WHEN 'claude' THEN '${BUILTIN_CLAUDE_CONNECTION_ID}'
+            WHEN 'codex' THEN '${BUILTIN_CODEX_CONNECTION_ID}'
+          END,
+          requested_provider = CASE (
+            SELECT value FROM settings WHERE key = 'runtime.kind'
+          )
+            WHEN 'claude' THEN 'anthropic'
+            WHEN 'codex' THEN 'openai'
+          END,
+          requested_model = COALESCE(
+            (
+              SELECT value
+              FROM settings
+              WHERE key = CASE (
+                SELECT value FROM settings WHERE key = 'runtime.kind'
+              )
+                WHEN 'claude' THEN 'runtime.claude.model'
+                ELSE 'runtime.codex.model'
+              END
+            ),
+            'auto'
+          )
+      WHERE connection_id IS NULL
+        AND (SELECT value FROM settings WHERE key = 'runtime.kind') IN ('claude', 'codex');
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3322,12 +3452,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   getTaskModelSelection(taskId: string): ModelSelection | null {
     const row = this.getTaskRow(taskId);
-    const selection = modelSelectionSchema.parse({
+    return readCanonicalModelSelection({
       connectionId: row.connection_id,
       requestedProvider: row.requested_provider,
       requestedModel: row.requested_model,
     });
-    return selection.connectionId === null ? null : selection;
   }
 
   setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null {
@@ -9296,11 +9425,12 @@ function toAgent(row: AgentRow): AgentRecord {
     writeCapable: row.write_capable === 1,
     currentActivity: row.current_activity,
     runtimeKind: row.runtime_kind,
-    modelSelection: {
-      connectionId: row.connection_id,
-      requestedProvider: row.requested_provider,
-      requestedModel: row.requested_model,
-    },
+    modelSelection:
+      readCanonicalModelSelection({
+        connectionId: row.connection_id,
+        requestedProvider: row.requested_provider,
+        requestedModel: row.requested_model,
+      }) ?? modelSelectionForRuntime(row.runtime_kind, row.requested_model ?? 'auto'),
     parentAgentId: row.parent_agent_id,
     depth: row.depth,
     canDelegate: row.can_delegate === 1,
@@ -9315,16 +9445,31 @@ function toAgent(row: AgentRow): AgentRecord {
 
 function toTurnModelIdentity(row: TurnRow): TurnModelIdentity {
   return {
-    selection: {
-      connectionId: row.connection_id,
-      requestedProvider: row.requested_provider,
-      requestedModel: row.requested_model,
-    },
+    selection:
+      readCanonicalModelSelection({
+        connectionId: row.connection_id,
+        requestedProvider: row.requested_provider,
+        requestedModel: row.requested_model,
+      }) ?? modelSelectionForRuntime(row.runtime_kind, row.model),
     resolution: {
       resolvedProvider: row.resolved_provider,
       resolvedModel: row.resolved_model,
     },
   };
+}
+
+function readCanonicalModelSelection(input: {
+  connectionId: string | null;
+  requestedProvider: string | null;
+  requestedModel: string | null;
+}): ModelSelection | null {
+  if (
+    input.connectionId === null ||
+    input.requestedProvider === null ||
+    input.requestedModel === null
+  )
+    return null;
+  return modelSelectionSchema.parse(input);
 }
 
 function toTeamBudgetReservation(row: TeamBudgetReservationRow): TeamBudgetReservationRecord {

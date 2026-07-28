@@ -4,7 +4,7 @@
 - 状態: planning
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
-  P1A-a完了
+  P1A-a/P1A-b完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -84,7 +84,7 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 
 ## 現在地とblocker
 
-- 現行DB migrationはv41。`provider_connections`をconnection domainの正本として追加し、
+- 現行DB migrationはv42。`provider_connections`をconnection domainの正本として追加し、
   安定IDの`builtin:claude-cli`と`builtin:codex-cli`をseedした。新規Claude／Codex Turn・Agentはbuilt-in connection IDと
   requested model identityを保存し、Runtimeが返したresolved modelを別フィールドへ保存する。
   Taskの明示selectionはcanonical repositoryへ保存され、未設定Taskは旧global Picker設定を読む。
@@ -93,8 +93,8 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   5 Workerのpackaged E2Eがgreen。Manager RuntimeにはAgent IDをtoken registrationへ固定した
   Team MCPを渡し、直下Agentのhire／assignと自分が作成したexecutionのsteer／cancelだけを許可する。
 - `spawnSlots: 8`とは別に、AI executionをglobal最大8件で動かすSchedulerを実装済み。
-- Provider Connectionの最小domainとbuilt-in永続化はP1A-aで実装済み。pre-v35 backfill／
-  dual-read／fixtureはP1A-b/c、外部API Adapter、Secret Storage、API rate-limit Scheduler、
+- Provider Connectionの最小domainとbuilt-in永続化はP1A-a、pre-v35 built-in identity backfillと
+  history dual-readはP1A-bで実装済み。独立fixture群はP1A-c、外部API Adapter、Secret Storage、API rate-limit Scheduler、
   feature flag基盤は後続Sliceであり未実装。
 - `01-multi-provider-addendum.md`の原文は未提供である。原文を創作せず、提供されるまで
   [blocker placeholder](instructions/01-multi-provider-addendum.md)として扱う。
@@ -125,6 +125,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Provider P1A-aで共通`ProviderConnection`契約、DB v41、built-in CLI 2件のseed、
   list/get persistence APIを追加した。実Provider API、Secret、Scheduler、legacy backfillを
   含めず、P1A-b/cへ分離した。
+- Provider P1A-bでDB v42を追加し、legacy Turnの`runtime_kind/model`、Agent thread、Taskの
+  最新Turnまたは旧runtime別設定からbuilt-in requested identityをbackfillした。resolved modelは
+  推測せず、Turn／Agentの読み込みはlegacy列へfallbackする。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。
