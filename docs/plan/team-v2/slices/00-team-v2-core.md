@@ -106,3 +106,6 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
 - C2d完了: C2c初回E2Eで検出したmock-only legacy dispatchを修正し、deterministic Leaderも
   `team_assign_task`でexecution IDを受け取り、必要な回数だけ`team_wait_reports`を行う。
   sampler unit 5件とElectron統合scenarioがgreenで、mockと実CLIの監査経路を一致させた。
+- C2c完了: Activity Cardへ永続監査IDを公開し、production packageで雇用3件・委譲3件の
+  日本語履歴を確認。同一user-data DBの再起動前後で全activity ID集合が完全一致し、
+  重複表示0件のpackaged E2Eがgreen。

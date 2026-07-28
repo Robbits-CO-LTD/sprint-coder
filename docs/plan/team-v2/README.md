@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、Core C1a/C1b/C2a/C2b/C2d完了
+- 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、Core C1a/C1b/C2a/C2b/C2c/C2d完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -108,6 +108,8 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   永続履歴カードとして表示した。次はC2cでpackagedアプリ上の表示と再起動復元を固定する。
 - C2c初回E2Eで、packaged mock scenarioだけが旧同期sendを使い委譲監査を作らない差を検出した。
   C2dでmock Leaderもproductionと同じformal assign／async execution／wait経路へ移行した。
+- C2cはproduction packageで雇用3件・委譲3件を確認し、同一user-data DBで再起動した前後の
+  全activity ID集合が一致し、各IDがDOMへ一度だけ表示されることを検証済み。
 
 ## 完成判定
 

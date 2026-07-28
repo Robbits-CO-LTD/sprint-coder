@@ -8,12 +8,18 @@ import type { TeamActivityDisplay } from '../lib/team-activity-display';
  * Deliberately inert — no buttons, no `tabIndex`, no `<details>` — so the timeline's keyboard order
  * is exactly what it was. The type is carried by words (and exposed as `data-activity-type` for
  * tests/styling), never by colour alone, and nothing here animates.
+ *
+ * `data-activity-id` is the persisted activity's own id, mirrored onto the root purely as a
+ * machine-readable identity: it is what lets a restart check assert that the timeline restored the
+ * same activities and rendered each of them exactly once (`orderedActivities` dedupes by this id).
+ * It is inert — no focus, ARIA, or visual consequence.
  */
 export function TeamActivityCard({ activity }: { activity: TeamActivityDisplay }) {
   return (
     <div
       className="team-activity"
       data-testid="team-activity-card"
+      data-activity-id={activity.id}
       data-activity-type={activity.type}
     >
       {/* Polite announcement of the same facts shown below — mirrors the Worker execution card's
