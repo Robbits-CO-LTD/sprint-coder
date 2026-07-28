@@ -642,6 +642,9 @@ export interface SprintCoderApi {
     createAnthropicConnection(
       input: import('@sprint-coder/contracts').AnthropicConnectionCreateInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createGeminiConnection(
+      input: import('@sprint-coder/contracts').GeminiConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
     verifyConnection(
       connectionId: string,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;

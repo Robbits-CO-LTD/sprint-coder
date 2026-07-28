@@ -5,7 +5,7 @@
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
   P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b、
-  UI U0/U1a/U1b、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4完了
+  UI U0/U1a/U1b、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5a完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -178,6 +178,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   公式Models APIのpaginationとcapabilityをcatalogへ反映し、Messages SSEのtext、thinking、
   tool use、usage、resolved model、429、取消をcanonical eventへ正規化する。Chat／Teamは
   Provider-neutral経路を再利用し、実API smokeはfinal gateへ留保する。
+- Provider P5aでGoogle Gemini APIのConnection、Models API、`streamGenerateContent` SSEを
+  共通Runtimeへ接続した。Google固有の認証、content／function declaration／structured output、
+  thinking、usage、429、取消をAdapter内へ隔離した。multimodal入力契約はP5bへ分離する。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。

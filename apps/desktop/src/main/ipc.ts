@@ -34,6 +34,7 @@ import {
   fileOpenResultSchema,
   fileSaveInputSchema,
   fileSaveResultSchema,
+  geminiConnectionCreateInputSchema,
   type FileChange,
   permissionSetInputSchema,
   permissionSettingsSchema,
@@ -175,6 +176,10 @@ import { ProviderVerificationService } from './provider-verification';
 import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
 import { OpenRouterCatalogClient } from './openrouter-provider-client';
 import { AnthropicProviderClient, parseAnthropicCredential } from './anthropic-provider-client';
+import {
+  GeminiProviderClient,
+  parseGeminiCredential,
+} from './gemini-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
 import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
 
@@ -274,6 +279,18 @@ export class IpcRouter {
       runtimeKind: 'official_api',
       providerId: 'anthropic',
       runtime: anthropic,
+    });
+    const gemini = new GeminiProviderClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('Gemini Connection has no secret reference');
+      return parseGeminiCredential(
+        providerSecrets.get(connection.secretReference),
+      );
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'google',
+      runtime: gemini,
     });
     this.providerVerification = new ProviderVerificationService(
       this.persistence,
@@ -633,6 +650,21 @@ export class IpcRouter {
           '',
           IPC_CHANNELS.providersCreateAnthropicConnection,
           () => this.providerConnections.createAnthropic(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateGeminiConnection,
+      geminiConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateGeminiConnection,
+          () => this.providerConnections.createGemini(input),
         ).value;
         return this.providerVerification.verify(created);
       },

@@ -48,6 +48,7 @@ import {
   fileOpenResultSchema,
   fileSaveInputSchema,
   fileSaveResultSchema,
+  geminiConnectionCreateInputSchema,
   fileEditFrameSchema,
   generatedImageSchema,
   generatedImageBytesSchema,
@@ -383,6 +384,13 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersCreateAnthropicConnection,
         anthropicConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createGeminiConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateGeminiConnection,
+        geminiConnectionCreateInputSchema,
         providerConnectionSchema,
         input,
       ),

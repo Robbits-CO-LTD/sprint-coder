@@ -1,15 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import {
   anthropicConnectionCreateInputSchema,
+  geminiConnectionCreateInputSchema,
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   type AnthropicConnectionCreateInput,
+  type GeminiConnectionCreateInput,
   type OpenAIConnectionCreateInput,
   type OpenRouterConnectionCreateInput,
   type ProviderConnection,
 } from '@sprint-coder/contracts';
 import { serializeOpenAICredential, type OpenAICredential } from './openai-provider-client';
 import { serializeAnthropicCredential } from './anthropic-provider-client';
+import { serializeGeminiCredential } from './gemini-provider-client';
 
 export interface ProviderConnectionRepository {
   listProviderConnections(): readonly ProviderConnection[];
@@ -116,6 +119,42 @@ export class ProviderConnectionService {
       return this.repository.createProviderConnection({
         id: `anthropic:${this.id()}`,
         providerId: 'anthropic',
+        runtimeKind: 'official_api',
+        displayName: parsed.displayName,
+        enabled: true,
+        secretReference,
+        verification: {
+          status: 'unverified',
+          verifiedAt: null,
+          expiresAt: null,
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: 2,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    } catch (error) {
+      this.secrets.delete(secretReference);
+      throw error;
+    }
+  }
+
+  createGemini(input: GeminiConnectionCreateInput): ProviderConnection {
+    const parsed = geminiConnectionCreateInputSchema.parse(input);
+    const secretReference = this.secrets.put(
+      serializeGeminiCredential({ apiKey: parsed.apiKey }),
+    );
+    const timestamp = this.now().toISOString();
+    try {
+      return this.repository.createProviderConnection({
+        id: `google:${this.id()}`,
+        providerId: 'google',
         runtimeKind: 'official_api',
         displayName: parsed.displayName,
         enabled: true,

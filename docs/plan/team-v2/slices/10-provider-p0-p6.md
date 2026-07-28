@@ -84,6 +84,17 @@ P2aでは生成API、Chat／Team配線、実API probeを行わない。実API sm
 
 実API smokeとpackaged E2Eは全実装後のfinal gateへ留保する。
 
+## P5 progress
+
+- P5a: Google Gemini API Connection、Main-only secret、Models API pagination、
+  `streamGenerateContent` SSE、function call、structured output、thinking、usage、
+  cancellation、429 normalizationを完了
+- P5b: 共通message contractのmultimodal inputとGemini `inlineData`変換
+
+P5aではModels APIが公開しないtool／structured／multimodal能力をモデル名から推測せず
+`unknown`にする。P5bは既存text-only Chat／Team経路を壊さない独立変更として実装する。
+実API smokeとpackaged E2Eはfinal gateへ留保する。
+
 ## Shared stop rule
 
 Sliceの受入条件がgreenになったら停止して証拠を報告する。隣接Provider、cleanup、将来の

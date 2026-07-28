@@ -1241,6 +1241,15 @@ export const anthropicConnectionCreateInputSchema = z
   })
   .strict();
 export type AnthropicConnectionCreateInput = z.infer<typeof anthropicConnectionCreateInputSchema>;
+export const geminiConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+  })
+  .strict();
+export type GeminiConnectionCreateInput = z.infer<
+  typeof geminiConnectionCreateInputSchema
+>;
 export const capabilitySourceSchema = z.enum(['provider_api', 'official_curated', 'unknown']);
 export type CapabilitySource = z.infer<typeof capabilitySourceSchema>;
 export type CatalogValue<T> = Readonly<{
@@ -1928,6 +1937,9 @@ export interface SprintCoderApi {
     createOpenAIConnection(input: OpenAIConnectionCreateInput): Promise<ProviderConnection>;
     createOpenRouterConnection(input: OpenRouterConnectionCreateInput): Promise<ProviderConnection>;
     createAnthropicConnection(input: AnthropicConnectionCreateInput): Promise<ProviderConnection>;
+    createGeminiConnection(
+      input: GeminiConnectionCreateInput,
+    ): Promise<ProviderConnection>;
     verifyConnection(connectionId: string): Promise<ProviderConnection>;
   };
   permissions: {
@@ -2018,6 +2030,7 @@ export const IPC_CHANNELS = {
   providersCreateOpenAIConnection: 'sprint-coder:providers:create-openai-connection',
   providersCreateOpenRouterConnection: 'sprint-coder:providers:create-openrouter-connection',
   providersCreateAnthropicConnection: 'sprint-coder:providers:create-anthropic-connection',
+  providersCreateGeminiConnection: 'sprint-coder:providers:create-gemini-connection',
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
