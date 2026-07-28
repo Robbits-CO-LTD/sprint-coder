@@ -1,0 +1,57 @@
+# Team v2 Core Slices
+
+## Slice 0 — Baseline and decisions
+
+### Outcome
+
+実装前baseline、Root Cause Confirmed Gate、Core schema、execution model、connection identityを
+確定する。
+
+### Required
+
+- Team unit 2失敗とE2E 3 timeoutの原因箇所・経路・独立証拠
+- current Team data flowとstate transition matrix
+- connection ID先行導入ADR
+- Coreのfeature boundariesとrollback
+- 既存CLI packaged resolution確認
+
+### Non-goals
+
+製品機能追加、外部API、Secret Storage。
+
+### Proof
+
+再現command、原因証拠、修正後に使う同一acceptance command、Accepted ADR。
+
+## Core A — Domain and persistence
+
+- parent/depth/canDelegate、Team Policy
+- ModelSelection、connection identity
+- execution、attempt、instruction revision、queue
+- direct message audit
+- Team activity event
+- restart projectionとmigration fixture
+
+Proof: pure domain state-machine testとpersistence integration。
+
+## Core B — Coordinator and Runtime
+
+- dynamic hire、Manager delegation
+- global execution Scheduler 8
+- async assign returning execution ID
+- queued steer、interrupt-and-resume running steer
+- Worker message routing
+- stop queued/running、budget、recovery
+
+Proof: deterministic Runtimeで8 parallel、depth、steer、crash／restart。
+
+## Core C — User experience and GA
+
+- Agent／Activity Card
+- persistent Chat Team event
+- hierarchical CanvasとList View
+- Team Policy settings
+- queue stateとelapsed
+- Claude CLI／Codex CLI packaged execution
+
+Proof: component、keyboard、accessibility、Playwright、packaged Computer Use evidence。
