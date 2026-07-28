@@ -31,6 +31,11 @@ import {
   type TeamExecutionJob,
 } from './team-execution-scheduler';
 import { ConnectionAdmissionController, type ConnectionWaitReason } from './connection-admission';
+import {
+  DEFAULT_RATE_LIMIT_RETRY_COUNT,
+  ProviderRateLimitedError,
+  rateLimitRetryDelayMs,
+} from './provider-rate-limit-retry';
 import type {
   AgentRecord,
   PersistenceClient,
@@ -685,6 +690,7 @@ export class TeamCoordinator {
     teamTaskId: string;
     executionId: string;
     doneCriteria: readonly string[];
+    resumeAttemptId?: string;
   }): Promise<void> {
     const execution = this.persistence.getTeamExecution(input.executionId);
     const content = execution.instruction.content;
@@ -700,7 +706,12 @@ export class TeamCoordinator {
         to: 'running',
         now: this.isoNow(),
       });
-      let attempt = this.persistence.createTeamAttempt(input.executionId, this.isoNow());
+      let attempt =
+        input.resumeAttemptId === undefined
+          ? this.persistence.createTeamAttempt(input.executionId, this.isoNow())
+          : this.persistence.getTeamAttempt(input.resumeAttemptId);
+      if (attempt.executionId !== input.executionId)
+        throw new Error('A resumed attempt must belong to the same execution');
       attempt = this.persistence.transitionTeamAttempt({
         attemptId: attempt.id,
         to: 'running',
@@ -817,6 +828,12 @@ export class TeamCoordinator {
         })
       )
         return;
+      if (
+        attemptId !== null &&
+        error instanceof ProviderRateLimitedError &&
+        this.requeueRateLimitedExecution(input, attemptId, worker, error)
+      )
+        return;
       this.persistence.transitionTeamTask(input.teamTaskId, 'failed', this.isoNow());
       if (attemptId !== null) {
         const attempt = this.persistence.getTeamAttempt(attemptId);
@@ -825,7 +842,8 @@ export class TeamCoordinator {
             attemptId,
             to: 'failed',
             now: this.isoNow(),
-            terminalReason: 'runtime_failure',
+            terminalReason:
+              error instanceof ProviderRateLimitedError ? 'rate_limited' : 'runtime_failure',
           });
       }
       const execution = this.persistence.getTeamExecution(input.executionId);
@@ -852,6 +870,60 @@ export class TeamCoordinator {
       this.emit(input.taskId, input.teamId);
       throw error;
     }
+  }
+
+  private requeueRateLimitedExecution(
+    input: {
+      taskId: string;
+      teamId: string;
+      leaderId: string;
+      workerId: string;
+      messageId: string;
+      messageSeq: number;
+      teamTaskId: string;
+      executionId: string;
+      doneCriteria: readonly string[];
+    },
+    attemptId: string,
+    worker: AgentRecord,
+    error: ProviderRateLimitedError,
+  ): boolean {
+    const attempt = this.persistence.getTeamAttempt(attemptId);
+    if (attempt.providerCallOrdinal >= DEFAULT_RATE_LIMIT_RETRY_COUNT) return false;
+    const waitingAttempt = this.persistence.recordTeamAttemptRateLimited(
+      attempt.id,
+      this.isoNow(),
+    );
+    const waitingExecution = this.persistence.getTeamExecution(input.executionId);
+    const delayMs = rateLimitRetryDelayMs(
+      attempt.providerCallOrdinal,
+      error.retryAfterMs,
+    );
+    const requeued = this.executionScheduler.requeueActive(input.executionId, {
+      executionId: input.executionId,
+      teamId: input.teamId,
+      teamLimit: this.persistence.getTeam(input.teamId).policy.maxConcurrentExecutions,
+      ...this.connectionSchedulingFields(waitingExecution, input.taskId, input.teamId),
+      notBeforeMs: this.now().getTime() + delayMs,
+      run: () =>
+        this.runScheduledExecution({
+          ...input,
+          resumeAttemptId: waitingAttempt.id,
+        }),
+    });
+    if (!requeued) throw new Error('Rate-limited execution left the Scheduler before retry');
+    const currentWorker = this.persistence
+      .getTeamSnapshot(input.teamId)
+      .agents.find(({ id }) => id === worker.id);
+    if (currentWorker?.state === 'busy')
+      this.persistence.transitionWorkerState(worker.id, 'waiting');
+    this.persistence.setWorkerCurrentActivity(
+      worker.id,
+      `Provider rate limit retry ${waitingAttempt.providerCallOrdinal}/${DEFAULT_RATE_LIMIT_RETRY_COUNT}`,
+      this.isoNow(),
+    );
+    this.emit(input.taskId, input.teamId);
+    return true;
   }
 
   private handleRequestedInterruption(input: {

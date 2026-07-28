@@ -151,15 +151,12 @@ if (runsWithElectronAbi)
         to: 'running',
         now: '2026-07-28T11:02:01.000Z',
       });
-      persistence.transitionTeamAttempt({
-        attemptId: first.id,
-        to: 'waiting_rate_limit',
-        now: '2026-07-28T11:02:02.000Z',
-      });
-      persistence.transitionTeamExecution({
-        executionId: execution.id,
-        to: 'waiting_rate_limit',
-        now: '2026-07-28T11:02:02.000Z',
+      expect(
+        persistence.recordTeamAttemptRateLimited(first.id, '2026-07-28T11:02:02.000Z'),
+      ).toMatchObject({
+        id: first.id,
+        state: 'waiting_rate_limit',
+        providerCallOrdinal: 1,
       });
       persistence.transitionTeamAttempt({
         attemptId: first.id,

@@ -2634,6 +2634,7 @@ export interface PersistenceClient {
     now: string;
     terminalReason?: string | null;
   }): TeamAttemptRecord;
+  recordTeamAttemptRateLimited(attemptId: string, now: string): TeamAttemptRecord;
   recoverInterruptedTeamExecutions(now: string): number;
   recordTeamV2Activity(input: {
     teamId: string;
@@ -4310,6 +4311,29 @@ export class SqlitePersistenceClient implements PersistenceClient {
         });
       }
       return next;
+    })();
+  }
+
+  recordTeamAttemptRateLimited(attemptId: string, now: string): TeamAttemptRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamAttempt(attemptId);
+      if (current.state !== 'running') throw new Error('Only a running attempt can be rate limited');
+      this.transitionTeamAttempt({ attemptId, to: 'waiting_rate_limit', now });
+      const updated = this.db
+        .prepare(
+          `UPDATE team_attempts
+           SET provider_call_ordinal = provider_call_ordinal + 1, updated_at = ?
+           WHERE id = ? AND state = 'waiting_rate_limit'`,
+        )
+        .run(now, attemptId);
+      if (updated.changes !== 1) throw new TeamConflictError();
+      const execution = this.getTeamExecution(current.executionId);
+      this.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'waiting_rate_limit',
+        now,
+      });
+      return this.getTeamAttempt(attemptId);
     })();
   }
 

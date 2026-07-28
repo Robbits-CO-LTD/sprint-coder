@@ -18,6 +18,7 @@ export type TeamExecutionJob = Readonly<{
     estimatedTokens: number;
   }>;
   onConnectionWait?(reason: ConnectionWaitReason): void;
+  notBeforeMs?: number;
   run(): Promise<void>;
 }>;
 
@@ -129,20 +130,31 @@ export class TeamExecutionScheduler {
       .map((job, index) => ({ job, index }))
       .filter(({ job }) => (activeByTeam.get(job.teamId) ?? 0) < job.teamLimit);
     if (teamAdmissible.length === 0) return -1;
-    if (this.connectionAdmission === undefined) return teamAdmissible[0]!.index;
-    const withConnection = teamAdmissible.filter(({ job }) => job.connection !== undefined);
-    if (withConnection.length === 0) return teamAdmissible[0]!.index;
+    const now = Date.now();
+    const timeAdmissible = teamAdmissible.filter(
+      ({ job }) => job.notBeforeMs === undefined || job.notBeforeMs <= now,
+    );
+    if (timeAdmissible.length === 0) {
+      const earliest = Math.min(
+        ...teamAdmissible.map(({ job }) => job.notBeforeMs ?? now),
+      );
+      this.scheduleRetry(Math.max(1, earliest - now));
+      return -1;
+    }
+    if (this.connectionAdmission === undefined) return timeAdmissible[0]!.index;
+    const withConnection = timeAdmissible.filter(({ job }) => job.connection !== undefined);
+    if (withConnection.length === 0) return timeAdmissible[0]!.index;
     const selected = this.connectionAdmission.selectNext(
       withConnection.map(({ job }) => toAdmissionCandidate(job)),
     );
     if (selected !== -1) return withConnection[selected]!.index;
-    const legacy = teamAdmissible.find(({ job }) => job.connection === undefined);
+    const legacy = timeAdmissible.find(({ job }) => job.connection === undefined);
     if (legacy !== undefined) return legacy.index;
     for (const { job } of withConnection) {
       const reason = this.connectionAdmission.waitReason(toAdmissionCandidate(job));
       if (reason !== null) job.onConnectionWait?.(reason);
     }
-    this.scheduleRetry();
+    this.scheduleRetry(250);
     return -1;
   }
 
@@ -162,12 +174,12 @@ export class TeamExecutionScheduler {
     }
   }
 
-  private scheduleRetry(): void {
+  private scheduleRetry(delayMs: number): void {
     if (this.retryTimer !== null) return;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.schedulePump();
-    }, 250);
+    }, delayMs);
     this.retryTimer.unref?.();
   }
 }
