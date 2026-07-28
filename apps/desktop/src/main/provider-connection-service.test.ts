@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { ProviderConnection } from '@sprint-coder/contracts';
 import { ProviderConnectionService } from './provider-connection-service';
 import { parseOpenAICredential } from './openai-provider-client';
+import {
+  MainProviderProfileRegistry,
+  parseOpenAICompatibleCredential,
+} from './provider-profile';
+import { PACK_A_PROVIDER_PROFILES } from './bundled-provider-profiles';
 
 describe('ProviderConnectionService', () => {
   it('stores credentials outside the Connection record and applies safe API limits', () => {
@@ -109,4 +114,46 @@ describe('ProviderConnectionService', () => {
     expect(stored).toHaveLength(1);
     expect(stored[0]).toContain('openrouter-secret');
   });
+
+  it.each(PACK_A_PROVIDER_PROFILES)(
+    'creates the $displayName Connection through the shared Profile path',
+    (profile) => {
+      const stored: string[] = [];
+      const profiles = new MainProviderProfileRegistry();
+      for (const candidate of PACK_A_PROVIDER_PROFILES) profiles.register(candidate);
+      const service = new ProviderConnectionService(
+        {
+          listProviderConnections: () => [],
+          createProviderConnection: (connection) => connection,
+        },
+        {
+          put: (secret) => {
+            stored.push(secret);
+            return 'provider-secret:00000000-0000-4000-8000-000000000004';
+          },
+          delete: () => undefined,
+        },
+        () => new Date('2026-07-28T00:00:00.000Z'),
+        () => 'connection-4',
+        profiles,
+      );
+
+      const connection = service.createProfile({
+        profileId: profile.id,
+        displayName: profile.displayName,
+        apiKey: 'profile-secret',
+      });
+
+      expect(connection).toMatchObject({
+        id: `${profile.id}:connection-4`,
+        providerId: profile.id,
+        runtimeKind: 'openai_compatible',
+        rateLimit: { mode: 'auto', maxConcurrentRequests: 2 },
+      });
+      expect(JSON.stringify(connection)).not.toContain('profile-secret');
+      expect(parseOpenAICompatibleCredential(stored[0] ?? '')).toEqual({
+        apiKey: 'profile-secret',
+      });
+    },
+  );
 });

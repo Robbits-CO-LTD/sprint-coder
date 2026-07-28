@@ -17,8 +17,11 @@ C1を拡大せず、将来Sliceへ分離する。
   protocol、model path、credential要件、error override、公式sourceを宣言する。model APIが
   返したcontext／output上限だけを`provider_api`として採用し、能力は推測せず`unknown`を維持する。
   contracts 29件、conformance 4件、対象lintがgreen
-- C1b: Mistral／DeepSeek／GroqCloudの公式Profile、Connection作成、Registry統合、UIを追加する。
-  fixture conformanceを先に通し、実API smokeはfinal gateへ留保する
+- C1b1: Mistral／DeepSeek／GroqCloudの公式Profile、Profile一覧、generic Connection作成、
+  Registry統合を完了。3社は専用Adapterを持たず、同じ`openai_compatible` Runtimeを使用する。
+  対象10件、contracts 29件、対象lintがgreen
+- C1b2: 設定UIへProfile一覧を追加する。fixture conformanceを先に通し、実API smokeは
+  final gateへ留保する
 
 ## C2 — Pack B
 

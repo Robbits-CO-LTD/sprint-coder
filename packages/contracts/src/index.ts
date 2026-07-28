@@ -1299,6 +1299,18 @@ export const providerProfileSchema = z
   })
   .strict();
 export type ProviderProfile = z.infer<typeof providerProfileSchema>;
+export const providerProfileConnectionCreateInputSchema = z
+  .object({
+    profileId: providerIdSchema,
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+    baseUrl: z.string().url().max(2_048).optional(),
+    accountId: z.string().trim().min(1).max(256).optional(),
+  })
+  .strict();
+export type ProviderProfileConnectionCreateInput = z.infer<
+  typeof providerProfileConnectionCreateInputSchema
+>;
 export const capabilitySourceSchema = z.enum(['provider_api', 'official_curated', 'unknown']);
 export type CapabilitySource = z.infer<typeof capabilitySourceSchema>;
 export type CatalogValue<T> = Readonly<{
@@ -2005,6 +2017,7 @@ export interface SprintCoderApi {
   };
   providers: {
     listConnections(): Promise<ProviderConnection[]>;
+    listProfiles(): Promise<ProviderProfile[]>;
     createOpenAIConnection(input: OpenAIConnectionCreateInput): Promise<ProviderConnection>;
     createOpenRouterConnection(input: OpenRouterConnectionCreateInput): Promise<ProviderConnection>;
     createAnthropicConnection(input: AnthropicConnectionCreateInput): Promise<ProviderConnection>;
@@ -2012,6 +2025,9 @@ export interface SprintCoderApi {
       input: GeminiConnectionCreateInput,
     ): Promise<ProviderConnection>;
     createXAIConnection(input: XAIConnectionCreateInput): Promise<ProviderConnection>;
+    createProfileConnection(
+      input: ProviderProfileConnectionCreateInput,
+    ): Promise<ProviderConnection>;
     verifyConnection(connectionId: string): Promise<ProviderConnection>;
   };
   permissions: {
@@ -2099,11 +2115,13 @@ export const IPC_CHANNELS = {
   modelsCatalogQuery: 'sprint-coder:models:catalog-query',
   modelsSetSelection: 'sprint-coder:models:set-selection',
   providersListConnections: 'sprint-coder:providers:list-connections',
+  providersListProfiles: 'sprint-coder:providers:list-profiles',
   providersCreateOpenAIConnection: 'sprint-coder:providers:create-openai-connection',
   providersCreateOpenRouterConnection: 'sprint-coder:providers:create-openrouter-connection',
   providersCreateAnthropicConnection: 'sprint-coder:providers:create-anthropic-connection',
   providersCreateGeminiConnection: 'sprint-coder:providers:create-gemini-connection',
   providersCreateXAIConnection: 'sprint-coder:providers:create-xai-connection',
+  providersCreateProfileConnection: 'sprint-coder:providers:create-profile-connection',
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',

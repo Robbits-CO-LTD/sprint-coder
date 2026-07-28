@@ -6,7 +6,7 @@
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
   P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b、
   UI U0/U1a/U1b/U1c/U2a/U3a、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5、P6、
-  Compatibility C1a完了
+  Compatibility C1a/C1b1完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -202,6 +202,11 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   公式sourceを所有する。Chat Completions SSEのtext／reasoning／tool／usage／resolutionと429を
   canonical eventへ正規化し、custom Base URLはHTTPSまたはloopback HTTPだけを許可する。
   contracts 29件、conformance 4件、対象lintはgreen。実Provider登録はC1bへ分離した。
+- Compatibility C1b1でMistral／DeepSeek／GroqCloudの公式Profileを登録し、Profile一覧と
+  generic Connection作成をMain／Preload IPCへ接続した。3社は専用Adapterを持たず、同じ
+  `openai_compatible` Runtimeへ解決される。公式source URLとreview日時をProfileへ保存し、
+  secretはMain-only storage、外部APIの初期同時上限は2を維持する。対象10件、contracts 29件、
+  対象lintはgreen。設定UIはC1b2へ分離した。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。

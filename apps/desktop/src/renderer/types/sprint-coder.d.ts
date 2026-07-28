@@ -633,6 +633,7 @@ export interface SprintCoderApi {
   };
   providers: {
     listConnections(): Promise<import('@sprint-coder/contracts').ProviderConnection[]>;
+    listProfiles(): Promise<import('@sprint-coder/contracts').ProviderProfile[]>;
     createOpenAIConnection(
       input: import('@sprint-coder/contracts').OpenAIConnectionCreateInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
@@ -647,6 +648,9 @@ export interface SprintCoderApi {
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
     createXAIConnection(
       input: import('@sprint-coder/contracts').XAIConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createProfileConnection(
+      input: import('@sprint-coder/contracts').ProviderProfileConnectionCreateInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
     verifyConnection(
       connectionId: string,

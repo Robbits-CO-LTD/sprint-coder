@@ -45,6 +45,8 @@ import {
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerProfileConnectionCreateInputSchema,
+  providerProfileSchema,
   connectionIdSchema,
   runtimeSetInputSchema,
   runtimeSettingsGetInputSchema,
@@ -185,6 +187,9 @@ import {
 import { XAIProviderClient, parseXAICredential } from './xai-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
 import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
+import { MainProviderProfileRegistry, parseOpenAICompatibleCredential } from './provider-profile';
+import { PACK_A_PROVIDER_PROFILES } from './bundled-provider-profiles';
+import { OpenAICompatibleProviderClient } from './openai-compatible-provider-client';
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
@@ -238,6 +243,7 @@ export class IpcRouter {
   private readonly skillSettings: SkillSettingsService;
   private readonly modelCatalog = new ModelCatalogService();
   private readonly providerRegistry = new MainProviderRegistry();
+  private readonly providerProfiles = new MainProviderProfileRegistry();
   private readonly providerVerification: ProviderVerificationService;
   private readonly providerConnections: ProviderConnectionService;
   private teamSkillReady = false;
@@ -253,6 +259,22 @@ export class IpcRouter {
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),
     );
+    for (const profile of PACK_A_PROVIDER_PROFILES) this.providerProfiles.register(profile);
+    const compatible = new OpenAICompatibleProviderClient(
+      this.providerProfiles,
+      (connection) => {
+        if (connection.secretReference === null)
+          throw new Error('Provider Profile Connection has no secret reference');
+        return parseOpenAICompatibleCredential(
+          providerSecrets.get(connection.secretReference),
+        );
+      },
+    );
+    this.providerRegistry.register({
+      runtimeKind: 'openai_compatible',
+      providerId: null,
+      runtime: compatible,
+    });
     const openAI = new OpenAIProviderClient((connection) => {
       if (connection.secretReference === null)
         throw new Error('OpenAI Connection has no secret reference');
@@ -309,7 +331,13 @@ export class IpcRouter {
       this.persistence,
       this.providerRegistry,
     );
-    this.providerConnections = new ProviderConnectionService(this.persistence, providerSecrets);
+    this.providerConnections = new ProviderConnectionService(
+      this.persistence,
+      providerSecrets,
+      undefined,
+      undefined,
+      this.providerProfiles,
+    );
     this.skillSettings = new SkillSettingsService({
       homePath: process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'),
     });
@@ -621,6 +649,12 @@ export class IpcRouter {
       z.array(providerConnectionSchema),
       () => [...this.providerConnections.list()],
     );
+    this.handle(
+      IPC_CHANNELS.providersListProfiles,
+      emptyPayloadSchema,
+      z.array(providerProfileSchema),
+      () => [...this.providerProfiles.list()],
+    );
     this.handleMutation(
       IPC_CHANNELS.providersCreateOpenAIConnection,
       openAIConnectionCreateInputSchema,
@@ -692,6 +726,21 @@ export class IpcRouter {
           '',
           IPC_CHANNELS.providersCreateXAIConnection,
           () => this.providerConnections.createXAI(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateProfileConnection,
+      providerProfileConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateProfileConnection,
+          () => this.providerConnections.createProfile(input),
         ).value;
         return this.providerVerification.verify(created);
       },

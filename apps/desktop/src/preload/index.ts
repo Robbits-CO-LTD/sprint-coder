@@ -27,6 +27,8 @@ import {
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerProfileConnectionCreateInputSchema,
+  providerProfileSchema,
   connectionIdSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
@@ -367,6 +369,13 @@ const api: SprintCoderApi = {
         z.array(providerConnectionSchema),
         {},
       ),
+    listProfiles: () =>
+      invoke(
+        IPC_CHANNELS.providersListProfiles,
+        emptyPayloadSchema,
+        z.array(providerProfileSchema),
+        {},
+      ),
     createOpenAIConnection: (input) =>
       invoke(
         IPC_CHANNELS.providersCreateOpenAIConnection,
@@ -399,6 +408,13 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersCreateXAIConnection,
         xAIConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createProfileConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateProfileConnection,
+        providerProfileConnectionCreateInputSchema,
         providerConnectionSchema,
         input,
       ),
