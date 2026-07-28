@@ -3,7 +3,7 @@
 - 計画版: v2
 - 状態: planning
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
-  Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a完了
+  Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -115,6 +115,10 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   LeaderがTeamを自動展開し、数学／実装の2件の実Worker報告を受信・統合するpackaged E2Eが
   40.9秒でgreen。Team intentは1–8人と「N人体制」を認識し、全executionの終端report待ちも
   組み込みSkillとE2Eへ明記した。
+- Provider P0でCore後の実装を再調査し、Provider domain、二段階admission、Capability Catalog／
+  Picker、Profile／verification／secrets、legacy migrationをADR-003〜007としてAcceptedにした。
+  v35 identity列は新規dataへ有効だがpre-v35 rowのbackfillは未実装、Worker実行時のAgent別
+  selection利用も未接続であるため、P1Aの必須残件として明記した。
 - Core C2aでDB v40の監査イベントを表示専用Team Activity summaryへ正規化し、
   C2bで「誰を雇ったか」「誰へ任せたか」を含む全11 activity typeを通常Chat timelineへ
   永続履歴カードとして表示した。

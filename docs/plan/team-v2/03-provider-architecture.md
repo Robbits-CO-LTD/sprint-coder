@@ -72,4 +72,5 @@ conformance失敗時は次の順で処理し、ADRへ記録する。
 - Core connection ID先行導入の実績
 - Provider固有コードの依存方向
 
-詳細な調査項目と判断証拠は[ADR backlog](adrs/ADR-P0-BACKLOG.md)を正本とする。
+P0判断は[ADR index](adrs/README.md)のADR-003〜007、調査証拠は
+[current state](01-current-state.md)を正本とする。

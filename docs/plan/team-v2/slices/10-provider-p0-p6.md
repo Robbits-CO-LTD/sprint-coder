@@ -11,6 +11,18 @@
 | P5 | Gemini | OpenAI wire formatの強制 | multimodal／structured contract |
 | P6 | xAI | generic RuntimeのxAI分岐 | Grok catalog／error／usage contract |
 
+## P0 completion
+
+P0は2026-07-28にdocs-onlyで完了した。
+
+- [current state](../01-current-state.md)をCore後の実装へ更新
+- [ADR-003〜007](../adrs/README.md)をAccepted
+- v35 identity先行導入の成功とpre-v35 backfill残件を分離
+- global 8枠を保持する二段階admission、CLI除外、FIFO／round-robin／agingを確定
+- Main catalog query、1000+ fixture、feature flag並走を確定
+- Profile、24時間TTL、3秒preflight、Main-only Secret Storageを確定
+- 実API通信、有料probe、製品コード変更は実施していない
+
 ## Shared stop rule
 
 Sliceの受入条件がgreenになったら停止して証拠を報告する。隣接Provider、cleanup、将来の
