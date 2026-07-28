@@ -67,6 +67,18 @@ jobs:
       - name: Test
         run: npm run test
 
-      - name: Package smoke
-        working-directory: apps/desktop
-        run: npx electron-forge package
+      # The Playwright global setup creates a production Electron package before
+      # launching it, so this is both the package smoke and the shipped-app E2E
+      # gate. Real Claude/Codex/API smoke specs remain explicitly opt-in and are
+      # skipped in this credential-free matrix.
+      - name: Package and packaged E2E (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run e2e
+        env:
+          SPRINT_CODER_E2E_MODE: packaged
+
+      - name: Package and packaged E2E (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: npm run e2e
+        env:
+          SPRINT_CODER_E2E_MODE: packaged
