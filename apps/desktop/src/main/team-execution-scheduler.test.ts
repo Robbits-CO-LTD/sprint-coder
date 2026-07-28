@@ -3,6 +3,8 @@ import {
   TEAM_GLOBAL_EXECUTION_LIMIT,
   TeamExecutionScheduler,
 } from './team-execution-scheduler';
+import { ConnectionAdmissionController } from './connection-admission';
+import type { ProviderConnection } from '@sprint-coder/contracts';
 
 type Deferred = Readonly<{
   promise: Promise<void>;
@@ -26,6 +28,80 @@ async function settleScheduler(): Promise<void> {
 }
 
 describe('TeamExecutionScheduler', () => {
+  it('keeps global slots available when one external Connection is saturated', async () => {
+    const admission = new ConnectionAdmissionController(
+      () => Date.parse('2026-07-28T00:00:01.000Z'),
+    );
+    const providerConnection = (
+      id: string,
+      runtimeKind: ProviderConnection['runtimeKind'],
+      maxConcurrentRequests: number | null,
+    ): ProviderConnection => ({
+      id,
+      providerId: id.split(':')[0]!,
+      runtimeKind,
+      displayName: id,
+      enabled: true,
+      secretReference: null,
+      verification: {
+        status: runtimeKind === 'builtin_cli' ? 'not_required' : 'verified',
+        verifiedAt: null,
+        expiresAt: null,
+        message: null,
+      },
+      rateLimit: {
+        mode: runtimeKind === 'builtin_cli' ? 'bypass' : 'auto',
+        maxConcurrentRequests,
+        requestsPerMinute: null,
+        tokensPerMinute: null,
+        lastObservedRateLimitHeaders: null,
+      },
+      createdAt: '2026-07-28T00:00:00.000Z',
+      updatedAt: '2026-07-28T00:00:00.000Z',
+    });
+    for (const connection of [
+      providerConnection('openai:primary', 'official_api', 1),
+      providerConnection('anthropic:primary', 'official_api', 1),
+      providerConnection('builtin:claude-cli', 'builtin_cli', null),
+    ])
+      admission.configure(connection);
+    const scheduler = new TeamExecutionScheduler(4, admission);
+    const gates = [deferred(), deferred(), deferred(), deferred()];
+    const started: string[] = [];
+    const waiting: string[] = [];
+    for (const [index, connectionId] of [
+      'openai:primary',
+      'openai:primary',
+      'anthropic:primary',
+      'builtin:claude-cli',
+    ].entries())
+      scheduler.submit({
+        executionId: `execution-${index + 1}`,
+        teamId: `team-${index + 1}`,
+        teamLimit: 8,
+        connection: {
+          connectionId,
+          queueOrdinal: index + 1,
+          queuedAt: '2026-07-28T00:00:00.000Z',
+          estimatedTokens: 10,
+        },
+        onConnectionWait: (reason) => waiting.push(reason),
+        run: async () => {
+          started.push(`execution-${index + 1}`);
+          await gates[index]!.promise;
+        },
+      });
+
+    await settleScheduler();
+    expect(started).toEqual(['execution-1', 'execution-3', 'execution-4']);
+    expect(waiting).toContain('connection_concurrency');
+    gates[0]!.resolve();
+    await settleScheduler();
+    expect(started).toEqual(['execution-1', 'execution-3', 'execution-4', 'execution-2']);
+    for (const gate of gates.slice(1)) gate.resolve();
+    await settleScheduler();
+  });
+
   it('runs at most eight jobs and leaves queued jobs outside the active count', async () => {
     const scheduler = new TeamExecutionScheduler();
     const gates = Array.from({ length: 10 }, deferred);

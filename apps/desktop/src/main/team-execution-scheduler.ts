@@ -1,9 +1,23 @@
+import type { ProviderConnection } from '@sprint-coder/contracts';
+import type {
+  ConnectionAdmissionController,
+  ConnectionAdmissionCandidate,
+  ConnectionWaitReason,
+} from './connection-admission';
+
 export const TEAM_GLOBAL_EXECUTION_LIMIT = 8;
 
 export type TeamExecutionJob = Readonly<{
   executionId: string;
   teamId: string;
   teamLimit: number;
+  connection?: Readonly<{
+    connectionId: string;
+    queueOrdinal: number;
+    queuedAt: string;
+    estimatedTokens: number;
+  }>;
+  onConnectionWait?(reason: ConnectionWaitReason): void;
   run(): Promise<void>;
 }>;
 
@@ -27,10 +41,18 @@ export class TeamExecutionScheduler {
   private readonly requeueAfterRun = new Map<string, TeamExecutionJob>();
   private nextOrdinal = 1;
   private pumpScheduled = false;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private readonly globalLimit = TEAM_GLOBAL_EXECUTION_LIMIT) {
+  constructor(
+    private readonly globalLimit = TEAM_GLOBAL_EXECUTION_LIMIT,
+    private readonly connectionAdmission?: ConnectionAdmissionController,
+  ) {
     if (!Number.isSafeInteger(globalLimit) || globalLimit < 1)
       throw new Error('Team global execution limit must be a positive integer');
+  }
+
+  configureConnection(connection: ProviderConnection): void {
+    this.connectionAdmission?.configure(connection);
   }
 
   submit(job: TeamExecutionJob): void {
@@ -90,6 +112,8 @@ export class TeamExecutionScheduler {
       if (index === -1) return;
       const [job] = this.queued.splice(index, 1);
       if (job === undefined) return;
+      if (job.connection !== undefined)
+        this.connectionAdmission?.admit(toAdmissionCandidate(job));
       this.active.set(job.executionId, job);
       // The job owns durable failure recording. Admission control must still release its slot
       // without turning that already-recorded failure into an unhandled process rejection.
@@ -101,9 +125,25 @@ export class TeamExecutionScheduler {
     const activeByTeam = new Map<string, number>();
     for (const job of this.active.values())
       activeByTeam.set(job.teamId, (activeByTeam.get(job.teamId) ?? 0) + 1);
-    return this.queued.findIndex(
-      (job) => (activeByTeam.get(job.teamId) ?? 0) < job.teamLimit,
+    const teamAdmissible = this.queued
+      .map((job, index) => ({ job, index }))
+      .filter(({ job }) => (activeByTeam.get(job.teamId) ?? 0) < job.teamLimit);
+    if (teamAdmissible.length === 0) return -1;
+    if (this.connectionAdmission === undefined) return teamAdmissible[0]!.index;
+    const withConnection = teamAdmissible.filter(({ job }) => job.connection !== undefined);
+    if (withConnection.length === 0) return teamAdmissible[0]!.index;
+    const selected = this.connectionAdmission.selectNext(
+      withConnection.map(({ job }) => toAdmissionCandidate(job)),
     );
+    if (selected !== -1) return withConnection[selected]!.index;
+    const legacy = teamAdmissible.find(({ job }) => job.connection === undefined);
+    if (legacy !== undefined) return legacy.index;
+    for (const { job } of withConnection) {
+      const reason = this.connectionAdmission.waitReason(toAdmissionCandidate(job));
+      if (reason !== null) job.onConnectionWait?.(reason);
+    }
+    this.scheduleRetry();
+    return -1;
   }
 
   private async run(job: QueuedJob): Promise<void> {
@@ -111,6 +151,7 @@ export class TeamExecutionScheduler {
       await job.run();
     } finally {
       this.active.delete(job.executionId);
+      this.connectionAdmission?.release(job.executionId);
       const replacement = this.requeueAfterRun.get(job.executionId);
       if (replacement !== undefined) {
         this.requeueAfterRun.delete(job.executionId);
@@ -120,4 +161,22 @@ export class TeamExecutionScheduler {
       this.schedulePump();
     }
   }
+
+  private scheduleRetry(): void {
+    if (this.retryTimer !== null) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      this.schedulePump();
+    }, 250);
+    this.retryTimer.unref?.();
+  }
+}
+
+function toAdmissionCandidate(job: QueuedJob): ConnectionAdmissionCandidate {
+  if (job.connection === undefined) throw new Error('Scheduled job has no Connection admission');
+  return {
+    executionId: job.executionId,
+    teamId: job.teamId,
+    ...job.connection,
+  };
 }

@@ -25,11 +25,17 @@ import {
   type TeamEnvelope,
 } from '@sprint-coder/domain';
 import { killProcessTree } from './process-tree';
-import { TeamExecutionScheduler } from './team-execution-scheduler';
+import {
+  TEAM_GLOBAL_EXECUTION_LIMIT,
+  TeamExecutionScheduler,
+  type TeamExecutionJob,
+} from './team-execution-scheduler';
+import { ConnectionAdmissionController, type ConnectionWaitReason } from './connection-admission';
 import type {
   AgentRecord,
   PersistenceClient,
   TeamBudgetReservationRecord,
+  TeamExecutionRecord,
   TeamSnapshot,
   TeamV2ActivityRecord,
 } from './persistence';
@@ -161,6 +167,7 @@ export class TeamCoordinator {
     string,
     { liveOutput: string; reasoningActive: boolean }
   >();
+  private readonly executionScheduler: TeamExecutionScheduler;
 
   constructor(
     private readonly persistence: PersistenceClient,
@@ -168,8 +175,20 @@ export class TeamCoordinator {
     private readonly publish: Publish = () => undefined,
     private readonly now: () => Date = () => new Date(),
     private readonly deliveryTimeoutMs = DEFAULT_WORKER_DELIVERY_TIMEOUT_MS,
-    private readonly executionScheduler = new TeamExecutionScheduler(),
-  ) {}
+    executionScheduler?: TeamExecutionScheduler,
+  ) {
+    if (executionScheduler !== undefined) {
+      this.executionScheduler = executionScheduler;
+      return;
+    }
+    const admission = new ConnectionAdmissionController(() => this.now().getTime());
+    for (const connection of this.persistence.listProviderConnections())
+      admission.configure(connection);
+    this.executionScheduler = new TeamExecutionScheduler(
+      TEAM_GLOBAL_EXECUTION_LIMIT,
+      admission,
+    );
+  }
 
   private handleWorkerActivity(
     taskId: string,
@@ -916,6 +935,7 @@ export class TeamCoordinator {
         executionId: input.executionId,
         teamId: input.teamId,
         teamLimit: this.persistence.getTeam(input.teamId).policy.maxConcurrentExecutions,
+        ...this.connectionSchedulingFields(revised, input.taskId, input.teamId),
         run: () =>
           this.runScheduledExecution({
             taskId: input.taskId,
@@ -1029,10 +1049,12 @@ export class TeamCoordinator {
     executionId: string;
     doneCriteria: readonly string[];
   }): void {
+    const execution = this.persistence.getTeamExecution(input.executionId);
     this.executionScheduler.submit({
       executionId: input.executionId,
       teamId: input.teamId,
       teamLimit: input.teamLimit,
+      ...this.connectionSchedulingFields(execution, input.taskId, input.teamId),
       run: () =>
         this.runScheduledExecution({
           taskId: input.taskId,
@@ -1046,6 +1068,51 @@ export class TeamCoordinator {
           doneCriteria: input.doneCriteria,
         }),
     });
+  }
+
+  private connectionSchedulingFields(
+    execution: TeamExecutionRecord,
+    taskId: string,
+    teamId: string,
+  ):
+    | Pick<TeamExecutionJob, 'connection' | 'onConnectionWait'>
+    | Record<never, never> {
+    if (
+      execution.modelSelection.connectionId === null ||
+      execution.queueOrdinal === null ||
+      execution.queuedAt === null
+    )
+      return {};
+    const connection = this.persistence.getProviderConnection(
+      execution.modelSelection.connectionId,
+    );
+    this.executionScheduler.configureConnection(connection);
+    return {
+      connection: {
+        connectionId: connection.id,
+        queueOrdinal: execution.queueOrdinal,
+        queuedAt: execution.queuedAt,
+        estimatedTokens: executionEstimate.tokens,
+      },
+      onConnectionWait: (reason: ConnectionWaitReason) =>
+        this.markExecutionWaitingForConnection(taskId, teamId, execution.id, reason),
+    };
+  }
+
+  private markExecutionWaitingForConnection(
+    taskId: string,
+    teamId: string,
+    executionId: string,
+    _reason: ConnectionWaitReason,
+  ): void {
+    const execution = this.persistence.getTeamExecution(executionId);
+    if (execution.state !== 'queued') return;
+    this.persistence.transitionTeamExecution({
+      executionId,
+      to: 'waiting_rate_limit',
+      now: this.isoNow(),
+    });
+    this.emit(taskId, teamId);
   }
 
   /** True while a durable execution is queued/running or a legacy dispatch is busy. */
