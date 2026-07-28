@@ -60,8 +60,9 @@ Proof: deterministic Runtimeで8 parallel、depth、steer、crash／restart。
   後方互換の同期経路として維持する。
 - B3a完了: queued instruction revision、queued cancel、Schedulerからの取消、task/delivery終端化、
   Claude/Codex MCP tool公開。revised instructionがruntime開始時に解決されることをElectron ABIで検証。
-- B3b次着手: running executionのinterrupt-and-resume steerとcancel。
-- B3c後続: 再起動queue rehydrate。
+- B3b完了: running runtime停止、attempt 1 interrupted、同一execution IDのinstruction revisionと
+  attempt 2再開、running cancel終端化。active slot終了後だけrequeueするScheduler境界を検証。
+- B3c次着手: 再起動queue rehydrate。
   Manager MCP caller bindingはRuntime接続Sliceで行い、model-controlled引数からAgent
   identityを受け取らない。
 

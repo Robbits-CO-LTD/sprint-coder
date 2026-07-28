@@ -57,7 +57,7 @@ const TOOLS = [
   },
   {
     name: 'team_steer_execution',
-    description: 'Replace the instruction of a queued execution while preserving its audit history.',
+    description: 'Replace the instruction of a queued or running execution while preserving its execution ID and attempt history.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -70,7 +70,7 @@ const TOOLS = [
   },
   {
     name: 'team_cancel_execution',
-    description: 'Cancel a queued execution before it consumes a runtime slot.',
+    description: 'Cancel a queued or running execution by its execution ID.',
     inputSchema: {
       type: 'object',
       properties: { executionId: { type: 'string' } },

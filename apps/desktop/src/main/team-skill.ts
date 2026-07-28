@@ -20,8 +20,8 @@ Team利用が明示された依頼では、必ずMCPサーバー \`team\` の実
 4. 実際に届いたreportだけを統合する。存在しないWorker、未着report、行われていない議論を生成しない。
 5. blocked、needs_input、failed、canceledをcompletedへ読み替えない。
 
-待機中の指示を直す場合は \`team_steer_execution\`、不要になった待機中の作業を止める場合は
-\`team_cancel_execution\` をexecution ID付きで使う。
+待機中または実行中の指示を直す場合は \`team_steer_execution\`、不要になった作業を止める場合は
+\`team_cancel_execution\` をexecution ID付きで使う。実行中のsteerは同じexecutionの新attemptとして再開される。
 
 人数指定を守り、必要以上に採用しない。Team MCP、Skill、digest、context fragmentの検証に失敗した場合は、Teamを使ったように振る舞わずfail closedにする。
 `;

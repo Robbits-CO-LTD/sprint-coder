@@ -24,6 +24,7 @@ type QueuedJob = TeamExecutionJob & { ordinal: number };
 export class TeamExecutionScheduler {
   private readonly queued: QueuedJob[] = [];
   private readonly active = new Map<string, QueuedJob>();
+  private readonly requeueAfterRun = new Map<string, TeamExecutionJob>();
   private nextOrdinal = 1;
   private pumpScheduled = false;
 
@@ -51,6 +52,16 @@ export class TeamExecutionScheduler {
     const index = this.queued.findIndex((job) => job.executionId === executionId);
     if (index === -1) return false;
     this.queued.splice(index, 1);
+    return true;
+  }
+
+  requeueActive(executionId: string, replacement: TeamExecutionJob): boolean {
+    if (!this.active.has(executionId)) return false;
+    if (replacement.executionId !== executionId)
+      throw new Error('A resumed job must keep the same execution ID');
+    if (this.requeueAfterRun.has(executionId))
+      throw new Error('Execution already has a pending resume');
+    this.requeueAfterRun.set(executionId, replacement);
     return true;
   }
 
@@ -100,6 +111,12 @@ export class TeamExecutionScheduler {
       await job.run();
     } finally {
       this.active.delete(job.executionId);
+      const replacement = this.requeueAfterRun.get(job.executionId);
+      if (replacement !== undefined) {
+        this.requeueAfterRun.delete(job.executionId);
+        this.queued.push({ ...replacement, ordinal: this.nextOrdinal });
+        this.nextOrdinal += 1;
+      }
       this.schedulePump();
     }
   }

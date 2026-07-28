@@ -103,6 +103,53 @@ class BlockingWorkerRuntime extends TestWorkerRuntime {
   }
 }
 
+class InterruptibleWorkerRuntime extends TestWorkerRuntime {
+  readonly contents: Array<{ agentId: string; content: string }> = [];
+  private readonly pending = new Map<
+    string,
+    {
+      resolve(): void;
+      reject(error: Error): void;
+    }
+  >();
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+  }): Promise<WorkerRuntimeResult> {
+    this.contents.push({ agentId: input.worker.id, content: input.content });
+    await new Promise<void>((resolve, reject) => {
+      this.pending.set(input.worker.id, { resolve, reject });
+    }).finally(() => this.pending.delete(input.worker.id));
+    return {
+      claims: {
+        deliveryId: input.envelope.deliveryId,
+        sourceAgentId: input.envelope.sourceAgentId,
+        targetAgentId: input.envelope.targetAgentId,
+      },
+      completion: {
+        status: 'succeeded',
+        summary: `${input.worker.role}: ${input.content}`,
+        artifacts: [],
+        verification: [{ name: 'interruptible-runtime', outcome: 'pass' }],
+        risks: [],
+      },
+      usage: { costCents: 1, tokens: 2, timeMs: 3, toolCalls: 4 },
+    };
+  }
+
+  complete(agentId: string): void {
+    const pending = this.pending.get(agentId);
+    if (pending === undefined) throw new Error('Agent does not have a running execution');
+    pending.resolve();
+  }
+
+  override async stop(agentId: string): Promise<void> {
+    this.pending.get(agentId)?.reject(new Error('Worker execution stopped'));
+  }
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -345,6 +392,73 @@ if (runsWithElectronAbi)
         .messages.find(({ executionId }) => executionId === canceled.executionId);
       expect(canceledMessage).toBeDefined();
       expect(persistence.getTeamDelivery(canceledMessage!.id)?.state).toBe('failed');
+      persistence.close();
+    });
+
+    it('interrupts running executions for steer or cancel without changing execution identity', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Running execution control');
+      const runtime = new InterruptibleWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const workers = [];
+      for (const role of ['steered', 'canceled'])
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: role,
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          }),
+        );
+      const [steeredWorker, canceledWorker] = workers;
+      if (steeredWorker === undefined || canceledWorker === undefined)
+        throw new Error('Expected two workers');
+      const [steered, canceled] = await Promise.all([
+        coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: steeredWorker.id,
+          content: 'initial-steered',
+          doneCriteria: ['runtime completes'],
+        }),
+        coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: canceledWorker.id,
+          content: 'initial-canceled',
+          doneCriteria: ['runtime completes'],
+        }),
+      ]);
+      await waitFor(() => runtime.contents.length === 2);
+
+      await expect(
+        coordinator.steerExecution(task.id, steered.executionId, 'revised-running'),
+      ).resolves.toMatchObject({ executionId: steered.executionId, state: 'queued' });
+      await waitFor(
+        () =>
+          runtime.contents.filter(({ agentId }) => agentId === steeredWorker.id).length === 2,
+      );
+      await expect(
+        coordinator.cancelExecution(task.id, canceled.executionId),
+      ).resolves.toMatchObject({ executionId: canceled.executionId, state: 'canceled' });
+
+      expect(persistence.listTeamAttempts(steered.executionId)).toMatchObject([
+        { ordinal: 1, state: 'interrupted', terminalReason: 'steered' },
+        { ordinal: 2, state: 'running', terminalReason: null },
+      ]);
+      expect(persistence.listTeamAttempts(canceled.executionId)).toMatchObject([
+        { ordinal: 1, state: 'canceled', terminalReason: 'user_canceled' },
+      ]);
+      expect(
+        runtime.contents.filter(({ agentId }) => agentId === steeredWorker.id).map(({ content }) => content),
+      ).toEqual(['initial-steered', 'revised-running']);
+
+      runtime.complete(steeredWorker.id);
+      await waitFor(() => persistence.getTeamExecution(steered.executionId).state === 'completed');
+      expect(persistence.listTeamAttempts(steered.executionId)).toMatchObject([
+        { ordinal: 1, state: 'interrupted' },
+        { ordinal: 2, state: 'completed' },
+      ]);
+      expect(persistence.getTeamExecution(canceled.executionId).state).toBe('canceled');
       persistence.close();
     });
 

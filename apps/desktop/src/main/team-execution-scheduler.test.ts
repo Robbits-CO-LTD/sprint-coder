@@ -188,4 +188,40 @@ describe('TeamExecutionScheduler', () => {
     third.resolve();
     await settleScheduler();
   });
+
+  it('requeues an active execution only after its current run releases the slot', async () => {
+    const scheduler = new TeamExecutionScheduler(1);
+    const first = deferred();
+    const resumed = deferred();
+    const started: string[] = [];
+    scheduler.submit({
+      executionId: 'execution-1',
+      teamId: 'team-1',
+      teamLimit: 8,
+      run: async () => {
+        started.push('first-attempt');
+        await first.promise;
+      },
+    });
+    await settleScheduler();
+    expect(
+      scheduler.requeueActive('execution-1', {
+        executionId: 'execution-1',
+        teamId: 'team-1',
+        teamLimit: 8,
+        run: async () => {
+          started.push('resumed-attempt');
+          await resumed.promise;
+        },
+      }),
+    ).toBe(true);
+    expect(scheduler.snapshot()).toMatchObject({ activeCount: 1, queuedExecutionIds: [] });
+
+    first.resolve();
+    await settleScheduler();
+    expect(started).toEqual(['first-attempt', 'resumed-attempt']);
+    expect(scheduler.snapshot().activeCount).toBe(1);
+    resumed.resolve();
+    await settleScheduler();
+  });
 });
