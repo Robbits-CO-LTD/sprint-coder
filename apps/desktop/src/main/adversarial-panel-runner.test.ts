@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   extractJsonObject,
-  runAdversarialPanel,
+  runAdversarialPanel as runPanelForTask,
   type SkepticRunner,
 } from './adversarial-panel-runner';
 import type { SkepticFinding } from './adversarial-panel';
@@ -19,6 +19,11 @@ const refusal = (detail: string) =>
     evidence: 'criterion 1 unmet',
     confidence: 'medium',
   });
+
+type PanelInput = Parameters<typeof runPanelForTask>[0];
+
+const runAdversarialPanel = (input: Omit<PanelInput, 'taskId'>) =>
+  runPanelForTask({ taskId: 'task-under-test', ...input });
 
 /** Answers each skeptic from a list, by index. */
 const scripted =
@@ -140,13 +145,13 @@ describe('running the panel', () => {
     expect(peak).toBe(3);
   });
 
-  it('counts a skeptic that answered in the wrong shape as a refute', async () => {
+  it('counts a malformed answer as a refute without overriding a strict majority', async () => {
     const run = await runAdversarialPanel({
       runner: scripted([APPROVAL, 'sure, looks good to me!', APPROVAL]),
       prompt: 'p',
     });
     expect(run.verdicts[1]).toMatchObject({ source: 'degraded', refuted: true });
-    expect(run.result.achieved).toBe(false);
+    expect(run.result.achieved).toBe(true);
   });
 
   it('counts a refute with nothing to fix as unusable rather than as a refusal to act on', async () => {
@@ -156,14 +161,14 @@ describe('running the panel', () => {
     expect(run.failureClass).toBe('infrastructure');
   });
 
-  it('counts a skeptic that threw as a refute rather than failing the round', async () => {
+  it('counts a thrown skeptic as a refute without overriding a strict majority', async () => {
     const runner: SkepticRunner = async ({ skepticIndex }) => {
       if (skepticIndex === 1) throw new Error('provider exploded');
       return APPROVAL;
     };
     const run = await runAdversarialPanel({ runner, prompt: 'p' });
     expect(run.verdicts[1]).toMatchObject({ source: 'degraded', refuted: true });
-    expect(run.result.achieved).toBe(false);
+    expect(run.result.achieved).toBe(true);
   });
 
   it('never rejects, however badly every skeptic fails', async () => {

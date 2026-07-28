@@ -35,6 +35,8 @@ import {
  * will not be counted.
  */
 export type SkepticRunner = (input: {
+  /** The Task whose work and policy boundary are being verified. */
+  taskId: string;
   skepticIndex: number;
   prompt: string;
   signal: AbortSignal;
@@ -53,6 +55,7 @@ export type PanelRun = Readonly<{
 export const DEFAULT_SKEPTIC_TIMEOUT_MS = 120_000;
 
 export async function runAdversarialPanel(input: {
+  taskId: string;
   runner: SkepticRunner;
   prompt: string;
   panelSize?: number;
@@ -63,7 +66,7 @@ export async function runAdversarialPanel(input: {
   const timeoutMs = input.timeoutMs ?? DEFAULT_SKEPTIC_TIMEOUT_MS;
   const verdicts = await Promise.all(
     Array.from({ length: size }, (_unused, skepticIndex) =>
-      runOneSkeptic(input.runner, input.prompt, skepticIndex, timeoutMs),
+      runOneSkeptic(input.runner, input.taskId, input.prompt, skepticIndex, timeoutMs),
     ),
   );
   const result = aggregatePanel(verdicts);
@@ -77,6 +80,7 @@ export async function runAdversarialPanel(input: {
 
 async function runOneSkeptic(
   runner: SkepticRunner,
+  taskId: string,
   prompt: string,
   skepticIndex: number,
   timeoutMs: number,
@@ -87,7 +91,7 @@ async function runOneSkeptic(
   timer.unref?.();
   try {
     const answer = await Promise.race([
-      runner({ skepticIndex, prompt, signal: controller.signal }),
+      runner({ taskId, skepticIndex, prompt, signal: controller.signal }),
       deadline(controller.signal),
     ]);
     if (answer === TIMED_OUT) return degradedVerdict(skepticIndex, 'timeout');

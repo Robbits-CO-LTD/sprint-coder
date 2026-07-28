@@ -13,10 +13,9 @@
 //     of passing broken work is far higher than one more round. The bias lives here, at the point
 //     where the evidence went missing, rather than in the aggregator which only counts.
 //
-//   - **The resumed skeptic cannot carry an approval.** Skeptic 0 is reused across rounds so it
-//     remembers what it already objected to, and that memory makes it the most likely to wave work
-//     through. Its *approval* is therefore excluded from the quorum while its *refute* still counts.
-//     Approval needs a strict majority of the cold panel — the skeptics that came to it fresh.
+//   - **Every seat is independent.** The runtime starts a fresh turn for every skeptic and every
+//     round. No seat receives a gatekeeper privilege that its runtime cannot actually provide.
+//     Approval therefore needs a strict majority of all distinct seats.
 //
 //   - **The bar must not rise between rounds.** A panel free to raise a new objection every round
 //     never converges, and correct work fails for reasons nobody stated when it could still have
@@ -45,7 +44,7 @@ export type SkepticFinding = Readonly<{
 }>;
 
 export type SkepticVerdict = Readonly<{
-  /** 0 is the resumed gatekeeper; 1 and above are the cold panel. */
+  /** Stable seat number within one panel run. Every seat is a fresh skeptic. */
   skepticIndex: number;
   refuted: boolean;
   findings: readonly SkepticFinding[];
@@ -59,9 +58,9 @@ export type SkepticVerdict = Readonly<{
 export type PanelResult = Readonly<{
   total: number;
   refutedCount: number;
-  /** Whether the cold panel's approval majority was reached, before the decisive-refute override. */
+  /** Whether a strict majority of distinct seats approved. */
   quorumAchieved: boolean;
-  /** The outcome: quorum reached AND no decisive refute from the gatekeeper. */
+  /** The outcome of the strict-majority vote. */
   achieved: boolean;
   /** Deduplicated, sanitised, capped — what the implementer is told to fix. */
   gaps: readonly SkepticFinding[];
@@ -69,7 +68,7 @@ export type PanelResult = Readonly<{
   blocking: SkepticBlocking;
 }>;
 
-/** Three gives a real majority: one rubber-stamp and one false refute both fail to decide. */
+/** Three gives a real majority: one false refute cannot block two corroborating approvals. */
 export const PANEL_SIZE_DEFAULT = 3;
 export const PANEL_SIZE_MIN = 1;
 /** Past five is cost without resolution; the votes stop changing the answer. */
@@ -163,14 +162,9 @@ export function parseSkepticVerdict(skepticIndex: number, value: unknown): Skept
 /**
  * Counts the panel.
  *
- * Approval needs a strict majority of the *cold* panel — skeptic 0's approval is excluded, its
- * refute is not. The bar is taken from the cold panel's size rather than the total so it stays a
- * real majority even when skeptic 0 is missing from the results entirely; deriving it from the total
- * would silently become a plurality in that case. A sole judge (`total <= 1`) simply decides.
- *
- * A high-confidence refute from skeptic 0 overrides the count: it is the member that has seen every
- * previous round, so when it is certain the work is still broken, a fresh majority that disagrees is
- * more likely to be missing history than to be right.
+ * Approval needs a strict majority of all distinct seats. A two-seat panel therefore needs both
+ * approvals, while the default three-seat panel tolerates one false refute. A sole judge simply
+ * decides.
  *
  * One vote per skeptic is the premise the majority rests on, so a repeated index is dropped rather
  * than counted twice: two copies of one approval would otherwise manufacture a quorum no second
@@ -192,24 +186,14 @@ export function aggregatePanel(verdicts: readonly SkepticVerdict[]): PanelResult
     });
 
   const refutedCount = distinct.filter((verdict) => verdict.refuted).length;
-  let quorumAchieved: boolean;
-  if (total <= 1) {
-    quorumAchieved = refutedCount === 0;
-  } else {
-    const cold = distinct.filter((verdict) => verdict.skepticIndex >= 1);
-    const coldApprovals = cold.filter((verdict) => !verdict.refuted).length;
-    quorumAchieved = coldApprovals >= Math.floor(cold.length / 2) + 1;
-  }
-
-  const decisiveRefute = distinct.some(
-    (verdict) => verdict.skepticIndex === 0 && verdict.refuted && verdict.confidence === 'high',
-  );
+  const approvals = total - refutedCount;
+  const quorumAchieved = approvals >= Math.floor(total / 2) + 1;
 
   return Object.freeze({
     total,
     refutedCount,
     quorumAchieved,
-    achieved: quorumAchieved && !decisiveRefute,
+    achieved: quorumAchieved,
     gaps: collectGaps(distinct),
     blocking: panelBlocking(distinct),
   });

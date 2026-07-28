@@ -75,16 +75,18 @@ export type SkepticRuntimeDeps = Readonly<{
  * checked, and none of them are grounds to call it done.
  */
 export function createSkepticRunner(deps: SkepticRuntimeDeps): SkepticRunner {
-  return async ({ skepticIndex, prompt, signal }) => {
+  return async ({ taskId: sourceTaskId, skepticIndex, prompt, signal }) => {
     const choice = deps.selectRuntime();
     if (choice === null) throw new Error('No runtime is configured to verify with');
 
     // Each skeptic is its own turn, so one failing or being cancelled cannot disturb another, and
-    // the runtime never sees two skeptics as the same conversation.
-    const taskId = verificationTaskId(skepticIndex);
+    // the runtime never sees two skeptics as the same conversation. Policy, workspace and context
+    // still come from the source Task: the synthetic runtime id is only transcript isolation.
+    const runtimeTaskId = verificationTaskId(sourceTaskId, skepticIndex);
     const turnId = deps.newTurnId();
-    const context = deps.contextFor(taskId);
-    if (!deps.authorizeEgress(choice.kind, taskId, turnId, prompt, context))
+    const workspacePath = deps.workspaceFor(sourceTaskId);
+    const context = deps.contextFor(sourceTaskId);
+    if (!deps.authorizeEgress(choice.kind, sourceTaskId, turnId, prompt, context))
       throw new Error(`Verification egress was denied for ${choice.kind}`);
 
     const buffer: string[] = [];
@@ -110,18 +112,18 @@ export function createSkepticRunner(deps: SkepticRuntimeDeps): SkepticRunner {
       settle = resolve;
       const onAbort = () => {
         // Tell the provider to stop. The panel has already stopped waiting, so a turn left running
-        // would be spend with no reader.
-        client.cancel(taskId, turnId);
+        // would be spent with no reader.
+        client.cancel(runtimeTaskId, turnId);
         resolve({ error: new Error('Verification exceeded its deadline') });
       };
       signal.addEventListener('abort', onAbort, { once: true });
       client.start(
-        taskId,
+        runtimeTaskId,
         turnId,
         prompt,
-        deps.workspaceFor(taskId),
+        workspacePath,
         choice.model,
-        deps.catalogFor(choice.kind, deps.workspaceFor(taskId)),
+        deps.catalogFor(choice.kind, workspacePath),
         context,
         undefined,
         undefined,
@@ -143,6 +145,6 @@ export function createSkepticRunner(deps: SkepticRuntimeDeps): SkepticRunner {
  * completion it is judging: a skeptic's turn must never land in the transcript the implementer
  * reads, or the next round would see the panel's own reasoning as prior context.
  */
-function verificationTaskId(skepticIndex: number): string {
-  return `verification:skeptic-${skepticIndex}`;
+function verificationTaskId(sourceTaskId: string, skepticIndex: number): string {
+  return `verification:${sourceTaskId}:skeptic-${skepticIndex}`;
 }

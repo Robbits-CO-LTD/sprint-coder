@@ -22,6 +22,8 @@ function harness(overrides: Partial<SkepticRuntimeDeps> = {}) {
   const starts: StartCall[] = [];
   const cancels: { taskId: string; turnId: string }[] = [];
   const egress: { kind: string; taskId: string; turnId: string; prompt: string }[] = [];
+  const workspaceLookups: string[] = [];
+  const contextLookups: string[] = [];
   let events: SkepticClientEvents | null = null;
   let turn = 0;
 
@@ -41,9 +43,15 @@ function harness(overrides: Partial<SkepticRuntimeDeps> = {}) {
       return client;
     },
     selectRuntime: () => ({ kind: 'claude', model: 'sonnet' }),
-    workspaceFor: () => '/ws',
+    workspaceFor: (taskId) => {
+      workspaceLookups.push(taskId);
+      return `/ws/${taskId}`;
+    },
     catalogFor: () => ({}),
-    contextFor: () => context,
+    contextFor: (taskId) => {
+      contextLookups.push(taskId);
+      return context;
+    },
     authorizeEgress: (kind, taskId, turnId, prompt) => {
       egress.push({ kind, taskId, turnId, prompt });
       return true;
@@ -52,11 +60,21 @@ function harness(overrides: Partial<SkepticRuntimeDeps> = {}) {
     ...overrides,
   };
 
+  const runner = createSkepticRunner(deps);
   return {
-    run: createSkepticRunner(deps),
+    run: (
+      input: Omit<Parameters<typeof runner>[0], 'taskId'> & {
+        taskId?: string;
+      },
+    ) => {
+      const { taskId = 'source-task', ...rest } = input;
+      return runner({ taskId, ...rest });
+    },
     starts,
     cancels,
     egress,
+    workspaceLookups,
+    contextLookups,
     complete: (turnId: string, text: string) => {
       events?.onEvent('t', turnId, { type: 'delta', delta: text });
       events?.onEvent('t', turnId, { type: 'completed' });
@@ -106,6 +124,22 @@ describe('running a skeptic on a real runtime', () => {
     await second;
     expect(h.starts.map((call) => call.turnId)).toEqual(['turn-1', 'turn-2']);
     expect(new Set(h.starts.map((call) => call.taskId)).size).toBe(2);
+  });
+
+  it('keeps equal skeptic seats isolated across source Tasks', async () => {
+    const h = harness();
+    const first = h.run({ taskId: 'task-a', skepticIndex: 0, prompt: 'p', signal: never });
+    await Promise.resolve();
+    h.complete('turn-1', 'a');
+    await first;
+    const second = h.run({ taskId: 'task-b', skepticIndex: 0, prompt: 'p', signal: never });
+    await Promise.resolve();
+    h.complete('turn-2', 'b');
+    await second;
+    expect(h.starts.map((call) => call.taskId)).toEqual([
+      'verification:task-a:skeptic-0',
+      'verification:task-b:skeptic-0',
+    ]);
   });
 
   it('keeps verification out of the Task whose work it judges', async () => {
@@ -161,7 +195,14 @@ describe('refusing to verify rather than pretending to', () => {
     const h = harness();
     const pending = h.run({ skepticIndex: 0, prompt: 'the exact prompt', signal: never });
     await Promise.resolve();
-    expect(h.egress[0]).toMatchObject({ kind: 'claude', prompt: 'the exact prompt' });
+    expect(h.egress[0]).toMatchObject({
+      kind: 'claude',
+      taskId: 'source-task',
+      prompt: 'the exact prompt',
+    });
+    expect(h.workspaceLookups).toEqual(['source-task']);
+    expect(h.contextLookups).toEqual(['source-task']);
+    expect(h.starts[0]?.workspacePath).toBe('/ws/source-task');
     h.complete('turn-1', '{}');
     await pending;
   });

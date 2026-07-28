@@ -47,6 +47,7 @@ const always =
 
 async function verify(runner: SkepticRunner, previousRounds: readonly AssuranceRound[]) {
   const run = await runAdversarialPanel({
+    taskId,
     runner,
     prompt: buildSkepticPrompt({
       objective: 'add a CSV parser',
@@ -104,11 +105,10 @@ describe('an adversarial panel driving the assurance state machine', () => {
     expect(decideCompletion(sealed, evidence).allowed).toBe(true);
   });
 
-  it('does not let a Turn complete on a panel that only half agreed', async () => {
+  it('lets a strict majority complete despite one false refute', async () => {
     const runner: SkepticRunner = async ({ skepticIndex }) =>
       skepticIndex === 2 ? answers.refuse : answers.approve;
     const { round } = await verify(runner, []);
-    // Cold panel is skeptics 1 and 2, one each way — no majority, so no completion.
-    expect(round.decision).toBe('repair');
+    expect(round.decision).toBe('complete');
   });
 });

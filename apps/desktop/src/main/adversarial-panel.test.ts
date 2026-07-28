@@ -151,9 +151,9 @@ describe('degraded votes', () => {
     expect(verdict.findings).toHaveLength(1);
   });
 
-  it('does not let a lost skeptic shrink the panel into a single deciding vote', () => {
+  it('lets two corroborating approvals outvote one lost skeptic', () => {
     const result = aggregatePanel([approve(0), approve(1), degradedVerdict(2, 'transport')]);
-    expect(result.achieved).toBe(false);
+    expect(result.achieved).toBe(true);
   });
 });
 
@@ -167,24 +167,24 @@ describe('panel aggregation', () => {
     expect(aggregatePanel([])).toMatchObject({ achieved: false, total: 0 });
   });
 
-  it('approves on a strict majority of the cold panel', () => {
+  it('approves on a strict majority of all seats', () => {
     expect(aggregatePanel([refute(0), approve(1), approve(2)]).achieved).toBe(true);
   });
 
-  it('does not let the resumed gatekeeper carry an approval the cold panel did not reach', () => {
+  it('does not approve when only one of three seats approves', () => {
     const result = aggregatePanel([approve(0), refute(1), refute(2)]);
     expect(result.quorumAchieved).toBe(false);
     expect(result.achieved).toBe(false);
   });
 
-  it('still counts the gatekeeper refute toward the reported total', () => {
+  it('counts every refute toward the reported total', () => {
     expect(aggregatePanel([refute(0), approve(1), approve(2)]).refutedCount).toBe(1);
   });
 
-  it('lets a confident gatekeeper refute override a cold-panel approval', () => {
+  it('does not give one seat an override the runtime cannot provide', () => {
     const result = aggregatePanel([refute(0, { confidence: 'high' }), approve(1), approve(2)]);
     expect(result.quorumAchieved).toBe(true);
-    expect(result.achieved).toBe(false);
+    expect(result.achieved).toBe(true);
   });
 
   it('keeps a majority bar as the panel grows', () => {
@@ -192,14 +192,15 @@ describe('panel aggregation', () => {
     expect(aggregatePanel([approve(0), approve(1), refute(2), refute(3)]).achieved).toBe(false);
   });
 
-  it('stays a true majority when the gatekeeper is absent from the results', () => {
+  it('requires both approvals in a two-seat panel', () => {
+    expect(aggregatePanel([approve(0), approve(1)]).achieved).toBe(true);
     expect(aggregatePanel([approve(1), refute(2)]).achieved).toBe(false);
   });
 
   it('does not let a repeated skeptic vote twice into a quorum nobody else reached', () => {
     const result = aggregatePanel([refute(0), approve(1), approve(1), refute(2)]);
     expect(result.total).toBe(3);
-    // The cold panel is skeptics 1 and 2, one each way — not a majority.
+    // There is one distinct approval and two distinct refutes.
     expect(result.achieved).toBe(false);
   });
 
