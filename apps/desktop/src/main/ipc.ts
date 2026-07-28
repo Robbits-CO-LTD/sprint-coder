@@ -42,9 +42,12 @@ import {
   modelCatalogQueryResultSchema,
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
+  type ModelSelection,
+  type NormalizedProviderUsage,
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   connectionIdSchema,
@@ -100,6 +103,8 @@ import {
   type AccessPreset,
   type CanonicalProviderEvent,
   type CodexModelOption,
+  type ProviderExecutionRequest,
+  type ProviderMessageToolCall,
   type ProviderModel,
   type PublicError,
   type RuntimeKind,
@@ -135,6 +140,7 @@ import {
 
 /** sha256 of nothing, used when a refusal has no file to hash. */
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
+const MAX_PROVIDER_LEADER_ROUNDS = 32;
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
@@ -152,13 +158,20 @@ import {
 } from './provider-egress';
 import { ReasoningBatcher } from './reasoning-batcher';
 import { createStreamingSecretRedactor } from './secret-redactor';
+import { secureLogger } from './secure-logger';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
 import {
   isTeamScenarioInput,
   LEADER_MCP_SYSTEM_PROMPT,
+  LEADER_PROVIDER_TOOLS,
+  MANAGER_PROVIDER_TOOLS,
   MANAGER_MCP_SYSTEM_PROMPT,
+  WORKER_MCP_SYSTEM_PROMPT,
+  WORKER_PROVIDER_TOOLS,
+  executeTeamTool,
+  type ExecuteTeamToolOptions,
 } from './team-tools';
 import {
   attachBuiltinTeamSkill,
@@ -180,10 +193,7 @@ import { ProviderVerificationService } from './provider-verification';
 import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
 import { OpenRouterCatalogClient } from './openrouter-provider-client';
 import { AnthropicProviderClient, parseAnthropicCredential } from './anthropic-provider-client';
-import {
-  GeminiProviderClient,
-  parseGeminiCredential,
-} from './gemini-provider-client';
+import { GeminiProviderClient, parseGeminiCredential } from './gemini-provider-client';
 import { XAIProviderClient, parseXAICredential } from './xai-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
 import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
@@ -260,16 +270,11 @@ export class IpcRouter {
       new ElectronProviderSecretCipher(),
     );
     for (const profile of BUNDLED_PROVIDER_PROFILES) this.providerProfiles.register(profile);
-    const compatible = new OpenAICompatibleProviderClient(
-      this.providerProfiles,
-      (connection) => {
-        if (connection.secretReference === null)
-          throw new Error('Provider Profile Connection has no secret reference');
-        return parseOpenAICompatibleCredential(
-          providerSecrets.get(connection.secretReference),
-        );
-      },
-    );
+    const compatible = new OpenAICompatibleProviderClient(this.providerProfiles, (connection) => {
+      if (connection.secretReference === null)
+        throw new Error('Provider Profile Connection has no secret reference');
+      return parseOpenAICompatibleCredential(providerSecrets.get(connection.secretReference));
+    });
     this.providerRegistry.register({
       runtimeKind: 'openai_compatible',
       providerId: null,
@@ -308,9 +313,7 @@ export class IpcRouter {
     const gemini = new GeminiProviderClient((connection) => {
       if (connection.secretReference === null)
         throw new Error('Gemini Connection has no secret reference');
-      return parseGeminiCredential(
-        providerSecrets.get(connection.secretReference),
-      );
+      return parseGeminiCredential(providerSecrets.get(connection.secretReference));
     });
     this.providerRegistry.register({
       runtimeKind: 'official_api',
@@ -368,7 +371,10 @@ export class IpcRouter {
           now: new Date().toISOString(),
         }).allowed;
       },
-      teamMcpFor: (worker, turnId) => this.registerManagerMcp(turnId, worker.taskId, worker.id),
+      teamMcpFor: (worker, turnId) =>
+        worker.canDelegate
+          ? this.registerManagerMcp(turnId, worker.taskId, worker.id)
+          : this.registerWorkerMcp(turnId, worker.taskId, worker.id),
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
     });
@@ -389,6 +395,18 @@ export class IpcRouter {
           },
           providerId,
         ).allowed,
+      managerGuidance: MANAGER_MCP_SYSTEM_PROMPT,
+      managerTools: MANAGER_PROVIDER_TOOLS,
+      workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
+      workerTools: WORKER_PROVIDER_TOOLS,
+      executeManagerTool: ({ worker, name, input, reportCursor, modelCatalogAudit }) =>
+        executeTeamTool(this.teamCoordinator, worker.taskId, name, input, {
+          requesterAgentId: worker.id,
+          longPoll: name === 'team_wait_reports',
+          waitReportsCursor: reportCursor,
+          listModelCandidates: (query) => this.listTeamModelCandidates(query),
+          modelCatalogAudit,
+        }),
     });
     this.teamCoordinator = new TeamCoordinator(
       persistence,
@@ -407,8 +425,10 @@ export class IpcRouter {
       // Real worker turns run a full provider CLI invocation; the deterministic 10s default is
       // far too tight for that.
       180_000,
+      undefined,
+      (selection, taskId) => this.validateTeamModelSelection(selection, taskId),
     );
-    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): the socket the real Claude Leader's MCP server
+    // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than
     // lazily on first team turn) means `initialize()` can await it once at app startup; a failed
     // start degrades to `socketPath === null`, which startSelectedRuntime treats as "fall back to
@@ -416,6 +436,8 @@ export class IpcRouter {
     this.teamMcpBridge = new TeamMcpBridge(
       this.teamCoordinator,
       defaultSocketPathFactory(app.getPath('userData')),
+      undefined,
+      (query) => this.listTeamModelCandidates(query),
     );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
@@ -588,49 +610,7 @@ export class IpcRouter {
       modelCatalogQueryInputSchema,
       modelCatalogQueryResultSchema,
       async (input) => {
-        const [codexCapability, claudeCapability] = await Promise.all([
-          this.codexRuntime.probe(),
-          this.claudeRuntime.probe(),
-        ]);
-        const checkedAt = new Date().toISOString();
-        const externalResults = await Promise.allSettled(
-          this.providerConnections
-            .list()
-            .filter(
-              (connection) =>
-                connection.enabled &&
-                connection.runtimeKind !== 'builtin_cli' &&
-                connection.secretReference !== null,
-            )
-            .map(async (connection) => {
-              const verified = await this.providerVerification.requireVerifiedForExecution(
-                connection.id,
-              );
-              return this.providerRegistry
-                .resolve(verified)
-                .listModels(verified, new AbortController().signal);
-            }),
-        );
-        const externalModels = externalResults.flatMap((result) =>
-          result.status === 'fulfilled' ? [...result.value] : [],
-        );
-        this.modelCatalog.replaceCatalog([
-          ...providerModelsForBuiltin(
-            'builtin:codex-cli',
-            'openai',
-            codexCapability.models,
-            codexCapability.available,
-            checkedAt,
-          ),
-          ...providerModelsForBuiltin(
-            'builtin:claude-cli',
-            'anthropic',
-            claudeCapability.models,
-            claudeCapability.available,
-            checkedAt,
-          ),
-          ...externalModels,
-        ]);
+        await this.refreshModelCatalog();
         const result = this.modelCatalog.query(input);
         const runtimeKind = this.persistence.getRuntime();
         const selection =
@@ -753,6 +733,25 @@ export class IpcRouter {
         this.providerVerification.verify(
           this.persistence.getProviderConnection(input.connectionId),
         ),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersLowerRateLimits,
+      providerConnectionRateLimitLowerInputSchema,
+      providerConnectionSchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.providersLowerRateLimits, () =>
+          this.persistence.lowerProviderConnectionRateLimits(input.connectionId, {
+            ...(input.maxConcurrentRequests === undefined
+              ? {}
+              : { maxConcurrentRequests: input.maxConcurrentRequests }),
+            ...(input.requestsPerMinute === undefined
+              ? {}
+              : { requestsPerMinute: input.requestsPerMinute }),
+            ...(input.tokensPerMinute === undefined
+              ? {}
+              : { tokensPerMinute: input.tokensPerMinute }),
+          }),
+        ).value,
     );
     this.handleMutation(
       IPC_CHANNELS.modelsSetSelection,
@@ -1816,9 +1815,9 @@ export class IpcRouter {
       builtinRuntimeForModelSelection(started.modelSelection) === null
         ? started.modelSelection.connectionId
         : null;
-    if (externalConnectionId !== null && !isTeamScenarioInput(started.text)) {
+    if (externalConnectionId !== null) {
       this.turnRuntimes.set(started.turnId, 'provider');
-      void this.startProviderTurn(started, externalConnectionId);
+      void this.startProviderTurn(started, externalConnectionId, isTeamScenarioInput(started.text));
       return;
     }
     this.pushRuntimeStatus({
@@ -1829,7 +1828,7 @@ export class IpcRouter {
       userMessage: null,
     });
     let kind = started.runtimeKind;
-    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Codex/Claude Leader drives team_* tools itself
+    // Leader MCP is enabled by default: a real Codex/Claude Leader drives team_* tools itself
     // over the MCP bridge instead of the deterministic mock scenario. Team tools are offered on
     // every real-runtime turn so the model itself senses
     // when a request warrants a team (the guidance says to hire only when genuinely beneficial);
@@ -1837,7 +1836,7 @@ export class IpcRouter {
     // team is needed" becomes visible without any keyword or button.
     const teamTurn = isTeamScenarioInput(started.text);
     const wantsLeaderMcp =
-      process.env['SPRINT_CODER_LEADER_MCP'] === '1' && kind !== 'mock' && teamTurn;
+      process.env['SPRINT_CODER_LEADER_MCP'] !== '0' && kind !== 'mock' && teamTurn;
     if (wantsLeaderMcp && !this.teamSkillReady) {
       this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
         code: 'RUNTIME_FAILED',
@@ -1963,6 +1962,112 @@ export class IpcRouter {
     return { socketPath, token, guidance: MANAGER_MCP_SYSTEM_PROMPT };
   }
 
+  private registerWorkerMcp(
+    turnId: string,
+    taskId: string,
+    requesterAgentId: string,
+  ): RuntimeTeamMcpOption | undefined {
+    const socketPath = this.teamMcpBridge.socketPath;
+    if (socketPath === null) return undefined;
+    const token = TeamMcpBridge.generateToken();
+    this.teamMcpBridge.register(turnId, { taskId, token, requesterAgentId });
+    return { socketPath, token, guidance: WORKER_MCP_SYSTEM_PROMPT };
+  }
+
+  private async refreshModelCatalog(): Promise<void> {
+    const [codexCapability, claudeCapability] = await Promise.all([
+      this.codexRuntime.probe(),
+      this.claudeRuntime.probe(),
+    ]);
+    const checkedAt = new Date().toISOString();
+    const externalResults = await Promise.allSettled(
+      this.providerConnections
+        .list()
+        .filter(
+          (connection) =>
+            connection.enabled &&
+            connection.runtimeKind !== 'builtin_cli' &&
+            connection.secretReference !== null,
+        )
+        .map(async (connection) => {
+          const verified = await this.providerVerification.requireVerifiedForExecution(
+            connection.id,
+          );
+          return this.providerRegistry
+            .resolve(verified)
+            .listModels(verified, new AbortController().signal);
+        }),
+    );
+    const externalModels = externalResults.flatMap((result) =>
+      result.status === 'fulfilled' ? [...result.value] : [],
+    );
+    this.modelCatalog.replaceCatalog([
+      ...providerModelsForBuiltin(
+        'builtin:codex-cli',
+        'openai',
+        codexCapability.models,
+        codexCapability.available,
+        checkedAt,
+      ),
+      ...providerModelsForBuiltin(
+        'builtin:claude-cli',
+        'anthropic',
+        claudeCapability.models,
+        claudeCapability.available,
+        checkedAt,
+      ),
+      ...externalModels,
+    ]);
+  }
+
+  private async listTeamModelCandidates(
+    input: Parameters<NonNullable<ExecuteTeamToolOptions['listModelCandidates']>>[0],
+  ): Promise<unknown> {
+    await this.refreshModelCatalog();
+    return this.modelCatalog.query({
+      taskId: input.taskId,
+      text: input.text,
+      connectionIds: [...input.connectionIds],
+      providerIds: [...input.providerIds],
+      capabilities: [...input.capabilities],
+      availableOnly: true,
+      cursor: input.cursor,
+      limit: input.limit,
+    });
+  }
+
+  private async validateTeamModelSelection(
+    selection: ModelSelection,
+    taskId: string,
+  ): Promise<void> {
+    if (
+      selection.connectionId === null ||
+      selection.requestedProvider === null ||
+      selection.requestedModel === null
+    )
+      throw new Error('Team Worker model selection must identify a Connection and model');
+    await this.refreshModelCatalog();
+    const result = this.modelCatalog.query({
+      taskId,
+      text: selection.requestedModel,
+      connectionIds: [selection.connectionId],
+      providerIds: [selection.requestedProvider],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 100,
+    });
+    if (
+      !result.items.some(
+        (model) =>
+          model.connectionId === selection.connectionId &&
+          model.providerId === selection.requestedProvider &&
+          model.modelId === selection.requestedModel,
+      )
+    )
+      throw new Error('Selected Team Worker model is not available on the requested Connection');
+  }
+
   private prepareContext(taskId: string, turnId: string, teamSkill = false): PreparedContext {
     const prepared = this.persistence.prepareContext(taskId, turnId);
     for (const event of prepared.usageEvents) this.publish(event);
@@ -2028,13 +2133,30 @@ export class IpcRouter {
     } else await this.mockRuntime.cancel(turnId);
   }
 
-  private async startProviderTurn(started: StartedTurn, connectionId: string): Promise<void> {
+  private async startProviderTurn(
+    started: StartedTurn,
+    connectionId: string,
+    teamTurn = false,
+  ): Promise<void> {
     const taskId = started.event.taskId;
     const controller = new AbortController();
     this.providerAbortByTurn.set(started.turnId, controller);
-    let completed = false;
     let synthesizing = false;
     const messageId = randomUUID();
+    let reportCursorValue = 0;
+    let modelCatalogQueried = false;
+    const reportCursor = {
+      read: () => reportCursorValue,
+      advance: (seq: number) => {
+        reportCursorValue = Math.max(reportCursorValue, seq);
+      },
+    };
+    const modelCatalogAudit = {
+      wasQueried: () => modelCatalogQueried,
+      markQueried: () => {
+        modelCatalogQueried = true;
+      },
+    };
     try {
       const connection = await this.providerVerification.requireVerifiedForExecution(
         connectionId,
@@ -2043,7 +2165,13 @@ export class IpcRouter {
       const modelId = started.modelSelection.requestedModel;
       if (modelId === null || connection.providerId !== started.modelSelection.requestedProvider)
         throw new Error('Provider Turn model selection is invalid');
-      const context = this.prepareContext(taskId, started.turnId);
+      const context = this.prepareContext(taskId, started.turnId, teamTurn);
+      if (teamTurn)
+        this.acknowledgeRuntimeContext(
+          taskId,
+          started.turnId,
+          context.fragments.map((fragment) => fragment.id),
+        );
       const egress = authorizeOfficialApiProviderEgress(
         {
           broker: this.permissionBroker,
@@ -2063,41 +2191,102 @@ export class IpcRouter {
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'executing'));
       });
       const runtime = this.providerRegistry.resolve(connection);
-      for await (const providerEvent of runtime.execute(
-        connection,
-        {
-          executionId: started.turnId,
-          connectionId,
-          modelId,
-          messages: context.fragments.map((fragment) => ({
-            role: fragment.trust,
-            content: fragment.content,
-          })),
-        },
-        controller.signal,
-      )) {
-        if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
-        await this.mailbox.run(taskId, () => {
+      const messages: ProviderExecutionRequest['messages'] = context.fragments.map((fragment) => ({
+        role: fragment.trust,
+        content: fragment.content,
+      }));
+      let aggregateUsage: NormalizedProviderUsage | undefined;
+      let finished = false;
+      for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
+        const roundToolCalls: ProviderMessageToolCall[] = [];
+        const roundOutput: string[] = [];
+        let roundCompleted = false;
+        for await (const providerEvent of runtime.execute(
+          connection,
+          {
+            executionId: providerTurnCallId(started.turnId, ordinal),
+            connectionId,
+            modelId,
+            messages,
+            ...(teamTurn ? { tools: [...LEADER_PROVIDER_TOOLS] } : {}),
+          },
+          controller.signal,
+        )) {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
-          if (providerEvent.type === 'reasoning_delta') {
-            this.pushReasoning(taskId, started.turnId, providerEvent.text);
-            return;
+          if (providerEvent.type === 'tool_call') {
+            if (!teamTurn)
+              throw new Error('Provider requested a tool that is not available for this Turn');
+            if (!LEADER_PROVIDER_TOOLS.some((tool) => tool.name === providerEvent.name))
+              throw new Error(`Provider Leader requested unknown Team tool: ${providerEvent.name}`);
+            if (roundToolCalls.some((toolCall) => toolCall.callId === providerEvent.callId))
+              throw new Error(`Provider Leader repeated tool call ID: ${providerEvent.callId}`);
+            roundToolCalls.push({
+              callId: providerEvent.callId,
+              name: providerEvent.name,
+              input: providerEvent.input,
+            });
+            continue;
           }
-          if (providerEvent.type === 'output_delta') {
-            if (!synthesizing) {
-              synthesizing = true;
-              this.publish(this.persistence.changeStage(taskId, started.turnId, 'synthesizing'));
+          if (providerEvent.type === 'usage')
+            aggregateUsage = mergeProviderTurnUsage(aggregateUsage, providerEvent.usage);
+          await this.mailbox.run(taskId, () => {
+            if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+            if (providerEvent.type === 'reasoning_delta') {
+              this.pushReasoning(taskId, started.turnId, providerEvent.text);
+              return;
             }
-            this.publish(
-              this.persistence.appendDelta(taskId, started.turnId, messageId, providerEvent.text),
-            );
-            return;
-          }
-          this.applyProviderTurnEvent(taskId, started.turnId, providerEvent);
-          if (providerEvent.type === 'completed') completed = true;
+            if (providerEvent.type === 'output_delta') {
+              roundOutput.push(providerEvent.text);
+              if (!synthesizing) {
+                synthesizing = true;
+                this.publish(this.persistence.changeStage(taskId, started.turnId, 'synthesizing'));
+              }
+              this.publish(
+                this.persistence.appendDelta(taskId, started.turnId, messageId, providerEvent.text),
+              );
+              return;
+            }
+            if (providerEvent.type !== 'usage')
+              this.applyProviderTurnEvent(taskId, started.turnId, providerEvent);
+            if (providerEvent.type === 'completed') roundCompleted = true;
+          });
+        }
+        if (!roundCompleted) throw new Error('Provider stream ended without a completion event');
+        if (roundToolCalls.length === 0) {
+          finished = true;
+          break;
+        }
+        messages.push({
+          role: 'assistant',
+          content: roundOutput.join(''),
+          toolCalls: roundToolCalls,
         });
+        for (const toolCall of roundToolCalls) {
+          const result = await executeTeamTool(
+            this.teamCoordinator,
+            taskId,
+            toolCall.name,
+            toolCall.input,
+            {
+              longPoll:
+                toolCall.name === 'team_wait_reports' || toolCall.name === 'team_wait_events',
+              waitReportsCursor: reportCursor,
+              listModelCandidates: (query) => this.listTeamModelCandidates(query),
+              modelCatalogAudit,
+            },
+          );
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify(result ?? null),
+            toolCallId: toolCall.callId,
+            toolName: toolCall.name,
+          });
+        }
       }
-      if (!completed) throw new Error('Provider stream ended without a completion event');
+      if (!finished)
+        throw new Error(`Provider Leader exceeded ${MAX_PROVIDER_LEADER_ROUNDS} provider rounds`);
+      if (aggregateUsage !== undefined)
+        this.persistence.recordTurnProviderUsage(taskId, started.turnId, aggregateUsage);
       await this.mailbox.run(taskId, () => {
         if (this.turnRuntimes.get(started.turnId) === 'provider')
           this.finishAndAdvance(taskId, started.turnId, 'completed');
@@ -2172,7 +2361,16 @@ export class IpcRouter {
           this.finishAndAdvance(taskId, turnId, 'completed');
         }
       })
-      .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
+      .catch((error: unknown) => {
+        secureLogger.error('Runtime event handling failed', {
+          kind,
+          taskId,
+          turnId,
+          eventType: runtimeEvent.type,
+          error,
+        });
+        this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError());
+      });
   }
 
   /**
@@ -2452,6 +2650,42 @@ export class IpcRouter {
   private closeAllPorts(): void {
     for (const binding of [...this.ports]) this.closePort(binding);
   }
+}
+
+function providerTurnCallId(turnId: string, ordinal: number): string {
+  const suffix = `:provider-call:${ordinal}`;
+  return `${turnId.slice(0, 256 - suffix.length)}${suffix}`;
+}
+
+function mergeProviderTurnUsage(
+  current: NormalizedProviderUsage | undefined,
+  next: NormalizedProviderUsage,
+): NormalizedProviderUsage {
+  if (current === undefined) return next;
+  const add = (left: number | null, right: number | null): number | null =>
+    left === null && right === null ? null : (left ?? 0) + (right ?? 0);
+  return {
+    inputTokens: add(current.inputTokens, next.inputTokens),
+    outputTokens: add(current.outputTokens, next.outputTokens),
+    cacheReadTokens: add(current.cacheReadTokens, next.cacheReadTokens),
+    cacheWriteTokens: add(current.cacheWriteTokens, next.cacheWriteTokens),
+    reasoningTokens: add(current.reasoningTokens, next.reasoningTokens),
+    providerCost:
+      current.providerCost !== null &&
+      next.providerCost !== null &&
+      current.providerCost.currency === next.providerCost.currency
+        ? {
+            amount: current.providerCost.amount + next.providerCost.amount,
+            currency: current.providerCost.currency,
+          }
+        : (current.providerCost ?? next.providerCost),
+    source:
+      current.source === 'unknown'
+        ? next.source
+        : next.source === 'unknown' || current.source === next.source
+          ? current.source
+          : 'runtime_observed',
+  };
 }
 
 export class TaskMailbox {

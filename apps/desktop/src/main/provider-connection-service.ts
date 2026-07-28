@@ -157,9 +157,7 @@ export class ProviderConnectionService {
 
   createGemini(input: GeminiConnectionCreateInput): ProviderConnection {
     const parsed = geminiConnectionCreateInputSchema.parse(input);
-    const secretReference = this.secrets.put(
-      serializeGeminiCredential({ apiKey: parsed.apiKey }),
-    );
+    const secretReference = this.secrets.put(serializeGeminiCredential({ apiKey: parsed.apiKey }));
     const timestamp = this.now().toISOString();
     try {
       return this.repository.createProviderConnection({
@@ -193,9 +191,7 @@ export class ProviderConnectionService {
 
   createXAI(input: XAIConnectionCreateInput): ProviderConnection {
     const parsed = xAIConnectionCreateInputSchema.parse(input);
-    const secretReference = this.secrets.put(
-      serializeXAICredential({ apiKey: parsed.apiKey }),
-    );
+    const secretReference = this.secrets.put(serializeXAICredential({ apiKey: parsed.apiKey }));
     const timestamp = this.now().toISOString();
     try {
       return this.repository.createProviderConnection({
@@ -229,8 +225,7 @@ export class ProviderConnectionService {
 
   createProfile(input: ProviderProfileConnectionCreateInput): ProviderConnection {
     const parsed = providerProfileConnectionCreateInputSchema.parse(input);
-    if (this.profiles === undefined)
-      throw new Error('Provider Profile Registry is not configured');
+    if (this.profiles === undefined) throw new Error('Provider Profile Registry is not configured');
     const profile = this.profiles.get(parsed.profileId);
     if (parsed.baseUrl !== undefined && !profile.baseUrlConfigurable)
       throw new Error(`Provider Profile ${profile.id} does not allow a custom base URL`);

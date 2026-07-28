@@ -22,6 +22,16 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
     ),
     get: vi.fn(() => null),
     listWorkerReports: vi.fn(() => []),
+    listAgentMessages: vi.fn(() => []),
+    sendAgentMessageAs: vi.fn(
+      async () =>
+        ({
+          id: 'message-direct-1',
+          targetAgentId: 'worker-2',
+          seq: 3,
+          state: 'delivered',
+        }) as never,
+    ),
     hasBusyWorkers: vi.fn(() => false),
     stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
     ...overrides,
@@ -52,6 +62,73 @@ describe('executeTeamTool routing', () => {
       null,
     );
     expect(result).toMatchObject({ ok: true, workerId: 'worker-1' });
+  });
+
+  it('requires an audited catalog selection on the real Leader and Manager path', async () => {
+    const coordinator = fakeCoordinator();
+    let queried = false;
+    const result = (await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      {
+        role: '調査',
+        objective: '調べる',
+      },
+      {
+        listModelCandidates: vi.fn(),
+        modelCatalogAudit: {
+          wasQueried: () => queried,
+          markQueried: () => {
+            queried = true;
+          },
+        },
+      },
+    )) as { ok: false; message: string };
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.message).toContain('query the model catalog');
+    expect(coordinator.hireWorker).not.toHaveBeenCalled();
+  });
+
+  it('allows the audited real path after catalog lookup and persists its selection reason', async () => {
+    const coordinator = fakeCoordinator();
+    let queried = false;
+    const options = {
+      listModelCandidates: vi.fn(async () => ({ items: [] })),
+      modelCatalogAudit: {
+        wasQueried: () => queried,
+        markQueried: () => {
+          queried = true;
+        },
+      },
+    };
+    await executeTeamTool(coordinator, 'task-1', 'team_list_models', {}, options);
+    const selection = {
+      connectionId: 'builtin:codex-cli',
+      requestedProvider: 'openai',
+      requestedModel: 'gpt-5.6-sol',
+    };
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      {
+        role: '実装',
+        objective: '実装する',
+        modelSelection: selection,
+        modelSelectionReason: 'catalogのtoolCalling情報を確認した',
+      },
+      options,
+    );
+
+    expect(coordinator.hireWorker).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelSelection: selection,
+        modelSelectionReason: 'catalogのtoolCalling情報を確認した',
+      }),
+      null,
+    );
   });
 
   it('maps a TeamCoordinator rejection to an {ok:false} tool result instead of throwing', async () => {
@@ -180,6 +257,30 @@ describe('executeTeamTool routing', () => {
 
     await executeTeamTool(coordinator, 'task-1', 'team_wait_reports', {}, options);
     expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 0, 'manager-1');
+  });
+
+  it('routes Worker communication with caller identity fixed outside model arguments', async () => {
+    const coordinator = fakeCoordinator();
+    const options = { requesterAgentId: 'worker-1' };
+
+    expect(
+      await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_send_message',
+        { targetAgentId: 'worker-2', content: 'APIの契約は確定しました' },
+        options,
+      ),
+    ).toMatchObject({ ok: true, messageId: 'message-direct-1', seq: 3 });
+    expect(coordinator.sendAgentMessageAs).toHaveBeenCalledWith(
+      'task-1',
+      'worker-1',
+      'worker-2',
+      'APIの契約は確定しました',
+    );
+
+    await executeTeamTool(coordinator, 'task-1', 'team_read_messages', { afterSeq: 2 }, options);
+    expect(coordinator.listAgentMessages).toHaveBeenCalledWith('task-1', 'worker-1', 2);
   });
 
   it('rejects Manager identity forgery and Manager-only legacy control calls', async () => {

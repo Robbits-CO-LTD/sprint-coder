@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProviderConnection } from '@sprint-coder/contracts';
-import { OpenAIProviderClient } from './openai-provider-client';
+import { OpenAIProviderClient, openAICompatibleResponseRequest } from './openai-provider-client';
 
 const connection: ProviderConnection = {
   id: 'openai:primary',
@@ -228,7 +228,7 @@ describe('OpenAIProviderClient', () => {
           });
         }),
     );
-    const iterator = client.execute(
+    const execution = client.execute(
       connection,
       {
         executionId: 'execution-cancel',
@@ -237,7 +237,8 @@ describe('OpenAIProviderClient', () => {
         messages: [{ role: 'user', content: 'hello' }],
       },
       new AbortController().signal,
-    )[Symbol.asyncIterator]();
+    );
+    const iterator = execution[Symbol.asyncIterator]();
     const pending = iterator.next();
     await started;
     await client.cancel('execution-cancel');
@@ -254,6 +255,45 @@ describe('OpenAIProviderClient', () => {
           providerCode: null,
         },
       },
+    });
+  });
+});
+
+describe('openAICompatibleResponseRequest', () => {
+  it('preserves assistant function calls and their outputs across provider rounds', () => {
+    expect(
+      openAICompatibleResponseRequest({
+        executionId: 'execution-tool-history',
+        connectionId: connection.id,
+        modelId: 'gpt-5.2',
+        messages: [
+          {
+            role: 'assistant',
+            content: '',
+            toolCalls: [{ callId: 'call-1', name: 'lookup', input: { q: 'value' } }],
+          },
+          {
+            role: 'tool',
+            content: '{"ok":true}',
+            toolCallId: 'call-1',
+            toolName: 'lookup',
+          },
+        ],
+      }),
+    ).toMatchObject({
+      input: [
+        {
+          type: 'function_call',
+          call_id: 'call-1',
+          name: 'lookup',
+          arguments: '{"q":"value"}',
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call-1',
+          output: '{"ok":true}',
+        },
+      ],
     });
   });
 });

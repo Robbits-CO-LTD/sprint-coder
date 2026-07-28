@@ -1,5 +1,14 @@
-import type { ChatMessage, TeamActivitySummary } from '../types/sprint-coder';
-import { QUEUE_REASON_LABELS, formatClockTime } from './team-execution-display';
+import type {
+  ChatMessage,
+  TeamActivitySummary,
+  TeamMessageSummary,
+  WorkerSummary,
+} from '../types/sprint-coder';
+import {
+  BUILTIN_CONNECTION_LABELS,
+  QUEUE_REASON_LABELS,
+  formatClockTime,
+} from './team-execution-display';
 
 // Display facts for the persisted Team activity log (Core C2b), rendered as history cards inside
 // the normal Chat timeline.
@@ -36,6 +45,208 @@ export function subjectRoleLabel(role: string | null | undefined): string {
 export function activityQueueReasonLabel(reason: string | null | undefined): string | null {
   if (reason == null || reason === '') return null;
   return QUEUE_REASON_LABELS[reason as TeamActivityQueueReason] ?? reason;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Model selection facts (Team v2): which model and which Connection an agent actually got, and —
+// on the hire itself — why.
+//
+// These live here rather than in team-execution-display.ts because the same three persisted fields
+// appear on BOTH `TeamActivitySummary` (the hire row) and `WorkerSummary` (the card), and both
+// surfaces must word them identically. Nothing is inferred: `engine` never stands in for a model,
+// a provider id is never turned into a product name, and an absent value is stated as 不明 rather
+// than left blank or guessed at.
+// ---------------------------------------------------------------------------------------------
+
+/** A model/Connection the backend did not record is said to be unknown, never omitted silently. */
+export const UNKNOWN_MODEL_SELECTION_LABEL = '不明';
+
+/** How long a `modelSelectionReason` may render before it is clamped. The contract allows 2,000
+ * characters; a history card is one line of annotation, so the tail is elided rather than allowed
+ * to push the whole timeline around. */
+export const MODEL_SELECTION_REASON_MAX_LENGTH = 120;
+
+/** A value the backend did not record and a value it recorded as whitespace are the same fact —
+ * "not known" — so both collapse to null here rather than being told apart downstream. */
+function recorded(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/** The model id verbatim — it is the backend's own string, and no part of it is interpreted. */
+export function requestedModelLabel(model: string | null | undefined): string {
+  return recorded(model) ?? UNKNOWN_MODEL_SELECTION_LABEL;
+}
+
+/** Built-in runtimes get their product name (the same map the execution card uses, imported rather
+ * than restated so the two cannot drift); every other id is a user-created Connection whose display
+ * name this contract does not carry, so the id itself is shown verbatim. */
+export function requestedConnectionLabel(connectionId: string | null | undefined): string {
+  const id = recorded(connectionId);
+  if (id === null) return UNKNOWN_MODEL_SELECTION_LABEL;
+  return BUILTIN_CONNECTION_LABELS[id] ?? id;
+}
+
+/** Reasons are free text from the backend: newlines collapse to spaces so one reason cannot become
+ * several lines of a one-line card, and an over-long reason is elided at a character boundary. */
+export function modelSelectionReasonLabel(reason: string | null | undefined): string | null {
+  const text = recorded(reason);
+  if (text === null) return null;
+  const collapsed = text.replace(/\s+/g, ' ');
+  if (collapsed.length <= MODEL_SELECTION_REASON_MAX_LENGTH) return collapsed;
+  return `${collapsed.slice(0, MODEL_SELECTION_REASON_MAX_LENGTH)}…`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Which runtime a Worker is actually running on (Team v2 multi-provider).
+//
+// `engine` is a backend-compatibility field whose union is still `mock | codex | claude`, so an
+// external-API Worker necessarily carries one of those three values. Reading it as the runtime is
+// therefore wrong for every Worker hired against a Provider Connection — it would announce a
+// GPT-5 Worker as "Claude". `connectionId` is the execution identity, so it decides.
+// ---------------------------------------------------------------------------------------------
+
+/** A Connection that is not one of the two built-in CLIs runs against an external Provider API.
+ * The contract carries no display name for it, and a Provider name must never be guessed from a
+ * connection id or a model id, so the surface states the only fact it has: it is an API run. */
+export const EXTERNAL_API_RUNTIME_LABEL = 'API';
+
+/** Product names for the built-in runtimes. Deliberately NOT `BUILTIN_CONNECTION_LABELS`: that map
+ * words the Connection row ("Claude CLI"), while this is the role/objective sub-line, which has
+ * always read "Claude"/"Codex". Both are keyed by the same two connection ids. */
+const BUILTIN_RUNTIME_LABELS: Readonly<Record<string, string>> = {
+  'builtin:claude-cli': 'Claude',
+  'builtin:codex-cli': 'Codex',
+};
+
+/** The pre-multi-provider wording, kept only for rows the backend recorded no Connection on.
+ * Keyed off the union so adding an engine is a type error here rather than a silent "Mock"; the
+ * lookup below still guards at runtime, since a newer backend can send this renderer a value the
+ * union does not yet have — exactly what the Canvas card's old ternary defaulted to "Mock". */
+const ENGINE_RUNTIME_LABELS: Readonly<Record<WorkerSummary['engine'], string>> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  mock: 'Mock',
+};
+
+/**
+ * The runtime name shown beside a Worker's objective, on the Canvas card and in the List row alike.
+ *
+ * A recorded `connectionId` is the Worker's real execution identity: the two built-in ids get their
+ * product name, and every other id — a user-created Provider Connection — is announced as an API
+ * run rather than as a Provider name inferred from the id. Only a legacy row that carries no
+ * Connection at all falls back to `engine`, where it is still the best fact available.
+ */
+export function workerRuntimeLabel(worker: Pick<WorkerSummary, 'connectionId' | 'engine'>): string {
+  const id = recorded(worker.connectionId);
+  if (id !== null) return BUILTIN_RUNTIME_LABELS[id] ?? EXTERNAL_API_RUNTIME_LABEL;
+  return ENGINE_RUNTIME_LABELS[worker.engine] ?? ENGINE_RUNTIME_LABELS.mock;
+}
+
+export type WorkerModelDisplay = {
+  /** Always a sentence-worthy string — 不明 when the backend recorded no model. */
+  modelLabel: string;
+  /** Always a sentence-worthy string — 不明 when the backend recorded no Connection. */
+  connectionLabel: string;
+  /** Single-sentence announcement, so the Canvas card and the List row say the same thing. */
+  ariaSummary: string;
+};
+
+/**
+ * The model/Connection pair a Worker card shows. Both keys always render: unlike the optional
+ * supplements on an activity card, "which model is this Worker running on" is a question the card
+ * exists to answer, so silence there would read as "no model" rather than "not recorded".
+ */
+export function describeWorkerModel(
+  worker: Pick<WorkerSummary, 'connectionId' | 'requestedModel'>,
+): WorkerModelDisplay {
+  const modelLabel = requestedModelLabel(worker.requestedModel);
+  const connection = requestedConnectionLabel(worker.connectionId);
+  return {
+    modelLabel,
+    connectionLabel: connection,
+    ariaSummary: `モデル ${modelLabel}、Connection ${connection}`,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Who a Worker card's message line is actually talking to (Team v2 worker-to-worker messaging).
+//
+// The backend persists `sourceAgentId`/`targetAgentId` on every `TeamMessageSummary` and a Manager
+// Worker may message its own children (see team-tools.ts / the hierarchy on `WorkerSummary`), so a
+// line on a Worker card is NOT necessarily a Leader exchange. Both the Canvas card and the List row
+// used to hard-code "Leaderから"/"報告", which renders a Worker A -> Worker B message as if the
+// Leader had sent it. The peer is resolved here, from the persisted ids alone, so the two surfaces
+// cannot word the same message differently.
+// ---------------------------------------------------------------------------------------------
+
+/** The Team's root agent, matched by `team.leaderAgentId` — never by engine/provider/model. */
+export const LEADER_MESSAGE_PEER_LABEL = 'Leader';
+/** A peer id that matches neither the Leader nor any known agent (a legacy or corrupted row). The
+ * line still names a counterpart rather than going blank, but nothing about WHICH agent it was is
+ * invented — an id, a Connection or a model id is not a role. */
+export const UNKNOWN_MESSAGE_PEER_LABEL = 'Agent';
+
+export type TeamMessageDirection = 'incoming' | 'outgoing';
+
+export type TeamMessagePeerDisplay = {
+  /** Relative to the Worker whose card is rendering: `incoming` is addressed TO it. */
+  direction: TeamMessageDirection;
+  /** The persisted id of the agent at the other end — the sender for `incoming`, the recipient
+   * for `outgoing`. Empty only when the backend recorded none. */
+  peerAgentId: string;
+  /** The counterpart's role: `Leader`, a Worker's own role, or `Agent` when unresolvable. */
+  peerLabel: string;
+  /** The tag on the message line — `…から` for `incoming`, `…へ` for `outgoing`. */
+  tagLabel: string;
+};
+
+export type TeamMessagePeerContext = {
+  /** The Worker whose card/row is rendering these lines. */
+  agentId: string;
+  /** `team.leaderAgentId`: the only id that may be named Leader. */
+  leaderAgentId: string;
+  /** Every agent a peer id can be resolved against, by persisted id. The Leader is matched by
+   * `leaderAgentId` above and so does not need to appear here. */
+  agents: readonly Pick<WorkerSummary, 'id' | 'role'>[];
+};
+
+/**
+ * The direction and counterpart of one message line on a Worker card.
+ *
+ * Direction is decided exactly as both surfaces already decided it — a message whose target is this
+ * Worker is incoming — so message order, styling and the rendered body are untouched; only WHO the
+ * tag names changes. Resolution is by persisted agent id only: the Leader is `leaderAgentId`, any
+ * other id must be present in `agents` to be named, and everything else is stated as a generic
+ * Agent. A `kind`, a connection id or a model never stands in for a role here.
+ */
+export function describeMessagePeer(
+  message: Pick<TeamMessageSummary, 'sourceAgentId' | 'targetAgentId'>,
+  context: TeamMessagePeerContext,
+): TeamMessagePeerDisplay {
+  const direction: TeamMessageDirection =
+    message.targetAgentId === context.agentId ? 'incoming' : 'outgoing';
+  const peerAgentId = direction === 'incoming' ? message.sourceAgentId : message.targetAgentId;
+  const peerLabel = messagePeerLabel(peerAgentId, context);
+  return {
+    direction,
+    peerAgentId,
+    peerLabel,
+    tagLabel: direction === 'incoming' ? `${peerLabel}から` : `${peerLabel}へ`,
+  };
+}
+
+/** An id the backend never recorded, an id belonging to no known agent, and an agent whose role is
+ * blank are all the same fact — "which agent this was is not known" — so all three land on the
+ * generic label instead of leaking a raw id into the sentence. */
+function messagePeerLabel(peerAgentId: string, context: TeamMessagePeerContext): string {
+  const id = recorded(peerAgentId);
+  if (id === null) return UNKNOWN_MESSAGE_PEER_LABEL;
+  if (id === recorded(context.leaderAgentId)) return LEADER_MESSAGE_PEER_LABEL;
+  const agent = context.agents.find((candidate) => candidate.id === id);
+  if (agent === undefined) return UNKNOWN_MESSAGE_PEER_LABEL;
+  return recorded(agent.role) ?? UNKNOWN_MESSAGE_PEER_LABEL;
 }
 
 /**
@@ -86,6 +297,22 @@ export function activityDetails(activity: TeamActivitySummary): string[] {
   if (activity.status != null && activity.status !== '') details.push(`状態 ${activity.status}`);
   if (activity.terminalReason != null && activity.terminalReason !== '') {
     details.push(`終了理由 ${activity.terminalReason}`);
+  }
+  // The hire is where the model choice is MADE, so it is the row that explains it. Every later row
+  // for the same Worker would only restate what its card and its execution card already show, and
+  // `modelSelectionReason` is only ever recorded against the decision itself. Each of the three is
+  // a supplement like the ones above: absent means absent, so nothing is claimed and no 不明
+  // placeholder is invented here — that wording belongs on the Worker card, which must answer the
+  // question every time it renders.
+  if (activity.type === 'worker_hired') {
+    if (recorded(activity.requestedModel) !== null) {
+      details.push(`モデル ${requestedModelLabel(activity.requestedModel)}`);
+    }
+    if (recorded(activity.connectionId) !== null) {
+      details.push(`Connection ${requestedConnectionLabel(activity.connectionId)}`);
+    }
+    const reason = modelSelectionReasonLabel(activity.modelSelectionReason);
+    if (reason !== null) details.push(`選定理由 ${reason}`);
   }
   return details;
 }

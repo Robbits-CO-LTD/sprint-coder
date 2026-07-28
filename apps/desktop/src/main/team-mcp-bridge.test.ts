@@ -156,6 +156,44 @@ describe('TeamMcpBridge', () => {
     expect(coordinator.stopWorker).toHaveBeenCalledWith('task-1', 'worker-1');
   });
 
+  it('binds model catalog lookup to the registered Task instead of model arguments', async () => {
+    const listModelCandidates = vi.fn(async (input: unknown) => ({
+      revision: 1,
+      total: 1,
+      items: [{ connectionId: 'builtin:codex-cli', modelId: 'gpt-5.6-sol' }],
+      nextCursor: null,
+      query: input,
+    }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      listModelCandidates,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-models', { taskId: 'task-trusted', token });
+
+    const { lines } = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_list_models',
+      args: { capabilities: ['reasoning'], limit: 20 },
+    });
+
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { total: 1 },
+    });
+    expect(listModelCandidates).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'task-trusted',
+        capabilities: ['reasoning'],
+        limit: 20,
+      }),
+    );
+  });
+
   it('binds Manager authority to the registered token rather than request arguments', async () => {
     const coordinator = fakeCoordinator();
     const bridge = new TeamMcpBridge(coordinator, testSocketPath());

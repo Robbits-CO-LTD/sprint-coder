@@ -15,11 +15,11 @@ export type ProviderVerificationResult = Readonly<{
 }>;
 
 export interface ProviderRuntime {
-  verify(
+  verify(connection: ProviderConnection, signal: AbortSignal): Promise<ProviderVerificationResult>;
+  listModels(
     connection: ProviderConnection,
     signal: AbortSignal,
-  ): Promise<ProviderVerificationResult>;
-  listModels(connection: ProviderConnection, signal: AbortSignal): Promise<readonly ProviderModel[]>;
+  ): Promise<readonly ProviderModel[]>;
   execute(
     connection: ProviderConnection,
     request: ProviderExecutionRequest,

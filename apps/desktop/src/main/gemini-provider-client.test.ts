@@ -28,36 +28,29 @@ const connection: ProviderConnection = {
 
 describe('GeminiProviderClient', () => {
   it('uses x-goog-api-key and maps the official model list without inferred capabilities', async () => {
-    const providerFetch = vi.fn(
-      async (_input: string | URL | Request, init?: RequestInit) => {
-        expect(new Headers(init?.headers).get('x-goog-api-key')).toBe(
-          'gemini-key',
-        );
-        return Response.json({
-          models: [
-            {
-              name: 'models/gemini-3.6-pro',
-              baseModelId: 'gemini-3.6-pro',
-              displayName: 'Gemini 3.6 Pro',
-              inputTokenLimit: 1_000_000,
-              outputTokenLimit: 65_536,
-              supportedGenerationMethods: ['generateContent'],
-              thinking: true,
-            },
-          ],
-        });
-      },
-    );
+    const providerFetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get('x-goog-api-key')).toBe('gemini-key');
+      return Response.json({
+        models: [
+          {
+            name: 'models/gemini-3.6-pro',
+            baseModelId: 'gemini-3.6-pro',
+            displayName: 'Gemini 3.6 Pro',
+            inputTokenLimit: 1_000_000,
+            outputTokenLimit: 65_536,
+            supportedGenerationMethods: ['generateContent'],
+            thinking: true,
+          },
+        ],
+      });
+    });
     const client = new GeminiProviderClient(
       () => ({ apiKey: 'gemini-key' }),
       providerFetch,
       () => new Date('2026-07-28T06:00:00.000Z'),
     );
 
-    const models = await client.listModels(
-      connection,
-      new AbortController().signal,
-    );
+    const models = await client.listModels(connection, new AbortController().signal);
     expect(models).toEqual([
       expect.objectContaining({
         providerId: 'google',
@@ -86,9 +79,7 @@ describe('GeminiProviderClient', () => {
     const client = new GeminiProviderClient(
       () => ({ apiKey: 'gemini-key' }),
       async (input, init) => {
-        expect(String(input)).toContain(
-          '/models/gemini-3.6-pro:streamGenerateContent?alt=sse',
-        );
+        expect(String(input)).toContain('/models/gemini-3.6-pro:streamGenerateContent?alt=sse');
         expect(JSON.parse(String(init?.body))).toMatchObject({
           systemInstruction: { parts: [{ text: 'be concise' }] },
           contents: [
@@ -100,6 +91,30 @@ describe('GeminiProviderClient', () => {
                   inlineData: {
                     mimeType: 'image/png',
                     data: 'aGVsbG8=',
+                  },
+                },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'lookup',
+                    args: { q: 'value' },
+                  },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'call-1',
+                    name: 'lookup',
+                    response: { output: '{"ok":true}' },
                   },
                 },
               ],
@@ -140,6 +155,17 @@ describe('GeminiProviderClient', () => {
             role: 'user',
             content: 'hello',
             inlineImages: [{ mimeType: 'image/png', base64: 'aGVsbG8=' }],
+          },
+          {
+            role: 'assistant',
+            content: '',
+            toolCalls: [{ callId: 'call-1', name: 'lookup', input: { q: 'value' } }],
+          },
+          {
+            role: 'tool',
+            content: '{"ok":true}',
+            toolCallId: 'call-1',
+            toolName: 'lookup',
           },
         ],
         tools: [

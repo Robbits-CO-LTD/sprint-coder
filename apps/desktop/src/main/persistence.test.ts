@@ -115,60 +115,61 @@ function bindMutationWorkspace(
   return workspaceKey;
 }
 
-describe('provider connections', () => {
-  it('seeds stable built-in CLI connections and restores them from SQLite', () => {
-    const { persistence, path } = createPersistence();
+if (runsWithElectronAbi)
+  describe('provider connections', () => {
+    it('seeds stable built-in CLI connections and restores them from SQLite', () => {
+      const { persistence, path } = createPersistence();
 
-    expect(persistence.listProviderConnections()).toEqual([
-      expect.objectContaining({
-        id: 'builtin:claude-cli',
-        providerId: 'anthropic',
-        runtimeKind: 'builtin_cli',
-        displayName: 'Claude CLI',
-        enabled: true,
-      }),
-      expect.objectContaining({
-        id: 'builtin:codex-cli',
-        providerId: 'openai',
-        runtimeKind: 'builtin_cli',
-        displayName: 'Codex CLI',
-        enabled: true,
-      }),
-    ]);
-    expect(persistence.getProviderConnection('builtin:codex-cli')).toEqual(
-      expect.objectContaining({
-        id: 'builtin:codex-cli',
-        providerId: 'openai',
-      }),
-    );
-    expect(() => persistence.getProviderConnection('missing:connection')).toThrow(NotFoundError);
-    const secretReference = 'provider-secret:123e4567-e89b-42d3-a456-426614174000';
-    expect(
-      persistence.setProviderConnectionSecretReference('builtin:codex-cli', secretReference),
-    ).toMatchObject({ id: 'builtin:codex-cli', secretReference });
+      expect(persistence.listProviderConnections()).toEqual([
+        expect.objectContaining({
+          id: 'builtin:claude-cli',
+          providerId: 'anthropic',
+          runtimeKind: 'builtin_cli',
+          displayName: 'Claude CLI',
+          enabled: true,
+        }),
+        expect.objectContaining({
+          id: 'builtin:codex-cli',
+          providerId: 'openai',
+          runtimeKind: 'builtin_cli',
+          displayName: 'Codex CLI',
+          enabled: true,
+        }),
+      ]);
+      expect(persistence.getProviderConnection('builtin:codex-cli')).toEqual(
+        expect.objectContaining({
+          id: 'builtin:codex-cli',
+          providerId: 'openai',
+        }),
+      );
+      expect(() => persistence.getProviderConnection('missing:connection')).toThrow(NotFoundError);
+      const secretReference = 'provider-secret:123e4567-e89b-42d3-a456-426614174000';
+      expect(
+        persistence.setProviderConnectionSecretReference('builtin:codex-cli', secretReference),
+      ).toMatchObject({ id: 'builtin:codex-cli', secretReference });
 
-    persistence.close();
-    const reopened = new SqlitePersistenceClient(path);
-    expect(reopened.listProviderConnections().map(({ id }) => id)).toEqual([
-      'builtin:claude-cli',
-      'builtin:codex-cli',
-    ]);
-    expect(reopened.getProviderConnection('builtin:codex-cli').secretReference).toBe(
-      secretReference,
-    );
-    reopened.close();
-  });
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listProviderConnections().map(({ id }) => id)).toEqual([
+        'builtin:claude-cli',
+        'builtin:codex-cli',
+      ]);
+      expect(reopened.getProviderConnection('builtin:codex-cli').secretReference).toBe(
+        secretReference,
+      );
+      reopened.close();
+    });
 
-  it('backfills legacy built-in identity without inferring resolved model', () => {
-    const { persistence, path } = createPersistence();
-    persistence.setRuntime('codex');
-    persistence.setModel('gpt-5.6-sol');
-    const task = persistence.createTask('legacy codex task');
-    const turn = persistence.startTurn(task.id, 'legacy identity');
-    persistence.close();
+    it('backfills legacy built-in identity without inferring resolved model', () => {
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-sol');
+      const task = persistence.createTask('legacy codex task');
+      const turn = persistence.startTurn(task.id, 'legacy identity');
+      persistence.close();
 
-    const legacy = new Database(path);
-    legacy.exec(`
+      const legacy = new Database(path);
+      legacy.exec(`
       UPDATE tasks
       SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
       UPDATE turns
@@ -180,23 +181,146 @@ describe('provider connections', () => {
       SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
       DELETE FROM schema_migrations WHERE version = 42;
     `);
-    legacy.close();
+      legacy.close();
 
-    const migrated = new SqlitePersistenceClient(path);
-    const selection = {
-      connectionId: 'builtin:codex-cli',
-      requestedProvider: 'openai',
-      requestedModel: 'gpt-5.6-sol',
-    };
-    expect(migrated.getTaskModelSelection(task.id)).toEqual(selection);
-    expect(migrated.getTaskLeader(task.id).modelSelection).toEqual(selection);
-    expect(migrated.getTurnModelIdentity(task.id, turn.turnId)).toEqual({
-      selection,
-      resolution: { resolvedProvider: null, resolvedModel: null },
+      const migrated = new SqlitePersistenceClient(path);
+      const selection = {
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-5.6-sol',
+      };
+      expect(migrated.getTaskModelSelection(task.id)).toEqual(selection);
+      expect(migrated.getTaskLeader(task.id).modelSelection).toEqual(selection);
+      expect(migrated.getTurnModelIdentity(task.id, turn.turnId)).toEqual({
+        selection,
+        resolution: { resolvedProvider: null, resolvedModel: null },
+      });
+      migrated.close();
     });
-    migrated.close();
+
+    it('migrates mixed Claude, Codex, and unknown-model history idempotently', () => {
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('claude');
+      persistence.setModel('claude-opus-history');
+      const claudeTask = persistence.createTask('legacy Claude');
+      const claudeTurn = persistence.startTurn(claudeTask.id, 'Claude history');
+      persistence.promoteTaskToTeam(claudeTask.id);
+
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-codex-history');
+      const codexTask = persistence.createTask('legacy Codex');
+      const codexTurn = persistence.startTurn(codexTask.id, 'Codex history');
+      persistence.promoteTaskToTeam(codexTask.id);
+
+      persistence.setRuntime('claude');
+      persistence.setModel('legacy-model-id-that-is-not-in-any-catalog');
+      const unknownTask = persistence.createTask('legacy unknown model');
+      const unknownTurn = persistence.startTurn(unknownTask.id, 'Unknown model history');
+      persistence.promoteTaskToTeam(unknownTask.id);
+      persistence.close();
+
+      const legacy = new Database(path);
+      legacy.exec(`
+      UPDATE tasks
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      UPDATE turns
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL,
+          resolved_provider = NULL, resolved_model = NULL;
+      UPDATE agent_threads
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      UPDATE agents
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      DELETE FROM schema_migrations WHERE version = 42;
+    `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.getTurnModelIdentity(claudeTask.id, claudeTurn.turnId).selection).toEqual({
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-opus-history',
+      });
+      expect(migrated.getTurnModelIdentity(codexTask.id, codexTurn.turnId).selection).toEqual({
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-codex-history',
+      });
+      expect(migrated.getTurnModelIdentity(unknownTask.id, unknownTurn.turnId).selection).toEqual({
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'legacy-model-id-that-is-not-in-any-catalog',
+      });
+      expect(migrated.getTaskLeader(claudeTask.id).modelSelection.connectionId).toBe(
+        'builtin:claude-cli',
+      );
+      expect(migrated.getTaskLeader(codexTask.id).modelSelection.connectionId).toBe(
+        'builtin:codex-cli',
+      );
+      migrated.close();
+
+      // Reopening after every migration row is present is the idempotency fixture: it must preserve
+      // the exact unknown value rather than trying to curate or replace it on a second pass.
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTaskModelSelection(unknownTask.id)?.requestedModel).toBe(
+        'legacy-model-id-that-is-not-in-any-catalog',
+      );
+      expect(reopened.getTeamByTask(claudeTask.id)).not.toBeNull();
+      expect(reopened.getTeamByTask(codexTask.id)).not.toBeNull();
+      reopened.close();
+    });
+
+    it('allows only external Provider rate limits to be lowered', () => {
+      const { persistence } = createPersistence();
+      const now = new Date().toISOString();
+      const external = persistence.createProviderConnection({
+        id: 'connection:rate-limit-test',
+        providerId: 'openai',
+        runtimeKind: 'official_api',
+        displayName: 'Rate limit test',
+        enabled: true,
+        secretReference: null,
+        verification: {
+          status: 'unverified',
+          verifiedAt: null,
+          expiresAt: null,
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: 2,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      expect(
+        persistence.lowerProviderConnectionRateLimits(external.id, {
+          maxConcurrentRequests: 1,
+          requestsPerMinute: 30,
+        }),
+      ).toMatchObject({
+        rateLimit: {
+          mode: 'manual',
+          maxConcurrentRequests: 1,
+          requestsPerMinute: 30,
+        },
+      });
+      expect(() =>
+        persistence.lowerProviderConnectionRateLimits(external.id, {
+          maxConcurrentRequests: 2,
+        }),
+      ).toThrow('can only be lowered');
+      expect(() =>
+        persistence.lowerProviderConnectionRateLimits('builtin:codex-cli', {
+          maxConcurrentRequests: 1,
+        }),
+      ).toThrow('Built-in CLI concurrency');
+      persistence.close();
+    });
   });
-});
 
 class PersistenceTestArtifacts implements EditArtifactRepository {
   readonly values = new Map<string, Buffer>();
@@ -4502,6 +4626,9 @@ if (runsWithElectronAbi)
         { version: 43 },
         { version: 44 },
         { version: 45 },
+        { version: 46 },
+        { version: 47 },
+        { version: 48 },
       ]);
       for (const [table, columns] of [
         [

@@ -30,8 +30,7 @@ type GeminiModel = Readonly<{
 }>;
 
 export function serializeGeminiCredential(credential: GeminiCredential): string {
-  if (credential.apiKey.trim().length === 0)
-    throw new Error('Gemini API key is missing');
+  if (credential.apiKey.trim().length === 0) throw new Error('Gemini API key is missing');
   return JSON.stringify(credential);
 }
 
@@ -62,19 +61,14 @@ export class GeminiProviderClient implements ProviderRuntime {
       return {
         status: 'verified',
         verifiedAt: checkedAt.toISOString(),
-        expiresAt: new Date(
-          checkedAt.getTime() + VERIFICATION_TTL_MS,
-        ).toISOString(),
+        expiresAt: new Date(checkedAt.getTime() + VERIFICATION_TTL_MS).toISOString(),
         message: null,
       };
     } catch (error) {
       if (signal.aborted) throw error;
       const status = error instanceof GeminiHttpError ? error.status : null;
       return {
-        status:
-          status === 401 || status === 403
-            ? 'invalid_credentials'
-            : 'unavailable',
+        status: status === 401 || status === 403 ? 'invalid_credentials' : 'unavailable',
         verifiedAt: checkedAt.toISOString(),
         expiresAt: checkedAt.toISOString(),
         message:
@@ -106,20 +100,14 @@ export class GeminiProviderClient implements ProviderRuntime {
         providerId: 'google',
         modelId,
         displayName: model.displayName?.trim() || modelId,
-        available:
-          model.supportedGenerationMethods?.includes('generateContent') ?? false,
+        available: model.supportedGenerationMethods?.includes('generateContent') ?? false,
         availabilityCheckedAt: observedAt,
         contextWindow: providerValue(positiveInteger(model.inputTokenLimit)),
-        maxOutputTokens: providerValue(
-          positiveInteger(model.outputTokenLimit),
-        ),
+        maxOutputTokens: providerValue(positiveInteger(model.outputTokenLimit)),
         toolCalling: unknown,
         structuredOutput: unknown,
         multimodalInput: unknown,
-        reasoning:
-          typeof model.thinking === 'boolean'
-            ? providerValue(model.thinking)
-            : unknown,
+        reasoning: typeof model.thinking === 'boolean' ? providerValue(model.thinking) : unknown,
       };
     });
   }
@@ -132,9 +120,7 @@ export class GeminiProviderClient implements ProviderRuntime {
     assertGeminiConnection(connection);
     const parsed = providerExecutionRequestSchema.parse(request);
     if (parsed.connectionId !== connection.id)
-      throw new Error(
-        'Execution Connection does not match the Gemini API Connection',
-      );
+      throw new Error('Execution Connection does not match the Gemini API Connection');
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     signal.addEventListener('abort', abort, { once: true });
@@ -154,10 +140,7 @@ export class GeminiProviderClient implements ProviderRuntime {
         },
       );
       if (!response.ok) {
-        const retryAfterMs = retryAfter(
-          response.headers.get('retry-after'),
-          this.now(),
-        );
+        const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
         if (response.status === 429)
           yield {
             type: 'rate_limit',
@@ -220,12 +203,10 @@ export class GeminiProviderClient implements ProviderRuntime {
         pageToken === null
           ? '?pageSize=1000'
           : `?pageSize=1000&pageToken=${encodeURIComponent(pageToken)}`;
-      const response = await this.authenticatedFetch(
-        connection,
-        `/models${query}`,
-        signal,
-        { method: 'GET', headers: { Accept: 'application/json' } },
-      );
+      const response = await this.authenticatedFetch(connection, `/models${query}`, signal, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+      });
       if (!response.ok) throw new GeminiHttpError(response.status);
       const value: unknown = await response.json();
       const page = object(value);
@@ -267,17 +248,13 @@ class GeminiHttpError extends Error {
   }
 }
 
-function geminiGenerateRequest(
-  request: ProviderExecutionRequest,
-): Record<string, unknown> {
+function geminiGenerateRequest(request: ProviderExecutionRequest): Record<string, unknown> {
   const system = request.messages
     .filter((message) => message.role === 'system')
     .map((message) => message.content)
     .join('\n\n');
   return {
-    ...(system === ''
-      ? {}
-      : { systemInstruction: { parts: [{ text: system }] } }),
+    ...(system === '' ? {} : { systemInstruction: { parts: [{ text: system }] } }),
     contents: request.messages
       .filter((message) => message.role !== 'system')
       .map((message) =>
@@ -288,7 +265,7 @@ function geminiGenerateRequest(
                 {
                   functionResponse: {
                     id: message.toolCallId,
-                    name: message.toolCallId,
+                    name: message.toolName ?? message.toolCallId,
                     response: { output: message.content },
                   },
                 },
@@ -297,7 +274,14 @@ function geminiGenerateRequest(
           : {
               role: message.role === 'assistant' ? 'model' : 'user',
               parts: [
-                { text: message.content },
+                ...(message.content === '' ? [] : [{ text: message.content }]),
+                ...(message.toolCalls ?? []).map((toolCall) => ({
+                  functionCall: {
+                    id: toolCall.callId,
+                    name: toolCall.name,
+                    args: toolCall.input,
+                  },
+                })),
                 ...(message.inlineImages ?? []).map((image) => ({
                   inlineData: {
                     mimeType: image.mimeType,
@@ -331,32 +315,21 @@ function geminiGenerateRequest(
   };
 }
 
-function normalizeHttpError(
-  status: number,
-  retryAfterMs: number | null,
-): NormalizedProviderError {
+function normalizeHttpError(status: number, retryAfterMs: number | null): NormalizedProviderError {
   if (status === 401)
     return error('credentials', 'Gemini API credentials were rejected', false, status);
   if (status === 403)
     return error('invalid_request', 'Gemini API permission denied', false, status);
-  if (status === 404)
-    return error('not_found', 'Gemini model was not found', false, status);
+  if (status === 404) return error('not_found', 'Gemini model was not found', false, status);
   if (status === 429)
     return {
       ...error('rate_limited', 'Gemini rate limit reached', true, status),
       retryAfterMs,
     };
-  if (status === 499)
-    return error('canceled', 'Gemini request was canceled', false, status);
-  if (status === 504)
-    return error('timeout', 'Gemini request timed out', true, status);
+  if (status === 499) return error('canceled', 'Gemini request was canceled', false, status);
+  if (status === 504) return error('timeout', 'Gemini request timed out', true, status);
   if (status >= 500)
-    return error(
-      'provider_unavailable',
-      'Gemini API is temporarily unavailable',
-      true,
-      status,
-    );
+    return error('provider_unavailable', 'Gemini API is temporarily unavailable', true, status);
   return error('invalid_request', 'Gemini API rejected the request', false, status);
 }
 
@@ -377,21 +350,12 @@ function error(
 
 function isGeminiModel(value: unknown): value is GeminiModel {
   const record = object(value);
-  return (
-    typeof record?.name === 'string' &&
-    record.name.length > 0 &&
-    record.name.length <= 512
-  );
+  return typeof record?.name === 'string' && record.name.length > 0 && record.name.length <= 512;
 }
 
 function assertGeminiConnection(connection: ProviderConnection): void {
-  if (
-    connection.runtimeKind !== 'official_api' ||
-    connection.providerId !== 'google'
-  )
-    throw new Error(
-      'Gemini Provider client requires an official Google Gemini API Connection',
-    );
+  if (connection.runtimeKind !== 'official_api' || connection.providerId !== 'google')
+    throw new Error('Gemini Provider client requires an official Google Gemini API Connection');
 }
 
 function stripModelPrefix(value: string): string {
@@ -399,22 +363,17 @@ function stripModelPrefix(value: string): string {
 }
 
 function positiveInteger(value: unknown): number | null {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0
-    ? value
-    : null;
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
 }
 
 function retryAfter(value: string | null, now: Date): number | null {
   if (value === null) return null;
   const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0)
-    return Math.ceil(seconds * 1_000);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1_000);
   const date = Date.parse(value);
   return Number.isFinite(date) ? Math.max(0, date - now.getTime()) : null;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object'
-    ? (value as Record<string, unknown>)
-    : null;
+  return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }

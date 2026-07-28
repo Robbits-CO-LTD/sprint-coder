@@ -74,10 +74,7 @@ export class ProviderVerificationService {
       }, this.preflightTimeoutMs);
     });
     try {
-      const result = await Promise.race([
-        runtime.verify(connection, controller.signal),
-        timeout,
-      ]);
+      const result = await Promise.race([runtime.verify(connection, controller.signal), timeout]);
       const verifiedAt = this.now();
       const verification: ProviderConnection['verification'] =
         result.status === 'verified'

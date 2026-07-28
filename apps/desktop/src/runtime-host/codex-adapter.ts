@@ -1,17 +1,23 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError } from '@sprint-coder/contracts';
-import type { CodexModelOption, EffortOption, RuntimeWriteScope } from '@sprint-coder/contracts';
+import type {
+  CodexModelOption,
+  EffortOption,
+  RuntimeWriteScope,
+  TurnStage,
+} from '@sprint-coder/contracts';
 import type {
   RuntimeCanonicalEvent,
   RuntimeContextFragment,
   RuntimeTeamMcpOption,
 } from './protocol';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
-import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
+import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -131,6 +137,8 @@ export class CodexRuntimeAdapter {
 
     let failed = false;
     let sawCompletion = false;
+    let stageIndex = -1;
+    const assistantMessageId = randomUUID();
     let nextRequestId = 1;
     const pending = new Map<
       number,
@@ -177,10 +185,18 @@ export class CodexRuntimeAdapter {
           respondToCodexRequest(message['method'], message['id'], sendResponse);
           return;
         }
-        handleCodexNotification(message, emit, () => {
-          sawCompletion = true;
-          child.stdin.end();
-        });
+        handleCodexNotification(
+          message,
+          emit,
+          assistantMessageId,
+          (stage) => {
+            stageIndex = advanceCodexAppServerStage(stageIndex, stage, emit);
+          },
+          () => {
+            sawCompletion = true;
+            child.stdin.end();
+          },
+        );
       } catch {
         failed = true;
         fail(
@@ -276,26 +292,37 @@ export class CodexRuntimeAdapter {
 function handleCodexNotification(
   message: Record<string, unknown>,
   emit: EmitEvent,
+  assistantMessageId: string,
+  advanceStage: (stage: TurnStage) => void,
   completed: () => void,
 ): void {
   const method = message['method'];
   if (typeof method !== 'string') return;
   const params = asRecord(message['params']);
+  if (method === 'turn/started') {
+    advanceStage('understanding');
+    return;
+  }
   if (method === 'item/agentMessage/delta') {
+    advanceStage('synthesizing');
     emit({
       type: 'delta',
-      messageId: requiredString(params['itemId'], 'message id'),
+      messageId: assistantMessageId,
       delta: requiredString(params['delta'], 'message delta'),
     });
     return;
   }
   if (method === 'item/reasoning/textDelta' || method === 'item/reasoning/summaryTextDelta') {
+    advanceStage('planning');
     emit({ type: 'reasoning', text: requiredString(params['delta'], 'reasoning delta') });
     return;
   }
   if (method === 'item/completed') {
     const item = asRecord(params['item']);
+    if (item['type'] === 'mcpToolCall' || item['type'] === 'commandExecution')
+      advanceStage('executing');
     if (item['type'] === 'fileChange' && Array.isArray(item['changes'])) {
+      advanceStage('executing');
       const changes = item['changes']
         .map((change) => asRecord(change))
         .filter(
@@ -317,9 +344,30 @@ function handleCodexNotification(
     const turn = asRecord(params['turn']);
     if (turn['status'] !== 'completed')
       throw new Error(`Codex turn failed with status ${String(turn['status'])}`);
+    advanceStage('synthesizing');
     emit({ type: 'completed' });
     completed();
   }
+}
+
+const CODEX_APP_SERVER_STAGES: readonly TurnStage[] = [
+  'understanding',
+  'planning',
+  'executing',
+  'synthesizing',
+];
+
+export function advanceCodexAppServerStage(
+  currentIndex: number,
+  target: TurnStage,
+  emit: EmitEvent,
+): number {
+  const targetIndex = CODEX_APP_SERVER_STAGES.indexOf(target);
+  for (let index = currentIndex + 1; index <= targetIndex; index += 1) {
+    const stage = CODEX_APP_SERVER_STAGES[index];
+    if (stage !== undefined) emit({ type: 'stage', stage });
+  }
+  return Math.max(currentIndex, targetIndex);
 }
 
 function respondToCodexRequest(
@@ -453,17 +501,7 @@ export function buildCodexArgs(
           '-c',
           'mcp_servers.team.enabled=true',
           '-c',
-          `mcp_servers.team.enabled_tools=${JSON.stringify([
-            'team_hire_worker',
-            'team_assign_task',
-            'team_steer_execution',
-            'team_cancel_execution',
-            'team_get_status',
-            'team_wait_events',
-            'team_send_to_worker',
-            'team_wait_reports',
-            'team_stop_worker',
-          ])}`,
+          `mcp_servers.team.enabled_tools=${JSON.stringify(TEAM_MCP_TOOL_NAMES)}`,
           '-c',
           'mcp_servers.team.default_tools_approval_mode="approve"',
           '-c',

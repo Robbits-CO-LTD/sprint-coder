@@ -10,7 +10,7 @@ import { chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { executeTeamTool } from './team-tools';
+import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { secureLogger } from './secure-logger';
 
@@ -105,7 +105,7 @@ export type TeamMcpRegistration = Readonly<{
   requesterAgentId?: string;
 }>;
 
-type Registered = TeamMcpRegistration & { waitCursor: number };
+type Registered = TeamMcpRegistration & { waitCursor: number; modelCatalogQueried: boolean };
 
 export class TeamMcpBridge {
   private readonly registrations = new Map<string, Registered>();
@@ -118,6 +118,9 @@ export class TeamMcpBridge {
     private readonly coordinator: TeamCoordinator,
     private readonly socketPathFactory: () => string,
     private readonly authenticationTimeoutMs = DEFAULT_AUTHENTICATION_TIMEOUT_MS,
+    private readonly listModelCandidates?: NonNullable<
+      ExecuteTeamToolOptions['listModelCandidates']
+    >,
   ) {}
 
   get socketPath(): string | null {
@@ -231,7 +234,11 @@ export class TeamMcpBridge {
    * Call this before starting the Claude runtime for that turn, and always pair it with
    * `unregister` on completion/failure/cancel — an un-unregistered turn keeps its token live. */
   register(turnId: string, registration: TeamMcpRegistration): void {
-    this.registrations.set(turnId, { ...registration, waitCursor: 0 });
+    this.registrations.set(turnId, {
+      ...registration,
+      waitCursor: 0,
+      modelCatalogQueried: false,
+    });
   }
 
   unregister(turnId: string): void {
@@ -305,6 +312,8 @@ export class TeamMcpBridge {
     }
     const [turnId, registration] = found;
     try {
+      if (process.env['SPRINT_CODER_TEAM_MCP_TRACE'] === '1')
+        secureLogger.debug('Team MCP tool received', { tool: request.tool });
       const result = await executeTeamTool(
         this.coordinator,
         registration.taskId,
@@ -319,6 +328,15 @@ export class TeamMcpBridge {
             read: () => registration.waitCursor,
             advance: (seq) => {
               registration.waitCursor = seq;
+            },
+          },
+          ...(this.listModelCandidates === undefined
+            ? {}
+            : { listModelCandidates: this.listModelCandidates }),
+          modelCatalogAudit: {
+            wasQueried: () => registration.modelCatalogQueried,
+            markQueried: () => {
+              registration.modelCatalogQueried = true;
             },
           },
         },

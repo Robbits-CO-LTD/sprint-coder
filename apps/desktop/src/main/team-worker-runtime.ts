@@ -132,6 +132,8 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     const turnId = randomUUID();
     const prompt = [
       `あなたはチームの「${input.worker.role}」担当Workerです。`,
+      `あなたのAgent ID: ${input.worker.id}`,
+      `親Agent ID: ${input.worker.parentAgentId ?? 'Leader'}`,
       input.worker.objective === null ? '' : `目的: ${input.worker.objective}`,
       '以下のLeaderからの依頼に対応し、結果を日本語で簡潔に報告してください。',
       '',
@@ -141,8 +143,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       .join('\n');
     if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, prompt))
       throw new Error(`${choice.kind} Team Worker egress was denied`);
-    const teamMcp =
-      input.worker.canDelegate === true ? this.deps.teamMcpFor?.(input.worker, turnId) : undefined;
+    const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId);
     if (input.worker.canDelegate === true && teamMcp === undefined)
       throw new Error('Manager Team MCP is unavailable');
 

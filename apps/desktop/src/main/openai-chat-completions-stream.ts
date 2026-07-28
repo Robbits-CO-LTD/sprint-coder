@@ -1,4 +1,4 @@
-import type { CanonicalProviderEvent } from '@sprint-coder/contracts';
+import type { CanonicalProviderEvent, ProviderMessageToolCall } from '@sprint-coder/contracts';
 
 type ToolAccumulator = {
   callId: string | null;
@@ -70,9 +70,7 @@ export async function* normalizeOpenAIChatCompletionsStream(
       outputTokens: integerOrNull(usage?.completion_tokens ?? usage?.output_tokens),
       cacheReadTokens: integerOrNull(asRecord(usage?.prompt_tokens_details)?.cached_tokens),
       cacheWriteTokens: null,
-      reasoningTokens: integerOrNull(
-        asRecord(usage?.completion_tokens_details)?.reasoning_tokens,
-      ),
+      reasoningTokens: integerOrNull(asRecord(usage?.completion_tokens_details)?.reasoning_tokens),
       providerCost: null,
       source: usage === null ? 'unknown' : 'provider_api',
     },
@@ -80,9 +78,7 @@ export async function* normalizeOpenAIChatCompletionsStream(
   yield { type: 'completed', stopReason };
 }
 
-async function* readServerSentJson(
-  body: ReadableStream<Uint8Array>,
-): AsyncIterable<unknown> {
+async function* readServerSentJson(body: ReadableStream<Uint8Array>): AsyncIterable<unknown> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let pending = '';
@@ -123,10 +119,10 @@ function reasoningTexts(value: unknown): string[] {
   });
 }
 
-function parseArguments(value: string): unknown {
+function parseArguments(value: string): ProviderMessageToolCall['input'] {
   if (value.length === 0) return null;
   try {
-    return JSON.parse(value) as unknown;
+    return JSON.parse(value) as ProviderMessageToolCall['input'];
   } catch {
     return value;
   }

@@ -137,7 +137,11 @@ export function needsNextPage({
  * Deliberately clamps instead of wrapping: the list is paged, so wrapping from the last loaded row
  * to the first would read as "you have reached the end" when more pages exist.
  */
-export function nextActiveIndex(key: string, activeIndex: number, itemCount: number): number | null {
+export function nextActiveIndex(
+  key: string,
+  activeIndex: number,
+  itemCount: number,
+): number | null {
   if (itemCount <= 0) return null;
   const last = itemCount - 1;
   switch (key) {

@@ -1,7 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { buildCodexArgs, buildCodexPrompt, parseCodexModels, probeCodex } from './codex-adapter';
+import {
+  advanceCodexAppServerStage,
+  buildCodexArgs,
+  buildCodexPrompt,
+  parseCodexModels,
+  probeCodex,
+} from './codex-adapter';
 
 describe('Codex runtime probe', () => {
+  it('advances app-server stages before assistant deltas can be persisted', () => {
+    const events: unknown[] = [];
+    const emit = (event: unknown): void => {
+      events.push(event);
+    };
+    let index = advanceCodexAppServerStage(-1, 'planning', emit);
+    index = advanceCodexAppServerStage(index, 'synthesizing', emit);
+    advanceCodexAppServerStage(index, 'executing', emit);
+    expect(events).toEqual([
+      { type: 'stage', stage: 'understanding' },
+      { type: 'stage', stage: 'planning' },
+      { type: 'stage', stage: 'executing' },
+      { type: 'stage', stage: 'synthesizing' },
+    ]);
+  });
+
   it('degrades to unavailable when the CLI cannot be spawned', async () => {
     await expect(probeCodex('__sprint_coder_codex_cli_does_not_exist__')).resolves.toEqual({
       available: false,
@@ -47,12 +69,10 @@ describe('Codex runtime probe', () => {
     expect(args).toContain('mcp_servers.team.args=["/tmp/team-mcp-server.cjs"]');
     expect(args).toContain('mcp_servers.team.enabled=true');
     expect(args).toContain(
-      'mcp_servers.team.enabled_tools=["team_hire_worker","team_assign_task","team_steer_execution","team_cancel_execution","team_get_status","team_wait_events","team_send_to_worker","team_wait_reports","team_stop_worker"]',
+      'mcp_servers.team.enabled_tools=["team_list_models","team_hire_worker","team_assign_task","team_steer_execution","team_cancel_execution","team_get_status","team_wait_events","team_send_to_worker","team_send_message","team_read_messages","team_wait_reports","team_stop_worker"]',
     );
     expect(args).toContain('mcp_servers.team.default_tools_approval_mode="approve"');
-    expect(args).toContain(
-      'mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
-    );
+    expect(args).toContain('mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]');
     expect(args.join(' ')).not.toContain('turn-token');
     expect(args.slice(0, 2)).toEqual(['app-server', '--stdio']);
   });

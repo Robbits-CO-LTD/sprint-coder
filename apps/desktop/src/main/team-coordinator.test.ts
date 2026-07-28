@@ -505,6 +505,59 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('cancels a queued execution when its Worker is stopped', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Stop queued Worker');
+      const runtime = new BlockingWorkerRuntime();
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        () => undefined,
+        () => new Date(),
+        120_000,
+        new TeamExecutionScheduler(1),
+      );
+      const firstWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'running',
+        objective: 'hold the only slot',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      const queuedWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'queued',
+        objective: 'must be canceled',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      const first = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: firstWorker.id,
+        content: 'running',
+        doneCriteria: ['complete'],
+      });
+      const queued = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: queuedWorker.id,
+        content: 'must-not-run',
+        doneCriteria: ['complete'],
+      });
+      await waitFor(() => runtime.activeExecutions === 1);
+
+      await expect(coordinator.stopWorker(task.id, queuedWorker.id)).resolves.toMatchObject({
+        id: queuedWorker.id,
+        state: 'stopped',
+      });
+      expect(persistence.getTeamExecution(queued.executionId).state).toBe('canceled');
+      expect(persistence.listTeamAttempts(queued.executionId)).toHaveLength(0);
+
+      runtime.releases.shift()?.();
+      await waitFor(() => persistence.getTeamExecution(first.executionId).state === 'completed');
+      expect(runtime.contents).toEqual(['running']);
+      persistence.close();
+    });
+
     it('interrupts running executions for steer or cancel without changing execution identity', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Running execution control');

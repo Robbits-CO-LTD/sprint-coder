@@ -3,14 +3,17 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { TeamActivityCard } from './TeamActivityCard';
 import {
   EMPTY_ACTIVITY_GROUPS,
+  MODEL_SELECTION_REASON_MAX_LENGTH,
   UNKNOWN_ACTIVITY_HEADLINE,
+  UNKNOWN_MODEL_SELECTION_LABEL,
   activityHeadline,
   describeActivity,
+  describeWorkerModel,
   groupActivitiesByMessage,
   orderedActivities,
 } from '../lib/team-activity-display';
-import { QUEUE_REASON_LABELS } from '../lib/team-execution-display';
-import type { ChatMessage, TeamActivitySummary } from '../types/sprint-coder';
+import { BUILTIN_CONNECTION_LABELS, QUEUE_REASON_LABELS } from '../lib/team-execution-display';
+import type { ChatMessage, TeamActivitySummary, WorkerSummary } from '../types/sprint-coder';
 
 let nextSeq = 0;
 
@@ -31,7 +34,40 @@ function activity(overrides: Partial<TeamActivitySummary> = {}): TeamActivitySum
     queueReason: null,
     attemptOrdinal: null,
     terminalReason: null,
+    connectionId: null,
+    requestedProvider: null,
+    requestedModel: null,
+    modelSelectionReason: null,
     recordedAt: '2026-07-28T01:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function worker(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
+  return {
+    id: 'worker-1',
+    teamId: 'team-1',
+    threadId: 'thread-1',
+    taskId: 'task-1',
+    kind: 'worker',
+    role: 'Reviewer',
+    state: 'ready',
+    objective: 'レビューする',
+    writeCapable: false,
+    currentActivity: null,
+    engine: 'mock',
+    connectionId: null,
+    requestedProvider: null,
+    requestedModel: null,
+    parentAgentId: 'leader-1',
+    depth: 1,
+    canDelegate: false,
+    managerPolicy: null,
+    liveOutput: '',
+    reasoningActive: false,
+    usage: { costCents: 0, tokens: 0, timeMs: 0, toolCalls: 0 },
+    createdAt: '2026-07-28T01:00:00.000Z',
+    updatedAt: '2026-07-28T01:00:00.000Z',
     ...overrides,
   };
 }
@@ -151,6 +187,128 @@ describe('activity supplements', () => {
   it('treats attempt ordinal 0 as a real ordinal and empty strings as absent', () => {
     expect(describeActivity(activity({ attemptOrdinal: 0 })).details).toContain('試行 0回目');
     expect(describeActivity(activity({ status: '', terminalReason: '' })).details).toEqual([]);
+  });
+});
+
+describe('worker model selection', () => {
+  it('shows the model and Connection a Worker actually got', () => {
+    const display = describeWorkerModel(
+      worker({ connectionId: 'conn-openai-prod', requestedModel: 'gpt-5' }),
+    );
+    expect(display.modelLabel).toBe('gpt-5');
+    expect(display.connectionLabel).toBe('conn-openai-prod');
+    expect(display.ariaSummary).toBe('モデル gpt-5、Connection conn-openai-prod');
+  });
+
+  it('names built-in Connections with the same map the execution card uses', () => {
+    expect(
+      describeWorkerModel(worker({ connectionId: 'builtin:claude-cli' })).connectionLabel,
+    ).toBe(BUILTIN_CONNECTION_LABELS['builtin:claude-cli']);
+  });
+
+  it('says 不明 rather than going blank when a value was not recorded', () => {
+    const none = describeWorkerModel(worker({ connectionId: null, requestedModel: null }));
+    expect(none.modelLabel).toBe(UNKNOWN_MODEL_SELECTION_LABEL);
+    expect(none.connectionLabel).toBe(UNKNOWN_MODEL_SELECTION_LABEL);
+
+    const blank = describeWorkerModel(worker({ connectionId: '  ', requestedModel: '' }));
+    expect(blank.modelLabel).toBe(UNKNOWN_MODEL_SELECTION_LABEL);
+    expect(blank.connectionLabel).toBe(UNKNOWN_MODEL_SELECTION_LABEL);
+  });
+
+  it('never derives a model or provider name from the engine', () => {
+    for (const engine of ['mock', 'codex', 'claude'] as WorkerSummary['engine'][]) {
+      const display = describeWorkerModel(worker({ engine, requestedModel: null }));
+      expect(display.modelLabel).toBe(UNKNOWN_MODEL_SELECTION_LABEL);
+    }
+  });
+});
+
+describe('worker_hired model supplements', () => {
+  it('shows the model, the Connection and the selection reason on the hire', () => {
+    const display = describeActivity(
+      activity({
+        type: 'worker_hired',
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-5-codex',
+        modelSelectionReason: 'コードレビュー向けに推論の強いモデルを選定',
+      }),
+    );
+    expect(display.detailLabel).toBe(
+      `モデル gpt-5-codex · Connection ${BUILTIN_CONNECTION_LABELS['builtin:codex-cli']} · 選定理由 コードレビュー向けに推論の強いモデルを選定`,
+    );
+    expect(display.ariaSummary).toContain('選定理由');
+  });
+
+  it('shows only the values that exist, and invents no 不明 placeholder', () => {
+    const modelOnly = describeActivity(
+      activity({ type: 'worker_hired', requestedModel: 'gpt-5', modelSelectionReason: null }),
+    );
+    expect(modelOnly.detailLabel).toBe('モデル gpt-5');
+
+    const reasonOnly = describeActivity(
+      activity({ type: 'worker_hired', modelSelectionReason: 'Leaderの既定' }),
+    );
+    expect(reasonOnly.detailLabel).toBe('選定理由 Leaderの既定');
+
+    const nothing = describeActivity(activity({ type: 'worker_hired' }));
+    expect(nothing.details).toEqual([]);
+    expect(nothing.detailLabel).toBeNull();
+    expect(nothing.ariaSummary).not.toContain(UNKNOWN_MODEL_SELECTION_LABEL);
+  });
+
+  it('collapses and clamps a long reason so one card stays one line of annotation', () => {
+    const display = describeActivity(
+      activity({
+        type: 'worker_hired',
+        modelSelectionReason: `理由\n\n続き   ${'あ'.repeat(400)}`,
+      }),
+    );
+    const detail = display.details.find((d) => d.startsWith('選定理由')) ?? '';
+    expect(detail).toContain('理由 続き');
+    expect(detail).not.toContain('\n');
+    expect(detail.endsWith('…')).toBe(true);
+    expect(detail.length).toBeLessThanOrEqual(
+      '選定理由 '.length + MODEL_SELECTION_REASON_MAX_LENGTH + 1,
+    );
+  });
+
+  it('leaves every other activity type exactly as it was', () => {
+    for (const type of ALL_TYPES) {
+      if (type === 'worker_hired') continue;
+      const display = describeActivity(
+        activity({
+          type,
+          connectionId: 'builtin:claude-cli',
+          requestedModel: 'claude-opus-5',
+          modelSelectionReason: 'ここには出さない',
+        }),
+      );
+      expect(display.detailLabel).toBeNull();
+    }
+  });
+
+  it('renders the hire supplements in the card itself', () => {
+    const html = renderToStaticMarkup(
+      <TeamActivityCard
+        activity={describeActivity(
+          activity({
+            type: 'worker_hired',
+            requestedModel: 'gpt-5',
+            connectionId: 'conn-1',
+            modelSelectionReason: '短時間で終わる作業のため',
+          }),
+        )}
+      />,
+    );
+    expect(html).toContain('data-testid="team-activity-detail"');
+    expect(html).toContain('モデル gpt-5');
+    expect(html).toContain('Connection conn-1');
+    expect(html).toContain('選定理由 短時間で終わる作業のため');
+    // Still inert: the supplement added no control and no new live-region urgency.
+    expect(html).not.toContain('<button');
+    expect(html).not.toContain('aria-live="assertive"');
   });
 });
 

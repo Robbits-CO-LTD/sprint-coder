@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { afterEach, describe, expect, it } from 'vitest';
-import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
+import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 
 // Exercises the exact script string the Claude adapter writes to disk and hands to the real
 // Claude CLI as an MCP stdio server (see claude-adapter.ts). The JSON-RPC handshake shape asserted
@@ -135,19 +135,7 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
         tools: { name: string; inputSchema: Record<string, unknown> }[];
       }
     ).tools;
-    expect(tools.map((tool) => tool.name).sort()).toEqual(
-      [
-        'team_hire_worker',
-        'team_assign_task',
-        'team_steer_execution',
-        'team_cancel_execution',
-        'team_get_status',
-        'team_wait_events',
-        'team_send_to_worker',
-        'team_stop_worker',
-        'team_wait_reports',
-      ].sort(),
-    );
+    expect(tools.map((tool) => tool.name).sort()).toEqual([...TEAM_MCP_TOOL_NAMES].sort());
     for (const tool of tools) expect(tool).toHaveProperty('inputSchema');
     expect(
       (

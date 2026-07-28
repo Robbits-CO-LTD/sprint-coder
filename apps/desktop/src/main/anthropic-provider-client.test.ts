@@ -103,7 +103,30 @@ describe('AnthropicProviderClient', () => {
           model: 'claude-opus-4-8',
           stream: true,
           system: 'be concise',
-          messages: [{ role: 'user', content: 'hello' }],
+          messages: [
+            { role: 'user', content: 'hello' },
+            {
+              role: 'assistant',
+              content: [
+                {
+                  type: 'tool_use',
+                  id: 'call-1',
+                  name: 'lookup',
+                  input: { q: 'value' },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'tool_result',
+                  tool_use_id: 'call-1',
+                  content: '{"ok":true}',
+                },
+              ],
+            },
+          ],
           tools: [
             {
               name: 'lookup',
@@ -132,6 +155,17 @@ describe('AnthropicProviderClient', () => {
         messages: [
           { role: 'system', content: 'be concise' },
           { role: 'user', content: 'hello' },
+          {
+            role: 'assistant',
+            content: '',
+            toolCalls: [{ callId: 'call-1', name: 'lookup', input: { q: 'value' } }],
+          },
+          {
+            role: 'tool',
+            content: '{"ok":true}',
+            toolCallId: 'call-1',
+            toolName: 'lookup',
+          },
         ],
         tools: [
           {

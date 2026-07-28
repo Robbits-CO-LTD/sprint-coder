@@ -120,7 +120,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(releaseTeamMcp).toHaveBeenCalledWith(expect.any(String));
   });
 
-  it('does not expose Team MCP to a leaf Worker and fails closed for an unbound Manager', async () => {
+  it('offers communication MCP to a leaf Worker and fails closed for an unbound Manager', async () => {
     runtimeHostMock.starts.length = 0;
     const teamMcpFor = vi.fn(() => undefined);
     const subject = runtime({ teamMcpFor });
@@ -130,7 +130,10 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       envelope: { ...envelope, targetAgentId: 'worker-1' },
       content: '通常作業',
     });
-    expect(teamMcpFor).not.toHaveBeenCalled();
+    expect(teamMcpFor).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'worker-1', canDelegate: false }),
+      expect.any(String),
+    );
     expect(runtimeHostMock.starts[0]?.[7]).toBeUndefined();
 
     await expect(

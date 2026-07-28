@@ -351,6 +351,7 @@ function collectDescendantPids(rootPid: number): number[] {
 export async function launchApp(
   userDataDir: string,
   mode: E2EMode = resolveE2EMode(),
+  environmentOverrides: Readonly<Record<string, string>> = {},
 ): Promise<ElectronApplication> {
   const env = {
     ...process.env,
@@ -363,6 +364,7 @@ export async function launchApp(
     // Team golden paths assert deterministic Worker reports. Production remains fail-closed:
     // simulated workers are enabled only inside this isolated E2E process.
     SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS: '1',
+    ...environmentOverrides,
   };
 
   if (mode === 'packaged') {

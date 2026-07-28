@@ -47,9 +47,7 @@ describe('ModelCatalogService', () => {
   it('refreshes observation timestamps without rebuilding the search index', () => {
     const service = new ModelCatalogService();
     service.replaceCatalog([model(1)]);
-    service.replaceCatalog([
-      { ...model(1), availabilityCheckedAt: '2026-07-28T01:00:00.000Z' },
-    ]);
+    service.replaceCatalog([{ ...model(1), availabilityCheckedAt: '2026-07-28T01:00:00.000Z' }]);
     const result = service.query({
       taskId: 'task-1',
       text: '',

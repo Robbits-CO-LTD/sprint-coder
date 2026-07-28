@@ -42,8 +42,7 @@ export class ModelCatalogService {
       );
       this.indexed = this.indexed.map((entry) => ({
         ...entry,
-        model:
-          refreshed.get(`${entry.model.connectionId}\0${entry.model.modelId}`) ?? entry.model,
+        model: refreshed.get(`${entry.model.connectionId}\0${entry.model.modelId}`) ?? entry.model,
       }));
       return;
     }

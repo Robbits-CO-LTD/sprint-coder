@@ -23,9 +23,7 @@ describe('bundled Provider Profiles', () => {
         expect(profile.verificationModel).toBeNull();
       } else {
         expect(profile.curatedModels.length).toBeGreaterThan(0);
-        expect(
-          profile.curatedModels.some(({ id }) => id === profile.verificationModel),
-        ).toBe(true);
+        expect(profile.curatedModels.some(({ id }) => id === profile.verificationModel)).toBe(true);
       }
     }
   });

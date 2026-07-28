@@ -21,7 +21,13 @@ afterEach(async () => {
 describe('builtin Team skill', () => {
   it('is the single source of Leader guidance', () => {
     expect(LEADER_MCP_SYSTEM_PROMPT).toBe(BUILTIN_TEAM_SKILL_CONTENT);
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_list_models');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_send_message');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_read_messages');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_hire_worker');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_get_status');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_steer_execution');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('liveOutput');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_wait_reports');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('未着report');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('全execution ID');

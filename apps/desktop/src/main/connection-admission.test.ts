@@ -43,8 +43,8 @@ const candidate = (executionId: string, connectionId: string, teamId = 'team-1')
 
 describe('ConnectionAdmissionController', () => {
   it('bypasses built-in CLI limits and skips a saturated external Connection fairly', () => {
-    const controller = new ConnectionAdmissionController(
-      () => Date.parse('2026-07-28T00:00:01.000Z'),
+    const controller = new ConnectionAdmissionController(() =>
+      Date.parse('2026-07-28T00:00:01.000Z'),
     );
     controller.configure(connection('builtin:claude-cli', 'builtin_cli', null));
     controller.configure(connection('openai:primary', 'official_api', 1));

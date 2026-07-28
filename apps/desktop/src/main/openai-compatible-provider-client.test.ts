@@ -310,9 +310,7 @@ describe('openAICompatibleChatCompletionRequest', () => {
         connectionId: connection.id,
         modelId: 'model-a',
         messages: [{ role: 'user', content: 'hello' }],
-        tools: [
-          { name: 'lookup', description: 'Lookup', inputSchema: { type: 'object' } },
-        ],
+        tools: [{ name: 'lookup', description: 'Lookup', inputSchema: { type: 'object' } }],
         structuredOutput: {
           name: 'answer',
           schema: { type: 'object' },
@@ -322,6 +320,43 @@ describe('openAICompatibleChatCompletionRequest', () => {
     ).toMatchObject({
       tools: [{ type: 'function', function: { name: 'lookup' } }],
       response_format: { type: 'json_schema', json_schema: { name: 'answer', strict: true } },
+    });
+  });
+
+  it('preserves assistant tool calls and their results across provider rounds', () => {
+    expect(
+      openAICompatibleChatCompletionRequest({
+        executionId: 'execution-tool-history',
+        connectionId: connection.id,
+        modelId: 'model-a',
+        messages: [
+          {
+            role: 'assistant',
+            content: '',
+            toolCalls: [{ callId: 'call-1', name: 'lookup', input: { q: 'value' } }],
+          },
+          {
+            role: 'tool',
+            content: '{"ok":true}',
+            toolCallId: 'call-1',
+            toolName: 'lookup',
+          },
+        ],
+      }),
+    ).toMatchObject({
+      messages: [
+        {
+          role: 'assistant',
+          tool_calls: [
+            {
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'lookup', arguments: '{"q":"value"}' },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'call-1', content: '{"ok":true}' },
+      ],
     });
   });
 });

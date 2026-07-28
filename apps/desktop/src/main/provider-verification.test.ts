@@ -60,9 +60,7 @@ describe('ProviderVerificationService', () => {
       expiresAt: '2026-07-29T00:00:00.000Z',
     });
     now = new Date('2026-07-29T00:00:00.001Z');
-    expect(service.getConnection(connection.id).verification.status).toBe(
-      'verification_expired',
-    );
+    expect(service.getConnection(connection.id).verification.status).toBe('verification_expired');
   });
 
   it('blocks on preflight timeout without classifying it as invalid credentials', async () => {

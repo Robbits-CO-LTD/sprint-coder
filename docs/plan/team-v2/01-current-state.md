@@ -2,119 +2,113 @@
 
 調査日: 2026-07-28
 
-対象commit: `2c645b6`
+基準: working tree上のTeam v2／Multi-Provider実装。macOS local final gate実行済み。
 
 ## 結論
 
-Team v2 Coreのdomain、永続execution／attempt、global最大8並列、階層UI、Team Policyは実装済みで
-ある。Multi-Providerのためのconnection identity列は先行導入済みだが、Connection正本、
-Provider Registry／Runtime、API rate admission、Secret Storage、共通Model Pickerは未実装である。
+Team v2 Core、公式API 5 Provider、OpenAI-compatible Pack A/B、共通Model Picker、
+Connection設定、Secret Storage、二段階Schedulerまで製品コードへ接続済みである。
 
-## データ経路マトリクス
+今回追加した最終統合では、実CLI／公式API LeaderとManagerがcatalogからWorker別modelを選び、
+Manager／Workerがprovider-neutralなtool loopでTeam toolを実行できるようにした。Worker間通信、
+実行中監視とsteer、階層Canvas、model／Connection／選定理由の監査表示も接続済みである。
 
-| 経路 | 現在の正本／境界 | 現状 | P1以降の扱い |
-|---|---|---|---|
-| Chat送信 | `persistence.ts:8294-8355` | Task selectionをTurnへsnapshot | Connection解決をRegistryへ委譲 |
-| Team雇用 | `persistence.ts:3485-3515` | built-in identityをAgent／threadへ保存 | Agent selectionを実行時にも使用 |
-| Team実行 | `team-coordinator.ts:410-454` | durable execution作成後に即ID返却 | Connection admissionを追加 |
-| runtime dispatch | `ipc.ts:1490-1525` | Claude／CodexをMainで分岐 | ProviderRuntime interfaceへ置換 |
-| Main→Runtime Host | `runtime-host.ts:58-105` | process-local protocol | canonical Provider eventを追加 |
-| Runtime Host→CLI | `claude-adapter.ts:128-198`、`codex-adapter.ts:70-123` | CLI process／MCP | built-in Runtimeとして保持 |
-| model選択UI | `Composer.tsx:438-515` | global配列を同期render | Main catalog queryへ置換 |
-| 設定保存 | `appStore.ts:784-822`、`ipc.ts:430-477` | global runtime/model | canonical Task selection repository |
-| queue復元 | `team-coordinator.ts:987-1017` | durable ordinal順に再投入 | Connection queueも同じ正本を使用 |
-| resolved model | `protocol.ts:43-51`、`persistence.ts:7769-7772` | Claudeのみ任意 | 全Providerでattemptへ正規化 |
+実装は完了し、変更中の反復ではなく最後にまとめたlocal final gateでunit、lint、typecheck、
+packaged E2E、実CLI、利用可能な実API、Computer Useを検証した。ただし3OS CIと、資格情報が
+存在しないProviderの実API smokeは未実行なので、全GA条件の完成は宣言しない。
 
-## Runtime
+## 実装済みの主要経路
 
-- Runtime Hostは1 UtilityProcessにつきClaudeまたはCodexのCLI Adapterを1つ持つ
-  (`runtime-host/index.ts:13-37`)。
-- Mainの`RuntimeHostClient`は`start`と`cancel`を持つ。Teamのrunning steerは現在のprocessを
-  cancelし、同じexecutionの新attemptとして再投入する。
-- Claude／Codex AdapterはCLI processを直接起動する。公式API Adapter、Provider Registry、
-  usage normalization、Connection verificationは存在しない。
-- protocol v5のcanonical eventはstage、delta、reasoning、thread、file change／edit、completed。
-  usage、rate-limit、routing、resolved providerの共通eventはない
-  (`runtime-host/protocol.ts:14-125`)。
-- packaged runtime-hostはForgeの独立entryで、Mainが`utilityProcess.fork`する
-  (`forge.config.ts:75-82`、`main/runtime-host.ts:125-165`)。production fuseはRunAsNode、
-  Node options、inspectorを無効化している。
+| 経路                  | 現在の正本／境界                      | 状態                                                  |
+| --------------------- | ------------------------------------- | ----------------------------------------------------- |
+| Chat model selection  | Task canonical selection repository   | 旧／新Pickerが同じselectionを読む                     |
+| Team model selection  | `team_list_models` + hire audit       | 実Leader／Managerはselectionと理由が必須              |
+| CLI Team              | Team MCP bridge                       | Claude／Codex Leader、Manager、Worker通信を接続       |
+| API Team              | canonical Provider tool loop          | Leader／Manager／Workerが複数roundのtool callを実行   |
+| Team hierarchy        | persisted parent/depth/Manager Policy | 深度4、Managerによる直下Agent再委譲                   |
+| execution             | durable execution／attempt            | assign即ID、queue、running steer、cancel、restart     |
+| Scheduler             | global 8 + Connection admission       | built-in bypass、token bucket、round-robin、aging     |
+| 429                   | same attempt retry                    | Retry-After、jitter、最大3回、terminal `rate_limited` |
+| Provider verification | Main verification service             | 24時間TTL、3秒preflight、期限切れfail-closed          |
+| Provider secrets      | safeStorage wrapper                   | DBはopaque referenceだけを保存                        |
+| Provider settings     | typed Main／Preload IPC               | 作成、再確認、外部Connection上限のlower-only変更      |
+| Team UI               | Canvas／List／Activity Card           | 階層、model、Connection、queue理由、選定理由を表示    |
 
-## Connection identityとmodel selection
+## RuntimeとProvider
 
-- stable built-in IDは`builtin:claude-cli`と`builtin:codex-cli`
-  (`connection-identity.ts:7-28`)。
-- DB v35はTurn、thread、Agentへidentity列、v36はTaskへselection列を追加した。
-  v38のexecution／attemptもidentity列を持つ (`persistence.ts:1810-1935`)。
-- 新規Task、Turn、Agentはidentityを保存する (`persistence.ts:3182-3254`、
-  `3485-3515`、`8294-8355`)。
-- v35 migrationは列追加だけで、既存rowをbackfillしない。pre-v35履歴はlegacy
-  `runtime_kind`／`model`だけを持つため、P1Aの必須対象である。
-- Task selectionはcanonical repositoryを持つが、RendererのPickerはglobal
-  `settings.setRuntime/setModel`を操作する。会話単位UIとの接続は未完了。
-- Worker identityは保存される一方、`RuntimeHostTeamWorkerRuntime`は実行時にglobal
-  runtime/modelを再選択する (`ipc.ts:216-225`、`team-worker-runtime.ts:103-171`)。
-  Worker別モデル割当は保存と実行がまだ一貫していない。
-- model contractは最大32件 (`contracts/index.ts:1257`)。ComposerとSettingsは
-  `runtime.models.map()`で同期renderするため、大量catalogへ対応していない。
+- built-in Connectionは`builtin:claude-cli`、`builtin:codex-cli`で安定している。
+- 外部APIはOpenAI、OpenRouter、Anthropic、Gemini、xAIを独立Runtimeとして登録済み。
+- Pack A/Bは専用Adapterを複製せず、宣言的`ProviderProfile`と共通OpenAI-compatible Runtimeを使う。
+- ChatとTeam attemptはrequested／resolved provider/model、routing、normalized usageを分離して保存する。
+- Provider message contractはassistant tool callとtool result履歴を保持し、OpenAI Responses、
+  Chat Completions、Anthropic Messages、Gemini形式へAdapter内で変換する。
+- Team CoreはProvider固有client／SDKへ依存しない。ESLint import制限とTypeScript AST検査は
+  local final gateでgreen。
 
-## Team executionとScheduler
+## Team executionと監督
 
-- `TeamExecutionScheduler`はglobal 8枠とTeam別上限を同時に守り、queued jobはactive countへ
-  含めない (`team-execution-scheduler.ts:1-123`)。
-- queue、attempt、instruction revision、queue reasonはDB v38から永続化される。
-- queue復元、queued steer/cancel、running interrupt-and-resumeはCoreで実装済み。
-- 現SchedulerはConnection IDを入力に持たず、token bucket、RPM／TPM、429 retry、
-  Connection間round-robin／agingを実装していない。P1Bは既存8枠を置換せず第二admissionを統合する。
-- built-in CLIには外部API rate limitを適用しない。現在の8並列を維持することが回帰条件である。
-
-## Persistence
-
-- 最新schemaはv45。v41は`provider_connections`と安定したbuilt-in Claude／Codex Connectionを
-  追加し、v42はpre-v35 built-in identityをbackfillし、v43はsecret reference列を追加する。
-  v44はverification status／TTL時刻／安全な表示messageを永続化する。
-  v45はConnection concurrency／RPM／TPM／mode／観測header metadataを永続化する。
-  migrationはchecksum検査、migrationごとのtransaction、適用前backup、
-  `foreign_key_check`を持つ (`persistence.ts:2872-3003`)。
-- 既存migration testはv1→v45をコード内生成DBで検査するが、計画指定の独立DB fixture群は
-  まだ存在しない。P1Aでfixtureを追加する。
-- legacy列は削除しない。P1Aはdual-readとunknown legacy runtime表示を追加し、cleanupは別Sliceにする。
+- Team全体の同時AI実行上限は8。queued／waiting中はactive枠を消費しない。
+- built-in CLIはConnection rate admissionをbypassし、Team全体の8枠だけを消費する。
+- Connection内FIFO、Connection間round-robin、同一Connection内Team round-robin、
+  30秒agingでstarvationを防ぐ。
+- Leaderは実行中に`team_get_status`で`currentActivity`と`liveOutput`を読み、
+  scope逸脱や誤実装を見つけた時点で`team_steer_execution`できる。
+- ManagerのauthorityはMCP tokenまたはprovider runtime contextへ固定し、直下Agentの
+  hire／assignと自分が作成したexecutionのsteer／cancelだけを許可する。
+- Worker間messageはTeam Policyを確認し、送信元identityをmodel引数から受け取らず監査保存する。
+- Worker停止はqueued job、rate-limit後のpending resume、running attemptも取消し、
+  停止後にexecutionが再開しない。
 
 ## Renderer／Preload／Main
 
-- RendererはZustand、Preloadはtyped IPC、MainはDB、秘密、runtime、networkの所有者である。
-- API keyをRenderer stateへ置かない。Rendererが扱うのはmasked metadataとsecret referenceだけにする。
-- U1のPickerはRuntime固有stateを読まず、Mainのcatalog query interfaceだけへ依存する。
+- RendererはProvider Runtime、Secret、DBへ直接触れない。
+- 共通PickerはMain catalog queryだけを読み、revision単位index、paging、常時virtualizationを使う。
+- 1000件超の合成catalog fixtureとviewport外非描画testを実装済み。
+- `multiProviderModelPickerV2=0`では旧Pickerへ戻せる。U4削除はfinal gate後の独立cleanupである。
+- Provider設定UIはClaude CLI非対話実行へ小Slice単位で委託した。今回の変更では、
+  Team階層表示、Worker model／Connection／理由、外部API表示、Connection同時実行上限を追加した。
 
-## Secrets、logging、rate limit
+## Persistenceとmigration
 
-- `safeStorage`を使うSecret Storageは未実装。
-- `secret-redactor.ts:66-97`は文字列／stream redactionを持つが、全production logを強制する
-  secure loggerではない。
-- production Mainに`console.*`が残る (`main/index.ts:101,197,204`、
-  `team-mcp-bridge.ts:135`)。P1BでCI禁止とsecure loggerへ移行する。
-- Connection設定、verification TTL、observed rate-limit headers、429 normalizationは未実装。
+- 現在のschemaはv48。
+- connection identity、Team execution／attempt／activity、Provider connection、
+  secret reference、verification、rate limit、routing metadataを永続化する。
+- pre-v35 built-in identityはv42でbackfillし、legacy列は削除せずdual-readを維持する。
+- migrationはtransaction、checksum、適用前backup、`foreign_key_check`を持つ。
+- v1から最新、built-in identity backfill、Claudeのみ、Codexのみ、Claude／Codex混在、
+  不明legacy model、二重migrationのfixtureを実装済み。
+- running／interrupted attemptの再起動復元はCoordinator／execution persistenceのfixtureで
+  分離して検証する。これらを含むmigration matrixはdesktop unit suiteでgreen。
 
-## 既存test資産
+## SecurityとCI
 
-- Runtime JSONL fixture: `runtime-host/fixtures/`。
-- Scheduler、execution persistence、Coordinatorのunit／Electron ABI testがある。
-- packaged Team、activity restart、Canvas／List、Policy、model/access E2Eがある。
-- v1 migrationはコード内fixtureだけであり、P1A指定の初期版、Team導入前、production、
-  Claude/Codex混在、running/interrupted、不明modelのDB fixtureは不足している。
-- 実AI、全E2E、packaged、Computer Useはユーザー指示により全実装後の最終gateへ集約する。
+- Main／Preload／Runtime productionの`console.*`はESLint error。
+- secure loggerはheader、body、URL query、Errorをsink前にredactする。
+- safeStorage、SQLite／Renderer非露出、canary secret testを実装済み。
+- Team CoreのProvider固有importとProvider名によるcontrol-flow分岐をASTで検査するtestを追加した。
+- 実secret、Authorization Header、ユーザー会話をUI委託prompt／fixtureへ渡していない。
 
-## 公式仕様の確認
+## Local final gate evidence
 
-P0は有料probeを行わず、2026-07-28時点の公式資料だけを確認した。
+- full typecheck、lint、format check: green
+- desktop unit: 106 files passed、3 skipped、1444 passed、23 skipped
+- contracts: 30 passed、domain: 284 passed
+- packaged E2E: 初回で検出した16件を修正し、対象再検証green
+- 実Claude packaged Team: 2 Worker reportとLeader統合green
+- 実Codex packaged Team: 数学担当／実装担当、2 Worker reportとLeader統合green
+- OpenRouter実API: verified、368-model catalog、stream／resolution／usage／completed green
+- Computer Use: production packageの共通Picker、unknown表示、Team Canvas、AX treeを確認
 
-- [OpenAI Models API](https://platform.openai.com/docs/api-reference/models/object)
-- [OpenAI rate limits](https://platform.openai.com/docs/guides/rate-limits)
-- [OpenRouter Models API](https://openrouter.ai/docs/api/api-reference/models/get-models)
-- [OpenRouter errors and Retry-After](https://openrouter.ai/docs/api/reference/errors-and-debugging)
-- [Anthropic Models API](https://platform.claude.com/docs/en/api/models/list)
-- [Anthropic rate limits](https://platform.claude.com/docs/en/api/rate-limits)
-- [Gemini Models API](https://ai.google.dev/api/models)
-- [Gemini rate limits](https://ai.google.dev/gemini-api/docs/rate-limits)
-- [xAI Models API](https://docs.x.ai/developers/rest-api-reference/inference/models)
-- [xAI rate limits](https://docs.x.ai/developers/rate-limits)
+## External release gateまで保留する証拠
+
+- 3OS CI
+- OpenAI、Anthropic、Gemini、xAI、Pack A/Bの実API smoke（資格情報なし）
+- Windows／Linux packaged E2E
+- UI U4 cleanup（rollback用旧Pickerを意図的に維持）
+
+## Blocker
+
+- `instructions/01-multi-provider-addendum.md`の原文はローカルに存在しない。提供されるまで
+  placeholderを維持し、内容を創作しない。
+- macOS local gateはgreenだが、上記external release gate未実行のためInitial GA／Pack GAを
+  completeとは扱わない。

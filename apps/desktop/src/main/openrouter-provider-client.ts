@@ -7,10 +7,7 @@ import {
   type ProviderModel,
 } from '@sprint-coder/contracts';
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
-import type {
-  OpenAICredentialResolver,
-  ProviderFetch,
-} from './openai-provider-client';
+import type { OpenAICredentialResolver, ProviderFetch } from './openai-provider-client';
 import { normalizeOpenRouterResponsesStream } from './openrouter-responses-stream';
 
 const OPENROUTER_API_BASE_URL = 'https://openrouter.ai/api/v1';
@@ -87,18 +84,12 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
         available: true,
         availabilityCheckedAt: observedAt,
         contextWindow: providerValue(positiveInteger(model.context_length)),
-        maxOutputTokens: providerValue(
-          positiveInteger(model.top_provider?.max_completion_tokens),
-        ),
-        toolCalling: providerValue(
-          parameters.has('tools') || parameters.has('tool_choice'),
-        ),
+        maxOutputTokens: providerValue(positiveInteger(model.top_provider?.max_completion_tokens)),
+        toolCalling: providerValue(parameters.has('tools') || parameters.has('tool_choice')),
         structuredOutput: providerValue(
           parameters.has('response_format') || parameters.has('structured_outputs'),
         ),
-        multimodalInput: providerValue(
-          [...modalities].some((modality) => modality !== 'text'),
-        ),
+        multimodalInput: providerValue([...modalities].some((modality) => modality !== 'text')),
         reasoning: providerValue(parameters.has('reasoning')),
         gateway: {
           providerId: 'openrouter',
@@ -130,19 +121,14 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
     signal.addEventListener('abort', abort, { once: true });
     this.executions.set(parsed.executionId, controller);
     try {
-      const response = await this.authenticatedFetch(
-        connection,
-        '/responses',
-        controller.signal,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-OpenRouter-Metadata': 'enabled',
-          },
-          body: JSON.stringify(responseRequest(parsed)),
+      const response = await this.authenticatedFetch(connection, '/responses', controller.signal, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-OpenRouter-Metadata': 'enabled',
         },
-      );
+        body: JSON.stringify(responseRequest(parsed)),
+      });
       if (!response.ok) {
         const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
         if (response.status === 429)
@@ -198,7 +184,11 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
     });
     if (!response.ok) throw new OpenRouterHttpError(response.status);
     const value: unknown = await response.json();
-    if (value === null || typeof value !== 'object' || !Array.isArray((value as { data?: unknown }).data))
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      !Array.isArray((value as { data?: unknown }).data)
+    )
       throw new Error('OpenRouter model catalog response is invalid');
     return (value as { data: unknown[] }).data.filter(isOpenRouterModel);
   }
@@ -266,8 +256,7 @@ function responseRequest(request: ProviderExecutionRequest): Record<string, unkn
         : {
             role: message.role,
             content:
-              message.inlineImages === undefined ||
-              message.inlineImages.length === 0
+              message.inlineImages === undefined || message.inlineImages.length === 0
                 ? message.content
                 : [
                     { type: 'input_text', text: message.content },
@@ -340,9 +329,7 @@ function httpError(status: number, retryAfterMs: number | null): NormalizedProvi
   return {
     category: status >= 500 ? 'provider_unavailable' : 'invalid_request',
     message:
-      status >= 500
-        ? 'OpenRouter is temporarily unavailable'
-        : 'OpenRouter rejected the request',
+      status >= 500 ? 'OpenRouter is temporarily unavailable' : 'OpenRouter rejected the request',
     retryable: status >= 500,
     retryAfterMs: null,
     providerCode: `http_${status}`,

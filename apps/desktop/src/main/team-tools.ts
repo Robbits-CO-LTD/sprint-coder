@@ -4,13 +4,13 @@
 // source/target envelopes and the sole enforcer of hierarchy policy, budget reservations, and the
 // Team/Worker state machines — this file never mutates Team state on its own.
 //
-// Real Codex/Claude runtimes stay no-tools for now (see runtime-host.ts): these definitions are
-// only ever registered on the mock/intelligence-loop ToolBroker (createDefaultToolBroker's
-// optional `team` bundle), never on RuntimeHostClient's path.
+// The same provider-neutral definitions feed the mock ToolBroker, the real CLI MCP bridge, and
+// official API tool loops. TeamCoordinator remains the only authority-bearing implementation.
 import { z } from 'zod';
 import {
   contextInheritancePolicySchema,
   modelSelectionSchema,
+  type ProviderTool,
 } from '@sprint-coder/contracts';
 import {
   createToolDefinition,
@@ -69,13 +69,14 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
     modelSelection: {
       type: 'object',
       properties: {
-        connectionId: { type: ['string', 'null'] },
-        requestedProvider: { type: ['string', 'null'] },
-        requestedModel: { type: ['string', 'null'] },
+        connectionId: { type: 'string' },
+        requestedProvider: { type: 'string' },
+        requestedModel: { type: 'string' },
       },
       required: ['connectionId', 'requestedProvider', 'requestedModel'],
       additionalProperties: false,
     },
+    modelSelectionReason: { type: 'string' },
     managerPolicy: {
       type: 'object',
       properties: {
@@ -90,11 +91,39 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
   ['role', 'objective'],
 );
 
+export const TEAM_LIST_MODELS_TOOL = teamToolDefinition(
+  'team_list_models',
+  'list-models',
+  {
+    text: { type: 'string' },
+    connectionIds: { type: 'array', items: { type: 'string' } },
+    providerIds: { type: 'array', items: { type: 'string' } },
+    capabilities: { type: 'array', items: { type: 'string' } },
+    cursor: { type: 'string' },
+    limit: { type: 'integer' },
+  },
+  [],
+);
+
 export const TEAM_SEND_TO_WORKER_TOOL = teamToolDefinition(
   'team_send_to_worker',
   'send-to-worker',
   { workerId: { type: 'string' }, content: { type: 'string' } },
   ['workerId', 'content'],
+);
+
+export const TEAM_SEND_MESSAGE_TOOL = teamToolDefinition(
+  'team_send_message',
+  'send-message',
+  { targetAgentId: { type: 'string' }, content: { type: 'string' } },
+  ['targetAgentId', 'content'],
+);
+
+export const TEAM_READ_MESSAGES_TOOL = teamToolDefinition(
+  'team_read_messages',
+  'read-messages',
+  { afterSeq: { type: 'integer' } },
+  [],
 );
 
 export const TEAM_ASSIGN_TASK_TOOL = teamToolDefinition(
@@ -149,16 +178,82 @@ export const TEAM_STOP_WORKER_TOOL = teamToolDefinition(
 );
 
 export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
+  TEAM_LIST_MODELS_TOOL,
   TEAM_HIRE_WORKER_TOOL,
   TEAM_ASSIGN_TASK_TOOL,
   TEAM_STEER_EXECUTION_TOOL,
   TEAM_CANCEL_EXECUTION_TOOL,
   TEAM_GET_STATUS_TOOL,
   TEAM_WAIT_EVENTS_TOOL,
+  TEAM_SEND_MESSAGE_TOOL,
+  TEAM_READ_MESSAGES_TOOL,
   TEAM_SEND_TO_WORKER_TOOL,
   TEAM_WAIT_REPORTS_TOOL,
   TEAM_STOP_WORKER_TOOL,
 ]);
+
+const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
+  team_list_models:
+    '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。',
+  team_hire_worker: '自分の直下にWorkerまたはManagerを雇用します。',
+  team_assign_task: '自分の直下Workerへtaskを割り当て、execution IDを返します。',
+  team_steer_execution: '自分の配下で実行中または待機中のexecutionへ修正指示を送ります。',
+  team_cancel_execution: '自分の配下のexecutionを取り消します。',
+  team_get_status: '現在のTeam階層、Agent、execution、待機状態を取得します。',
+  team_wait_events: '指定cursor以降の配下Worker報告を取得します。',
+  team_wait_reports: '配下Workerの新しい完了報告を待ちます。',
+  team_send_message: '同じTeamのAgentへ監査される直接messageを送信します。',
+  team_read_messages: '自分宛ての未読Team messageをsequence順に取得します。',
+  team_send_to_worker: '既存Workerへ直接messageを送信します。',
+  team_stop_worker: '指定Workerを停止します。',
+});
+
+const MANAGER_TEAM_TOOL_NAMES = new Set(
+  Object.keys(TEAM_TOOL_DESCRIPTIONS).filter(
+    (name) => name !== 'team_send_to_worker' && name !== 'team_stop_worker',
+  ),
+);
+
+function providerToolDefinition(tool: ToolDefinition): ProviderTool {
+  const providerInputSchema = tool.inputSchema as unknown as ProviderTool['inputSchema'];
+  const inputSchema =
+    tool.providerName === 'team_hire_worker'
+      ? ({
+          ...(providerInputSchema as Record<string, ProviderTool['inputSchema']>),
+          required: ['role', 'objective', 'modelSelection', 'modelSelectionReason'],
+        } as ProviderTool['inputSchema'])
+      : providerInputSchema;
+  return {
+    name: tool.providerName,
+    description: TEAM_TOOL_DESCRIPTIONS[tool.providerName]!,
+    inputSchema,
+  };
+}
+
+export const LEADER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
+  TEAM_TOOLS.filter(
+    (tool) =>
+      tool.providerName !== 'team_send_message' && tool.providerName !== 'team_read_messages',
+  ).map(providerToolDefinition),
+);
+
+/** Official API Managers receive the same coordinator-backed authority as CLI Managers, expressed
+ * in the provider-neutral tool contract. Leader-only arbitrary messaging/stopping is deliberately
+ * omitted: executeTeamTool also enforces this server-side through requesterAgentId. */
+export const MANAGER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
+  TEAM_TOOLS.filter((tool) => MANAGER_TEAM_TOOL_NAMES.has(tool.providerName)).map(
+    providerToolDefinition,
+  ),
+);
+
+export const WORKER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
+  TEAM_TOOLS.filter(
+    (tool) =>
+      tool.providerName === 'team_get_status' ||
+      tool.providerName === 'team_send_message' ||
+      tool.providerName === 'team_read_messages',
+  ).map(providerToolDefinition),
+);
 
 function teamToolError(error: unknown): { ok: false; error: string; message: string } {
   return {
@@ -178,24 +273,30 @@ const pacing = (): Promise<void> =>
     : new Promise((resolve) => setTimeout(resolve, HIRE_PACING_MS));
 
 export type TeamToolName =
+  | 'team_list_models'
   | 'team_hire_worker'
   | 'team_assign_task'
   | 'team_steer_execution'
   | 'team_cancel_execution'
   | 'team_get_status'
   | 'team_wait_events'
+  | 'team_send_message'
+  | 'team_read_messages'
   | 'team_send_to_worker'
   | 'team_wait_reports'
   | 'team_stop_worker';
 
 export function isTeamToolName(value: unknown): value is TeamToolName {
   return (
+    value === 'team_list_models' ||
     value === 'team_hire_worker' ||
     value === 'team_assign_task' ||
     value === 'team_steer_execution' ||
     value === 'team_cancel_execution' ||
     value === 'team_get_status' ||
     value === 'team_wait_events' ||
+    value === 'team_send_message' ||
+    value === 'team_read_messages' ||
     value === 'team_send_to_worker' ||
     value === 'team_wait_reports' ||
     value === 'team_stop_worker'
@@ -217,6 +318,7 @@ const hireArgsSchema = z
     contextInheritancePolicy: contextInheritancePolicySchema.optional(),
     writeCapable: z.boolean().optional(),
     modelSelection: modelSelectionSchema.optional(),
+    modelSelectionReason: z.string().min(1).max(2_000).optional(),
     managerPolicy: z
       .object({
         maxDirectChildren: z.number().int().positive().nullable().optional(),
@@ -227,9 +329,33 @@ const hireArgsSchema = z
       .optional(),
   })
   .strict();
+const listModelsArgsSchema = z
+  .object({
+    text: z.string().max(200).optional(),
+    connectionIds: z.array(z.string().min(1).max(256)).max(32).optional(),
+    providerIds: z.array(z.string().min(1).max(128)).max(32).optional(),
+    capabilities: z
+      .array(z.enum(['toolCalling', 'structuredOutput', 'multimodalInput', 'reasoning']))
+      .max(4)
+      .optional(),
+    cursor: z
+      .string()
+      .regex(/^cursor:[0-9]+$/)
+      .nullable()
+      .optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  })
+  .strict();
 const sendArgsSchema = z
   .object({ workerId: z.string().min(1).max(128), content: z.string().min(1).max(20_000) })
   .strict();
+const directMessageArgsSchema = z
+  .object({
+    targetAgentId: z.string().min(1).max(128),
+    content: z.string().min(1).max(20_000),
+  })
+  .strict();
+const readMessagesArgsSchema = z.object({ afterSeq: z.number().int().min(0).optional() }).strict();
 const assignArgsSchema = z
   .object({
     workerId: z.string().min(1).max(128),
@@ -267,6 +393,20 @@ export type ExecuteTeamToolOptions = Readonly<{
   waitReportsCursor?: TeamWaitReportsCursor;
   longPollTimeoutMs?: number;
   longPollIntervalMs?: number;
+  listModelCandidates?(input: {
+    taskId: string;
+    text: string;
+    connectionIds: readonly string[];
+    providerIds: readonly string[];
+    capabilities: readonly ('toolCalling' | 'structuredOutput' | 'multimodalInput' | 'reasoning')[];
+    cursor: string | null;
+    limit: number;
+  }): Promise<unknown> | unknown;
+  /** Per real Leader/Manager turn. A successful catalog read must precede an audited hire. */
+  modelCatalogAudit?: Readonly<{
+    wasQueried(): boolean;
+    markQueried(): void;
+  }>;
 }>;
 
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 60_000;
@@ -308,9 +448,8 @@ async function executeWaitReports(
  * Leader's tool calls. `taskId` always comes from the caller's own trusted binding (ToolBroker's
  * ToolExecutionContext, or the bridge's per-turn registration) — it is never read from `args` —
  * so a tool call can never spoof which Task/Team it targets, let alone the source/target agent
- * identity inside it (this Leader-only entry point lets TeamCoordinator resolve the Leader).
- * Manager runtimes use a separate caller-bound entry point; they never provide their identity in
- * model-controlled arguments. */
+ * identity inside it. Leader, Manager, and Worker callers share this entry point; non-Leader
+ * identity is supplied only by the trusted MCP/provider runtime context, never model arguments. */
 export async function executeTeamTool(
   coordinator: TeamCoordinator,
   taskId: string,
@@ -320,8 +459,35 @@ export async function executeTeamTool(
 ): Promise<unknown> {
   if (!isTeamToolName(toolName)) throw new Error(`Unknown team tool: ${toolName}`);
   switch (toolName) {
+    case 'team_list_models': {
+      const request = listModelsArgsSchema.parse(args);
+      if (options.listModelCandidates === undefined)
+        return teamToolError(new Error('Team model catalog is unavailable'));
+      const result = await options.listModelCandidates({
+        taskId,
+        text: request.text ?? '',
+        connectionIds: request.connectionIds ?? [],
+        providerIds: request.providerIds ?? [],
+        capabilities: request.capabilities ?? [],
+        cursor: request.cursor ?? null,
+        limit: request.limit ?? 50,
+      });
+      options.modelCatalogAudit?.markQueried();
+      return result;
+    }
     case 'team_hire_worker': {
       const request = hireArgsSchema.parse(args);
+      if (
+        options.listModelCandidates !== undefined &&
+        (request.modelSelection === undefined ||
+          request.modelSelectionReason === undefined ||
+          options.modelCatalogAudit?.wasQueried() !== true)
+      )
+        return teamToolError(
+          new Error(
+            'Real Team Leaders and Managers must query the model catalog, select an available model, and record the selection reason',
+          ),
+        );
       await pacing();
       try {
         const hireInput = {
@@ -333,6 +499,9 @@ export async function executeTeamTool(
           ...(request.modelSelection === undefined
             ? {}
             : { modelSelection: request.modelSelection }),
+          ...(request.modelSelectionReason === undefined
+            ? {}
+            : { modelSelectionReason: request.modelSelectionReason }),
         };
         const worker =
           options.requesterAgentId === undefined
@@ -376,6 +545,54 @@ export async function executeTeamTool(
           messageId: message.id,
           state: message.state,
           deliveryState: message.deliveryState,
+        };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
+    case 'team_send_message': {
+      const request = directMessageArgsSchema.parse(args);
+      if (options.requesterAgentId === undefined)
+        return teamToolError(new Error('team_send_message requires a caller-bound Agent identity'));
+      try {
+        const message = await coordinator.sendAgentMessageAs(
+          taskId,
+          options.requesterAgentId,
+          request.targetAgentId,
+          request.content,
+        );
+        return {
+          ok: true,
+          messageId: message.id,
+          targetAgentId: message.targetAgentId,
+          seq: message.seq,
+          state: message.state,
+        };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
+    case 'team_read_messages': {
+      const request = readMessagesArgsSchema.parse(args);
+      if (options.requesterAgentId === undefined)
+        return teamToolError(
+          new Error('team_read_messages requires a caller-bound Agent identity'),
+        );
+      try {
+        const messages = coordinator.listAgentMessages(
+          taskId,
+          options.requesterAgentId,
+          request.afterSeq ?? 0,
+        );
+        return {
+          ok: true,
+          messages: messages.map((message) => ({
+            messageId: message.id,
+            sourceAgentId: message.sourceAgentId,
+            seq: message.seq,
+            content: message.content,
+            createdAt: message.createdAt,
+          })),
         };
       } catch (error) {
         return teamToolError(error);
@@ -547,8 +764,8 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
 // --- Leader MCP guidance ----------------------------------------------------------------------
 //
 // Appended to the real Codex/Claude Leader's prompt only when
-// SPRINT_CODER_LEADER_MCP=1 routes the turn through the MCP bridge instead of the deterministic
-// mock scenario. Concise and in Japanese to match the rest of the in-app leader/worker copy.
+// The MCP bridge is the default for real CLI Team turns; SPRINT_CODER_LEADER_MCP=0 is the explicit
+// rollback switch. Concise and in Japanese to match the rest of the in-app leader/worker copy.
 /** Compatibility export for adapters while the authority-bearing copy travels as a context
  * fragment. The content's source of truth is the versioned builtin skill, not this module. */
 export const LEADER_MCP_SYSTEM_PROMPT = BUILTIN_TEAM_SKILL_CONTENT;
@@ -556,7 +773,16 @@ export const MANAGER_MCP_SYSTEM_PROMPT = `${BUILTIN_TEAM_SKILL_CONTENT}
 
 あなたはTeamのManagerです。team_hire_workerで自分の直下Agentだけを雇用し、
 team_assign_taskで直下Agentへ正式taskを割り当ててください。requester identityを引数へ
-追加しないでください。権限はMCP tokenへ固定されています。
+追加しないでください。作業開始時、配下の待機中、最終報告前にteam_read_messagesを確認し、
+必要な情報はteam_send_messageで同じTeamのAgentへ共有してください。配下Agentの終端reportを
+確認・統合したら、必ず自分の親Agentへ結果をteam_send_messageで報告してください。
+権限はMCP tokenへ固定されています。
+`;
+export const WORKER_MCP_SYSTEM_PROMPT = `あなたはTeamのWorkerです。
+作業開始時と最終報告前、長い作業では区切りごとにteam_read_messagesで自分宛てのmessageを確認し、
+他Agentとの情報共有が必要な場合はteam_get_statusで永続Agent IDを確認してから
+team_send_messageを使ってください。taskIdや送信元identityを引数へ追加しないでください。
+権限はMCP tokenへ固定されています。Team管理ツールを呼び出してはいけません。
 `;
 
 // --- Deterministic mock team scenario -------------------------------------------------------

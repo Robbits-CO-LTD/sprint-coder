@@ -33,10 +33,7 @@ describe('normalizeGeminiContentStream', () => {
       },
     ]);
     const events = [];
-    for await (const event of normalizeGeminiContentStream(
-      body,
-      'gemini-requested',
-    ))
+    for await (const event of normalizeGeminiContentStream(body, 'gemini-requested'))
       events.push(event);
 
     expect(events).toEqual([
@@ -77,11 +74,7 @@ function sse(events: readonly unknown[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(
-        encoder.encode(
-          events
-            .map((event) => `data: ${JSON.stringify(event)}\n\n`)
-            .join(''),
-        ),
+        encoder.encode(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')),
       );
       controller.close();
     },

@@ -73,9 +73,14 @@ export class TeamExecutionScheduler {
 
   cancelQueued(executionId: string): boolean {
     const index = this.queued.findIndex((job) => job.executionId === executionId);
-    if (index === -1) return false;
-    this.queued.splice(index, 1);
-    return true;
+    if (index !== -1) {
+      this.queued.splice(index, 1);
+      return true;
+    }
+    // A rate-limited or steered execution can already be durably waiting while its replacement
+    // job is parked here until the current run's finally block. Removing that replacement is part
+    // of canceling a queued execution; otherwise a stopped Worker could restart moments later.
+    return this.requeueAfterRun.delete(executionId);
   }
 
   requeueActive(executionId: string, replacement: TeamExecutionJob): boolean {
@@ -113,8 +118,7 @@ export class TeamExecutionScheduler {
       if (index === -1) return;
       const [job] = this.queued.splice(index, 1);
       if (job === undefined) return;
-      if (job.connection !== undefined)
-        this.connectionAdmission?.admit(toAdmissionCandidate(job));
+      if (job.connection !== undefined) this.connectionAdmission?.admit(toAdmissionCandidate(job));
       this.active.set(job.executionId, job);
       // The job owns durable failure recording. Admission control must still release its slot
       // without turning that already-recorded failure into an unhandled process rejection.
@@ -135,9 +139,7 @@ export class TeamExecutionScheduler {
       ({ job }) => job.notBeforeMs === undefined || job.notBeforeMs <= now,
     );
     if (timeAdmissible.length === 0) {
-      const earliest = Math.min(
-        ...teamAdmissible.map(({ job }) => job.notBeforeMs ?? now),
-      );
+      const earliest = Math.min(...teamAdmissible.map(({ job }) => job.notBeforeMs ?? now));
       this.scheduleRetry(Math.max(1, earliest - now));
       return -1;
     }

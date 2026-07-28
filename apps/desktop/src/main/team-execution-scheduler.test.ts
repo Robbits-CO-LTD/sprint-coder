@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  TEAM_GLOBAL_EXECUTION_LIMIT,
-  TeamExecutionScheduler,
-} from './team-execution-scheduler';
+import { TEAM_GLOBAL_EXECUTION_LIMIT, TeamExecutionScheduler } from './team-execution-scheduler';
 import { ConnectionAdmissionController } from './connection-admission';
 import type { ProviderConnection } from '@sprint-coder/contracts';
 
@@ -29,8 +26,8 @@ async function settleScheduler(): Promise<void> {
 
 describe('TeamExecutionScheduler', () => {
   it('keeps global slots available when one external Connection is saturated', async () => {
-    const admission = new ConnectionAdmissionController(
-      () => Date.parse('2026-07-28T00:00:01.000Z'),
+    const admission = new ConnectionAdmissionController(() =>
+      Date.parse('2026-07-28T00:00:01.000Z'),
     );
     const providerConnection = (
       id: string,
@@ -299,5 +296,37 @@ describe('TeamExecutionScheduler', () => {
     expect(scheduler.snapshot().activeCount).toBe(1);
     resumed.resolve();
     await settleScheduler();
+  });
+
+  it('cancels a replacement that is waiting for the active run to release', async () => {
+    const scheduler = new TeamExecutionScheduler(1);
+    const first = deferred();
+    const started: string[] = [];
+    scheduler.submit({
+      executionId: 'execution-1',
+      teamId: 'team-1',
+      teamLimit: 8,
+      run: async () => {
+        started.push('first-attempt');
+        await first.promise;
+      },
+    });
+    await settleScheduler();
+    expect(
+      scheduler.requeueActive('execution-1', {
+        executionId: 'execution-1',
+        teamId: 'team-1',
+        teamLimit: 8,
+        run: async () => {
+          started.push('must-not-restart');
+        },
+      }),
+    ).toBe(true);
+
+    expect(scheduler.cancelQueued('execution-1')).toBe(true);
+    first.resolve();
+    await settleScheduler();
+    expect(started).toEqual(['first-attempt']);
+    expect(scheduler.snapshot()).toMatchObject({ activeCount: 0, queuedExecutionIds: [] });
   });
 });

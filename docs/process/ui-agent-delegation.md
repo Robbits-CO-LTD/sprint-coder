@@ -79,6 +79,28 @@ submit／dispatchのfail-closedを追加した。メインAgentが2file・1000�
 hard-codeなし、backend変更0を確認し、component test 38件と対象lintのgreenを得て受理した。
 実API smokeとpackaged操作は全実装後のfinal gateへ留保した。
 
+同日のTeam runtime最終統合では、設定modelだけを使用してUIを独立sub-Sliceへ分割した。
+Worker model／Connection／選定理由表示、階層Canvas／List、Renderer Team Policy型同期、
+外部API Runtime表示を実装した。最初の表示委託は指示に反してPrettier／ESLint／typecheckを
+実行したため、その結果をfinal evidenceへ採用しない。後続委託はBashとTaskを禁止し、
+読み取りと対象file編集だけを許可した。
+
+Connection同時実行上限UIは2file、500差分行を上限として3往復した。第1・第2往復は
+完了report前に長時間応答待ちとなり中断したが、保存済み差分をメインAgentが読み取り、
+第2往復でtest codeまで生成されたことを確認した。第3往復は予算上限でreport前に終了したが、
+挙動を変えず新規commentを短縮し、2file・500差分行へ収めた。これらの委託中にtest、lint、
+typecheck、formatは実行していない。生成したtest codeを含む全検証はfinal gateへ留保する。
+
+Worker間通信表示は別sub-Sliceとして5fileを許可し、CanvasとListが共通の純粋helperで
+送信元／送信先Agent IDを解決するよう委託した。LeaderはLeader、既知Workerはrole、不明IDは
+Agentと表示し、provider名やmodel名から相手を推測しない。Claudeは実装とcomponent-levelの
+test codeを追加したが、ユーザー指定どおりtest、lint、typecheckは実行していない。
+
+同時実行上限のnull表示を既定2と一致させる修正は、同じ設定modelへ2file・120差分行上限で
+追加委託した。Claudeはnullを実効上限2として扱い、3以上を保存不可にした。委託先は指示に反して
+最初にread-onlyの`grep`を1回実行したため、その出力は検証証拠へ採用しない。製品処理、test、
+lint、typecheck、formatterは実行しておらず、メインAgentが差分とtest fixtureの整合を確認した。
+
 ## Delegation scope
 
 - Provider settings

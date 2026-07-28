@@ -8,6 +8,7 @@ import {
   providerProfileSchema,
   permissionSettingsSchema,
   permissionSetInputSchema,
+  providerConnectionRateLimitLowerInputSchema,
   providerConnectionSchema,
   publicErrorSchema,
   runtimeSettingsSchema,
@@ -103,9 +104,7 @@ describe('public contracts', () => {
         verificationModel: null,
         authentication: { headerName: 'Authorization', scheme: 'Bearer' },
         requiredCredentialFields: [],
-        errorOverrides: [
-          { status: 429, category: 'rate_limited', retryable: true },
-        ],
+        errorOverrides: [{ status: 429, category: 'rate_limited', retryable: true }],
         sourceReference: 'https://docs.example.com/openai-compatibility',
         reviewedAt: '2026-07-28T00:00:00.000Z',
       }),
@@ -188,6 +187,29 @@ describe('public contracts', () => {
     ).toThrow();
   });
 
+  it('requires a positive lower-only Provider rate-limit patch', () => {
+    expect(
+      providerConnectionRateLimitLowerInputSchema.parse({
+        connectionId: 'connection:openai-primary',
+        maxConcurrentRequests: 1,
+      }),
+    ).toEqual({
+      connectionId: 'connection:openai-primary',
+      maxConcurrentRequests: 1,
+    });
+    expect(() =>
+      providerConnectionRateLimitLowerInputSchema.parse({
+        connectionId: 'connection:openai-primary',
+      }),
+    ).toThrow();
+    expect(() =>
+      providerConnectionRateLimitLowerInputSchema.parse({
+        connectionId: 'connection:openai-primary',
+        maxConcurrentRequests: 0,
+      }),
+    ).toThrow();
+  });
+
   it('validates the bounded Team promotion result', () => {
     expect(
       teamSummarySchema.parse({
@@ -230,6 +252,9 @@ describe('public contracts', () => {
     writeCapable: true,
     currentActivity: null,
     engine: 'codex',
+    connectionId: null,
+    requestedProvider: null,
+    requestedModel: null,
     parentAgentId: 'leader-1',
     depth: 1,
     canDelegate: false,
@@ -308,6 +333,10 @@ describe('public contracts', () => {
     queueReason: null,
     attemptOrdinal: null,
     terminalReason: null,
+    connectionId: null,
+    requestedProvider: null,
+    requestedModel: null,
+    modelSelectionReason: null,
     recordedAt: '2026-07-23T00:00:00.000Z',
   } as const;
 

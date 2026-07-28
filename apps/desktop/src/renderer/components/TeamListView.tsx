@@ -6,18 +6,18 @@ import { ArrowLeft, LayoutGrid } from './icons';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
 import { TeamPolicyDialog, TeamPolicyTrigger } from './TeamPolicyDialog';
 import { latestExecutionForWorker } from '../lib/team-execution-display';
+import {
+  describeMessagePeer,
+  describeWorkerModel,
+  workerRuntimeLabel,
+} from '../lib/team-activity-display';
+// Hierarchy vocabulary is imported from the Canvas's placement module on purpose: it is a pure,
+// DOM-free helper, and sharing it (rather than re-wording the same facts here) is what keeps
+// List/Canvas parity true by construction — the same reason this view reuses the Canvas's testids.
+import { describeHierarchy, parentAgentOf } from './TeamCanvas/placement';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
 
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
-
-// The engine labels the Canvas's Worker card shows in `.role-sub` (WorkerNode.tsx). Keyed off the
-// union rather than WorkerNode's ternary chain so a new engine is a type error here, not a silent
-// "Mock".
-const ENGINE_LABELS: Record<WorkerSummary['engine'], string> = {
-  claude: 'Claude',
-  codex: 'Codex',
-  mock: 'Mock',
-};
 
 // Team List View (Slice 6.1 item 4): an accessible ALTERNATE projection of the exact same store
 // selectors/actions the Canvas uses (see TeamCanvas.tsx) — not a simplified or read-only variant.
@@ -130,6 +130,10 @@ export function TeamListView({
         <ul className="tlv-workers" aria-label="Worker一覧">
           {workers.map((worker) => {
             const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
+            const model = describeWorkerModel(worker);
+            // Null when the parent is the Leader (it is not in `workers`) — exactly what the
+            // Canvas passes into WorkerNode, so both views name the same parent.
+            const hierarchy = describeHierarchy(worker, parentAgentOf(worker, workers));
             const relevant = detail.messages
               .filter((m) => m.targetAgentId === worker.id || m.sourceAgentId === worker.id)
               .sort((a, b) => a.seq - b.seq)
@@ -139,6 +143,8 @@ export function TeamListView({
                 key={worker.id}
                 className="tlv-worker"
                 data-testid="team-worker"
+                data-depth={worker.depth}
+                data-parent-agent-id={parentAgentOf(worker, workers)?.id ?? ''}
                 id={`team-agent-${worker.id}`}
                 tabIndex={-1}
                 aria-label={`Worker ${worker.role} · ${worker.state}`}
@@ -160,15 +166,40 @@ export function TeamListView({
                     停止
                   </button>
                 </div>
-                {/* Same text the Canvas renders in `.role-sub` — the a11y list/canvas parity spec
-                    diffs the two innerTexts verbatim. A null objective renders as nothing on both
-                    sides ("Claude ·"), so there is no placeholder to invent here. */}
+                {/* Same text the Canvas renders in `.role-sub`, from the same pure helper — the
+                    a11y list/canvas parity spec diffs the two innerTexts verbatim, and the runtime
+                    name must come from `connectionId` (the execution identity) rather than from the
+                    compatibility field `engine`. A null objective renders as nothing on both sides
+                    ("Claude ·"), so there is no placeholder to invent here. */}
                 <p className="tlv-objective">
-                  {ENGINE_LABELS[worker.engine]} · {worker.objective}
+                  {workerRuntimeLabel(worker)} · {worker.objective}
                 </p>
                 <p className="tlv-activity">
                   現在: {worker.currentActivity ?? (worker.state === 'done' ? '完了' : '待機')}
                 </p>
+                {/* Same helper, same wording, same testids as the Canvas's Worker card — only the
+                    variant class differs (see WorkerNode.tsx), so the two views never disagree
+                    about which model a Worker got. */}
+                <div className="team-exec team-exec-list" data-testid="team-worker-model">
+                  {/* Same helper, same wording, same testid as the Canvas's Worker card — the
+                      depth/parent/kind facts must read identically in both views. */}
+                  <p className="team-exec-row" data-testid="team-worker-hierarchy">
+                    <span className="team-exec-key">階層</span>
+                    <span className="team-exec-value team-exec-instruction">{hierarchy}</span>
+                  </p>
+                  <p className="team-exec-row" data-testid="team-worker-model-name">
+                    <span className="team-exec-key">モデル</span>
+                    <span className="team-exec-value team-exec-instruction">
+                      {model.modelLabel}
+                    </span>
+                  </p>
+                  <p className="team-exec-row" data-testid="team-worker-model-connection">
+                    <span className="team-exec-key">Connection</span>
+                    <span className="team-exec-value team-exec-instruction">
+                      {model.connectionLabel}
+                    </span>
+                  </p>
+                </div>
                 {/* Same component, same helper, same facts as the Canvas's Worker card. */}
                 <TeamExecutionStatus
                   execution={latestExecutionForWorker(detail.executions, worker.id)}
@@ -191,12 +222,18 @@ export function TeamListView({
                 {relevant.length > 0 && (
                   <ul className="tlv-recent" aria-label={`${worker.role}との最近のやり取り`}>
                     {relevant.map((m) => {
-                      const incoming = m.targetAgentId === worker.id;
+                      // Same helper, same context (`leaderAgentId` + the Team's Workers) as the
+                      // Canvas card, so a Worker-to-Worker message is tagged with the sibling's own
+                      // role in BOTH views instead of being attributed to the Leader in either.
+                      const peer = describeMessagePeer(m, {
+                        agentId: worker.id,
+                        leaderAgentId: detail.team.leaderAgentId,
+                        agents: workers,
+                      });
+                      const incoming = peer.direction === 'incoming';
                       return (
                         <li key={m.id} className={`w-line${incoming ? ' msg-in' : ''}`}>
-                          <span className={`tag${incoming ? '' : ' out'}`}>
-                            {incoming ? 'Leaderから' : '報告'}
-                          </span>
+                          <span className={`tag${incoming ? '' : ' out'}`}>{peer.tagLabel}</span>
                           {/* Same renderer/options as WorkerNode.tsx, deliberately: the parity
                               spec diffs innerText, and plain text here collapsed the block break
                               the Canvas's Markdown <p> produces ("Leaderから本文" vs

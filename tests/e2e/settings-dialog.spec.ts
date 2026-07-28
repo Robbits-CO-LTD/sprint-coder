@@ -4,6 +4,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
+const LEGACY_PICKER_ENV = { SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2: '0' };
+
 // Issue #5: the sidebar's "設定" button had no onClick and was not disabled either, so it looked
 // pressable and did nothing, and no settings screen existed in the renderer at all.
 
@@ -27,7 +29,7 @@ test.describe('settings dialog', () => {
   });
 
   test('opens from the sidebar, closes by Escape and by the close button, and returns focus', async () => {
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
     const page: Page = await firstWindow(app);
     await page.getByTestId('sidebar-new-task-button').click();
 
@@ -107,7 +109,7 @@ test.describe('settings dialog', () => {
 
     // Durable: these go through the same persisted settings the chips use.
     await closeApp(app);
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
     const restarted: Page = await firstWindow(app);
     await restarted.getByTestId('sidebar-settings-button').click();
     await expect(restarted.getByTestId('settings-dialog')).toBeVisible();

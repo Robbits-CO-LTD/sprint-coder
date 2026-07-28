@@ -94,7 +94,10 @@ test.describe('List View parity with Canvas (settled Team)', () => {
       for (const facts of canvasWorkers.values()) {
         expect(facts.lines.length).toBe(2);
         expect(facts.lines.some((l) => l.startsWith('Leaderから'))).toBe(true);
-        expect(facts.lines.some((l) => l.startsWith('報告'))).toBe(true);
+        // Team v2 identifies the persisted peer on both directions. A report to the Leader is
+        // therefore tagged "Leaderへ"; the old generic "報告" label could not distinguish a
+        // Leader report from Worker-to-Worker communication.
+        expect(facts.lines.some((l) => l.startsWith('Leaderへ'))).toBe(true);
       }
 
       await page.getByTestId('team-view-toggle').click();

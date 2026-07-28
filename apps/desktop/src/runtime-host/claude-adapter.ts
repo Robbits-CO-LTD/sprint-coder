@@ -16,7 +16,7 @@ import type {
   RuntimeTeamMcpOption,
 } from './protocol';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
-import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
+import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -277,17 +277,6 @@ export class ClaudeRuntimeAdapter {
 // under `mcpServers.team` always fully-qualifies its tool names as `mcp__team__<name>` per the
 // MCP naming convention — verified directly against the installed CLI.
 const TEAM_MCP_SERVER_NAME = 'team';
-const TEAM_MCP_TOOL_NAMES = [
-  'team_hire_worker',
-  'team_assign_task',
-  'team_steer_execution',
-  'team_cancel_execution',
-  'team_get_status',
-  'team_wait_events',
-  'team_send_to_worker',
-  'team_wait_reports',
-  'team_stop_worker',
-] as const;
 
 function claudeExpectedCapabilities(
   writeScope: RuntimeWriteScope,

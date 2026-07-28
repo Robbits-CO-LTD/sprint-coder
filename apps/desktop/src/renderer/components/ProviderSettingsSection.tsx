@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
   ProviderConnection,
+  ProviderConnectionRateLimitLowerInput,
   ProviderProfile,
   ProviderVerificationStatus,
 } from '@sprint-coder/contracts';
@@ -8,7 +9,10 @@ import type {
 // Plaintext credentials remain here only until Main accepts them into Secret Storage.
 // Raw provider errors and secret references are never rendered.
 
-type ProvidersApi = NonNullable<Window['sprintCoder']>['providers'];
+type CurrentProvidersApi = NonNullable<Window['sprintCoder']>['providers'];
+type ProvidersApi = Omit<CurrentProvidersApi, 'lowerRateLimits'> & {
+  lowerRateLimits?: CurrentProvidersApi['lowerRateLimits'];
+};
 
 /** Null whenever this build of Main has not wired the provider IPC, per the contract's
  * runtime-check rule. Module scope so the effect below can see it is not a reactive value. */
@@ -30,6 +34,23 @@ async function loadConnections(api: ProvidersApi): Promise<ProviderConnection[]>
 async function loadProfiles(api: ProvidersApi): Promise<ProviderProfile[]> {
   if (typeof api.listProfiles !== 'function') return [];
   return api.listProfiles();
+}
+
+/** The runtime check keeps an older Main/Preload usable: it offers no control rather than a save
+ * button that throws when `lowerRateLimits` is absent. */
+type RateLimitLoweringApi = {
+  lowerRateLimits(input: ProviderConnectionRateLimitLowerInput): Promise<ProviderConnection>;
+};
+
+export function rateLimitLoweringApi(api: ProvidersApi | null): RateLimitLoweringApi | null {
+  if (api === null) return null;
+  const candidate: unknown = api;
+  const method = (candidate as { lowerRateLimits?: unknown }).lowerRateLimits;
+  return typeof method === 'function' ? (candidate as RateLimitLoweringApi) : null;
+}
+
+export function supportsRateLimitLowering(api: ProvidersApi | null): boolean {
+  return rateLimitLoweringApi(api) !== null;
 }
 
 export const VERIFICATION_LABEL: Record<ProviderVerificationStatus, string> = {
@@ -61,6 +82,8 @@ export const PROFILE_LIST_WARNING =
 // otherwise leave the form pointing at its fixed Provider, holding the key typed for the other one.
 export const PROFILE_UNAVAILABLE_NOTICE =
   '選択していたProvider Profileは利用できなくなりました。入力したAPIキーなどは消去しました。Providerを選び直してください。';
+export const RATE_LIMIT_ERROR =
+  '同時実行上限を変更できませんでした。値を確認して再試行してください。';
 export const UNSUPPORTED_TEXT = 'この環境ではProvider設定APIが利用できません。';
 export const LOADING_TEXT = 'Connectionを読み込んでいます。';
 export const EMPTY_TEXT = '利用できるConnectionはまだありません。';
@@ -211,6 +234,80 @@ export function isExternalConnection(connection: ProviderConnection): boolean {
   );
 }
 
+// Concurrency is the one rate limit this screen touches, and only downward. A wider ceiling is what
+// produces 429s, so nothing here raises one: there is no control for it, and the save path refuses.
+export const CONCURRENCY_LABEL = '同時実行上限';
+export const CONCURRENCY_AUTO_TEXT = '自動（既定2）';
+export const CONCURRENCY_DEFAULT_INPUT = 2;
+
+/** The number actually in force. A null is not "no ceiling": Main has simply not observed a limit
+ * yet and is running its built-in default of 2 until it does, so 2 is what every rule below
+ * compares against. Reading a null as "anything goes" would let this screen raise the effective
+ * ceiling — the one thing it must not do — while the card still reads 自動（既定2）. */
+export function effectiveConcurrencyLimit(current: number | null): number {
+  return current ?? CONCURRENCY_DEFAULT_INPUT;
+}
+
+/** What the ceiling in force reads as. A null is named as the default it is really running under,
+ * never as "unlimited". */
+export function concurrencyLimitText(current: number | null): string {
+  return current === null ? CONCURRENCY_AUTO_TEXT : String(current);
+}
+
+/** The field starts at the ceiling in force, so saving an untouched form changes no number. */
+export function concurrencyInputDefault(current: number | null): string {
+  return String(effectiveConcurrencyLimit(current));
+}
+
+/** Says both what is in force now and what may be saved. The unobserved case quotes the default it
+ * is running under, so the number here is the same one the save button enforces. */
+export function concurrencyLimitHint(current: number | null): string {
+  return current === null
+    ? `現在は${CONCURRENCY_AUTO_TEXT}です。${CONCURRENCY_DEFAULT_INPUT}以下の整数だけを保存できます。`
+    : `現在の上限は${current}です。${current}以下の整数だけを保存できます。`;
+}
+
+/** Only a plain positive integer. Blank, a sign, a decimal, an exponent — none of them is a limit,
+ * and a null keeps every one of them away from both the save button and Main. */
+export function parseConcurrencyLimit(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^[0-9]+$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) && value >= 1 ? value : null;
+}
+
+/** The one rule both the button and the save path read, so neither can drift from the other: a
+ * value at or below the ceiling in force, an unobserved one included — that ceiling is the built-in
+ * default, so only 1 or 2 gets through. Equal is allowed: it is not a raise, and it is how an
+ * unobserved ceiling is pinned to the number the card has been showing all along. */
+export function isLoweringConcurrency(current: number | null, next: number): boolean {
+  return next <= effectiveConcurrencyLimit(current);
+}
+
+/** What the user has typed, tagged with the ceiling it was typed against. Null until they type. */
+export type ConcurrencyDraft = { source: number | null; value: string } | null;
+
+/** What the field shows, derived rather than reset by an effect: the draft for as long as the
+ * ceiling it was typed against is still the one in force, and that ceiling's own default otherwise.
+ * A ceiling that moved underneath the field — this card's own save, or a reload — therefore retires
+ * the draft on the very next render, while a reload that changed nothing leaves typing alone. */
+export function concurrencyDraftValue(draft: ConcurrencyDraft, current: number | null): string {
+  if (draft === null || draft.source !== current) return concurrencyInputDefault(current);
+  return draft.value;
+}
+
+/** `busy` is the whole section's in-flight state, this card's own save included, so a second save
+ * cannot start on top of the first. */
+export function canLowerConcurrencyLimit(state: {
+  current: number | null;
+  input: string;
+  busy: boolean;
+}): boolean {
+  if (state.busy) return false;
+  const next = parseConcurrencyLimit(state.input);
+  return next !== null && isLoweringConcurrency(state.current, next);
+}
+
 /**
  * Claude CLI and Anthropic API share `providerId: 'anthropic'`; Codex CLI and OpenAI API share
  * `providerId: 'openai'`. Only `runtimeKind` separates them, so the label has to read both.
@@ -244,8 +341,15 @@ export function isSectionBusy(state: {
   loading: boolean;
   submitting: boolean;
   verifyingId: string | null;
+  /** Optional so a caller written before the concurrency control still reads as plain idle. */
+  savingRateLimitId?: string | null;
 }): boolean {
-  return state.loading || state.submitting || state.verifyingId !== null;
+  return (
+    state.loading ||
+    state.submitting ||
+    state.verifyingId !== null ||
+    (state.savingRateLimitId ?? null) !== null
+  );
 }
 
 /** `busy` is the whole section's in-flight state, not just this form's: a create issued while a
@@ -317,6 +421,29 @@ export async function createConnection(
   }
 }
 
+/** The last gate before Main, behind the disabled save button: a built-in CLI, a value that is not
+ * a positive integer, and above all a raise are each refused here too, so no path through this
+ * screen can widen a ceiling. Rejecting reaches the caller as the section's generic rate-limit
+ * error; none of these messages is ever rendered. Only the one limit this screen owns is sent —
+ * the per-minute limits are left untouched rather than resubmitted at their current values. */
+export async function lowerConcurrencyLimit(
+  api: ProvidersApi,
+  connection: ProviderConnection,
+  input: string,
+): Promise<ProviderConnection> {
+  if (!isExternalConnection(connection)) {
+    throw new Error('built-in CLI concurrency is not set from this screen');
+  }
+  const next = parseConcurrencyLimit(input);
+  if (next === null) throw new Error('the concurrency limit must be a positive integer');
+  if (!isLoweringConcurrency(connection.rateLimit.maxConcurrentRequests, next)) {
+    throw new Error('this screen can only lower a provider concurrency limit');
+  }
+  const lowering = rateLimitLoweringApi(api);
+  if (lowering === null) throw new Error('this build of Main cannot lower provider rate limits');
+  return lowering.lowerRateLimits({ connectionId: connection.id, maxConcurrentRequests: next });
+}
+
 /** Replaces a Connection in place when Main already knows it, appends it otherwise. */
 export function upsertConnection(
   connections: readonly ProviderConnection[],
@@ -329,18 +456,43 @@ export function upsertConnection(
   return merged;
 }
 
+export type ConnectionRateLimitControl = {
+  /** False on a Main that never wired the rate-limit IPC: the control is then not offered at all,
+   * rather than offered and always failing. */
+  supported: boolean;
+  saving: boolean;
+  /** Takes the field as typed; `lowerConcurrencyLimit` is what reads it, so the refusal rules live
+   * in one place instead of being re-implemented per caller. */
+  onSave: (connection: ProviderConnection, input: string) => void;
+};
+
 export function ProviderConnectionCard({
   connection,
   verifying,
   disabled,
   onRetry,
+  rateLimit,
 }: {
   connection: ProviderConnection;
   verifying: boolean;
   disabled: boolean;
   onRetry: (connection: ProviderConnection) => void;
+  /** Omitted wherever the concurrency control is not wired; the rest of the card is unaffected. */
+  rateLimit?: ConnectionRateLimitControl;
 }) {
   const status = connection.verification.status;
+  const currentLimit = connection.rateLimit.maxConcurrentRequests;
+  const [limitDraft, setLimitDraft] = useState<ConcurrencyDraft>(null);
+  // Keyed on the stored number, so a ceiling that moved underneath the field is what the field then
+  // shows, while typing survives a reload that changed nothing. No effect, so no reset frame either.
+  const limitInput = concurrencyDraftValue(limitDraft, currentLimit);
+  // Only where Main can re-check credentials, which is also the only place Main accepts a limit:
+  // a built-in CLI's concurrency belongs to Team Policy, and it is not offered here.
+  const limitControl =
+    isExternalConnection(connection) && rateLimit?.supported === true ? rateLimit : null;
+  const savingLimit = limitControl?.saving === true;
+  const limitInputId = `settings-connection-limit-${connection.id}`;
+  const limitHintId = `${limitInputId}-hint`;
   return (
     <li className="settings-connection-card" data-testid={`settings-connection-${connection.id}`}>
       <span className="settings-connection-main">
@@ -349,6 +501,50 @@ export function ProviderConnectionCard({
           {connectionKindLabel(connection)}
           {connection.enabled ? '' : ' · 無効'}
         </small>
+        {limitControl !== null && (
+          <span className="settings-field">
+            <label className="settings-field-label" htmlFor={limitInputId}>
+              {CONCURRENCY_LABEL}
+            </label>
+            <span className="settings-key-row">
+              <input
+                id={limitInputId}
+                data-testid={limitInputId}
+                type="number"
+                className="settings-text-input"
+                inputMode="numeric"
+                min={1}
+                // Bounded by the ceiling in force — the built-in default while none has been
+                // observed — so the spinner cannot reach a value the save button would refuse.
+                max={effectiveConcurrencyLimit(currentLimit)}
+                step={1}
+                aria-describedby={limitHintId}
+                disabled={disabled || savingLimit}
+                value={limitInput}
+                onChange={(e) => setLimitDraft({ source: currentLimit, value: e.target.value })}
+              />
+              <button
+                type="button"
+                className="settings-secondary-button"
+                data-testid={`${limitInputId}-save`}
+                aria-label={`${connection.displayName}の${CONCURRENCY_LABEL}を保存`}
+                disabled={
+                  !canLowerConcurrencyLimit({
+                    current: currentLimit,
+                    input: limitInput,
+                    busy: disabled || savingLimit,
+                  })
+                }
+                onClick={() => limitControl.onSave(connection, limitInput)}
+              >
+                {savingLimit ? '保存中' : '保存'}
+              </button>
+            </span>
+            <span className="settings-hint" id={limitHintId}>
+              {concurrencyLimitHint(currentLimit)}
+            </span>
+          </span>
+        )}
       </span>
       <span className={`settings-connection-badge tone-${VERIFICATION_TONE[status]}`}>
         {verifying ? '検証中' : VERIFICATION_LABEL[status]}
@@ -377,6 +573,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [savingRateLimitId, setSavingRateLimitId] = useState<string | null>(null);
   const [form, setForm] = useState<ProviderFormValues>(EMPTY_FORM);
   const [showKey, setShowKey] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -384,7 +581,9 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
   const generation = useRef(0);
   const mounted = useRef(true);
 
-  const busy = isSectionBusy({ loading, submitting, verifyingId });
+  const busy = isSectionBusy({ loading, submitting, verifyingId, savingRateLimitId });
+  // Read at render because that is when a card has to decide whether to offer the control at all.
+  const rateLimitSupported = supportsRateLimitLowering(providerApi());
   const selectedProfile = selectedProviderProfile(form, profiles);
   const selectionUnavailable = isProviderSelectionUnavailable(form, profiles);
 
@@ -462,6 +661,32 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
       setError(VERIFY_ERROR);
     } finally {
       setVerifyingId(null);
+    }
+  }
+
+  async function lowerRateLimit(connection: ProviderConnection, input: string): Promise<void> {
+    const api = providerApi();
+    if (api === null) {
+      setSupported(false);
+      return;
+    }
+    if (busy) return;
+    setError(null);
+    setSavingRateLimitId(connection.id);
+    try {
+      const updated = await lowerConcurrencyLimit(api, connection, input);
+      // Only Main's own answer reaches the list: a failure below leaves the card showing the limit
+      // that is actually in force, never the number that was typed.
+      setConnections((current) => upsertConnection(current ?? [], updated));
+      setStatus(
+        `${updated.displayName}の${CONCURRENCY_LABEL}を${concurrencyLimitText(
+          updated.rateLimit.maxConcurrentRequests,
+        )}に変更しました。`,
+      );
+    } catch {
+      setError(RATE_LIMIT_ERROR);
+    } finally {
+      setSavingRateLimitId(null);
     }
   }
 
@@ -546,6 +771,11 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
                   verifying={verifyingId === connection.id}
                   disabled={busy}
                   onRetry={(target) => void retryVerification(target)}
+                  rateLimit={{
+                    supported: rateLimitSupported,
+                    saving: savingRateLimitId === connection.id,
+                    onSave: (target, input) => void lowerRateLimit(target, input),
+                  }}
                 />
               ))}
             </ul>
@@ -723,7 +953,9 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
                     spellCheck={false}
                     placeholder={selectedProfile.baseUrl}
                     value={form.baseUrl}
-                    onChange={(e) => setForm((current) => ({ ...current, baseUrl: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((current) => ({ ...current, baseUrl: e.target.value }))
+                    }
                   />
                   <span className="settings-hint">{BASE_URL_HINT}</span>
                 </label>

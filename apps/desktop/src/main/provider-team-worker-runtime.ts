@@ -2,6 +2,9 @@ import type {
   ExecutionResolution,
   NormalizedProviderUsage,
   ProviderConnection,
+  ProviderExecutionRequest,
+  ProviderMessageToolCall,
+  ProviderTool,
 } from '@sprint-coder/contracts';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import { builtinRuntimeForModelSelection } from './connection-identity';
@@ -26,6 +29,23 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     providerId: string;
     prompt: string;
   }): boolean;
+  managerGuidance: string;
+  managerTools: readonly ProviderTool[];
+  workerGuidance: string;
+  workerTools: readonly ProviderTool[];
+  executeManagerTool(input: {
+    worker: AgentRecord;
+    name: string;
+    input: unknown;
+    reportCursor: {
+      read(): number;
+      advance(seq: number): void;
+    };
+    modelCatalogAudit: {
+      wasQueried(): boolean;
+      markQueried(): void;
+    };
+  }): Promise<unknown>;
 }>;
 
 type ActiveProviderWorker = {
@@ -34,15 +54,18 @@ type ActiveProviderWorker = {
   controller: AbortController;
 };
 
+const MAX_PROVIDER_MANAGER_ROUNDS = 32;
+
 export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
   private readonly active = new Map<string, ActiveProviderWorker>();
 
   constructor(private readonly deps: ProviderTeamWorkerRuntimeDeps) {}
 
   start(worker: AgentRecord): Promise<{ pid?: number | null }> {
-    return builtinRuntimeForModelSelection(worker.modelSelection) === null
-      ? Promise.resolve({ pid: null })
-      : this.deps.fallback.start(worker);
+    return worker.modelSelection.connectionId === null ||
+      builtinRuntimeForModelSelection(worker.modelSelection) !== null
+      ? this.deps.fallback.start(worker)
+      : Promise.resolve({ pid: null });
   }
 
   async execute(input: {
@@ -51,7 +74,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     content: string;
     onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult> {
-    if (builtinRuntimeForModelSelection(input.worker.modelSelection) !== null)
+    if (
+      input.worker.modelSelection.connectionId === null ||
+      builtinRuntimeForModelSelection(input.worker.modelSelection) !== null
+    )
       return this.deps.fallback.execute(input);
     const connectionId = input.worker.modelSelection.connectionId;
     const modelId = input.worker.modelSelection.requestedModel;
@@ -78,8 +104,34 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     const output: string[] = [];
     let resolution: ExecutionResolution | undefined;
     let providerUsage: NormalizedProviderUsage | undefined;
-    let completed = false;
     let reasoningActive = false;
+    let providerCallCount = 0;
+    let toolCallCount = 0;
+    let finished = false;
+    let reportCursorValue = 0;
+    let modelCatalogQueried = false;
+    const availableTools = input.worker.canDelegate
+      ? this.deps.managerTools
+      : this.deps.workerTools;
+    const toolGuidance = input.worker.canDelegate
+      ? this.deps.managerGuidance
+      : this.deps.workerGuidance;
+    const reportCursor = {
+      read: () => reportCursorValue,
+      advance: (seq: number) => {
+        reportCursorValue = Math.max(reportCursorValue, seq);
+      },
+    };
+    const modelCatalogAudit = {
+      wasQueried: () => modelCatalogQueried,
+      markQueried: () => {
+        modelCatalogQueried = true;
+      },
+    };
+    const messages: ProviderExecutionRequest['messages'] = [
+      ...(availableTools.length > 0 ? [{ role: 'system' as const, content: toolGuidance }] : []),
+      { role: 'user', content: prompt },
+    ];
     input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
     input.onEvent?.({
       type: 'activity',
@@ -89,42 +141,98 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     });
     try {
       const runtime = this.deps.registry.resolve(connection);
-      for await (const event of runtime.execute(
-        connection,
-        {
-          executionId,
-          connectionId,
-          modelId,
-          messages: [{ role: 'user', content: prompt }],
-        },
-        controller.signal,
-      )) {
-        if (event.type === 'output_delta') {
-          output.push(event.text);
-          input.onEvent?.({ type: 'outputDelta', text: event.text });
-        } else if (event.type === 'reasoning_delta') {
-          if (!reasoningActive) {
-            reasoningActive = true;
-            input.onEvent?.({ type: 'reasoningPresence', active: true });
-          }
-        } else if (event.type === 'resolution') resolution = event.resolution;
-        else if (event.type === 'usage') providerUsage = event.usage;
-        else if (event.type === 'error') {
-          if (event.error.category === 'rate_limited')
-            throw new ProviderRateLimitedError(
-              event.error.message,
-              event.error.retryAfterMs,
-            );
-          throw new Error(event.error.message);
-        } else if (event.type === 'tool_call')
-          throw new Error('External API Workers do not receive Team management tools');
-        else if (event.type === 'completed') completed = true;
+      while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
+        providerCallCount += 1;
+        const providerExecutionId = providerCallExecutionId(executionId, providerCallCount);
+        this.active.set(input.worker.id, {
+          executionId: providerExecutionId,
+          connection,
+          controller,
+        });
+        const roundOutput: string[] = [];
+        const roundToolCalls: ProviderMessageToolCall[] = [];
+        let completed = false;
+        for await (const event of runtime.execute(
+          connection,
+          {
+            executionId: providerExecutionId,
+            connectionId,
+            modelId,
+            messages,
+            ...(availableTools.length > 0 ? { tools: [...availableTools] } : {}),
+          },
+          controller.signal,
+        )) {
+          if (event.type === 'output_delta') {
+            output.push(event.text);
+            roundOutput.push(event.text);
+            input.onEvent?.({ type: 'outputDelta', text: event.text });
+          } else if (event.type === 'reasoning_delta') {
+            if (!reasoningActive) {
+              reasoningActive = true;
+              input.onEvent?.({ type: 'reasoningPresence', active: true });
+            }
+          } else if (event.type === 'resolution') resolution = event.resolution;
+          else if (event.type === 'usage')
+            providerUsage = mergeProviderUsage(providerUsage, event.usage);
+          else if (event.type === 'error') {
+            if (event.error.category === 'rate_limited')
+              throw new ProviderRateLimitedError(event.error.message, event.error.retryAfterMs);
+            throw new Error(event.error.message);
+          } else if (event.type === 'tool_call') {
+            if (!availableTools.some((tool) => tool.name === event.name))
+              throw new Error(`External API Agent requested unauthorized Team tool: ${event.name}`);
+            if (roundToolCalls.some((toolCall) => toolCall.callId === event.callId))
+              throw new Error(`External API Agent repeated tool call ID: ${event.callId}`);
+            roundToolCalls.push({
+              callId: event.callId,
+              name: event.name,
+              input: event.input,
+            });
+          } else if (event.type === 'completed') completed = true;
+        }
+        if (!completed) throw new Error('Provider Worker stream ended without completion');
+        if (reasoningActive) {
+          input.onEvent?.({ type: 'reasoningPresence', active: false });
+          reasoningActive = false;
+        }
+        if (roundToolCalls.length === 0) {
+          finished = true;
+          break;
+        }
+
+        messages.push({
+          role: 'assistant',
+          content: roundOutput.join(''),
+          toolCalls: roundToolCalls,
+        });
+        for (const toolCall of roundToolCalls) {
+          toolCallCount += 1;
+          input.onEvent?.({
+            type: 'activity',
+            phase: 'executing',
+            label: `${input.worker.canDelegate ? 'Manager' : 'Worker'}が${toolCall.name}を実行中`,
+            at: new Date().toISOString(),
+          });
+          const result = await this.deps.executeManagerTool({
+            worker: input.worker,
+            name: toolCall.name,
+            input: toolCall.input,
+            reportCursor,
+            modelCatalogAudit,
+          });
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify(result ?? null),
+            toolCallId: toolCall.callId,
+            toolName: toolCall.name,
+          });
+        }
       }
-      if (!completed) throw new Error('Provider Worker stream ended without completion');
-      if (reasoningActive) {
-        input.onEvent?.({ type: 'reasoningPresence', active: false });
-        reasoningActive = false;
-      }
+      if (!finished)
+        throw new Error(
+          `External API Manager exceeded ${MAX_PROVIDER_MANAGER_ROUNDS} provider rounds`,
+        );
       input.onEvent?.({ type: 'completed' });
       const summary = output.join('').trim() || '(空の応答)';
       return {
@@ -149,14 +257,13 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           costCents: costCents(providerUsage),
           tokens: tokenCount(providerUsage, prompt, summary),
           timeMs: Date.now() - startedAt,
-          toolCalls: 0,
+          toolCalls: toolCallCount,
         },
         ...(resolution === undefined ? {} : { resolution }),
         ...(providerUsage === undefined ? {} : { providerUsage }),
       };
     } finally {
-      if (reasoningActive)
-        input.onEvent?.({ type: 'reasoningPresence', active: false });
+      if (reasoningActive) input.onEvent?.({ type: 'reasoningPresence', active: false });
       if (this.active.get(input.worker.id)?.controller === controller)
         this.active.delete(input.worker.id);
     }
@@ -178,9 +285,49 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
   }
 }
 
+function providerCallExecutionId(executionId: string, ordinal: number): string {
+  const suffix = `:provider-call:${ordinal}`;
+  return `${executionId.slice(0, 256 - suffix.length)}${suffix}`;
+}
+
+function mergeProviderUsage(
+  current: NormalizedProviderUsage | undefined,
+  next: NormalizedProviderUsage,
+): NormalizedProviderUsage {
+  if (current === undefined) return next;
+  return {
+    inputTokens: addNullable(current.inputTokens, next.inputTokens),
+    outputTokens: addNullable(current.outputTokens, next.outputTokens),
+    cacheReadTokens: addNullable(current.cacheReadTokens, next.cacheReadTokens),
+    cacheWriteTokens: addNullable(current.cacheWriteTokens, next.cacheWriteTokens),
+    reasoningTokens: addNullable(current.reasoningTokens, next.reasoningTokens),
+    providerCost:
+      current.providerCost !== null &&
+      next.providerCost !== null &&
+      current.providerCost.currency === next.providerCost.currency
+        ? {
+            amount: current.providerCost.amount + next.providerCost.amount,
+            currency: current.providerCost.currency,
+          }
+        : (current.providerCost ?? next.providerCost),
+    source:
+      current.source === 'unknown'
+        ? next.source
+        : next.source === 'unknown' || current.source === next.source
+          ? current.source
+          : 'runtime_observed',
+  };
+}
+
+function addNullable(left: number | null, right: number | null): number | null {
+  return left === null && right === null ? null : (left ?? 0) + (right ?? 0);
+}
+
 function workerPrompt(worker: AgentRecord, content: string): string {
   return [
     `あなたはチームの「${worker.role}」担当Workerです。`,
+    `あなたのAgent ID: ${worker.id}`,
+    `親Agent ID: ${worker.parentAgentId ?? 'Leader'}`,
     worker.objective === null ? '' : `目的: ${worker.objective}`,
     '以下の依頼を実行し、結果を日本語で簡潔に報告してください。',
     '',

@@ -14,14 +14,20 @@ description: Sprint Coderで実在するWorkerを安全に編成・監視する
 
 Team利用が明示された依頼では、必ずMCPサーバー \`team\` の実ツールを呼び出す。ツール名を文章へ書くだけで利用したことにしない。
 
-1. \`team_hire_worker\` で重複しない役割のWorkerを必要人数だけ採用する。
-2. \`team_assign_task\` で各Workerへobjective、scope、nonGoals、doneCriteria、targetPaths、constraintsを含む正式taskを割り当て、返されたexecution IDを記録する。queuedは失敗ではない。
-3. \`team_wait_reports\` を繰り返し、記録した全execution IDについてaccepted、queued、runningではなく終端reportが届くまで待つ。
-4. 全Workerの終端reportを確認してから、実際に届いたreportだけを統合する。存在しないWorker、未着report、行われていない議論を生成しない。
-5. blocked、needs_input、failed、canceledをcompletedへ読み替えない。
+1. \`team_list_models\` で利用可能なConnection／modelとsource付き能力を確認する。作業に必要な能力でfilterし、unknownを0やfalseと解釈せず、model名やProvider名から適性を推測しない。
+2. \`team_hire_worker\` で重複しない役割のWorkerを必要人数だけ採用する。各作業に選んだconnection ID、provider ID、model IDを\`modelSelection\`へ、その選定根拠を\`modelSelectionReason\`へ必ず明示する。
+3. \`team_assign_task\` で各Workerへobjective、scope、nonGoals、doneCriteria、targetPaths、constraintsを含む正式taskを割り当て、返されたexecution IDを記録する。queuedは失敗ではない。
+4. 実行中は \`team_get_status\` を繰り返してcurrentActivity、liveOutput、階層、待機理由を監視する。scope逸脱、誤った実装、重複作業を見つけた時点で、完了を待たず \`team_steer_execution\` を呼ぶ。
+5. \`team_wait_reports\` を繰り返し、記録した全execution IDについてaccepted、queued、runningではなく終端reportが届くまで待つ。
+6. 全Workerの終端reportを確認してから、実際に届いたreportだけを統合する。存在しないWorker、未着report、行われていない議論を生成しない。
+7. blocked、needs_input、failed、canceledをcompletedへ読み替えない。
 
 待機中または実行中の指示を直す場合は \`team_steer_execution\`、不要になった作業を止める場合は
 \`team_cancel_execution\` をexecution ID付きで使う。実行中のsteerは同じexecutionの新attemptとして再開される。
+
+Agent同士で情報共有が必要な場合は、送信元Agentの認証済みidentityで
+\`team_send_message\`を使い、受信側は\`team_read_messages\`で監査済みmessageを読む。
+Team PolicyがWorker間通信を禁止している場合は迂回しない。
 
 人数指定を守り、必要以上に採用しない。Team MCP、Skill、digest、context fragmentの検証に失敗した場合は、Teamを使ったように振る舞わずfail closedにする。
 `;

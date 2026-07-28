@@ -269,20 +269,31 @@ function anthropicMessageRequest(request: ProviderExecutionRequest): Record<stri
           : {
               role: message.role,
               content:
-                message.inlineImages === undefined ||
-                message.inlineImages.length === 0
-                  ? message.content
-                  : [
-                      { type: 'text', text: message.content },
-                      ...message.inlineImages.map((image) => ({
-                        type: 'image',
-                        source: {
-                          type: 'base64',
-                          media_type: image.mimeType,
-                          data: image.base64,
-                        },
+                message.role === 'assistant' &&
+                message.toolCalls !== undefined &&
+                message.toolCalls.length > 0
+                  ? [
+                      ...(message.content === '' ? [] : [{ type: 'text', text: message.content }]),
+                      ...message.toolCalls.map((toolCall) => ({
+                        type: 'tool_use',
+                        id: toolCall.callId,
+                        name: toolCall.name,
+                        input: toolCall.input,
                       })),
-                    ],
+                    ]
+                  : message.inlineImages === undefined || message.inlineImages.length === 0
+                    ? message.content
+                    : [
+                        { type: 'text', text: message.content },
+                        ...message.inlineImages.map((image) => ({
+                          type: 'image',
+                          source: {
+                            type: 'base64',
+                            media_type: image.mimeType,
+                            data: image.base64,
+                          },
+                        })),
+                      ],
             },
       ),
     ...(request.tools === undefined

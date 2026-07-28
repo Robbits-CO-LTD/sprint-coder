@@ -114,10 +114,7 @@ export function shouldApplyModelPickerAnswer(args: {
 /** An optimistic selection may only be painted over the Task it belongs to. Writing it against
  * another Task's snapshot would also have to invent that Task's `enabled`, and a guess there is the
  * difference between the V2 picker and the legacy chip. */
-export function canApplyOptimisticSelection(
-  current: ModelPickerSnapshot,
-  taskId: string,
-): boolean {
+export function canApplyOptimisticSelection(current: ModelPickerSnapshot, taskId: string): boolean {
   return current.taskId === taskId;
 }
 

@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  CONCURRENCY_AUTO_TEXT,
+  CONCURRENCY_LABEL,
   CREATE_ERROR,
   KEY_BOUNDARY_HINT,
   LIST_ERROR,
@@ -15,34 +17,62 @@ import {
   PROVIDER_FORM_OPTIONS,
   ProviderConnectionCard,
   ProviderSettingsSection,
+  RATE_LIMIT_ERROR,
   SECTION_DESCRIPTION,
   SELECTION_UNAVAILABLE_ID,
   VERIFICATION_LABEL,
   VERIFICATION_TONE,
   VERIFY_ERROR,
   applyProviderSelection,
+  canLowerConcurrencyLimit,
   canSubmitProviderForm,
   clearUnavailableProfileInput,
+  concurrencyDraftValue,
+  concurrencyInputDefault,
+  concurrencyLimitHint,
+  concurrencyLimitText,
   connectionKindLabel,
   createConnection,
+  effectiveConcurrencyLimit,
   isExternalConnection,
+  isLoweringConcurrency,
   isProviderSelectionUnavailable,
   isSectionBusy,
+  lowerConcurrencyLimit,
+  parseConcurrencyLimit,
   profileRequiresAccountId,
   providerSelectDescribedBy,
   providerSelectValue,
+  rateLimitLoweringApi,
   selectedProviderProfile,
+  supportsRateLimitLowering,
   upsertConnection,
   type ProviderFormValues,
 } from './ProviderSettingsSection';
 import type {
   ProviderConnection,
+  ProviderConnectionRateLimitLowerInput,
   ProviderProfile,
   ProviderVerificationStatus,
 } from '@sprint-coder/contracts';
 
 // Every key in this file is a fake literal. Nothing here reads a real credential.
 const FAKE_KEY = 'sk-test-not-a-real-key';
+
+// An unobserved ceiling by default — the state Main starts every Connection in, and the one the
+// concurrency control has to read as its own default rather than as "unlimited".
+function rateLimit(
+  overrides: Partial<ProviderConnection['rateLimit']> = {},
+): ProviderConnection['rateLimit'] {
+  return {
+    mode: 'auto',
+    maxConcurrentRequests: null,
+    requestsPerMinute: null,
+    tokensPerMinute: null,
+    lastObservedRateLimitHeaders: null,
+    ...overrides,
+  };
+}
 
 function connection(overrides: Partial<ProviderConnection> = {}): ProviderConnection {
   return {
@@ -53,13 +83,7 @@ function connection(overrides: Partial<ProviderConnection> = {}): ProviderConnec
     enabled: true,
     secretReference: 'provider-secret:11111111-2222-4333-8444-555555555555',
     verification: { status: 'verified', verifiedAt: null, expiresAt: null, message: null },
-    rateLimit: {
-      mode: 'auto',
-      maxConcurrentRequests: null,
-      requestsPerMinute: null,
-      tokensPerMinute: null,
-      lastObservedRateLimitHeaders: null,
-    },
+    rateLimit: rateLimit(),
     createdAt: '2026-07-29T00:00:00.000Z',
     updatedAt: '2026-07-29T00:00:00.000Z',
     ...overrides,
@@ -123,6 +147,22 @@ function fakeApi() {
     createGeminiConnection: vi.fn(async () => created),
     createXAIConnection: vi.fn(async () => created),
     verifyConnection: vi.fn(async () => created),
+  };
+}
+
+// A Main with the rate-limit IPC wired. `fakeApi` above deliberately lacks it: a build that
+// predates the method is a real shape this screen has to survive, and is what the capability check
+// below is for. Main's own answer is what comes back, never the number that was typed.
+function fakeRateLimitApi() {
+  const lowered = connection({
+    rateLimit: rateLimit({ mode: 'manual', maxConcurrentRequests: 1 }),
+  });
+  return {
+    ...fakeApi(),
+    lowerRateLimits: vi.fn(async (input: ProviderConnectionRateLimitLowerInput) => ({
+      ...lowered,
+      id: input.connectionId,
+    })),
   };
 }
 
@@ -226,6 +266,13 @@ describe('isSectionBusy', () => {
     // The one that matters most: a verification in flight blocks starting a second one, whichever
     // Connection the click came from. Both responses would otherwise race into the same list.
     expect(isSectionBusy({ ...idle, verifyingId: 'conn-1' })).toBe(true);
+  });
+
+  it('counts a rate-limit save, and reads a caller that predates it as plain idle', () => {
+    expect(isSectionBusy({ ...idle, savingRateLimitId: 'conn-1' })).toBe(true);
+    // Optional on purpose: an omitted flag is 'no save in flight', not a busy section.
+    expect(isSectionBusy({ ...idle, savingRateLimitId: null })).toBe(false);
+    expect(isSectionBusy(idle)).toBe(false);
   });
 });
 
@@ -404,7 +451,7 @@ describe('a Profile that leaves the listing', () => {
     expect(cleared.displayName).toBe('本番');
     expect(canSubmitProviderForm(cleared, false, listed)).toBe(false);
     // Nothing to clear leaves the very same object, for a Profile still listed and for a fixed one.
-    const stillListed = profileForm(listed[0]);
+    const stillListed = profileForm(listed[0]!);
     expect(clearUnavailableProfileInput(stillListed, listed)).toBe(stillListed);
     const fixed = form();
     expect(clearUnavailableProfileInput(fixed, [])).toBe(fixed);
@@ -508,6 +555,297 @@ describe('upsertConnection', () => {
     const added = connection({ id: 'conn-2' });
     expect(upsertConnection([existing], added)).toEqual([existing, added]);
     expect(upsertConnection([], added)).toEqual([added]);
+  });
+});
+
+// Concurrency is the one rate limit this screen touches, and only downward: a wider ceiling is what
+// produces 429s. Every gate below therefore has to refuse a raise, not merely discourage one.
+describe('the concurrency limit a card may save', () => {
+  it('accepts a plain positive integer and refuses everything else', () => {
+    expect(parseConcurrencyLimit('3')).toBe(3);
+    expect(parseConcurrencyLimit('  4  ')).toBe(4);
+    expect(parseConcurrencyLimit('007')).toBe(7);
+    for (const raw of ['', '   ', '0', '-1', '+2', '1.5', '1e2', '2a', 'abc', '２']) {
+      expect(parseConcurrencyLimit(raw)).toBeNull();
+    }
+    // Past Number.isSafeInteger, so it is not a limit anyone can hold Main to.
+    expect(parseConcurrencyLimit('9007199254740993')).toBeNull();
+  });
+
+  it('names an unobserved ceiling as the default in force, never as unlimited', () => {
+    expect(concurrencyLimitText(null)).toBe(CONCURRENCY_AUTO_TEXT);
+    expect(concurrencyLimitText(null)).not.toContain('無制限');
+    expect(concurrencyLimitText(4)).toBe('4');
+    // The field starts at the ceiling in force, so saving an untouched form changes no number.
+    expect(concurrencyInputDefault(4)).toBe('4');
+    expect(concurrencyInputDefault(null)).toBe('2');
+    expect(concurrencyLimitHint(null)).toContain(CONCURRENCY_AUTO_TEXT);
+    // The unobserved hint quotes the ceiling the save button actually enforces, not an invitation
+    // to type any positive integer.
+    expect(concurrencyLimitHint(null)).toContain('2以下');
+    expect(concurrencyLimitHint(4)).toContain('4以下');
+  });
+
+  it('reads an unobserved ceiling as the built-in default, not as no ceiling', () => {
+    expect(effectiveConcurrencyLimit(null)).toBe(2);
+    expect(effectiveConcurrencyLimit(4)).toBe(4);
+    expect(effectiveConcurrencyLimit(1)).toBe(1);
+  });
+
+  it('treats equal as lowering and anything above the ceiling as a raise', () => {
+    // The card says 自動（既定2）, so 2 is the ceiling in force: only 1 or 2 is a lowering, and
+    // anything above it would widen the effective limit without ever saying so.
+    expect(isLoweringConcurrency(null, 1)).toBe(true);
+    expect(isLoweringConcurrency(null, 2)).toBe(true);
+    expect(isLoweringConcurrency(null, 3)).toBe(false);
+    expect(isLoweringConcurrency(null, 9999)).toBe(false);
+    expect(isLoweringConcurrency(4, 3)).toBe(true);
+    expect(isLoweringConcurrency(4, 4)).toBe(true);
+    expect(isLoweringConcurrency(4, 5)).toBe(false);
+  });
+
+  it('keeps what was typed until the ceiling itself moves, then shows the new one', () => {
+    // Nothing typed yet: the field starts at the ceiling in force, unobserved case included.
+    expect(concurrencyDraftValue(null, 4)).toBe('4');
+    expect(concurrencyDraftValue(null, null)).toBe('2');
+    // Typed against the ceiling still in force — a reload that changed no number must not wipe it,
+    // not even a half-finished value the save button already refuses.
+    expect(concurrencyDraftValue({ source: 4, value: '3' }, 4)).toBe('3');
+    expect(concurrencyDraftValue({ source: 4, value: '' }, 4)).toBe('');
+    expect(concurrencyDraftValue({ source: null, value: '1' }, null)).toBe('1');
+    // The ceiling moved underneath the draft — this card's own save, or a reload — so the field
+    // shows the number now in force rather than the one typed against the old one.
+    expect(concurrencyDraftValue({ source: 4, value: '3' }, 1)).toBe('1');
+    expect(concurrencyDraftValue({ source: null, value: '1' }, 2)).toBe('2');
+    // A ceiling that becomes unobserved reads as the default, never as the stale draft.
+    expect(concurrencyDraftValue({ source: 4, value: '3' }, null)).toBe('2');
+  });
+
+  it('unpresses the save button for a raise, an unparseable value, or a busy section', () => {
+    const idle = { current: 4, input: '3', busy: false };
+    expect(canLowerConcurrencyLimit(idle)).toBe(true);
+    expect(canLowerConcurrencyLimit({ ...idle, input: '4' })).toBe(true);
+    expect(canLowerConcurrencyLimit({ ...idle, input: '5' })).toBe(false);
+    expect(canLowerConcurrencyLimit({ ...idle, input: '' })).toBe(false);
+    expect(canLowerConcurrencyLimit({ ...idle, input: '0' })).toBe(false);
+    expect(canLowerConcurrencyLimit({ current: null, input: '2', busy: false })).toBe(true);
+    expect(canLowerConcurrencyLimit({ current: null, input: '1', busy: false })).toBe(true);
+    expect(canLowerConcurrencyLimit({ current: null, input: '3', busy: false })).toBe(false);
+    expect(canLowerConcurrencyLimit({ current: null, input: '9999', busy: false })).toBe(false);
+    // One section, one in-flight slot: this card's own save is part of `busy` too, so a second
+    // click cannot start on top of the first.
+    expect(canLowerConcurrencyLimit({ ...idle, busy: true })).toBe(false);
+    expect(canLowerConcurrencyLimit({ current: null, input: '2', busy: true })).toBe(false);
+  });
+});
+
+describe('lowerConcurrencyLimit', () => {
+  it('sends only the one limit this screen owns, for the Connection that was saved', async () => {
+    const api = fakeRateLimitApi();
+    const updated = await lowerConcurrencyLimit(
+      api,
+      connection({
+        id: 'conn-7',
+        rateLimit: rateLimit({ maxConcurrentRequests: 4 }),
+      }),
+      ' 3 ',
+    );
+    expect(api.lowerRateLimits).toHaveBeenCalledWith({
+      connectionId: 'conn-7',
+      maxConcurrentRequests: 3,
+    });
+    // The per-minute limits are left untouched rather than resubmitted at their current values.
+    const [payload] = api.lowerRateLimits.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(Object.keys(payload).sort()).toEqual(['connectionId', 'maxConcurrentRequests']);
+    // Main's own answer is what the caller gets back, never the number that was typed.
+    expect(updated.rateLimit.maxConcurrentRequests).toBe(1);
+  });
+
+  it('lets an equal value through, which is how an unobserved ceiling is pinned', async () => {
+    const equal = fakeRateLimitApi();
+    await lowerConcurrencyLimit(
+      equal,
+      connection({ rateLimit: rateLimit({ maxConcurrentRequests: 3 }) }),
+      '3',
+    );
+    expect(equal.lowerRateLimits).toHaveBeenCalledWith({
+      connectionId: 'conn-1',
+      maxConcurrentRequests: 3,
+    });
+    // An unobserved ceiling is pinned at the default it was already running under, not above it.
+    const auto = fakeRateLimitApi();
+    await lowerConcurrencyLimit(auto, connection(), '2');
+    expect(auto.lowerRateLimits).toHaveBeenCalledWith({
+      connectionId: 'conn-1',
+      maxConcurrentRequests: 2,
+    });
+  });
+
+  it('never widens a ceiling, however the save was reached', async () => {
+    const api = fakeRateLimitApi();
+    const limited = connection({
+      rateLimit: rateLimit({ mode: 'manual', maxConcurrentRequests: 2 }),
+    });
+    await expect(lowerConcurrencyLimit(api, limited, '3')).rejects.toThrow();
+    await expect(lowerConcurrencyLimit(api, limited, '9999')).rejects.toThrow();
+    // Including the unobserved case, where the ceiling being widened is the built-in default: the
+    // card reads 自動（既定2）, so anything above 2 would raise it without ever saying so.
+    await expect(lowerConcurrencyLimit(api, connection(), '3')).rejects.toThrow();
+    await expect(lowerConcurrencyLimit(api, connection(), '9999')).rejects.toThrow();
+    expect(api.lowerRateLimits).not.toHaveBeenCalled();
+  });
+
+  it('refuses a value that is not a positive integer before Main ever hears about it', async () => {
+    const api = fakeRateLimitApi();
+    for (const raw of ['', '   ', '0', '-2', '1.5', 'abc']) {
+      await expect(lowerConcurrencyLimit(api, connection(), raw)).rejects.toThrow();
+    }
+    expect(api.lowerRateLimits).not.toHaveBeenCalled();
+  });
+
+  it('refuses a built-in CLI, whose concurrency belongs to Team Policy', async () => {
+    const api = fakeRateLimitApi();
+    for (const runtimeKind of ['builtin_cli', 'mock'] as const) {
+      await expect(lowerConcurrencyLimit(api, connection({ runtimeKind }), '1')).rejects.toThrow();
+    }
+    expect(api.lowerRateLimits).not.toHaveBeenCalled();
+  });
+
+  it('refuses on a Main that never wired the method, rather than calling something absent', async () => {
+    const older = fakeApi();
+    await expect(lowerConcurrencyLimit(older, connection(), '1')).rejects.toThrow();
+    // And it reaches for nothing else in its place.
+    expect(older.verifyConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe('rate-limit capability detection', () => {
+  it('is false without an API and on a Main that predates the method', () => {
+    expect(supportsRateLimitLowering(null)).toBe(false);
+    expect(rateLimitLoweringApi(null)).toBeNull();
+    expect(supportsRateLimitLowering(fakeApi())).toBe(false);
+    expect(rateLimitLoweringApi(fakeApi())).toBeNull();
+  });
+
+  it('is true once Main offers it, and hands back the same API to call', () => {
+    const api = fakeRateLimitApi();
+    expect(supportsRateLimitLowering(api)).toBe(true);
+    expect(rateLimitLoweringApi(api)).toBe(api);
+  });
+});
+
+describe('the concurrency control on a card', () => {
+  const control = { supported: true, saving: false, onSave: () => {} };
+
+  it('labels the field, seeds it with the ceiling in force, and says what may be saved', () => {
+    const html = renderToStaticMarkup(
+      <ProviderConnectionCard
+        connection={connection({
+          rateLimit: rateLimit({ mode: 'manual', maxConcurrentRequests: 4 }),
+        })}
+        verifying={false}
+        disabled={false}
+        onRetry={() => {}}
+        rateLimit={control}
+      />,
+    );
+    expect(html).toContain(CONCURRENCY_LABEL);
+    expect(html).toContain('for="settings-connection-limit-conn-1"');
+    expect(html).toContain('data-testid="settings-connection-limit-conn-1"');
+    expect(html).toContain('data-testid="settings-connection-limit-conn-1-save"');
+    expect(html).toContain('aria-describedby="settings-connection-limit-conn-1-hint"');
+    expect(html).toContain('id="settings-connection-limit-conn-1-hint"');
+    expect(html).toContain(concurrencyLimitHint(4));
+    // Seeded at the ceiling and bounded by it, so the spinner itself cannot reach a raise.
+    expect(html).toContain('value="4"');
+    expect(html).toContain('max="4"');
+    expect(html).toContain('本番 OpenAIの同時実行上限を保存');
+  });
+
+  it('offers an unobserved ceiling the built-in default, and bounds the spinner by it', () => {
+    const html = renderToStaticMarkup(
+      <ProviderConnectionCard
+        connection={connection()}
+        verifying={false}
+        disabled={false}
+        onRetry={() => {}}
+        rateLimit={control}
+      />,
+    );
+    expect(html).toContain(concurrencyLimitHint(null));
+    expect(html).toContain(CONCURRENCY_AUTO_TEXT);
+    expect(html).toContain('value="2"');
+    // Bounded by the default in force rather than left open, so the spinner cannot climb to a
+    // number the save button refuses.
+    expect(html).toContain('max="2"');
+  });
+
+  it('goes inert while its own save is in flight, and while the section is busy', () => {
+    const saving = renderToStaticMarkup(
+      <ProviderConnectionCard
+        connection={connection()}
+        verifying={false}
+        disabled={false}
+        onRetry={() => {}}
+        rateLimit={{ ...control, saving: true }}
+      />,
+    );
+    expect(saving).toContain('保存中');
+    expect(saving).toMatch(/data-testid="settings-connection-limit-conn-1-save"[^>]*disabled/);
+    expect(saving).toMatch(/data-testid="settings-connection-limit-conn-1"[^>]*disabled/);
+    const blocked = renderToStaticMarkup(
+      <ProviderConnectionCard
+        connection={connection()}
+        verifying={false}
+        disabled
+        onRetry={() => {}}
+        rateLimit={control}
+      />,
+    );
+    // Blocked by someone else's operation, so it must not claim to be saving itself.
+    expect(blocked).not.toContain('保存中');
+    expect(blocked).toMatch(/data-testid="settings-connection-limit-conn-1-save"[^>]*disabled/);
+  });
+
+  it('is absent for a built-in CLI and on a Main that cannot lower a limit', () => {
+    const cli = renderToStaticMarkup(
+      <ProviderConnectionCard
+        connection={connection({
+          providerId: 'anthropic',
+          runtimeKind: 'builtin_cli',
+          displayName: 'Claude CLI',
+          secretReference: null,
+        })}
+        verifying={false}
+        disabled={false}
+        onRetry={() => {}}
+        rateLimit={control}
+      />,
+    );
+    expect(cli).not.toContain(CONCURRENCY_LABEL);
+    expect(cli).not.toContain('settings-connection-limit-');
+    // Not offered and always failing, but simply not offered.
+    const unsupported = renderToStaticMarkup(
+      <ProviderConnectionCard
+        connection={connection()}
+        verifying={false}
+        disabled={false}
+        onRetry={() => {}}
+        rateLimit={{ ...control, supported: false }}
+      />,
+    );
+    expect(unsupported).not.toContain(CONCURRENCY_LABEL);
+    // An omitted control is the same story, and leaves the rest of the card alone.
+    const omitted = renderToStaticMarkup(
+      <ProviderConnectionCard
+        connection={connection()}
+        verifying={false}
+        disabled={false}
+        onRetry={() => {}}
+      />,
+    );
+    expect(omitted).not.toContain(CONCURRENCY_LABEL);
+    expect(omitted).toContain('本番 OpenAIの検証を再実行');
   });
 });
 
@@ -678,7 +1016,7 @@ describe('secret boundary copy', () => {
 
 describe('error copy', () => {
   it('is fixed generic Japanese text with no interpolation seams for backend detail', () => {
-    const copy = [LIST_ERROR, CREATE_ERROR, VERIFY_ERROR, PROFILE_LIST_WARNING];
+    const copy = [LIST_ERROR, CREATE_ERROR, VERIFY_ERROR, PROFILE_LIST_WARNING, RATE_LIMIT_ERROR];
     for (const message of [...copy, PROFILE_UNAVAILABLE_NOTICE]) {
       expect(message).toMatch(/[ぁ-んァ-ヶ一-龠]/);
       expect(message).not.toContain('${');

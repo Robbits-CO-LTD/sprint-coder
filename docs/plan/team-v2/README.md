@@ -1,12 +1,13 @@
 # Team v2・Multi-Provider 改訂計画
 
 - 計画版: v2
-- 状態: planning
+- 状態: implementation complete — local final gate green、external release gates pending
 - 現在地: Team Slice 0、Core A、Core B1a/B1b/B2a/B2b/B3a/B3b/B3c/B4、
   Core C1a/C1b/C2a/C2b/C2c/C2d/C3a/C3b/C4a/C4b/C5a、Provider P0、
   P1A-a/P1A-b、P1B-a/P1B-b1/P1B-b2/P1B-b3/P1B-c1/P1B-c2a/P1B-c2b、
   UI U0/U1a/U1b/U1c/U2a/U3a、Provider P2a/P2b/P2c1/P2c2/P2c3、P3、P4、P5、P6、
-  Compatibility C1a/C1b1/C1b2/C2a完了
+  Compatibility C1a/C1b1/C1b2/C2a、最終Team runtime統合、階層／model表示、
+  Connection lower-only rate-limit UI、Core C5bまで実装済み。macOS local final gate green
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -86,6 +87,21 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 
 ## 現在地とblocker
 
+> 以下の詳細はSliceごとの実装履歴である。現在の正確な状態は
+> [Current State](01-current-state.md)を優先する。今回の最終統合後はユーザー指定により
+> local final gateは2026-07-28に実行済みである。3OS CIと、資格情報がないProviderの実API
+> smokeは未実行なので、Initial GA／Compatibility Pack GAの全条件greenとは読み替えない。
+
+- 実CLI／API LeaderとManagerのTeam tool loop、Worker通信、catalogに基づくWorker別model選定、
+  実行中status監視／steer、Worker停止時のqueue取消を最終統合した。
+- Canvas／Listは永続parent/depthから階層配置し、model、Connection、選定理由、外部API Runtimeを
+  推測なしで表示する。
+- 外部Connectionの`maxConcurrentRequests`を現在値以下へ下げるMain／Preload／Renderer契約を
+  追加した。built-in CLIは対象外である。
+- architecture AST testを追加した。full typecheck／lint／format、全unit、packaged E2E、
+  実Claude／Codex Team、OpenRouter実API、macOS Computer Useをlocal final gateで実行した。
+  証拠と残件は[Testing and CI](10-testing-and-ci.md)に記録する。
+
 - 現行DB migrationはv48。`provider_connections`をconnection domainの正本として追加し、
   安定IDの`builtin:claude-cli`と`builtin:codex-cli`をseedした。新規Claude／Codex Turn・Agentはbuilt-in connection IDと
   requested model identityを保存し、Runtimeが返したresolved modelを別フィールドへ保存する。
@@ -96,7 +112,8 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   Team MCPを渡し、直下Agentのhire／assignと自分が作成したexecutionのsteer／cancelだけを許可する。
 - `spawnSlots: 8`とは別に、AI executionをglobal最大8件で動かすSchedulerを実装済み。
 - Provider Connectionの最小domainとbuilt-in永続化はP1A-a、pre-v35 built-in identity backfillと
-  history dual-readはP1A-bで実装済み。独立fixture群はP1A-cへ留保した。外部API Adapter、
+  history dual-readはP1A-bで実装済み。Claudeのみ、Codexのみ、混在、不明legacy model、
+  二重migration、running／interrupted復元のfixtureも追加済みである。外部API Adapter、
   Secret Storage、API rate-limit Scheduler、feature flag基盤はP1B〜P6で実装済み。
 - `01-multi-provider-addendum.md`の原文は未提供である。原文を創作せず、提供されるまで
   [blocker placeholder](instructions/01-multi-provider-addendum.md)として扱う。
@@ -120,6 +137,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
   LeaderがTeamを自動展開し、数学／実装の2件の実Worker報告を受信・統合するpackaged E2Eが
   40.9秒でgreen。Team intentは1–8人と「N人体制」を認識し、全executionの終端report待ちも
   組み込みSkillとE2Eへ明記した。
+- Core C5bでCodex app-serverのTeam MCP tool surfaceを12ツールへ同期し、assistant delta前の
+  stage遷移とTurn内message ID正規化を追加した。packaged実Codex Leaderが「数学担当」
+  「実装担当」を雇用し、2件の実Worker reportを受信・統合するE2Eが1.4分でgreen。
 - Provider P0でCore後の実装を再調査し、Provider domain、二段階admission、Capability Catalog／
   Picker、Profile／verification／secrets、legacy migrationをADR-003〜007としてAcceptedにした。
   v35 identity列は新規dataへ有効だがpre-v35 rowのbackfillは未実装、Worker実行時のAgent別
@@ -184,8 +204,8 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Provider P3でOpenRouterを独立Gateway Runtimeとして登録した。1000件超catalog、価格、
   capability、Responses stream、Tool Calling、Structured Output、取消、429を共通境界へ
   正規化する。requested model、Gateway、選択upstream、routing metadata、usage／costを分離し、
-  DB v48でChat TurnとTeam attemptへ完全なresolutionを永続化する。実API smokeはfinal gateへ
-  留保する。
+  DB v48でChat TurnとTeam attemptへ完全なresolutionを永続化する。実API smokeでは認証、
+  368モデルのcatalog、`openrouter/free`のstream、resolution、usage、completionがgreen。
 - Provider P4でAnthropic公式APIをClaude CLIとは別のConnection／Runtimeとして登録した。
   公式Models APIのpaginationとcapabilityをcatalogへ反映し、Messages SSEのtext、thinking、
   tool use、usage、resolved model、429、取消をcanonical eventへ正規化する。Chat／Teamは

@@ -55,6 +55,36 @@ export default tseslint.config(
     },
   },
   {
+    files: [
+      'apps/desktop/src/main/team-coordinator.ts',
+      'apps/desktop/src/main/team-execution-scheduler.ts',
+      'apps/desktop/src/main/team-tools.ts',
+    ],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                './openai-*',
+                './anthropic-*',
+                './gemini-*',
+                './openrouter-*',
+                './xai-*',
+                'openai',
+                '@anthropic-ai/*',
+                '@google/generative-ai',
+              ],
+              message:
+                'Team Core may depend only on provider-neutral runtime/registry contracts, never a Provider client, Adapter, or SDK.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ['**/*.test.ts', '**/*.test.tsx'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',

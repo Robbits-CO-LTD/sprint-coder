@@ -130,4 +130,8 @@ Proof: component、keyboard、accessibility、Playwright、packaged Computer Use
   一時stdio serverだけをPATH上の`node`／`node.exe`で起動する。packaged実Claude Leaderが
   Teamを自動展開し、数学／実装の2件の実Worker reportを受信・統合するE2Eが40.9秒でgreen。
   1–8人の人数表現、「N人体制」、全execution IDの終端report待ちを回帰条件へ追加した。
-- 次着手: C5bで実Codex CLIのpackaged Team executionを検証し、Core GA残件を監査する。
+- C5b完了: Codex app-serverのTeam MCP許可surfaceを正本の12ツールへ同期した。さらに
+  app-server notificationへ単調なstage遷移とTurn内で安定したassistant message IDを適用し、
+  tool前後の複数messageを既存Turn persistenceへ安全に保存する。packaged実Codex Leaderが
+  数学担当／実装担当の2 Workerを雇用し、2件の実reportを統合するE2Eが1.4分でgreen。
+- 次着手: 3OS CIとWindows／Linux packaged evidenceをrelease環境で取得する。

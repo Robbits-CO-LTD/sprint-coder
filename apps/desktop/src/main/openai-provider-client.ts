@@ -29,7 +29,8 @@ export function serializeOpenAICredential(credential: OpenAICredential): string 
 
 export function parseOpenAICredential(value: string): OpenAICredential {
   const parsed: unknown = JSON.parse(value);
-  if (parsed === null || typeof parsed !== 'object') throw new Error('OpenAI credential is invalid');
+  if (parsed === null || typeof parsed !== 'object')
+    throw new Error('OpenAI credential is invalid');
   const record = parsed as Record<string, unknown>;
   if (typeof record.apiKey !== 'string' || record.apiKey.trim().length === 0)
     throw new Error('OpenAI API key is missing');
@@ -39,9 +40,7 @@ export function parseOpenAICredential(value: string): OpenAICredential {
     throw new Error('OpenAI project ID is invalid');
   return {
     apiKey: record.apiKey,
-    ...(typeof record.organizationId === 'string'
-      ? { organizationId: record.organizationId }
-      : {}),
+    ...(typeof record.organizationId === 'string' ? { organizationId: record.organizationId } : {}),
     ...(typeof record.projectId === 'string' ? { projectId: record.projectId } : {}),
   };
 }
@@ -85,9 +84,7 @@ export class OpenAIProviderClient implements ProviderRuntime {
       if (error instanceof OpenAIHttpError)
         return {
           status:
-            error.status === 401 || error.status === 403
-              ? 'invalid_credentials'
-              : 'unavailable',
+            error.status === 401 || error.status === 403 ? 'invalid_credentials' : 'unavailable',
           verifiedAt: checkedAt.toISOString(),
           expiresAt: checkedAt.toISOString(),
           message:
@@ -147,7 +144,7 @@ export class OpenAIProviderClient implements ProviderRuntime {
       const response = await this.authenticatedFetch(connection, '/responses', controller.signal, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(openAICompatibleResponseRequest(parsed)),
+        body: JSON.stringify(openAICompatibleResponseRequest(parsed)),
       });
       if (!response.ok) {
         const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
@@ -169,11 +166,7 @@ export class OpenAIProviderClient implements ProviderRuntime {
         };
         return;
       }
-      yield* normalizeOpenAIResponsesStream(
-        response.body,
-        connection.providerId,
-        parsed.modelId,
-      );
+      yield* normalizeOpenAIResponsesStream(response.body, connection.providerId, parsed.modelId);
     } catch {
       yield {
         type: 'error',
@@ -257,32 +250,43 @@ function isOpenAIModelList(value: unknown): value is OpenAIModelList {
 export function openAICompatibleResponseRequest(
   request: ProviderExecutionRequest,
 ): Record<string, unknown> {
+  const input: Record<string, unknown>[] = [];
+  for (const message of request.messages) {
+    if (message.role === 'tool') {
+      input.push({
+        type: 'function_call_output',
+        call_id: message.toolCallId,
+        output: message.content,
+      });
+      continue;
+    }
+    if (message.content !== '' || (message.toolCalls?.length ?? 0) === 0)
+      input.push({
+        role: message.role,
+        content:
+          message.inlineImages === undefined || message.inlineImages.length === 0
+            ? message.content
+            : [
+                { type: 'input_text', text: message.content },
+                ...message.inlineImages.map((image) => ({
+                  type: 'input_image',
+                  image_url: `data:${image.mimeType};base64,${image.base64}`,
+                })),
+              ],
+      });
+    for (const toolCall of message.toolCalls ?? [])
+      input.push({
+        type: 'function_call',
+        call_id: toolCall.callId,
+        name: toolCall.name,
+        arguments: JSON.stringify(toolCall.input),
+      });
+  }
   return {
     model: request.modelId,
     stream: true,
     store: false,
-    input: request.messages.map((message) =>
-      message.role === 'tool'
-        ? {
-            type: 'function_call_output',
-            call_id: message.toolCallId,
-            output: message.content,
-          }
-        : {
-            role: message.role,
-            content:
-              message.inlineImages === undefined ||
-              message.inlineImages.length === 0
-                ? message.content
-                : [
-                    { type: 'input_text', text: message.content },
-                    ...message.inlineImages.map((image) => ({
-                      type: 'input_image',
-                      image_url: `data:${image.mimeType};base64,${image.base64}`,
-                    })),
-                  ],
-          },
-    ),
+    input,
     ...(request.tools === undefined
       ? {}
       : {
@@ -345,9 +349,7 @@ function normalizeHttpError(status: number, retryAfterMs: number | null): Normal
   return {
     category: status >= 500 ? 'provider_unavailable' : 'invalid_request',
     message:
-      status >= 500
-        ? 'OpenAI API is temporarily unavailable'
-        : 'OpenAI API rejected the request',
+      status >= 500 ? 'OpenAI API is temporarily unavailable' : 'OpenAI API rejected the request',
     retryable: status >= 500,
     retryAfterMs: null,
     providerCode: `http_${status}`,

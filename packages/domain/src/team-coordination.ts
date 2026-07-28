@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import type { CapabilityCeiling } from './permission';
 import { assertTeamMessageAllowed } from './team';
 
 export const budgetScopes = ['global', 'team', 'worker'] as const;

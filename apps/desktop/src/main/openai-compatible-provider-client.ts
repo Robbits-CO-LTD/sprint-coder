@@ -8,10 +8,7 @@ import {
   type ProviderProfile,
 } from '@sprint-coder/contracts';
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
-import type {
-  OpenAICompatibleCredential,
-  ProviderProfileRegistry,
-} from './provider-profile';
+import type { OpenAICompatibleCredential, ProviderProfileRegistry } from './provider-profile';
 import { resolveProfileBaseUrl } from './provider-profile';
 import type { ProviderFetch } from './openai-provider-client';
 import { openAICompatibleResponseRequest } from './openai-provider-client';
@@ -54,9 +51,7 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
       if (error instanceof CompatibleHttpError)
         return {
           status:
-            error.status === 401 || error.status === 403
-              ? 'invalid_credentials'
-              : 'unavailable',
+            error.status === 401 || error.status === 403 ? 'invalid_credentials' : 'unavailable',
           verifiedAt: checkedAt.toISOString(),
           expiresAt: checkedAt.toISOString(),
           message:
@@ -80,8 +75,7 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
   ): Promise<readonly ProviderModel[]> {
     assertCompatibleConnection(connection);
     const profile = this.profiles.get(connection.providerId);
-    if (profile.modelsPath === null)
-      return this.catalogModels(connection, profile.curatedModels);
+    if (profile.modelsPath === null) return this.catalogModels(connection, profile.curatedModels);
     const response = await this.fetchModels(connection, signal);
     return this.catalogModels(connection, response.data);
   }
@@ -149,17 +143,11 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
         profile.protocol === 'responses'
           ? openAICompatibleResponseRequest(parsed)
           : openAICompatibleChatCompletionRequest(parsed);
-      const response = await this.authenticatedFetch(
-        connection,
-        profile,
-        path,
-        controller.signal,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        },
-      );
+      const response = await this.authenticatedFetch(connection, profile, path, controller.signal, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
       if (!response.ok) {
         const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
         if (response.status === 429)
@@ -184,11 +172,7 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
         return;
       }
       if (profile.protocol === 'responses')
-        yield* normalizeOpenAIResponsesStream(
-          response.body,
-          connection.providerId,
-          parsed.modelId,
-        );
+        yield* normalizeOpenAIResponsesStream(response.body, connection.providerId, parsed.modelId);
       else
         yield* normalizeOpenAIChatCompletionsStream(
           response.body,
@@ -294,9 +278,7 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
         throw new Error(`Provider Profile ${profile.id} requires an account ID`);
     const headers = new Headers(init.headers);
     const prefix =
-      profile.authentication.scheme.length === 0
-        ? ''
-        : `${profile.authentication.scheme} `;
+      profile.authentication.scheme.length === 0 ? '' : `${profile.authentication.scheme} `;
     headers.set(profile.authentication.headerName, `${prefix}${credential.apiKey}`);
     const baseUrl = resolveProfileBaseUrl(profile, credential);
     return this.providerFetch(`${baseUrl}${path}`, { ...init, headers, signal });
@@ -345,6 +327,18 @@ export function openAICompatibleChatCompletionRequest(
               })),
             ],
       ...(message.role === 'tool' ? { tool_call_id: message.toolCallId } : {}),
+      ...(message.role === 'assistant' && message.toolCalls !== undefined
+        ? {
+            tool_calls: message.toolCalls.map((toolCall) => ({
+              id: toolCall.callId,
+              type: 'function',
+              function: {
+                name: toolCall.name,
+                arguments: JSON.stringify(toolCall.input),
+              },
+            })),
+          }
+        : {}),
     })),
     ...(request.tools === undefined
       ? {}

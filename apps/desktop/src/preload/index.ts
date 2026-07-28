@@ -27,6 +27,7 @@ import {
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   connectionIdSchema,
@@ -424,6 +425,13 @@ const api: SprintCoderApi = {
         z.object({ connectionId: connectionIdSchema }).strict(),
         providerConnectionSchema,
         { connectionId },
+      ),
+    lowerRateLimits: (input) =>
+      invoke(
+        IPC_CHANNELS.providersLowerRateLimits,
+        providerConnectionRateLimitLowerInputSchema,
+        providerConnectionSchema,
+        input,
       ),
   },
   permissions: {

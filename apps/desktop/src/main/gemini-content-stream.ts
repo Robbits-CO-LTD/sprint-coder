@@ -1,7 +1,4 @@
-import type {
-  CanonicalProviderEvent,
-  NormalizedProviderUsage,
-} from '@sprint-coder/contracts';
+import type { CanonicalProviderEvent, NormalizedProviderUsage } from '@sprint-coder/contracts';
 
 export async function* normalizeGeminiContentStream(
   body: ReadableStream<Uint8Array>,
@@ -34,9 +31,7 @@ export async function* normalizeGeminiContentStream(
                 : 'provider_unavailable',
           message: 'Gemini streaming request failed',
           retryable:
-            status === 'RESOURCE_EXHAUSTED' ||
-            status === 'UNAVAILABLE' ||
-            status === 'INTERNAL',
+            status === 'RESOURCE_EXHAUSTED' || status === 'UNAVAILABLE' || status === 'INTERNAL',
           retryAfterMs: null,
           providerCode: status?.slice(0, 128) ?? null,
         },
@@ -51,8 +46,7 @@ export async function* normalizeGeminiContentStream(
     const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
     for (const candidateValue of candidates) {
       const candidate = record(candidateValue);
-      if (typeof candidate?.finishReason === 'string')
-        stopReason = candidate.finishReason;
+      if (typeof candidate?.finishReason === 'string') stopReason = candidate.finishReason;
       const content = record(candidate?.content);
       const parts = Array.isArray(content?.parts) ? content.parts : [];
       for (const partValue of parts) {
@@ -63,10 +57,7 @@ export async function* normalizeGeminiContentStream(
             : { type: 'output_delta', text: part.text };
         }
         const functionCall = record(part?.functionCall);
-        if (
-          functionCall !== null &&
-          typeof functionCall.name === 'string'
-        ) {
+        if (functionCall !== null && typeof functionCall.name === 'string') {
           toolOrdinal += 1;
           yield {
             type: 'tool_call',
@@ -115,18 +106,13 @@ function mergeUsage(
   return {
     ...current,
     inputTokens: integer(value.promptTokenCount) ?? current.inputTokens,
-    outputTokens:
-      integer(value.candidatesTokenCount) ?? current.outputTokens,
-    cacheReadTokens:
-      integer(value.cachedContentTokenCount) ?? current.cacheReadTokens,
-    reasoningTokens:
-      integer(value.thoughtsTokenCount) ?? current.reasoningTokens,
+    outputTokens: integer(value.candidatesTokenCount) ?? current.outputTokens,
+    cacheReadTokens: integer(value.cachedContentTokenCount) ?? current.cacheReadTokens,
+    reasoningTokens: integer(value.thoughtsTokenCount) ?? current.reasoningTokens,
   };
 }
 
-async function* readServerSentJson(
-  body: ReadableStream<Uint8Array>,
-): AsyncIterable<unknown> {
+async function* readServerSentJson(body: ReadableStream<Uint8Array>): AsyncIterable<unknown> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let pending = '';
@@ -159,10 +145,9 @@ async function* readServerSentJson(
   }
 }
 
-function jsonValue(value: unknown): Extract<
-  CanonicalProviderEvent,
-  { type: 'tool_call' }
->['input'] {
+function jsonValue(
+  value: unknown,
+): Extract<CanonicalProviderEvent, { type: 'tool_call' }>['input'] {
   try {
     return JSON.parse(JSON.stringify(value ?? {})) as Extract<
       CanonicalProviderEvent,
@@ -178,13 +163,9 @@ function stripModelPrefix(value: string): string {
 }
 
 function record(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object'
-    ? (value as Record<string, unknown>)
-    : null;
+  return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }
 
 function integer(value: unknown): number | null {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0
-    ? value
-    : null;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
 }

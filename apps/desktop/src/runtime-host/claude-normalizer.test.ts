@@ -93,8 +93,16 @@ describe('ClaudeJsonlNormalizer', () => {
 
   it('accepts the exact read-only plus Team MCP capability surface', () => {
     const teamTools = [
+      'mcp__team__team_list_models',
       'mcp__team__team_hire_worker',
+      'mcp__team__team_assign_task',
+      'mcp__team__team_steer_execution',
+      'mcp__team__team_cancel_execution',
+      'mcp__team__team_get_status',
+      'mcp__team__team_wait_events',
       'mcp__team__team_send_to_worker',
+      'mcp__team__team_send_message',
+      'mcp__team__team_read_messages',
       'mcp__team__team_wait_reports',
       'mcp__team__team_stop_worker',
     ];
@@ -120,8 +128,16 @@ describe('ClaudeJsonlNormalizer', () => {
       teamMcp: {
         serverName: 'team',
         toolNames: [
+          'mcp__team__team_list_models',
           'mcp__team__team_hire_worker',
+          'mcp__team__team_assign_task',
+          'mcp__team__team_steer_execution',
+          'mcp__team__team_cancel_execution',
+          'mcp__team__team_get_status',
+          'mcp__team__team_wait_events',
           'mcp__team__team_send_to_worker',
+          'mcp__team__team_send_message',
+          'mcp__team__team_read_messages',
           'mcp__team__team_wait_reports',
           'mcp__team__team_stop_worker',
         ],

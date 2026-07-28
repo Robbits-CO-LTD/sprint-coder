@@ -28,39 +28,32 @@ const connection: ProviderConnection = {
 
 describe('XAIProviderClient', () => {
   it('merges xAI model identity, modalities, context, and exact price units', async () => {
-    const providerFetch = vi.fn(
-      async (input: string | URL | Request, init?: RequestInit) => {
-        expect(new Headers(init?.headers).get('Authorization')).toBe(
-          'Bearer xai-key',
-        );
-        if (String(input).endsWith('/models'))
-          return Response.json({
-            object: 'list',
-            data: [{ id: 'grok-4.5', context_length: 256_000 }],
-          });
+    const providerFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer xai-key');
+      if (String(input).endsWith('/models'))
         return Response.json({
-          models: [
-            {
-              id: 'grok-4.5',
-              input_modalities: ['text', 'image'],
-              output_modalities: ['text'],
-              prompt_text_token_price: 12_500,
-              completion_text_token_price: 25_000,
-            },
-          ],
+          object: 'list',
+          data: [{ id: 'grok-4.5', context_length: 256_000 }],
         });
-      },
-    );
+      return Response.json({
+        models: [
+          {
+            id: 'grok-4.5',
+            input_modalities: ['text', 'image'],
+            output_modalities: ['text'],
+            prompt_text_token_price: 12_500,
+            completion_text_token_price: 25_000,
+          },
+        ],
+      });
+    });
     const client = new XAIProviderClient(
       () => ({ apiKey: 'xai-key' }),
       providerFetch,
       () => new Date('2026-07-28T07:00:00.000Z'),
     );
 
-    const models = await client.listModels(
-      connection,
-      new AbortController().signal,
-    );
+    const models = await client.listModels(connection, new AbortController().signal);
     expect(models).toEqual([
       expect.objectContaining({
         providerId: 'xai',

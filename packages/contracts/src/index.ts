@@ -208,6 +208,16 @@ export const contextInheritancePolicySchema = z.enum([
   'selected_items',
   'full_fork',
 ]);
+const teamConnectionIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+const teamProviderIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9][a-z0-9._-]*$/);
 
 export const teamUsageTotalsSchema = z
   .object({
@@ -243,6 +253,9 @@ export const workerSummarySchema = z
     writeCapable: z.boolean(),
     currentActivity: z.string().nullable(),
     engine: z.enum(['mock', 'codex', 'claude']),
+    connectionId: teamConnectionIdSchema.nullable(),
+    requestedProvider: teamProviderIdSchema.nullable(),
+    requestedModel: z.string().min(1).max(256).nullable(),
     parentAgentId: idSchema.nullable(),
     depth: z.number().int().min(0).max(4),
     canDelegate: z.boolean(),
@@ -354,6 +367,10 @@ export const teamActivitySummarySchema = z
       .nullable(),
     attemptOrdinal: z.number().int().min(1).nullable(),
     terminalReason: z.string().min(1).max(128).nullable(),
+    connectionId: teamConnectionIdSchema.nullable(),
+    requestedProvider: teamProviderIdSchema.nullable(),
+    requestedModel: z.string().min(1).max(256).nullable(),
+    modelSelectionReason: z.string().min(1).max(2_000).nullable(),
     recordedAt: timestampSchema,
   })
   .strict();
@@ -469,6 +486,7 @@ export const teamHireWorkerInputSchema = z
     contextInheritancePolicy: contextInheritancePolicySchema,
     writeCapable: z.boolean(),
     modelSelection: modelSelectionSchema.optional(),
+    modelSelectionReason: z.string().min(1).max(2_000).optional(),
   })
   .strict();
 export type TeamHireWorkerInput = z.infer<typeof teamHireWorkerInputSchema>;
@@ -1198,6 +1216,24 @@ export const providerConnectionRateLimitSchema = z
   })
   .strict();
 export type ProviderConnectionRateLimit = z.infer<typeof providerConnectionRateLimitSchema>;
+export const providerConnectionRateLimitLowerInputSchema = z
+  .object({
+    connectionId: connectionIdSchema,
+    maxConcurrentRequests: z.number().int().positive().optional(),
+    requestsPerMinute: z.number().int().positive().optional(),
+    tokensPerMinute: z.number().int().positive().optional(),
+  })
+  .strict()
+  .refine(
+    (input) =>
+      input.maxConcurrentRequests !== undefined ||
+      input.requestsPerMinute !== undefined ||
+      input.tokensPerMinute !== undefined,
+    { message: 'At least one Provider rate limit must be supplied' },
+  );
+export type ProviderConnectionRateLimitLowerInput = z.infer<
+  typeof providerConnectionRateLimitLowerInputSchema
+>;
 export const providerConnectionSchema = z
   .object({
     id: connectionIdSchema,
@@ -1247,18 +1283,14 @@ export const geminiConnectionCreateInputSchema = z
     apiKey: z.string().min(1).max(16_384),
   })
   .strict();
-export type GeminiConnectionCreateInput = z.infer<
-  typeof geminiConnectionCreateInputSchema
->;
+export type GeminiConnectionCreateInput = z.infer<typeof geminiConnectionCreateInputSchema>;
 export const xAIConnectionCreateInputSchema = z
   .object({
     displayName: z.string().trim().min(1).max(100),
     apiKey: z.string().min(1).max(16_384),
   })
   .strict();
-export type XAIConnectionCreateInput = z.infer<
-  typeof xAIConnectionCreateInputSchema
->;
+export type XAIConnectionCreateInput = z.infer<typeof xAIConnectionCreateInputSchema>;
 export const providerProfileProtocolSchema = z.enum(['chat_completions', 'responses']);
 export type ProviderProfileProtocol = z.infer<typeof providerProfileProtocolSchema>;
 export const providerProfileErrorOverrideSchema = z
@@ -1493,6 +1525,14 @@ export const providerInlineImageSchema = z
   })
   .strict();
 export type ProviderInlineImage = z.infer<typeof providerInlineImageSchema>;
+export const providerMessageToolCallSchema = z
+  .object({
+    callId: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+    input: z.json(),
+  })
+  .strict();
+export type ProviderMessageToolCall = z.infer<typeof providerMessageToolCallSchema>;
 export const providerExecutionRequestSchema = z
   .object({
     executionId: z.string().min(1).max(256),
@@ -1505,6 +1545,8 @@ export const providerExecutionRequestSchema = z
             role: z.enum(['system', 'user', 'assistant', 'tool']),
             content: z.string(),
             toolCallId: z.string().min(1).max(256).optional(),
+            toolName: z.string().min(1).max(256).optional(),
+            toolCalls: z.array(providerMessageToolCallSchema).max(128).optional(),
             inlineImages: z.array(providerInlineImageSchema).max(8).optional(),
           })
           .strict()
@@ -1520,6 +1562,22 @@ export const providerExecutionRequestSchema = z
                 code: 'custom',
                 path: ['toolCallId'],
                 message: 'toolCallId is only valid for tool result messages',
+              });
+            if (message.role !== 'tool' && message.toolName !== undefined)
+              context.addIssue({
+                code: 'custom',
+                path: ['toolName'],
+                message: 'toolName is only valid for tool result messages',
+              });
+            if (
+              message.role !== 'assistant' &&
+              message.toolCalls !== undefined &&
+              message.toolCalls.length > 0
+            )
+              context.addIssue({
+                code: 'custom',
+                path: ['toolCalls'],
+                message: 'toolCalls are only valid on assistant messages',
               });
             if (
               message.role !== 'user' &&
@@ -2042,14 +2100,13 @@ export interface SprintCoderApi {
     createOpenAIConnection(input: OpenAIConnectionCreateInput): Promise<ProviderConnection>;
     createOpenRouterConnection(input: OpenRouterConnectionCreateInput): Promise<ProviderConnection>;
     createAnthropicConnection(input: AnthropicConnectionCreateInput): Promise<ProviderConnection>;
-    createGeminiConnection(
-      input: GeminiConnectionCreateInput,
-    ): Promise<ProviderConnection>;
+    createGeminiConnection(input: GeminiConnectionCreateInput): Promise<ProviderConnection>;
     createXAIConnection(input: XAIConnectionCreateInput): Promise<ProviderConnection>;
     createProfileConnection(
       input: ProviderProfileConnectionCreateInput,
     ): Promise<ProviderConnection>;
     verifyConnection(connectionId: string): Promise<ProviderConnection>;
+    lowerRateLimits(input: ProviderConnectionRateLimitLowerInput): Promise<ProviderConnection>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
@@ -2144,6 +2201,7 @@ export const IPC_CHANNELS = {
   providersCreateXAIConnection: 'sprint-coder:providers:create-xai-connection',
   providersCreateProfileConnection: 'sprint-coder:providers:create-profile-connection',
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
+  providersLowerRateLimits: 'sprint-coder:providers:lower-rate-limits',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

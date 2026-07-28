@@ -12,6 +12,7 @@ import {
   type TeamPolicyUpdateInput,
   type TeamSendMessageInput,
   type ExecutionResolution,
+  type ModelSelection,
   type NormalizedProviderUsage,
   type WorkerCompletion,
   type WorkerSummary,
@@ -185,6 +186,10 @@ export class TeamCoordinator {
     private readonly now: () => Date = () => new Date(),
     private readonly deliveryTimeoutMs = DEFAULT_WORKER_DELIVERY_TIMEOUT_MS,
     executionScheduler?: TeamExecutionScheduler,
+    private readonly validateModelSelection?: (
+      selection: ModelSelection,
+      taskId: string,
+    ) => Promise<void> | void,
   ) {
     if (executionScheduler !== undefined) {
       this.executionScheduler = executionScheduler;
@@ -193,10 +198,7 @@ export class TeamCoordinator {
     const admission = new ConnectionAdmissionController(() => this.now().getTime());
     for (const connection of this.persistence.listProviderConnections())
       admission.configure(connection);
-    this.executionScheduler = new TeamExecutionScheduler(
-      TEAM_GLOBAL_EXECUTION_LIMIT,
-      admission,
-    );
+    this.executionScheduler = new TeamExecutionScheduler(TEAM_GLOBAL_EXECUTION_LIMIT, admission);
   }
 
   private handleWorkerActivity(
@@ -283,6 +285,66 @@ export class TeamCoordinator {
       .map((message) => this.messageSummaryFromSnapshot(snapshot, message.id));
   }
 
+  listAgentMessages(
+    taskId: string,
+    requesterAgentId: string,
+    afterSeq: number,
+  ): readonly TeamMessageSummary[] {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) return [];
+    const snapshot = this.persistence.getTeamSnapshot(team.id);
+    if (!snapshot.agents.some(({ id }) => id === requesterAgentId))
+      throw new Error('Requesting Agent not found in Team');
+    return snapshot.messages
+      .filter((message) => message.targetAgentId === requesterAgentId && message.seq > afterSeq)
+      .sort((left, right) => left.seq - right.seq)
+      .map((message) => this.messageSummaryFromSnapshot(snapshot, message.id));
+  }
+
+  async sendAgentMessageAs(
+    taskId: string,
+    requesterAgentId: string,
+    targetAgentId: string,
+    content: string,
+  ): Promise<TeamMessageSummary> {
+    return this.enqueue(taskId, async () => {
+      const team = this.persistence.getTeamByTask(taskId);
+      if (team === null || team.state !== 'active') throw new Error('Team must be active');
+      const snapshot = this.persistence.getTeamSnapshot(team.id);
+      if (!snapshot.agents.some(({ id }) => id === requesterAgentId))
+        throw new Error('Requesting Agent not found in Team');
+      if (!snapshot.agents.some(({ id }) => id === targetAgentId))
+        throw new Error('Target Agent not found in Team');
+      const since = new Date(this.now().getTime() - TEAM_MESSAGE_RATE_LIMIT.windowMs).toISOString();
+      assertTeamMessageRate({
+        recentCount: this.persistence.countRecentTeamMessages(team.id, since),
+        ...TEAM_MESSAGE_RATE_LIMIT,
+      });
+      const message = this.persistence.createTeamMessage({
+        teamId: team.id,
+        sourceAgentId: requesterAgentId,
+        targetAgentId,
+        content,
+      });
+      const now = this.isoNow();
+      this.persistence.createTeamDelivery({ messageId: message.id, now });
+      this.persistence.transitionTeamMessageState(message.id, 'dispatching');
+      this.persistence.transitionTeamDelivery({
+        messageId: message.id,
+        to: 'dispatched',
+        now,
+      });
+      this.persistence.transitionTeamMessageState(message.id, 'delivered');
+      this.persistence.transitionTeamDelivery({
+        messageId: message.id,
+        to: 'acked',
+        now,
+      });
+      this.emit(taskId, team.id);
+      return this.messageSummaryFromSnapshot(this.persistence.getTeamSnapshot(team.id), message.id);
+    });
+  }
+
   async hireWorker(
     input: TeamHireWorkerInput,
     childManagerPolicy: ManagerPolicy | null = null,
@@ -310,6 +372,8 @@ export class TeamCoordinator {
       const effectiveRequesterId = requesterAgentId ?? team.leaderAgentId;
       const requester = before.agents.find(({ id }) => id === effectiveRequesterId);
       if (requester === undefined) throw new Error('Hiring Agent not found in Team');
+      if (input.modelSelection !== undefined)
+        await this.validateModelSelection?.(input.modelSelection, input.taskId);
       if (team.state === 'draft') team = this.persistence.transitionTeamState(team.id, 'forming');
       if (!['forming', 'active', 'paused'].includes(team.state))
         throw new Error('Team does not accept new workers');
@@ -335,9 +399,10 @@ export class TeamCoordinator {
         contextInheritancePolicy: input.contextInheritancePolicy,
         parentCapabilityCeiling: childCeiling,
         writeCapable: input.writeCapable,
-        ...(input.modelSelection === undefined
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.modelSelectionReason === undefined
           ? {}
-          : { modelSelection: input.modelSelection }),
+          : { modelSelectionReason: input.modelSelectionReason }),
         parentAgentId: requester.id,
         canDelegate: childManagerPolicy !== null,
         managerPolicy: childManagerPolicy,
@@ -501,10 +566,9 @@ export class TeamCoordinator {
         throw new Error('Manager may only steer executions it assigned');
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'steer', instruction);
-      const leader = this.persistence.getTaskLeader(taskId);
       const revised = this.persistence.reviseQueuedTeamExecution({
         executionId,
-        createdByAgentId: leader.id,
+        createdByAgentId: execution.createdByAgentId,
         instruction,
         now: this.isoNow(),
       });
@@ -903,15 +967,9 @@ export class TeamCoordinator {
   ): boolean {
     const attempt = this.persistence.getTeamAttempt(attemptId);
     if (attempt.providerCallOrdinal >= DEFAULT_RATE_LIMIT_RETRY_COUNT) return false;
-    const waitingAttempt = this.persistence.recordTeamAttemptRateLimited(
-      attempt.id,
-      this.isoNow(),
-    );
+    const waitingAttempt = this.persistence.recordTeamAttemptRateLimited(attempt.id, this.isoNow());
     const waitingExecution = this.persistence.getTeamExecution(input.executionId);
-    const delayMs = rateLimitRetryDelayMs(
-      attempt.providerCallOrdinal,
-      error.retryAfterMs,
-    );
+    const delayMs = rateLimitRetryDelayMs(attempt.providerCallOrdinal, error.retryAfterMs);
     const requeued = this.executionScheduler.requeueActive(input.executionId, {
       executionId: input.executionId,
       teamId: input.teamId,
@@ -1054,7 +1112,7 @@ export class TeamCoordinator {
         .getTeamSnapshot(team.id)
         .agents.find(({ id, kind }) => id === agentId && kind === 'worker');
       if (worker === undefined) throw new Error('Worker not found');
-      await this.runtime.stop(worker.id);
+      await this.cancelWorkerExecutions(team.id, worker.id);
       const stopped = ['done', 'failed', 'stopped'].includes(worker.state)
         ? worker
         : this.persistence.transitionWorkerState(worker.id, 'stopped');
@@ -1071,7 +1129,7 @@ export class TeamCoordinator {
       const workers = this.persistence
         .getTeamSnapshot(team.id)
         .agents.filter(({ kind }) => kind === 'worker');
-      await Promise.all(workers.map(({ id }) => this.runtime.stop(id)));
+      for (const worker of workers) await this.cancelWorkerExecutions(team.id, worker.id);
       for (const worker of workers) {
         if (!['done', 'failed', 'stopped'].includes(worker.state))
           this.persistence.transitionWorkerState(worker.id, 'stopped');
@@ -1087,6 +1145,28 @@ export class TeamCoordinator {
       this.emit(taskId, team.id);
       return this.detail(team.id);
     });
+  }
+
+  private async cancelWorkerExecutions(teamId: string, workerId: string): Promise<void> {
+    const pending = this.persistence
+      .listTeamExecutions(teamId)
+      .filter(
+        (execution) =>
+          execution.assigneeAgentId === workerId &&
+          !['completed', 'failed', 'canceled'].includes(execution.state),
+      );
+    let stoppedRunningRuntime = false;
+    for (const execution of pending) {
+      if (execution.state === 'running') {
+        await this.interruptRunningExecution(execution, 'cancel', null);
+        stoppedRunningRuntime = true;
+        continue;
+      }
+      if (!this.executionScheduler.cancelQueued(execution.id))
+        throw new Error('Worker execution is not present in the Scheduler');
+      this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+    }
+    if (!stoppedRunningRuntime) await this.runtime.stop(workerId);
   }
 
   recoverOnStartup(): ReturnType<PersistenceClient['recoverTeamsOnStartup']> {
@@ -1159,9 +1239,7 @@ export class TeamCoordinator {
     execution: TeamExecutionRecord,
     taskId: string,
     teamId: string,
-  ):
-    | Pick<TeamExecutionJob, 'connection' | 'onConnectionWait'>
-    | Record<never, never> {
+  ): Pick<TeamExecutionJob, 'connection' | 'onConnectionWait'> | Record<never, never> {
     if (
       execution.modelSelection.connectionId === null ||
       execution.queueOrdinal === null ||
@@ -1188,7 +1266,7 @@ export class TeamCoordinator {
     taskId: string,
     teamId: string,
     executionId: string,
-    _reason: ConnectionWaitReason,
+    reason: ConnectionWaitReason,
   ): void {
     const execution = this.persistence.getTeamExecution(executionId);
     if (execution.state !== 'queued') return;
@@ -1196,6 +1274,7 @@ export class TeamCoordinator {
       executionId,
       to: 'waiting_rate_limit',
       now: this.isoNow(),
+      queueReason: reason === 'connection_concurrency' ? 'connection_concurrency' : 'rate_limit',
     });
     this.emit(taskId, teamId);
   }
@@ -1430,6 +1509,10 @@ export class TeamCoordinator {
     ]);
     const actor = snapshot.agents.find(({ id }) => id === activity.actorAgentId);
     const subject = snapshot.agents.find(({ id }) => id === activity.subjectAgentId);
+    const selection =
+      typeof payload['modelSelection'] === 'object' && payload['modelSelection'] !== null
+        ? (payload['modelSelection'] as Record<string, unknown>)
+        : {};
     return teamActivitySummarySchema.parse({
       id: activity.id,
       teamId: activity.teamId,
@@ -1455,6 +1538,16 @@ export class TeamCoordinator {
         payload['terminalReason'].length <= 128
           ? payload['terminalReason']
           : null,
+      connectionId:
+        typeof selection['connectionId'] === 'string' ? selection['connectionId'] : null,
+      requestedProvider:
+        typeof selection['requestedProvider'] === 'string' ? selection['requestedProvider'] : null,
+      requestedModel:
+        typeof selection['requestedModel'] === 'string' ? selection['requestedModel'] : null,
+      modelSelectionReason:
+        typeof payload['modelSelectionReason'] === 'string'
+          ? payload['modelSelectionReason']
+          : null,
       recordedAt: activity.recordedAt,
     });
   }
@@ -1472,6 +1565,9 @@ export class TeamCoordinator {
       writeCapable: agent.writeCapable,
       currentActivity: agent.currentActivity,
       engine: agent.runtimeKind,
+      connectionId: agent.modelSelection.connectionId,
+      requestedProvider: agent.modelSelection.requestedProvider,
+      requestedModel: agent.modelSelection.requestedModel,
       parentAgentId: agent.parentAgentId,
       depth: agent.depth,
       canDelegate: agent.canDelegate,

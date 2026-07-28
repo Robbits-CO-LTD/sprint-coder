@@ -2,10 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ProviderConnection } from '@sprint-coder/contracts';
 import { ProviderConnectionService } from './provider-connection-service';
 import { parseOpenAICredential } from './openai-provider-client';
-import {
-  MainProviderProfileRegistry,
-  parseOpenAICompatibleCredential,
-} from './provider-profile';
+import { MainProviderProfileRegistry, parseOpenAICompatibleCredential } from './provider-profile';
 import { PACK_A_PROVIDER_PROFILES } from './bundled-provider-profiles';
 
 describe('ProviderConnectionService', () => {
@@ -75,9 +72,9 @@ describe('ProviderConnectionService', () => {
       },
     );
 
-    expect(() =>
-      service.createOpenAI({ displayName: 'OpenAI', apiKey: 'secret-canary' }),
-    ).toThrow('db failed');
+    expect(() => service.createOpenAI({ displayName: 'OpenAI', apiKey: 'secret-canary' })).toThrow(
+      'db failed',
+    );
     expect(deleted).toBe('provider-secret:00000000-0000-4000-8000-000000000001');
   });
 

@@ -1,6 +1,6 @@
 // Source for the ephemeral MCP stdio server the Codex/Claude adapter hands the real Leader when
-// SPRINT_CODER_LEADER_MCP=1 routes a team-intent turn through team-mcp-bridge.ts instead of the
-// deterministic mock scenario (see ADR amendment + tasks/todo.md). This is exported as a plain
+// Real CLI Team turns route through team-mcp-bridge.ts by default; SPRINT_CODER_LEADER_MCP=0 is
+// the rollback switch. This is exported as a plain
 // string — never as a file checked into the repo tree the CLI could stumble on — and written to
 // a fresh temp file by claude-adapter.ts at the start of every such turn, then deleted when the
 // turn ends.
@@ -15,6 +15,21 @@
 //    TEAM_BRIDGE_SOCKET, authenticating with TEAM_BRIDGE_TOKEN. It never talks to
 //    TeamCoordinator/persistence directly and holds no taskId of its own — the bridge is the only
 //    thing that knows which Task/turn this socket connection belongs to.
+export const TEAM_MCP_TOOL_NAMES = [
+  'team_list_models',
+  'team_hire_worker',
+  'team_assign_task',
+  'team_steer_execution',
+  'team_cancel_execution',
+  'team_get_status',
+  'team_wait_events',
+  'team_send_to_worker',
+  'team_send_message',
+  'team_read_messages',
+  'team_wait_reports',
+  'team_stop_worker',
+] as const;
+
 export const TEAM_MCP_SERVER_SOURCE = `'use strict';
 const net = require('net');
 
@@ -22,6 +37,30 @@ const SOCKET_PATH = process.env.TEAM_BRIDGE_SOCKET;
 const TOKEN = process.env.TEAM_BRIDGE_TOKEN;
 
 const TOOLS = [
+  {
+    name: 'team_list_models',
+    description:
+      'Search available Provider Connections and models before hiring. Capability values include their source; unknown must not be treated as false or inferred from names.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' },
+        connectionIds: { type: 'array', items: { type: 'string' }, maxItems: 32 },
+        providerIds: { type: 'array', items: { type: 'string' }, maxItems: 32 },
+        capabilities: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['toolCalling', 'structuredOutput', 'multimodalInput', 'reasoning'],
+          },
+          maxItems: 4,
+        },
+        cursor: { type: ['string', 'null'], pattern: '^cursor:[0-9]+$' },
+        limit: { type: 'integer', minimum: 1, maximum: 100 },
+      },
+      additionalProperties: false,
+    },
+  },
   {
     name: 'team_hire_worker',
     description:
@@ -46,6 +85,10 @@ const TOOLS = [
           required: ['connectionId', 'requestedProvider', 'requestedModel'],
           additionalProperties: false,
         },
+        modelSelectionReason: {
+          type: 'string',
+          description: 'Why this source-backed available model fits this Worker. Do not infer capability from names.',
+        },
         managerPolicy: {
           type: 'object',
           properties: {
@@ -57,7 +100,7 @@ const TOOLS = [
           additionalProperties: false,
         },
       },
-      required: ['role', 'objective'],
+      required: ['role', 'objective', 'modelSelection', 'modelSelectionReason'],
       additionalProperties: false,
     },
   },
@@ -119,6 +162,30 @@ const TOOLS = [
       type: 'object',
       properties: { workerId: { type: 'string' }, content: { type: 'string' } },
       required: ['workerId', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_send_message',
+    description:
+      'Send an audited direct message to another Agent in the same Team. Worker-to-Worker delivery is controlled by Team Policy.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targetAgentId: { type: 'string' },
+        content: { type: 'string' },
+      },
+      required: ['targetAgentId', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_read_messages',
+    description:
+      'Read messages addressed to this authenticated Agent after an optional sequence cursor.',
+    inputSchema: {
+      type: 'object',
+      properties: { afterSeq: { type: 'integer', minimum: 0 } },
       additionalProperties: false,
     },
   },

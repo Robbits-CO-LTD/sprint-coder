@@ -1,7 +1,4 @@
-import {
-  providerProfileSchema,
-  type ProviderProfile,
-} from '@sprint-coder/contracts';
+import { providerProfileSchema, type ProviderProfile } from '@sprint-coder/contracts';
 
 export interface ProviderProfileRegistry {
   register(profile: ProviderProfile): void;
@@ -77,7 +74,11 @@ export function resolveProfileBaseUrl(
     baseUrl = baseUrl.replaceAll('{accountId}', encodeURIComponent(accountId));
   }
   const parsed = new URL(baseUrl);
-  if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1')
+  if (
+    parsed.protocol !== 'https:' &&
+    parsed.hostname !== 'localhost' &&
+    parsed.hostname !== '127.0.0.1'
+  )
     throw new Error('Custom Provider base URL must use HTTPS or loopback HTTP');
   return baseUrl.replace(/\/+$/, '');
 }

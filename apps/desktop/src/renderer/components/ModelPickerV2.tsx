@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import type { ModelCatalogQueryResult, ModelSelection, ProviderModel } from '@sprint-coder/contracts';
+import type {
+  ModelCatalogQueryResult,
+  ModelSelection,
+  ProviderModel,
+} from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import {
   resolveTriggerLabel,
@@ -374,7 +378,12 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
             aria-autocomplete="list"
             aria-activedescendant={active ? optionId(activeIndex) : undefined}
           />
-          <div className="mpv2-count" role="status" aria-live="polite" data-testid="model-picker-v2-count">
+          <div
+            className="mpv2-count"
+            role="status"
+            aria-live="polite"
+            data-testid="model-picker-v2-count"
+          >
             {countMessage}
           </div>
           <div

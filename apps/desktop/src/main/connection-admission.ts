@@ -1,9 +1,7 @@
 import type { ProviderConnection } from '@sprint-coder/contracts';
 
 export type ConnectionWaitReason =
-  | 'connection_concurrency'
-  | 'requests_per_minute'
-  | 'tokens_per_minute';
+  'connection_concurrency' | 'requests_per_minute' | 'tokens_per_minute';
 
 export type ConnectionAdmissionCandidate = Readonly<{
   executionId: string;
@@ -57,10 +55,7 @@ export class ConnectionAdmissionController {
     )
       return 'connection_concurrency';
     const bucket = this.refill(connection);
-    if (
-      connection.rateLimit.requestsPerMinute !== null &&
-      bucket.requestTokens < 1
-    )
+    if (connection.rateLimit.requestsPerMinute !== null && bucket.requestTokens < 1)
       return 'requests_per_minute';
     if (
       connection.rateLimit.tokensPerMinute !== null &&
@@ -101,9 +96,7 @@ export class ConnectionAdmissionController {
     const admissible = candidates
       .map((candidate, index) => ({ candidate, index }))
       .filter(({ candidate }) => this.waitReason(candidate) === null)
-      .sort(
-        (left, right) => left.candidate.queueOrdinal - right.candidate.queueOrdinal,
-      );
+      .sort((left, right) => left.candidate.queueOrdinal - right.candidate.queueOrdinal);
     if (admissible.length === 0) return -1;
     const connectionIds = [...new Set(admissible.map(({ candidate }) => candidate.connectionId))];
     const connectionId = nextAfter(connectionIds, this.lastConnectionId);

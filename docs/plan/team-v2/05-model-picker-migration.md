@@ -29,10 +29,11 @@ catalog件数に比例するfilter、sort、group処理を置かない。
 
 ## U1 — Feature flag
 
-`multiProviderModelPickerV2`をMain-owned feature flagとして追加し、既定OFFにする。
+`multiProviderModelPickerV2`をMain-owned feature flagとして追加する。U1導入時点では既定OFF、
+U3a完了後の現在は既定ONである。
 
-- OFF: 旧Picker
-- ON: 新Picker
+- 明示的OFF: 旧Picker
+- 既定ON: 新Picker
 - 両方が同じcanonical selection repositoryを使用
 - 既存Claude CLI／Codex CLIだけで新Pickerを利用可能
 - Provider基盤が利用不能でもOFFへ戻せる

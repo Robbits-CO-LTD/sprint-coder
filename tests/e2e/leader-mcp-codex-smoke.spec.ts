@@ -40,7 +40,16 @@ test.describe('leader MCP smoke (real Codex CLI)', () => {
   });
 
   test('Codex drives two real Worker reports over MCP in the packaged app', async () => {
-    app = await launchApp(dir);
+    app = await launchApp(dir, undefined, { SPRINT_CODER_TEAM_MCP_TRACE: '1' });
+    const runtimeDiagnostics: string[] = [];
+    app.process().stdout?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString('utf8');
+      if (text.includes('Team MCP tool received')) runtimeDiagnostics.push(text);
+    });
+    app.process().stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString('utf8');
+      if (text.includes('Runtime event handling failed')) runtimeDiagnostics.push(text);
+    });
     const page = await firstWindow(app);
     await page.getByTestId('sidebar-new-task-button').click();
     await selectCodexRuntime(page);
@@ -48,10 +57,25 @@ test.describe('leader MCP smoke (real Codex CLI)', () => {
 
     await page
       .getByTestId('composer-textarea')
-      .fill('「1+1の答え」を、数学の観点と実装の観点の2人体制で並行に検討して結論をまとめてください');
+      .fill(
+        '「1+1の答え」を、数学の観点と実装の観点の2人体制で並行に検討して結論をまとめてください',
+      );
     await page.getByTestId('composer-send-button').click();
 
-    await expect(page.getByTestId('team-list')).toBeVisible({ timeout: 300_000 });
+    const teamOutcome = await Promise.race([
+      page
+        .getByTestId('team-list')
+        .waitFor({ state: 'visible', timeout: 120_000 })
+        .then(() => 'team' as const),
+      page
+        .locator('[data-testid="surface-footer-connection"][data-tone="failed"]')
+        .waitFor({ state: 'visible', timeout: 120_000 })
+        .then(() => 'runtime_error' as const),
+    ]);
+    expect(
+      teamOutcome,
+      runtimeDiagnostics.join('\n') || 'Codex Runtime failed before Team Canvas appeared',
+    ).toBe('team');
     await expect(page.getByTestId('team-worker').first()).toBeVisible({ timeout: 300_000 });
 
     const reports = page.locator('.w-line:has(.tag.out)');

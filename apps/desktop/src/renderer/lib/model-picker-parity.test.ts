@@ -78,7 +78,12 @@ describe('resolveTriggerLabel', () => {
 });
 
 describe('shouldApplyModelPickerAnswer', () => {
-  const base = { requestTaskId: 'task-a', requestToken: 2, currentTaskId: 'task-a', latestToken: 2 };
+  const base = {
+    requestTaskId: 'task-a',
+    requestToken: 2,
+    currentTaskId: 'task-a',
+    latestToken: 2,
+  };
 
   it('applies the newest answer for the Task on screen', () => {
     expect(shouldApplyModelPickerAnswer(base)).toBe(true);
@@ -118,7 +123,9 @@ describe('rollbackModelPicker', () => {
     // The user moved to Task B before the rejection arrived; B's snapshot is the truth now, and
     // restoring A's would strand the Composer on another Task's selection and `enabled`.
     const current = snapshot({ taskId: 'task-b', enabled: false, selection: null });
-    expect(rollbackModelPicker({ current, previous, taskId: 'task-a', attempted })).toEqual(current);
+    expect(rollbackModelPicker({ current, previous, taskId: 'task-a', attempted })).toEqual(
+      current,
+    );
   });
 
   it('leaves a newer selection for the same Task untouched', () => {

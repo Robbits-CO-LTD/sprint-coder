@@ -2610,6 +2610,15 @@ export interface PersistenceClient {
     connectionId: string,
     verification: ProviderConnection['verification'],
   ): ProviderConnection;
+  lowerProviderConnectionRateLimits(
+    connectionId: string,
+    limits: Partial<
+      Pick<
+        ProviderConnection['rateLimit'],
+        'maxConcurrentRequests' | 'requestsPerMinute' | 'tokensPerMinute'
+      >
+    >,
+  ): ProviderConnection;
   listTasks(): TaskSummary[];
   getTask(taskId: string): TaskSummary;
   createTask(title?: string, localOnly?: boolean): TaskSummary;
@@ -2631,6 +2640,7 @@ export interface PersistenceClient {
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
     modelSelection?: ModelSelection;
+    modelSelectionReason?: string;
     writeCapable?: boolean;
     parentAgentId?: string;
     canDelegate?: boolean;
@@ -3353,6 +3363,48 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.getProviderConnection(connectionId);
   }
 
+  lowerProviderConnectionRateLimits(
+    connectionId: string,
+    limits: Partial<
+      Pick<
+        ProviderConnection['rateLimit'],
+        'maxConcurrentRequests' | 'requestsPerMinute' | 'tokensPerMinute'
+      >
+    >,
+  ): ProviderConnection {
+    const current = this.getProviderConnection(connectionId);
+    if (current.runtimeKind === 'builtin_cli')
+      throw new Error('Built-in CLI concurrency is controlled by Team Policy, not API rate limits');
+    const lower = (name: keyof typeof limits, next: number | null | undefined): number | null => {
+      const existing = current.rateLimit[name];
+      if (next === undefined) return existing;
+      if (next === null || !Number.isSafeInteger(next) || next < 1)
+        throw new Error(`Provider ${name} must be a positive integer`);
+      if (existing !== null && next > existing)
+        throw new Error(`Provider ${name} can only be lowered from this screen`);
+      return next;
+    };
+    const maxConcurrentRequests = lower('maxConcurrentRequests', limits.maxConcurrentRequests);
+    const requestsPerMinute = lower('requestsPerMinute', limits.requestsPerMinute);
+    const tokensPerMinute = lower('tokensPerMinute', limits.tokensPerMinute);
+    const result = this.db
+      .prepare(
+        `UPDATE provider_connections
+         SET rate_limit_mode = 'manual', max_concurrent_requests = ?,
+             requests_per_minute = ?, tokens_per_minute = ?, updated_at = ?
+         WHERE id = ? AND runtime_kind != 'builtin_cli'`,
+      )
+      .run(
+        maxConcurrentRequests,
+        requestsPerMinute,
+        tokensPerMinute,
+        new Date().toISOString(),
+        connectionId,
+      );
+    if (result.changes !== 1) throw new NotFoundError('Provider connection not found');
+    return this.getProviderConnection(connectionId);
+  }
+
   private runMigrations(databasePath: string): void {
     this.db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL
@@ -3855,6 +3907,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
     modelSelection?: ModelSelection;
+    modelSelectionReason?: string;
     writeCapable?: boolean;
     parentAgentId?: string;
     canDelegate?: boolean;
@@ -3890,8 +3943,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const agentId = randomUUID();
       const modelSelection = input.modelSelection ?? parent.modelSelection;
       const builtinRuntime = builtinRuntimeForModelSelection(modelSelection);
-      const runtimeKind =
-        input.runtimeKind ?? builtinRuntime?.runtimeKind ?? parent.runtimeKind;
+      const runtimeKind = input.runtimeKind ?? builtinRuntime?.runtimeKind ?? parent.runtimeKind;
       this.db
         .prepare(
           `INSERT INTO agent_threads(
@@ -3956,6 +4008,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
           depth,
           canDelegate,
           modelSelection,
+          modelSelectionReason:
+            input.modelSelectionReason ??
+            (input.modelSelection === undefined
+              ? '親Agentのmodel selectionを継承'
+              : '呼び出し元がmodel selectionを明示'),
         },
         now,
       });
@@ -4122,7 +4179,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         input.to === 'waiting_verification'
           ? 'verification'
           : input.to === 'waiting_rate_limit'
-            ? 'rate_limit'
+            ? (input.queueReason ?? 'rate_limit')
             : (input.queueReason ?? null);
       if (input.to === 'queued' && queueReason === null)
         throw new Error('A queued execution requires a queue reason');
@@ -4404,7 +4461,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   recordTeamAttemptRateLimited(attemptId: string, now: string): TeamAttemptRecord {
     return this.db.transaction(() => {
       const current = this.getTeamAttempt(attemptId);
-      if (current.state !== 'running') throw new Error('Only a running attempt can be rate limited');
+      if (current.state !== 'running')
+        throw new Error('Only a running attempt can be rate limited');
       this.transitionTeamAttempt({ attemptId, to: 'waiting_rate_limit', now });
       const updated = this.db
         .prepare(

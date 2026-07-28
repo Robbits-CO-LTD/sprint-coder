@@ -13,10 +13,7 @@ export async function* normalizeOpenAIResponsesStream(
       yield { type: 'output_delta', text: event.delta };
       continue;
     }
-    if (
-      event.type === 'response.reasoning_summary_text.delta' &&
-      typeof event.delta === 'string'
-    ) {
+    if (event.type === 'response.reasoning_summary_text.delta' && typeof event.delta === 'string') {
       yield { type: 'reasoning_delta', text: event.delta };
       continue;
     }
@@ -44,8 +41,7 @@ export async function* normalizeOpenAIResponsesStream(
         type: 'resolution',
         resolution: {
           resolvedProvider: providerId,
-          resolvedModel:
-            typeof response?.model === 'string' ? response.model : requestedModel,
+          resolvedModel: typeof response?.model === 'string' ? response.model : requestedModel,
         },
       };
       yield {
@@ -56,10 +52,7 @@ export async function* normalizeOpenAIResponsesStream(
           cacheReadTokens: integerOrNull(inputDetails?.cached_tokens),
           cacheWriteTokens: null,
           reasoningTokens: integerOrNull(outputDetails?.reasoning_tokens),
-          providerCost: providerCost(
-            usage?.cost_in_usd_ticks,
-            options.costTicksPerUsd,
-          ),
+          providerCost: providerCost(usage?.cost_in_usd_ticks, options.costTicksPerUsd),
           source: 'provider_api',
         },
       };
@@ -84,9 +77,7 @@ export async function* normalizeOpenAIResponsesStream(
   }
 }
 
-async function* readServerSentJson(
-  body: ReadableStream<Uint8Array>,
-): AsyncIterable<unknown> {
+async function* readServerSentJson(body: ReadableStream<Uint8Array>): AsyncIterable<unknown> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let pending = '';
@@ -124,10 +115,7 @@ function parseToolArguments(
 ): Extract<CanonicalProviderEvent, { type: 'tool_call' }>['input'] {
   if (typeof value !== 'string') return null;
   try {
-    return JSON.parse(value) as Extract<
-      CanonicalProviderEvent,
-      { type: 'tool_call' }
-    >['input'];
+    return JSON.parse(value) as Extract<CanonicalProviderEvent, { type: 'tool_call' }>['input'];
   } catch {
     return value;
   }

@@ -110,8 +110,7 @@ export const PACK_B_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     authentication: BEARER,
     requiredCredentialFields: [],
     errorOverrides: [],
-    sourceReference:
-      'https://docs.nvidia.com/nim/large-language-models/latest/api-reference.html',
+    sourceReference: 'https://docs.nvidia.com/nim/large-language-models/latest/api-reference.html',
     reviewedAt: REVIEWED_AT,
   },
   {

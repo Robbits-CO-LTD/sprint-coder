@@ -37,10 +37,7 @@ export class ProviderSecretStorage {
     const encrypted = this.cipher.encrypt(secret);
     const descriptor = openSync(
       this.pathForReference(reference),
-      constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_WRONLY |
-        (constants.O_NOFOLLOW ?? 0),
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
       0o600,
     );
     try {

@@ -15,10 +15,7 @@ export async function* normalizeOpenRouterResponsesStream(
       yield { type: 'output_delta', text: event.delta };
       continue;
     }
-    if (
-      event.type === 'response.reasoning_summary_text.delta' &&
-      typeof event.delta === 'string'
-    ) {
+    if (event.type === 'response.reasoning_summary_text.delta' && typeof event.delta === 'string') {
       yield { type: 'reasoning_delta', text: event.delta };
       continue;
     }
@@ -48,8 +45,7 @@ export async function* normalizeOpenRouterResponsesStream(
         type: 'resolution',
         resolution: {
           resolvedProvider: 'openrouter',
-          resolvedModel:
-            typeof response?.model === 'string' ? response.model : requestedModel,
+          resolvedModel: typeof response?.model === 'string' ? response.model : requestedModel,
           gatewayProvider: 'openrouter',
           upstreamProvider: upstream,
           routing: routingSummary(metadata),
@@ -152,16 +148,12 @@ function routingSummary(
   return Object.keys(result).length === 0 ? null : result;
 }
 
-function parseJsonOrString(value: unknown): Extract<
-  CanonicalProviderEvent,
-  { type: 'tool_call' }
->['input'] {
+function parseJsonOrString(
+  value: unknown,
+): Extract<CanonicalProviderEvent, { type: 'tool_call' }>['input'] {
   if (typeof value !== 'string') return null;
   try {
-    return JSON.parse(value) as Extract<
-      CanonicalProviderEvent,
-      { type: 'tool_call' }
-    >['input'];
+    return JSON.parse(value) as Extract<CanonicalProviderEvent, { type: 'tool_call' }>['input'];
   } catch {
     return value;
   }

@@ -70,6 +70,24 @@ secretを渡さない。生成tokenを最小化し、実費を報告する。
 
 自動testとComputer Useのどちらか片方だけで完成としない。
 
+## 2026-07-28 local final gate
+
+- full typecheck、lint、format check: green
+- desktop unit: 106 files passed、3 skipped、1444 passed、23 skipped
+- contracts 30、domain 284: green
+- production package build: green
+- packaged E2Eの初回16 failureは、legacy Picker flag、Team Runtime fallback、a11y label、
+  Codex app-server stage／message identityの実不具合として修正し、対象再検証green
+- 実Claude Leader: 2 Workerの実reportを受信し統合
+- 実Codex Leader: 数学担当／実装担当の2 Workerを雇用し、実reportを受信し統合
+- OpenRouter: 認証、368-model catalog、`openrouter/free` streaming、resolution、usage、
+  completionが実APIでgreen
+- Computer Use: macOS production packageの共通Picker、Capability unknown表示、Team Canvas、
+  accessibility treeを確認
+
+未実行は3OS CI、Windows／Linux package、資格情報がないProviderの実API smokeである。
+これらをgreenと記録しない。
+
 ## Existing failing baseline
 
 Team unitの2失敗とTeam E2Eの3 timeoutはSlice 0でRoot Cause Confirmed Gateを通す。test timeout延長、
