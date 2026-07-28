@@ -136,6 +136,88 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('uses a canonical Task selection while preserving the legacy global fallback', () => {
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('claude');
+      persistence.setModel('claude-opus-5');
+      const legacyTask = persistence.createTask();
+      expect(persistence.getTaskModelSelection(legacyTask.id)).toBeNull();
+
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const legacyTurn = persistence.startTurn(legacyTask.id, 'use the legacy picker fallback');
+      expect(legacyTurn).toMatchObject({
+        runtimeKind: 'codex',
+        model: 'gpt-5.6-terra',
+      });
+      persistence.cancelTurn(legacyTask.id, legacyTurn.turnId);
+
+      const explicitSelection = {
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-opus-5',
+      } as const;
+      expect(persistence.setTaskModelSelection(legacyTask.id, explicitSelection)).toEqual(
+        explicitSelection,
+      );
+      expect(persistence.getTaskLeader(legacyTask.id)).toMatchObject({
+        runtimeKind: 'claude',
+        modelSelection: explicitSelection,
+      });
+
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const explicitTurn = persistence.startTurn(legacyTask.id, 'use the Task selection');
+      expect(explicitTurn).toMatchObject({
+        runtimeKind: 'claude',
+        model: 'claude-opus-5',
+        modelSelection: explicitSelection,
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTaskModelSelection(legacyTask.id)).toEqual(explicitSelection);
+      expect(reopened.getTaskLeader(legacyTask.id)).toMatchObject({
+        runtimeKind: 'claude',
+        modelSelection: explicitSelection,
+      });
+      expect(reopened.getTurnModelIdentity(legacyTask.id, explicitTurn.turnId).selection).toEqual(
+        explicitSelection,
+      );
+      reopened.close();
+    });
+
+    it('updates a Worker Agent and AgentThread selection atomically', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const team = persistence.promoteTaskToTeam(task.id);
+      const worker = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'implementer',
+        objective: 'Implement.',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+      });
+      const selection = {
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-5.6-terra',
+      } as const;
+
+      expect(persistence.setAgentModelSelection(worker.id, selection)).toMatchObject({
+        id: worker.id,
+        runtimeKind: 'codex',
+        modelSelection: selection,
+      });
+      expect(
+        persistence.getTeamSnapshot(team.id).agents.find((agent) => agent.id === worker.id),
+      ).toMatchObject({
+        runtimeKind: 'codex',
+        modelSelection: selection,
+      });
+      persistence.close();
+    });
+
     it('persists ordered leader-routed delivery and rejects direct Worker messages', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();

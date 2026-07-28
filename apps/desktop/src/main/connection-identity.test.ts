@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   BUILTIN_CLAUDE_CONNECTION_ID,
   BUILTIN_CODEX_CONNECTION_ID,
+  builtinRuntimeForModelSelection,
   modelSelectionForRuntime,
 } from './connection-identity';
 
-describe('modelSelectionForRuntime', () => {
+describe('connection identity', () => {
   it('maps built-in Claude and Codex CLI runtimes to stable Connection identities', () => {
     expect(modelSelectionForRuntime('claude', 'claude-opus-5')).toEqual({
       connectionId: BUILTIN_CLAUDE_CONNECTION_ID,
@@ -25,5 +26,30 @@ describe('modelSelectionForRuntime', () => {
       requestedProvider: null,
       requestedModel: null,
     });
+  });
+
+  it('round-trips built-in Claude and Codex selections', () => {
+    expect(
+      builtinRuntimeForModelSelection(modelSelectionForRuntime('claude', 'claude-opus-5')),
+    ).toEqual({
+      runtimeKind: 'claude',
+      model: 'claude-opus-5',
+    });
+    expect(
+      builtinRuntimeForModelSelection(modelSelectionForRuntime('codex', 'gpt-5.6-terra')),
+    ).toEqual({
+      runtimeKind: 'codex',
+      model: 'gpt-5.6-terra',
+    });
+  });
+
+  it('rejects an external Connection during Team v2 Core', () => {
+    expect(() =>
+      builtinRuntimeForModelSelection({
+        connectionId: 'connection:openai-production',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-5.6',
+      }),
+    ).toThrow('supports only built-in Claude and Codex Connections');
   });
 });

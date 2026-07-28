@@ -4409,6 +4409,7 @@ if (runsWithElectronAbi)
         { version: 33 },
         { version: 34 },
         { version: 35 },
+        { version: 36 },
       ]);
       for (const [table, columns] of [
         [
@@ -4423,6 +4424,7 @@ if (runsWithElectronAbi)
         ],
         ['agent_threads', ['connection_id', 'requested_provider', 'requested_model']],
         ['agents', ['connection_id', 'requested_provider', 'requested_model']],
+        ['tasks', ['connection_id', 'requested_provider', 'requested_model']],
       ] as const) {
         const actual = new Set(
           (

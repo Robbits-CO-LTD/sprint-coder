@@ -2,7 +2,7 @@
 
 - 計画版: v2
 - 状態: planning
-- 現在地: Team Slice 0完了。Core A1 connection identity完了、Core A2着手前
+- 現在地: Team Slice 0完了。Core A1 connection identity、Core A2 canonical selection repository完了
 - 正本: このディレクトリと配下のADR
 
 ## 要約
@@ -29,12 +29,12 @@ PRでは、影響を受けるADRと計画文書も同時に更新する。
 
 ## Milestone
 
-| Milestone | 完成内容 | 後続をblockする条件 |
-|---|---|---|
-| A: Team v2 Core GA | 既存CLIでTeam v2本体を完成 | 外部API Provider数は条件にしない |
+| Milestone                    | 完成内容                                                          | 後続をblockする条件              |
+| ---------------------------- | ----------------------------------------------------------------- | -------------------------------- |
+| A: Team v2 Core GA           | 既存CLIでTeam v2本体を完成                                        | 外部API Provider数は条件にしない |
 | B: Multi-Provider Initial GA | OpenAI、OpenRouter、Anthropic、Gemini、xAI、Claude CLI、Codex CLI | Compatibility Packは条件にしない |
-| C1: Compatibility Pack A GA | Mistral、DeepSeek、GroqCloud | Initial GAをblockしない |
-| C2: Compatibility Pack B GA | Moonshot、MiniMax、Zhipu、NVIDIA NIM、Cloudflare Workers AI | Initial GAとPack Aをblockしない |
+| C1: Compatibility Pack A GA  | Mistral、DeepSeek、GroqCloud                                      | Initial GAをblockしない          |
+| C2: Compatibility Pack B GA  | Moonshot、MiniMax、Zhipu、NVIDIA NIM、Cloudflare Workers AI       | Initial GAとPack Aをblockしない  |
 
 詳細は[scope and milestones](00-scope-and-milestones.md)を参照する。
 
@@ -82,8 +82,9 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 
 ## 現在地とblocker
 
-- 現行DB migrationはv35。新規Claude／Codex Turn・Agentはbuilt-in connection IDと
+- 現行DB migrationはv36。新規Claude／Codex Turn・Agentはbuilt-in connection IDと
   requested model identityを保存し、Runtimeが返したresolved modelを別フィールドへ保存する。
+  Taskの明示selectionはcanonical repositoryへ保存され、未設定Taskは旧global Picker設定を読む。
 - TeamはWorker上限3、task単位のPromise queueによる直列実行、深度1である。
 - `spawnSlots: 8`はWorker起動時の予算leaseであり、AI実行の8並列Schedulerではない。
 - Provider Connection、外部API Adapter、Secret Storage、API rate-limit Scheduler、feature flag基盤は
@@ -93,8 +94,7 @@ connection ID列の先行導入判断だけはTeam Slice 0で確定し、Provide
 - Slice 0のRoot Cause Confirmed Gateは完了した。Team unitは26 passed／1 skipped、
   packaged Team E2Eは3 passedで、productionのNode inspector fuseが無効のまま一時test bundle
   だけをPlaywrightで検査する。
-- 次はCore A2として、Task／Agentのcanonical selection repositoryと階層・Policy domainを
-  独立sub-Sliceへ分けて実装する。
+- 次はCore A3として、階層・Team Policy domainを独立sub-Sliceへ分けて実装する。
 
 ## 完成判定
 

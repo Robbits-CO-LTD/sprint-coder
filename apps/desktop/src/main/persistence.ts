@@ -7,6 +7,7 @@ import {
   approvalSummarySchema,
   commandSummarySchema,
   executionResolutionSchema,
+  modelSelectionSchema,
   taskSummarySchema,
   turnEventSchema,
   turnSnapshotSchema,
@@ -102,7 +103,7 @@ import {
 } from './context-ledger';
 import { redactSecrets } from './secret-redactor';
 import { deriveTaskTitle } from './task-title';
-import { modelSelectionForRuntime } from './connection-identity';
+import { builtinRuntimeForModelSelection, modelSelectionForRuntime } from './connection-identity';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
 import {
   legacyMutationWorkspaceKey,
@@ -263,6 +264,9 @@ type TaskRow = {
   branch_epoch: number;
   context_epoch: number;
   title_source: 'default' | 'auto' | 'manual';
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -1728,6 +1732,15 @@ const migrations = [
       ALTER TABLE agents ADD COLUMN requested_model TEXT;
     `,
   },
+  {
+    version: 36,
+    checksum: 'team-v2-core-v36-task-model-selection',
+    sql: `
+      ALTER TABLE tasks ADD COLUMN connection_id TEXT;
+      ALTER TABLE tasks ADD COLUMN requested_provider TEXT;
+      ALTER TABLE tasks ADD COLUMN requested_model TEXT;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2021,7 +2034,10 @@ export interface PersistenceClient {
   listTasks(): TaskSummary[];
   getTask(taskId: string): TaskSummary;
   createTask(title?: string, localOnly?: boolean): TaskSummary;
+  getTaskModelSelection(taskId: string): ModelSelection | null;
+  setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null;
   getTaskLeader(taskId: string): AgentRecord;
+  setAgentModelSelection(agentId: string, selection: ModelSelection): AgentRecord;
   promoteTaskToTeam(taskId: string): TeamRecord;
   getTeam(teamId: string): TeamRecord;
   getTeamByTask(taskId: string): TeamRecord | null;
@@ -2884,6 +2900,45 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return task;
   }
 
+  getTaskModelSelection(taskId: string): ModelSelection | null {
+    const row = this.getTaskRow(taskId);
+    const selection = modelSelectionSchema.parse({
+      connectionId: row.connection_id,
+      requestedProvider: row.requested_provider,
+      requestedModel: row.requested_model,
+    });
+    return selection.connectionId === null ? null : selection;
+  }
+
+  setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null {
+    const parsed = modelSelectionSchema.parse(selection);
+    const runtime = builtinRuntimeForModelSelection(parsed);
+    return this.db.transaction(() => {
+      const task = this.getTaskRow(taskId);
+      const now = new Date().toISOString();
+      const updated = this.db
+        .prepare(
+          `UPDATE tasks
+           SET connection_id = ?, requested_provider = ?, requested_model = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(parsed.connectionId, parsed.requestedProvider, parsed.requestedModel, now, task.id);
+      if (updated.changes !== 1) throw new TeamConflictError();
+      const leader = this.getTaskLeader(taskId);
+      const effectiveRuntime =
+        runtime ?? ({ runtimeKind: this.getRuntime(), model: this.getModel() } as const);
+      this.updateAgentModelSelectionInTransaction(
+        leader.id,
+        runtime === null
+          ? modelSelectionForRuntime(effectiveRuntime.runtimeKind, effectiveRuntime.model)
+          : parsed,
+        effectiveRuntime.runtimeKind,
+        now,
+      );
+      return this.getTaskModelSelection(taskId);
+    })();
+  }
+
   getTaskLeader(taskId: string): AgentRecord {
     const task = this.getTaskRow(taskId);
     const row = this.db
@@ -2895,6 +2950,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .get(taskId, task.primary_thread_id) as AgentRow | undefined;
     if (row === undefined) throw new NotFoundError('Task leader not found');
     return toAgent(row);
+  }
+
+  setAgentModelSelection(agentId: string, selection: ModelSelection): AgentRecord {
+    const parsed = modelSelectionSchema.parse(selection);
+    const runtime = builtinRuntimeForModelSelection(parsed);
+    if (runtime === null) throw new Error('Agent model selection cannot be cleared');
+    return this.db.transaction(() => {
+      this.updateAgentModelSelectionInTransaction(
+        agentId,
+        parsed,
+        runtime.runtimeKind,
+        new Date().toISOString(),
+      );
+      return this.getAgent(agentId);
+    })();
   }
 
   promoteTaskToTeam(taskId: string): TeamRecord {
@@ -7168,9 +7238,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private startTurnInTransaction(taskId: string, text: string): StartedTurn {
     const now = new Date().toISOString();
     const turnId = randomUUID();
-    const runtimeKind = this.getRuntime();
-    const model = this.getModel();
-    const modelSelection = modelSelectionForRuntime(runtimeKind, model);
+    const taskSelection = this.getTaskModelSelection(taskId);
+    const explicitRuntime =
+      taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+    const runtimeKind = explicitRuntime?.runtimeKind ?? this.getRuntime();
+    const model = explicitRuntime?.model ?? this.getModel();
+    const modelSelection = taskSelection ?? modelSelectionForRuntime(runtimeKind, model);
     const userMessage = chatMessageSchema.parse({
       id: randomUUID(),
       taskId,
@@ -7784,6 +7857,44 @@ export class SqlitePersistenceClient implements PersistenceClient {
       TaskRow | undefined;
     if (row === undefined) throw new NotFoundError('Task not found');
     return row;
+  }
+
+  private updateAgentModelSelectionInTransaction(
+    agentId: string,
+    selection: ModelSelection,
+    runtimeKind: RuntimeKind,
+    now: string,
+  ): void {
+    const current = this.getAgent(agentId);
+    const agentUpdate = this.db
+      .prepare(
+        `UPDATE agents
+         SET connection_id = ?, requested_provider = ?, requested_model = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        selection.connectionId,
+        selection.requestedProvider,
+        selection.requestedModel,
+        now,
+        current.id,
+      );
+    const threadUpdate = this.db
+      .prepare(
+        `UPDATE agent_threads
+         SET runtime_kind = ?, connection_id = ?, requested_provider = ?, requested_model = ?,
+             revision = revision + 1, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        runtimeKind,
+        selection.connectionId,
+        selection.requestedProvider,
+        selection.requestedModel,
+        now,
+        current.threadId,
+      );
+    if (agentUpdate.changes !== 1 || threadUpdate.changes !== 1) throw new TeamConflictError();
   }
 
   private getAgent(agentId: string): AgentRecord {
