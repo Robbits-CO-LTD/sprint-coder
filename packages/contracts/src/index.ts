@@ -1185,9 +1185,7 @@ export const providerConnectionVerificationSchema = z
     message: z.string().min(1).max(500).nullable(),
   })
   .strict();
-export type ProviderConnectionVerification = z.infer<
-  typeof providerConnectionVerificationSchema
->;
+export type ProviderConnectionVerification = z.infer<typeof providerConnectionVerificationSchema>;
 export const providerRateLimitModeSchema = z.enum(['bypass', 'auto', 'manual']);
 export type ProviderRateLimitMode = z.infer<typeof providerRateLimitModeSchema>;
 export const providerConnectionRateLimitSchema = z
@@ -1228,23 +1226,22 @@ export const openAIConnectionCreateInputSchema = z
     projectId: z.string().trim().min(1).max(128).optional(),
   })
   .strict();
-export type OpenAIConnectionCreateInput = z.infer<
-  typeof openAIConnectionCreateInputSchema
->;
+export type OpenAIConnectionCreateInput = z.infer<typeof openAIConnectionCreateInputSchema>;
 export const openRouterConnectionCreateInputSchema = z
   .object({
     displayName: z.string().trim().min(1).max(100),
     apiKey: z.string().min(1).max(16_384),
   })
   .strict();
-export type OpenRouterConnectionCreateInput = z.infer<
-  typeof openRouterConnectionCreateInputSchema
->;
-export const capabilitySourceSchema = z.enum([
-  'provider_api',
-  'official_curated',
-  'unknown',
-]);
+export type OpenRouterConnectionCreateInput = z.infer<typeof openRouterConnectionCreateInputSchema>;
+export const anthropicConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+  })
+  .strict();
+export type AnthropicConnectionCreateInput = z.infer<typeof anthropicConnectionCreateInputSchema>;
+export const capabilitySourceSchema = z.enum(['provider_api', 'official_curated', 'unknown']);
 export type CapabilitySource = z.infer<typeof capabilitySourceSchema>;
 export type CatalogValue<T> = Readonly<{
   value: T | null;
@@ -1360,12 +1357,8 @@ export const canonicalProviderEventSchema = z.discriminatedUnion('type', [
       input: z.json(),
     })
     .strict(),
-  z
-    .object({ type: z.literal('usage'), usage: normalizedProviderUsageSchema })
-    .strict(),
-  z
-    .object({ type: z.literal('resolution'), resolution: executionResolutionSchema })
-    .strict(),
+  z.object({ type: z.literal('usage'), usage: normalizedProviderUsageSchema }).strict(),
+  z.object({ type: z.literal('resolution'), resolution: executionResolutionSchema }).strict(),
   z
     .object({
       type: z.literal('rate_limit'),
@@ -1539,9 +1532,7 @@ export const runtimeSettingsSchema = z
   })
   .strict();
 export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;
-export const runtimeSettingsGetInputSchema = z
-  .object({ taskId: idSchema.optional() })
-  .strict();
+export const runtimeSettingsGetInputSchema = z.object({ taskId: idSchema.optional() }).strict();
 export const runtimeSetInputSchema = z
   .object({ kind: runtimeKindSchema, taskId: idSchema.optional() })
   .strict();
@@ -1935,9 +1926,8 @@ export interface SprintCoderApi {
   providers: {
     listConnections(): Promise<ProviderConnection[]>;
     createOpenAIConnection(input: OpenAIConnectionCreateInput): Promise<ProviderConnection>;
-    createOpenRouterConnection(
-      input: OpenRouterConnectionCreateInput,
-    ): Promise<ProviderConnection>;
+    createOpenRouterConnection(input: OpenRouterConnectionCreateInput): Promise<ProviderConnection>;
+    createAnthropicConnection(input: AnthropicConnectionCreateInput): Promise<ProviderConnection>;
     verifyConnection(connectionId: string): Promise<ProviderConnection>;
   };
   permissions: {
@@ -2026,8 +2016,8 @@ export const IPC_CHANNELS = {
   modelsSetSelection: 'sprint-coder:models:set-selection',
   providersListConnections: 'sprint-coder:providers:list-connections',
   providersCreateOpenAIConnection: 'sprint-coder:providers:create-openai-connection',
-  providersCreateOpenRouterConnection:
-    'sprint-coder:providers:create-openrouter-connection',
+  providersCreateOpenRouterConnection: 'sprint-coder:providers:create-openrouter-connection',
+  providersCreateAnthropicConnection: 'sprint-coder:providers:create-anthropic-connection',
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',

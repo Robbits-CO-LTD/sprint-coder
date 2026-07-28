@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
+  anthropicConnectionCreateInputSchema,
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
@@ -375,6 +376,13 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersCreateOpenRouterConnection,
         openRouterConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createAnthropicConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateAnthropicConnection,
+        anthropicConnectionCreateInputSchema,
         providerConnectionSchema,
         input,
       ),

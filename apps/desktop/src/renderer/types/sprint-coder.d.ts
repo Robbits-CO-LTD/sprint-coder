@@ -639,6 +639,9 @@ export interface SprintCoderApi {
     createOpenRouterConnection(
       input: import('@sprint-coder/contracts').OpenRouterConnectionCreateInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createAnthropicConnection(
+      input: import('@sprint-coder/contracts').AnthropicConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
     verifyConnection(
       connectionId: string,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;

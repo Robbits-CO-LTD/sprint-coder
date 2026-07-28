@@ -73,6 +73,17 @@ P2aでは生成API、Chat／Team配線、実API probeを行わない。実API sm
 
 実API smoke、packaged E2E、再起動後のrouting履歴確認は全実装後のfinal gateへ留保する。
 
+## P4 completion
+
+- Anthropic公式APIを`official_api` Connectionとして追加し、built-in Claude CLIと識別
+- `x-api-key`とversion headerをMain-only Adapterで付与し、Secretはreferenceだけを永続化
+- Models APIのpagination、availability、context／output上限、公開capabilityをcatalogへ反映
+- Messages SSEのtext、thinking、Tool Calling、Structured Output、usage、resolved model、
+  cancellation、429／529をcanonical eventへ正規化
+- Chat／Teamは共通ProviderRuntime経路を再利用し、Team CoreへAnthropic固有importを追加しない
+
+実API smokeとpackaged E2Eは全実装後のfinal gateへ留保する。
+
 ## Shared stop rule
 
 Sliceの受入条件がgreenになったら停止して証拠を報告する。隣接Provider、cleanup、将来の

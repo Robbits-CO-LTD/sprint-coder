@@ -13,6 +13,7 @@ import { workspaceMutationBinding } from './path-guard';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
+  anthropicConnectionCreateInputSchema,
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
@@ -166,19 +167,14 @@ import {
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { ModelCatalogService } from './model-catalog-service';
-import {
-  builtinRuntimeForModelSelection,
-  modelSelectionForRuntime,
-} from './connection-identity';
+import { builtinRuntimeForModelSelection, modelSelectionForRuntime } from './connection-identity';
 import { ProviderSecretStorage } from './provider-secret-storage';
 import { ElectronProviderSecretCipher } from './electron-provider-secret-cipher';
 import { MainProviderRegistry } from './provider-runtime';
 import { ProviderVerificationService } from './provider-verification';
-import {
-  OpenAIProviderClient,
-  parseOpenAICredential,
-} from './openai-provider-client';
+import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
 import { OpenRouterCatalogClient } from './openrouter-provider-client';
+import { AnthropicProviderClient, parseAnthropicCredential } from './anthropic-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
 import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
 
@@ -268,6 +264,16 @@ export class IpcRouter {
       runtimeKind: 'official_api',
       providerId: 'openrouter',
       runtime: openRouter,
+    });
+    const anthropic = new AnthropicProviderClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('Anthropic Connection has no secret reference');
+      return parseAnthropicCredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'anthropic',
+      runtime: anthropic,
     });
     this.providerVerification = new ProviderVerificationService(
       this.persistence,
@@ -443,9 +449,7 @@ export class IpcRouter {
           this.claudeRuntime.probe(),
         ]);
         const taskSelection =
-          input.taskId === undefined
-            ? null
-            : this.persistence.getTaskModelSelection(input.taskId);
+          input.taskId === undefined ? null : this.persistence.getTaskModelSelection(input.taskId);
         const taskRuntime =
           taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
         const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
@@ -618,6 +622,21 @@ export class IpcRouter {
         return this.providerVerification.verify(created);
       },
     );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateAnthropicConnection,
+      anthropicConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateAnthropicConnection,
+          () => this.providerConnections.createAnthropic(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
     this.handle(
       IPC_CHANNELS.providersVerifyConnection,
       z.object({ connectionId: connectionIdSchema }).strict(),
@@ -639,10 +658,7 @@ export class IpcRouter {
           const connection = await this.providerVerification.requireVerifiedForExecution(
             input.selection.connectionId,
           );
-          if (
-            connection.providerId !== input.selection.requestedProvider ||
-            !connection.enabled
-          )
+          if (connection.providerId !== input.selection.requestedProvider || !connection.enabled)
             throw new InvalidModelError('codex');
           const models = await this.providerRegistry
             .resolve(connection)
@@ -655,16 +671,22 @@ export class IpcRouter {
           if (!capability.models.some(({ id }) => id === runtime.model))
             throw new InvalidModelError(runtime.runtimeKind);
         }
-        return this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.modelsSetSelection, () => {
-          if (runtime !== null) {
-            this.persistence.setRuntime(runtime.runtimeKind);
-            this.persistence.setModel(runtime.model);
-          }
-          return (
-            this.persistence.setTaskModelSelection(input.taskId, input.selection) ??
-            input.selection
-          );
-        }).value;
+        return this.runMutation(
+          event,
+          envelope,
+          input.taskId,
+          IPC_CHANNELS.modelsSetSelection,
+          () => {
+            if (runtime !== null) {
+              this.persistence.setRuntime(runtime.runtimeKind);
+              this.persistence.setModel(runtime.model);
+            }
+            return (
+              this.persistence.setTaskModelSelection(input.taskId, input.selection) ??
+              input.selection
+            );
+          },
+        ).value;
       },
     );
     this.handleMutation(
@@ -701,9 +723,7 @@ export class IpcRouter {
         // capability list — Codex and Claude have disjoint model spaces (Main-side scoping per
         // the ADR), so a Codex model id can never leak into a Claude turn or vice versa.
         const taskSelection =
-          input.taskId === undefined
-            ? null
-            : this.persistence.getTaskModelSelection(input.taskId);
+          input.taskId === undefined ? null : this.persistence.getTaskModelSelection(input.taskId);
         const taskRuntime =
           taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
         const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
@@ -712,24 +732,30 @@ export class IpcRouter {
         if (!capability.available) throw new RuntimeUnavailableError(runtimeKind);
         if (!capability.models.some(({ id }) => id === input.model))
           throw new InvalidModelError(runtimeKind);
-        return this.runMutation(event, envelope, input.taskId ?? '', IPC_CHANNELS.settingsSetModel, () => {
-          if (this.persistence.getRuntime() !== runtimeKind)
-            this.persistence.setRuntime(runtimeKind);
-          this.persistence.setModel(input.model);
-          if (input.taskId !== undefined)
-            this.persistence.setTaskModelSelection(
-              input.taskId,
-              modelSelectionForRuntime(runtimeKind, input.model),
-            );
-          // Models advertise different reasoning levels, so a model change can strand the stored
-          // Codex level (Sol advertises `ultra`, GPT-5.5 does not). Re-clamp and persist here so
-          // the synchronous turn dispatch can trust `getCodexEffort()` without a probe — leaving
-          // it stale would fail the next turn outright rather than degrade.
-          if (runtimeKind === 'codex')
-            this.persistence.setCodexEffort(
-              clampCodexEffort(this.persistence.getCodexEffort(), capability.models, input.model),
-            );
-        }).value;
+        return this.runMutation(
+          event,
+          envelope,
+          input.taskId ?? '',
+          IPC_CHANNELS.settingsSetModel,
+          () => {
+            if (this.persistence.getRuntime() !== runtimeKind)
+              this.persistence.setRuntime(runtimeKind);
+            this.persistence.setModel(input.model);
+            if (input.taskId !== undefined)
+              this.persistence.setTaskModelSelection(
+                input.taskId,
+                modelSelectionForRuntime(runtimeKind, input.model),
+              );
+            // Models advertise different reasoning levels, so a model change can strand the stored
+            // Codex level (Sol advertises `ultra`, GPT-5.5 does not). Re-clamp and persist here so
+            // the synchronous turn dispatch can trust `getCodexEffort()` without a probe — leaving
+            // it stale would fail the next turn outright rather than degrade.
+            if (runtimeKind === 'codex')
+              this.persistence.setCodexEffort(
+                clampCodexEffort(this.persistence.getCodexEffort(), capability.models, input.model),
+              );
+          },
+        ).value;
       },
     );
     this.handle(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, (input) => {
@@ -1888,13 +1914,10 @@ export class IpcRouter {
       this.providerAbortByTurn.delete(turnId);
       const identity = this.persistence.getTurnModelIdentity(taskId, turnId);
       if (identity.selection.connectionId !== null) {
-        const connection = this.persistence.getProviderConnection(
-          identity.selection.connectionId,
-        );
+        const connection = this.persistence.getProviderConnection(identity.selection.connectionId);
         await this.providerRegistry.resolve(connection).cancel(turnId);
       }
-    }
-    else await this.mockRuntime.cancel(turnId);
+    } else await this.mockRuntime.cancel(turnId);
   }
 
   private async startProviderTurn(started: StartedTurn, connectionId: string): Promise<void> {
@@ -1910,10 +1933,7 @@ export class IpcRouter {
         controller.signal,
       );
       const modelId = started.modelSelection.requestedModel;
-      if (
-        modelId === null ||
-        connection.providerId !== started.modelSelection.requestedProvider
-      )
+      if (modelId === null || connection.providerId !== started.modelSelection.requestedProvider)
         throw new Error('Provider Turn model selection is invalid');
       const context = this.prepareContext(taskId, started.turnId);
       const egress = authorizeOfficialApiProviderEgress(
@@ -1930,9 +1950,7 @@ export class IpcRouter {
       if (!egress.allowed) throw new Error('Provider egress was denied by policy');
       await this.mailbox.run(taskId, () => {
         if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
-        this.publish(
-          this.persistence.changeStage(taskId, started.turnId, 'understanding'),
-        );
+        this.publish(this.persistence.changeStage(taskId, started.turnId, 'understanding'));
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'planning'));
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'executing'));
       });
@@ -1960,17 +1978,10 @@ export class IpcRouter {
           if (providerEvent.type === 'output_delta') {
             if (!synthesizing) {
               synthesizing = true;
-              this.publish(
-                this.persistence.changeStage(taskId, started.turnId, 'synthesizing'),
-              );
+              this.publish(this.persistence.changeStage(taskId, started.turnId, 'synthesizing'));
             }
             this.publish(
-              this.persistence.appendDelta(
-                taskId,
-                started.turnId,
-                messageId,
-                providerEvent.text,
-              ),
+              this.persistence.appendDelta(taskId, started.turnId, messageId, providerEvent.text),
             );
             return;
           }
@@ -1984,11 +1995,7 @@ export class IpcRouter {
           this.finishAndAdvance(taskId, started.turnId, 'completed');
       });
     } catch {
-      if (
-        controller.signal.aborted ||
-        this.turnRuntimes.get(started.turnId) !== 'provider'
-      )
-        return;
+      if (controller.signal.aborted || this.turnRuntimes.get(started.turnId) !== 'provider') return;
       await this.mailbox.run(taskId, () => {
         if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
         this.finishAndAdvance(taskId, started.turnId, 'failed');
