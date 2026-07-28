@@ -1135,6 +1135,13 @@ export type PublicError = z.infer<typeof publicErrorSchema>;
 
 export const runtimeKindSchema = z.enum(['mock', 'codex', 'claude']);
 export type RuntimeKind = z.infer<typeof runtimeKindSchema>;
+export const providerRuntimeKindSchema = z.enum([
+  'builtin_cli',
+  'official_api',
+  'openai_compatible',
+  'mock',
+]);
+export type ProviderRuntimeKind = z.infer<typeof providerRuntimeKindSchema>;
 export const connectionIdSchema = z
   .string()
   .min(1)
@@ -1145,6 +1152,18 @@ export const providerIdSchema = z
   .min(1)
   .max(64)
   .regex(/^[a-z0-9][a-z0-9._-]*$/);
+export const providerConnectionSchema = z
+  .object({
+    id: connectionIdSchema,
+    providerId: providerIdSchema,
+    runtimeKind: providerRuntimeKindSchema,
+    displayName: z.string().min(1).max(100),
+    enabled: z.boolean(),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type ProviderConnection = z.infer<typeof providerConnectionSchema>;
 export const modelSelectionSchema = z
   .object({
     connectionId: connectionIdSchema.nullable(),

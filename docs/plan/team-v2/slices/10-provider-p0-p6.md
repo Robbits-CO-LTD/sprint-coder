@@ -23,6 +23,15 @@ P0は2026-07-28にdocs-onlyで完了した。
 - Profile、24時間TTL、3秒preflight、Main-only Secret Storageを確定
 - 実API通信、有料probe、製品コード変更は実施していない
 
+## P1A progress
+
+- P1A-a: 共通`ProviderConnection`契約、DB v41、built-in CLI 2件の安定ID seed、
+  persistence list/getを完了
+- P1A-b: pre-v35 legacy rowのbackfillとdual-read
+- P1A-c: 指定DB fixture、再起動復元、旧／新Picker互換、CLI並列維持の証拠
+
+P1A-aでは実Provider API、Secret Storage、Scheduler変更を行わない。
+
 ## Shared stop rule
 
 Sliceの受入条件がgreenになったら停止して証拠を報告する。隣接Provider、cleanup、将来の

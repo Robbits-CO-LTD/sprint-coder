@@ -7,6 +7,7 @@ import {
   modelSelectionSchema,
   permissionSettingsSchema,
   permissionSetInputSchema,
+  providerConnectionSchema,
   publicErrorSchema,
   runtimeSettingsSchema,
   taskRenameInputSchema,
@@ -107,6 +108,31 @@ describe('public contracts', () => {
         connectionId: 'builtin:codex-cli',
         requestedProvider: null,
         requestedModel: 'gpt-5.6-sol',
+      }),
+    ).toThrow();
+  });
+
+  it('validates Provider Connections independently from legacy Chat runtime kinds', () => {
+    expect(
+      providerConnectionSchema.parse({
+        id: 'builtin:claude-cli',
+        providerId: 'anthropic',
+        runtimeKind: 'builtin_cli',
+        displayName: 'Claude CLI',
+        enabled: true,
+        createdAt: '2026-07-28T00:00:00.000Z',
+        updatedAt: '2026-07-28T00:00:00.000Z',
+      }),
+    ).toMatchObject({ runtimeKind: 'builtin_cli' });
+    expect(() =>
+      providerConnectionSchema.parse({
+        id: 'bad connection id',
+        providerId: 'Anthropic',
+        runtimeKind: 'claude',
+        displayName: '',
+        enabled: true,
+        createdAt: 'invalid',
+        updatedAt: 'invalid',
       }),
     ).toThrow();
   });

@@ -8,6 +8,7 @@ import {
   commandSummarySchema,
   executionResolutionSchema,
   modelSelectionSchema,
+  providerConnectionSchema,
   taskSummarySchema,
   turnEventSchema,
   turnSnapshotSchema,
@@ -24,6 +25,8 @@ import {
   type ContextUsage,
   type ExecutionResolution,
   type ModelSelection,
+  type ProviderConnection,
+  type ProviderRuntimeKind,
   type QueuedInput,
   type RuntimeKind,
   type DatabaseRecovery,
@@ -119,7 +122,12 @@ import {
 } from './context-ledger';
 import { redactSecrets } from './secret-redactor';
 import { deriveTaskTitle } from './task-title';
-import { builtinRuntimeForModelSelection, modelSelectionForRuntime } from './connection-identity';
+import {
+  BUILTIN_CLAUDE_CONNECTION_ID,
+  BUILTIN_CODEX_CONNECTION_ID,
+  builtinRuntimeForModelSelection,
+  modelSelectionForRuntime,
+} from './connection-identity';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
 import {
   legacyMutationWorkspaceKey,
@@ -283,6 +291,15 @@ type TaskRow = {
   connection_id: string | null;
   requested_provider: string | null;
   requested_model: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type ProviderConnectionRow = {
+  id: string;
+  provider_id: string;
+  runtime_kind: ProviderRuntimeKind;
+  display_name: string;
+  enabled: number;
   created_at: string;
   updated_at: string;
 };
@@ -1974,6 +1991,33 @@ const migrations = [
         ON team_v2_activity_events(execution_id, attempt_id, seq);
     `,
   },
+  {
+    version: 41,
+    checksum: 'provider-p1a-v41-connection-domain-builtins',
+    sql: `
+      CREATE TABLE provider_connections (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN (
+          'builtin_cli', 'official_api', 'openai_compatible', 'mock'
+        )),
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 100),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX provider_connections_provider_idx
+        ON provider_connections(provider_id, runtime_kind, enabled, id);
+
+      INSERT INTO provider_connections(
+        id, provider_id, runtime_kind, display_name, enabled, created_at, updated_at
+      ) VALUES
+        ('${BUILTIN_CLAUDE_CONNECTION_ID}', 'anthropic', 'builtin_cli', 'Claude CLI', 1,
+         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        ('${BUILTIN_CODEX_CONNECTION_ID}', 'openai', 'builtin_cli', 'Codex CLI', 1,
+         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2327,6 +2371,8 @@ export type TeamSnapshot = Readonly<{
 export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
 
 export interface PersistenceClient {
+  listProviderConnections(): readonly ProviderConnection[];
+  getProviderConnection(connectionId: string): ProviderConnection;
   listTasks(): TaskSummary[];
   getTask(taskId: string): TaskSummary;
   createTask(title?: string, localOnly?: boolean): TaskSummary;
@@ -2948,6 +2994,25 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.backfillAcceptanceContracts();
     this.interruptActiveCommands();
     this.contextLedger = new ContextLedger(this);
+  }
+
+  listProviderConnections(): readonly ProviderConnection[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM provider_connections
+         ORDER BY runtime_kind, provider_id, display_name, id`,
+      )
+      .all() as ProviderConnectionRow[];
+    return rows.map(toProviderConnection);
+  }
+
+  getProviderConnection(connectionId: string): ProviderConnection {
+    const row = this.db
+      .prepare('SELECT * FROM provider_connections WHERE id = ?')
+      .get(connectionId) as ProviderConnectionRow | undefined;
+    if (row === undefined) throw new NotFoundError('Provider connection not found');
+    return toProviderConnection(row);
   }
 
   private runMigrations(databasePath: string): void {
@@ -9182,6 +9247,18 @@ function toTask(row: TaskRow): TaskSummary {
     goal: row.goal,
     workspacePath: row.workspace_path,
     localOnly: row.local_only === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {
+  return providerConnectionSchema.parse({
+    id: row.id,
+    providerId: row.provider_id,
+    runtimeKind: row.runtime_kind satisfies ProviderRuntimeKind,
+    displayName: row.display_name,
+    enabled: row.enabled === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });

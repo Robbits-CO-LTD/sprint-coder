@@ -115,6 +115,44 @@ function bindMutationWorkspace(
   return workspaceKey;
 }
 
+describe('provider connections', () => {
+  it('seeds stable built-in CLI connections and restores them from SQLite', () => {
+    const { persistence, path } = createPersistence();
+
+    expect(persistence.listProviderConnections()).toEqual([
+      expect.objectContaining({
+        id: 'builtin:claude-cli',
+        providerId: 'anthropic',
+        runtimeKind: 'builtin_cli',
+        displayName: 'Claude CLI',
+        enabled: true,
+      }),
+      expect.objectContaining({
+        id: 'builtin:codex-cli',
+        providerId: 'openai',
+        runtimeKind: 'builtin_cli',
+        displayName: 'Codex CLI',
+        enabled: true,
+      }),
+    ]);
+    expect(persistence.getProviderConnection('builtin:codex-cli')).toEqual(
+      expect.objectContaining({
+        id: 'builtin:codex-cli',
+        providerId: 'openai',
+      }),
+    );
+    expect(() => persistence.getProviderConnection('missing:connection')).toThrow(NotFoundError);
+
+    persistence.close();
+    const reopened = new SqlitePersistenceClient(path);
+    expect(reopened.listProviderConnections().map(({ id }) => id)).toEqual([
+      'builtin:claude-cli',
+      'builtin:codex-cli',
+    ]);
+    reopened.close();
+  });
+});
+
 class PersistenceTestArtifacts implements EditArtifactRepository {
   readonly values = new Map<string, Buffer>();
   async put(input: { owner: EditArtifactOwner; bytes: Buffer }): Promise<EditArtifactRef> {
@@ -4414,6 +4452,7 @@ if (runsWithElectronAbi)
         { version: 38 },
         { version: 39 },
         { version: 40 },
+        { version: 41 },
       ]);
       for (const [table, columns] of [
         [
@@ -4470,6 +4509,7 @@ if (runsWithElectronAbi)
         'team_execution_instructions',
         'team_attempts',
         'team_v2_activity_events',
+        'provider_connections',
       ])
         expect(migratedTables.has(table)).toBe(true);
       expect(
