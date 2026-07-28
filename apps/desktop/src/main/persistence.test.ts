@@ -142,6 +142,10 @@ describe('provider connections', () => {
       }),
     );
     expect(() => persistence.getProviderConnection('missing:connection')).toThrow(NotFoundError);
+    const secretReference = 'provider-secret:123e4567-e89b-42d3-a456-426614174000';
+    expect(
+      persistence.setProviderConnectionSecretReference('builtin:codex-cli', secretReference),
+    ).toMatchObject({ id: 'builtin:codex-cli', secretReference });
 
     persistence.close();
     const reopened = new SqlitePersistenceClient(path);
@@ -149,6 +153,9 @@ describe('provider connections', () => {
       'builtin:claude-cli',
       'builtin:codex-cli',
     ]);
+    expect(reopened.getProviderConnection('builtin:codex-cli').secretReference).toBe(
+      secretReference,
+    );
     reopened.close();
   });
 
@@ -4492,6 +4499,7 @@ if (runsWithElectronAbi)
         { version: 40 },
         { version: 41 },
         { version: 42 },
+        { version: 43 },
       ]);
       for (const [table, columns] of [
         [

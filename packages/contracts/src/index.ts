@@ -1159,6 +1159,12 @@ export const providerConnectionSchema = z
     runtimeKind: providerRuntimeKindSchema,
     displayName: z.string().min(1).max(100),
     enabled: z.boolean(),
+    secretReference: z
+      .string()
+      .regex(
+        /^provider-secret:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      )
+      .nullable(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })

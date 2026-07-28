@@ -300,6 +300,7 @@ type ProviderConnectionRow = {
   runtime_kind: ProviderRuntimeKind;
   display_name: string;
   enabled: number;
+  secret_reference: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -2148,6 +2149,13 @@ const migrations = [
         AND (SELECT value FROM settings WHERE key = 'runtime.kind') IN ('claude', 'codex');
     `,
   },
+  {
+    version: 43,
+    checksum: 'provider-p1b-v43-secret-reference',
+    sql: `
+      ALTER TABLE provider_connections ADD COLUMN secret_reference TEXT;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2503,6 +2511,10 @@ export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executo
 export interface PersistenceClient {
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
+  setProviderConnectionSecretReference(
+    connectionId: string,
+    secretReference: string | null,
+  ): ProviderConnection;
   listTasks(): TaskSummary[];
   getTask(taskId: string): TaskSummary;
   createTask(title?: string, localOnly?: boolean): TaskSummary;
@@ -3143,6 +3155,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .get(connectionId) as ProviderConnectionRow | undefined;
     if (row === undefined) throw new NotFoundError('Provider connection not found');
     return toProviderConnection(row);
+  }
+
+  setProviderConnectionSecretReference(
+    connectionId: string,
+    secretReference: string | null,
+  ): ProviderConnection {
+    if (
+      secretReference !== null &&
+      !/^provider-secret:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        secretReference,
+      )
+    )
+      throw new Error('Invalid Provider secret reference');
+    const result = this.db
+      .prepare(
+        `UPDATE provider_connections
+         SET secret_reference = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(secretReference, new Date().toISOString(), connectionId);
+    if (result.changes !== 1) throw new NotFoundError('Provider connection not found');
+    return this.getProviderConnection(connectionId);
   }
 
   private runMigrations(databasePath: string): void {
@@ -9388,6 +9422,7 @@ function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {
     runtimeKind: row.runtime_kind satisfies ProviderRuntimeKind,
     displayName: row.display_name,
     enabled: row.enabled === 1,
+    secretReference: row.secret_reference,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });

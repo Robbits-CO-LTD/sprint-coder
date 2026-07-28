@@ -37,7 +37,7 @@ P1A-aでは実Provider API、Secret Storage、Scheduler変更を行わない。
 - P1B-a: Provider Runtime／Registry interface、canonical event、error／usage normalization、
   capability schema、Mock Runtimeを完了
 - P1B-b1: secure logger、sink側強制redaction、production `no-console`を完了
-- P1B-b2: Main-only Secret Storage
+- P1B-b2: safeStorage adapter、Main-only encrypted blob、DB secret referenceを完了
 - P1B-b3: connection verification
 - P1B-c: global 8枠へConnection admissionを統合
 
