@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ContextUsage, TurnEvent } from '@sprint-coder/contracts';
+import { formatStateReminder, type LiveState } from './context-reminder';
 
 export const CONTEXT_HARD_CAP_TOKENS = 32_000;
 export const CONTEXT_SYSTEM_PROMPT =
@@ -55,8 +56,21 @@ export type PreparedContext = {
   compacted: boolean;
 };
 
+/**
+ * Supplies the live state to restate after a compaction.
+ *
+ * A callback rather than a constructor value because the answer is only correct at the moment the
+ * context is assembled — a snapshot taken when the ledger was built would be the stale reading the
+ * reminder exists to prevent. Optional, so a caller with nothing live to report keeps today's
+ * behaviour unchanged.
+ */
+export type LiveStateSource = (taskId: string, turnId: string) => LiveState;
+
 export class ContextLedger {
-  constructor(private readonly storage: ContextLedgerStorage) {}
+  constructor(
+    private readonly storage: ContextLedgerStorage,
+    private readonly liveState: LiveStateSource | null = null,
+  ) {}
 
   prepare(taskId: string, turnId: string): PreparedContext {
     const state = this.storage.loadContextLedgerState(taskId, turnId);
@@ -119,6 +133,15 @@ export class ContextLedger {
       superseded.map((fragment) => fragment.id),
     );
     const supersededIds = new Set(superseded.map((fragment) => fragment.id));
+    // Last, so it is the most recent thing the model reads: the summary above it is history, and
+    // this is what is still true. Deliberately not persisted — it is derived from live state, and a
+    // replayed Turn must rebuild it from the state of that moment rather than restore this one.
+    const reminderContent =
+      this.liveState === null ? null : formatStateReminder(this.liveState(taskId, turnId));
+    const reminder =
+      reminderContent === null
+        ? null
+        : makeFragment(taskId, 'background', 'system', reminderContent, now, null);
     const after = [
       system,
       ...(goal === null ? [] : [goal]),
@@ -126,6 +149,7 @@ export class ContextLedger {
       ...state.compactions,
       compaction,
       ...state.background,
+      ...(reminder === null ? [] : [reminder]),
     ];
     usageEvents.push(this.storage.recordContextUsage(taskId, turnId, aggregateContextUsage(after)));
     return { fragments: after, usageEvents, compacted: true };

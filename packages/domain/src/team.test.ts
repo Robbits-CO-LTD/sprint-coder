@@ -2,10 +2,34 @@ import { describe, expect, it } from 'vitest';
 import {
   assertLeaderRoutedMessage,
   assertWorkerPersistenceInput,
+  isWorkerActive,
   transitionTeam,
   transitionTeamMessage,
   transitionWorker,
+  workerStates,
 } from './team';
+
+describe('worker liveness', () => {
+  it('calls a Worker active exactly while the machine can still move it', () => {
+    expect(workerStates.filter(isWorkerActive)).toEqual([
+      'invited',
+      'spawning',
+      'ready',
+      'busy',
+      'waiting',
+    ]);
+    expect(workerStates.filter((state) => !isWorkerActive(state))).toEqual([
+      'done',
+      'failed',
+      'stopped',
+    ]);
+  });
+
+  it('classifies a state the moment its transitions are declared, with nothing to update', () => {
+    // Every declared state gets an answer; a new one cannot be silently missed by a stale list.
+    for (const state of workerStates) expect(typeof isWorkerActive(state)).toBe('boolean');
+  });
+});
 
 describe('team domain', () => {
   it('enforces the team lifecycle', () => {

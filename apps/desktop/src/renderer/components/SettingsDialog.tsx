@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { Check, X } from './icons';
 import {
@@ -13,6 +13,11 @@ import {
 } from '../lib/runtime-labels';
 import type { RuntimeKind } from '../types/sprint-coder';
 import { SkillSettingsSection } from './SkillSettingsSection';
+import {
+  readAccessPresetDefault,
+  writeAccessPresetDefault,
+  type AccessPresetDefault,
+} from '../lib/access-preset-preference';
 
 // Settings dialog (issue #5). The sidebar's "設定" button had no onClick and was not disabled
 // either, so it looked pressable and did nothing — and no settings screen existed anywhere in the
@@ -34,6 +39,9 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
   const setRuntime = useAppStore((s) => s.setRuntime);
   const setModel = useAppStore((s) => s.setModel);
   const setEffort = useAppStore((s) => s.setEffort);
+  const [accessDefault, setAccessDefault] = useState<AccessPresetDefault>(() =>
+    readAccessPresetDefault(),
+  );
   const dialogRef = useRef<HTMLDialogElement>(null);
   // The element that had focus when the dialog opened. Chromium's <dialog> restores focus itself,
   // but capturing it makes the guarantee explicit and independently testable.
@@ -159,6 +167,31 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
               {selectedModel !== undefined && selectedModel.description !== '' && (
                 <p className="settings-hint">{selectedModel.description}</p>
               )}
+            </div>
+
+            <div className="settings-group">
+              <label className="settings-field" htmlFor="settings-access-default">
+                <span className="settings-field-label">新しいタスクの安全設定</span>
+                <select
+                  id="settings-access-default"
+                  data-testid="settings-access-default"
+                  value={accessDefault}
+                  onChange={(event) => {
+                    const value = event.target.value as AccessPresetDefault;
+                    setAccessDefault(value);
+                    writeAccessPresetDefault(value);
+                  }}
+                >
+                  <option value="last">前回選択した設定</option>
+                  <option value="ask">毎回確認</option>
+                  <option value="auto">安全時は自動</option>
+                  <option value="full">フルアクセス</option>
+                </select>
+              </label>
+              <p className="settings-hint">
+                設定しない場合は直近の選択を引き継ぎます。ここで指定すると、その値を新しいタスクの
+                デフォルトにします。
+              </p>
             </div>
 
             <div className="settings-group">

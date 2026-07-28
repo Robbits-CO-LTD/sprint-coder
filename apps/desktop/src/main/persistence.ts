@@ -97,6 +97,8 @@ import {
   type PersistedFragment,
   type PreparedContext,
 } from './context-ledger';
+import type { LiveState } from './context-reminder';
+import { deriveLiveState } from './live-state';
 import { redactSecrets } from './secret-redactor';
 import { deriveTaskTitle } from './task-title';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
@@ -2536,7 +2538,38 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.backfillLegacyNativeEditSagaRevisions();
     this.backfillAcceptanceContracts();
     this.interruptActiveCommands();
-    this.contextLedger = new ContextLedger(this);
+    this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
+      this.liveStateForReminder(taskId, turnId),
+    );
+  }
+
+  /**
+   * The facts a compaction would otherwise erase, read fresh at context-assembly time.
+   *
+   * Best-effort by design: this feeds a reminder, and a Turn that cannot be prepared because the
+   * reminder's own lookups threw would be a far worse failure than a Turn that proceeds without one.
+   * A task with no Team, or with no contract yet, simply has less to restate.
+   */
+  private liveStateForReminder(taskId: string, turnId: string): LiveState {
+    return deriveLiveState({
+      agents: this.safely(() => {
+        const team = this.getTeamByTask(taskId);
+        return team === null ? [] : this.getTeamSnapshot(team.id).agents;
+      }),
+      // The Turn's own diff, not the Acceptance Contract's allowed scope. Allowed scope is what the
+      // Turn was permitted to touch, and a reminder that lists a permitted-but-untouched file as
+      // changed tells the model work is done that is not — which is the reminder causing the exact
+      // skipped work it exists to prevent.
+      diff: this.safely(() => this.getTurnDiff(taskId, turnId)),
+    });
+  }
+
+  private safely<T>(read: () => readonly T[]): readonly T[] {
+    try {
+      return read();
+    } catch {
+      return [];
+    }
   }
 
   private runMigrations(databasePath: string): void {
