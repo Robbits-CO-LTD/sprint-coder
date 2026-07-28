@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeTeamTool } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
+import { secureLogger } from './secure-logger';
 
 // macOS's sockaddr_un.sun_path is 104 bytes (Linux allows 108); staying comfortably under that
 // keeps bind() from failing on long app-data paths (a real, previously-hit failure mode on this
@@ -132,7 +133,7 @@ export class TeamMcpBridge {
       this.startPromise = null;
       // A bridge that fails to start is a soft failure: callers (ipc.ts) treat a null socketPath
       // as "fall back to the mock leader path" rather than crashing turn dispatch.
-      console.error('[team-mcp-bridge] failed to start', error);
+      secureLogger.error('Team MCP bridge failed to start', error);
       return null as unknown as string;
     });
     return this.startPromise;

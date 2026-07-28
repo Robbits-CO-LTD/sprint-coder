@@ -44,6 +44,17 @@ export default tseslint.config(
     },
   },
   {
+    files: [
+      'apps/desktop/src/main/**/*.{ts,tsx}',
+      'apps/desktop/src/preload/**/*.{ts,tsx}',
+      'apps/desktop/src/runtime-host/**/*.{ts,tsx}',
+    ],
+    ignores: ['**/*.test.ts', '**/*.test.tsx'],
+    rules: {
+      'no-console': 'error',
+    },
+  },
+  {
     files: ['**/*.test.ts', '**/*.test.tsx'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',

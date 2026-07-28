@@ -14,6 +14,7 @@ import {
   evaluateNativeMutationPlatformGate,
   type NativeMutationPackagedLoadEvidence,
 } from './native-mutation-platform-gate';
+import { secureLogger } from './secure-logger';
 
 const isDevelopment = !app.isPackaged;
 app.setName('Sprint Coder');
@@ -98,7 +99,7 @@ app.on('before-quit', (event) => {
     try {
       await router?.dispose();
     } catch (error) {
-      console.error('CommandRunner shutdown did not fully drain', error);
+      secureLogger.error('CommandRunner shutdown did not fully drain', error);
     } finally {
       try {
         persistence?.close();
@@ -194,14 +195,14 @@ async function wireEditSagaRecovery(
     if (gate.allowed) {
       await executor.reconcileAll();
     } else {
-      console.log(
-        `Native mutation platform gate denied reconciliation: ${gate.reasons.join(', ')}`,
-      );
+      secureLogger.info('Native mutation platform gate denied reconciliation', {
+        reasons: gate.reasons,
+      });
     }
   } catch (error) {
     // Fail-closed dormant wiring: a recovery-wiring failure must neither enable
     // mutation nor block the read-only application from starting.
-    console.error('Edit Saga recovery wiring did not initialize', error);
+    secureLogger.error('Edit Saga recovery wiring did not initialize', error);
   }
 }
 
