@@ -157,4 +157,35 @@ describe('TeamExecutionScheduler', () => {
     await settleScheduler();
     expect(scheduler.snapshot().activeCount).toBe(0);
   });
+
+  it('removes a queued job without consuming a slot or disturbing FIFO', async () => {
+    const scheduler = new TeamExecutionScheduler(1);
+    const first = deferred();
+    const third = deferred();
+    const started: string[] = [];
+    for (const [executionId, gate] of [
+      ['first', first],
+      ['canceled', deferred()],
+      ['third', third],
+    ] as const)
+      scheduler.submit({
+        executionId,
+        teamId: 'team-1',
+        teamLimit: 8,
+        run: async () => {
+          started.push(executionId);
+          await gate.promise;
+        },
+      });
+
+    await settleScheduler();
+    expect(scheduler.cancelQueued('canceled')).toBe(true);
+    expect(scheduler.cancelQueued('canceled')).toBe(false);
+    expect(scheduler.snapshot().queuedExecutionIds).toEqual(['third']);
+    first.resolve();
+    await settleScheduler();
+    expect(started).toEqual(['first', 'third']);
+    third.resolve();
+    await settleScheduler();
+  });
 });

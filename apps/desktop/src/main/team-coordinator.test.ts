@@ -12,6 +12,7 @@ import {
   type WorkerRuntimeResult,
 } from './team-coordinator';
 import type { TeamEnvelope } from '@sprint-coder/domain';
+import { TeamExecutionScheduler } from './team-execution-scheduler';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -72,12 +73,14 @@ class BlockingWorkerRuntime extends TestWorkerRuntime {
   activeExecutions = 0;
   maxActiveExecutions = 0;
   readonly releases: Array<() => void> = [];
+  readonly contents: string[] = [];
 
   override async execute(input: {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
   }): Promise<WorkerRuntimeResult> {
+    this.contents.push(input.content);
     this.activeExecutions += 1;
     this.maxActiveExecutions = Math.max(this.maxActiveExecutions, this.activeExecutions);
     await new Promise<void>((resolve) => this.releases.push(resolve));
@@ -279,6 +282,69 @@ if (runsWithElectronAbi)
           .getTeamSnapshot(teamId)
           .messages.filter(({ executionId }) => executionId !== null),
       ).toHaveLength(20);
+      persistence.close();
+    });
+
+    it('steers and cancels queued executions before they consume a runtime slot', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Queued execution control');
+      const runtime = new BlockingWorkerRuntime();
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        () => undefined,
+        () => new Date(),
+        120_000,
+        new TeamExecutionScheduler(1),
+      );
+      const workers = [];
+      for (const role of ['first', 'steered', 'canceled'])
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: role,
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          }),
+        );
+      const [first, steered, canceled] = await Promise.all(
+        workers.map((worker) =>
+          coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: `initial-${worker.role}`,
+            doneCriteria: ['runtime completes'],
+          }),
+        ),
+      );
+      if (first === undefined || steered === undefined || canceled === undefined)
+        throw new Error('Expected three submissions');
+      await waitFor(() => runtime.activeExecutions === 1);
+
+      await expect(
+        coordinator.steerExecution(task.id, steered.executionId, 'revised-steered'),
+      ).resolves.toMatchObject({ executionId: steered.executionId, state: 'queued' });
+      await expect(
+        coordinator.cancelExecution(task.id, canceled.executionId),
+      ).resolves.toMatchObject({ executionId: canceled.executionId, state: 'canceled' });
+      expect(persistence.getTeamExecution(steered.executionId).instruction).toMatchObject({
+        revision: 2,
+        content: 'revised-steered',
+      });
+      expect(persistence.listTeamAttempts(canceled.executionId)).toHaveLength(0);
+
+      runtime.releases.shift()?.();
+      await waitFor(() => runtime.contents.includes('revised-steered'));
+      expect(runtime.contents).toEqual(['initial-first', 'revised-steered']);
+      runtime.releases.shift()?.();
+      await waitFor(() => persistence.getTeamExecution(steered.executionId).state === 'completed');
+      expect(persistence.getTeamExecution(canceled.executionId).state).toBe('canceled');
+      const canceledMessage = persistence
+        .getTeamSnapshot(workers[0]!.teamId)
+        .messages.find(({ executionId }) => executionId === canceled.executionId);
+      expect(canceledMessage).toBeDefined();
+      expect(persistence.getTeamDelivery(canceledMessage!.id)?.state).toBe('failed');
       persistence.close();
     });
 

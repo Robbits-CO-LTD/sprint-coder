@@ -135,6 +135,8 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
       [
         'team_hire_worker',
         'team_assign_task',
+        'team_steer_execution',
+        'team_cancel_execution',
         'team_get_status',
         'team_wait_events',
         'team_send_to_worker',

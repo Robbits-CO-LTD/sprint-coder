@@ -16,6 +16,12 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
     assignTask: vi.fn(
       async () => ({ executionId: 'execution-2', state: 'queued' }) as never,
     ),
+    steerExecution: vi.fn(
+      async () => ({ executionId: 'execution-2', state: 'queued' }) as never,
+    ),
+    cancelExecution: vi.fn(
+      async () => ({ executionId: 'execution-2', state: 'canceled' }) as never,
+    ),
     get: vi.fn(() => null),
     listWorkerReports: vi.fn(() => []),
     hasBusyWorkers: vi.fn(() => false),
@@ -75,6 +81,24 @@ describe('executeTeamTool routing', () => {
       doneCriteria: ['targeted test passes'],
     });
     expect(assigned).toMatchObject({ ok: true, executionId: 'execution-2', state: 'queued' });
+
+    expect(
+      await executeTeamTool(coordinator, 'task-1', 'team_steer_execution', {
+        executionId: 'execution-2',
+        instruction: 'add the regression test',
+      }),
+    ).toMatchObject({ ok: true, executionId: 'execution-2', state: 'queued' });
+    expect(coordinator.steerExecution).toHaveBeenCalledWith(
+      'task-1',
+      'execution-2',
+      'add the regression test',
+    );
+    expect(
+      await executeTeamTool(coordinator, 'task-1', 'team_cancel_execution', {
+        executionId: 'execution-2',
+      }),
+    ).toMatchObject({ ok: true, executionId: 'execution-2', state: 'canceled' });
+    expect(coordinator.cancelExecution).toHaveBeenCalledWith('task-1', 'execution-2');
 
     expect(await executeTeamTool(coordinator, 'task-1', 'team_get_status', {})).toEqual({
       ok: true,

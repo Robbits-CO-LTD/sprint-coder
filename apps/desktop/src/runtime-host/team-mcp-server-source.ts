@@ -25,7 +25,7 @@ const TOOLS = [
   {
     name: 'team_hire_worker',
     description:
-      'Hire a new team Worker with a role and objective you choose based on the user request. Hire only as many Workers as the task genuinely needs (max 3) -- fewer is fine, even one.',
+      'Hire a new team Worker with a role and objective you choose based on the user request. Hire only as many Workers as the task genuinely needs.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -43,7 +43,7 @@ const TOOLS = [
   },
   {
     name: 'team_assign_task',
-    description: 'Assign a formal task with explicit completion criteria to a hired Worker.',
+    description: 'Assign a formal task with explicit completion criteria. Returns an execution ID immediately; queued is not a failure.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -52,6 +52,29 @@ const TOOLS = [
         doneCriteria: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 },
       },
       required: ['workerId', 'objective', 'doneCriteria'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_steer_execution',
+    description: 'Replace the instruction of a queued execution while preserving its audit history.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        executionId: { type: 'string' },
+        instruction: { type: 'string' },
+      },
+      required: ['executionId', 'instruction'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_cancel_execution',
+    description: 'Cancel a queued execution before it consumes a runtime slot.',
+    inputSchema: {
+      type: 'object',
+      properties: { executionId: { type: 'string' } },
+      required: ['executionId'],
       additionalProperties: false,
     },
   },

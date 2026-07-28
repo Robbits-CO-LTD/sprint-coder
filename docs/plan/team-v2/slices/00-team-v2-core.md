@@ -58,7 +58,10 @@ Proof: deterministic Runtimeで8 parallel、depth、steer、crash／restart。
   `team_assign_task`が完了を待たずexecution IDを返す。global 8 running／2 queued、
   attempt、message link、失敗時枠解放をElectron ABIで検証。旧IPC `sendToWorker`は
   後方互換の同期経路として維持する。
-- B3次着手: queued/running steer、queued/running cancel、再起動queue rehydrate。
+- B3a完了: queued instruction revision、queued cancel、Schedulerからの取消、task/delivery終端化、
+  Claude/Codex MCP tool公開。revised instructionがruntime開始時に解決されることをElectron ABIで検証。
+- B3b次着手: running executionのinterrupt-and-resume steerとcancel。
+- B3c後続: 再起動queue rehydrate。
   Manager MCP caller bindingはRuntime接続Sliceで行い、model-controlled引数からAgent
   identityを受け取らない。
 

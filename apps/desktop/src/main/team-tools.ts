@@ -85,6 +85,23 @@ export const TEAM_ASSIGN_TASK_TOOL = teamToolDefinition(
   ['workerId', 'objective', 'doneCriteria'],
 );
 
+export const TEAM_STEER_EXECUTION_TOOL = teamToolDefinition(
+  'team_steer_execution',
+  'steer-execution',
+  {
+    executionId: { type: 'string' },
+    instruction: { type: 'string' },
+  },
+  ['executionId', 'instruction'],
+);
+
+export const TEAM_CANCEL_EXECUTION_TOOL = teamToolDefinition(
+  'team_cancel_execution',
+  'cancel-execution',
+  { executionId: { type: 'string' } },
+  ['executionId'],
+);
+
 export const TEAM_GET_STATUS_TOOL = teamToolDefinition('team_get_status', 'get-status', {}, []);
 
 export const TEAM_WAIT_EVENTS_TOOL = teamToolDefinition(
@@ -111,6 +128,8 @@ export const TEAM_STOP_WORKER_TOOL = teamToolDefinition(
 export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
   TEAM_HIRE_WORKER_TOOL,
   TEAM_ASSIGN_TASK_TOOL,
+  TEAM_STEER_EXECUTION_TOOL,
+  TEAM_CANCEL_EXECUTION_TOOL,
   TEAM_GET_STATUS_TOOL,
   TEAM_WAIT_EVENTS_TOOL,
   TEAM_SEND_TO_WORKER_TOOL,
@@ -138,6 +157,8 @@ const pacing = (): Promise<void> =>
 export type TeamToolName =
   | 'team_hire_worker'
   | 'team_assign_task'
+  | 'team_steer_execution'
+  | 'team_cancel_execution'
   | 'team_get_status'
   | 'team_wait_events'
   | 'team_send_to_worker'
@@ -148,6 +169,8 @@ export function isTeamToolName(value: unknown): value is TeamToolName {
   return (
     value === 'team_hire_worker' ||
     value === 'team_assign_task' ||
+    value === 'team_steer_execution' ||
+    value === 'team_cancel_execution' ||
     value === 'team_get_status' ||
     value === 'team_wait_events' ||
     value === 'team_send_to_worker' ||
@@ -181,6 +204,15 @@ const assignArgsSchema = z
     objective: z.string().min(1).max(10_000),
     doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(20),
   })
+  .strict();
+const steerExecutionArgsSchema = z
+  .object({
+    executionId: z.string().min(1).max(128),
+    instruction: z.string().min(1).max(100_000),
+  })
+  .strict();
+const cancelExecutionArgsSchema = z
+  .object({ executionId: z.string().min(1).max(128) })
   .strict();
 const getStatusArgsSchema = z.object({}).strict();
 const waitEventsArgsSchema = z.object({ cursor: z.number().int().min(0).optional() }).strict();
@@ -310,6 +342,28 @@ export async function executeTeamTool(
         return teamToolError(error);
       }
     }
+    case 'team_steer_execution': {
+      const request = steerExecutionArgsSchema.parse(args);
+      try {
+        const execution = await coordinator.steerExecution(
+          taskId,
+          request.executionId,
+          request.instruction,
+        );
+        return { ok: true, executionId: execution.executionId, state: execution.state };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
+    case 'team_cancel_execution': {
+      const request = cancelExecutionArgsSchema.parse(args);
+      try {
+        const execution = await coordinator.cancelExecution(taskId, request.executionId);
+        return { ok: true, executionId: execution.executionId, state: execution.state };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
     case 'team_get_status': {
       getStatusArgsSchema.parse(args);
       return { ok: true, team: coordinator.get(taskId) };
@@ -355,6 +409,18 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
     implementationKind: 'built-in',
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_assign_task', input),
+  });
+  broker.registerImplementation({
+    toolId: TEAM_STEER_EXECUTION_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_steer_execution', input),
+  });
+  broker.registerImplementation({
+    toolId: TEAM_CANCEL_EXECUTION_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_cancel_execution', input),
   });
   broker.registerImplementation({
     toolId: TEAM_GET_STATUS_TOOL.toolId,

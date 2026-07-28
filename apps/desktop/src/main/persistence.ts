@@ -2369,6 +2369,7 @@ export interface PersistenceClient {
     instruction: string;
     now: string;
   }): TeamExecutionRecord;
+  cancelQueuedTeamExecution(executionId: string, now: string): TeamExecutionRecord;
   createTeamAttempt(executionId: string, now: string): TeamAttemptRecord;
   getTeamAttempt(attemptId: string): TeamAttemptRecord;
   listTeamAttempts(executionId: string): readonly TeamAttemptRecord[];
@@ -3795,6 +3796,49 @@ export class SqlitePersistenceClient implements PersistenceClient {
         now: input.now,
       });
       return revised;
+    })();
+  }
+
+  cancelQueuedTeamExecution(executionId: string, now: string): TeamExecutionRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamExecution(executionId);
+      if (
+        !['assigned', 'queued', 'waiting_verification', 'waiting_rate_limit'].includes(
+          current.state,
+        )
+      )
+        throw new Error('Only a queued Team execution can be canceled without interruption');
+      const canceled = this.transitionTeamExecution({
+        executionId: current.id,
+        to: 'canceled',
+        now,
+      });
+      const message = this.db
+        .prepare(
+          `SELECT id FROM team_messages
+           WHERE execution_id = ? AND source_agent_id = ?
+           ORDER BY seq LIMIT 1`,
+        )
+        .get(current.id, current.createdByAgentId) as { id: string } | undefined;
+      if (message !== undefined) {
+        const delivery = this.getTeamDelivery(message.id);
+        if (delivery !== null && ['persisted', 'dispatched', 'timedOut'].includes(delivery.state))
+          this.transitionTeamDelivery({
+            messageId: message.id,
+            to: 'failed',
+            now,
+            error: 'execution_canceled',
+          });
+        const task = this.db
+          .prepare('SELECT id FROM team_tasks WHERE message_id = ?')
+          .get(message.id) as { id: string } | undefined;
+        if (task !== undefined) {
+          const currentTask = this.getTeamTask(task.id);
+          if (!['completed', 'failed', 'canceled'].includes(currentTask.status))
+            this.transitionTeamTask(task.id, 'canceled', now);
+        }
+      }
+      return canceled;
     })();
   }
 

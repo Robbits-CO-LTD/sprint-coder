@@ -274,12 +274,14 @@ export class ClaudeRuntimeAdapter {
 // Kept as a small local constant rather than importing team-tools.ts's tool name list: the
 // Runtime Host boundary is deliberately self-contained (see the ADR's rationale for duplicating
 // terminateProcessTree/signalTree instead of sharing a cross-file utility), and the MCP server
-// under `mcpServers.team` always fully-qualifies its 4 tool names as `mcp__team__<name>` per the
+// under `mcpServers.team` always fully-qualifies its tool names as `mcp__team__<name>` per the
 // MCP naming convention — verified directly against the installed CLI.
 const TEAM_MCP_SERVER_NAME = 'team';
 const TEAM_MCP_TOOL_NAMES = [
   'team_hire_worker',
   'team_assign_task',
+  'team_steer_execution',
+  'team_cancel_execution',
   'team_get_status',
   'team_wait_events',
   'team_send_to_worker',

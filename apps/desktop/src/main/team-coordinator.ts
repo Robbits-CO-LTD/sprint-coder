@@ -397,12 +397,49 @@ export class TeamCoordinator {
             messageSeq: message.seq,
             teamTaskId: teamTask.id,
             executionId: execution.id,
-            content: input.content,
             doneCriteria: input.doneCriteria,
           }),
       });
       this.emit(input.taskId, team.id);
       return { executionId: queued.id, state: queued.state };
+    });
+  }
+
+  async steerExecution(
+    taskId: string,
+    executionId: string,
+    instruction: string,
+  ): Promise<TeamExecutionSubmission> {
+    return this.enqueue(taskId, async () => {
+      const team = this.persistence.getTeamByTask(taskId);
+      if (team === null) throw new Error('Team not found');
+      const execution = this.persistence.getTeamExecution(executionId);
+      if (execution.teamId !== team.id) throw new Error('Execution does not belong to Task Team');
+      if (execution.state === 'running')
+        throw new Error('Running execution steer requires interrupt-and-resume');
+      const leader = this.persistence.getTaskLeader(taskId);
+      const revised = this.persistence.reviseQueuedTeamExecution({
+        executionId,
+        createdByAgentId: leader.id,
+        instruction,
+        now: this.isoNow(),
+      });
+      this.emit(taskId, team.id);
+      return { executionId: revised.id, state: revised.state };
+    });
+  }
+
+  async cancelExecution(taskId: string, executionId: string): Promise<TeamExecutionSubmission> {
+    return this.enqueue(taskId, async () => {
+      const team = this.persistence.getTeamByTask(taskId);
+      if (team === null) throw new Error('Team not found');
+      const execution = this.persistence.getTeamExecution(executionId);
+      if (execution.teamId !== team.id) throw new Error('Execution does not belong to Task Team');
+      if (!this.executionScheduler.cancelQueued(execution.id))
+        throw new Error('Running execution cancel requires runtime interruption');
+      const canceled = this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+      this.emit(taskId, team.id);
+      return { executionId: canceled.id, state: canceled.state };
     });
   }
 
@@ -544,9 +581,10 @@ export class TeamCoordinator {
     messageSeq: number;
     teamTaskId: string;
     executionId: string;
-    content: string;
     doneCriteria: readonly string[];
   }): Promise<void> {
+    const execution = this.persistence.getTeamExecution(input.executionId);
+    const content = execution.instruction.content;
     const snapshot = this.persistence.getTeamSnapshot(input.teamId);
     const leader = snapshot.agents.find(({ id }) => id === input.leaderId);
     const worker = snapshot.agents.find(({ id }) => id === input.workerId);
@@ -585,7 +623,7 @@ export class TeamCoordinator {
         now: this.isoNow(),
       });
       this.persistence.transitionWorkerState(worker.id, 'busy');
-      this.persistence.setWorkerCurrentActivity(worker.id, input.content, this.isoNow());
+      this.persistence.setWorkerCurrentActivity(worker.id, content, this.isoNow());
       this.emit(input.taskId, input.teamId);
 
       const completion = await this.dispatchWithRetry(
@@ -594,7 +632,7 @@ export class TeamCoordinator {
         worker,
         input.messageId,
         input.messageSeq,
-        input.content,
+        content,
         input.teamTaskId,
       );
       this.persistence.transitionTeamMessageState(input.messageId, 'delivered');

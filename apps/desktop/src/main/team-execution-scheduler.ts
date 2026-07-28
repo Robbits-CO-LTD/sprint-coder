@@ -47,6 +47,13 @@ export class TeamExecutionScheduler {
     this.schedulePump();
   }
 
+  cancelQueued(executionId: string): boolean {
+    const index = this.queued.findIndex((job) => job.executionId === executionId);
+    if (index === -1) return false;
+    this.queued.splice(index, 1);
+    return true;
+  }
+
   snapshot(): TeamExecutionSchedulerSnapshot {
     return {
       activeCount: this.active.size,
