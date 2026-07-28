@@ -86,6 +86,35 @@ describe('defaultSocketPathFactory', () => {
 });
 
 describe('TeamMcpBridge', () => {
+  it('closes accepted sockets during dispose instead of hanging app shutdown', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    expect(socketPath).not.toBeNull();
+    const socket = createConnection(socketPath as string);
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+    const clientClosed = new Promise<string>((resolve) =>
+      socket.once('close', () => resolve('closed')),
+    );
+
+    await expect(
+      Promise.race([
+        bridge.dispose().then(() => 'disposed'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 500)),
+      ]),
+    ).resolves.toBe('disposed');
+    await expect(
+      Promise.race([
+        clientClosed,
+        new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 500)),
+      ]),
+    ).resolves.toBe('closed');
+    expect(socket.destroyed).toBe(true);
+  });
+
   it('closes an unauthenticated connection after a bounded grace period', async () => {
     const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath(), 25);
     bridges.push(bridge);

@@ -1125,7 +1125,19 @@ export class TeamCoordinator {
         terminalReason: control.kind === 'steer' ? 'steered' : 'user_canceled',
       });
       const delivery = this.persistence.getTeamDelivery(input.messageId);
-      if (delivery !== null && ['persisted', 'dispatched', 'timedOut'].includes(delivery.state))
+      if (control.kind === 'steer' && delivery?.state === 'dispatched')
+        // The original instruction reached the Worker and started an attempt. Steering supersedes
+        // that attempt; it is not a delivery failure. Marking it failed made the Canvas announce
+        // 「配信に失敗しました」 even while the revised attempt was running successfully.
+        this.persistence.transitionTeamDelivery({
+          messageId: input.messageId,
+          to: 'acked',
+          now: this.isoNow(),
+        });
+      else if (
+        delivery !== null &&
+        ['persisted', 'dispatched', 'timedOut'].includes(delivery.state)
+      )
         this.persistence.transitionTeamDelivery({
           messageId: input.messageId,
           to: 'failed',
@@ -1484,13 +1496,16 @@ export class TeamCoordinator {
         };
       } catch (error) {
         lastError = error;
+        // A deliberate steer/cancel stops the current Runtime call. That is an execution-control
+        // outcome, not a transport timeout; let handleRequestedInterruption settle delivery with
+        // the correct steer (acked) or cancel (failed) semantics.
+        if (executionId !== undefined && this.executionInterruptions.has(executionId)) break;
         this.persistence.transitionTeamDelivery({
           messageId,
           to: 'timedOut',
           now: this.isoNow(),
           error: error instanceof Error ? error.message : 'worker timeout',
         });
-        if (executionId !== undefined && this.executionInterruptions.has(executionId)) break;
         if (attempt === TEAM_DELIVERY_MAX_ATTEMPTS) break;
       }
     }

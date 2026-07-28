@@ -105,7 +105,10 @@ app.on('before-quit', (event) => {
         persistence?.close();
       } finally {
         shutdownCommitted = true;
-        app.quit();
+        // The original quit event was canceled while async Runtime/MCP cleanup drained. Calling
+        // app.quit() again from that canceled lifecycle can leave a headless Electron main process
+        // alive on macOS. Cleanup is complete here, so exit deterministically.
+        app.exit(0);
       }
     }
   })();

@@ -109,6 +109,7 @@ type Registered = TeamMcpRegistration & { waitCursor: number; modelCatalogQuerie
 
 export class TeamMcpBridge {
   private readonly registrations = new Map<string, Registered>();
+  private readonly sockets = new Set<Socket>();
   private server: Server | null = null;
   private windowsBroker: ChildProcess | null = null;
   private socketPathValue: string | null = null;
@@ -250,6 +251,8 @@ export class TeamMcpBridge {
   }
 
   private handleConnection(socket: Socket, requiredBridgeToken: string | null): void {
+    this.sockets.add(socket);
+    socket.once('close', () => this.sockets.delete(socket));
     let buffer = '';
     let authenticated = false;
     let bridgeAuthenticated = requiredBridgeToken === null;
@@ -376,6 +379,11 @@ export class TeamMcpBridge {
     this.windowsBroker?.kill();
     this.windowsBroker = null;
     if (server === null) return;
+    // net.Server.close waits for every accepted connection. Claude/Codex may keep an authenticated
+    // bridge socket open after a completed turn, so destroy those sockets before waiting or app
+    // quit can hang indefinitely.
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (socketPath !== null && !isWindowsNamedPipe(socketPath)) {
       try {

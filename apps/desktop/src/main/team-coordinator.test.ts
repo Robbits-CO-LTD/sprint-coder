@@ -722,6 +722,12 @@ if (runsWithElectronAbi)
         { ordinal: 2, state: 'completed' },
       ]);
       expect(persistence.getTeamExecution(canceled.executionId).state).toBe('canceled');
+      const messagesByContent = new Map(
+        coordinator.get(task.id)?.messages.map((message) => [message.content, message]) ?? [],
+      );
+      expect(messagesByContent.get('initial-steered')?.deliveryState).toBe('acked');
+      expect(messagesByContent.get('revised-running')?.deliveryState).toBe('acked');
+      expect(messagesByContent.get('initial-canceled')?.deliveryState).toBe('failed');
       persistence.close();
     });
 
