@@ -12,6 +12,7 @@ import {
   providerConnectionSchema,
   publicErrorSchema,
   runtimeSettingsSchema,
+  teamModelResearchSettingsSchema,
   taskRenameInputSchema,
   teamBudgetStatusSchema,
   teamActivitySummarySchema,
@@ -89,6 +90,13 @@ describe('public contracts', () => {
         expectedRevision: -1,
       }),
     ).toThrow();
+  });
+
+  it('validates the global Team model research setting without coercion', () => {
+    expect(teamModelResearchSettingsSchema.parse({ researchBeforeHiring: true })).toEqual({
+      researchBeforeHiring: true,
+    });
+    expect(() => teamModelResearchSettingsSchema.parse({ researchBeforeHiring: 'true' })).toThrow();
   });
 
   it('validates a declarative OpenAI-compatible Provider Profile', () => {

@@ -1,12 +1,14 @@
 import {
   modelCatalogQueryInputSchema,
   providerModelSchema,
+  type ModelCatalogAccessType,
   type ModelCatalogQueryInput,
   type ProviderModel,
 } from '@sprint-coder/contracts';
 
 type IndexedModel = Readonly<{
   model: ProviderModel;
+  accessType: ModelCatalogAccessType;
   searchText: string;
 }>;
 
@@ -24,7 +26,10 @@ export class ModelCatalogService {
     return this.indexBuildCountValue;
   }
 
-  replaceCatalog(models: readonly ProviderModel[]): void {
+  replaceCatalog(
+    models: readonly ProviderModel[],
+    subscriptionConnectionIds: ReadonlySet<string> = new Set(),
+  ): void {
     const unique = new Map<string, ProviderModel>();
     for (const candidate of models) {
       const model = providerModelSchema.parse(candidate);
@@ -35,7 +40,18 @@ export class ModelCatalogService {
         `${right.connectionId}\0${right.modelId}`,
       ),
     );
-    const fingerprint = JSON.stringify(normalized.map(stableCatalogIdentity));
+    const normalizedWithAccess = normalized.map((model) => ({
+      model,
+      accessType: subscriptionConnectionIds.has(model.connectionId)
+        ? ('subscription' as const)
+        : ('api' as const),
+    }));
+    const fingerprint = JSON.stringify(
+      normalizedWithAccess.map(({ model, accessType }) => ({
+        model: stableCatalogIdentity(model),
+        accessType,
+      })),
+    );
     if (fingerprint === this.fingerprint) {
       const refreshed = new Map(
         normalized.map((model) => [`${model.connectionId}\0${model.modelId}`, model]),
@@ -47,9 +63,11 @@ export class ModelCatalogService {
       return;
     }
     this.fingerprint = fingerprint;
-    this.indexed = normalized.map((model) => ({
+    this.indexed = normalizedWithAccess.map(({ model, accessType }) => ({
       model,
-      searchText: `${model.displayName}\0${model.modelId}\0${model.providerId}`.toLocaleLowerCase(),
+      accessType,
+      searchText:
+        `${model.displayName}\0${model.modelId}\0${model.providerId}\0${model.connectionDisplayName ?? ''}`.toLocaleLowerCase(),
     }));
     this.revisionValue += 1;
     this.indexBuildCountValue += 1;
@@ -64,8 +82,9 @@ export class ModelCatalogService {
     const query = modelCatalogQueryInputSchema.parse(input);
     const text = query.text.trim().toLocaleLowerCase();
     const offset = query.cursor === null ? 0 : Number(query.cursor.slice('cursor:'.length));
-    const filtered = this.indexed.filter(({ model, searchText }) => {
+    const filtered = this.indexed.filter(({ model, accessType, searchText }) => {
       if (query.availableOnly && !model.available) return false;
+      if (query.accessTypes.length > 0 && !query.accessTypes.includes(accessType)) return false;
       if (query.connectionIds.length > 0 && !query.connectionIds.includes(model.connectionId))
         return false;
       if (query.providerIds.length > 0 && !query.providerIds.includes(model.providerId))

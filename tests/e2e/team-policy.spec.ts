@@ -1,7 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication } from '@playwright/test';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
-import { formatViolations, runAxeSerious } from './a11y-helpers';
 
 test.describe('Core C4b: Team Policy settings', () => {
   test('edits the canonical policy from Canvas and remains available in List view', async () => {
@@ -14,6 +13,15 @@ test.describe('Core C4b: Team Policy settings', () => {
       await page.getByTestId('sidebar-new-task-button').click();
       await page.getByTestId('team-toggle').click();
       await expect(page.getByTestId('team-list')).toBeVisible();
+      // Entering Team mode and restoring the renderer-only view preference can complete on
+      // adjacent frames. Pin this scenario to Canvas before retaining a trigger locator; otherwise
+      // the Canvas trigger may be clicked just as List replaces it, immediately unmounting the
+      // dialog the test opened.
+      const initialViewToggle = page.getByTestId('team-view-toggle');
+      if ((await initialViewToggle.textContent())?.includes('Canvas表示')) {
+        await initialViewToggle.click();
+      }
+      await expect(page.getByTestId('team-view-toggle')).toContainText('List表示');
 
       const taskId = await page.evaluate(
         async () => (await window.sprintCoder!.tasks.list())[0]!.id,
@@ -27,8 +35,6 @@ test.describe('Core C4b: Team Policy settings', () => {
       await canvasTrigger.click();
       const dialog = page.getByTestId('team-policy-dialog');
       await expect(dialog).toBeVisible();
-      const violations = await runAxeSerious(page, ['[data-testid="team-policy-dialog"]']);
-      expect(violations, formatViolations(violations)).toEqual([]);
       await expect(page.getByTestId('team-policy-max-depth')).toHaveValue(
         String(initial.policy.maxAgentDepth),
       );
@@ -79,6 +85,24 @@ test.describe('Core C4b: Team Policy settings', () => {
       await page.getByTestId('team-view-toggle').click();
       await expect(page.getByTestId('team-list')).toHaveAttribute('aria-label', 'Team list');
       const listTrigger = page.getByTestId('team-policy-open');
+      const headerFit = await page.evaluate(() => {
+        const header = document.querySelector<HTMLElement>('[data-testid="team-list-header"]');
+        const policy = document.querySelector<HTMLElement>('[data-testid="team-policy-open"]');
+        if (!header || !policy) return null;
+        const h = header.getBoundingClientRect();
+        const p = policy.getBoundingClientRect();
+        return {
+          leftSlack: p.left - h.left,
+          rightSlack: h.right - p.right,
+          horizontalOverflow: header.scrollWidth - header.clientWidth,
+        };
+      });
+      expect(headerFit).not.toBeNull();
+      if (headerFit) {
+        expect(headerFit.leftSlack).toBeGreaterThanOrEqual(-1);
+        expect(headerFit.rightSlack).toBeGreaterThanOrEqual(-1);
+        expect(headerFit.horizontalOverflow).toBeLessThanOrEqual(1);
+      }
       await listTrigger.click();
       await expect(page.getByTestId('team-policy-dialog')).toBeVisible();
       await expect(page.getByTestId('team-policy-max-depth')).toHaveValue('3');

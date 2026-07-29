@@ -74,53 +74,26 @@ test.describe('settings dialog', () => {
     await expect(page.getByTestId('settings-dialog')).not.toBeVisible();
   });
 
-  test('changes Runtime, model and effort by keyboard alone, and the change survives a restart', async () => {
+  test('keeps Runtime selection in the Composer instead of duplicating it in Settings', async () => {
     const page: Page = await firstWindow(app!);
     await page.getByTestId('sidebar-settings-button').click();
     const dialog = page.getByTestId('settings-dialog');
     await expect(dialog).toBeVisible();
 
-    // Runtime is a real radio group: selecting Claude here is the same setting the Composer chip
-    // edits, so the chip must follow.
-    const claudeRadio = page.getByTestId('settings-runtime-claude').locator('input');
-    await expect(claudeRadio).toBeEnabled();
-    await claudeRadio.check();
-    await expect(claudeRadio).toBeChecked();
-
-    // Effort is Claude-only; with Claude selected it becomes usable, and the hint stops explaining
-    // why it is not.
-    const effort = page.getByTestId('settings-effort');
-    await expect(effort).toBeEnabled();
-    await effort.selectOption('xhigh');
-    await expect(effort).toHaveValue('xhigh');
-
-    const model = page.getByTestId('settings-model');
-    await expect(model).toBeEnabled();
-    await model.selectOption('sonnet');
-    await expect(model).toHaveValue('sonnet');
+    await expect(page.getByTestId('settings-nav-general')).toHaveCount(0);
+    await expect(page.locator('[data-testid^="settings-runtime-"]')).toHaveCount(0);
+    await expect(page.getByTestId('settings-nav-models')).toBeVisible();
+    await expect(page.getByTestId('settings-model')).toBeVisible();
+    await expect(page.getByTestId('settings-effort')).toBeVisible();
 
     await page.keyboard.press('Escape');
     await expect(dialog).not.toBeVisible();
-
-    // The Composer chips reflect the same settings — one source of truth, not two.
-    await expect(page.getByTestId('runtime-selector')).toHaveText('Claude Code');
-    await expect(page.getByTestId('effort-selector')).toHaveText('effort: X-High');
-    await expect(page.getByTestId('model-selector')).toHaveText('Sonnet 5');
-
-    // Durable: these go through the same persisted settings the chips use.
-    await closeApp(app);
-    app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
-    const restarted: Page = await firstWindow(app);
-    await restarted.getByTestId('sidebar-settings-button').click();
-    await expect(restarted.getByTestId('settings-dialog')).toBeVisible();
-    await expect(restarted.getByTestId('settings-runtime-claude').locator('input')).toBeChecked();
-    await expect(restarted.getByTestId('settings-effort')).toHaveValue('xhigh');
-    await expect(restarted.getByTestId('settings-model')).toHaveValue('sonnet');
+    await expect(page.getByTestId('runtime-selector')).toBeVisible();
   });
 
   test('surfaces CLI detection status, which was previously only a tooltip', async () => {
     const page: Page = await firstWindow(app!);
-    // Dialog is still open from the previous test's restart.
+    await page.getByTestId('sidebar-settings-button').click();
     await expect(page.getByTestId('settings-dialog')).toBeVisible();
 
     for (const kind of ['codex', 'claude']) {
@@ -149,6 +122,75 @@ test.describe('settings dialog', () => {
     await page.getByRole('button', { name: '1件を読み込む' }).click();
     await expect(page.getByText('読み込み済み', { exact: true })).toBeVisible();
 
+    await page.keyboard.press('Escape');
+  });
+
+  test('progressively reveals the add form, keeps optional fields folded, and clears the draft on cancel', async ({}, testInfo) => {
+    const page: Page = await firstWindow(app!);
+    const runtimeErrors: string[] = [];
+    page.on('pageerror', (error) => runtimeErrors.push(`pageerror: ${error.message}`));
+    page.on('console', (message) => {
+      if (message.type() === 'error') runtimeErrors.push(`console: ${message.text()}`);
+    });
+
+    await page.getByTestId('sidebar-settings-button').click();
+    await expect(page.getByTestId('settings-dialog')).toBeVisible();
+    await page.getByTestId('settings-nav-models').click();
+
+    const addToggle = page.getByTestId('settings-provider-add-toggle');
+    await expect(addToggle).toBeVisible();
+    await expect(addToggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByTestId('settings-provider-api-key')).toHaveCount(0);
+
+    await addToggle.click();
+    await expect(addToggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByTestId('settings-provider-kind')).toBeVisible();
+    await expect(page.getByTestId('settings-provider-name')).toBeVisible();
+    const apiKey = page.getByTestId('settings-provider-api-key');
+    await expect(apiKey).toBeVisible();
+    await expect(apiKey).toHaveAttribute('type', 'password');
+
+    await page
+      .getByTestId('settings-provider-name')
+      .fill(`日本語の検証用接続${'長い表示名'.repeat(12)}`);
+    await apiKey.fill('dummy-key-not-submitted-0123456789');
+
+    const reveal = page.getByTestId('settings-provider-api-key-reveal');
+    await reveal.click();
+    await expect(apiKey).toHaveAttribute('type', 'text');
+    await expect(reveal).toHaveAttribute('aria-pressed', 'true');
+    await reveal.click();
+    await expect(apiKey).toHaveAttribute('type', 'password');
+
+    const advanced = page.getByTestId('settings-provider-advanced');
+    await expect(advanced).not.toHaveAttribute('open', '');
+    await advanced.locator('summary').click();
+    await expect(advanced).toHaveAttribute('open', '');
+    await expect(page.getByText('組織ID（任意）', { exact: true })).toBeVisible();
+    await expect(page.getByText('プロジェクトID（任意）', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('settings-provider-org')).toBeVisible();
+    await expect(page.getByTestId('settings-provider-project')).toBeVisible();
+
+    const badges = page.locator('.settings-connection-badge');
+    await expect(badges.first()).toBeVisible();
+    expect(await badges.first().evaluate((element) => element.tagName)).toBe('SPAN');
+
+    await page.screenshot({
+      path: testInfo.outputPath('provider-settings-open.png'),
+      fullPage: true,
+    });
+
+    await page.getByTestId('settings-provider-cancel').click();
+    await expect(page.getByTestId('settings-provider-api-key')).toHaveCount(0);
+    await addToggle.click();
+    await expect(page.getByTestId('settings-provider-name')).toHaveValue('');
+    await expect(page.getByTestId('settings-provider-api-key')).toHaveValue('');
+
+    await page.screenshot({
+      path: testInfo.outputPath('provider-settings-reset.png'),
+      fullPage: true,
+    });
+    expect(runtimeErrors).toEqual([]);
     await page.keyboard.press('Escape');
   });
 });

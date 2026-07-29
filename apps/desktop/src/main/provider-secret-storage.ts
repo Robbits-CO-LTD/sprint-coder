@@ -17,6 +17,13 @@ export interface ProviderSecretCipher {
   decrypt(value: Buffer): string;
 }
 
+export class ProviderSecretStorageUnavailableError extends Error {
+  constructor() {
+    super('OS secret encryption is unavailable');
+    this.name = 'ProviderSecretStorageUnavailableError';
+  }
+}
+
 const REFERENCE_PATTERN =
   /^provider-secret:([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 const MAX_SECRET_BYTES = 64 * 1024;
@@ -28,13 +35,20 @@ export class ProviderSecretStorage {
   ) {}
 
   put(secret: string): string {
-    if (!this.cipher.isAvailable()) throw new Error('OS secret encryption is unavailable');
     const byteLength = Buffer.byteLength(secret);
     if (byteLength < 1 || byteLength > MAX_SECRET_BYTES)
       throw new Error('Provider secret has an invalid size');
+    let encrypted: Buffer;
+    try {
+      // Some OS backends initialize lazily. Let the cipher attempt encryption instead of
+      // rejecting solely from a transient availability probe.
+      encrypted = this.cipher.encrypt(secret);
+    } catch (error) {
+      if (!this.cipher.isAvailable()) throw new ProviderSecretStorageUnavailableError();
+      throw error;
+    }
     mkdirSync(this.rootPath, { recursive: true, mode: 0o700 });
     const reference = `provider-secret:${randomUUID()}`;
-    const encrypted = this.cipher.encrypt(secret);
     const descriptor = openSync(
       this.pathForReference(reference),
       constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
@@ -50,7 +64,6 @@ export class ProviderSecretStorage {
   }
 
   get(reference: string): string {
-    if (!this.cipher.isAvailable()) throw new Error('OS secret encryption is unavailable');
     const descriptor = openSync(
       this.pathForReference(reference),
       constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
@@ -61,7 +74,12 @@ export class ProviderSecretStorage {
         throw new Error('Provider secret blob is invalid');
       const encrypted = readFileSync(descriptor);
       try {
-        return this.cipher.decrypt(encrypted);
+        try {
+          return this.cipher.decrypt(encrypted);
+        } catch (error) {
+          if (!this.cipher.isAvailable()) throw new ProviderSecretStorageUnavailableError();
+          throw error;
+        }
       } finally {
         encrypted.fill(0);
       }

@@ -377,8 +377,9 @@ export function orderedActivities(
 export type TimelineActivityGroups = {
   /** Activities recorded before the first message — never dropped. */
   leading: TeamActivityDisplay[];
-  /** Activities recorded at or after a message, keyed by that message's id. Anything after the
-   * last message lands on the last message, so the tail is never dropped either. */
+  /** Activities keyed by the user message that started their conversational Turn. The renderer
+   * places this bucket before that Turn's assistant answer, even when a trailing lifecycle event
+   * was persisted a moment after the answer itself. */
   byMessageId: Record<string, TeamActivityDisplay[]>;
 };
 
@@ -390,16 +391,19 @@ export const EMPTY_ACTIVITY_GROUPS: TimelineActivityGroups = {
 };
 
 /**
- * Slot each activity into the Chat timeline by `recordedAt`: it belongs after the last message
- * (in render order) that was created no later than it, and before that message's successor.
+ * Slot each activity into the Chat timeline by `recordedAt`: it belongs to the last user message
+ * (in render order) that was created no later than it.
  *
- * Messages keep their own order and their own associated cards — this only says which gap between
- * two messages a history card falls into. Within a gap the activities stay in `seq` order.
+ * A Team lifecycle can persist its final rows just after the assistant answer is stored. Anchoring
+ * to every message made those rows appear below the answer, as if all tool work happened after the
+ * conclusion. User messages are the durable Turn boundary, so anchoring to them keeps live work
+ * between request and answer without inventing a `turnId` that TeamActivitySummary does not carry.
+ * Within a Turn the activities stay in backend `seq` order.
  * With no activities at all the result is the shared empty object, so the timeline renders exactly
  * the DOM it rendered before this feature existed.
  */
 export function groupActivitiesByMessage(
-  messages: readonly Pick<ChatMessage, 'id' | 'createdAt'>[],
+  messages: readonly Pick<ChatMessage, 'id' | 'author' | 'createdAt'>[],
   activities: readonly TeamActivitySummary[] | null | undefined,
 ): TimelineActivityGroups {
   const ordered = orderedActivities(activities);
@@ -411,6 +415,7 @@ export function groupActivitiesByMessage(
   for (const activity of ordered) {
     let hostId: string | null = null;
     for (const message of messages) {
+      if (message.author !== 'user') continue;
       if (compareTimestamps(message.createdAt, activity.recordedAt) <= 0) hostId = message.id;
     }
     const display = describeActivity(activity);

@@ -185,6 +185,47 @@ describe('TeamMcpBridge', () => {
     expect(coordinator.stopWorker).toHaveBeenCalledWith('task-1', 'worker-1');
   });
 
+  it('allows Draft creation only for a turn explicitly bound to skill-creator', async () => {
+    const createSkillDraft = vi.fn(async (input: unknown) => ({
+      id: 'draft-1',
+      input,
+    }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      undefined,
+      createSkillDraft,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const deniedToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-denied', { taskId: 'task-1', token: deniedToken });
+    const denied = await roundTrip(socketPath as string, {
+      token: deniedToken,
+      tool: 'skill_draft_create',
+      args: { kind: 'chat', skillId: 'reviewer', files: [] },
+    });
+    expect(JSON.parse(denied.lines[0] as string)).toMatchObject({ ok: false });
+
+    const allowedToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-allowed', {
+      taskId: 'task-1',
+      token: allowedToken,
+      allowSkillDrafts: true,
+    });
+    const allowed = await roundTrip(socketPath as string, {
+      token: allowedToken,
+      tool: 'skill_draft_create',
+      args: { kind: 'chat', skillId: 'reviewer', files: [{ path: 'SKILL.md', content: 'x' }] },
+    });
+    expect(JSON.parse(allowed.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { id: 'draft-1' },
+    });
+    expect(createSkillDraft).toHaveBeenCalledOnce();
+  });
+
   it('binds model catalog lookup to the registered Task instead of model arguments', async () => {
     const listModelCandidates = vi.fn(async (input: unknown) => ({
       revision: 1,

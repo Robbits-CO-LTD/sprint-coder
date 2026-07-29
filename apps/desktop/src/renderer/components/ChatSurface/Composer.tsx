@@ -1,22 +1,25 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
+import type { SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
 import { useAppStore } from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
-import { ContextBar } from './ContextBar';
-import { ArrowRightLeft, ArrowUp, Paperclip, Plus, Square, Target } from '../icons';
+import { ContextBar, PermissionChip } from './ContextBar';
+import { ArrowUp, Paperclip, Plus, X } from '../icons';
 import { ComposerMenu } from './ComposerMenu';
 import { ModelPickerV2 } from '../ModelPickerV2';
 import { isModelPickerV2Active } from '../../lib/model-picker-parity';
 import { IMAGEGEN_PREFIX } from './imagegen';
 import type { ComposerMenuItem } from './ComposerMenu';
-import { SlashCommandMenu } from './SlashCommandMenu';
+import { SlashCommandMenu, type SlashMenuItem } from './SlashCommandMenu';
 import {
   filterSlashCommands,
+  removeSlashToken,
   SLASH_COMMANDS,
-  slashCommandQuery,
+  slashTokenAtCursor,
   type SlashCommand,
   type SlashCommandId,
 } from './slash-commands';
+import { buildSkillSearchIndex, filterSkillSearchIndex } from './skill-picker';
 // Shared with the settings dialog (issue #5) so the same option can never be named two ways.
 import {
   EFFORT_DESC,
@@ -29,36 +32,12 @@ import {
 } from '../../lib/runtime-labels';
 import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
-const STEER_UNSUPPORTED_HINT =
-  '選択中のruntimeでは実行中の追加指示に対応していません。キュー追加を使ってください';
-
-type SendMode = 'queue' | 'steer' | 'stopAndSend';
-
-const MODE_LABEL: Record<SendMode, string> = {
-  queue: 'キュー',
-  steer: 'Steer',
-  stopAndSend: 'Stop & Send',
-};
-
-const MODE_HINT: Record<SendMode, string> = {
-  queue: '生成完了後にキューへ追加します',
-  steer: '実行中のTurnへ追加指示を送ります（Turnが切り替わると送信し直しが必要です）',
-  stopAndSend: '実行中のTurnを停止し、直ちにこのメッセージで開始します',
-};
-
-const MODE_ICON: Record<SendMode, typeof Plus> = {
-  queue: Plus,
-  steer: ArrowRightLeft,
-  stopAndSend: Square,
-};
-
 export function Composer({ taskId }: { taskId: string }) {
   const draft = useAppStore((s) => s.draftByTask[taskId]) ?? '';
   const setDraft = useAppStore((s) => s.setDraft);
+  const setGoal = useAppStore((s) => s.setGoal);
   const startTurn = useAppStore((s) => s.startTurn);
   const queueMessage = useAppStore((s) => s.queueMessage);
-  const steerMessage = useAppStore((s) => s.steerMessage);
-  const stopAndSend = useAppStore((s) => s.stopAndSend);
   const createTask = useAppStore((s) => s.createTask);
   const selectWorkspace = useAppStore((s) => s.selectWorkspace);
   const toggleTeamView = useAppStore((s) => s.toggleTeamView);
@@ -68,44 +47,54 @@ export function Composer({ taskId }: { taskId: string }) {
   const toast = useAppStore((s) => s.toast);
   const dismissToast = useAppStore((s) => s.dismissToast);
   const runtime = useAppStore((s) => s.runtime);
+  const currentTeam = useAppStore((s) => s.teamByTask[taskId]);
+  const skillCatalog = useAppStore((s) => s.skillCatalog);
+  const skillCatalogRevision = useAppStore((s) => s.skillCatalogRevision);
+  const selectedSkills = useAppStore((s) => s.skillSelectionByTask[taskId]) ?? [];
+  const loadSkills = useAppStore((s) => s.loadSkills);
+  const setSkillSelection = useAppStore((s) => s.setSkillSelection);
   // The V2 Model Picker replaces the legacy chip only once Main has answered `true` for *this*
   // Task (UI slice U1b). `enabled === null` (unresolved, in flight, or a backend without the
   // `models` API) and a stale answer for the previous Task both keep the legacy chip, so the flag
   // being off — or the query never arriving — is indistinguishable from today's UI.
   const modelPickerV2 = useAppStore((s) => isModelPickerV2Active(s.modelPicker, taskId));
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const [sendMode, setSendMode] = useState<SendMode>('queue');
-  const [wasTurnActive, setWasTurnActive] = useState(false);
-  // Goal editing moved here from the header (issue #13): TaskHeader's chip is now a read-only
-  // display of the current value, and the plus menu is the single entry point for changing it.
-  const [goalEditing, setGoalEditing] = useState(false);
+  // `/goal` changes the meaning of this same Composer for one send. It deliberately does not open
+  // a second input: the armed chip and placeholder are the only extra UI needed to make the mode
+  // visible and cancelable.
+  const [goalRequested, setGoalRequested] = useState(false);
   // Armed by the plus menu, consumed by the next send. One-shot rather than a mode, so a user who
   // opens the menu and changes their mind is not stuck generating images.
   const [imageRequested, setImageRequested] = useState(false);
   const [slashSelection, setSlashSelection] = useState(0);
   const [slashDismissedDraft, setSlashDismissedDraft] = useState<string | null>(null);
+  const [composerCursor, setComposerCursor] = useState(draft.length);
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
   const canQueue = typeof window.sprintCoder?.turns?.queue === 'function';
-  const canSteer = typeof window.sprintCoder?.turns?.steer === 'function';
-  const canStopAndSend = typeof window.sprintCoder?.turns?.stopAndSend === 'function';
-  const hasAnyActiveModeCapability = canQueue || canSteer || canStopAndSend;
-  // Codex and Claude runtimes are headless single-shot invocations and do not support mid-turn
-  // steering (STEER_UNSUPPORTED) — the Steer segment stays visible but disabled so the user
-  // understands why, per FR-SET-03.
-  const steerBlockedByRuntime = runtime.kind === 'codex' || runtime.kind === 'claude';
-  const slashQuery = slashCommandQuery(draft);
+  const slashMatch = slashTokenAtCursor(draft, composerCursor);
+  const slashQuery = slashMatch?.query ?? null;
+  const skillIndex = useMemo(
+    () => buildSkillSearchIndex(skillCatalog),
+    // Main returns a stable revision. Avoid rebuilding the index when unrelated store state changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [skillCatalogRevision],
+  );
   const slashCommands = slashQuery === null ? [] : filterSlashCommands(SLASH_COMMANDS, slashQuery);
-  const slashOpen = slashQuery !== null && draft !== slashDismissedDraft;
-  const activeSlashSelection = Math.min(slashSelection, Math.max(0, slashCommands.length - 1));
+  const slashSkills = slashQuery === null ? [] : filterSkillSearchIndex(skillIndex, slashQuery);
+  const selectedSkillKeys = new Set(
+    selectedSkills.map(({ ref }) => `${ref.source}:${ref.skillId}:${ref.digest}`),
+  );
+  const chatSkillCount = selectedSkills.filter(({ kind }) => kind === 'chat').length;
+  const teamSkillCount = selectedSkills.filter(({ kind }) => kind === 'team').length;
   const goalSupported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
   const workspaceSupported =
     typeof window !== 'undefined' && window.sprintCoder?.workspace !== undefined;
   const teamSupported = typeof window !== 'undefined' && window.sprintCoder?.teams !== undefined;
   const slashUnavailable: Partial<Record<SlashCommandId, string>> = {
-    ...(!goalSupported ? { goal: 'Goal編集に対応していません' } : {}),
+    ...(!goalSupported ? { goal: 'Goal設定に対応していません' } : {}),
     ...(!workspaceSupported ? { workspace: 'Workspace選択に対応していません' } : {}),
     ...(!teamSupported ? { team: 'Teamビューに対応していません' } : {}),
     ...(runtime.kind === 'codex' && runtime.codexAvailable
@@ -117,17 +106,50 @@ export function Composer({ taskId }: { taskId: string }) {
               : 'Codex Runtime選択時に画像生成を使えます',
         }),
   };
-
-  // Reset the mode selector back to the default once the turn finishes (render-time adjustment
-  // instead of an effect, per react-hooks/set-state-in-effect).
-  if (turnActive !== wasTurnActive) {
-    setWasTurnActive(turnActive);
-    if (!turnActive) setSendMode('queue');
-  }
-  // Likewise, fall back off Steer if the runtime switches to Codex or Claude while it's selected.
-  if (sendMode === 'steer' && steerBlockedByRuntime) {
-    setSendMode('queue');
-  }
+  const slashItems: SlashMenuItem[] = [
+    ...slashCommands.map((command) => ({
+      key: `command:${command.id}`,
+      group: 'コマンド' as const,
+      command: command.command,
+      label: command.label,
+      description: command.description,
+      ...(slashUnavailable[command.id] === undefined
+        ? {}
+        : { unavailable: slashUnavailable[command.id] }),
+    })),
+    ...slashSkills.map((skill) => {
+      const skillKey = `${skill.ref.source}:${skill.ref.skillId}:${skill.ref.digest}`;
+      const unavailable = !skill.enabled
+        ? 'このSkillは無効です'
+        : selectedSkillKeys.has(skillKey)
+          ? 'すでに選択されています'
+          : skill.kind === 'chat' && chatSkillCount >= 5
+            ? 'Chat Skillは最大5件です'
+            : skill.kind === 'team' && teamSkillCount >= 1
+              ? 'Team Skillは最大1件です'
+              : skill.kind === 'team' &&
+                  currentTeam !== null &&
+                  currentTeam !== undefined &&
+                  currentTeam.workers.some(({ kind }) => kind === 'worker')
+                ? 'このTaskではTeamが開始済みです。別のTeam Skillは新規Taskで使用してください'
+                : undefined;
+      return {
+        key: `skill:${skillKey}`,
+        group:
+          skill.ref.source === 'builtin'
+            ? ('Built-in Skills' as const)
+            : skill.kind === 'team'
+              ? ('Team Skills' as const)
+              : ('Chat Skills' as const),
+        command: `/${skill.ref.skillId}`,
+        label: skill.name,
+        description: skill.description,
+        ...(unavailable === undefined ? {} : { unavailable }),
+      };
+    }),
+  ];
+  const slashOpen = slashQuery !== null && draft !== slashDismissedDraft;
+  const activeSlashSelection = Math.min(slashSelection, Math.max(0, slashItems.length - 1));
 
   useEffect(() => {
     const node = textareaRef.current;
@@ -135,6 +157,10 @@ export function Composer({ taskId }: { taskId: string }) {
     node.style.height = 'auto';
     node.style.height = `${Math.min(node.scrollHeight, 140)}px`;
   }, [draft]);
+
+  useEffect(() => {
+    void loadSkills();
+  }, [loadSkills]);
 
   // Focus restoration after send (a11y fix, Phase 7 / NFR-A11Y-02): the textarea is
   // `disabled={sending}` for the brief window between `startTurn` firing and the `turn.accepted`
@@ -151,17 +177,17 @@ export function Composer({ taskId }: { taskId: string }) {
     wasSendingRef.current = sending;
   }, [sending]);
 
-  const activeModeCapable =
-    sendMode === 'queue'
-      ? canQueue
-      : sendMode === 'steer'
-        ? canSteer && !steerBlockedByRuntime
-        : canStopAndSend;
-  const sendDisabled = !draft.trim() || sending || (turnActive && !activeModeCapable);
+  const sendDisabled = !draft.trim() || sending || (turnActive && !goalRequested && !canQueue);
 
   function handleSend() {
     const raw = draft.trim();
     if (!raw || sendDisabled) return;
+    if (goalRequested) {
+      setGoalRequested(false);
+      setDraft(taskId, '');
+      void setGoal(taskId, raw);
+      return;
+    }
     // The prefix goes into the stored message rather than being injected invisibly in the adapter.
     // The issue names this as an open question; traceability wins. An image appearing with no
     // explanation in the history is worse than a visible directive, and a hidden one would make
@@ -172,24 +198,32 @@ export function Composer({ taskId }: { taskId: string }) {
       void startTurn(taskId, text);
       return;
     }
-    if (sendMode === 'steer' && canSteer && !steerBlockedByRuntime && turn) {
-      void steerMessage(taskId, text, turn.turnId);
-    } else if (sendMode === 'stopAndSend' && canStopAndSend) {
-      void stopAndSend(taskId, text);
-    } else if (canQueue) {
-      void queueMessage(taskId, text);
-    }
+    if (canQueue) void queueMessage(taskId, text);
+  }
+
+  function removeActiveSlashToken(restoreTextareaFocus = true): void {
+    if (slashMatch === null) return;
+    const nextDraft = removeSlashToken(draft, slashMatch);
+    const nextCursor = slashMatch.start;
+    setDraft(taskId, nextDraft);
+    setComposerCursor(nextCursor);
+    if (!restoreTextareaFocus) return;
+    requestAnimationFrame(() => {
+      textareaRef.current?.setSelectionRange(nextCursor, nextCursor);
+      textareaRef.current?.focus({ preventScroll: true });
+    });
   }
 
   function runSlashCommand(command: SlashCommand) {
-    setDraft(taskId, '');
+    removeActiveSlashToken();
     setSlashDismissedDraft(null);
     switch (command.id) {
       case 'new':
         void createTask();
         break;
       case 'goal':
-        setGoalEditing(true);
+        setImageRequested(false);
+        setGoalRequested(true);
         break;
       case 'team':
         void toggleTeamView(taskId);
@@ -198,31 +232,52 @@ export function Composer({ taskId }: { taskId: string }) {
         void selectWorkspace(taskId);
         break;
       case 'image':
+        setGoalRequested(false);
         setImageRequested(true);
         break;
     }
   }
 
+  function selectSkill(skill: SkillCatalogItem): void {
+    const selection: TurnSkillSelection = { kind: skill.kind, ref: skill.ref };
+    removeActiveSlashToken();
+    setSlashDismissedDraft(null);
+    void setSkillSelection(taskId, [...selectedSkills, selection]);
+  }
+
+  function selectSlashItem(item: SlashMenuItem): void {
+    if (item.key.startsWith('command:')) {
+      const command = SLASH_COMMANDS.find(({ id }) => `command:${id}` === item.key);
+      if (command) runSlashCommand(command);
+      return;
+    }
+    const skill = slashSkills.find(
+      ({ ref }) => `skill:${ref.source}:${ref.skillId}:${ref.digest}` === item.key,
+    );
+    if (skill) selectSkill(skill);
+  }
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.nativeEvent.isComposing) return;
     if (slashOpen) {
       if (e.key === 'Escape') {
         e.preventDefault();
         setSlashDismissedDraft(draft);
         return;
       }
-      if (slashCommands.length > 0) {
+      if (slashItems.length > 0) {
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
           e.preventDefault();
           const direction = e.key === 'ArrowDown' ? 1 : -1;
           setSlashSelection(
-            (activeSlashSelection + direction + slashCommands.length) % slashCommands.length,
+            (activeSlashSelection + direction + slashItems.length) % slashItems.length,
           );
           return;
         }
         if (e.key === 'Enter' || e.key === 'Tab') {
           e.preventDefault();
-          const selected = slashCommands[activeSlashSelection];
-          if (selected && slashUnavailable[selected.id] === undefined) runSlashCommand(selected);
+          const selected = slashItems[activeSlashSelection];
+          if (selected && selected.unavailable === undefined) selectSlashItem(selected);
           return;
         }
       }
@@ -230,6 +285,9 @@ export function Composer({ taskId }: { taskId: string }) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    } else if (e.key === 'Escape' && goalRequested) {
+      e.preventDefault();
+      setGoalRequested(false);
     }
   }
 
@@ -237,17 +295,48 @@ export function Composer({ taskId }: { taskId: string }) {
     <div className="composer-zone">
       <div className="composer-inner">
         <ContextBar taskId={taskId} />
-        {goalEditing && <GoalEditor taskId={taskId} onDone={() => setGoalEditing(false)} />}
         <QueuedList items={queued} />
         <div className="composer">
           {slashOpen && (
             <SlashCommandMenu
-              commands={slashCommands}
+              items={slashItems}
               selectedIndex={activeSlashSelection}
-              unavailable={slashUnavailable}
               onHover={setSlashSelection}
-              onSelect={runSlashCommand}
+              onSelect={selectSlashItem}
             />
+          )}
+          {selectedSkills.length > 0 && (
+            <div className="composer-skill-chips" aria-label="この送信で使用するSkill">
+              {selectedSkills.map((selection) => {
+                const item = skillCatalog.find(
+                  ({ ref }) =>
+                    ref.source === selection.ref.source &&
+                    ref.skillId === selection.ref.skillId &&
+                    ref.digest === selection.ref.digest,
+                );
+                const key = `${selection.ref.source}:${selection.ref.skillId}:${selection.ref.digest}`;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`composer-skill-chip ${selection.kind}`}
+                    title={`${item?.name ?? selection.ref.skillId}をこの送信から外す`}
+                    onClick={() =>
+                      void setSkillSelection(
+                        taskId,
+                        selectedSkills.filter(
+                          ({ ref }) => `${ref.source}:${ref.skillId}:${ref.digest}` !== key,
+                        ),
+                      )
+                    }
+                  >
+                    <span>{selection.kind === 'team' ? 'Team' : 'Skill'}</span>
+                    {item?.name ?? selection.ref.skillId}
+                    <X size={12} />
+                  </button>
+                );
+              })}
+            </div>
           )}
           <textarea
             ref={textareaRef}
@@ -255,40 +344,53 @@ export function Composer({ taskId }: { taskId: string }) {
             data-testid="composer-textarea"
             rows={1}
             placeholder={
-              turnActive
-                ? 'Turn実行中です。既定ではキューに追加されます (Enter)'
-                : 'メッセージを送信 (Enterで送信 / Shift+Enterで改行)'
+              goalRequested
+                ? 'Goalを入力 (Enterで保存 / Escでキャンセル)'
+                : turnActive
+                  ? 'Turn実行中です。既定ではキューに追加されます (Enter)'
+                  : 'メッセージを送信 (Enterで送信 / Shift+Enterで改行)'
             }
             value={draft}
             disabled={sending}
             onChange={(e) => {
               const nextDraft = e.target.value;
-              if (slashCommandQuery(nextDraft) !== slashQuery) setSlashSelection(0);
+              const nextCursor = e.target.selectionStart;
+              if (slashTokenAtCursor(nextDraft, nextCursor)?.query !== slashQuery)
+                setSlashSelection(0);
+              setComposerCursor(nextCursor);
               setDraft(taskId, nextDraft);
             }}
+            onClick={(event) => setComposerCursor(event.currentTarget.selectionStart)}
+            onKeyUp={(event) => setComposerCursor(event.currentTarget.selectionStart)}
             onKeyDown={handleKeyDown}
             aria-label="メッセージ入力"
             aria-autocomplete="list"
             aria-controls={slashOpen ? 'composer-slash-commands' : undefined}
             aria-activedescendant={
-              slashOpen && slashCommands[activeSlashSelection]
-                ? `slash-command-${slashCommands[activeSlashSelection].id}`
+              slashOpen && slashItems[activeSlashSelection]
+                ? `slash-item-${slashItems[activeSlashSelection].key}`
                 : undefined
             }
           />
           <div className="composer-row">
-            <RuntimeChip />
-            {/* Keyed by Task: the picker's local state (the open popup, the typed search, the
-                loaded page window, the display name of the row just chosen) all belong to one
-                Task, so switching Tasks remounts it rather than adjusting that state during
-                render. */}
-            {modelPickerV2 ? <ModelPickerV2 key={taskId} taskId={taskId} /> : <ModelChip />}
-            <EffortChip />
             <PlusMenu
-              taskId={taskId}
-              onSetGoal={() => setGoalEditing(true)}
-              onRequestImage={() => setImageRequested(true)}
+              onRequestImage={() => {
+                setGoalRequested(false);
+                setImageRequested(true);
+              }}
             />
+            <PermissionChip taskId={taskId} />
+            {goalRequested && (
+              <button
+                type="button"
+                className="cmp-chip goal-armed"
+                data-testid="composer-goal-armed"
+                title="次の送信内容をGoalとして保存します。クリックで取り消し"
+                onClick={() => setGoalRequested(false)}
+              >
+                Goal ×
+              </button>
+            )}
             {imageRequested && (
               <button
                 type="button"
@@ -300,50 +402,42 @@ export function Composer({ taskId }: { taskId: string }) {
                 画像生成 ×
               </button>
             )}
-            {turnActive && hasAnyActiveModeCapability && (
-              <div className="send-mode-group" role="group" aria-label="実行中の送信方法">
-                {(['queue', 'steer', 'stopAndSend'] as SendMode[])
-                  .filter((mode) =>
-                    mode === 'queue' ? canQueue : mode === 'steer' ? canSteer : canStopAndSend,
-                  )
-                  .map((mode) => {
-                    const blocked = mode === 'steer' && steerBlockedByRuntime;
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        className={`send-mode-btn${sendMode === mode ? ' active' : ''}`}
-                        onClick={() => {
-                          if (!blocked) setSendMode(mode);
-                        }}
-                        disabled={blocked}
-                        aria-disabled={blocked || undefined}
-                        title={blocked ? STEER_UNSUPPORTED_HINT : MODE_HINT[mode]}
-                        aria-pressed={sendMode === mode}
-                      >
-                        {MODE_LABEL[mode]}
-                      </button>
-                    );
-                  })}
-              </div>
-            )}
+            <div className="composer-run-controls" data-testid="composer-run-controls">
+              {/* One AI control, not two: under V2 the picker names a connection *and* a model in a
+                  single choice, so a separate Runtime chip would be a second, coarser control over
+                  the same decision — and one the picker deliberately cannot read. With the flag
+                  off the pair is exactly what it was.
+
+                  The picker is keyed by Task: its local state (the open popup, the typed search,
+                  the loaded page window, the display name of the row just chosen) all belongs to
+                  one Task, so switching Tasks remounts it rather than adjusting that state during
+                  render. */}
+              {modelPickerV2 ? (
+                <ModelPickerV2 key={taskId} taskId={taskId} />
+              ) : (
+                <>
+                  <RuntimeChip />
+                  <ModelChip />
+                </>
+              )}
+              <EffortChip />
+            </div>
             <button
               type="button"
               className="send-btn"
               data-testid="composer-send-button"
               disabled={sendDisabled}
               onClick={handleSend}
-              aria-label={turnActive ? `${MODE_LABEL[sendMode]}で送信` : '送信'}
-              title={turnActive ? MODE_HINT[sendMode] : '送信'}
+              aria-label={goalRequested ? 'Goalを保存' : turnActive ? 'キューに追加' : '送信'}
+              title={
+                goalRequested
+                  ? 'Goalを保存'
+                  : turnActive
+                    ? '現在の実行が終わったら送信します'
+                    : '送信'
+              }
             >
-              {turnActive ? (
-                (() => {
-                  const ModeIcon = MODE_ICON[sendMode];
-                  return <ModeIcon size={15} />;
-                })()
-              ) : (
-                <ArrowUp size={15} />
-              )}
+              <ArrowUp size={15} />
             </button>
           </div>
         </div>
@@ -539,6 +633,20 @@ function effortLabel(id: string): string {
   );
 }
 
+/** Compact Japanese labels keep Model + Effort readable as one control cluster in the Composer. */
+function compactEffortLabel(id: string): string {
+  const labels: Record<string, string> = {
+    low: '低',
+    medium: '中程度',
+    high: '高',
+    xhigh: '非常に高',
+    max: '最大',
+    ultra: 'Ultra',
+    ultracode: 'Ultracode',
+  };
+  return labels[id] ?? effortLabel(id);
+}
+
 /**
  * The levels offered for the active Runtime, and why the chip is disabled when it is.
  *
@@ -658,7 +766,7 @@ function EffortChip() {
         onClick={() => setOpen((value) => !value)}
         title={enabled ? 'Effortを選択' : (disabledReason ?? 'Effortを変更できません')}
       >
-        {`effort: ${selected === '' ? '—' : effortLabel(selected)}`}
+        {selected === '' ? '—' : compactEffortLabel(selected)}
       </button>
       {open && (
         <div className="runtime-menu effort-menu" role="menu" aria-label="Effort選択">
@@ -689,30 +797,10 @@ function EffortChip() {
 // Items the app cannot honour yet are shown and announced unavailable with the reason, matching how
 // the Runtime/Effort chips already treat an unusable option — hiding them would leave the user
 // wondering whether the feature exists at all.
-function PlusMenu({
-  taskId,
-  onSetGoal,
-  onRequestImage,
-}: {
-  taskId: string;
-  onSetGoal: () => void;
-  onRequestImage: () => void;
-}) {
-  const goal = useAppStore((s) => s.tasks.find((t) => t.id === taskId)?.goal ?? null);
+function PlusMenu({ onRequestImage }: { onRequestImage: () => void }) {
   const runtime = useAppStore((s) => s.runtime);
-  const goalSupported =
-    typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
 
   const items: ComposerMenuItem[] = [
-    {
-      id: 'goal',
-      label: 'ゴールを設定',
-      description: goal === null || goal === '' ? '未設定' : goal,
-      icon: <Target size={14} />,
-      ...(goalSupported
-        ? { onSelect: onSetGoal }
-        : { unavailableReason: 'Goal編集に対応していません' }),
-    },
     {
       id: 'attach',
       label: 'ファイルを添付',
@@ -747,53 +835,6 @@ function PlusMenu({
       menuLabel="Composerの操作"
       triggerIcon={<Plus size={15} />}
     />
-  );
-}
-
-// Inline Goal editor, opened from the plus menu. Mirrors the interaction the header chip used to
-// own (Enter commits, Escape cancels, blur commits) so the muscle memory carries over.
-function GoalEditor({ taskId, onDone }: { taskId: string; onDone: () => void }) {
-  const goal = useAppStore((s) => s.tasks.find((t) => t.id === taskId)?.goal ?? '');
-  const setGoal = useAppStore((s) => s.setGoal);
-  const [draft, setDraft] = useState(goal);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
-
-  function commit() {
-    const trimmed = draft.trim();
-    if (trimmed !== goal) void setGoal(taskId, trimmed);
-    onDone();
-  }
-
-  return (
-    <div className="goal-editor">
-      <label className="goal-editor-label" htmlFor={`goal-input-${taskId}`}>
-        <Target size={13} /> Goal
-      </label>
-      <input
-        ref={inputRef}
-        id={`goal-input-${taskId}`}
-        className="goal-input"
-        data-testid="composer-goal-input"
-        value={draft}
-        placeholder="このTaskのゴールを入力"
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            commit();
-          } else if (e.key === 'Escape') {
-            e.preventDefault();
-            onDone();
-          }
-        }}
-      />
-    </div>
   );
 }
 

@@ -9,3 +9,7 @@ export function multiProviderModelPickerV2Enabled(
 ): boolean {
   return env['SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2'] !== '0';
 }
+
+export function settingsWorkspaceV2Enabled(env: FeatureFlagEnvironment = process.env): boolean {
+  return env['SPRINT_CODER_SETTINGS_WORKSPACE_V2'] !== '0';
+}

@@ -121,4 +121,96 @@ describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
     await service.remove('claude', 'writer');
     expect(await service.scan()).toMatchObject({ importedCount: 0, installed: [] });
   });
+
+  it('returns a catalog and resolves only its pinned enabled revision', async () => {
+    const root = await home();
+    await skill(root, 'agents', 'reviewer');
+    const service = new SkillSettingsService({ homePath: root });
+    const preview = await service.preview(7, 'agents', 'reviewer');
+    await service.import(7, preview.previewId);
+
+    const catalog = await service.listCatalog();
+    expect(catalog.revision).toMatch(/^[a-f0-9]{64}$/);
+    const item = catalog.items[0]!;
+    expect(item).toMatchObject({
+      kind: 'chat',
+      name: 'reviewer',
+      ref: { source: 'agents', skillId: 'reviewer' },
+    });
+    const [resolved] = await service.resolveSelections([{ kind: item.kind, ref: item.ref }]);
+    expect(resolved?.content).toContain('reviewer description');
+    expect(resolved?.packagePath).toContain(item.ref.digest);
+
+    await service.setEnabled('agents', 'reviewer', false);
+    await expect(
+      service.resolveSelections([{ kind: item.kind, ref: item.ref }]),
+    ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+  });
+
+  it('keeps an AI-produced Skill as a Draft until an exact digest is confirmed for install', async () => {
+    const root = await home();
+    const service = new SkillSettingsService({ homePath: root });
+    const draft = await service.createDraft({
+      kind: 'chat',
+      skillId: 'review-helper',
+      files: [
+        {
+          path: 'SKILL.md',
+          content:
+            '---\nname: Review Helper\ndescription: Review code safely\n---\n\n# Review\n\nInspect the requested files.',
+        },
+        {
+          path: 'agents/openai.yaml',
+          content: 'display_name: Review Helper\n',
+        },
+      ],
+    });
+
+    const reopened = new SkillSettingsService({ homePath: root });
+    expect(await reopened.listDrafts()).toEqual([draft]);
+    expect((await service.listCatalog()).items).toEqual([]);
+    await expect(service.installDraft(draft.id, '0'.repeat(64))).rejects.toMatchObject({
+      code: 'SOURCE_CHANGED',
+    });
+
+    const installed = await reopened.installDraft(draft.id, draft.digest);
+    expect(installed).toMatchObject({
+      kind: 'chat',
+      ref: { source: 'created', skillId: 'review-helper', digest: draft.digest },
+    });
+    expect(await reopened.listDrafts()).toEqual([]);
+    expect((await reopened.listCatalog()).items[0]).toMatchObject({
+      ref: { source: 'created', skillId: 'review-helper' },
+    });
+  });
+
+  it('rejects credentials and a Team Draft without a valid Blueprint', async () => {
+    const root = await home();
+    const service = new SkillSettingsService({ homePath: root });
+    await expect(
+      service.createDraft({
+        kind: 'chat',
+        skillId: 'unsafe',
+        files: [
+          {
+            path: 'SKILL.md',
+            content:
+              '---\nname: Unsafe\ndescription: Unsafe draft\n---\nAuthorization: Bearer sprint-secret-token-value',
+          },
+        ],
+      }),
+    ).rejects.toThrow();
+    await expect(
+      service.createDraft({
+        kind: 'team',
+        skillId: 'missing-blueprint',
+        files: [
+          {
+            path: 'SKILL.md',
+            content: '---\nname: Team\ndescription: Team draft\n---\n',
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+  });
 });

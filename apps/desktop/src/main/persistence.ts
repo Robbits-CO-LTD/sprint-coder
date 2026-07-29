@@ -11,6 +11,9 @@ import {
   normalizedProviderUsageSchema,
   providerConnectionSchema,
   taskSummarySchema,
+  teamBlueprintSchema,
+  turnSkillSelectionsSchema,
+  turnSkillSelectionSchema,
   turnEventSchema,
   turnSnapshotSchema,
   workerReportSchema,
@@ -31,6 +34,7 @@ import {
   type ProviderRuntimeKind,
   type QueuedInput,
   type RuntimeKind,
+  type SkillDraft,
   type DatabaseRecovery,
   type FileChange,
   type FileChangeRecord,
@@ -38,9 +42,11 @@ import {
   generatedImageSchema,
   type TaskSummary,
   type TeamBudgetStatus,
+  type TeamBlueprint,
   type TeamUsageTotals,
   type TurnEvent,
   type TurnSnapshot,
+  type TurnSkillSelection,
   type TurnStage,
 } from '@sprint-coder/contracts';
 import {
@@ -115,6 +121,7 @@ import {
 } from '@sprint-coder/domain';
 import {
   ContextLedger,
+  aggregateContextUsage,
   defaultContextUsage,
   estimateTokens,
   type ContextFragment,
@@ -353,6 +360,7 @@ type AgentRow = {
   depth: number;
   can_delegate: number;
   manager_policy_json: string | null;
+  blueprint_role_key: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -560,6 +568,18 @@ type TurnRow = {
   created_at: string;
 };
 type QueueRow = { ordinal: number; payload_json: string };
+type SkillBindingIdentityRow = {
+  source: TurnSkillSelection['ref']['source'];
+  skill_id: string;
+  digest: string;
+  kind: TurnSkillSelection['kind'];
+};
+type TurnSkillBindingRow = SkillBindingIdentityRow & {
+  name: string;
+  description: string;
+  content: string;
+  package_path: string;
+};
 type OperationRow = { request_hash: string; state: string; result_json: string | null };
 type IntelligenceStepRow = {
   id: string;
@@ -2244,6 +2264,57 @@ const migrations = [
       ALTER TABLE team_attempts ADD COLUMN resolution_json TEXT;
     `,
   },
+  {
+    version: 49,
+    checksum: 'skills-v2-v49-turn-draft-bindings',
+    sql: `
+      CREATE TABLE task_draft_skill_bindings (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 6),
+        source TEXT NOT NULL CHECK (source IN ('builtin', 'created', 'agents', 'claude')),
+        skill_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('chat', 'team')),
+        PRIMARY KEY(task_id, ordinal),
+        UNIQUE(task_id, source, skill_id, digest)
+      );
+
+      CREATE TABLE turn_skill_bindings (
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 6),
+        source TEXT NOT NULL CHECK (source IN ('builtin', 'created', 'agents', 'claude')),
+        skill_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('chat', 'team')),
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        content TEXT NOT NULL,
+        package_path TEXT NOT NULL,
+        PRIMARY KEY(turn_id, ordinal),
+        UNIQUE(turn_id, source, skill_id, digest)
+      );
+      CREATE INDEX turn_skill_bindings_turn_idx
+        ON turn_skill_bindings(turn_id, ordinal);
+    `,
+  },
+  {
+    version: 50,
+    checksum: 'team-blueprint-v50-pinned-binding',
+    sql: `
+      ALTER TABLE agents ADD COLUMN blueprint_role_key TEXT;
+
+      CREATE TABLE team_blueprint_bindings (
+        team_id TEXT PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
+        source TEXT NOT NULL CHECK (source IN ('builtin', 'created', 'agents', 'claude')),
+        skill_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        name TEXT NOT NULL,
+        package_path TEXT NOT NULL,
+        blueprint_json TEXT NOT NULL,
+        bound_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2379,12 +2450,20 @@ export type StartedTurn = {
   runtimeKind: RuntimeKind;
   model: string;
   modelSelection: ModelSelection;
+  skills: PersistedTurnSkill[];
   event: TurnEvent;
   /** Present only when this Turn's message triggered automatic naming (issue #4), so the caller
    * can push the new title to the renderer without a dedicated event. */
   renamedTask?: TaskSummary;
 };
 export type QueueTransition = { started: StartedTurn; queueEvent: TurnEvent } | null;
+export type PersistedTurnSkill = Readonly<{
+  selection: TurnSkillSelection;
+  name: string;
+  description: string;
+  content: string;
+  packagePath: string;
+}>;
 export type BackgroundActivityRecord = Readonly<{
   id: string;
   taskId: string;
@@ -2460,8 +2539,17 @@ export type AgentRecord = Readonly<{
   depth: number;
   canDelegate: boolean;
   managerPolicy: ManagerPolicy | null;
+  blueprintRoleKey: string | null;
   createdAt: string;
   updatedAt: string;
+}>;
+export type TeamBlueprintBindingRecord = Readonly<{
+  teamId: string;
+  selection: TurnSkillSelection;
+  name: string;
+  packagePath: string;
+  blueprint: TeamBlueprint;
+  boundAt: string;
 }>;
 export type TurnModelIdentity = Readonly<{
   selection: ModelSelection;
@@ -2632,6 +2720,14 @@ export interface PersistenceClient {
   getTeamSnapshot(teamId: string): TeamSnapshot;
   transitionTeamState(teamId: string, to: TeamState): TeamRecord;
   updateTeamPolicy(teamId: string, policy: TeamPolicy, expectedRevision: number): TeamRecord;
+  getTeamBlueprint(teamId: string): TeamBlueprintBindingRecord | null;
+  bindTeamBlueprint(input: {
+    teamId: string;
+    selection: TurnSkillSelection;
+    name: string;
+    packagePath: string;
+    blueprint: TeamBlueprint;
+  }): TeamBlueprintBindingRecord;
   registerTeamWorker(input: {
     teamId: string;
     role: string;
@@ -2645,6 +2741,7 @@ export interface PersistenceClient {
     parentAgentId?: string;
     canDelegate?: boolean;
     managerPolicy?: ManagerPolicy | null;
+    blueprintRoleKey?: string;
   }): AgentRecord;
   transitionWorkerState(agentId: string, to: WorkerState): AgentRecord;
   createTeamExecution(input: {
@@ -2795,6 +2892,8 @@ export interface PersistenceClient {
   setGoal(taskId: string, goal: string): TaskSummary;
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
+  getDraftSkillSelections(taskId: string): TurnSkillSelection[];
+  setDraftSkillSelections(taskId: string, skills: readonly TurnSkillSelection[]): void;
   getCanvasView(taskId: string): CanvasViewRecord | null;
   saveCanvasView(input: {
     taskId: string;
@@ -2837,6 +2936,10 @@ export interface PersistenceClient {
   setEffort(effort: ClaudeEffort): void;
   getCodexEffort(): string;
   setCodexEffort(effort: string): void;
+  getTeamModelResearchBeforeHiring(): boolean;
+  setTeamModelResearchBeforeHiring(enabled: boolean): void;
+  getDefaultTeamPolicy(): TeamPolicy;
+  setDefaultTeamPolicy(policy: TeamPolicy): void;
   getPermissionPolicy(taskId: string): PermissionPolicyRecord;
   setAccessPreset(
     taskId: string,
@@ -3051,7 +3154,9 @@ export interface PersistenceClient {
   ): NativeMutationIntentSnapshot;
   listRecoverableNativeMutationIntents(): readonly NativeMutationIntentSnapshot[];
   listMessages(taskId: string): ChatMessage[];
-  startTurn(taskId: string, text: string): StartedTurn;
+  startTurn(taskId: string, text: string, skills?: readonly PersistedTurnSkill[]): StartedTurn;
+  getTurnSkills(taskId: string, turnId: string): PersistedTurnSkill[];
+  recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent;
   getTurnModelIdentity(taskId: string, turnId: string): TurnModelIdentity;
   recordTurnResolution(
     taskId: string,
@@ -3068,6 +3173,7 @@ export interface PersistenceClient {
     taskId: string,
     text: string,
     operationId: string,
+    skills?: readonly PersistedTurnSkill[],
   ): { ordinal: number; event: TurnEvent };
   steerTurn(taskId: string, text: string, expectedTurnId: string): void;
   startNextQueued(taskId: string): QueueTransition;
@@ -3626,13 +3732,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
   listTasks(): TaskSummary[] {
     return (
       this.db
-        .prepare('SELECT * FROM tasks WHERE archived = 0 ORDER BY pinned DESC, updated_at DESC')
-        .all() as TaskRow[]
-    ).map(toTask);
+        .prepare(
+          `SELECT tasks.*,
+             EXISTS(
+               SELECT 1 FROM messages
+               WHERE messages.task_id = tasks.id AND messages.author = 'user'
+             ) AS has_conversation
+           FROM tasks
+           WHERE archived = 0
+           ORDER BY pinned DESC, updated_at DESC`,
+        )
+        .all() as (TaskRow & { has_conversation: number })[]
+    ).map((row) => toTask(row, row.has_conversation === 1));
   }
 
   getTask(taskId: string): TaskSummary {
-    return toTask(this.getTaskRow(taskId));
+    return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
   }
 
   createTask(title?: string, localOnly = false): TaskSummary {
@@ -3652,6 +3767,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       goal: null,
       workspacePath: null,
       localOnly,
+      hasConversation: false,
       createdAt: now,
       updatedAt: now,
     });
@@ -3793,7 +3909,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
              revision, created_at, updated_at
            ) VALUES (?, ?, 'draft', ?, ?, ?, 0, ?, ?)`,
         )
-        .run(teamId, taskId, leader.id, TEAM_BUDGET_STRUCTURED_SEED, TEAM_POLICY_SEED, now, now);
+        .run(
+          teamId,
+          taskId,
+          leader.id,
+          TEAM_BUDGET_STRUCTURED_SEED,
+          JSON.stringify(this.getDefaultTeamPolicy()),
+          now,
+          now,
+        );
       const assigned = this.db
         .prepare('UPDATE agents SET team_id = ?, updated_at = ? WHERE id = ? AND team_id IS NULL')
         .run(teamId, now, leader.id);
@@ -3900,6 +4024,81 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  getTeamBlueprint(teamId: string): TeamBlueprintBindingRecord | null {
+    this.getTeam(teamId);
+    const row = this.db
+      .prepare(
+        `SELECT source, skill_id, digest, name, package_path, blueprint_json, bound_at
+         FROM team_blueprint_bindings WHERE team_id = ?`,
+      )
+      .get(teamId) as
+      | {
+          source: TurnSkillSelection['ref']['source'];
+          skill_id: string;
+          digest: string;
+          name: string;
+          package_path: string;
+          blueprint_json: string;
+          bound_at: string;
+        }
+      | undefined;
+    if (row === undefined) return null;
+    return {
+      teamId,
+      selection: turnSkillSelectionSchema.parse({
+        kind: 'team',
+        ref: { source: row.source, skillId: row.skill_id, digest: row.digest },
+      }),
+      name: row.name,
+      packagePath: row.package_path,
+      blueprint: teamBlueprintSchema.parse(JSON.parse(row.blueprint_json)),
+      boundAt: row.bound_at,
+    };
+  }
+
+  bindTeamBlueprint(input: {
+    teamId: string;
+    selection: TurnSkillSelection;
+    name: string;
+    packagePath: string;
+    blueprint: TeamBlueprint;
+  }): TeamBlueprintBindingRecord {
+    if (input.selection.kind !== 'team') throw new Error('Team Blueprint requires a Team Skill');
+    const blueprint = teamBlueprintSchema.parse(input.blueprint);
+    return this.db.transaction(() => {
+      const existing = this.getTeamBlueprint(input.teamId);
+      if (existing !== null) {
+        if (existing.selection.ref.digest !== input.selection.ref.digest)
+          throw new Error('Team Blueprint revision is already pinned');
+        return existing;
+      }
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO team_blueprint_bindings(
+             team_id, source, skill_id, digest, name, package_path, blueprint_json, bound_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.teamId,
+          input.selection.ref.source,
+          input.selection.ref.skillId,
+          input.selection.ref.digest,
+          input.name,
+          input.packagePath,
+          JSON.stringify(blueprint),
+          now,
+        );
+      this.db
+        .prepare(
+          `UPDATE teams SET policy_json = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(JSON.stringify(blueprint.policy), now, input.teamId);
+      return this.getTeamBlueprint(input.teamId)!;
+    })();
+  }
+
   registerTeamWorker(input: {
     teamId: string;
     role: string;
@@ -3913,6 +4112,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     parentAgentId?: string;
     canDelegate?: boolean;
     managerPolicy?: ManagerPolicy | null;
+    blueprintRoleKey?: string;
   }): AgentRecord {
     assertWorkerPersistenceInput(input);
     return this.db.transaction(() => {
@@ -3968,9 +4168,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
              id, team_id, thread_id, task_id, kind, role, state, objective,
              parent_capability_ceiling_json, context_inheritance_policy,
              write_capable, connection_id, requested_provider, requested_model,
-             parent_agent_id, depth, can_delegate, manager_policy_json, created_at, updated_at
+             parent_agent_id, depth, can_delegate, manager_policy_json, blueprint_role_key,
+             created_at, updated_at
            ) VALUES (
-             ?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+             ?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
            )`,
         )
         .run(
@@ -3990,6 +4191,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           depth,
           canDelegate ? 1 : 0,
           managerPolicy === null ? null : JSON.stringify(managerPolicy),
+          input.blueprintRoleKey ?? null,
           now,
           now,
         );
@@ -4006,6 +4208,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
         subjectAgentId: agentId,
         payload: {
           role: input.role.trim(),
+          blueprintRoleKey: input.blueprintRoleKey ?? null,
+          teamBlueprint:
+            this.getTeamBlueprint(team.id) === null
+              ? null
+              : {
+                  name: this.getTeamBlueprint(team.id)!.name,
+                  digest: this.getTeamBlueprint(team.id)!.selection.ref.digest,
+                },
           depth,
           canDelegate,
           modelSelection,
@@ -5015,6 +5225,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .all(team.id) as { id: string }[];
     for (const worker of workers) {
       for (const kind of budgetKinds) {
+        if (kind === 'spawnSlots') continue;
         const totals = this.budgetTotals('worker', kind, team.id, worker.id);
         statuses.push({
           scope: 'worker',
@@ -5346,7 +5557,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .run(new Date().toISOString(), taskId);
       if (result.changes !== 1) throw new NotFoundError('Task not found');
       this.quarantineStaleBackgroundInTransaction(taskId);
-      return toTask(this.getTaskRow(taskId));
+      return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
     })();
   }
   setGoal(taskId: string, goal: string): TaskSummary {
@@ -5360,7 +5571,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .run(goal, current.goal === goal ? 0 : 1, new Date().toISOString(), taskId);
       if (result.changes !== 1) throw new NotFoundError('Task not found');
       this.quarantineStaleBackgroundInTransaction(taskId);
-      return toTask(this.getTaskRow(taskId));
+      return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
     })();
   }
 
@@ -5373,6 +5584,45 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('UPDATE tasks SET draft = ?, updated_at = ? WHERE id = ?')
       .run(draft, new Date().toISOString(), taskId);
     if (result.changes !== 1) throw new NotFoundError('Task not found');
+  }
+
+  getDraftSkillSelections(taskId: string): TurnSkillSelection[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT source, skill_id, digest, kind
+         FROM task_draft_skill_bindings
+         WHERE task_id = ?
+         ORDER BY ordinal`,
+      )
+      .all(taskId) as SkillBindingIdentityRow[];
+    return turnSkillSelectionsSchema.parse(rows.map(toTurnSkillSelection));
+  }
+
+  setDraftSkillSelections(taskId: string, skills: readonly TurnSkillSelection[]): void {
+    const parsed = turnSkillSelectionsSchema.parse(skills);
+    this.db.transaction(() => {
+      this.assertTask(taskId);
+      this.db.prepare('DELETE FROM task_draft_skill_bindings WHERE task_id = ?').run(taskId);
+      const insert = this.db.prepare(
+        `INSERT INTO task_draft_skill_bindings(
+           task_id, ordinal, source, skill_id, digest, kind
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      parsed.forEach((selection, index) =>
+        insert.run(
+          taskId,
+          index + 1,
+          selection.ref.source,
+          selection.ref.skillId,
+          selection.ref.digest,
+          selection.kind,
+        ),
+      );
+      this.db
+        .prepare('UPDATE tasks SET updated_at = ? WHERE id = ?')
+        .run(new Date().toISOString(), taskId);
+    })();
   }
 
   getCanvasView(taskId: string): CanvasViewRecord | null {
@@ -5660,6 +5910,46 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(effort, new Date().toISOString());
+  }
+
+  getTeamModelResearchBeforeHiring(): boolean {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'team.model-research-before-hiring'")
+      .get() as { value: string } | undefined;
+    return row?.value === '1';
+  }
+
+  setTeamModelResearchBeforeHiring(enabled: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('team.model-research-before-hiring', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(enabled ? '1' : '0', new Date().toISOString());
+  }
+
+  getDefaultTeamPolicy(): TeamPolicy {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'team.default-policy'")
+      .get() as { value: string } | undefined;
+    if (row === undefined) return { ...DEFAULT_TEAM_POLICY };
+    try {
+      const parsed = JSON.parse(row.value) as TeamPolicy;
+      assertTeamPolicy(parsed);
+      return { ...parsed };
+    } catch {
+      return { ...DEFAULT_TEAM_POLICY };
+    }
+  }
+
+  setDefaultTeamPolicy(policy: TeamPolicy): void {
+    assertTeamPolicy(policy);
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('team.default-policy', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(JSON.stringify(policy), new Date().toISOString());
   }
 
   getBackgroundEpochs(taskId: string): BackgroundEpochs {
@@ -8265,17 +8555,41 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ).map(toMessage);
   }
 
-  startTurn(taskId: string, text: string): StartedTurn {
+  startTurn(taskId: string, text: string, skills: readonly PersistedTurnSkill[] = []): StartedTurn {
     return this.db.transaction(() => {
       this.assertTask(taskId);
       this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
-      return this.startTurnInTransaction(taskId, text);
+      return this.startTurnInTransaction(taskId, text, skills);
     })();
   }
 
   getTurnModelIdentity(taskId: string, turnId: string): TurnModelIdentity {
     return toTurnModelIdentity(this.getTurn(taskId, turnId));
+  }
+
+  getTurnSkills(taskId: string, turnId: string): PersistedTurnSkill[] {
+    this.getTurn(taskId, turnId);
+    const rows = this.db
+      .prepare(
+        `SELECT source, skill_id, digest, kind, name, description, content, package_path
+         FROM turn_skill_bindings
+         WHERE turn_id = ?
+         ORDER BY ordinal`,
+      )
+      .all(turnId) as TurnSkillBindingRow[];
+    return rows.map((row) => ({
+      selection: toTurnSkillSelection(row),
+      name: row.name,
+      description: row.description,
+      content: row.content,
+      packagePath: row.package_path,
+    }));
+  }
+
+  recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent {
+    this.getTurn(taskId, turnId);
+    return this.appendEvent({ type: 'skill.draft.created', taskId, turnId, draft });
   }
 
   recordTurnResolution(
@@ -8329,9 +8643,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     taskId: string,
     text: string,
     operationId: string,
+    skills: readonly PersistedTurnSkill[] = [],
   ): { ordinal: number; event: TurnEvent } {
     return this.db.transaction(() => {
       this.assertTask(taskId);
+      const parsedSkills = validatePersistedTurnSkills(skills);
       const row = this.db
         .prepare(
           'SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM input_queue WHERE task_id = ?',
@@ -8342,7 +8658,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
           `INSERT INTO input_queue(task_id, ordinal, operation_id, mode, payload_json, state, created_at)
         VALUES (?, ?, ?, 'queue', ?, 'queued', ?)`,
         )
-        .run(taskId, row.ordinal, operationId, JSON.stringify({ text }), new Date().toISOString());
+        .run(
+          taskId,
+          row.ordinal,
+          operationId,
+          JSON.stringify({ text, skills: parsedSkills }),
+          new Date().toISOString(),
+        );
       const event = this.queueChangedEvent(taskId);
       return { ordinal: row.ordinal, event };
     })();
@@ -8375,11 +8697,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .get(taskId) as QueueRow | undefined;
       if (row === undefined) return null;
-      const parsed = JSON.parse(row.payload_json) as { text: string };
+      const parsed = parseQueuedPayload(row.payload_json);
       this.db
         .prepare("UPDATE input_queue SET state = 'dequeued' WHERE task_id = ? AND ordinal = ?")
         .run(taskId, row.ordinal);
-      const started = this.startTurnInTransaction(taskId, parsed.text);
+      const started = this.startTurnInTransaction(taskId, parsed.text, parsed.skills);
       return { started, queueEvent: this.queueChangedEvent(taskId) };
     })();
   }
@@ -8512,7 +8834,37 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   prepareContext(taskId: string, turnId: string): PreparedContext {
-    return this.db.transaction(() => this.contextLedger.prepare(taskId, turnId))();
+    return this.db.transaction(() => {
+      const prepared = this.contextLedger.prepare(taskId, turnId);
+      const skillFragments: ContextFragment[] = this.getTurnSkills(taskId, turnId).map((skill) => {
+        const trust = skill.selection.ref.source === 'builtin' ? 'system' : 'user';
+        const id = `skill:${createHash('sha256')
+          .update(
+            `${skill.selection.ref.source}:${skill.selection.ref.skillId}:${skill.selection.ref.digest}`,
+          )
+          .digest('hex')}`;
+        return {
+          id,
+          taskId,
+          source: 'skill',
+          trust,
+          tokenEstimate: estimateTokens(skill.content),
+          content: skill.content,
+          createdAt: new Date().toISOString(),
+          messageId: null,
+        };
+      });
+      if (skillFragments.length === 0) return prepared;
+      const fragments = [...prepared.fragments, ...skillFragments];
+      return {
+        ...prepared,
+        fragments,
+        usageEvents: [
+          ...prepared.usageEvents,
+          this.recordContextUsage(taskId, turnId, aggregateContextUsage(fragments)),
+        ],
+      };
+    })();
   }
 
   createIntelligenceStep(input: {
@@ -8842,9 +9194,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.close();
   }
 
-  private startTurnInTransaction(taskId: string, text: string): StartedTurn {
+  private startTurnInTransaction(
+    taskId: string,
+    text: string,
+    skills: readonly PersistedTurnSkill[] = [],
+  ): StartedTurn {
     const now = new Date().toISOString();
     const turnId = randomUUID();
+    const parsedSkills = validatePersistedTurnSkills(skills);
     const taskSelection = this.getTaskModelSelection(taskId);
     const explicitRuntime =
       taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
@@ -8884,6 +9241,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
         now,
         now,
       );
+    const insertSkill = this.db.prepare(
+      `INSERT INTO turn_skill_bindings(
+         turn_id, ordinal, source, skill_id, digest, kind,
+         name, description, content, package_path
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    parsedSkills.forEach((skill, index) =>
+      insertSkill.run(
+        turnId,
+        index + 1,
+        skill.selection.ref.source,
+        skill.selection.ref.skillId,
+        skill.selection.ref.digest,
+        skill.selection.kind,
+        skill.name,
+        skill.description,
+        skill.content,
+        skill.packagePath,
+      ),
+    );
     this.insertAcceptanceContract(
       createInitialAcceptanceContract({
         taskId,
@@ -8902,6 +9279,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       runtimeKind,
       model,
       modelSelection,
+      skills: parsedSkills,
       event,
       ...(renamedTask === null ? {} : { renamedTask }),
     };
@@ -8930,7 +9308,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare("UPDATE tasks SET title = ?, title_source = 'auto', updated_at = ? WHERE id = ?")
       .run(derived, now, taskId);
-    return toTask(this.getTaskRow(taskId));
+    return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
   }
 
   private attachBackgroundCompletionsInTransaction(
@@ -9219,7 +9597,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .all(taskId) as QueueRow[]
     ).map((row) => ({
       ordinal: row.ordinal,
-      text: (JSON.parse(row.payload_json) as { text: string }).text,
+      ...(() => {
+        const payload = parseQueuedPayload(row.payload_json);
+        return {
+          text: payload.text,
+          ...(payload.skills.length === 0
+            ? {}
+            : { skills: payload.skills.map((skill) => skill.selection) }),
+        };
+      })(),
     }));
   }
 
@@ -9450,7 +9836,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare(`UPDATE tasks SET ${column} = ?, updated_at = ? WHERE id = ?`)
       .run(value, new Date().toISOString(), taskId);
     if (result.changes !== 1) throw new NotFoundError('Task not found');
-    return toTask(this.getTaskRow(taskId));
+    return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
   }
 
   private updateTurn(turnId: string, state: TurnState): void {
@@ -9464,6 +9850,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
       TaskRow | undefined;
     if (row === undefined) throw new NotFoundError('Task not found');
     return row;
+  }
+
+  private hasConversation(taskId: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 AS present FROM messages WHERE task_id = ? AND author = 'user' LIMIT 1")
+        .get(taskId) !== undefined
+    );
   }
 
   private updateAgentModelSelectionInTransaction(
@@ -9724,7 +10118,63 @@ export class AcceptanceEvidenceMissingError extends Error {
   }
 }
 
-function toTask(row: TaskRow): TaskSummary {
+function toTurnSkillSelection(row: SkillBindingIdentityRow): TurnSkillSelection {
+  return {
+    kind: row.kind,
+    ref: {
+      source: row.source,
+      skillId: row.skill_id,
+      digest: row.digest,
+    },
+  };
+}
+
+function validatePersistedTurnSkills(skills: readonly PersistedTurnSkill[]): PersistedTurnSkill[] {
+  const selections = turnSkillSelectionsSchema.parse(skills.map((skill) => skill.selection));
+  return skills.map((skill, index) => {
+    if (
+      typeof skill.name !== 'string' ||
+      skill.name.length < 1 ||
+      skill.name.length > 200 ||
+      typeof skill.description !== 'string' ||
+      skill.description.length < 1 ||
+      skill.description.length > 2_000 ||
+      typeof skill.content !== 'string' ||
+      skill.content.length < 1 ||
+      skill.content.length > 40_000 ||
+      typeof skill.packagePath !== 'string' ||
+      !isAbsolute(skill.packagePath) ||
+      skill.packagePath.length > 4_096
+    )
+      throw new Error('Resolved Skill payload is invalid');
+    return {
+      selection: selections[index]!,
+      name: skill.name,
+      description: skill.description,
+      content: skill.content,
+      packagePath: skill.packagePath,
+    };
+  });
+}
+
+function parseQueuedPayload(payloadJson: string): {
+  text: string;
+  skills: PersistedTurnSkill[];
+} {
+  const parsed: unknown = JSON.parse(payloadJson);
+  if (typeof parsed !== 'object' || parsed === null) throw new Error('Queued input is invalid');
+  const value = parsed as { text?: unknown; skills?: unknown };
+  if (typeof value.text !== 'string' || value.text.trim() === '' || value.text.length > 100_000)
+    throw new Error('Queued input text is invalid');
+  if (value.skills === undefined) return { text: value.text, skills: [] };
+  if (!Array.isArray(value.skills)) throw new Error('Queued Skill payload is invalid');
+  return {
+    text: value.text,
+    skills: validatePersistedTurnSkills(value.skills as PersistedTurnSkill[]),
+  };
+}
+
+function toTask(row: TaskRow, hasConversation: boolean): TaskSummary {
   return taskSummarySchema.parse({
     id: row.id,
     title: row.title,
@@ -9733,6 +10183,7 @@ function toTask(row: TaskRow): TaskSummary {
     goal: row.goal,
     workspacePath: row.workspace_path,
     localOnly: row.local_only === 1,
+    hasConversation,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -9812,6 +10263,7 @@ function toAgent(row: AgentRow): AgentRecord {
       row.manager_policy_json === null
         ? null
         : (JSON.parse(row.manager_policy_json) as ManagerPolicy),
+    blueprintRoleKey: row.blueprint_role_key,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

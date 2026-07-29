@@ -2,6 +2,8 @@ import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
+const LEGACY_PICKER_ENV = { SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2: '0' };
+
 // Issue #11. The image *pipeline* against the real CLI is covered by codex-smoke.test.ts (opt-in,
 // spends real usage); these cover the parts that must hold without a real Codex turn — the UI gating,
 // the prefix that reaches the message, and the "asked but got nothing" outcome.
@@ -10,7 +12,9 @@ async function withApp(label: string, body: (page: Page) => Promise<void>): Prom
   const dir = createUserDataDir(label);
   let app: ElectronApplication | null = null;
   try {
-    app = await launchApp(dir);
+    // These scenarios intentionally exercise the rollback Picker's separate Runtime control. The
+    // V2 Picker combines Runtime and model in one control and has its own parity coverage.
+    app = await launchApp(dir, undefined, LEGACY_PICKER_ENV);
     const page = await firstWindow(app);
     await page.getByTestId('sidebar-new-task-button').click();
     await expect(page.getByTestId('composer-textarea')).toBeVisible();

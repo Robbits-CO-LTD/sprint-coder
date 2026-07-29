@@ -16,7 +16,9 @@
 //    TeamCoordinator/persistence directly and holds no taskId of its own — the bridge is the only
 //    thing that knows which Task/turn this socket connection belongs to.
 export const TEAM_MCP_TOOL_NAMES = [
+  'skill_draft_create',
   'team_list_models',
+  'team_record_model_research',
   'team_hire_worker',
   'team_assign_task',
   'team_steer_execution',
@@ -37,6 +39,38 @@ const SOCKET_PATH = process.env.TEAM_BRIDGE_SOCKET;
 const TOKEN = process.env.TEAM_BRIDGE_TOKEN;
 
 const TOOLS = [
+  {
+    name: 'skill_draft_create',
+    description:
+      'Create a validated, managed Skill Draft for user review. This never installs the Skill. Include SKILL.md and optional official package files; Team Skills must include team/blueprint.json.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['chat', 'team'] },
+        skillId: {
+          type: 'string',
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$',
+          maxLength: 128,
+        },
+        files: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 256,
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', minLength: 1, maxLength: 500 },
+              content: { type: 'string', maxLength: 1048576 },
+            },
+            required: ['path', 'content'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['kind', 'skillId', 'files'],
+      additionalProperties: false,
+    },
+  },
   {
     name: 'team_list_models',
     description:
@@ -62,12 +96,47 @@ const TOOLS = [
     },
   },
   {
-    name: 'team_hire_worker',
+    name: 'team_record_model_research',
     description:
-      'Hire a new team Worker with a role and objective you choose based on the user request. Hire only as many Workers as the task genuinely needs.',
+      'When model Web research is enabled, record source URLs and a factual summary for one exact catalog model after using live Web search and before hiring.',
     inputSchema: {
       type: 'object',
       properties: {
+        modelSelection: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string' },
+            requestedProvider: { type: 'string' },
+            requestedModel: { type: 'string' },
+          },
+          required: ['connectionId', 'requestedProvider', 'requestedModel'],
+          additionalProperties: false,
+        },
+        summary: { type: 'string', minLength: 1, maxLength: 2000 },
+        sources: {
+          type: 'array',
+          items: { type: 'string', format: 'uri' },
+          minItems: 1,
+          maxItems: 8,
+        },
+      },
+      required: ['modelSelection', 'summary', 'sources'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_hire_worker',
+    description:
+      'Hire one direct report. Use agentKind=worker without managerPolicy for a leaf. Use agentKind=manager with a relative maxDelegationLevels policy for a Manager.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentKind: {
+          type: 'string',
+          enum: ['worker', 'manager'],
+          description:
+            'worker creates a non-delegating leaf and forbids managerPolicy; manager requires managerPolicy.',
+        },
         role: { type: 'string', description: 'Short role label you choose based on the request, e.g. researcher/implementer/reviewer or anything else fitting -- in the same language as the request.' },
         objective: { type: 'string', description: 'What this Worker should accomplish.' },
         contextInheritancePolicy: {
@@ -89,26 +158,41 @@ const TOOLS = [
           type: 'string',
           description: 'Why this source-backed available model fits this Worker. Do not infer capability from names.',
         },
+        blueprintRoleKey: {
+          type: 'string',
+          description:
+            'Required when a Team Skill Blueprint is active. Must exactly match one role key from the pinned Blueprint.',
+        },
         managerPolicy: {
           type: 'object',
           description:
-            'Include only when hiring a Manager. maxDelegationDepth is the absolute Team depth, not an additional-level count: Leader=0, its Manager=1, and that Manager needs at least 2 to hire a direct child.',
+            'Required only for agentKind=manager. maxDelegationLevels is the number of additional levels the new Manager may create below itself.',
           properties: {
             maxDirectChildren: { type: 'integer', minimum: 1 },
-            maxDelegationDepth: {
+            maxDelegationLevels: {
               type: 'integer',
               minimum: 1,
               maximum: 4,
               description:
-                'Absolute deepest Agent depth this Manager may create. It must be greater than the new Manager own depth.',
+                'Relative levels below the new Manager. Use 1 when the Manager only needs direct leaf children.',
             },
             allowManagerChildren: { type: 'boolean' },
           },
-          required: ['maxDelegationDepth', 'allowManagerChildren'],
+          required: ['maxDelegationLevels', 'allowManagerChildren'],
           additionalProperties: false,
         },
       },
-      required: ['role', 'objective', 'modelSelection', 'modelSelectionReason'],
+      required: ['agentKind', 'role', 'objective', 'modelSelection', 'modelSelectionReason'],
+      allOf: [
+        {
+          if: { properties: { agentKind: { const: 'manager' } } },
+          then: { required: ['managerPolicy'] },
+        },
+        {
+          if: { properties: { agentKind: { const: 'worker' } } },
+          then: { not: { required: ['managerPolicy'] } },
+        },
+      ],
       additionalProperties: false,
     },
   },

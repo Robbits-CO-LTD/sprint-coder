@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { TeamActivityCard } from './TeamActivityCard';
+import { formatTeamWorkDuration, TeamActivityCard, TeamActivityGroup } from './TeamActivityCard';
 import {
   EMPTY_ACTIVITY_GROUPS,
   MODEL_SELECTION_REASON_MAX_LENGTH,
@@ -366,6 +366,19 @@ describe('groupActivitiesByMessage', () => {
     expect(bucketIds(groups, 'm2')).toEqual(['tie']);
   });
 
+  it('keeps trailing lifecycle rows with the user Turn instead of below its assistant answer', () => {
+    const turnMessages = [
+      message({ id: 'request', author: 'user', createdAt: '2026-07-28T01:00:00.000Z' }),
+      message({ id: 'answer', author: 'assistant', createdAt: '2026-07-28T01:01:00.000Z' }),
+    ];
+    const groups = groupActivitiesByMessage(turnMessages, [
+      activity({ id: 'trailing', recordedAt: '2026-07-28T01:01:01.000Z' }),
+    ]);
+
+    expect(bucketIds(groups, 'request')).toEqual(['trailing']);
+    expect(bucketIds(groups, 'answer')).toEqual([]);
+  });
+
   it('renders nothing extra when there are no activities, and keeps everything with no messages', () => {
     expect(groupActivitiesByMessage(messages, [])).toBe(EMPTY_ACTIVITY_GROUPS);
     expect(groupActivitiesByMessage(messages, null).leading).toEqual([]);
@@ -438,5 +451,41 @@ describe('<TeamActivityCard />', () => {
       expect(html).toContain(`data-activity-type="${type}"`);
       expect(html).toContain('data-testid="team-activity-headline"');
     }
+  });
+});
+
+describe('<TeamActivityGroup />', () => {
+  it('keeps live work expanded and collapses completed work behind an elapsed summary', () => {
+    const display = describeActivity(activity({ recordedAt: '2026-07-28T01:07:34.000Z' }));
+    const active = renderToStaticMarkup(
+      <TeamActivityGroup
+        activities={[display]}
+        active
+        startedAtMs={Date.parse('2026-07-28T01:00:00.000Z')}
+        finishedAtMs={null}
+      />,
+    );
+    const completed = renderToStaticMarkup(
+      <TeamActivityGroup
+        activities={[display]}
+        active={false}
+        startedAtMs={Date.parse('2026-07-28T01:00:00.000Z')}
+        finishedAtMs={Date.parse('2026-07-28T01:07:34.000Z')}
+      />,
+    );
+
+    expect(active).toContain('<details class="team-activity-group"');
+    expect(active).toContain('open=""');
+    expect(active).toContain('作業中 · 1件');
+    expect(completed).not.toContain('open=""');
+    expect(completed).toContain('7m 34s作業しました');
+    expect(completed).toContain('data-testid="team-activity-card"');
+  });
+
+  it('formats short and long durations without zero-padding noise', () => {
+    expect(formatTeamWorkDuration(999)).toBe('1s未満');
+    expect(formatTeamWorkDuration(34_999)).toBe('34s');
+    expect(formatTeamWorkDuration(454_999)).toBe('7m 34s');
+    expect(formatTeamWorkDuration(4_054_999)).toBe('1h 7m 34s');
   });
 });

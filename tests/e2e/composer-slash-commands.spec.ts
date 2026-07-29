@@ -29,9 +29,21 @@ test.describe('composer slash commands', () => {
     await textarea.press('ArrowDown');
     await expect(page.getByTestId('slash-command-goal')).toHaveAttribute('aria-selected', 'true');
     await textarea.press('Enter');
-    await expect(page.getByTestId('composer-goal-input')).toBeFocused();
-    await page.getByTestId('composer-goal-input').press('Escape');
+    await expect(page.getByTestId('composer-goal-armed')).toBeVisible();
+    await expect(textarea).toBeFocused();
     await expect(textarea).toHaveValue('');
+    await expect(textarea).toHaveAttribute(
+      'placeholder',
+      'Goalを入力 (Enterで保存 / Escでキャンセル)',
+    );
+
+    await textarea.fill('認証まわりのリファクタを完了させる');
+    await textarea.press('Enter');
+    await expect(page.getByTestId('composer-goal-armed')).toHaveCount(0);
+    await expect(page.getByTestId('task-goal-chip')).toContainText(
+      '認証まわりのリファクタを完了させる',
+    );
+    await expect(page.getByTestId('composer-goal-input')).toHaveCount(0);
 
     await textarea.fill('/wor');
     await expect(page.getByTestId('slash-command-workspace')).toBeVisible();

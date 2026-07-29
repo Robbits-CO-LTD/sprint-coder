@@ -213,7 +213,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
             type: 'tool_call',
             callId: 'hire-1',
             name: 'team_hire_worker',
-            input: { role: '実装', objective: '機能を実装する' },
+            input: { agentKind: 'worker', role: '実装', objective: '機能を実装する' },
           };
           yield { type: 'completed', stopReason: 'tool_calls' };
           return;
@@ -264,7 +264,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       expect.objectContaining({
         worker: expect.objectContaining({ id: 'worker-1', canDelegate: true }),
         name: 'team_hire_worker',
-        input: { role: '実装', objective: '機能を実装する' },
+        input: { agentKind: 'worker', role: '実装', objective: '機能を実装する' },
       }),
     );
     expect(requests).toHaveLength(2);
@@ -279,7 +279,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
             {
               callId: 'hire-1',
               name: 'team_hire_worker',
-              input: { role: '実装', objective: '機能を実装する' },
+              input: { agentKind: 'worker', role: '実装', objective: '機能を実装する' },
             },
           ],
         },
@@ -399,6 +399,7 @@ function providerWorker(canDelegate = false): AgentRecord {
           allowManagerChildren: true,
         }
       : null,
+    blueprintRoleKey: null,
     createdAt: '2026-07-28T00:00:00.000Z',
     updatedAt: '2026-07-28T00:00:00.000Z',
   };

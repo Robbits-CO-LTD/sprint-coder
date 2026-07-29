@@ -31,6 +31,8 @@ import {
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   connectionIdSchema,
+  createdSkillMutationInputSchema,
+  createdSkillEnabledInputSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
@@ -38,6 +40,12 @@ import {
   runtimeSettingsGetInputSchema,
   runtimeSettingsSchema,
   skillCandidateInputSchema,
+  skillCatalogSchema,
+  skillCatalogItemSchema,
+  skillDraftSchema,
+  skillDraftCreateInputSchema,
+  skillDraftInstallInputSchema,
+  skillDraftIdInputSchema,
   skillEnabledInputSchema,
   skillImportInputSchema,
   skillImportResultSchema,
@@ -64,11 +72,15 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
+  taskSkillSelectionInputSchema,
   teamDetailSchema,
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
   teamPolicyUpdateInputSchema,
+  teamPolicySchema,
+  teamModelResearchSettingsSchema,
+  teamModelResearchSettingsSetInputSchema,
   teamSendMessageInputSchema,
   teamSummarySchema,
   teamWorkerRefSchema,
@@ -81,6 +93,7 @@ import {
   turnSnapshotSchema,
   turnStartInputSchema,
   turnStartResultSchema,
+  turnSkillSelectionsSchema,
   turnSteerInputSchema,
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
@@ -317,6 +330,24 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.settingsSetCodexEffort, runtimeCodexEffortSetInputSchema, z.undefined(), {
         effort,
       }),
+    getTeamModelResearch: () =>
+      invoke(
+        IPC_CHANNELS.settingsGetTeamModelResearch,
+        emptyPayloadSchema,
+        teamModelResearchSettingsSchema,
+        {},
+      ),
+    setTeamModelResearch: (input) =>
+      invoke(
+        IPC_CHANNELS.settingsSetTeamModelResearch,
+        teamModelResearchSettingsSetInputSchema,
+        z.undefined(),
+        input,
+      ),
+    getDefaultTeamPolicy: () =>
+      invoke(IPC_CHANNELS.settingsGetDefaultTeamPolicy, emptyPayloadSchema, teamPolicySchema, {}),
+    setDefaultTeamPolicy: (policy) =>
+      invoke(IPC_CHANNELS.settingsSetDefaultTeamPolicy, teamPolicySchema, z.undefined(), policy),
     scanSkills: () =>
       invoke(IPC_CHANNELS.settingsSkillsScan, emptyPayloadSchema, skillScanResultSchema, {}),
     previewSkill: (provider, skillId) =>
@@ -345,6 +376,49 @@ const api: SprintCoderApi = {
         provider,
         skillId,
       }),
+  },
+  skills: {
+    list: () => invoke(IPC_CHANNELS.skillsList, emptyPayloadSchema, skillCatalogSchema, {}),
+    getDraftSelection: (taskId) =>
+      invoke(IPC_CHANNELS.skillsGetDraftSelection, taskIdPayloadSchema, turnSkillSelectionsSchema, {
+        taskId,
+      }),
+    setDraftSelection: (taskId, skills) =>
+      invoke(IPC_CHANNELS.skillsSetDraftSelection, taskSkillSelectionInputSchema, z.undefined(), {
+        taskId,
+        skills,
+      }),
+    listDrafts: () =>
+      invoke(IPC_CHANNELS.skillsListDrafts, emptyPayloadSchema, z.array(skillDraftSchema), {}),
+    createDraft: (input) =>
+      invoke(IPC_CHANNELS.skillsCreateDraft, skillDraftCreateInputSchema, skillDraftSchema, input),
+    installDraft: (draftId, expectedDigest, confirmed) =>
+      invoke(
+        IPC_CHANNELS.skillsInstallDraft,
+        skillDraftInstallInputSchema,
+        skillCatalogItemSchema,
+        { draftId, expectedDigest, confirmed },
+      ),
+    discardDraft: (draftId) =>
+      invoke(IPC_CHANNELS.skillsDiscardDraft, skillDraftIdInputSchema, z.undefined(), { draftId }),
+    removeCreated: (skillId, digest) =>
+      invoke(IPC_CHANNELS.skillsRemoveCreated, createdSkillMutationInputSchema, z.undefined(), {
+        skillId,
+        digest,
+      }),
+    setCreatedEnabled: (skillId, digest, enabled) =>
+      invoke(IPC_CHANNELS.skillsSetCreatedEnabled, createdSkillEnabledInputSchema, z.undefined(), {
+        skillId,
+        digest,
+        enabled,
+      }),
+    exportCreated: (skillId, digest) =>
+      invoke(
+        IPC_CHANNELS.skillsExportCreated,
+        createdSkillMutationInputSchema,
+        z.string().nullable(),
+        { skillId, digest },
+      ),
   },
   models: {
     query: (input) =>

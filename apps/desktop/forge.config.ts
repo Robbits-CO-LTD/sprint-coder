@@ -3,8 +3,9 @@ import { MakerZIP } from '@electron-forge/maker-zip';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
-import { cpSync, mkdirSync } from 'node:fs';
+import { cpSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
@@ -40,6 +41,7 @@ const runtimeModuleFiles = [
   ['file-uri-to-path', 'package.json'],
   ['file-uri-to-path', 'index.js'],
 ] as const;
+const macCodeSignIdentity = process.env['SPRINT_CODER_CODESIGN_IDENTITY'] ?? '-';
 
 function copyHoistedRuntimeModules(buildPath: string): void {
   const rootNodeModules = resolve(__dirname, '..', '..', 'node_modules');
@@ -70,6 +72,35 @@ const config: ForgeConfig = {
         }
       },
     ],
+  },
+  hooks: {
+    postPackage: async (_forgeConfig, packageResult) => {
+      if (packageResult.platform !== 'darwin') return;
+      // Electron's downloaded template carries its own com.github.Electron ad-hoc signature.
+      // Re-sign the completed bundle so macOS Keychain sees our final bundle identity and
+      // safeStorage can create the app-specific encryption key. Local packages use an ad-hoc
+      // identity; release jobs supply SPRINT_CODER_CODESIGN_IDENTITY.
+      for (const outputPath of packageResult.outputPaths) {
+        const appBundles = readdirSync(outputPath, { withFileTypes: true }).filter(
+          (entry) => entry.isDirectory() && entry.name.endsWith('.app'),
+        );
+        if (appBundles.length !== 1)
+          throw new Error(
+            `Expected one macOS app bundle in packaged output, found ${appBundles.length}`,
+          );
+        execFileSync(
+          '/usr/bin/codesign',
+          [
+            '--force',
+            '--deep',
+            '--sign',
+            macCodeSignIdentity,
+            join(outputPath, appBundles[0]!.name),
+          ],
+          { stdio: 'inherit' },
+        );
+      }
+    },
   },
   makers: [new MakerZIP({}, ['darwin', 'win32', 'linux'])],
   plugins: [

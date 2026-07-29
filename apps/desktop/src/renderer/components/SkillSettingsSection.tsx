@@ -1,13 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
   SkillCandidateSummary,
+  SkillCatalogItem,
+  SkillDraft,
   SkillPreviewResult,
   SkillScanResult,
 } from '@sprint-coder/contracts';
 
 type CandidateState = 'idle' | 'previewing' | 'ready' | 'importing' | 'imported' | 'failed';
 
-export function SkillSettingsSection({ active }: { active: boolean }) {
+export function SkillSettingsSection({
+  active,
+  onCreateWithAi,
+}: {
+  active: boolean;
+  onCreateWithAi?: () => void;
+}) {
   const [scan, setScan] = useState<SkillScanResult | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -17,6 +25,8 @@ export function SkillSettingsSection({ active }: { active: boolean }) {
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<SkillDraft[]>([]);
+  const [catalog, setCatalog] = useState<SkillCatalogItem[]>([]);
   const generation = useRef(0);
 
   useEffect(() => {
@@ -29,18 +39,105 @@ export function SkillSettingsSection({ active }: { active: boolean }) {
     setLoading(true);
     setError(null);
     try {
-      const result = await skillApi().scanSkills();
+      const [result, managedDrafts, selectable] = await Promise.all([
+        skillApi().scanSkills(),
+        window.sprintCoder?.skills?.listDrafts?.().catch(() => [] as SkillDraft[]) ??
+          Promise.resolve([] as SkillDraft[]),
+        window.sprintCoder?.skills?.list?.().catch(() => null) ?? Promise.resolve(null),
+      ]);
       if (request !== generation.current) return;
       setScan(result);
       setSelected(new Set());
       setPreviews(new Map());
       setStates(new Map());
       setStatus(`${result.claudeDetected + result.agentsDetected}件のSkillを検出しました。`);
+      setDrafts(managedDrafts);
+      setCatalog(selectable?.items ?? []);
     } catch {
       if (request === generation.current)
         setError('Skill一覧を取得できませんでした。再読み込みしてください。');
     } finally {
       if (request === generation.current) setLoading(false);
+    }
+  }
+
+  async function removeCreated(item: SkillCatalogItem): Promise<void> {
+    const removalKey = `created:${item.ref.skillId}`;
+    if (pendingRemoval !== removalKey) {
+      setPendingRemoval(removalKey);
+      return;
+    }
+    try {
+      await window.sprintCoder?.skills?.removeCreated(item.ref.skillId, item.ref.digest);
+      setPendingRemoval(null);
+      setCatalog((current) =>
+        current.filter(
+          ({ ref }) => !(ref.source === 'created' && ref.skillId === item.ref.skillId),
+        ),
+      );
+      setStatus(`${item.name}を削除しました。既存履歴のrevisionは保持されます。`);
+    } catch {
+      setError(`${item.name}を削除できませんでした。`);
+    }
+  }
+
+  async function exportCreated(item: SkillCatalogItem): Promise<void> {
+    try {
+      const path = await window.sprintCoder?.skills?.exportCreated(
+        item.ref.skillId,
+        item.ref.digest,
+      );
+      if (path) setStatus(`${item.name}を${path}へExportしました。`);
+    } catch {
+      setError(`${item.name}をExportできませんでした。`);
+    }
+  }
+
+  async function toggleCreated(item: SkillCatalogItem): Promise<void> {
+    try {
+      await window.sprintCoder?.skills?.setCreatedEnabled(
+        item.ref.skillId,
+        item.ref.digest,
+        !item.enabled,
+      );
+      setCatalog((current) =>
+        current.map((candidate) =>
+          candidate.ref.source === 'created' && candidate.ref.skillId === item.ref.skillId
+            ? { ...candidate, enabled: !item.enabled }
+            : candidate,
+        ),
+      );
+      setStatus(`${item.name}を${item.enabled ? '無効' : '有効'}にしました。`);
+    } catch {
+      setError(`${item.name}の状態を変更できませんでした。`);
+    }
+  }
+
+  async function installDraft(draft: SkillDraft): Promise<void> {
+    setError(null);
+    try {
+      const api = window.sprintCoder?.skills;
+      if (api === undefined) throw new Error('Skill API unavailable');
+      await api.installDraft(draft.id, draft.digest, true);
+      setDrafts((current) => current.filter(({ id }) => id !== draft.id));
+      const nextCatalog = await api.list();
+      setCatalog(nextCatalog.items);
+      setStatus(`${draft.name}をインストールしました。`);
+    } catch {
+      setError(`${draft.name}をインストールできませんでした。内容を再確認してください。`);
+    }
+  }
+
+  async function discardDraft(draft: SkillDraft): Promise<void> {
+    setError(null);
+    try {
+      const api = window.sprintCoder?.skills;
+      if (api === undefined) throw new Error('Skill API unavailable');
+      await api.discardDraft(draft.id);
+      setDrafts((current) => current.filter(({ id }) => id !== draft.id));
+      setStatus(`${draft.name}のDraftを破棄しました。`);
+    } catch {
+      setError(`${draft.name}のDraftを破棄できませんでした。`);
     }
   }
 
@@ -171,14 +268,21 @@ export function SkillSettingsSection({ active }: { active: boolean }) {
           <h3 id="settings-skills-title">Skills</h3>
           <p>Claude CodeとCodexのSkillを検証済みコピーとして読み込みます。</p>
         </div>
-        <button
-          type="button"
-          className="settings-secondary-button"
-          onClick={() => void refresh()}
-          disabled={loading || busy}
-        >
-          再読み込み
-        </button>
+        <div className="settings-skill-heading-actions">
+          {onCreateWithAi !== undefined && (
+            <button type="button" className="settings-primary-button" onClick={onCreateWithAi}>
+              AIでSkillを作成
+            </button>
+          )}
+          <button
+            type="button"
+            className="settings-secondary-button"
+            onClick={() => void refresh()}
+            disabled={loading || busy}
+          >
+            再読み込み
+          </button>
+        </div>
       </div>
 
       <dl className="settings-skill-counts">
@@ -203,6 +307,103 @@ export function SkillSettingsSection({ active }: { active: boolean }) {
         </span>
         <span>置換不可</span>
       </div>
+
+      {catalog.some(({ ref }) => ref.source === 'created') && (
+        <div className="settings-installed-skills" aria-label="作成済みSkill">
+          {catalog
+            .filter(({ ref }) => ref.source === 'created')
+            .map((item) => {
+              const removalKey = `created:${item.ref.skillId}`;
+              return (
+                <div key={removalKey} className="settings-installed-row">
+                  <span>
+                    <strong>{item.name}</strong>
+                    <small>
+                      作成済み · {item.kind === 'team' ? 'Team Skill' : 'Chat Skill'} ·{' '}
+                      {item.enabled ? '有効' : '無効'}
+                    </small>
+                  </span>
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    onClick={() => void toggleCreated(item)}
+                  >
+                    {item.enabled ? '無効にする' : '有効にする'}
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    onClick={() => void exportCreated(item)}
+                  >
+                    Export
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      pendingRemoval === removalKey
+                        ? 'settings-danger-button'
+                        : 'settings-secondary-button'
+                    }
+                    onClick={() => void removeCreated(item)}
+                  >
+                    {pendingRemoval === removalKey ? '削除を確定' : '削除'}
+                  </button>
+                </div>
+              );
+            })}
+        </div>
+      )}
+      <div className="settings-builtin-skill">
+        <span>
+          <strong>Skill Creator</strong>
+          <small>Chat Skill／Team Skill作成 · 組み込みSkill</small>
+        </span>
+        <span>常時有効</span>
+      </div>
+
+      {drafts.length > 0 && (
+        <div className="settings-skill-drafts" aria-label="確認待ちのSkill Draft">
+          <h4>確認待ちのDraft</h4>
+          {drafts.map((draft) => (
+            <article key={draft.id} className="settings-skill-draft-card">
+              <div>
+                <strong>{draft.name}</strong>
+                <small>
+                  {draft.kind === 'team' ? 'Team Skill' : 'Chat Skill'} · {draft.files.length}
+                  件のファイル
+                </small>
+                <p>{draft.description}</p>
+                <code>{draft.digest.slice(0, 12)}</code>
+                <details className="settings-skill-draft-files">
+                  <summary>ファイル内容を確認</summary>
+                  {draft.files.map((file) => (
+                    <div key={file.path}>
+                      <strong>{file.path}</strong>
+                      <pre>{file.content}</pre>
+                    </div>
+                  ))}
+                </details>
+              </div>
+              <div className="settings-skill-actions">
+                <button
+                  type="button"
+                  className="settings-secondary-button"
+                  onClick={() => void discardDraft(draft)}
+                >
+                  破棄
+                </button>
+                <button
+                  type="button"
+                  className="settings-primary-button"
+                  onClick={() => void installDraft(draft)}
+                >
+                  内容を確認してインストール
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
 
       {(scan?.installed.length ?? 0) > 0 && (
         <div className="settings-installed-skills" aria-label="読み込み済みSkill">

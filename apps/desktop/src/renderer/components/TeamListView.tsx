@@ -88,39 +88,44 @@ export function TeamListView({
     >
       <header
         className="tlv-header"
+        data-testid="team-list-header"
         id={`team-agent-${detail.team.leaderAgentId}`}
         tabIndex={-1}
         aria-label={`Leader · ${detail.team.state}`}
       >
-        <button type="button" className="team-back-btn" data-testid="team-back" onClick={onBack}>
-          <ArrowLeft size={14} /> Chatに戻る
-        </button>
-        <h2 id="team-list-title" className="team-title">
-          {task.title}
-        </h2>
-        {/* Same wording as TeamCanvas's chip (the a11y list/canvas parity spec compares the two
-            verbatim) and, like it, no denominator: the Worker count is dynamic — see the note on
-            TeamCanvas's `liveText`. */}
-        <span className="team-status-chip">{`${detail.team.state} · Worker ${workers.length}人`}</span>
-        <button
-          type="button"
-          className="team-view-toggle-btn"
-          data-testid="team-view-toggle"
-          onClick={onSwitchToCanvasView}
-          title="Team Canvasに切り替え"
-        >
-          <LayoutGrid size={14} /> Canvas表示
-        </button>
-        <TeamPolicyTrigger onOpen={() => setPolicyOpen(true)} />
-        <button
-          type="button"
-          className="team-stop-all-btn"
-          data-testid="team-stop-all"
-          disabled={teamBusy || workers.length === 0 || detail.team.state === 'completed'}
-          onClick={() => void stopAllTeamWorkers(task.id)}
-        >
-          すべて停止
-        </button>
+        <div className="tlv-header-main">
+          <button type="button" className="team-back-btn" data-testid="team-back" onClick={onBack}>
+            <ArrowLeft size={14} /> Chatに戻る
+          </button>
+          <h2 id="team-list-title" className="team-title">
+            {task.title}
+          </h2>
+        </div>
+        <div className="tlv-header-actions">
+          {/* Same wording as TeamCanvas's chip (the a11y list/canvas parity spec compares the two
+              verbatim) and, like it, no denominator: the Worker count is dynamic — see the note on
+              TeamCanvas's `liveText`. */}
+          <span className="team-status-chip">{`${detail.team.state} · Worker ${workers.length}人`}</span>
+          <button
+            type="button"
+            className="team-view-toggle-btn"
+            data-testid="team-view-toggle"
+            onClick={onSwitchToCanvasView}
+            title="Team Canvasに切り替え"
+          >
+            <LayoutGrid size={14} /> Canvas表示
+          </button>
+          <TeamPolicyTrigger onOpen={() => setPolicyOpen(true)} />
+          <button
+            type="button"
+            className="team-stop-all-btn"
+            data-testid="team-stop-all"
+            disabled={teamBusy || workers.length === 0 || detail.team.state === 'completed'}
+            onClick={() => void stopAllTeamWorkers(task.id)}
+          >
+            すべて停止
+          </button>
+        </div>
       </header>
       <div aria-live="polite" className="visually-hidden">
         {`Team status: ${detail.team.state}, workers ${workers.length}`}

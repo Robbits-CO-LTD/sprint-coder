@@ -2,10 +2,17 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  ADD_CONNECTION_CLOSE_LABEL,
+  ADD_CONNECTION_LABEL,
+  ADD_FORM_PANEL_ID,
+  ADD_TOGGLE_ID,
+  ADVANCED_SUMMARY_LABEL,
+  CANCEL_LABEL,
   CONCURRENCY_AUTO_TEXT,
   CONCURRENCY_LABEL,
   CREATE_ERROR,
   KEY_BOUNDARY_HINT,
+  KEY_HINT_ID,
   LIST_ERROR,
   LOADING_TEXT,
   PROFILE_LIST_WARNING,
@@ -15,11 +22,17 @@ import {
   PROFILE_UNAVAILABLE_VALUE,
   PROFILE_WARNING_ID,
   PROVIDER_FORM_OPTIONS,
+  ProviderAddConnectionForm,
   ProviderConnectionCard,
   ProviderSettingsSection,
   RATE_LIMIT_ERROR,
   SECTION_DESCRIPTION,
   SELECTION_UNAVAILABLE_ID,
+  SUBMIT_BLOCKED_ACCOUNT_ID,
+  SUBMIT_BLOCKED_BUSY,
+  SUBMIT_BLOCKED_INPUT,
+  SUBMIT_BLOCKED_SELECTION,
+  SUBMIT_HINT_ID,
   VERIFICATION_LABEL,
   VERIFICATION_TONE,
   VERIFY_ERROR,
@@ -34,6 +47,7 @@ import {
   connectionKindLabel,
   createConnection,
   effectiveConcurrencyLimit,
+  hasOptionalProviderFields,
   isExternalConnection,
   isLoweringConcurrency,
   isProviderSelectionUnavailable,
@@ -41,8 +55,10 @@ import {
   lowerConcurrencyLimit,
   parseConcurrencyLimit,
   profileRequiresAccountId,
+  providerCreateErrorMessage,
   providerSelectDescribedBy,
   providerSelectValue,
+  providerSubmitBlockedReason,
   rateLimitLoweringApi,
   selectedProviderProfile,
   supportsRateLimitLowering,
@@ -325,6 +341,36 @@ describe('createConnection', () => {
       displayName: '本番',
       apiKey: FAKE_KEY,
     });
+  });
+});
+
+describe('providerCreateErrorMessage', () => {
+  it('shows a sanitized Main error instead of replacing it with a generic input error', () => {
+    const error = Object.assign(
+      new Error(
+        'OSの安全な保管領域を利用できません。macOSのログインキーチェーンを確認してから再試行してください。',
+      ),
+      { code: 'RUNTIME_UNAVAILABLE' },
+    );
+    expect(providerCreateErrorMessage(error)).toBe(
+      '接続を追加できませんでした。OSの安全な保管領域を利用できません。macOSのログインキーチェーンを確認してから再試行してください。',
+    );
+  });
+
+  it('does not expose unexpected errors', () => {
+    expect(providerCreateErrorMessage(new Error('internal detail'))).toBe(CREATE_ERROR);
+  });
+
+  it('recognizes a sanitized secure-storage error after contextBridge serialization', () => {
+    expect(
+      providerCreateErrorMessage({
+        message: 'serialized',
+        toString: () =>
+          'Error: OSの安全な保管領域を利用できません。macOSのログインキーチェーンを確認してから再試行してください。',
+      }),
+    ).toBe(
+      '接続を追加できませんでした。OSの安全な保管領域を利用できません。macOSのログインキーチェーンを確認してから再試行してください。',
+    );
   });
 });
 
@@ -967,22 +1013,230 @@ describe('ProviderSettingsSection', () => {
     expect(html).toContain('aria-busy="false"');
   });
 
-  it('masks the API key field by default and exposes a pressed-state reveal toggle', () => {
+  // The registered Connections are what this screen is for; adding one is an occasional act behind
+  // a disclosure, not the first thing the section spends its height on.
+  it('starts with the add form closed, behind one collapsed disclosure button', () => {
     const html = renderToStaticMarkup(<ProviderSettingsSection active />);
-    expect(html).toContain('id="settings-provider-api-key"');
-    expect(html).toContain('type="password"');
-    expect(html).toContain('aria-pressed="false"');
-    expect(html).toContain('aria-controls="settings-provider-api-key"');
-    expect(html).toContain('APIキーを表示');
+    expect(html).toContain(`id="${ADD_TOGGLE_ID}"`);
+    expect(html).toContain(ADD_CONNECTION_LABEL);
+    expect(html).toContain('aria-expanded="false"');
+    // Not merely hidden: unmounted, so no field is in the DOM and no plaintext key can sit in one.
+    expect(html).not.toContain('id="settings-provider-api-key"');
+    expect(html).not.toContain('id="settings-provider-kind"');
+    expect(html).not.toContain('data-testid="settings-provider-submit"');
+    expect(html).not.toContain(`id="${ADD_FORM_PANEL_ID}"`);
+    // A collapsed disclosure controls nothing that is on screen, so it points at nothing.
+    expect(html).not.toContain(`aria-controls="${ADD_FORM_PANEL_ID}"`);
+    // And no second heading above the form: the button is the only thing naming this act.
+    expect(html).not.toContain('Connectionを追加');
   });
 
-  it('offers every required provider and starts with submit disabled', () => {
+  it('says what the section is for without repeating the key-storage sentence', () => {
     const html = renderToStaticMarkup(<ProviderSettingsSection active />);
+    expect(html).toContain(SECTION_DESCRIPTION);
+    // The boundary copy belongs beside the field it is about, which is inside the closed form.
+    expect(html).not.toContain(KEY_BOUNDARY_HINT);
+  });
+});
+
+// Rendered open, which is the one state the section itself never starts in.
+function addFormMarkup(
+  overrides: Partial<Parameters<typeof ProviderAddConnectionForm>[0]> = {},
+): string {
+  return renderToStaticMarkup(
+    <ProviderAddConnectionForm
+      form={form({ displayName: '', apiKey: '' })}
+      profiles={[]}
+      profilesFailed={false}
+      busy={false}
+      submitting={false}
+      showKey={false}
+      onChange={() => {}}
+      onToggleKey={() => {}}
+      onSubmit={() => {}}
+      onCancel={() => {}}
+      {...overrides}
+    />,
+  );
+}
+
+describe('the add form, once the disclosure is open', () => {
+  it('is named by the button that opened it, and offers a way back out', () => {
+    const html = addFormMarkup();
+    expect(html).toContain(`id="${ADD_FORM_PANEL_ID}"`);
+    expect(html).toContain(`aria-labelledby="${ADD_TOGGLE_ID}"`);
+    expect(html).toContain(CANCEL_LABEL);
+    expect(html).toContain('data-testid="settings-provider-cancel"');
+    // Both ways out exist: this one, and the disclosure button's own closed label.
+    expect(ADD_CONNECTION_CLOSE_LABEL).not.toBe(ADD_CONNECTION_LABEL);
+  });
+
+  it('shows only the three basic fields, in Japanese, above the fold', () => {
+    const html = addFormMarkup();
+    expect(html).toContain('プロバイダー');
+    expect(html).toContain('表示名');
+    expect(html).toContain('APIキー');
     for (const option of PROVIDER_FORM_OPTIONS) expect(html).toContain(option.label);
+    // The legend/label pair that used to read as two competing headings is gone.
+    expect(html).not.toContain('<legend');
+    expect(html).not.toContain('>Provider<');
+  });
+
+  it('folds the optional per-Provider fields into a collapsed 詳細設定 disclosure', () => {
+    const html = addFormMarkup();
+    expect(html).toContain('data-testid="settings-provider-advanced"');
+    expect(html).toContain(ADVANCED_SUMMARY_LABEL);
+    // <details> without `open` is collapsed: OpenAI's scope fields are present but out of the way.
+    expect(html).not.toMatch(/<details[^>]*\sopen/);
+    expect(html).toContain('組織ID（任意）');
+    expect(html).toContain('プロジェクトID（任意）');
+    expect(html).not.toContain('Organization ID');
+    expect(html).not.toContain('Project ID');
     expect(html).toContain('id="settings-provider-org"');
     expect(html).toContain('id="settings-provider-project"');
-    // Empty display name and empty key on first render, so the submit must start unpressable.
+  });
+
+  it('offers no empty disclosure for a Provider that declares no optional field', () => {
+    const html = addFormMarkup({
+      form: form({ provider: 'anthropic', displayName: '', apiKey: '' }),
+    });
+    expect(html).not.toContain('data-testid="settings-provider-advanced"');
+    expect(html).not.toContain(ADVANCED_SUMMARY_LABEL);
+    expect(html).not.toContain('id="settings-provider-org"');
+  });
+
+  // A required field folded out of sight is a form that cannot be submitted and does not say why.
+  it('keeps a required Profile field out in the open, never inside 詳細設定', () => {
+    const needsAccount = profile({ requiredCredentialFields: ['account_id'] });
+    const html = addFormMarkup({
+      form: profileForm(needsAccount, { displayName: '', apiKey: '' }),
+      profiles: [needsAccount],
+    });
+    expect(html).toContain('data-testid="settings-provider-account-id"');
+    expect(html).toContain('必須');
+    // Nothing optional to fold for this Profile, so there is no disclosure it could be hiding in.
+    expect(html).not.toContain('data-testid="settings-provider-advanced"');
+    const configurable = profile({
+      requiredCredentialFields: ['account_id'],
+      baseUrlConfigurable: true,
+    });
+    const withBoth = addFormMarkup({
+      form: profileForm(configurable, { displayName: '', apiKey: '' }),
+      profiles: [configurable],
+    });
+    // The optional Base URL is inside the disclosure; the required Account ID is before it.
+    const advancedAt = withBoth.indexOf('data-testid="settings-provider-advanced"');
+    const accountAt = withBoth.indexOf('data-testid="settings-provider-account-id"');
+    const baseUrlAt = withBoth.indexOf('data-testid="settings-provider-base-url"');
+    expect(accountAt).toBeGreaterThan(-1);
+    expect(accountAt).toBeLessThan(advancedAt);
+    expect(baseUrlAt).toBeGreaterThan(advancedAt);
+    expect(withBoth).toContain('ベースURL（任意）');
+  });
+
+  it('masks the key and puts a labelled reveal inside the field', () => {
+    const html = addFormMarkup();
+    expect(html).toContain('id="settings-provider-api-key"');
+    expect(html).toContain('type="password"');
+    expect(html).toContain('data-testid="settings-provider-api-key-reveal"');
+    expect(html).toContain('aria-pressed="false"');
+    expect(html).toContain('aria-controls="settings-provider-api-key"');
+    expect(html).toContain('aria-label="APIキーを表示"');
+    expect(html).toContain('title="APIキーを表示"');
+    // The field, not a separate paragraph, carries the one short line about where the key goes.
+    expect(html).toContain(`aria-describedby="${KEY_HINT_ID}"`);
+    expect(html).toContain(`id="${KEY_HINT_ID}"`);
+    expect(html).toContain(KEY_BOUNDARY_HINT);
+  });
+
+  it('flips the reveal to a pressed hide control once the key is shown', () => {
+    const html = addFormMarkup({ showKey: true });
+    expect(html).toContain('type="text"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('aria-label="APIキーを隠す"');
+  });
+
+  it('starts with submit disabled and says why, without hiding that it is a button', () => {
+    const html = addFormMarkup();
     expect(html).toMatch(/data-testid="settings-provider-submit"[^>]*disabled/);
+    expect(html).toContain(SUBMIT_BLOCKED_INPUT);
+    expect(html).toContain(`id="${SUBMIT_HINT_ID}"`);
+    expect(html).toMatch(
+      new RegExp(`data-testid="settings-provider-submit"[^>]*aria-describedby="${SUBMIT_HINT_ID}"`),
+    );
+    // A filled-in form drops both the disabled state and the explanation.
+    const ready = addFormMarkup({ form: form() });
+    expect(ready).not.toMatch(/data-testid="settings-provider-submit"[^>]*disabled/);
+    expect(ready).not.toContain(SUBMIT_HINT_ID);
+  });
+
+  it('reports its own submit as 追加中 rather than as someone else‘s work', () => {
+    const html = addFormMarkup({ form: form(), busy: true, submitting: true });
+    expect(html).toContain('追加中');
+    expect(html).not.toContain(SUBMIT_BLOCKED_BUSY);
+    expect(html).toMatch(/data-testid="settings-provider-submit"[^>]*disabled/);
+    // A form blocked by a reload or a verification says so instead.
+    const blocked = addFormMarkup({ form: form(), busy: true });
+    expect(blocked).toContain(SUBMIT_BLOCKED_BUSY);
+    expect(blocked).not.toContain('追加中');
+  });
+
+  it('still refuses and explains a Profile that left the listing', () => {
+    const gone = profile();
+    const html = addFormMarkup({ form: profileForm(gone), profiles: [] });
+    expect(html).toContain(PROFILE_UNAVAILABLE_NOTICE);
+    expect(html).toContain(`data-testid="${SELECTION_UNAVAILABLE_ID}"`);
+    expect(html).toContain(SUBMIT_BLOCKED_SELECTION);
+    expect(html).toMatch(/data-testid="settings-provider-submit"[^>]*disabled/);
+  });
+});
+
+describe('providerSubmitBlockedReason', () => {
+  it('names a reason exactly when the submit is refused, and none when it is not', () => {
+    const cases: [ProviderFormValues, boolean, ProviderProfile[]][] = [
+      [form(), false, []],
+      [form({ displayName: '' }), false, []],
+      [form({ apiKey: '' }), false, []],
+      [form(), true, []],
+      [profileForm(profile()), false, []],
+      [
+        profileForm(profile({ requiredCredentialFields: ['account_id'] })),
+        false,
+        [profile({ requiredCredentialFields: ['account_id'] })],
+      ],
+    ];
+    for (const [candidate, busy, profiles] of cases) {
+      const reason = providerSubmitBlockedReason(candidate, busy, profiles);
+      expect(reason === null).toBe(canSubmitProviderForm(candidate, busy, profiles));
+    }
+  });
+
+  it('picks the reason the user can act on first', () => {
+    // A withdrawn selection outranks everything: filling more fields would not unblock it.
+    expect(providerSubmitBlockedReason(profileForm(profile()), true, [])).toBe(
+      SUBMIT_BLOCKED_SELECTION,
+    );
+    expect(providerSubmitBlockedReason(form({ apiKey: '' }), true, [])).toBe(SUBMIT_BLOCKED_INPUT);
+    const needsAccount = profile({ requiredCredentialFields: ['account_id'] });
+    expect(providerSubmitBlockedReason(profileForm(needsAccount), false, [needsAccount])).toBe(
+      SUBMIT_BLOCKED_ACCOUNT_ID,
+    );
+    expect(providerSubmitBlockedReason(form(), true, [])).toBe(SUBMIT_BLOCKED_BUSY);
+    expect(providerSubmitBlockedReason(form(), false, [])).toBeNull();
+  });
+});
+
+describe('hasOptionalProviderFields', () => {
+  it('is true only where there is an optional field to fold away', () => {
+    expect(
+      hasOptionalProviderFields({ scopedFixedProvider: false, baseUrlConfigurable: false }),
+    ).toBe(false);
+    expect(
+      hasOptionalProviderFields({ scopedFixedProvider: true, baseUrlConfigurable: false }),
+    ).toBe(true);
+    expect(
+      hasOptionalProviderFields({ scopedFixedProvider: false, baseUrlConfigurable: true }),
+    ).toBe(true);
   });
 });
 
@@ -1003,14 +1257,61 @@ describe('secret boundary copy', () => {
     // 「保存されず」would be a false promise. The honest claim is cleared-here, stored-by-Main.
     for (const text of [SECTION_DESCRIPTION, KEY_BOUNDARY_HINT]) {
       expect(text).not.toMatch(/保存されず|保存しません|保存されません/);
-      expect(text).toContain('Main');
     }
+    expect(KEY_BOUNDARY_HINT).toContain('Main');
     expect(KEY_BOUNDARY_HINT).toContain('消去');
     expect(KEY_BOUNDARY_HINT).toContain('安全な保管領域');
+    // Said once, beside the field it is about, rather than twice at two lengths.
+    expect(KEY_BOUNDARY_HINT.length).toBeLessThan(60);
+    expect(SECTION_DESCRIPTION).not.toContain('APIキー');
+    expect(addFormMarkup()).toContain(KEY_BOUNDARY_HINT);
     const html = renderToStaticMarkup(<ProviderSettingsSection active />);
     expect(html).toContain(SECTION_DESCRIPTION);
-    expect(html).toContain(KEY_BOUNDARY_HINT);
     expect(html).not.toContain('provider-secret:'); // nor the reference, ever
+  });
+});
+
+// 「確認不要」is a fact about the Connection, not something anyone can press. It used to be a
+// bordered chip sitting beside 検証を再実行, which put the two in the same visual family.
+describe('the verification badge is not a control', () => {
+  function buttonsIn(html: string): string[] {
+    return html.match(/<button[\s\S]*?<\/button>/g) ?? [];
+  }
+
+  it('renders every status as a plain span with no button semantics', () => {
+    for (const status of Object.keys(VERIFICATION_LABEL) as ProviderVerificationStatus[]) {
+      const html = renderToStaticMarkup(
+        <ProviderConnectionCard
+          connection={connection({
+            verification: { status, verifiedAt: null, expiresAt: null, message: null },
+          })}
+          verifying={false}
+          disabled={false}
+          onRetry={() => {}}
+        />,
+      );
+      const label = VERIFICATION_LABEL[status];
+      expect(html).toContain(`data-testid="settings-connection-badge-conn-1"`);
+      expect(html).toContain(
+        `<span class="settings-connection-badge tone-${VERIFICATION_TONE[status]}"`,
+      );
+      // Never inside a <button>, and never a button in disguise either.
+      for (const button of buttonsIn(html)) expect(button).not.toContain(label);
+      const badge = html.slice(html.indexOf('settings-connection-badge'));
+      const openTag = badge.slice(0, badge.indexOf('>'));
+      expect(openTag).not.toContain('role=');
+      expect(openTag).not.toContain('tabindex');
+      expect(openTag).not.toContain('onclick');
+    }
+  });
+
+  it('is styled without the border and fill that the real buttons carry', () => {
+    const css = readFileSync(new URL('../index.css', import.meta.url), 'utf8');
+    const start = css.indexOf('.settings-connection-badge {');
+    expect(start).toBeGreaterThan(-1);
+    const block = css.slice(start, css.indexOf('}', start));
+    expect(block).toContain('border: none');
+    expect(block).toContain('background: none');
   });
 });
 

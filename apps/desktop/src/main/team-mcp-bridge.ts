@@ -103,9 +103,23 @@ export type TeamMcpRegistration = Readonly<{
   taskId: string;
   token: string;
   requesterAgentId?: string;
+  requireModelResearch?: boolean;
+  allowSkillDrafts?: boolean;
 }>;
 
-type Registered = TeamMcpRegistration & { waitCursor: number; modelCatalogQueried: boolean };
+type Registered = TeamMcpRegistration & {
+  waitCursor: number;
+  modelCatalogQueried: boolean;
+  researchedModels: Set<string>;
+};
+
+function modelSelectionKey(selection: {
+  connectionId: string | null;
+  requestedProvider: string | null;
+  requestedModel: string | null;
+}): string {
+  return `${selection.connectionId ?? ''}\0${selection.requestedProvider ?? ''}\0${selection.requestedModel ?? ''}`;
+}
 
 export class TeamMcpBridge {
   private readonly registrations = new Map<string, Registered>();
@@ -122,6 +136,10 @@ export class TeamMcpBridge {
     private readonly listModelCandidates?: NonNullable<
       ExecuteTeamToolOptions['listModelCandidates']
     >,
+    private readonly createSkillDraft?: (
+      input: unknown,
+      context: { taskId: string; turnId: string },
+    ) => Promise<unknown>,
   ) {}
 
   get socketPath(): string | null {
@@ -239,6 +257,7 @@ export class TeamMcpBridge {
       ...registration,
       waitCursor: 0,
       modelCatalogQueried: false,
+      researchedModels: new Set(),
     });
   }
 
@@ -317,33 +336,60 @@ export class TeamMcpBridge {
     try {
       if (process.env['SPRINT_CODER_TEAM_MCP_TRACE'] === '1')
         secureLogger.debug('Team MCP tool received', { tool: request.tool });
-      const result = await executeTeamTool(
-        this.coordinator,
-        registration.taskId,
-        request.tool,
-        request.args,
-        {
-          ...(registration.requesterAgentId === undefined
-            ? {}
-            : { requesterAgentId: registration.requesterAgentId }),
-          longPoll: request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
-          waitReportsCursor: {
-            read: () => registration.waitCursor,
-            advance: (seq) => {
-              registration.waitCursor = seq;
-            },
-          },
-          ...(this.listModelCandidates === undefined
-            ? {}
-            : { listModelCandidates: this.listModelCandidates }),
-          modelCatalogAudit: {
-            wasQueried: () => registration.modelCatalogQueried,
-            markQueried: () => {
-              registration.modelCatalogQueried = true;
-            },
-          },
-        },
-      );
+      const result =
+        request.tool === 'skill_draft_create'
+          ? await this.executeSkillDraftTool(turnId, registration, request.args)
+          : await executeTeamTool(
+              this.coordinator,
+              registration.taskId,
+              request.tool,
+              request.args,
+              {
+                ...(registration.requesterAgentId === undefined
+                  ? {}
+                  : { requesterAgentId: registration.requesterAgentId }),
+                longPoll:
+                  request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
+                waitReportsCursor: {
+                  read: () => registration.waitCursor,
+                  advance: (seq) => {
+                    registration.waitCursor = seq;
+                  },
+                },
+                ...(this.listModelCandidates === undefined
+                  ? {}
+                  : { listModelCandidates: this.listModelCandidates }),
+                modelCatalogAudit: {
+                  wasQueried: () => registration.modelCatalogQueried,
+                  markQueried: () => {
+                    registration.modelCatalogQueried = true;
+                  },
+                },
+                ...(registration.requireModelResearch === true
+                  ? {
+                      modelResearchAudit: {
+                        required: true,
+                        record: (input: {
+                          modelSelection: {
+                            connectionId: string | null;
+                            requestedProvider: string | null;
+                            requestedModel: string | null;
+                          };
+                        }) => {
+                          registration.researchedModels.add(
+                            modelSelectionKey(input.modelSelection),
+                          );
+                        },
+                        hasEvidence: (selection: {
+                          connectionId: string | null;
+                          requestedProvider: string | null;
+                          requestedModel: string | null;
+                        }) => registration.researchedModels.has(modelSelectionKey(selection)),
+                      },
+                    }
+                  : {}),
+              },
+            );
       socket.write(`${JSON.stringify({ ok: true, result })}\n`);
     } catch (error) {
       socket.write(
@@ -351,6 +397,20 @@ export class TeamMcpBridge {
       );
     }
     void turnId;
+  }
+
+  private async executeSkillDraftTool(
+    turnId: string,
+    registration: Registered,
+    input: unknown,
+  ): Promise<unknown> {
+    if (
+      registration.allowSkillDrafts !== true ||
+      registration.requesterAgentId !== undefined ||
+      this.createSkillDraft === undefined
+    )
+      throw new Error('skill_draft_create is not available for this Turn');
+    return this.createSkillDraft(input, { taskId: registration.taskId, turnId });
   }
 
   /** Constant-time token compare: every registered token is compared with `timingSafeEqual`

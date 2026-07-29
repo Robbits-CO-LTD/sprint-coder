@@ -15,6 +15,7 @@ export type TaskSummary = {
   goal: string | null;
   workspacePath: string | null;
   localOnly: boolean;
+  hasConversation?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -275,6 +276,13 @@ export type TurnEvent =
       deliveryId: string;
       completionId: string;
       fragmentId: string;
+    }
+  | {
+      type: 'skill.draft.created';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      draft: import('@sprint-coder/contracts').SkillDraft;
     }
   | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
   | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage }
@@ -546,7 +554,12 @@ export type CanvasViewSaveResult = { revision: number };
 
 export interface SprintCoderApi {
   app: {
-    getInfo(): Promise<{ version: string; platform: string; recovery: DatabaseRecovery }>;
+    getInfo(): Promise<{
+      version: string;
+      platform: string;
+      recovery: DatabaseRecovery;
+      settingsWorkspaceV2?: boolean;
+    }>;
   };
   runtime: {
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
@@ -599,11 +612,20 @@ export interface SprintCoderApi {
     start(input: {
       taskId: string;
       text: string;
+      skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
-    queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
+    queue(input: {
+      taskId: string;
+      text: string;
+      skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
+    }): Promise<{ ordinal: number }>;
     steer(input: { taskId: string; text: string; expectedTurnId: string }): Promise<void>;
-    stopAndSend(input: { taskId: string; text: string }): Promise<void>;
+    stopAndSend(input: {
+      taskId: string;
+      text: string;
+      skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
+    }): Promise<void>;
     snapshot(taskId: string): Promise<TurnSnapshot>;
     subscribe(
       taskId: string,
@@ -649,6 +671,10 @@ export interface SprintCoderApi {
     setModel(model: string, taskId?: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
     setCodexEffort(effort: string): Promise<void>;
+    getTeamModelResearch(): Promise<{ researchBeforeHiring: boolean }>;
+    setTeamModelResearch(input: { researchBeforeHiring: boolean }): Promise<void>;
+    getDefaultTeamPolicy(): Promise<import('@sprint-coder/contracts').TeamPolicy>;
+    setDefaultTeamPolicy(policy: import('@sprint-coder/contracts').TeamPolicy): Promise<void>;
     scanSkills(): Promise<import('@sprint-coder/contracts').SkillScanResult>;
     previewSkill(
       provider: import('@sprint-coder/contracts').SkillProvider,
@@ -665,6 +691,29 @@ export interface SprintCoderApi {
       provider: import('@sprint-coder/contracts').SkillProvider,
       skillId: string,
     ): Promise<void>;
+  };
+  skills: {
+    list(): Promise<import('@sprint-coder/contracts').SkillCatalog>;
+    getDraftSelection(
+      taskId: string,
+    ): Promise<import('@sprint-coder/contracts').TurnSkillSelection[]>;
+    setDraftSelection(
+      taskId: string,
+      skills: import('@sprint-coder/contracts').TurnSkillSelection[],
+    ): Promise<void>;
+    listDrafts(): Promise<import('@sprint-coder/contracts').SkillDraft[]>;
+    createDraft(
+      input: import('@sprint-coder/contracts').SkillDraftCreateInput,
+    ): Promise<import('@sprint-coder/contracts').SkillDraft>;
+    installDraft(
+      draftId: string,
+      expectedDigest: string,
+      confirmed: true,
+    ): Promise<import('@sprint-coder/contracts').SkillCatalogItem>;
+    discardDraft(draftId: string): Promise<void>;
+    removeCreated(skillId: string, digest: string): Promise<void>;
+    setCreatedEnabled(skillId: string, digest: string, enabled: boolean): Promise<void>;
+    exportCreated(skillId: string, digest: string): Promise<string | null>;
   };
   models: {
     query(

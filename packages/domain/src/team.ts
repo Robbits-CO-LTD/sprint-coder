@@ -18,6 +18,30 @@ export type ManagerPolicy = Readonly<{
   allowManagerChildren: boolean;
 }>;
 
+export type TeamDelegationErrorCode =
+  | 'legacy_delegation_field'
+  | 'not_manager'
+  | 'direct_child_limit'
+  | 'manager_child_forbidden'
+  | 'team_depth_limit'
+  | 'manager_delegation_limit';
+
+export class TeamDelegationError extends Error {
+  readonly code: TeamDelegationErrorCode;
+  readonly details: Readonly<Record<string, number | string | boolean | null>>;
+
+  constructor(
+    code: TeamDelegationErrorCode,
+    message: string,
+    details: Readonly<Record<string, number | string | boolean | null>> = {},
+  ) {
+    super(message);
+    this.name = 'TeamDelegationError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export const DEFAULT_TEAM_POLICY: TeamPolicy = Object.freeze({
   maxAgentDepth: TEAM_MAX_AGENT_DEPTH,
   maxConcurrentExecutions: TEAM_MAX_CONCURRENT_EXECUTIONS,
@@ -222,7 +246,11 @@ export function assertDelegationAllowed(input: {
   )
     throw new Error('Invalid requester hierarchy depth');
   if (!requester.canDelegate || requester.managerPolicy === null)
-    throw new Error('Only a Manager with canDelegate may hire child Agents');
+    throw new TeamDelegationError(
+      'not_manager',
+      'Only a Manager with canDelegate may hire child Agents',
+      { requesterDepth: requester.depth },
+    );
   const managerPolicy = assertManagerPolicy(requester.managerPolicy, teamPolicy);
   if (!Number.isSafeInteger(input.directChildCount) || input.directChildCount < 0)
     throw new Error('Invalid direct child count');
@@ -230,11 +258,36 @@ export function assertDelegationAllowed(input: {
     managerPolicy.maxDirectChildren !== null &&
     input.directChildCount >= managerPolicy.maxDirectChildren
   )
-    throw new Error('Manager direct-child limit reached');
+    throw new TeamDelegationError('direct_child_limit', 'Manager direct-child limit reached', {
+      directChildCount: input.directChildCount,
+      maxDirectChildren: managerPolicy.maxDirectChildren,
+    });
   if (input.requestedChildCanDelegate && !managerPolicy.allowManagerChildren)
-    throw new Error('Manager Policy forbids hiring another Manager');
+    throw new TeamDelegationError(
+      'manager_child_forbidden',
+      'Manager Policy forbids hiring another Manager',
+      { requesterDepth: requester.depth },
+    );
   const childDepth = requester.depth + 1;
-  if (childDepth > teamPolicy.maxAgentDepth || childDepth > managerPolicy.maxDelegationDepth)
-    throw new Error(`Team hierarchy depth exceeds ${teamPolicy.maxAgentDepth}`);
+  if (childDepth > teamPolicy.maxAgentDepth)
+    throw new TeamDelegationError(
+      'team_depth_limit',
+      `Team hierarchy depth exceeds ${teamPolicy.maxAgentDepth}`,
+      {
+        requesterDepth: requester.depth,
+        requestedChildDepth: childDepth,
+        maxAgentDepth: teamPolicy.maxAgentDepth,
+      },
+    );
+  if (childDepth > managerPolicy.maxDelegationDepth)
+    throw new TeamDelegationError(
+      'manager_delegation_limit',
+      `Manager delegation limit ${managerPolicy.maxDelegationDepth} does not allow child depth ${childDepth}`,
+      {
+        requesterDepth: requester.depth,
+        requestedChildDepth: childDepth,
+        maxDelegationDepth: managerPolicy.maxDelegationDepth,
+      },
+    );
   return childDepth;
 }

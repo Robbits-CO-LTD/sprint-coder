@@ -1,5 +1,10 @@
 import { create } from 'zustand';
-import type { ModelSelection } from '@sprint-coder/contracts';
+import type {
+  ModelSelection,
+  SkillCatalogItem,
+  SkillDraft,
+  TurnSkillSelection,
+} from '@sprint-coder/contracts';
 import type {
   AccessPreset,
   AutoPermissionDecision,
@@ -52,6 +57,9 @@ export type TurnRuntimeState = {
   reachedStageIndex: number;
   status: TurnStatus;
   startedAt: number;
+  /** Set when the terminal event arrives so completed-work duration freezes truthfully. Historical
+   * snapshots do not currently carry this timestamp; restored turns omit it instead of guessing. */
+  finishedAt?: number;
   streamingMessageId: string | null;
   streamingContent: string;
 };
@@ -138,6 +146,10 @@ type AppState = {
   lastSeqByTask: Record<string, number>;
   sendingByTask: Record<string, boolean>;
   draftByTask: Record<string, string>;
+  skillCatalog: SkillCatalogItem[];
+  skillCatalogRevision: string | null;
+  skillSelectionByTask: Record<string, TurnSkillSelection[] | undefined>;
+  skillDraftsByTask: Record<string, { turnId: string; draft: SkillDraft }[]>;
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   permissionByTask: Record<string, PermissionSettings | undefined>;
   approvalsByTask: Record<string, ApprovalSummary[]>;
@@ -184,6 +196,7 @@ type AppState = {
   /** Whether the recovery notice has been dismissed. A launch-scoped fact, so acknowledging it
    * should not require persistence — it simply stops being shown for this session. */
   recoveryAcknowledged: boolean;
+  settingsWorkspaceV2: boolean;
   /** Latest Runtime process liveness, pushed by main. Null until the first transition. */
   runtimeStatus: RuntimeStatus | null;
 
@@ -230,10 +243,14 @@ type AppState = {
     expectedRevision: number,
   ): Promise<{ ok: true } | { ok: false; message: string }>;
   setDraft(taskId: string, text: string): void;
-  startTurn(taskId: string, text: string): Promise<void>;
-  queueMessage(taskId: string, text: string): Promise<void>;
+  loadSkills(): Promise<void>;
+  setSkillSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
+  installSkillDraft(taskId: string, draft: SkillDraft): Promise<void>;
+  discardSkillDraft(taskId: string, draftId: string): Promise<void>;
+  startTurn(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
+  queueMessage(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
   steerMessage(taskId: string, text: string, expectedTurnId: string): Promise<void>;
-  stopAndSend(taskId: string, text: string): Promise<void>;
+  stopAndSend(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
   cancelActiveTurn(taskId: string): Promise<void>;
   showToast(message: string): void;
   dismissToast(): void;
@@ -279,6 +296,28 @@ async function restoreDraft(
     }
   } catch {
     // Non-fatal: leave the draft empty rather than blocking task selection.
+  }
+}
+
+async function restoreSkillSelection(
+  taskId: string,
+  apply: (fn: (state: AppState) => Partial<AppState>) => void,
+  get: () => AppState,
+) {
+  if (
+    !window.sprintCoder ||
+    typeof window.sprintCoder.skills?.getDraftSelection !== 'function' ||
+    get().skillSelectionByTask[taskId] !== undefined
+  )
+    return;
+  try {
+    const skills = await window.sprintCoder.skills.getDraftSelection(taskId);
+    if (get().selectedTaskId === taskId && get().skillSelectionByTask[taskId] === undefined)
+      apply((state) => ({
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: skills },
+      }));
+  } catch {
+    // A missing optional API must not block the composer.
   }
 }
 
@@ -594,6 +633,20 @@ function handleTurnEvent(
       });
       break;
     }
+    case 'skill.draft.created': {
+      apply((state) => ({
+        skillDraftsByTask: {
+          ...state.skillDraftsByTask,
+          [taskId]: [
+            ...(state.skillDraftsByTask[taskId] ?? []).filter(
+              ({ draft }) => draft.id !== ev.draft.id,
+            ),
+            { turnId: ev.turnId, draft: ev.draft },
+          ],
+        },
+      }));
+      break;
+    }
     case 'turn.completed': {
       apply((state) => {
         const turn = state.turnByTask[taskId];
@@ -616,7 +669,10 @@ function handleTurnEvent(
         }
         return {
           messagesByTask: { ...state.messagesByTask, [taskId]: nextMessages },
-          turnByTask: { ...state.turnByTask, [taskId]: { ...turn, status: ev.state } },
+          turnByTask: {
+            ...state.turnByTask,
+            [taskId]: { ...turn, status: ev.state, finishedAt: Date.now() },
+          },
           turnDiffByTask: {
             ...state.turnDiffByTask,
             [taskId]: { turnId: ev.turnId, entries: ev.diff },
@@ -700,6 +756,10 @@ export const useAppStore = create<AppState>((set, get) => {
     lastSeqByTask: {},
     sendingByTask: {},
     draftByTask: {},
+    skillCatalog: [],
+    skillCatalogRevision: null,
+    skillSelectionByTask: {},
+    skillDraftsByTask: {},
     workspaceByTask: {},
     permissionByTask: {},
     approvalsByTask: {},
@@ -729,6 +789,7 @@ export const useAppStore = create<AppState>((set, get) => {
     reasoningSeenByTurn: {},
     recovery: null,
     recoveryAcknowledged: false,
+    settingsWorkspaceV2: true,
     runtimeStatus: null,
     stageAnnouncement: '',
     toast: null,
@@ -788,7 +849,11 @@ export const useAppStore = create<AppState>((set, get) => {
         void window.sprintCoder.app
           .getInfo()
           .then((info) => {
-            if (info.recovery !== undefined) set({ recovery: info.recovery });
+            if (info.recovery !== undefined)
+              set({
+                recovery: info.recovery,
+                settingsWorkspaceV2: info.settingsWorkspaceV2 ?? true,
+              });
           })
           .catch(() => undefined);
       if (typeof window.sprintCoder.runtime?.subscribeStatus === 'function')
@@ -856,6 +921,7 @@ export const useAppStore = create<AppState>((set, get) => {
           text: '',
           connectionIds: [],
           providerIds: [],
+          accessTypes: [],
           capabilities: [],
           availableOnly: true,
           cursor: null,
@@ -1101,6 +1167,8 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       set({ teamViewOpen: false });
       void restoreDraft(taskId, apply, get);
+      void restoreSkillSelection(taskId, apply, get);
+      void get().loadSkills();
       void loadWorkspace(taskId, apply, get);
       void loadPermission(taskId, apply, get);
       // The model selection is per-Task (UI slice U1b), so both the legacy chips' source and the
@@ -1444,9 +1512,73 @@ export const useAppStore = create<AppState>((set, get) => {
       persistDraftDebounced(taskId, text);
     },
 
-    async startTurn(taskId: string, text: string) {
+    async loadSkills() {
+      if (!window.sprintCoder || typeof window.sprintCoder.skills?.list !== 'function') return;
+      try {
+        const catalog = await window.sprintCoder.skills.list();
+        if (get().skillCatalogRevision === catalog.revision) return;
+        set({ skillCatalog: catalog.items, skillCatalogRevision: catalog.revision });
+      } catch {
+        // Skills are additive. Chat remains usable when the catalog cannot be loaded.
+      }
+    },
+
+    async setSkillSelection(taskId: string, skills: TurnSkillSelection[]) {
+      const previous = get().skillSelectionByTask[taskId] ?? [];
+      set((state) => ({
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [...skills] },
+      }));
+      if (!window.sprintCoder || typeof window.sprintCoder.skills?.setDraftSelection !== 'function')
+        return;
+      try {
+        await window.sprintCoder.skills.setDraftSelection(taskId, [...skills]);
+      } catch (err) {
+        set((state) => ({
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: previous },
+          error: describeError(err),
+        }));
+      }
+    },
+
+    async installSkillDraft(taskId: string, draft: SkillDraft) {
+      if (typeof window.sprintCoder?.skills?.installDraft !== 'function') return;
+      try {
+        await window.sprintCoder.skills.installDraft(draft.id, draft.digest, true);
+        set((state) => ({
+          skillDraftsByTask: {
+            ...state.skillDraftsByTask,
+            [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
+              ({ draft: item }) => item.id !== draft.id,
+            ),
+          },
+        }));
+        await get().loadSkills();
+      } catch (err) {
+        set({ error: describeError(err) });
+      }
+    },
+
+    async discardSkillDraft(taskId: string, draftId: string) {
+      if (typeof window.sprintCoder?.skills?.discardDraft !== 'function') return;
+      try {
+        await window.sprintCoder.skills.discardDraft(draftId);
+        set((state) => ({
+          skillDraftsByTask: {
+            ...state.skillDraftsByTask,
+            [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
+              ({ draft }) => draft.id !== draftId,
+            ),
+          },
+        }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      }
+    },
+
+    async startTurn(taskId: string, text: string, skills) {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder) return;
+      const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const turn = get().turnByTask[taskId];
       if (turn && (turn.status === 'running' || turn.status === 'canceling')) return;
 
@@ -1467,18 +1599,32 @@ export const useAppStore = create<AppState>((set, get) => {
         pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: optimisticId },
         sendingByTask: { ...state.sendingByTask, [taskId]: true },
         draftByTask: { ...state.draftByTask, [taskId]: '' },
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
       }));
       persistDraftDebounced(taskId, '');
+      void window.sprintCoder.skills?.setDraftSelection(taskId, []).catch(() => undefined);
 
       try {
-        const result = await window.sprintCoder.turns.start({ taskId, text: trimmed });
+        const result = await window.sprintCoder.turns.start({
+          taskId,
+          text: trimmed,
+          skills: selectedSkills,
+        });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
-        // `renamedTask` is present only when this was the Task's first message and it was still
-        // carrying the placeholder title (issue #4) — merge it so the sidebar updates immediately
-        // instead of at the next full `tasks.list()`.
+        // A DB Task exists before this point so per-Task settings have a stable id, but it becomes
+        // conversation history only after this acceptance succeeds. `renamedTask` is present only
+        // when the first message also produced an automatic title (issue #4).
         const renamed = result?.renamedTask;
-        if (renamed !== undefined)
-          set((state) => ({ tasks: state.tasks.map((t) => (t.id === renamed.id ? renamed : t)) }));
+        set((state) => ({
+          tasks: state.tasks.map((task) =>
+            task.id === taskId
+              ? {
+                  ...(renamed ?? task),
+                  hasConversation: true,
+                }
+              : task,
+          ),
+        }));
       } catch (err) {
         const code = errorCode(err);
         set((state) => ({
@@ -1489,30 +1635,47 @@ export const useAppStore = create<AppState>((set, get) => {
           pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: undefined },
           sendingByTask: { ...state.sendingByTask, [taskId]: false },
           draftByTask: { ...state.draftByTask, [taskId]: trimmed },
+          skillSelectionByTask: {
+            ...state.skillSelectionByTask,
+            [taskId]: selectedSkills,
+          },
           error: code === 'TURN_ACTIVE' ? null : describeError(err),
         }));
+        void window.sprintCoder.skills
+          ?.setDraftSelection(taskId, selectedSkills)
+          .catch(() => undefined);
         if (code === 'TURN_ACTIVE') {
-          get().showToast(
-            'すでに実行中です。キューに追加するか、Steer/Stop & Sendを選んでください',
-          );
+          get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
         }
       }
     },
 
-    async queueMessage(taskId: string, text: string) {
+    async queueMessage(taskId: string, text: string, skills) {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.queue !== 'function')
         return;
-      set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
+      const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
+      set((state) => ({
+        draftByTask: { ...state.draftByTask, [taskId]: '' },
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+      }));
       persistDraftDebounced(taskId, '');
+      void window.sprintCoder.skills?.setDraftSelection(taskId, []).catch(() => undefined);
       try {
-        await window.sprintCoder.turns.queue({ taskId, text: trimmed });
+        await window.sprintCoder.turns.queue({ taskId, text: trimmed, skills: selectedSkills });
         // queue.changed (delivered via subscription) reconciles the compact queued list.
       } catch (err) {
         set((state) => ({
           draftByTask: { ...state.draftByTask, [taskId]: trimmed },
+          skillSelectionByTask: {
+            ...state.skillSelectionByTask,
+            [taskId]: selectedSkills,
+          },
           error: describeError(err),
         }));
+        void window.sprintCoder.skills
+          ?.setDraftSelection(taskId, selectedSkills)
+          .catch(() => undefined);
       }
     },
 
@@ -1543,7 +1706,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async stopAndSend(taskId: string, text: string) {
+    async stopAndSend(taskId: string, text: string, skills) {
       const trimmed = text.trim();
       if (
         !trimmed ||
@@ -1551,15 +1714,31 @@ export const useAppStore = create<AppState>((set, get) => {
         typeof window.sprintCoder.turns.stopAndSend !== 'function'
       )
         return;
-      set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
+      const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
+      set((state) => ({
+        draftByTask: { ...state.draftByTask, [taskId]: '' },
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+      }));
       persistDraftDebounced(taskId, '');
+      void window.sprintCoder.skills?.setDraftSelection(taskId, []).catch(() => undefined);
       try {
-        await window.sprintCoder.turns.stopAndSend({ taskId, text: trimmed });
+        await window.sprintCoder.turns.stopAndSend({
+          taskId,
+          text: trimmed,
+          skills: selectedSkills,
+        });
       } catch (err) {
         set((state) => ({
           draftByTask: { ...state.draftByTask, [taskId]: trimmed },
+          skillSelectionByTask: {
+            ...state.skillSelectionByTask,
+            [taskId]: selectedSkills,
+          },
           error: describeError(err),
         }));
+        void window.sprintCoder.skills
+          ?.setDraftSelection(taskId, selectedSkills)
+          .catch(() => undefined);
       }
     },
 
