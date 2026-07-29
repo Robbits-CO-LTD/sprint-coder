@@ -80,8 +80,10 @@ export function createSkepticRunner(deps: SkepticRuntimeDeps): SkepticRunner {
     if (choice === null) throw new Error('No runtime is configured to verify with');
 
     // Each skeptic is its own turn, so one failing or being cancelled cannot disturb another, and
-    // the runtime never sees two skeptics as the same conversation. Policy, workspace and context
-    // still come from the source Task: the synthetic runtime id is only transcript isolation.
+    // the runtime never sees two skeptics as the same conversation. Policy and workspace still
+    // come from the source Task, but its prepared conversation context is used only to authorize
+    // egress — copying it into every skeptic would copy the same untrusted instructions into every
+    // supposedly independent seat. The synthetic runtime id is only transcript isolation.
     const runtimeTaskId = verificationTaskId(sourceTaskId, skepticIndex);
     const turnId = deps.newTurnId();
     const workspacePath = deps.workspaceFor(sourceTaskId);
@@ -124,7 +126,7 @@ export function createSkepticRunner(deps: SkepticRuntimeDeps): SkepticRunner {
         workspacePath,
         choice.model,
         deps.catalogFor(choice.kind, workspacePath),
-        context,
+        undefined,
         undefined,
         undefined,
         'read-only',
