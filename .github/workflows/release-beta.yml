@@ -1,0 +1,202 @@
+name: Beta Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*.*.*-beta.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate beta
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: metadata
+        shell: bash
+        run: |
+          version="$(node -p "require('./apps/desktop/package.json').version")"
+          tag="v${version}"
+
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+            echo "::error::Desktop version '${version}' is not a beta SemVer."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_NAME}" != "${tag}" ]]; then
+            echo "::error::Tag '${GITHUB_REF_NAME}' does not match package version '${tag}'."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Manual beta releases must run from the main branch."
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify embedded client version
+        shell: bash
+        run: |
+          node <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const manifest = require('./apps/desktop/package.json');
+          const adapter = readFileSync(
+            './apps/desktop/src/runtime-host/codex-adapter.ts',
+            'utf8',
+          );
+          if (!adapter.includes(`version: '${manifest.version}'`)) {
+            throw new Error(
+              `Codex client version does not match desktop version ${manifest.version}`,
+            );
+          }
+          NODE
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Test
+        run: npm run test
+
+  make:
+    name: Make ${{ matrix.label }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS
+            artifact: macos
+          - os: windows-2022
+            label: Windows
+            artifact: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Verify Electron binary
+        run: node node_modules/electron/cli.js -p "process.versions.electron"
+        env:
+          ELECTRON_RUN_AS_NODE: '1'
+
+      - name: Rebuild native modules for Electron ABI
+        working-directory: apps/desktop
+        run: npx --yes @electron/rebuild -f -w better-sqlite3
+
+      - name: Build NativeSafeFs for Electron ABI
+        run: npm run build:native-safe-fs
+
+      - name: Make release ZIP
+        working-directory: apps/desktop
+        run: npx electron-forge make
+        env:
+          CI: 'true'
+          SPRINT_CODER_RELEASE: '1'
+          SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
+
+      - name: Upload release ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint-coder-${{ matrix.artifact }}-${{ runner.arch }}
+          path: apps/desktop/out/make/zip/**/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish prerelease
+    needs: [validate, make]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download release ZIPs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sprint-coder-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          shopt -s nullglob
+          assets=(release-assets/*.zip)
+          if (( ${#assets[@]} != 2 )); then
+            echo "::error::Expected two release ZIPs, found ${#assets[@]}."
+            exit 1
+          fi
+
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Sprint Coder ${RELEASE_VERSION}" \
+              --prerelease
+          else
+            create_args=(
+              "${RELEASE_TAG}"
+              --repo "${GITHUB_REPOSITORY}"
+              --title "Sprint Coder ${RELEASE_VERSION}"
+              --generate-notes
+              --prerelease
+            )
+            if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+              create_args+=(--target "${GITHUB_SHA}")
+            else
+              create_args+=(--verify-tag)
+            fi
+            gh release create "${create_args[@]}"
+          fi
+
+          gh release upload "${RELEASE_TAG}" "${assets[@]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

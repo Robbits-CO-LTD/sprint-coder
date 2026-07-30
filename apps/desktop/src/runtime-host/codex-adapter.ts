@@ -218,7 +218,11 @@ export class CodexRuntimeAdapter {
     void (async () => {
       try {
         await send('initialize', {
-          clientInfo: { name: 'sprint-coder', title: 'Sprint Coder', version: '0.1.0' },
+          clientInfo: {
+            name: 'sprint-coder',
+            title: 'Sprint Coder',
+            version: '0.0.1-beta.0',
+          },
           capabilities: {},
         });
         child.stdin.write(
