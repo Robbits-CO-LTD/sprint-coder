@@ -63,6 +63,9 @@ import {
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
+// The Windows bridge runs the full SQLite integration suite in a child Electron process. Native
+// startup plus the Windows-only Job Object case can exceed the POSIX timeout on hosted runners.
+const persistenceBridgeTimeoutMs = process.platform === 'win32' ? 60_000 : 30_000;
 const artifactIt = it.skipIf(process.platform === 'win32');
 const commandExecutionIt = it.skipIf(process.platform === 'win32');
 const windowsCommandGateIt = it.runIf(process.platform === 'win32');
@@ -5186,23 +5189,27 @@ if (runsWithElectronAbi)
   });
 else
   describe('SqlitePersistenceClient v27 Electron ABI bridge', () => {
-    it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
-      const result = spawnSync(
-        electronTestExecutablePath(),
-        [
-          join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-          'run',
-          'src/main/persistence.test.ts',
-        ],
-        {
-          cwd: process.cwd(),
-          encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-          timeout: 30_000,
-        },
-      );
-      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    }, 35_000);
+    it(
+      'runs the SQLite integration suite with the bundled Electron Node ABI',
+      () => {
+        const result = spawnSync(
+          electronTestExecutablePath(),
+          [
+            join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+            'run',
+            'src/main/persistence.test.ts',
+          ],
+          {
+            cwd: process.cwd(),
+            encoding: 'utf8',
+            env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
+            timeout: persistenceBridgeTimeoutMs,
+          },
+        );
+        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      },
+      persistenceBridgeTimeoutMs + 5_000,
+    );
   });
 
 function persistedEditPlan(preImage = 'before', postImage = 'after'): PreparedStructuredPatch {
