@@ -23,7 +23,7 @@ jobs:
       version: ${{ steps.metadata.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve release metadata
         id: metadata
@@ -51,7 +51,7 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -115,10 +115,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -151,7 +151,7 @@ jobs:
           SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS: '1'
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sprint-coder-${{ matrix.artifact }}-${{ runner.arch }}
           path: |
@@ -169,7 +169,7 @@ jobs:
       contents: write
     steps:
       - name: Download release ZIPs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: sprint-coder-*
           path: release-assets
