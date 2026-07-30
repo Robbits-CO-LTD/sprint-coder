@@ -1,3 +1,4 @@
+import { basename } from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import {
@@ -71,7 +72,7 @@ test.describe('command runner flow', () => {
       });
     }, REPO_ROOT);
     await page.getByRole('button', { name: 'Workspace未選択' }).first().click();
-    await expect(page.getByRole('button', { name: 'sprint-coder' }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: basename(REPO_ROOT) }).first()).toBeVisible();
 
     const textarea = page.getByTestId('composer-textarea');
     const card = page.getByTestId('approval-card');

@@ -28,7 +28,7 @@ test.describe('automatic Task naming', () => {
     const textarea = page.getByTestId('composer-textarea');
     await expect(textarea).toBeVisible();
 
-    const sidebar = page.locator('.sidebar');
+    const sidebar = page.locator('.sidebar .sb-scroll');
     // A blank Task is a composer workspace, not conversation history.
     await expect(sidebar.getByText(PLACEHOLDER, { exact: true })).toHaveCount(0);
 

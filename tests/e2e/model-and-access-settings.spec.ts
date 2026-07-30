@@ -87,13 +87,13 @@ test.describe('claude model clarity and effort settings', () => {
     await expect(page.getByTestId('model-option-auto')).toContainText('claude-sonnet-5');
     await page.getByTestId('model-option-auto').click();
 
-    // Task 2: the effort chip is a real interactive control for Claude (not the static
-    // "effort: medium" placeholder), and the selection survives an app restart.
+    // Task 2: the compact effort chip is a real interactive control for Claude, and the selection
+    // survives an app restart.
     await expect(page.getByTestId('effort-selector')).toBeEnabled();
-    await expect(page.getByTestId('effort-selector')).toHaveText('effort: Medium');
+    await expect(page.getByTestId('effort-selector')).toHaveText('中程度');
     await page.getByTestId('effort-selector').click();
     await page.getByTestId('effort-option-high').click();
-    await expect(page.getByTestId('effort-selector')).toHaveText('effort: High');
+    await expect(page.getByTestId('effort-selector')).toHaveText('高');
 
     // Task 3 (issue #8): Ultracode is the sixth level. It is reachable from the same menu, keeps
     // the menuitemradio semantics, and persists like the documented five.
@@ -102,13 +102,13 @@ test.describe('claude model clarity and effort settings', () => {
     await expect(ultracode).toHaveAttribute('role', 'menuitemradio');
     await expect(ultracode).toHaveAttribute('aria-checked', 'false');
     await ultracode.click();
-    await expect(page.getByTestId('effort-selector')).toHaveText('effort: Ultracode');
+    await expect(page.getByTestId('effort-selector')).toHaveText('Ultracode');
 
     await closeApp(app);
     app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
     page = await firstWindow(app);
     await expect(page.getByTestId('runtime-selector')).toHaveText('Claude Code');
-    await expect(page.getByTestId('effort-selector')).toHaveText('effort: Ultracode');
+    await expect(page.getByTestId('effort-selector')).toHaveText('Ultracode');
 
     // Keyboard-only round trip through the enlarged menu: the trigger is reachable by Tab-less
     // focus, Enter opens it, the option takes focus, Enter selects, and Escape closes.
@@ -121,7 +121,7 @@ test.describe('claude model clarity and effort settings', () => {
     );
     await page.getByTestId('effort-option-max').focus();
     await page.keyboard.press('Enter');
-    await expect(page.getByTestId('effort-selector')).toHaveText('effort: Max');
+    await expect(page.getByTestId('effort-selector')).toHaveText('最大');
     await page.getByTestId('effort-selector').click();
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('effort-selector')).toHaveAttribute('aria-expanded', 'false');
@@ -169,7 +169,7 @@ test.describe('codex per-model effort settings', () => {
     const effortChip = page.getByTestId('effort-selector');
     await expect(effortChip).toBeDisabled();
     await expect(effortChip).toHaveAttribute('title', /Auto以外/);
-    await expect(effortChip).toHaveText('effort: —');
+    await expect(effortChip).toHaveText('—');
 
     // Pick a concrete model; the chip becomes usable and lists exactly what that model advertises.
     await page.getByTestId('model-selector').click();
@@ -196,7 +196,7 @@ test.describe('codex per-model effort settings', () => {
     if (highest === null || highest === undefined) throw new Error('no effort options offered');
     const highestId = highest.replace('effort-option-', '');
     await page.getByTestId(highest).click();
-    await expect(effortChip).toHaveText(new RegExp(`effort: `, 'i'));
+    await expect(effortChip).not.toHaveText('—');
     const labelAfterPick = await effortChip.textContent();
 
     await closeApp(app);
@@ -210,7 +210,7 @@ test.describe('codex per-model effort settings', () => {
     // promised to accept.
     await page.getByTestId('model-selector').click();
     await page.getByTestId('model-option-auto').click();
-    await expect(page.getByTestId('effort-selector')).toHaveText('effort: —');
+    await expect(page.getByTestId('effort-selector')).toHaveText('—');
     await expect(page.getByTestId('effort-selector')).toBeDisabled();
 
     // ...and coming back to the model restores a usable level (clamped to that model's default if
