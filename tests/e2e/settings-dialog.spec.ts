@@ -107,6 +107,20 @@ test.describe('settings dialog', () => {
     await expect(page.getByTestId('settings-dialog')).not.toBeVisible();
   });
 
+  test('never offers full access as an inherited default for a new Task', async () => {
+    const page: Page = await firstWindow(app!);
+    await page.getByTestId('sidebar-settings-button').click();
+    const accessDefault = page.getByTestId('settings-access-default');
+    await expect(accessDefault).toBeVisible();
+    await expect(accessDefault.locator('option')).toHaveText([
+      '前回選択した設定',
+      '毎回確認',
+      '安全時は自動',
+    ]);
+    await expect(accessDefault.locator('option[value="full"]')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+  });
+
   test('previews and imports a detected Skill using the typed settings bridge', async () => {
     const page: Page = await firstWindow(app!);
     await page.getByTestId('sidebar-settings-button').click();

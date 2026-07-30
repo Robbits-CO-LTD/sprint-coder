@@ -143,6 +143,18 @@ export function transitionWorker(from: WorkerState, to: WorkerState): WorkerStat
   return to;
 }
 
+/**
+ * Whether a Worker in this state can still do anything.
+ *
+ * Read off the transition table rather than restating it as a list of terminal names, because a list is
+ * a second place to remember: adding a state and forgetting the list would silently report a live
+ * Worker as finished, or a finished one as live. A state nothing leads out of is terminal by
+ * construction, so a new state is classified correctly the moment its transitions are declared.
+ */
+export function isWorkerActive(state: WorkerState): boolean {
+  return workerTransitions[state].length > 0;
+}
+
 export function transitionTeamMessage(
   from: TeamMessageState,
   to: TeamMessageState,

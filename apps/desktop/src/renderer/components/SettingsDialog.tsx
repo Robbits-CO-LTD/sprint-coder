@@ -13,6 +13,11 @@ import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/spri
 import { ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
 import type { TeamPolicy } from '@sprint-coder/contracts';
+import {
+  readAccessPresetDefault,
+  writeAccessPresetDefault,
+  type AccessPresetDefault,
+} from '../lib/access-preset-preference';
 
 // Settings dialog (issue #5). The sidebar's "設定" button had no onClick and was not disabled
 // either, so it looked pressable and did nothing — and no settings screen existed anywhere in the
@@ -173,6 +178,7 @@ export function LegacyBody({
         <>
           <ModelGroup />
           <EffortGroup />
+          <AccessDefaultGroup />
           {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item, which
               is exactly where a user who cannot select a Runtime will not look. */}
           <CliDetectionGroup />
@@ -293,6 +299,7 @@ export function WorkspaceBody({
             <WorkspacePage {...page('models')}>
               <ModelGroup />
               <EffortGroup />
+              <AccessDefaultGroup />
               {/* Unmounting clears the renderer-local plaintext credential state. */}
               {open && <ProviderSettingsSection active={open} />}
             </WorkspacePage>
@@ -456,6 +463,37 @@ function EffortGroup() {
       </label>
       <p className="settings-hint" data-testid="settings-effort-hint">
         {effortReason ?? EFFORT_DESC[runtime.effort]}
+      </p>
+    </div>
+  );
+}
+
+function AccessDefaultGroup() {
+  const [accessDefault, setAccessDefault] = useState<AccessPresetDefault>(() =>
+    readAccessPresetDefault(),
+  );
+  return (
+    <div className="settings-group">
+      <label className="settings-field" htmlFor="settings-access-default">
+        <span className="settings-field-label">新しいタスクの安全設定</span>
+        <select
+          id="settings-access-default"
+          data-testid="settings-access-default"
+          value={accessDefault}
+          onChange={(event) => {
+            const value = event.target.value as AccessPresetDefault;
+            setAccessDefault(value);
+            writeAccessPresetDefault(value);
+          }}
+        >
+          <option value="last">前回選択した設定</option>
+          <option value="ask">毎回確認</option>
+          <option value="auto">安全時は自動</option>
+        </select>
+      </label>
+      <p className="settings-hint">
+        設定しない場合は直近の安全な選択を引き継ぎます。フルアクセスは新しいタスクへ
+        引き継がれず、タスクごとに確認します。
       </p>
     </div>
   );

@@ -44,6 +44,7 @@ import {
   projectCommandTail,
   type CommandTailProjection,
 } from './command-projection';
+import { accessPresetForNewTask, rememberAccessPreset } from '../lib/access-preset-preference';
 
 export type TurnStatus =
   'running' | 'canceling' | 'completed' | 'canceled' | 'failed' | 'interrupted';
@@ -1081,6 +1082,7 @@ export const useAppStore = create<AppState>((set, get) => {
           preset,
           previous.policyEpoch,
         );
+        rememberAccessPreset(preset);
         set((state) => ({
           permissionByTask:
             state.permissionByTask[taskId]?.preset === preset &&
@@ -1369,6 +1371,8 @@ export const useAppStore = create<AppState>((set, get) => {
         const task = await window.sprintCoder.tasks.create();
         set((state) => ({ tasks: [task, ...state.tasks] }));
         await get().selectTask(task.id);
+        const preset = accessPresetForNewTask();
+        if (preset !== 'ask') await get().setAccessPreset(task.id, preset);
       } catch (err) {
         set({ error: describeError(err) });
       }

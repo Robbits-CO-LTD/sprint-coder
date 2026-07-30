@@ -8,9 +8,11 @@ import {
   assertTeamMessageAllowed,
   assertTeamPolicy,
   assertWorkerPersistenceInput,
+  isWorkerActive,
   transitionTeam,
   transitionTeamMessage,
   transitionWorker,
+  workerStates,
 } from './team';
 
 function delegationError(action: () => void): TeamDelegationError {
@@ -22,6 +24,27 @@ function delegationError(action: () => void): TeamDelegationError {
   }
   throw new Error('Expected TeamDelegationError');
 }
+
+describe('worker liveness', () => {
+  it('calls a Worker active exactly while the machine can still move it', () => {
+    expect(workerStates.filter(isWorkerActive)).toEqual([
+      'invited',
+      'spawning',
+      'ready',
+      'busy',
+      'waiting',
+    ]);
+    expect(workerStates.filter((state) => !isWorkerActive(state))).toEqual([
+      'done',
+      'failed',
+      'stopped',
+    ]);
+  });
+
+  it('classifies every declared state', () => {
+    for (const state of workerStates) expect(typeof isWorkerActive(state)).toBe('boolean');
+  });
+});
 
 describe('team domain', () => {
   it('enforces the team lifecycle', () => {

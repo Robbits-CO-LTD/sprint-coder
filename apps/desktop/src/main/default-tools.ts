@@ -18,6 +18,11 @@ import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
 import type { TeamCoordinator } from './team-coordinator';
 import { registerTeamTools, TEAM_TOOLS } from './team-tools';
+import {
+  executeWorkspacePatch,
+  WORKSPACE_PATCH_TOOL,
+  type WorkspacePatchDeps,
+} from './workspace-patch-tool';
 
 export const MOCK_ECHO_TOOL = createToolDefinition({
   toolId: createToolId({ provider: 'builtin', namespace: 'mock', name: 'echo', version: '1' }),
@@ -111,6 +116,12 @@ export function createDefaultToolBroker(
   // supplied, i.e. only on the mock/intelligence-loop broker — real Codex/Claude adapters never
   // pass this bundle, so they stay no-tools per the current production boundary.
   team?: { coordinator: TeamCoordinator },
+  // Workspace mutation (Slice 4.7): supplied only when the native mutation platform gate allows,
+  // which `index.ts` is the only place to evaluate. Absent means the edit tool is never registered
+  // and the model never learns it exists — deliberately not the same as registering one that always
+  // refuses, which a model would keep retrying. The gate stays the single decision point; this
+  // parameter only carries its answer.
+  workspaceEdit?: WorkspacePatchDeps,
 ): ToolBroker {
   const commandRunner = new CommandRunner();
   const commandIds = new WeakMap<object, string>();
@@ -119,6 +130,7 @@ export function createDefaultToolBroker(
   registry.register(COMMAND_RUNNER_TOOL);
   registry.register(APPROVAL_PROBE_TOOL);
   if (team !== undefined) for (const definition of TEAM_TOOLS) registry.register(definition);
+  if (workspaceEdit !== undefined) registry.register(WORKSPACE_PATCH_TOOL);
   const defaultAuthorizer: ToolAuthorizer = ({ entry }) =>
     entry.sideEffect === 'none' && entry.requiredCapabilities.length === 0
       ? { decision: 'allow', reason: 'pure_builtin' }
@@ -136,6 +148,12 @@ export function createDefaultToolBroker(
       return `承認された確認対象: ${origin}（外部通信は実行していません）`;
     },
   });
+  if (workspaceEdit !== undefined)
+    broker.registerImplementation({
+      toolId: WORKSPACE_PATCH_TOOL.toolId,
+      implementationKind: 'built-in',
+      execute: (input, context) => executeWorkspacePatch(input, context, workspaceEdit),
+    });
   broker.registerImplementation({
     toolId: MOCK_ECHO_TOOL.toolId,
     implementationKind: 'built-in',
