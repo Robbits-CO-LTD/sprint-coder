@@ -137,19 +137,34 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     ).tools;
     expect(tools.map((tool) => tool.name).sort()).toEqual([...TEAM_MCP_TOOL_NAMES].sort());
     for (const tool of tools) expect(tool).toHaveProperty('inputSchema');
-    expect(
-      (
-        tools.find(({ name }) => name === 'team_hire_worker')?.inputSchema['properties'] as Record<
-          string,
-          unknown
-        >
-      )['managerPolicy'],
-    ).toMatchObject({
+    const hireSchema = tools.find(({ name }) => name === 'team_hire_worker')?.inputSchema;
+    const hireProperties = hireSchema?.['properties'] as Record<string, unknown>;
+    expect(hireProperties['agentKind']).toMatchObject({
+      type: 'string',
+      enum: ['worker', 'manager'],
+    });
+    expect(hireProperties['managerPolicy']).toMatchObject({
       type: 'object',
-      description: expect.stringContaining('absolute Team depth'),
-      required: ['maxDelegationDepth', 'allowManagerChildren'],
+      description: expect.stringContaining('number of additional levels'),
+      required: ['maxDelegationLevels', 'allowManagerChildren'],
       additionalProperties: false,
     });
+    expect(
+      (hireProperties['managerPolicy'] as { properties: Record<string, unknown> }).properties,
+    ).toHaveProperty('maxDelegationLevels');
+    expect(
+      (hireProperties['managerPolicy'] as { properties: Record<string, unknown> }).properties,
+    ).not.toHaveProperty('maxDelegationDepth');
+    expect(hireSchema?.['allOf']).toHaveLength(2);
+    expect(hireSchema?.['required']).toEqual(
+      expect.arrayContaining([
+        'agentKind',
+        'role',
+        'objective',
+        'modelSelection',
+        'modelSelectionReason',
+      ]),
+    );
   });
 
   it('forwards tools/call to the bridge socket with the configured token and relays a success result', async () => {
@@ -158,13 +173,16 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
       jsonrpc: '2.0',
       id: 2,
       method: 'tools/call',
-      params: { name: 'team_hire_worker', arguments: { role: '調査', objective: '調べる' } },
+      params: {
+        name: 'team_hire_worker',
+        arguments: { agentKind: 'worker', role: '調査', objective: '調べる' },
+      },
     });
     await vi_waitFor(() => harness.bridgeReceived.length === 1);
     expect(harness.bridgeReceived[0]).toMatchObject({
       token: 'test-bridge-token-0123456789',
       tool: 'team_hire_worker',
-      args: { role: '調査', objective: '調べる' },
+      args: { agentKind: 'worker', role: '調査', objective: '調べる' },
     });
     harness.bridgeRespond({
       ok: true,

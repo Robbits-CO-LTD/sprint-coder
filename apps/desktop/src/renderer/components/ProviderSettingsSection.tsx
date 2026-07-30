@@ -5,6 +5,7 @@ import type {
   ProviderProfile,
   ProviderVerificationStatus,
 } from '@sprint-coder/contracts';
+import { Eye, EyeOff, Plus, X } from './icons';
 
 // Plaintext credentials remain here only until Main accepts them into Secret Storage.
 // Raw provider errors and secret references are never rendered.
@@ -71,8 +72,8 @@ export const VERIFICATION_TONE: Record<ProviderVerificationStatus, string> = {
   unavailable: 'danger',
 };
 
-export const LIST_ERROR = 'Connection一覧を取得できませんでした。再読み込みしてください。';
-export const CREATE_ERROR = 'Connectionを追加できませんでした。入力内容を確認してください。';
+export const LIST_ERROR = '接続一覧を取得できませんでした。再読み込みしてください。';
+export const CREATE_ERROR = '接続を追加できませんでした。入力内容を確認してください。';
 export const VERIFY_ERROR = '検証を実行できませんでした。時間をおいて再試行してください。';
 // A Profile listing failure is not fatal: the fixed Providers below still work, so this is a
 // warning beside the picker rather than the section's error alert.
@@ -81,18 +82,19 @@ export const PROFILE_LIST_WARNING =
 // Said out loud because the alternative is a silent one: a Profile that leaves the listing would
 // otherwise leave the form pointing at its fixed Provider, holding the key typed for the other one.
 export const PROFILE_UNAVAILABLE_NOTICE =
-  '選択していたProvider Profileは利用できなくなりました。入力したAPIキーなどは消去しました。Providerを選び直してください。';
+  '選択していたプロバイダープロファイルは利用できなくなりました。入力したAPIキーなどは消去しました。プロバイダーを選び直してください。';
 export const RATE_LIMIT_ERROR =
   '同時実行上限を変更できませんでした。値を確認して再試行してください。';
-export const UNSUPPORTED_TEXT = 'この環境ではProvider設定APIが利用できません。';
-export const LOADING_TEXT = 'Connectionを読み込んでいます。';
-export const EMPTY_TEXT = '利用できるConnectionはまだありません。';
+export const UNSUPPORTED_TEXT = 'この環境ではプロバイダー設定APIが利用できません。';
+export const LOADING_TEXT = '接続を読み込んでいます。';
+export const EMPTY_TEXT = '登録済みの接続はまだありません。';
 
-// Rule 1's boundary in user-facing words: the screen forgets the key, Main keeps it safely.
-export const SECTION_DESCRIPTION =
-  '組み込みCLIと外部APIの接続先を管理します。登録済みAPIキーはMainプロセスが安全に保管し、この画面へ再表示しません。';
+// Rule 1's boundary in user-facing words: the screen forgets the key, Main keeps it safely. Said
+// once, beside the field it is about, rather than twice in two lengths — the section's own
+// description now says what the section is for and nothing else.
+export const SECTION_DESCRIPTION = '組み込みCLIと外部APIの接続先を管理します。';
 export const KEY_BOUNDARY_HINT =
-  'APIキーの平文はこの入力欄にのみ一時的に保持され、送信後に画面から消去されます。キーはMainプロセスがOSの安全な保管領域に保存し、DBには参照情報だけが残ります。';
+  '入力したキーは送信後に画面から消去し、Mainプロセスが端末の安全な保管領域へ保存します。';
 
 export const PROVIDER_FORM_OPTIONS = [
   { key: 'openai', label: 'OpenAI API', scoped: true },
@@ -119,6 +121,24 @@ export const PROFILE_UNAVAILABLE_VALUE = 'profile-unavailable';
 export const PROFILE_UNAVAILABLE_OPTION_LABEL = 'Provider未選択';
 export const PROFILE_WARNING_ID = 'settings-provider-profile-warning';
 export const SELECTION_UNAVAILABLE_ID = 'settings-provider-unavailable';
+
+/** The add form is progressive disclosure, not a second screen: one button in the same settings
+ * pane expands it in place, and the same button collapses it again. No nested modal — this whole
+ * section is already inside the settings dialog, and a dialog on a dialog steals the focus trap. */
+export const ADD_TOGGLE_ID = 'settings-provider-add-toggle';
+export const ADD_FORM_PANEL_ID = 'settings-provider-add-form';
+export const ADD_CONNECTION_LABEL = '接続を追加';
+export const ADD_CONNECTION_CLOSE_LABEL = '追加をやめる';
+export const CANCEL_LABEL = 'キャンセル';
+export const SUBMIT_LABEL = '追加して検証';
+export const SUBMITTING_LABEL = '追加中';
+/** Optional, provider-specific extras only. Anything a Provider *requires* stays in the basic three
+ * above it — a required field folded out of sight is a form that cannot be submitted and does not
+ * say why. */
+export const ADVANCED_SUMMARY_LABEL = '詳細設定';
+export const KEY_HINT_ID = 'settings-provider-api-key-hint';
+export const SUBMIT_HINT_ID = 'settings-provider-submit-hint';
+export const CONNECTION_LIST_LABEL = '登録済みの接続';
 
 export type ProviderFormValues = {
   /** Read only while `profileId` is null. */
@@ -369,6 +389,51 @@ export function canSubmitProviderForm(
   );
 }
 
+/** Why the submit is unpressable, in the user's words, or null when it is pressable. The one gate is
+ * still `canSubmitProviderForm`; this only names its refusal, and the two are kept in step by
+ * returning null exactly when that function returns true. A disabled button with no stated reason
+ * is the form telling the user to guess. */
+export const SUBMIT_BLOCKED_SELECTION = 'プロバイダーを選び直すと追加できます。';
+export const SUBMIT_BLOCKED_INPUT = '表示名とAPIキーを入力すると追加できます。';
+export const SUBMIT_BLOCKED_ACCOUNT_ID = 'このプロバイダーはアカウントIDが必須です。';
+export const SUBMIT_BLOCKED_BUSY = '他の処理が終わるまでお待ちください。';
+
+export function providerSubmitBlockedReason(
+  form: ProviderFormValues,
+  busy: boolean,
+  profiles: readonly ProviderProfile[] = [],
+): string | null {
+  if (isProviderSelectionUnavailable(form, profiles)) return SUBMIT_BLOCKED_SELECTION;
+  if (form.displayName.trim() === '' || form.apiKey === '') return SUBMIT_BLOCKED_INPUT;
+  if (
+    profileRequiresAccountId(selectedProviderProfile(form, profiles)) &&
+    form.accountId.trim() === ''
+  ) {
+    return SUBMIT_BLOCKED_ACCOUNT_ID;
+  }
+  return busy ? SUBMIT_BLOCKED_BUSY : null;
+}
+
+/** Whether the 詳細設定 disclosure has anything to hold. Only optional extras count, so a Provider
+ * that asks for nothing beyond the basic three shows no empty disclosure at all. */
+export function hasOptionalProviderFields(state: {
+  scopedFixedProvider: boolean;
+  baseUrlConfigurable: boolean;
+}): boolean {
+  return state.scopedFixedProvider || state.baseUrlConfigurable;
+}
+
+export function providerCreateErrorMessage(error: unknown): string {
+  if (String(error).includes('OSの安全な保管領域を利用できません'))
+    return '接続を追加できませんでした。OSの安全な保管領域を利用できません。macOSのログインキーチェーンを確認してから再試行してください。';
+  if (error !== null && typeof error === 'object') {
+    const record = error as { code?: unknown };
+    if (typeof record.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(record.code))
+      return `${CREATE_ERROR}（コード: ${record.code}）`;
+  }
+  return CREATE_ERROR;
+}
+
 /** Dispatches to the per-provider create method. Optional fields are omitted, never sent empty.
  * Every Profile goes through the single generic API, so adding a Provider to Pack A stays a Main
  * change: there is no company-specific branch here to extend. */
@@ -546,7 +611,13 @@ export function ProviderConnectionCard({
           </span>
         )}
       </span>
-      <span className={`settings-connection-badge tone-${VERIFICATION_TONE[status]}`}>
+      {/* A fact about the Connection, not a control. Deliberately a plain <span> with no border,
+          no fill and no role: 「確認不要」is not something anyone can press, and dressing it as a
+          chip put it in the same visual family as 検証を再実行 right beside it. */}
+      <span
+        className={`settings-connection-badge tone-${VERIFICATION_TONE[status]}`}
+        data-testid={`settings-connection-badge-${connection.id}`}
+      >
         {verifying ? '検証中' : VERIFICATION_LABEL[status]}
       </span>
       {isExternalConnection(connection) && (
@@ -564,6 +635,281 @@ export function ProviderConnectionCard({
   );
 }
 
+/** The add form, split out so it can be rendered — and tested — in the one state the section itself
+ * never starts in: open. Every value it edits belongs to the section, plaintext key included, so
+ * closing the disclosure is what clears it. */
+export function ProviderAddConnectionForm({
+  form,
+  profiles,
+  profilesFailed,
+  busy,
+  submitting,
+  showKey,
+  onChange,
+  onToggleKey,
+  onSubmit,
+  onCancel,
+}: {
+  form: ProviderFormValues;
+  profiles: readonly ProviderProfile[];
+  profilesFailed: boolean;
+  busy: boolean;
+  submitting: boolean;
+  showKey: boolean;
+  onChange: (update: (current: ProviderFormValues) => ProviderFormValues) => void;
+  onToggleKey: () => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const selectedProfile = selectedProviderProfile(form, profiles);
+  const selectionUnavailable = isProviderSelectionUnavailable(form, profiles);
+  // No fixed Provider is selected while a withdrawn Profile is: its scoped fields would be the
+  // clearest possible claim that OpenAI is chosen, which is exactly what is not true here.
+  const fixedOption =
+    selectedProfile === null && !selectionUnavailable
+      ? PROVIDER_FORM_OPTIONS.find((option) => option.key === form.provider)
+      : undefined;
+  const showAdvanced = hasOptionalProviderFields({
+    scopedFixedProvider: fixedOption?.scoped === true,
+    baseUrlConfigurable: selectedProfile?.baseUrlConfigurable === true,
+  });
+  // Its own submit is not a reason to explain: the button already reads 追加中.
+  const blockedReason = submitting ? null : providerSubmitBlockedReason(form, busy, profiles);
+
+  return (
+    <form
+      id={ADD_FORM_PANEL_ID}
+      className="settings-provider-form"
+      // Named by the disclosure button that opened it, so the group needs no second heading of its
+      // own — the pair 「Connectionを追加」/「PROVIDER」 that used to sit here read as two.
+      aria-labelledby={ADD_TOGGLE_ID}
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSubmit();
+      }}
+    >
+      <fieldset className="settings-group" disabled={submitting}>
+        <label className="settings-field" htmlFor="settings-provider-kind">
+          <span className="settings-field-label">プロバイダー</span>
+          <select
+            id="settings-provider-kind"
+            data-testid="settings-provider-kind"
+            value={providerSelectValue(form, profiles)}
+            aria-describedby={providerSelectDescribedBy({ profilesFailed, selectionUnavailable })}
+            onChange={(e) =>
+              onChange((current) => applyProviderSelection(current, e.target.value, profiles))
+            }
+          >
+            {/* Present only as the current value of a withdrawn selection, and disabled: it
+                is not offered as a choice, it just stops the picker from displaying a
+                Provider the user never picked. */}
+            {selectionUnavailable && (
+              <option value={PROFILE_UNAVAILABLE_VALUE} disabled>
+                {PROFILE_UNAVAILABLE_OPTION_LABEL}
+              </option>
+            )}
+            {PROVIDER_FORM_OPTIONS.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+            {/* Whatever Main lists, in Main's order. The Renderer names no Provider of its
+                own, so a Pack that gains or loses one needs no change here. */}
+            {profiles.length > 0 && (
+              <optgroup label={PROFILE_GROUP_LABEL}>
+                {profiles.map((profile) => (
+                  <option key={profile.id} value={`${PROFILE_OPTION_PREFIX}${profile.id}`}>
+                    {profile.displayName}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+        </label>
+
+        {/* Announced on arrival: the selection changed underneath the user, and only they
+            can resolve it. Submit stays disabled until they do. */}
+        {selectionUnavailable && (
+          <p
+            className="settings-provider-error"
+            id={SELECTION_UNAVAILABLE_ID}
+            data-testid={SELECTION_UNAVAILABLE_ID}
+            role="alert"
+          >
+            {PROFILE_UNAVAILABLE_NOTICE}
+          </p>
+        )}
+
+        {profilesFailed && (
+          <p className="settings-hint" id={PROFILE_WARNING_ID} data-testid={PROFILE_WARNING_ID}>
+            {PROFILE_LIST_WARNING}
+          </p>
+        )}
+
+        <label className="settings-field" htmlFor="settings-provider-name">
+          <span className="settings-field-label">表示名</span>
+          <input
+            id="settings-provider-name"
+            data-testid="settings-provider-name"
+            type="text"
+            className="settings-text-input"
+            autoComplete="off"
+            value={form.displayName}
+            onChange={(e) => onChange((current) => ({ ...current, displayName: e.target.value }))}
+          />
+        </label>
+
+        <div className="settings-field">
+          <label className="settings-field-label" htmlFor="settings-provider-api-key">
+            APIキー
+          </label>
+          {/* The reveal sits inside the field's right edge, where a masked input is looked at,
+              rather than as a second control competing with it in a row. */}
+          <div className="settings-key-field">
+            <input
+              id="settings-provider-api-key"
+              data-testid="settings-provider-api-key"
+              // Masked by default; the toggle beside it is the only way to reveal it.
+              type={showKey ? 'text' : 'password'}
+              className="settings-text-input settings-key-input"
+              autoComplete="off"
+              spellCheck={false}
+              aria-describedby={KEY_HINT_ID}
+              value={form.apiKey}
+              onChange={(e) => onChange((current) => ({ ...current, apiKey: e.target.value }))}
+            />
+            <button
+              type="button"
+              className="settings-key-reveal"
+              data-testid="settings-provider-api-key-reveal"
+              aria-pressed={showKey}
+              aria-controls="settings-provider-api-key"
+              aria-label={showKey ? 'APIキーを隠す' : 'APIキーを表示'}
+              title={showKey ? 'APIキーを隠す' : 'APIキーを表示'}
+              onClick={onToggleKey}
+            >
+              {showKey ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+          </div>
+          <p className="settings-hint" id={KEY_HINT_ID}>
+            {KEY_BOUNDARY_HINT}
+          </p>
+        </div>
+
+        {/* Required by the selected Profile, so it stays out in the open beside the basic three.
+            Folding a required field into 詳細設定 would hide the reason submit refuses. */}
+        {profileRequiresAccountId(selectedProfile) && (
+          <label className="settings-field" htmlFor="settings-provider-account-id">
+            <span className="settings-field-label">アカウントID（必須）</span>
+            <input
+              id="settings-provider-account-id"
+              data-testid="settings-provider-account-id"
+              type="text"
+              className="settings-text-input"
+              autoComplete="off"
+              spellCheck={false}
+              required
+              value={form.accountId}
+              onChange={(e) => onChange((current) => ({ ...current, accountId: e.target.value }))}
+            />
+          </label>
+        )}
+
+        {showAdvanced && (
+          <details className="settings-provider-advanced" data-testid="settings-provider-advanced">
+            <summary>{ADVANCED_SUMMARY_LABEL}</summary>
+            <div className="settings-provider-advanced-body">
+              {fixedOption?.scoped === true && (
+                <>
+                  <label className="settings-field" htmlFor="settings-provider-org">
+                    <span className="settings-field-label">組織ID（任意）</span>
+                    <input
+                      id="settings-provider-org"
+                      data-testid="settings-provider-org"
+                      type="text"
+                      className="settings-text-input"
+                      autoComplete="off"
+                      value={form.organizationId}
+                      onChange={(e) =>
+                        onChange((current) => ({ ...current, organizationId: e.target.value }))
+                      }
+                    />
+                  </label>
+                  <label className="settings-field" htmlFor="settings-provider-project">
+                    <span className="settings-field-label">プロジェクトID（任意）</span>
+                    <input
+                      id="settings-provider-project"
+                      data-testid="settings-provider-project"
+                      type="text"
+                      className="settings-text-input"
+                      autoComplete="off"
+                      value={form.projectId}
+                      onChange={(e) =>
+                        onChange((current) => ({ ...current, projectId: e.target.value }))
+                      }
+                    />
+                  </label>
+                </>
+              )}
+
+              {/* Each extra field is asked for only where the selected Profile declares it.
+                  Nothing is inferred from the Provider's identity. */}
+              {selectedProfile?.baseUrlConfigurable === true && (
+                <label className="settings-field" htmlFor="settings-provider-base-url">
+                  <span className="settings-field-label">ベースURL（任意）</span>
+                  <input
+                    id="settings-provider-base-url"
+                    data-testid="settings-provider-base-url"
+                    type="url"
+                    className="settings-text-input"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={selectedProfile.baseUrl}
+                    value={form.baseUrl}
+                    onChange={(e) =>
+                      onChange((current) => ({ ...current, baseUrl: e.target.value }))
+                    }
+                  />
+                  <span className="settings-hint">{BASE_URL_HINT}</span>
+                </label>
+              )}
+            </div>
+          </details>
+        )}
+
+        <div className="settings-provider-actions">
+          {blockedReason !== null && (
+            <p
+              className="settings-hint settings-provider-submit-hint"
+              id={SUBMIT_HINT_ID}
+              data-testid={SUBMIT_HINT_ID}
+            >
+              {blockedReason}
+            </p>
+          )}
+          <button
+            type="button"
+            className="settings-secondary-button"
+            data-testid="settings-provider-cancel"
+            onClick={onCancel}
+          >
+            {CANCEL_LABEL}
+          </button>
+          <button
+            type="submit"
+            className="settings-primary-button"
+            data-testid="settings-provider-submit"
+            disabled={!canSubmitProviderForm(form, busy, profiles)}
+            aria-describedby={blockedReason === null ? undefined : SUBMIT_HINT_ID}
+          >
+            {submitting ? SUBMITTING_LABEL : SUBMIT_LABEL}
+          </button>
+        </div>
+      </fieldset>
+    </form>
+  );
+}
+
 export function ProviderSettingsSection({ active }: { active: boolean }) {
   const [connections, setConnections] = useState<ProviderConnection[] | null>(null);
   const [profiles, setProfiles] = useState<readonly ProviderProfile[]>([]);
@@ -576,6 +922,9 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
   const [savingRateLimitId, setSavingRateLimitId] = useState<string | null>(null);
   const [form, setForm] = useState<ProviderFormValues>(EMPTY_FORM);
   const [showKey, setShowKey] = useState(false);
+  // Closed on arrival: the registered Connections are what this screen is for, and adding one is an
+  // occasional act. The form is unmounted while closed, so no plaintext key survives a close.
+  const [formOpen, setFormOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const generation = useRef(0);
@@ -584,8 +933,6 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
   const busy = isSectionBusy({ loading, submitting, verifyingId, savingRateLimitId });
   // Read at render because that is when a card has to decide whether to offer the control at all.
   const rateLimitSupported = supportsRateLimitLowering(providerApi());
-  const selectedProfile = selectedProviderProfile(form, profiles);
-  const selectionUnavailable = isProviderSelectionUnavailable(form, profiles);
 
   useEffect(() => {
     mounted.current = true;
@@ -634,7 +981,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     }
     if (connectionResult.status === 'fulfilled') {
       setConnections(connectionResult.value);
-      setStatus(`${connectionResult.value.length}件のConnectionを読み込みました。`);
+      setStatus(`${connectionResult.value.length}件の接続を読み込みました。`);
     } else {
       setError(LIST_ERROR);
       setLoadFailed(true);
@@ -713,19 +1060,21 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
       setStatus(
         `${created.displayName}を追加しました。検証結果: ${VERIFICATION_LABEL[created.verification.status]}`,
       );
-    } catch {
-      setError(CREATE_ERROR);
+    } catch (error) {
+      setError(providerCreateErrorMessage(error));
     } finally {
       setSubmitting(false);
     }
   }
 
-  // No fixed Provider is selected while a withdrawn Profile is: its scoped fields would be the
-  // clearest possible claim that OpenAI is chosen, which is exactly what is not true here.
-  const fixedOption =
-    selectedProfile === null && !selectionUnavailable
-      ? PROVIDER_FORM_OPTIONS.find((option) => option.key === form.provider)
-      : undefined;
+  /** Both ways out of the form — the disclosure button again, and キャンセル — land here. The whole
+   * draft goes with it, plaintext key first: a closed form must not be holding a credential. */
+  function closeAddForm(): void {
+    setFormOpen(false);
+    setForm(EMPTY_FORM);
+    setShowKey(false);
+  }
+
   const listed = connections ?? [];
 
   return (
@@ -737,7 +1086,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     >
       <div className="settings-section-heading">
         <div>
-          <h3 id="settings-providers-title">Provider Connection</h3>
+          <h3 id="settings-providers-title">プロバイダー接続</h3>
           <p>{SECTION_DESCRIPTION}</p>
         </div>
         <button
@@ -763,7 +1112,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
           ) : listed.length === 0 ? (
             <p className="settings-hint">{EMPTY_TEXT}</p>
           ) : (
-            <ul className="settings-connection-list" aria-label="Connection一覧">
+            <ul className="settings-connection-list" aria-label={CONNECTION_LIST_LABEL}>
               {listed.map((connection) => (
                 <ProviderConnectionCard
                   key={connection.id}
@@ -787,211 +1136,37 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
             </p>
           )}
 
-          <form
-            className="settings-provider-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void submitForm();
-            }}
-          >
-            <fieldset className="settings-group" disabled={submitting}>
-              <legend>Connectionを追加</legend>
+          <div className="settings-provider-add">
+            {/* One disclosure, in place, inside the settings dialog that is already open. The
+                single accent on this screen: everything else here is data or a quiet control. */}
+            <button
+              type="button"
+              id={ADD_TOGGLE_ID}
+              data-testid="settings-provider-add-toggle"
+              className="settings-add-connection"
+              aria-expanded={formOpen}
+              {...(formOpen ? { 'aria-controls': ADD_FORM_PANEL_ID } : {})}
+              onClick={() => (formOpen ? closeAddForm() : setFormOpen(true))}
+            >
+              {formOpen ? <X size={14} /> : <Plus size={14} />}
+              {formOpen ? ADD_CONNECTION_CLOSE_LABEL : ADD_CONNECTION_LABEL}
+            </button>
 
-              <label className="settings-field" htmlFor="settings-provider-kind">
-                <span className="settings-field-label">Provider</span>
-                <select
-                  id="settings-provider-kind"
-                  data-testid="settings-provider-kind"
-                  value={providerSelectValue(form, profiles)}
-                  aria-describedby={providerSelectDescribedBy({
-                    profilesFailed,
-                    selectionUnavailable,
-                  })}
-                  onChange={(e) =>
-                    setForm((current) => applyProviderSelection(current, e.target.value, profiles))
-                  }
-                >
-                  {/* Present only as the current value of a withdrawn selection, and disabled: it
-                      is not offered as a choice, it just stops the picker from displaying a
-                      Provider the user never picked. */}
-                  {selectionUnavailable && (
-                    <option value={PROFILE_UNAVAILABLE_VALUE} disabled>
-                      {PROFILE_UNAVAILABLE_OPTION_LABEL}
-                    </option>
-                  )}
-                  {PROVIDER_FORM_OPTIONS.map((option) => (
-                    <option key={option.key} value={option.key}>
-                      {option.label}
-                    </option>
-                  ))}
-                  {/* Whatever Main lists, in Main's order. The Renderer names no Provider of its
-                      own, so a Pack that gains or loses one needs no change here. */}
-                  {profiles.length > 0 && (
-                    <optgroup label={PROFILE_GROUP_LABEL}>
-                      {profiles.map((profile) => (
-                        <option key={profile.id} value={`${PROFILE_OPTION_PREFIX}${profile.id}`}>
-                          {profile.displayName}
-                        </option>
-                      ))}
-                    </optgroup>
-                  )}
-                </select>
-              </label>
-
-              {/* Announced on arrival: the selection changed underneath the user, and only they
-                  can resolve it. Submit stays disabled until they do. */}
-              {selectionUnavailable && (
-                <p
-                  className="settings-provider-error"
-                  id={SELECTION_UNAVAILABLE_ID}
-                  data-testid={SELECTION_UNAVAILABLE_ID}
-                  role="alert"
-                >
-                  {PROFILE_UNAVAILABLE_NOTICE}
-                </p>
-              )}
-
-              {profilesFailed && (
-                <p
-                  className="settings-hint"
-                  id={PROFILE_WARNING_ID}
-                  data-testid={PROFILE_WARNING_ID}
-                >
-                  {PROFILE_LIST_WARNING}
-                </p>
-              )}
-
-              <label className="settings-field" htmlFor="settings-provider-name">
-                <span className="settings-field-label">表示名</span>
-                <input
-                  id="settings-provider-name"
-                  data-testid="settings-provider-name"
-                  type="text"
-                  className="settings-text-input"
-                  autoComplete="off"
-                  value={form.displayName}
-                  onChange={(e) =>
-                    setForm((current) => ({ ...current, displayName: e.target.value }))
-                  }
-                />
-              </label>
-
-              <div className="settings-field">
-                <label className="settings-field-label" htmlFor="settings-provider-api-key">
-                  APIキー
-                </label>
-                <div className="settings-key-row">
-                  <input
-                    id="settings-provider-api-key"
-                    data-testid="settings-provider-api-key"
-                    // Masked by default; the toggle below is the only way to reveal it.
-                    type={showKey ? 'text' : 'password'}
-                    className="settings-text-input"
-                    autoComplete="off"
-                    spellCheck={false}
-                    value={form.apiKey}
-                    onChange={(e) => setForm((current) => ({ ...current, apiKey: e.target.value }))}
-                  />
-                  <button
-                    type="button"
-                    className="settings-secondary-button"
-                    aria-pressed={showKey}
-                    aria-controls="settings-provider-api-key"
-                    aria-label={showKey ? 'APIキーを隠す' : 'APIキーを表示'}
-                    onClick={() => setShowKey((value) => !value)}
-                  >
-                    {showKey ? '隠す' : '表示'}
-                  </button>
-                </div>
-                <p className="settings-hint">{KEY_BOUNDARY_HINT}</p>
-              </div>
-
-              {fixedOption?.scoped === true && (
-                <>
-                  <label className="settings-field" htmlFor="settings-provider-org">
-                    <span className="settings-field-label">Organization ID（任意）</span>
-                    <input
-                      id="settings-provider-org"
-                      data-testid="settings-provider-org"
-                      type="text"
-                      className="settings-text-input"
-                      autoComplete="off"
-                      value={form.organizationId}
-                      onChange={(e) =>
-                        setForm((current) => ({ ...current, organizationId: e.target.value }))
-                      }
-                    />
-                  </label>
-                  <label className="settings-field" htmlFor="settings-provider-project">
-                    <span className="settings-field-label">Project ID（任意）</span>
-                    <input
-                      id="settings-provider-project"
-                      data-testid="settings-provider-project"
-                      type="text"
-                      className="settings-text-input"
-                      autoComplete="off"
-                      value={form.projectId}
-                      onChange={(e) =>
-                        setForm((current) => ({ ...current, projectId: e.target.value }))
-                      }
-                    />
-                  </label>
-                </>
-              )}
-
-              {/* Each extra field is asked for only where the selected Profile declares it.
-                  Nothing is inferred from the Provider's identity. */}
-              {selectedProfile?.baseUrlConfigurable === true && (
-                <label className="settings-field" htmlFor="settings-provider-base-url">
-                  <span className="settings-field-label">Base URL（任意）</span>
-                  <input
-                    id="settings-provider-base-url"
-                    data-testid="settings-provider-base-url"
-                    type="url"
-                    className="settings-text-input"
-                    autoComplete="off"
-                    spellCheck={false}
-                    placeholder={selectedProfile.baseUrl}
-                    value={form.baseUrl}
-                    onChange={(e) =>
-                      setForm((current) => ({ ...current, baseUrl: e.target.value }))
-                    }
-                  />
-                  <span className="settings-hint">{BASE_URL_HINT}</span>
-                </label>
-              )}
-
-              {profileRequiresAccountId(selectedProfile) && (
-                <label className="settings-field" htmlFor="settings-provider-account-id">
-                  <span className="settings-field-label">Account ID（必須）</span>
-                  <input
-                    id="settings-provider-account-id"
-                    data-testid="settings-provider-account-id"
-                    type="text"
-                    className="settings-text-input"
-                    autoComplete="off"
-                    spellCheck={false}
-                    required
-                    value={form.accountId}
-                    onChange={(e) =>
-                      setForm((current) => ({ ...current, accountId: e.target.value }))
-                    }
-                  />
-                </label>
-              )}
-
-              <div className="settings-provider-actions">
-                <button
-                  type="submit"
-                  className="settings-primary-button"
-                  data-testid="settings-provider-submit"
-                  disabled={!canSubmitProviderForm(form, busy, profiles)}
-                >
-                  {submitting ? '追加中' : '追加して検証'}
-                </button>
-              </div>
-            </fieldset>
-          </form>
+            {formOpen && (
+              <ProviderAddConnectionForm
+                form={form}
+                profiles={profiles}
+                profilesFailed={profilesFailed}
+                busy={busy}
+                submitting={submitting}
+                showKey={showKey}
+                onChange={setForm}
+                onToggleKey={() => setShowKey((value) => !value)}
+                onSubmit={() => void submitForm()}
+                onCancel={closeAddForm}
+              />
+            )}
+          </div>
         </>
       )}
 

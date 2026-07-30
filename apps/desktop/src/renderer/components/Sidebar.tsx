@@ -7,8 +7,12 @@ import type { TaskSummary } from '../types/sprint-coder';
 function groupTasks(tasks: TaskSummary[], query: string) {
   const q = query.trim().toLowerCase();
   const matches = (t: TaskSummary) => q === '' || t.title.toLowerCase().includes(q);
-  const visible = tasks.filter((t) => !t.archived && matches(t));
-  const archived = tasks.filter((t) => t.archived && matches(t));
+  // A DB Task is created before the first message because Workspace, permission, model and draft
+  // settings all need a stable id. It is not conversation history until a message is accepted.
+  // `undefined` keeps compatibility with older Main builds that predate this projection.
+  const hasHistory = (task: TaskSummary) => task.hasConversation !== false;
+  const visible = tasks.filter((t) => hasHistory(t) && !t.archived && matches(t));
+  const archived = tasks.filter((t) => hasHistory(t) && t.archived && matches(t));
   const nowIso = new Date().toISOString();
 
   const pinned = visible.filter((t) => t.pinned);

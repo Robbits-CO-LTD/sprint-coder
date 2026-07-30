@@ -121,6 +121,13 @@ function createWindow(): BrowserWindow {
     minWidth: 760,
     minHeight: 560,
     show: false,
+    backgroundColor: '#12110f',
+    ...(process.platform === 'darwin'
+      ? {
+          titleBarStyle: 'hiddenInset' as const,
+          trafficLightPosition: { x: 14, y: 13 },
+        }
+      : {}),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       sandbox: true,

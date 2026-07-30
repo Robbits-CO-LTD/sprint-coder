@@ -54,6 +54,7 @@ if (runsWithElectronAbi)
 
       expect(persistence.getTeamByTask(task.id)).toBeNull();
       const result = (await dispatch(broker, toolContext, 'team_hire_worker', {
+        agentKind: 'worker',
         role: '調査',
         objective: '調査してください',
       })) as { ok: true; workerId: string; role: string; state: string };
@@ -79,7 +80,11 @@ if (runsWithElectronAbi)
       const workers = [];
       for (const role of ['調査', '設計', '実装', 'レビュー', '検証'])
         workers.push(
-          await dispatch(broker, toolContext, 'team_hire_worker', { role, objective: role }),
+          await dispatch(broker, toolContext, 'team_hire_worker', {
+            agentKind: 'worker',
+            role,
+            objective: role,
+          }),
         );
 
       expect(workers).toHaveLength(5);
@@ -96,6 +101,7 @@ if (runsWithElectronAbi)
       const toolContext = { taskId: task.id, turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
       startMockTurnCatalog(broker, toolContext);
       const worker = (await dispatch(broker, toolContext, 'team_hire_worker', {
+        agentKind: 'worker',
         role: '調査',
         objective: 'go',
       })) as { workerId: string };
@@ -122,6 +128,7 @@ if (runsWithElectronAbi)
       const toolContext = { taskId: task.id, turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
       startMockTurnCatalog(broker, toolContext);
       const hired = (await dispatch(broker, toolContext, 'team_hire_worker', {
+        agentKind: 'worker',
         role: '実装',
         objective: '実装してください',
       })) as { workerId: string };

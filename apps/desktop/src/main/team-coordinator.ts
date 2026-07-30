@@ -23,6 +23,7 @@ import {
   buildTeamEnvelope,
   TEAM_DELIVERY_MAX_ATTEMPTS,
   TEAM_MESSAGE_RATE_LIMIT,
+  TeamDelegationError,
   type ManagerPolicy,
   type TeamExecutionState,
   type TeamEnvelope,
@@ -43,6 +44,7 @@ import type {
   AgentRecord,
   PersistenceClient,
   TeamBudgetReservationRecord,
+  TeamBlueprintBindingRecord,
   TeamExecutionRecord,
   TeamSnapshot,
   TeamV2ActivityRecord,
@@ -68,6 +70,12 @@ export type WorkerRuntimeResult = Readonly<{
 export type TeamExecutionSubmission = Readonly<{
   executionId: string;
   state: TeamExecutionState;
+}>;
+
+export type ManagerHirePolicy = Readonly<{
+  maxDirectChildren: number | null;
+  maxDelegationLevels: number;
+  allowManagerChildren: boolean;
 }>;
 
 type ExecutionInterruptionControl = Readonly<{
@@ -190,6 +198,9 @@ export class TeamCoordinator {
       selection: ModelSelection,
       taskId: string,
     ) => Promise<void> | void,
+    private readonly resolveTeamBlueprint?: (
+      taskId: string,
+    ) => Omit<TeamBlueprintBindingRecord, 'teamId' | 'boundAt'> | null,
   ) {
     if (executionScheduler !== undefined) {
       this.executionScheduler = executionScheduler;
@@ -199,6 +210,71 @@ export class TeamCoordinator {
     for (const connection of this.persistence.listProviderConnections())
       admission.configure(connection);
     this.executionScheduler = new TeamExecutionScheduler(TEAM_GLOBAL_EXECUTION_LIMIT, admission);
+  }
+
+  private pinnedBlueprint(taskId: string, teamId: string): TeamBlueprintBindingRecord | null {
+    const existing = this.persistence.getTeamBlueprint(teamId);
+    const candidate = this.resolveTeamBlueprint?.(taskId) ?? null;
+    if (
+      existing !== null &&
+      candidate !== null &&
+      existing.selection.ref.digest !== candidate.selection.ref.digest
+    )
+      throw new Error(
+        'このTaskのTeamには別のBlueprint revisionが固定されています。新規Taskを作成してください',
+      );
+    if (existing !== null) return existing;
+    if (candidate === null) return null;
+    return this.persistence.bindTeamBlueprint({ teamId, ...candidate });
+  }
+
+  private assertBlueprintHire(
+    binding: TeamBlueprintBindingRecord,
+    snapshot: TeamSnapshot,
+    requester: AgentRecord,
+    input: TeamHireWorkerInput,
+    childManagerPolicy: ManagerHirePolicy | null,
+  ): void {
+    const roleKey = input.blueprintRoleKey;
+    if (roleKey === undefined) throw new Error('Team Blueprint適用中はblueprintRoleKeyが必要です');
+    const role = binding.blueprint.roles.find(({ key }) => key === roleKey);
+    if (role === undefined) throw new Error(`Blueprintに定義されていないRoleです: ${roleKey}`);
+    if (snapshot.agents.some((agent) => agent.blueprintRoleKey === roleKey))
+      throw new Error(`Blueprint Roleはすでに採用済みです: ${roleKey}`);
+    const requesterRoleKey = requester.kind === 'leader' ? 'leader' : requester.blueprintRoleKey;
+    if (role.parentKey !== requesterRoleKey)
+      throw new Error(`Blueprint Role ${roleKey}の親は${role.parentKey}である必要があります`);
+    if (input.role.trim() !== role.title.trim())
+      throw new Error(`Role名はBlueprint定義の「${role.title}」と一致する必要があります`);
+    if (role.modelRequirements !== undefined) {
+      if (input.modelSelection === undefined)
+        throw new Error(`Blueprint Role ${roleKey}はモデル能力要件を持つためモデル選択が必要です`);
+      const preferred = role.modelRequirements.preferredProviders;
+      if (
+        preferred !== undefined &&
+        preferred.length > 0 &&
+        (input.modelSelection.requestedProvider === null ||
+          !preferred.includes(input.modelSelection.requestedProvider))
+      )
+        throw new Error(
+          `Blueprint Role ${roleKey}はProvider ${preferred.join(', ')}のいずれかを必要とします`,
+        );
+    }
+    if (role.canDelegate !== (childManagerPolicy !== null))
+      throw new Error(
+        role.canDelegate
+          ? 'このBlueprint RoleはManager Policyが必要です'
+          : 'このBlueprint Roleは再委譲できません',
+      );
+  }
+
+  private blueprintReady(binding: TeamBlueprintBindingRecord, snapshot: TeamSnapshot): boolean {
+    const hired = new Set(
+      snapshot.agents
+        .map(({ blueprintRoleKey }) => blueprintRoleKey)
+        .filter((value): value is string => value !== null),
+    );
+    return binding.blueprint.roles.every(({ key, required }) => !required || hired.has(key));
   }
 
   private handleWorkerActivity(
@@ -314,6 +390,8 @@ export class TeamCoordinator {
     return this.enqueue(input.taskId, async () => {
       const team = this.persistence.getTeamByTask(input.taskId);
       if (team === null) throw new Error('Team not found for Task');
+      if (this.persistence.getTeamBlueprint(team.id) !== null)
+        throw new Error('Team Skillの固定Policyが適用中のため個別Policyを変更できません');
       this.persistence.updateTeamPolicy(team.id, input.policy, input.expectedRevision);
       const detail = this.detail(team.id);
       this.publish(input.taskId, detail);
@@ -410,7 +488,7 @@ export class TeamCoordinator {
 
   async hireWorker(
     input: TeamHireWorkerInput,
-    childManagerPolicy: ManagerPolicy | null = null,
+    childManagerPolicy: ManagerHirePolicy | null = null,
   ): Promise<WorkerSummary> {
     return this.hireWorkerWithAuthority(input, null, childManagerPolicy);
   }
@@ -418,7 +496,7 @@ export class TeamCoordinator {
   async hireWorkerAs(
     input: TeamHireWorkerInput,
     requesterAgentId: string,
-    childManagerPolicy: ManagerPolicy | null = null,
+    childManagerPolicy: ManagerHirePolicy | null = null,
   ): Promise<WorkerSummary> {
     return this.hireWorkerWithAuthority(input, requesterAgentId, childManagerPolicy);
   }
@@ -426,7 +504,7 @@ export class TeamCoordinator {
   private async hireWorkerWithAuthority(
     input: TeamHireWorkerInput,
     requesterAgentId: string | null,
-    childManagerPolicy: ManagerPolicy | null,
+    childManagerPolicy: ManagerHirePolicy | null,
   ): Promise<WorkerSummary> {
     return this.enqueue(input.taskId, async () => {
       let team = this.persistence.getTeamByTask(input.taskId);
@@ -435,6 +513,25 @@ export class TeamCoordinator {
       const effectiveRequesterId = requesterAgentId ?? team.leaderAgentId;
       const requester = before.agents.find(({ id }) => id === effectiveRequesterId);
       if (requester === undefined) throw new Error('Hiring Agent not found in Team');
+      if (
+        requester.canDelegate &&
+        requester.managerPolicy !== null &&
+        requester.managerPolicy.maxDelegationDepth <= requester.depth
+      )
+        throw new TeamDelegationError(
+          'manager_delegation_limit',
+          'This legacy Manager record has no remaining delegation depth; re-hire the Manager with maxDelegationLevels',
+          {
+            requesterDepth: requester.depth,
+            maxDelegationDepth: requester.managerPolicy.maxDelegationDepth,
+            requiresRehire: true,
+          },
+        );
+      const blueprint = this.pinnedBlueprint(input.taskId, team.id);
+      if (blueprint !== null) {
+        this.assertBlueprintHire(blueprint, before, requester, input, childManagerPolicy);
+        team = this.persistence.getTeam(team.id);
+      }
       if (input.modelSelection !== undefined)
         await this.validateModelSelection?.(input.modelSelection, input.taskId);
       if (team.state === 'draft') team = this.persistence.transitionTeamState(team.id, 'forming');
@@ -442,22 +539,58 @@ export class TeamCoordinator {
         throw new Error('Team does not accept new workers');
 
       const childDepth = requester.depth + 1;
-      if (childManagerPolicy !== null && childManagerPolicy.maxDelegationDepth <= childDepth)
-        throw new Error(
-          `Manager maxDelegationDepth is an absolute Team depth and must be greater than the new Manager depth ${childDepth}; use at least ${childDepth + 1}`,
-        );
+      let persistedManagerPolicy: ManagerPolicy | null = null;
+      if (childManagerPolicy !== null) {
+        if (
+          !Number.isSafeInteger(childManagerPolicy.maxDelegationLevels) ||
+          childManagerPolicy.maxDelegationLevels < 1
+        )
+          throw new Error('Manager maxDelegationLevels must be a positive integer');
+        if (
+          childManagerPolicy.maxDirectChildren !== null &&
+          (!Number.isSafeInteger(childManagerPolicy.maxDirectChildren) ||
+            childManagerPolicy.maxDirectChildren < 1)
+        )
+          throw new Error('Manager maxDirectChildren must be null or a positive integer');
+        const requestedMaxDepth = childDepth + childManagerPolicy.maxDelegationLevels;
+        const requesterMaxDepth =
+          requester.managerPolicy?.maxDelegationDepth ?? team.policy.maxAgentDepth;
+        if (requestedMaxDepth > team.policy.maxAgentDepth)
+          throw new TeamDelegationError(
+            'team_depth_limit',
+            `Requested Manager delegation reaches depth ${requestedMaxDepth}, beyond Team limit ${team.policy.maxAgentDepth}`,
+            {
+              requesterDepth: requester.depth,
+              requestedManagerDepth: childDepth,
+              requestedMaxDepth,
+              maxAgentDepth: team.policy.maxAgentDepth,
+            },
+          );
+        if (requestedMaxDepth > requesterMaxDepth)
+          throw new TeamDelegationError(
+            'manager_delegation_limit',
+            `Requested Manager delegation reaches depth ${requestedMaxDepth}, beyond parent Manager limit ${requesterMaxDepth}`,
+            {
+              requesterDepth: requester.depth,
+              requestedManagerDepth: childDepth,
+              requestedMaxDepth,
+              maxDelegationDepth: requesterMaxDepth,
+            },
+          );
+        persistedManagerPolicy = {
+          maxDirectChildren: childManagerPolicy.maxDirectChildren,
+          maxDelegationDepth: requestedMaxDepth,
+          allowManagerChildren: childManagerPolicy.allowManagerChildren,
+        };
+      }
       const childCeiling =
-        childManagerPolicy === null
+        persistedManagerPolicy === null
           ? leafWorkerCeiling
           : Object.freeze({
               entries: Object.freeze([]),
-              maxWorkerDepth: Math.max(
-                0,
-                Math.min(team.policy.maxAgentDepth, childManagerPolicy.maxDelegationDepth) -
-                  childDepth,
-              ),
+              maxWorkerDepth: persistedManagerPolicy.maxDelegationDepth - childDepth,
               maxConcurrentWorkers:
-                childManagerPolicy.maxDirectChildren ?? team.policy.maxConcurrentExecutions,
+                persistedManagerPolicy.maxDirectChildren ?? team.policy.maxConcurrentExecutions,
             });
       const worker = this.persistence.registerTeamWorker({
         teamId: team.id,
@@ -471,8 +604,11 @@ export class TeamCoordinator {
           ? {}
           : { modelSelectionReason: input.modelSelectionReason }),
         parentAgentId: requester.id,
-        canDelegate: childManagerPolicy !== null,
-        managerPolicy: childManagerPolicy,
+        canDelegate: persistedManagerPolicy !== null,
+        managerPolicy: persistedManagerPolicy,
+        ...(input.blueprintRoleKey === undefined
+          ? {}
+          : { blueprintRoleKey: input.blueprintRoleKey }),
       });
       let reservations: readonly TeamBudgetReservationRecord[] = [];
       try {
@@ -496,7 +632,12 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
         const latestTeam = this.persistence.getTeam(team.id);
-        if (latestTeam.state === 'forming') this.persistence.transitionTeamState(team.id, 'active');
+        if (
+          latestTeam.state === 'forming' &&
+          (blueprint === null ||
+            this.blueprintReady(blueprint, this.persistence.getTeamSnapshot(team.id)))
+        )
+          this.persistence.transitionTeamState(team.id, 'active');
         this.emit(input.taskId, team.id);
         return this.workerSummary(current);
       } catch (error) {

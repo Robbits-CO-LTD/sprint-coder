@@ -10,11 +10,13 @@ import { z } from 'zod';
 import {
   contextInheritancePolicySchema,
   modelSelectionSchema,
+  type ModelSelection,
   type ProviderTool,
 } from '@sprint-coder/contracts';
 import {
   createToolDefinition,
   createToolId,
+  TeamDelegationError,
   type JsonValue,
   type ToolDefinition,
 } from '@sprint-coder/domain';
@@ -30,6 +32,7 @@ const teamToolDefinition = (
   name: string,
   properties: Record<string, JsonValue>,
   required: readonly string[],
+  schemaExtensions: Readonly<Record<string, JsonValue>> = {},
 ): ToolDefinition =>
   createToolDefinition({
     toolId: createToolId({ provider: 'builtin', namespace: 'team', name, version: '1' }),
@@ -46,6 +49,7 @@ const teamToolDefinition = (
       properties,
       required: [...required],
       additionalProperties: false,
+      ...schemaExtensions,
     },
     outputSchema: { type: 'object' },
     sideEffect: 'none',
@@ -62,6 +66,7 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
   'team_hire_worker',
   'hire-worker',
   {
+    agentKind: { type: 'string', enum: ['worker', 'manager'] },
     role: { type: 'string' },
     objective: { type: 'string' },
     contextInheritancePolicy: { type: 'string' },
@@ -77,18 +82,31 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
       additionalProperties: false,
     },
     modelSelectionReason: { type: 'string' },
+    blueprintRoleKey: { type: 'string' },
     managerPolicy: {
       type: 'object',
       properties: {
-        maxDirectChildren: { type: 'integer' },
-        maxDelegationDepth: { type: 'integer' },
+        maxDirectChildren: { type: 'integer', minimum: 1 },
+        maxDelegationLevels: { type: 'integer', minimum: 1, maximum: 4 },
         allowManagerChildren: { type: 'boolean' },
       },
-      required: ['maxDelegationDepth', 'allowManagerChildren'],
+      required: ['maxDelegationLevels', 'allowManagerChildren'],
       additionalProperties: false,
     },
   },
-  ['role', 'objective'],
+  ['agentKind', 'role', 'objective'],
+  {
+    allOf: [
+      {
+        if: { properties: { agentKind: { const: 'manager' } } },
+        then: { required: ['managerPolicy'] },
+      },
+      {
+        if: { properties: { agentKind: { const: 'worker' } } },
+        then: { not: { required: ['managerPolicy'] } },
+      },
+    ],
+  },
 );
 
 export const TEAM_LIST_MODELS_TOOL = teamToolDefinition(
@@ -196,7 +214,7 @@ const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
   team_list_models:
     '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。',
   team_hire_worker:
-    '自分の直下にWorkerまたはManagerを雇用します。ManagerのmaxDelegationDepthはLeader=0とする絶対深度で、追加段数ではありません。',
+    '自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。',
   team_assign_task: '自分の直下Workerへtaskを割り当て、execution IDを返します。',
   team_steer_execution: '自分の配下で実行中または待機中のexecutionへ修正指示を送ります。',
   team_cancel_execution: '自分の配下のexecutionを取り消します。',
@@ -222,7 +240,7 @@ function providerToolDefinition(tool: ToolDefinition): ProviderTool {
     tool.providerName === 'team_hire_worker'
       ? ({
           ...(providerInputSchema as Record<string, ProviderTool['inputSchema']>),
-          required: ['role', 'objective', 'modelSelection', 'modelSelectionReason'],
+          required: ['agentKind', 'role', 'objective', 'modelSelection', 'modelSelectionReason'],
         } as ProviderTool['inputSchema'])
       : providerInputSchema;
   return {
@@ -257,11 +275,18 @@ export const WORKER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
   ).map(providerToolDefinition),
 );
 
-function teamToolError(error: unknown): { ok: false; error: string; message: string } {
+function teamToolError(error: unknown): {
+  ok: false;
+  error: string;
+  message: string;
+  code?: string;
+  details?: Readonly<Record<string, number | string | boolean | null>>;
+} {
   return {
     ok: false,
     error: error instanceof Error ? error.name : 'Error',
     message: error instanceof Error ? error.message : String(error),
+    ...(error instanceof TeamDelegationError ? { code: error.code, details: error.details } : {}),
   };
 }
 
@@ -276,6 +301,7 @@ const pacing = (): Promise<void> =>
 
 export type TeamToolName =
   | 'team_list_models'
+  | 'team_record_model_research'
   | 'team_hire_worker'
   | 'team_assign_task'
   | 'team_steer_execution'
@@ -291,6 +317,7 @@ export type TeamToolName =
 export function isTeamToolName(value: unknown): value is TeamToolName {
   return (
     value === 'team_list_models' ||
+    value === 'team_record_model_research' ||
     value === 'team_hire_worker' ||
     value === 'team_assign_task' ||
     value === 'team_steer_execution' ||
@@ -313,24 +340,47 @@ export function isTeamToolName(value: unknown): value is TeamToolName {
 // all). `.strict()` rejects any extra property — including an attacker- or model-supplied
 // `sourceAgentId`/`taskId` — so identity can never be smuggled in through tool arguments; the
 // taskId always comes from the caller's own registration/context, never from `args`.
-const hireArgsSchema = z
+const hireCommonShape = {
+  role: z.string().min(1).max(100),
+  objective: z.string().min(1).max(10_000),
+  contextInheritancePolicy: contextInheritancePolicySchema.optional(),
+  writeCapable: z.boolean().optional(),
+  modelSelection: modelSelectionSchema.optional(),
+  modelSelectionReason: z.string().min(1).max(2_000).optional(),
+  blueprintRoleKey: z
+    .string()
+    .min(1)
+    .max(80)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
+    .optional(),
+};
+const managerHirePolicySchema = z
   .object({
-    role: z.string().min(1).max(100),
-    objective: z.string().min(1).max(10_000),
-    contextInheritancePolicy: contextInheritancePolicySchema.optional(),
-    writeCapable: z.boolean().optional(),
-    modelSelection: modelSelectionSchema.optional(),
-    modelSelectionReason: z.string().min(1).max(2_000).optional(),
-    managerPolicy: z
-      .object({
-        maxDirectChildren: z.number().int().positive().nullable().optional(),
-        maxDelegationDepth: z.number().int().min(1).max(4),
-        allowManagerChildren: z.boolean(),
-      })
-      .strict()
-      .optional(),
+    maxDirectChildren: z.number().int().positive().nullable().optional(),
+    maxDelegationLevels: z.number().int().min(1).max(4),
+    allowManagerChildren: z.boolean(),
   })
   .strict();
+const hireArgsSchema = z.discriminatedUnion('agentKind', [
+  z.object({ ...hireCommonShape, agentKind: z.literal('worker') }).strict(),
+  z
+    .object({
+      ...hireCommonShape,
+      agentKind: z.literal('manager'),
+      managerPolicy: managerHirePolicySchema,
+    })
+    .strict(),
+]);
+
+function usesLegacyDelegationField(args: unknown): boolean {
+  if (typeof args !== 'object' || args === null) return false;
+  const managerPolicy = (args as Record<string, unknown>)['managerPolicy'];
+  return (
+    typeof managerPolicy === 'object' &&
+    managerPolicy !== null &&
+    Object.hasOwn(managerPolicy, 'maxDelegationDepth')
+  );
+}
 const listModelsArgsSchema = z
   .object({
     text: z.string().max(200).optional(),
@@ -346,6 +396,27 @@ const listModelsArgsSchema = z
       .nullable()
       .optional(),
     limit: z.number().int().min(1).max(100).optional(),
+  })
+  .strict();
+const modelResearchArgsSchema = z
+  .object({
+    modelSelection: modelSelectionSchema.refine(
+      (selection) =>
+        selection.connectionId !== null &&
+        selection.requestedProvider !== null &&
+        selection.requestedModel !== null,
+      'Model research must identify a Connection, Provider, and model',
+    ),
+    summary: z.string().min(1).max(2_000),
+    sources: z
+      .array(
+        z
+          .string()
+          .url()
+          .refine((value) => value.startsWith('https://') || value.startsWith('http://')),
+      )
+      .min(1)
+      .max(8),
   })
   .strict();
 const sendArgsSchema = z
@@ -408,6 +479,17 @@ export type ExecuteTeamToolOptions = Readonly<{
   modelCatalogAudit?: Readonly<{
     wasQueried(): boolean;
     markQueried(): void;
+  }>;
+  /** Present only when the user's Team model-research setting is enabled for this Leader/Manager
+   * turn. Recording is a separate audited step after native Web search and before hiring. */
+  modelResearchAudit?: Readonly<{
+    required: boolean;
+    record(input: {
+      modelSelection: ModelSelection;
+      summary: string;
+      sources: readonly string[];
+    }): void;
+    hasEvidence(modelSelection: ModelSelection): boolean;
   }>;
 }>;
 
@@ -489,8 +571,28 @@ export async function executeTeamTool(
       options.modelCatalogAudit?.markQueried();
       return result;
     }
+    case 'team_record_model_research': {
+      const request = modelResearchArgsSchema.parse(args);
+      if (options.modelResearchAudit?.required !== true)
+        return teamToolError(new Error('Model Web research is not enabled for this Team turn'));
+      options.modelResearchAudit.record(request);
+      return {
+        ok: true,
+        modelSelection: request.modelSelection,
+        sourcesRecorded: request.sources.length,
+      };
+    }
     case 'team_hire_worker': {
-      const request = hireArgsSchema.parse(args);
+      if (usesLegacyDelegationField(args))
+        return teamToolError(
+          new TeamDelegationError(
+            'legacy_delegation_field',
+            'managerPolicy.maxDelegationDepth is no longer accepted; use relative maxDelegationLevels',
+          ),
+        );
+      const parsed = hireArgsSchema.safeParse(args);
+      if (!parsed.success) return teamToolError(parsed.error);
+      const request = parsed.data;
       if (
         options.listModelCandidates !== undefined &&
         (request.modelSelection === undefined ||
@@ -500,6 +602,16 @@ export async function executeTeamTool(
         return teamToolError(
           new Error(
             'Real Team Leaders and Managers must query the model catalog, select an available model, and record the selection reason',
+          ),
+        );
+      if (
+        options.modelResearchAudit?.required === true &&
+        (request.modelSelection === undefined ||
+          !options.modelResearchAudit.hasEvidence(request.modelSelection))
+      )
+        return teamToolError(
+          new Error(
+            'Web research evidence for this exact model must be recorded before hiring the Worker',
           ),
         );
       await pacing();
@@ -516,12 +628,15 @@ export async function executeTeamTool(
           ...(request.modelSelectionReason === undefined
             ? {}
             : { modelSelectionReason: request.modelSelectionReason }),
+          ...(request.blueprintRoleKey === undefined
+            ? {}
+            : { blueprintRoleKey: request.blueprintRoleKey }),
         };
         const worker =
           options.requesterAgentId === undefined
             ? await coordinator.hireWorker(
                 hireInput,
-                request.managerPolicy === undefined
+                request.agentKind === 'worker'
                   ? null
                   : {
                       ...request.managerPolicy,
@@ -531,14 +646,27 @@ export async function executeTeamTool(
             : await coordinator.hireWorkerAs(
                 hireInput,
                 options.requesterAgentId,
-                request.managerPolicy === undefined
+                request.agentKind === 'worker'
                   ? null
                   : {
                       ...request.managerPolicy,
                       maxDirectChildren: request.managerPolicy.maxDirectChildren ?? null,
                     },
               );
-        return { ok: true, workerId: worker.id, role: worker.role, state: worker.state };
+        return {
+          ok: true,
+          workerId: worker.id,
+          role: worker.role,
+          state: worker.state,
+          agentKind: request.agentKind,
+          parentAgentId: worker.parentAgentId,
+          depth: worker.depth,
+          canDelegate: worker.canDelegate,
+          remainingDelegationLevels:
+            worker.managerPolicy == null
+              ? 0
+              : Math.max(0, worker.managerPolicy.maxDelegationDepth - worker.depth),
+        };
       } catch (error) {
         return teamToolError(error);
       }
@@ -796,8 +924,9 @@ team_assign_taskで直下Agentへ正式taskを割り当ててください。requ
 追加しないでください。作業開始時、配下の待機中、最終報告前にteam_read_messagesを確認し、
 必要な情報はteam_send_messageで同じTeamのAgentへ共有してください。配下Agentの終端reportを
 確認・統合したら、必ず自分の親Agentへ結果をteam_send_messageで報告してください。
-managerPolicy.maxDelegationDepthは追加段数ではなくLeader=0とする絶対深度です。depth 1のManagerが
-直下Workerを雇うには2以上を指定してください。budgetのworker spawnSlotsは雇用権限ではなく、
+直下のleaf Workerを雇う場合はagentKind: "worker"を指定し、managerPolicyを付けないでください。
+再委譲するManagerを雇う場合だけagentKind: "manager"とmanagerPolicyを指定します。
+managerPolicy.maxDelegationLevelsはその子Managerの直下から許す追加段数で、直属Workerだけなら1です。
 雇用可否はTeam Policyと自分のManager Policyで判断してください。
 権限はMCP tokenへ固定されています。
 `;
@@ -819,7 +948,7 @@ const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 // Natural team intent (「チームで進めて」「teamでお願い」…) auto-routes the turn into the team
 // orchestration path — the user should not need to know the fixture keyword or press ⬡ Team.
 const TEAM_INTENT =
-  /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^0-9０-９一二三四五六七八九十])[1-8一二三四五六七八]人(?:(?:体制)?で|雇って|を雇)/i;
+  /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
 
 export function isTeamScenarioInput(input: string): boolean {
   return TEAM_INTENT.test(input);
@@ -884,7 +1013,7 @@ export function createTeamScenarioSampler(input: string): ModelSampler {
         calls: TEAM_SCENARIO_ROLES.map((role, index) => ({
           callId: teamCallId('hire', input, role, index),
           toolName: 'team_hire_worker',
-          arguments: { role, objective: `${role}: ${excerpt}` },
+          arguments: { agentKind: 'worker', role, objective: `${role}: ${excerpt}` },
         })),
       };
 

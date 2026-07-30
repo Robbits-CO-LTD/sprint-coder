@@ -1,13 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import { filterSlashCommands, SLASH_COMMANDS, slashCommandQuery } from './slash-commands';
+import {
+  filterSlashCommands,
+  removeSlashToken,
+  SLASH_COMMANDS,
+  slashCommandQuery,
+  slashTokenAtCursor,
+} from './slash-commands';
 
 describe('slash commands', () => {
-  it('recognizes only a slash-prefixed, single-token draft', () => {
+  it('preserves the legacy whole-draft query while cursor matching supports inline tokens', () => {
     expect(slashCommandQuery('/')).toBe('');
     expect(slashCommandQuery('/GO')).toBe('go');
     expect(slashCommandQuery(' /goal')).toBeNull();
-    expect(slashCommandQuery('/goal now')).toBeNull();
+    expect(slashCommandQuery('hello /goal')).toBeNull();
+    expect(slashTokenAtCursor('hello /goal')?.query).toBe('goal');
+    expect(slashTokenAtCursor('/goal now', 3)?.query).toBe('goal');
+    expect(slashTokenAtCursor('/goal now', 9)).toBeNull();
+    expect(slashCommandQuery('hello/not-a-command')).toBeNull();
     expect(slashCommandQuery('hello')).toBeNull();
+  });
+
+  it('removes only the selected slash token', () => {
+    const draft = '前文 /accessibility 後文';
+    const match = slashTokenAtCursor(draft, 8);
+    expect(match).not.toBeNull();
+    expect(removeSlashToken(draft, match!)).toBe('前文  後文');
   });
 
   it('filters by command name and localized keywords', () => {

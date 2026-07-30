@@ -108,13 +108,32 @@ export function TeamPolicyDialog({
         document.activeElement instanceof HTMLElement ? document.activeElement : null;
       dialog.showModal();
     }
-    return () => {
-      if (dialog.open) dialog.close();
-      const opener = openerRef.current;
-      openerRef.current = null;
-      if (opener && document.contains(opener)) opener.focus({ preventScroll: true });
-    };
   }, [open]);
+
+  function closeAndRestoreFocus(): void {
+    const opener = openerRef.current;
+    const openerTestId = opener?.dataset.testid;
+    openerRef.current = null;
+    onClose();
+    // The parent conditionally renders this dialog, so closing means unmounting it. Restore focus
+    // after that commit; doing it synchronously would target the trigger while the modal is still
+    // in Chromium's top layer. In particular, do not call dialog.close() from an effect cleanup:
+    // React StrictMode deliberately runs setup -> cleanup -> setup in development, and the cleanup
+    // close event previously collapsed the freshly opened policy dialog during dev E2E.
+    const restore = (): void => {
+      // Resolve the trigger again on every frame. Saving replaces the canonical Team detail and
+      // can therefore replace the header button after the dialog itself has already unmounted.
+      const currentTrigger = openerTestId
+        ? document.querySelector<HTMLElement>(`[data-testid="${openerTestId}"]`)
+        : null;
+      const target = currentTrigger ?? (opener && document.contains(opener) ? opener : null);
+      target?.focus({ preventScroll: true });
+    };
+    requestAnimationFrame(() => {
+      restore();
+      requestAnimationFrame(restore);
+    });
+  }
 
   async function save() {
     // Guards a double-submit: Enter in a field and a click on 保存 both land here, and the second
@@ -127,7 +146,7 @@ export function TeamPolicyDialog({
     if (result.ok) {
       // teamByTask has already been replaced with the canonical detail the backend returned.
       setSaving(false);
-      onClose();
+      closeAndRestoreFocus();
       return;
     }
     // Failure keeps the dialog open with the user's edits intact. Nothing local is written to the
@@ -148,14 +167,14 @@ export function TeamPolicyDialog({
         // Escape. Routed through the parent so `open` and the element's own state never disagree;
         // focus restoration then runs in the effect above.
         e.preventDefault();
-        if (!saving) onClose();
+        if (!saving) closeAndRestoreFocus();
       }}
       onClose={() => {
-        if (!saving) onClose();
+        if (!saving) closeAndRestoreFocus();
       }}
       onClick={(e) => {
         // Backdrop clicks land on the <dialog> element itself, never on its children.
-        if (e.target === dialogRef.current && !saving) onClose();
+        if (e.target === dialogRef.current && !saving) closeAndRestoreFocus();
       }}
     >
       <form
@@ -173,7 +192,7 @@ export function TeamPolicyDialog({
             data-testid="team-policy-close"
             aria-label="ポリシー設定を閉じる"
             disabled={saving}
-            onClick={onClose}
+            onClick={closeAndRestoreFocus}
           >
             <X size={16} />
           </button>
@@ -307,7 +326,7 @@ export function TeamPolicyDialog({
             className="settings-secondary-button"
             data-testid="team-policy-cancel"
             disabled={saving}
-            onClick={onClose}
+            onClick={closeAndRestoreFocus}
           >
             キャンセル
           </button>

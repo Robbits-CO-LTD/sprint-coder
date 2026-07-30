@@ -5,10 +5,7 @@ import {
   MainProviderRegistry,
   type ProviderRuntime,
 } from './provider-runtime';
-import {
-  ProviderVerificationService,
-  ProviderVerificationTimeoutError,
-} from './provider-verification';
+import { ProviderVerificationService } from './provider-verification';
 
 function externalConnection(): ProviderConnection {
   return {
@@ -64,10 +61,13 @@ describe('ProviderVerificationService', () => {
   });
 
   it('blocks on preflight timeout without classifying it as invalid credentials', async () => {
-    const connection = externalConnection();
+    let connection = externalConnection();
     const repository = {
       getProviderConnection: () => connection,
-      updateProviderConnectionVerification: () => connection,
+      updateProviderConnectionVerification: (
+        _connectionId: string,
+        verification: ProviderConnection['verification'],
+      ) => (connection = { ...connection, verification }),
     };
     const hangingRuntime: ProviderRuntime = {
       verify: () => new Promise(() => undefined),
@@ -81,9 +81,13 @@ describe('ProviderVerificationService', () => {
     registry.register({ runtimeKind: 'official_api', providerId: null, runtime: hangingRuntime });
     const service = new ProviderVerificationService(repository, registry, () => new Date(), 100, 1);
 
-    await expect(service.requireVerifiedForExecution(connection.id)).rejects.toBeInstanceOf(
-      ProviderVerificationTimeoutError,
+    await expect(service.requireVerifiedForExecution(connection.id)).rejects.toThrow(
+      'Provider connection verification timed out',
     );
-    expect(connection.verification.status).toBe('unverified');
+    expect(connection.verification).toMatchObject({
+      status: 'unavailable',
+      expiresAt: null,
+      message: 'Provider connection verification timed out',
+    });
   });
 });

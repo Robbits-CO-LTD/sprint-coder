@@ -50,6 +50,11 @@ describe('createTeamScenarioSampler', () => {
       '実装',
       'レビュー',
     ]);
+    expect(
+      sample.calls.every(
+        (call) => (call.arguments as { agentKind: string }).agentKind === 'worker',
+      ),
+    ).toBe(true);
     // Deterministic: identical input always produces identical callIds.
     const again = await sampler({
       stepOrdinal: 1,

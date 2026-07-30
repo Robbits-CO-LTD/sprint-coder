@@ -14,8 +14,10 @@ Leader→Manager→Worker委譲、Worker間連携、実行中の指示修正で�
 
 - hierarchyはLeader depth 0、最大Agent depth 4
 - Team Policyで`canDelegate`を与えられたManagerだけが子を雇用
-- `ManagerPolicy.maxDelegationDepth`は追加段数ではなくLeader=0とする絶対深度。新Manager自身の
-  depth以下の値は、子を1人も雇えない自己矛盾構成として雇用前に拒否する
+- 永続化する`ManagerPolicy.maxDelegationDepth`はLeader=0とする絶対深度のまま維持する。
+  一方、モデル向け`team_hire_worker`は`managerPolicy.maxDelegationLevels`を新Managerの下へ
+  許可する相対段数として受け取り、Coordinatorが一度だけ絶対深度へ変換する。親Managerの
+  絶対上限を超える変換はAgent作成前に拒否する
 - Worker同士のdirect messageを許可し、全messageをpersist-before-dispatchで監査
 - steerはProvider-native in-turn mutationへ依存しない
 - queued steerはinstruction revision更新

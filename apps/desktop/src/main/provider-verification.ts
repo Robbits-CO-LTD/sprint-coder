@@ -91,6 +91,14 @@ export class ProviderVerificationService {
               message: result.message,
             };
       return this.repository.updateProviderConnectionVerification(connection.id, verification);
+    } catch (error) {
+      if (!(error instanceof ProviderVerificationTimeoutError)) throw error;
+      return this.repository.updateProviderConnectionVerification(connection.id, {
+        status: 'unavailable',
+        verifiedAt: this.now().toISOString(),
+        expiresAt: null,
+        message: 'Provider connection verification timed out',
+      });
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       signal.removeEventListener('abort', abort);

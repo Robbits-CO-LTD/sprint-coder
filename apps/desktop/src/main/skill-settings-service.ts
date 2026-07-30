@@ -1,17 +1,23 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type {
   SkillCandidateSummary,
+  SkillCatalog,
+  SkillCatalogItem,
+  SkillDraft,
+  SkillDraftCreateInput,
   SkillImportResult,
   SkillPreviewResult,
   SkillProvider,
   SkillScanResult,
+  TurnSkillSelection,
 } from '@sprint-coder/contracts';
 import {
   SkillStore,
   SkillStoreError,
   type SkillCandidate,
   type SkillImportPreview,
+  type ResolvedSkillPackage,
 } from './skill-store';
 
 const PREVIEW_TTL_MS = 5 * 60 * 1_000;
@@ -26,8 +32,17 @@ type PreviewRecord = {
   preview: SkillImportPreview;
 };
 
+export type ResolvedTurnSkill = Readonly<{
+  selection: TurnSkillSelection;
+  name: string;
+  description: string;
+  content: string;
+  packagePath: string;
+}>;
+
 export class SkillSettingsService {
   private readonly previews = new Map<string, PreviewRecord>();
+  private readonly drafts = new Map<string, SkillDraft>();
   private store: Promise<SkillStore> | null = null;
 
   constructor(
@@ -162,6 +177,124 @@ export class SkillSettingsService {
 
   async remove(provider: SkillProvider, skillId: string): Promise<void> {
     await (await this.getStore()).removeImported(provider, skillId);
+  }
+
+  async removeCreated(skillId: string, digest: string): Promise<void> {
+    await (await this.getStore()).removeCreated(skillId, digest);
+  }
+
+  async setCreatedEnabled(skillId: string, digest: string, enabled: boolean): Promise<void> {
+    await (await this.getStore()).setCreatedEnabled(skillId, digest, enabled);
+  }
+
+  async exportCreated(skillId: string, digest: string, destinationParent: string): Promise<string> {
+    return (await this.getStore()).exportCreated(skillId, digest, destinationParent);
+  }
+
+  async listCatalog(): Promise<SkillCatalog> {
+    const items = (await (await this.getStore()).listSelectable()).map((item) => ({
+      ref: {
+        skillId: item.skillId,
+        source: item.source,
+        digest: item.digest,
+      },
+      kind: item.kind,
+      name: item.name,
+      description: item.description,
+      enabled: item.enabled,
+      removable: item.removable,
+      exportable: item.exportable,
+    }));
+    const revision = createHash('sha256').update(JSON.stringify(items)).digest('hex');
+    return { revision, items };
+  }
+
+  async listDrafts(): Promise<SkillDraft[]> {
+    const stored = await (await this.getStore()).listCreatedDrafts();
+    this.drafts.clear();
+    for (const draft of stored) this.drafts.set(draft.id, draft);
+    return stored;
+  }
+
+  async createDraft(input: SkillDraftCreateInput): Promise<SkillDraft> {
+    if (this.drafts.size >= 64)
+      throw new SkillSettingsError('PREVIEW_LIMIT', 'Skill Draft数の上限に達しました');
+    const validation = (await this.getStore()).validateCreatedSkill(input.skillId, input.files);
+    if (validation.kind !== input.kind)
+      throw new SkillSettingsError(
+        'INVALID_SKILL',
+        input.kind === 'team'
+          ? 'Team Skillにはteam/blueprint.jsonが必要です'
+          : 'Chat SkillへTeam Blueprintを含めることはできません',
+      );
+    const now = new Date(this.now()).toISOString();
+    const draft: SkillDraft = {
+      id: randomUUID(),
+      kind: validation.kind,
+      skillId: validation.skillId,
+      name: validation.name,
+      description: validation.description,
+      digest: validation.digest,
+      files: input.files.map((file) => ({ ...file })),
+      createdAt: now,
+      updatedAt: now,
+    };
+    await (await this.getStore()).saveCreatedDraft(draft);
+    this.drafts.set(draft.id, draft);
+    return draft;
+  }
+
+  async installDraft(draftId: string, expectedDigest: string): Promise<SkillCatalogItem> {
+    const draft =
+      this.drafts.get(draftId) ?? (await this.listDrafts()).find(({ id }) => id === draftId);
+    if (draft === undefined)
+      throw new SkillSettingsError('NOT_FOUND', 'Skill Draftが見つかりません');
+    if (draft.digest !== expectedDigest)
+      throw new SkillSettingsError('SOURCE_CHANGED', 'Skill Draftが確認後に変更されました');
+    const installed = await (await this.getStore()).installCreatedSkill(draft.skillId, draft.files);
+    await (await this.getStore()).removeCreatedDraft(draftId);
+    this.drafts.delete(draftId);
+    return {
+      ref: {
+        skillId: installed.skillId,
+        source: installed.source,
+        digest: installed.digest,
+      },
+      kind: installed.kind,
+      name: installed.name,
+      description: installed.description,
+      enabled: installed.enabled,
+      removable: installed.removable,
+      exportable: installed.exportable,
+    };
+  }
+
+  async discardDraft(draftId: string): Promise<void> {
+    const exists =
+      this.drafts.has(draftId) || (await this.listDrafts()).some(({ id }) => id === draftId);
+    if (!exists) throw new SkillSettingsError('NOT_FOUND', 'Skill Draftが見つかりません');
+    await (await this.getStore()).removeCreatedDraft(draftId);
+    this.drafts.delete(draftId);
+  }
+
+  async resolveSelections(selections: readonly TurnSkillSelection[]): Promise<ResolvedTurnSkill[]> {
+    const resolved = await Promise.all(
+      selections.map(async (selection) => {
+        const item: ResolvedSkillPackage = await (
+          await this.getStore()
+        ).resolveSelectable(selection.ref.source, selection.ref.skillId, selection.ref.digest);
+        if (item.kind !== selection.kind)
+          throw new SkillSettingsError('SOURCE_CHANGED', 'Skillの種類が変更されました');
+        return {
+          selection,
+          name: item.name,
+          description: item.description,
+          content: item.content,
+          packagePath: item.packagePath,
+        };
+      }),
+    );
+    return resolved;
   }
 
   private async getStore(): Promise<SkillStore> {

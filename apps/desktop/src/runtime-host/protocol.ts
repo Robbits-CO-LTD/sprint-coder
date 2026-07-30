@@ -10,15 +10,20 @@ import {
   type TurnStage,
 } from '@sprint-coder/contracts';
 import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
+import { isAbsolute, normalize, sep } from 'node:path';
 
 export const RUNTIME_PROTOCOL_VERSION = 5;
 
 export type RuntimeContextFragment = Readonly<{
   id: string;
-  source: 'system' | 'history' | 'goal' | 'compaction' | 'background';
+  source: 'system' | 'history' | 'goal' | 'compaction' | 'background' | 'skill';
   trust: 'system' | 'user' | 'assistant';
   authority: 'system' | 'user' | 'none';
   content: string;
+}>;
+export type RuntimeSkillInput = Readonly<{
+  name: string;
+  path: string;
 }>;
 
 /** Additive, optional per-turn addendum: when present, the Codex/Claude adapter wires the real Leader
@@ -29,6 +34,9 @@ export type RuntimeTeamMcpOption = Readonly<{
   socketPath: string;
   token: string;
   guidance: string;
+  /** Enables the Runtime's native live-Web search only for a Leader/Manager that must research
+   * candidate models before hiring. Omitted/false preserves the existing no-Web Team profile. */
+  enableWebSearch?: boolean;
 }>;
 
 type EnvelopeBase = {
@@ -100,6 +108,7 @@ export type MainToRuntimeEnvelope =
       // 'read-only', which is the pre-#37 behaviour.
       writeScope?: 'read-only' | 'workspace-write' | 'full';
       contextFragments: RuntimeContextFragment[];
+      skills?: RuntimeSkillInput[];
       toolCatalogSnapshot: ToolCatalogSnapshot;
       teamMcp?: RuntimeTeamMcpOption;
     })
@@ -148,9 +157,48 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
       value.writeScope === 'full') &&
     'contextFragments' in value &&
     isRuntimeContextFragments(value.contextFragments) &&
+    (!('skills' in value) || value.skills === undefined || isRuntimeSkillInputs(value.skills)) &&
     'toolCatalogSnapshot' in value &&
     isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot) &&
     (!('teamMcp' in value) || value.teamMcp === undefined || isRuntimeTeamMcpOption(value.teamMcp))
+  );
+}
+
+function isRuntimeSkillInputs(value: unknown): value is RuntimeSkillInput[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 6 &&
+    value.every(
+      (item) =>
+        typeof item === 'object' &&
+        item !== null &&
+        Object.keys(item).every((key) => key === 'name' || key === 'path') &&
+        typeof (item as Record<string, unknown>)['name'] === 'string' &&
+        /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(
+          (item as Record<string, unknown>)['name'] as string,
+        ) &&
+        typeof (item as Record<string, unknown>)['path'] === 'string' &&
+        isManagedRuntimeSkillPath(
+          (item as Record<string, unknown>)['name'] as string,
+          (item as Record<string, unknown>)['path'] as string,
+        ),
+    )
+  );
+}
+
+function isManagedRuntimeSkillPath(name: string, path: string): boolean {
+  if (path.length < 1 || path.length > 4_096 || !isAbsolute(path) || normalize(path) !== path)
+    return false;
+  const parts = path.split(sep);
+  const digest = parts.at(-1);
+  const skillId = parts.at(-2);
+  const source = parts.at(-3);
+  const revisions = parts.at(-4);
+  return (
+    revisions === 'revisions' &&
+    ['builtin', 'created', 'claude', 'agents'].includes(source ?? '') &&
+    skillId === name &&
+    /^[a-f0-9]{64}$/.test(digest ?? '')
   );
 }
 
@@ -165,7 +213,8 @@ function isRuntimeTeamMcpOption(value: unknown): value is RuntimeTeamMcpOption {
     record['token'].length >= 16 &&
     record['token'].length <= 256 &&
     typeof record['guidance'] === 'string' &&
-    record['guidance'].length <= 20_000
+    record['guidance'].length <= 20_000 &&
+    (record['enableWebSearch'] === undefined || typeof record['enableWebSearch'] === 'boolean')
   );
 }
 
@@ -184,7 +233,7 @@ function isRuntimeContextFragments(value: unknown): value is RuntimeContextFragm
       record['id'].length < 1 ||
       record['id'].length > 128 ||
       ids.has(record['id']) ||
-      !['system', 'history', 'goal', 'compaction', 'background'].includes(
+      !['system', 'history', 'goal', 'compaction', 'background', 'skill'].includes(
         record['source'] as string,
       ) ||
       !['system', 'user', 'assistant'].includes(record['trust'] as string) ||
@@ -204,6 +253,8 @@ function isRuntimeContextFragments(value: unknown): value is RuntimeContextFragm
 function hasValidFragmentAuthority(fragment: Record<string, unknown>): boolean {
   if (fragment['source'] === 'system') return fragment['authority'] === 'system';
   if (fragment['source'] === 'goal') return fragment['authority'] === 'user';
+  if (fragment['source'] === 'skill')
+    return fragment['authority'] === (fragment['trust'] === 'user' ? 'user' : 'none');
   if (fragment['source'] === 'history')
     return fragment['authority'] === (fragment['trust'] === 'user' ? 'user' : 'none');
   return fragment['authority'] === 'none';

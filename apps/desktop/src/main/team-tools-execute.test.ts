@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { ModelSelection } from '@sprint-coder/contracts';
 import { executeTeamTool } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 
@@ -9,8 +10,30 @@ import type { TeamCoordinator } from './team-coordinator';
 // without any Electron ABI dependency at all.
 function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordinator {
   return {
-    hireWorker: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
-    hireWorkerAs: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
+    hireWorker: vi.fn(
+      async () =>
+        ({
+          id: 'worker-1',
+          role: 'role',
+          state: 'ready',
+          parentAgentId: 'leader-1',
+          depth: 1,
+          canDelegate: false,
+          managerPolicy: null,
+        }) as never,
+    ),
+    hireWorkerAs: vi.fn(
+      async () =>
+        ({
+          id: 'worker-1',
+          role: 'role',
+          state: 'ready',
+          parentAgentId: 'manager-1',
+          depth: 2,
+          canDelegate: false,
+          managerPolicy: null,
+        }) as never,
+    ),
     sendToWorker: vi.fn(
       async () => ({ id: 'message-1', state: 'delivered', deliveryState: 'acked' }) as never,
     ),
@@ -48,6 +71,7 @@ describe('executeTeamTool routing', () => {
   it('routes team_hire_worker to TeamCoordinator.hireWorker with the caller-bound taskId', async () => {
     const coordinator = fakeCoordinator();
     const result = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'worker',
       role: '調査',
       objective: '調べる',
     });
@@ -61,7 +85,64 @@ describe('executeTeamTool routing', () => {
       },
       null,
     );
-    expect(result).toMatchObject({ ok: true, workerId: 'worker-1' });
+    expect(result).toMatchObject({
+      ok: true,
+      workerId: 'worker-1',
+      agentKind: 'worker',
+      parentAgentId: 'leader-1',
+      depth: 1,
+      canDelegate: false,
+      remainingDelegationLevels: 0,
+    });
+  });
+
+  it('enforces the discriminated worker/manager hire contract and rejects the legacy field', async () => {
+    const coordinator = fakeCoordinator();
+    const leafWithPolicy = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'worker',
+      role: 'leaf',
+      objective: 'work',
+      managerPolicy: {
+        maxDirectChildren: 2,
+        maxDelegationLevels: 1,
+        allowManagerChildren: false,
+      },
+    });
+    const managerWithoutPolicy = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'manager',
+      role: 'manager',
+      objective: 'manage',
+    });
+    const zeroLevels = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'manager',
+      role: 'manager',
+      objective: 'manage',
+      managerPolicy: {
+        maxDirectChildren: 2,
+        maxDelegationLevels: 0,
+        allowManagerChildren: false,
+      },
+    });
+    const legacy = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'manager',
+      role: 'manager',
+      objective: 'manage',
+      managerPolicy: {
+        maxDirectChildren: 2,
+        maxDelegationDepth: 2,
+        allowManagerChildren: false,
+      },
+    });
+
+    expect(leafWithPolicy).toMatchObject({ ok: false, error: 'ZodError' });
+    expect(managerWithoutPolicy).toMatchObject({ ok: false, error: 'ZodError' });
+    expect(zeroLevels).toMatchObject({ ok: false, error: 'ZodError' });
+    expect(legacy).toMatchObject({
+      ok: false,
+      code: 'legacy_delegation_field',
+      message: expect.stringContaining('maxDelegationLevels'),
+    });
+    expect(coordinator.hireWorker).not.toHaveBeenCalled();
   });
 
   it('requires an audited catalog selection on the real Leader and Manager path', async () => {
@@ -72,6 +153,7 @@ describe('executeTeamTool routing', () => {
       'task-1',
       'team_hire_worker',
       {
+        agentKind: 'worker',
         role: '調査',
         objective: '調べる',
       },
@@ -114,6 +196,7 @@ describe('executeTeamTool routing', () => {
       'task-1',
       'team_hire_worker',
       {
+        agentKind: 'worker',
         role: '実装',
         objective: '実装する',
         modelSelection: selection,
@@ -131,6 +214,74 @@ describe('executeTeamTool routing', () => {
     );
   });
 
+  it('requires Web research evidence for the exact selected model when the setting is enabled', async () => {
+    const coordinator = fakeCoordinator();
+    const researched = new Set<string>();
+    const selection = {
+      connectionId: 'openrouter:primary',
+      requestedProvider: 'openrouter',
+      requestedModel: 'anthropic/claude-opus-5',
+    };
+    const key = (value: ModelSelection) =>
+      `${value.connectionId}\0${value.requestedProvider}\0${value.requestedModel}`;
+    const options = {
+      listModelCandidates: vi.fn(async () => ({ items: [] })),
+      modelCatalogAudit: {
+        wasQueried: () => true,
+        markQueried: vi.fn(),
+      },
+      modelResearchAudit: {
+        required: true,
+        record: (input: { modelSelection: ModelSelection }) => {
+          researched.add(key(input.modelSelection));
+        },
+        hasEvidence: (candidate: ModelSelection) => researched.has(key(candidate)),
+      },
+    };
+
+    const before = (await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      {
+        agentKind: 'worker',
+        role: '実装',
+        objective: '実装する',
+        modelSelection: selection,
+        modelSelectionReason: 'Web調査に基づく',
+      },
+      options,
+    )) as { ok: false; message: string };
+    expect(before.message).toContain('Web research evidence');
+    expect(coordinator.hireWorker).not.toHaveBeenCalled();
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_record_model_research',
+      {
+        modelSelection: selection,
+        summary: '公式情報でtool useと長いcontextを確認した',
+        sources: ['https://openrouter.ai/models/anthropic/claude-opus-5'],
+      },
+      options,
+    );
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      {
+        agentKind: 'worker',
+        role: '実装',
+        objective: '実装する',
+        modelSelection: selection,
+        modelSelectionReason: '公式情報のWeb調査に基づく',
+      },
+      options,
+    );
+    expect(coordinator.hireWorker).toHaveBeenCalledOnce();
+  });
+
   it('maps a TeamCoordinator rejection to an {ok:false} tool result instead of throwing', async () => {
     const coordinator = fakeCoordinator({
       hireWorker: vi.fn(async () => {
@@ -138,6 +289,7 @@ describe('executeTeamTool routing', () => {
       }),
     });
     const result = (await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'worker',
       role: 'x',
       objective: 'y',
     })) as { ok: false; message: string };
@@ -192,7 +344,7 @@ describe('executeTeamTool routing', () => {
     const options = { requesterAgentId: 'manager-1' };
     const managerPolicy = {
       maxDirectChildren: 2,
-      maxDelegationDepth: 3,
+      maxDelegationLevels: 1,
       allowManagerChildren: false,
     };
 
@@ -200,7 +352,7 @@ describe('executeTeamTool routing', () => {
       coordinator,
       'task-1',
       'team_hire_worker',
-      { role: '実装担当', objective: '実装する', managerPolicy },
+      { agentKind: 'manager', role: '実装担当', objective: '実装する', managerPolicy },
       options,
     );
     expect(coordinator.hireWorkerAs).toHaveBeenCalledWith(
@@ -335,13 +487,13 @@ describe('executeTeamTool routing', () => {
     ).rejects.toThrow();
     expect(coordinator.sendToWorker).not.toHaveBeenCalled();
 
-    await expect(
-      executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
-        role: 'r',
-        objective: 'o',
-        taskId: 'attacker-supplied-task-id',
-      }),
-    ).rejects.toThrow();
+    const rejected = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'worker',
+      role: 'r',
+      objective: 'o',
+      taskId: 'attacker-supplied-task-id',
+    });
+    expect(rejected).toMatchObject({ ok: false, error: 'ZodError' });
     expect(coordinator.hireWorker).not.toHaveBeenCalled();
   });
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { WorkspaceChip } from '../WorkspaceChip';
+import { ShieldAlert } from '../icons';
 import { useAppStore } from '../../store/appStore';
 import { accessDescription, accessEnforcement } from '../../lib/access-labels';
 import type { ContextUsage } from '../../types/sprint-coder';
@@ -15,16 +16,12 @@ const SOURCE_LABEL: Record<ContextUsage['fragments'][number]['source'], string> 
 
 const WARNING_THRESHOLD_PCT = 80;
 
-// ContextBar: workspace / branch / permission preset / usage (§4.2). Workspace is backed by
-// real data (workspace.get/select) via WorkspaceChip; branch/permission chips remain
-// placeholders until their APIs land on the preload contract. The usage chip reflects real
-// contextUsage data (TurnSnapshot.contextUsage / `context.usage` events) and degrades to a
-// plain "context —" display while the backend hasn't sent any data yet.
+// ContextBar: workspace / usage (§4.2). Access mode lives beside the Composer's plus button because
+// it configures the next send; keeping it in this row made that action look like workspace metadata.
 export function ContextBar({ taskId }: { taskId: string }) {
   return (
     <div className="context-bar">
       <WorkspaceChip taskId={taskId} variant="context" />
-      <PermissionChip taskId={taskId} />
       <span className="ctx-spacer" />
       <ContextUsageChip taskId={taskId} />
     </div>
@@ -43,7 +40,7 @@ const PRESET_DESC: Record<AccessPreset, string> = {
   full: '広い操作を許可しますが、管理denyと秘密保護は維持します',
 };
 
-function PermissionChip({ taskId }: { taskId: string }) {
+export function PermissionChip({ taskId }: { taskId: string }) {
   const permission = useAppStore((state) => state.permissionByTask[taskId]) ?? {
     preset: 'ask' as const,
     policyEpoch: 0,
@@ -79,11 +76,18 @@ function PermissionChip({ taskId }: { taskId: string }) {
     void setAccessPreset(taskId, preset);
   }
 
-  if (!supported) return <span className="ctx-chip">{PRESET_LABEL[permission.preset]}</span>;
+  if (!supported) {
+    return (
+      <span className="composer-permission-chip" data-access-preset={permission.preset}>
+        <ShieldAlert size={16} />
+        {PRESET_LABEL[permission.preset]}
+      </span>
+    );
+  }
 
   return (
     <div
-      className="ctx-permission-wrap"
+      className="ctx-permission-wrap composer-permission-wrap"
       ref={wrapRef}
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
@@ -96,7 +100,7 @@ function PermissionChip({ taskId }: { taskId: string }) {
       <button
         data-testid="access-selector"
         type="button"
-        className="ctx-chip chip-btn"
+        className="composer-permission-chip"
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => {
@@ -107,6 +111,7 @@ function PermissionChip({ taskId }: { taskId: string }) {
         data-access-enforcement={enforcement}
         title={accessDescription(permission.preset, runtimeKind)}
       >
+        <ShieldAlert size={16} />
         {PRESET_LABEL[permission.preset]}
         {/* Moved here from the TaskHeader when the duplicate chips were removed (issue #47). It must
             travel with the control, not be dropped: this is the one place the app admits that a

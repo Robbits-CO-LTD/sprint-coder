@@ -32,6 +32,7 @@ describe('ModelCatalogService', () => {
       text: 'Synthetic Model 11',
       connectionIds: [],
       providerIds: [],
+      accessTypes: [],
       capabilities: [],
       availableOnly: true,
       cursor: null,
@@ -53,6 +54,7 @@ describe('ModelCatalogService', () => {
       text: '',
       connectionIds: [],
       providerIds: [],
+      accessTypes: [],
       capabilities: [],
       availableOnly: true,
       cursor: null,
@@ -60,5 +62,50 @@ describe('ModelCatalogService', () => {
     });
     expect(service.indexBuildCount).toBe(1);
     expect(result.items[0]?.availabilityCheckedAt).toBe('2026-07-28T01:00:00.000Z');
+  });
+
+  it('filters subscription and API models without exposing Runtime-specific state to Renderer', () => {
+    const service = new ModelCatalogService();
+    const subscription = {
+      ...model(1),
+      connectionId: 'builtin:claude-cli',
+      connectionDisplayName: 'Claude Code',
+    };
+    const api = {
+      ...model(2),
+      connectionId: 'openrouter:connection-1',
+      connectionDisplayName: 'OpenRouter',
+    };
+    service.replaceCatalog([subscription, api], new Set(['builtin:claude-cli']));
+
+    const subscriptionResult = service.query({
+      taskId: 'task-1',
+      text: '',
+      connectionIds: [],
+      providerIds: [],
+      accessTypes: ['subscription'],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 10,
+    });
+    const apiResult = service.query({
+      taskId: 'task-1',
+      text: 'OpenRouter',
+      connectionIds: [],
+      providerIds: [],
+      accessTypes: ['api'],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 10,
+    });
+
+    expect(subscriptionResult.items.map(({ connectionId }) => connectionId)).toEqual([
+      'builtin:claude-cli',
+    ]);
+    expect(apiResult.items.map(({ connectionId }) => connectionId)).toEqual([
+      'openrouter:connection-1',
+    ]);
   });
 });

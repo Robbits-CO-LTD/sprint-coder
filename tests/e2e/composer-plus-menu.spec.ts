@@ -38,19 +38,19 @@ test.describe('composer plus menu', () => {
       await plus.focus();
       await page.keyboard.press('ArrowDown');
       await expect(plus).toHaveAttribute('aria-expanded', 'true');
-      await expect(page.getByTestId('composer-menu-goal')).toBeFocused();
+      await expect(page.getByTestId('composer-menu-attach')).toBeFocused();
 
       // Arrows move and wrap.
       await page.keyboard.press('ArrowDown');
+      await expect(page.getByTestId('composer-menu-imagegen')).toBeFocused();
+      await page.keyboard.press('ArrowDown');
       await expect(page.getByTestId('composer-menu-attach')).toBeFocused();
-      await page.keyboard.press('ArrowUp');
-      await expect(page.getByTestId('composer-menu-goal')).toBeFocused();
       await page.keyboard.press('ArrowUp');
       await expect(page.getByTestId('composer-menu-imagegen')).toBeFocused();
 
       // Home/End jump to the ends.
       await page.keyboard.press('Home');
-      await expect(page.getByTestId('composer-menu-goal')).toBeFocused();
+      await expect(page.getByTestId('composer-menu-attach')).toBeFocused();
       await page.keyboard.press('End');
       await expect(page.getByTestId('composer-menu-imagegen')).toBeFocused();
 
@@ -79,45 +79,18 @@ test.describe('composer plus menu', () => {
     });
   });
 
-  test('sets a Goal from the menu, and the header reflects it', async () => {
-    await withApp('composer-plus-goal', async (page) => {
-      // No chip at all before a Goal exists (issue #47): one that says 「未設定」 spends header space
-      // to report an absence.
+  test('does not expose a separate Goal input or plus-menu control', async () => {
+    await withApp('composer-no-separate-goal-input', async (page) => {
       await expect(page.getByTestId('task-goal-chip')).toHaveCount(0);
+      const textarea = page.getByTestId('composer-textarea');
+      await expect(textarea).toHaveAttribute(
+        'placeholder',
+        'メッセージを送信 (Enterで送信 / Shift+Enterで改行)',
+      );
 
       await page.getByTestId('composer-plus').click();
-      await page.getByTestId('composer-menu-goal').click();
-
-      // The menu closes and the editor takes focus, so this is one keyboard flow end to end.
-      const goalInput = page.getByTestId('composer-goal-input');
-      await expect(goalInput).toBeFocused();
-      await goalInput.fill('認証まわりのリファクタを完了させる');
-      await goalInput.press('Enter');
-
-      await expect(goalInput).toHaveCount(0);
-      await expect(page.getByTestId('task-goal-chip')).toContainText(
-        '認証まわりのリファクタを完了させる',
-      );
-
-      // The header chip is display-only now — there is exactly one way to change a Goal.
-      expect(
-        await page.getByTestId('task-goal-chip').evaluate((el) => el.tagName.toLowerCase()),
-      ).not.toBe('button');
-      await expect(page.locator('[data-testid="task-goal-chip"] button')).toHaveCount(0);
-
-      // The menu shows the current value as the item's description.
-      await page.getByTestId('composer-plus').click();
-      await expect(page.getByTestId('composer-menu-goal')).toContainText(
-        '認証まわりのリファクタを完了させる',
-      );
-
-      // Escape in the editor cancels rather than committing.
-      await page.getByTestId('composer-menu-goal').click();
-      await page.getByTestId('composer-goal-input').fill('この値は破棄される');
-      await page.getByTestId('composer-goal-input').press('Escape');
-      await expect(page.getByTestId('task-goal-chip')).toContainText(
-        '認証まわりのリファクタを完了させる',
-      );
+      await expect(page.getByTestId('composer-menu-goal')).toHaveCount(0);
+      await expect(page.getByTestId('composer-goal-input')).toHaveCount(0);
     });
   });
 
@@ -143,12 +116,11 @@ test.describe('composer plus menu', () => {
       await expect(page.getByTestId('composer-menu-imagegen')).toContainText('Codex Runtime');
       await expect(page.getByTestId('composer-menu-attach')).toContainText('未実装');
 
-      // Activating an unavailable item does nothing — no editor opens, the menu stays put.
+      // Activating an unavailable item does nothing and the menu stays put.
       // `force` because Playwright's actionability check treats aria-disabled as disabled and would
       // refuse the click; the point here is precisely what happens when a user does click it.
       await page.getByTestId('composer-menu-attach').click({ force: true });
       await expect(page.getByTestId('composer-plus')).toHaveAttribute('aria-expanded', 'true');
-      await expect(page.getByTestId('composer-goal-input')).toHaveCount(0);
     });
   });
 

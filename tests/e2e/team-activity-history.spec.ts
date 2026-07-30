@@ -30,6 +30,14 @@ function activityCards(page: Page): Locator {
   return page.getByTestId('team-activity-card');
 }
 
+function activityGroup(page: Page): Locator {
+  return page.getByTestId('team-activity-group');
+}
+
+function activitySummary(page: Page): Locator {
+  return page.getByTestId('team-activity-summary');
+}
+
 function cardsOfType(page: Page, type: string): Locator {
   return page.locator(`[data-testid="team-activity-card"][data-activity-type="${type}"]`);
 }
@@ -94,7 +102,9 @@ function duplicateIds(ids: readonly string[]): string[] {
 }
 
 test.describe('Core C2c: Team activity history in the packaged app survives a restart', () => {
-  test('shows who was hired and delegated to, and restores the identical activities', async () => {
+  // Playwright requires object destructuring when the second `testInfo` argument is used.
+  // eslint-disable-next-line no-empty-pattern
+  test('shows who was hired and delegated to, and restores the identical activities', async ({}, testInfo) => {
     const userDataDir = createUserDataDir('team-activity-history');
     let app: ElectronApplication | null = null;
     try {
@@ -127,6 +137,31 @@ test.describe('Core C2c: Team activity history in the packaged app survives a re
         async () => (await window.sprintCoder!.tasks.list())[0]!.id,
       );
       await waitForTimelineToMatchPersistedActivities(page, taskId);
+
+      // The live rows settle into one compact work summary, and that summary remains between the
+      // user's request and the Leader's answer even if a trailing lifecycle row was persisted
+      // after the answer timestamp.
+      await expect(activityGroup(page)).toHaveCount(1);
+      await expect(activityGroup(page)).not.toHaveAttribute('open', '');
+      await expect(activitySummary(page)).toContainText(/作業しました/);
+      const summaryPrecedesAnswer = await activitySummary(page).evaluate((summary) => {
+        const answers = document.querySelectorAll('.msg-assistant');
+        const answer = answers.item(answers.length - 1);
+        return (
+          answer !== null &&
+          (summary.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+        );
+      });
+      expect(summaryPrecedesAnswer).toBe(true);
+      await testInfo.attach('collapsed-team-work-summary', {
+        body: await page.screenshot(),
+        contentType: 'image/png',
+      });
+
+      // The summary is compression, not data loss: opening it restores every persisted activity.
+      await activitySummary(page).click();
+      await expect(activityGroup(page)).toHaveAttribute('open', '');
+      await expect(activityCards(page).first()).toBeVisible();
 
       // One hire card and one delegation card per Worker — the history says who did what to whom.
       await expect(cardsOfType(page, 'worker_hired')).toHaveCount(3);
@@ -164,6 +199,9 @@ test.describe('Core C2c: Team activity history in the packaged app survives a re
       const idsAfterRestart = await activityIdsInDom(page);
       expect(duplicateIds(idsAfterRestart)).toEqual([]);
       expect([...idsAfterRestart].sort()).toEqual([...idsBeforeRestart].sort());
+      await expect(activityGroup(page)).toHaveCount(1);
+      await expect(activityGroup(page)).not.toHaveAttribute('open', '');
+      await expect(activitySummary(page)).toContainText(/作業しました/);
       await expect(cardsOfType(page, 'worker_hired')).toHaveCount(3);
       await expect(cardsOfType(page, 'task_assigned')).toHaveCount(3);
 

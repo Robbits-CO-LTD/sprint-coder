@@ -108,8 +108,8 @@ export function TaskHeader({
         </button>
       )}
       {/* Workspace and Access used to sit here too (issue #47), as read-only copies of controls that
-          already live in the ContextBar directly above the composer — the header was printing the
-          same state a second time. Goal stays, because the ContextBar does NOT show it and this is
+          already live in the Composer beside the plus menu — the header was printing the same
+          state a second time. Goal stays, because the Composer does NOT show its saved value and this is
           the only place to check it at a glance, but only once there is one: a chip that exists to
           say 「未設定」 spends space to report an absence. */}
       {(task.goal ?? '') !== '' && <GoalChip task={task} />}
@@ -150,23 +150,14 @@ export function TaskHeader({
   );
 }
 
-// Goal chip: read-only display of the current Goal (FR-COMP-05).
-//
-// Editing moved to the Composer's plus menu (issue #13). Two entry points for one setting was the
-// alternative, and the reason to prefer one is that a Goal is read far more often than it is
-// changed: the header is where the user *checks* it while working, and mixing an edit affordance
-// into that spot makes an accidental click mutate state they only meant to glance at.
+// Goal chip: read-only display of the value explicitly saved through `/goal` (FR-COMP-05).
 //
 // Rendered only when a Goal exists (issue #47). The caller decides that, so this component never has
 // to describe an absence.
 function GoalChip({ task }: { task: TaskSummary }) {
   const goal = task.goal ?? '';
   return (
-    <span
-      className="goal-chip"
-      data-testid="task-goal-chip"
-      title={`Goal: ${goal}（Composerのプラスボタンから変更できます）`}
-    >
+    <span className="goal-chip" data-testid="task-goal-chip" title={`Goal: ${goal}`}>
       <Target size={13} /> {goal}
     </span>
   );

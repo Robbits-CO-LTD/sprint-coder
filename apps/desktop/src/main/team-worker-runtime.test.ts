@@ -61,6 +61,7 @@ function worker(canDelegate: boolean): AgentRecord {
     managerPolicy: canDelegate
       ? { maxDirectChildren: 2, maxDelegationDepth: 3, allowManagerChildren: false }
       : null,
+    blueprintRoleKey: null,
     createdAt: '2026-07-28T00:00:00.000Z',
     updatedAt: '2026-07-28T00:00:00.000Z',
   };
@@ -93,13 +94,9 @@ function runtime(
     catalogFor: () => ({ tools: [] }),
     authorizeEgress: () => true,
     ...(overrides.teamMcpFor === undefined ? {} : { teamMcpFor: overrides.teamMcpFor }),
-    ...(overrides.releaseTeamMcp === undefined
-      ? {}
-      : { releaseTeamMcp: overrides.releaseTeamMcp }),
+    ...(overrides.releaseTeamMcp === undefined ? {} : { releaseTeamMcp: overrides.releaseTeamMcp }),
     ...(overrides.contextFor === undefined ? {} : { contextFor: overrides.contextFor }),
-    ...(overrides.writeScopeFor === undefined
-      ? {}
-      : { writeScopeFor: overrides.writeScopeFor }),
+    ...(overrides.writeScopeFor === undefined ? {} : { writeScopeFor: overrides.writeScopeFor }),
   });
 }
 
@@ -149,10 +146,8 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       },
     ];
     expect(
-      buildInheritedWorkerContext(
-        { ...worker(false), contextInheritancePolicy: 'none' },
-        messages,
-      ).fragments,
+      buildInheritedWorkerContext({ ...worker(false), contextInheritancePolicy: 'none' }, messages)
+        .fragments,
     ).toEqual([]);
     expect(
       buildInheritedWorkerContext(

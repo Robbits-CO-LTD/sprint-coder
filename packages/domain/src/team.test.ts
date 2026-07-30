@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MANAGER_POLICY,
   DEFAULT_TEAM_POLICY,
+  TeamDelegationError,
   assertDelegationAllowed,
   assertManagerPolicy,
   assertTeamMessageAllowed,
@@ -11,6 +12,16 @@ import {
   transitionTeamMessage,
   transitionWorker,
 } from './team';
+
+function delegationError(action: () => void): TeamDelegationError {
+  try {
+    action();
+  } catch (error) {
+    if (error instanceof TeamDelegationError) return error;
+    throw error;
+  }
+  throw new Error('Expected TeamDelegationError');
+}
 
 describe('team domain', () => {
   it('enforces the team lifecycle', () => {
@@ -105,65 +116,114 @@ describe('team domain', () => {
         teamPolicy: DEFAULT_TEAM_POLICY,
       }),
     ).toBe(4);
-    expect(() =>
+    try {
       assertDelegationAllowed({
         requester: { ...requester, depth: 4 },
         requestedChildCanDelegate: false,
         directChildCount: 0,
         teamPolicy: DEFAULT_TEAM_POLICY,
-      }),
-    ).toThrow('depth exceeds 4');
+      });
+      throw new Error('Expected Team depth rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TeamDelegationError);
+      expect(error).toMatchObject({
+        code: 'team_depth_limit',
+        details: { requesterDepth: 4, requestedChildDepth: 5, maxAgentDepth: 4 },
+      });
+    }
   });
 
-  it('rejects delegation by a non-Manager and enforces Manager child limits', () => {
-    expect(() =>
+  it('distinguishes a Manager delegation ceiling from the Team depth ceiling', () => {
+    try {
       assertDelegationAllowed({
         requester: {
           kind: 'worker',
           depth: 1,
-          canDelegate: false,
-          managerPolicy: null,
+          canDelegate: true,
+          managerPolicy: {
+            maxDirectChildren: 2,
+            maxDelegationDepth: 1,
+            allowManagerChildren: false,
+          },
         },
         requestedChildCanDelegate: false,
         directChildCount: 0,
         teamPolicy: DEFAULT_TEAM_POLICY,
-      }),
-    ).toThrow('Only a Manager');
+      });
+      throw new Error('Expected Manager delegation rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TeamDelegationError);
+      expect(error).toMatchObject({
+        code: 'manager_delegation_limit',
+        details: { requesterDepth: 1, requestedChildDepth: 2, maxDelegationDepth: 1 },
+      });
+    }
+  });
 
-    expect(() =>
-      assertDelegationAllowed({
-        requester: {
-          kind: 'worker',
-          depth: 1,
-          canDelegate: true,
-          managerPolicy: {
-            maxDirectChildren: 2,
-            maxDelegationDepth: 4,
-            allowManagerChildren: false,
+  it('rejects delegation by a non-Manager and enforces Manager child limits', () => {
+    expect(
+      delegationError(() =>
+        assertDelegationAllowed({
+          requester: {
+            kind: 'worker',
+            depth: 1,
+            canDelegate: false,
+            managerPolicy: null,
           },
-        },
-        requestedChildCanDelegate: true,
-        directChildCount: 1,
-        teamPolicy: DEFAULT_TEAM_POLICY,
-      }),
-    ).toThrow('forbids hiring another Manager');
-    expect(() =>
-      assertDelegationAllowed({
-        requester: {
-          kind: 'worker',
-          depth: 1,
-          canDelegate: true,
-          managerPolicy: {
-            maxDirectChildren: 2,
-            maxDelegationDepth: 4,
-            allowManagerChildren: true,
+          requestedChildCanDelegate: false,
+          directChildCount: 0,
+          teamPolicy: DEFAULT_TEAM_POLICY,
+        }),
+      ),
+    ).toMatchObject({
+      code: 'not_manager',
+      message: expect.stringContaining('Only a Manager'),
+    });
+
+    expect(
+      delegationError(() =>
+        assertDelegationAllowed({
+          requester: {
+            kind: 'worker',
+            depth: 1,
+            canDelegate: true,
+            managerPolicy: {
+              maxDirectChildren: 2,
+              maxDelegationDepth: 4,
+              allowManagerChildren: false,
+            },
           },
-        },
-        requestedChildCanDelegate: false,
-        directChildCount: 2,
-        teamPolicy: DEFAULT_TEAM_POLICY,
-      }),
-    ).toThrow('direct-child limit reached');
+          requestedChildCanDelegate: true,
+          directChildCount: 1,
+          teamPolicy: DEFAULT_TEAM_POLICY,
+        }),
+      ),
+    ).toMatchObject({
+      code: 'manager_child_forbidden',
+      message: expect.stringContaining('forbids hiring another Manager'),
+    });
+    expect(
+      delegationError(() =>
+        assertDelegationAllowed({
+          requester: {
+            kind: 'worker',
+            depth: 1,
+            canDelegate: true,
+            managerPolicy: {
+              maxDirectChildren: 2,
+              maxDelegationDepth: 4,
+              allowManagerChildren: true,
+            },
+          },
+          requestedChildCanDelegate: false,
+          directChildCount: 2,
+          teamPolicy: DEFAULT_TEAM_POLICY,
+        }),
+      ),
+    ).toMatchObject({
+      code: 'direct_child_limit',
+      message: expect.stringContaining('direct-child limit reached'),
+    });
   });
 
   it('rejects Team policy values beyond the Core safety bounds', () => {

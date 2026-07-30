@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { TeamActivityDisplay } from '../lib/team-activity-display';
 
 /**
@@ -39,5 +40,76 @@ export function TeamActivityCard({ activity }: { activity: TeamActivityDisplay }
         </p>
       )}
     </div>
+  );
+}
+
+export function formatTeamWorkDuration(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1_000));
+  if (totalSeconds === 0) return '1s未満';
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+/**
+ * One Turn's Team trace. While the Turn is live the rows stay open so the user can follow the
+ * tools as they happen. The moment the Turn settles, `active` stops forcing the disclosure open
+ * and the same durable rows collapse behind one elapsed-time summary. Native `<details>` keeps the
+ * history keyboard-accessible and lets a reader reopen it without a second state model.
+ */
+export function TeamActivityGroup({
+  activities,
+  active,
+  startedAtMs,
+  finishedAtMs,
+}: {
+  activities: readonly TeamActivityDisplay[];
+  active: boolean;
+  startedAtMs: number;
+  finishedAtMs: number | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (activities.length === 0) return null;
+
+  const recordedEnds = activities
+    .map(({ recordedAt }) => Date.parse(recordedAt))
+    .filter((value) => Number.isFinite(value));
+  const endedAtMs = Math.max(startedAtMs, finishedAtMs ?? startedAtMs, ...recordedEnds);
+  const open = active || expanded;
+  const summaryLabel = active
+    ? `作業中 · ${activities.length}件`
+    : `${formatTeamWorkDuration(endedAtMs - startedAtMs)}作業しました`;
+
+  return (
+    <details
+      className="team-activity-group"
+      data-testid="team-activity-group"
+      open={open}
+      onToggle={(event) => {
+        if (active) {
+          if (!event.currentTarget.open) event.currentTarget.open = true;
+          return;
+        }
+        setExpanded(event.currentTarget.open);
+      }}
+    >
+      <summary
+        data-testid="team-activity-summary"
+        aria-label={`${summaryLabel}。作業履歴${activities.length}件`}
+      >
+        <span>{summaryLabel}</span>
+        <span className="team-activity-chevron" aria-hidden="true">
+          {open ? '⌄' : '›'}
+        </span>
+      </summary>
+      <div className="team-activity-list">
+        {activities.map((activity) => (
+          <TeamActivityCard key={activity.id} activity={activity} />
+        ))}
+      </div>
+    </details>
   );
 }

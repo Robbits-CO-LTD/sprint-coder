@@ -79,6 +79,7 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
       return {
         connectionId: connection.id,
         providerId: connection.providerId,
+        modelAuthor: providerValue(openRouterModelAuthor(model.id)),
         modelId: model.id,
         displayName: model.name?.trim() || model.id,
         available: true,
@@ -234,6 +235,13 @@ function positiveInteger(value: number | null | undefined): number | null {
 
 function nonEmpty(value: string | null | undefined): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function openRouterModelAuthor(modelId: string): string | null {
+  const separator = modelId.indexOf('/');
+  if (separator <= 0) return null;
+  const author = modelId.slice(0, separator).replace(/^~/, '');
+  return author.length > 0 ? author : null;
 }
 
 function assertOpenRouterConnection(connection: ProviderConnection): void {

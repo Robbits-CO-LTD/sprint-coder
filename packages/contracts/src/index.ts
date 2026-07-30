@@ -4,6 +4,15 @@ const idSchema = z.string().min(1).max(128);
 const timestampSchema = z.string().datetime();
 const taskTextSchema = z.string().max(100_000);
 
+function isSafeSkillDraftPath(value: string): boolean {
+  if (value.startsWith('/') || value.includes('\\')) return false;
+  const parts = value.split('/');
+  return (
+    parts.length <= 9 &&
+    parts.every((part) => part !== '' && part !== '.' && part !== '..' && !part.startsWith('.'))
+  );
+}
+
 export const toolIdSchema = z
   .string()
   .regex(
@@ -123,6 +132,9 @@ export const taskSummarySchema = z
     goal: z.string().nullable(),
     workspacePath: z.string().nullable(),
     localOnly: z.boolean(),
+    /** Whether the Task has accepted at least one user message. Older backends may omit this;
+     * renderers must treat absence as an established Task for compatibility. */
+    hasConversation: z.boolean().optional(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })
@@ -147,6 +159,73 @@ export const teamPolicySchema = z
   })
   .strict();
 export type TeamPolicy = z.infer<typeof teamPolicySchema>;
+export const teamBlueprintRoleSchema = z
+  .object({
+    key: z
+      .string()
+      .min(1)
+      .max(80)
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+    title: z.string().min(1).max(100),
+    parentKey: z.string().min(1).max(80),
+    responsibility: z.string().min(1).max(2_000),
+    scope: z.array(z.string().min(1).max(500)).max(64),
+    nonGoals: z.array(z.string().min(1).max(500)).max(64),
+    doneCriteria: z.array(z.string().min(1).max(500)).max(64),
+    required: z.boolean(),
+    canDelegate: z.boolean(),
+    modelRequirements: z
+      .object({
+        capabilities: z.array(z.string().min(1).max(100)).max(32),
+        preferredProviders: z.array(z.string().min(1).max(64)).max(16).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export const teamBlueprintSchema = z
+  .object({
+    version: z.literal(1),
+    kind: z.literal('team'),
+    policy: teamPolicySchema,
+    leaderInstructions: z.string().min(1).max(20_000),
+    roles: z.array(teamBlueprintRoleSchema).min(1).max(64),
+  })
+  .strict()
+  .superRefine((blueprint, context) => {
+    const keys = new Set<string>();
+    for (const role of blueprint.roles) {
+      if (keys.has(role.key))
+        context.addIssue({ code: 'custom', message: `Role keyが重複しています: ${role.key}` });
+      keys.add(role.key);
+    }
+    for (const role of blueprint.roles) {
+      if (role.parentKey !== 'leader' && !keys.has(role.parentKey))
+        context.addIssue({
+          code: 'custom',
+          message: `親Roleが存在しません: ${role.parentKey}`,
+        });
+      if (role.parentKey === role.key)
+        context.addIssue({ code: 'custom', message: `Roleは自身を親にできません: ${role.key}` });
+    }
+    const parents = new Map(blueprint.roles.map((role) => [role.key, role.parentKey]));
+    for (const role of blueprint.roles) {
+      const visited = new Set<string>([role.key]);
+      let current = role.parentKey;
+      while (current !== 'leader' && parents.has(current)) {
+        if (visited.has(current)) {
+          context.addIssue({
+            code: 'custom',
+            message: `Roleの親子関係が循環しています: ${role.key}`,
+          });
+          break;
+        }
+        visited.add(current);
+        current = parents.get(current)!;
+      }
+    }
+  });
+export type TeamBlueprint = z.infer<typeof teamBlueprintSchema>;
 export const teamPolicyUpdateInputSchema = z
   .object({
     taskId: idSchema,
@@ -487,6 +566,12 @@ export const teamHireWorkerInputSchema = z
     writeCapable: z.boolean(),
     modelSelection: modelSelectionSchema.optional(),
     modelSelectionReason: z.string().min(1).max(2_000).optional(),
+    blueprintRoleKey: z
+      .string()
+      .min(1)
+      .max(80)
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
+      .optional(),
   })
   .strict();
 export type TeamHireWorkerInput = z.infer<typeof teamHireWorkerInputSchema>;
@@ -581,10 +666,101 @@ export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export const turnStageSchema = z.enum(['understanding', 'planning', 'executing', 'synthesizing']);
 export type TurnStage = z.infer<typeof turnStageSchema>;
 
+export const skillSourceSchema = z.enum(['builtin', 'created', 'agents', 'claude']);
+export const skillKindSchema = z.enum(['chat', 'team']);
+export const skillIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/);
+export const skillDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export const skillRefSchema = z
+  .object({
+    skillId: skillIdSchema,
+    source: skillSourceSchema,
+    digest: skillDigestSchema,
+  })
+  .strict();
+export const turnSkillSelectionSchema = z
+  .object({
+    kind: skillKindSchema,
+    ref: skillRefSchema,
+  })
+  .strict();
+export const turnSkillSelectionsSchema = z
+  .array(turnSkillSelectionSchema)
+  .max(6)
+  .superRefine((selections, context) => {
+    const refs = new Set<string>();
+    let chatCount = 0;
+    let teamCount = 0;
+    for (const selection of selections) {
+      const key = `${selection.ref.source}:${selection.ref.skillId}:${selection.ref.digest}`;
+      if (refs.has(key))
+        context.addIssue({
+          code: 'custom',
+          message: '同じSkillを複数回選択できません',
+        });
+      refs.add(key);
+      if (selection.kind === 'chat') chatCount += 1;
+      else teamCount += 1;
+    }
+    if (chatCount > 5) context.addIssue({ code: 'custom', message: 'Chat Skillは最大5件です' });
+    if (teamCount > 1) context.addIssue({ code: 'custom', message: 'Team Skillは最大1件です' });
+  });
+export const skillDraftFileSchema = z
+  .object({
+    path: z
+      .string()
+      .min(1)
+      .max(500)
+      .refine(isSafeSkillDraftPath, 'Skill Draftのファイルパスが安全ではありません'),
+    content: z.string().max(1024 * 1024),
+  })
+  .strict();
+export const skillDraftSchema = z
+  .object({
+    id: idSchema,
+    kind: skillKindSchema,
+    skillId: skillIdSchema,
+    name: z.string().min(1).max(200),
+    description: z.string().min(1).max(2_000),
+    digest: skillDigestSchema,
+    files: z.array(skillDraftFileSchema).min(1).max(256),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export const skillDraftCreateInputSchema = z
+  .object({
+    kind: skillKindSchema,
+    skillId: skillIdSchema,
+    files: z.array(skillDraftFileSchema).min(1).max(256),
+  })
+  .strict();
+export const skillDraftInstallInputSchema = z
+  .object({
+    draftId: idSchema,
+    expectedDigest: skillDigestSchema,
+    confirmed: z.literal(true),
+  })
+  .strict();
+export const skillDraftIdInputSchema = z.object({ draftId: idSchema }).strict();
+export const createdSkillMutationInputSchema = z
+  .object({ skillId: skillIdSchema, digest: skillDigestSchema })
+  .strict();
+export const createdSkillEnabledInputSchema = createdSkillMutationInputSchema
+  .extend({ enabled: z.boolean() })
+  .strict();
+export type SkillDraftFile = z.infer<typeof skillDraftFileSchema>;
+export type SkillDraft = z.infer<typeof skillDraftSchema>;
+export type SkillDraftCreateInput = z.infer<typeof skillDraftCreateInputSchema>;
+
 export const queuedInputSchema = z
   .object({
     ordinal: z.number().int().positive(),
     text: taskTextSchema,
+    skills: turnSkillSelectionsSchema.optional(),
   })
   .strict();
 export type QueuedInput = z.infer<typeof queuedInputSchema>;
@@ -596,7 +772,7 @@ export const contextUsageSchema = z
     fragments: z.array(
       z
         .object({
-          source: z.enum(['system', 'history', 'goal', 'compaction', 'background']),
+          source: z.enum(['system', 'history', 'goal', 'compaction', 'background', 'skill']),
           tokens: z.number().int().nonnegative(),
         })
         .strict(),
@@ -1042,6 +1218,13 @@ export const turnEventSchema = z.discriminatedUnion('type', [
     .strict(),
   z
     .object({
+      type: z.literal('skill.draft.created'),
+      ...turnEventBase,
+      draft: skillDraftSchema,
+    })
+    .strict(),
+  z
+    .object({
       type: z.literal('delivery.acknowledged'),
       ...turnEventBase,
       deliveryId: digestSchema,
@@ -1392,7 +1575,9 @@ export function catalogValueSchema<T extends z.ZodType>(
 export const providerModelSchema = z
   .object({
     connectionId: connectionIdSchema,
+    connectionDisplayName: z.string().min(1).max(100).optional(),
     providerId: providerIdSchema,
+    modelAuthor: catalogValueSchema(z.string().min(1).max(128)).optional(),
     modelId: z.string().min(1).max(256),
     displayName: z.string().min(1).max(256),
     available: z.boolean(),
@@ -1711,6 +1896,13 @@ export const runtimeModelSetInputSchema = z
   .object({ model: codexModelIdSchema, taskId: idSchema.optional() })
   .strict();
 export const runtimeEffortSetInputSchema = z.object({ effort: claudeEffortSchema }).strict();
+export const teamModelResearchSettingsSchema = z
+  .object({
+    researchBeforeHiring: z.boolean(),
+  })
+  .strict();
+export type TeamModelResearchSettings = z.infer<typeof teamModelResearchSettingsSchema>;
+export const teamModelResearchSettingsSetInputSchema = teamModelResearchSettingsSchema;
 export const runtimeCodexEffortSetInputSchema = z
   .object({ effort: effortOptionSchema.shape.id })
   .strict();
@@ -1721,12 +1913,15 @@ export const modelCatalogCapabilitySchema = z.enum([
   'reasoning',
 ]);
 export type ModelCatalogCapability = z.infer<typeof modelCatalogCapabilitySchema>;
+export const modelCatalogAccessTypeSchema = z.enum(['subscription', 'api']);
+export type ModelCatalogAccessType = z.infer<typeof modelCatalogAccessTypeSchema>;
 export const modelCatalogQueryInputSchema = z
   .object({
     taskId: idSchema,
     text: z.string().max(200).default(''),
     connectionIds: z.array(connectionIdSchema).max(32).default([]),
     providerIds: z.array(providerIdSchema).max(32).default([]),
+    accessTypes: z.array(modelCatalogAccessTypeSchema).max(2).default([]),
     capabilities: z.array(modelCatalogCapabilitySchema).max(4).default([]),
     availableOnly: z.boolean().default(true),
     cursor: z
@@ -1809,11 +2004,29 @@ export const commandResultSchema = <T extends z.ZodType>(value: T) =>
 
 export const emptyPayloadSchema = z.object({}).strict();
 export const skillProviderSchema = z.enum(['claude', 'agents']);
-export const skillIdSchema = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/);
+export const skillCatalogItemSchema = z
+  .object({
+    ref: skillRefSchema,
+    kind: skillKindSchema,
+    name: z.string().min(1).max(200),
+    description: z.string().min(1).max(2_000),
+    enabled: z.boolean(),
+    removable: z.boolean(),
+    exportable: z.boolean(),
+  })
+  .strict();
+export const skillCatalogSchema = z
+  .object({
+    revision: z.string().min(1).max(128),
+    items: z.array(skillCatalogItemSchema).max(4_096),
+  })
+  .strict();
+export const taskSkillSelectionInputSchema = z
+  .object({
+    taskId: idSchema,
+    skills: turnSkillSelectionsSchema,
+  })
+  .strict();
 export const skillCandidateSummarySchema = z
   .object({
     provider: skillProviderSchema,
@@ -1879,6 +2092,12 @@ export const skillImportResultSchema = z
   })
   .strict();
 export type SkillProvider = z.infer<typeof skillProviderSchema>;
+export type SkillSource = z.infer<typeof skillSourceSchema>;
+export type SkillKind = z.infer<typeof skillKindSchema>;
+export type SkillRef = z.infer<typeof skillRefSchema>;
+export type TurnSkillSelection = z.infer<typeof turnSkillSelectionSchema>;
+export type SkillCatalogItem = z.infer<typeof skillCatalogItemSchema>;
+export type SkillCatalog = z.infer<typeof skillCatalogSchema>;
 export type SkillCandidateSummary = z.infer<typeof skillCandidateSummarySchema>;
 export type SkillScanResult = z.infer<typeof skillScanResultSchema>;
 export type SkillPreviewResult = z.infer<typeof skillPreviewResultSchema>;
@@ -1905,7 +2124,11 @@ export const taskArchivedInputSchema = z
 export const taskGoalInputSchema = z.object({ taskId: idSchema, goal: taskTextSchema }).strict();
 export const taskDraftInputSchema = z.object({ taskId: idSchema, draft: taskTextSchema }).strict();
 export const turnStartInputSchema = z
-  .object({ taskId: idSchema, text: z.string().trim().min(1).max(100_000) })
+  .object({
+    taskId: idSchema,
+    text: z.string().trim().min(1).max(100_000),
+    skills: turnSkillSelectionsSchema.default([]),
+  })
   .strict();
 export const turnQueueInputSchema = turnStartInputSchema;
 export const turnQueueResultSchema = z.object({ ordinal: z.number().int().positive() }).strict();
@@ -1971,7 +2194,12 @@ export const databaseRecoverySchema = z
 export type DatabaseRecovery = z.infer<typeof databaseRecoverySchema>;
 
 export const appInfoSchema = z
-  .object({ version: z.string(), platform: z.string(), recovery: databaseRecoverySchema })
+  .object({
+    version: z.string(),
+    platform: z.string(),
+    recovery: databaseRecoverySchema,
+    settingsWorkspaceV2: z.boolean().optional(),
+  })
   .strict();
 
 /**
@@ -2083,12 +2311,32 @@ export interface SprintCoderApi {
     /** Codex reasoning level. Rejects a level the selected model does not advertise (see
      * `effortOptionSchema`) — Codex fails the whole turn on an unsupported one. */
     setCodexEffort(effort: string): Promise<void>;
+    getTeamModelResearch(): Promise<TeamModelResearchSettings>;
+    setTeamModelResearch(input: TeamModelResearchSettings): Promise<void>;
+    getDefaultTeamPolicy(): Promise<TeamPolicy>;
+    setDefaultTeamPolicy(policy: TeamPolicy): Promise<void>;
     scanSkills(): Promise<SkillScanResult>;
     previewSkill(provider: SkillProvider, skillId: string): Promise<SkillPreviewResult>;
     importSkill(previewId: string): Promise<SkillImportResult>;
     updateSkill(previewId: string): Promise<SkillImportResult>;
     setSkillEnabled(provider: SkillProvider, skillId: string, enabled: boolean): Promise<void>;
     removeSkill(provider: SkillProvider, skillId: string): Promise<void>;
+  };
+  skills: {
+    list(): Promise<SkillCatalog>;
+    getDraftSelection(taskId: string): Promise<TurnSkillSelection[]>;
+    setDraftSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
+    listDrafts(): Promise<SkillDraft[]>;
+    createDraft(input: SkillDraftCreateInput): Promise<SkillDraft>;
+    installDraft(
+      draftId: string,
+      expectedDigest: string,
+      confirmed: true,
+    ): Promise<SkillCatalogItem>;
+    discardDraft(draftId: string): Promise<void>;
+    removeCreated(skillId: string, digest: string): Promise<void>;
+    setCreatedEnabled(skillId: string, digest: string, enabled: boolean): Promise<void>;
+    exportCreated(skillId: string, digest: string): Promise<string | null>;
   };
   models: {
     query(input: ModelCatalogQueryInput): Promise<ModelCatalogQueryResult>;
@@ -2131,10 +2379,19 @@ export interface SprintCoderApi {
     start(input: {
       taskId: string;
       text: string;
+      skills?: TurnSkillSelection[];
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
-    queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
+    queue(input: {
+      taskId: string;
+      text: string;
+      skills?: TurnSkillSelection[];
+    }): Promise<{ ordinal: number }>;
     steer(input: { taskId: string; text: string; expectedTurnId: string }): Promise<void>;
-    stopAndSend(input: { taskId: string; text: string }): Promise<void>;
+    stopAndSend(input: {
+      taskId: string;
+      text: string;
+      skills?: TurnSkillSelection[];
+    }): Promise<void>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
     snapshot(taskId: string): Promise<TurnSnapshot>;
     subscribe(
@@ -2180,6 +2437,16 @@ export const IPC_CHANNELS = {
   settingsSkillsUpdate: 'sprint-coder:settings:skills:update',
   settingsSkillsSetEnabled: 'sprint-coder:settings:skills:set-enabled',
   settingsSkillsRemove: 'sprint-coder:settings:skills:remove',
+  skillsList: 'sprint-coder:skills:list',
+  skillsGetDraftSelection: 'sprint-coder:skills:get-draft-selection',
+  skillsSetDraftSelection: 'sprint-coder:skills:set-draft-selection',
+  skillsListDrafts: 'sprint-coder:skills:list-drafts',
+  skillsCreateDraft: 'sprint-coder:skills:create-draft',
+  skillsInstallDraft: 'sprint-coder:skills:install-draft',
+  skillsDiscardDraft: 'sprint-coder:skills:discard-draft',
+  skillsRemoveCreated: 'sprint-coder:skills:remove-created',
+  skillsSetCreatedEnabled: 'sprint-coder:skills:set-created-enabled',
+  skillsExportCreated: 'sprint-coder:skills:export-created',
   /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */
   reasoningEvent: 'sprint-coder:turns:reasoning',
   fileEditEvent: 'sprint-coder:turns:file-edit',
@@ -2190,6 +2457,10 @@ export const IPC_CHANNELS = {
   filesSave: 'sprint-coder:files:save',
   imagesRead: 'sprint-coder:images:read',
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
+  settingsGetTeamModelResearch: 'sprint-coder:settings:get-team-model-research',
+  settingsSetTeamModelResearch: 'sprint-coder:settings:set-team-model-research',
+  settingsGetDefaultTeamPolicy: 'sprint-coder:settings:get-default-team-policy',
+  settingsSetDefaultTeamPolicy: 'sprint-coder:settings:set-default-team-policy',
   modelsCatalogQuery: 'sprint-coder:models:catalog-query',
   modelsSetSelection: 'sprint-coder:models:set-selection',
   providersListConnections: 'sprint-coder:providers:list-connections',

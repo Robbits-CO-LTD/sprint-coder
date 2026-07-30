@@ -245,7 +245,9 @@ export function buildInheritedWorkerContext(
   if (worker.contextInheritancePolicy === 'summary') {
     const content = relevant
       .slice(-6)
-      .map(({ author, content: message }) => `${author === 'user' ? 'User' : 'Assistant'}: ${message}`)
+      .map(
+        ({ author, content: message }) => `${author === 'user' ? 'User' : 'Assistant'}: ${message}`,
+      )
       .join('\n')
       .slice(-8_000);
     if (content.length === 0) return { fragments: [], usageEvents: [], compacted: false };

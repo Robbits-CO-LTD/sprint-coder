@@ -55,6 +55,7 @@ describe('OpenRouterCatalogClient', () => {
     expect(models[0]).toMatchObject({
       connectionId: 'openrouter:primary',
       providerId: 'openrouter',
+      modelAuthor: { value: 'vendor', source: 'provider_api' },
       modelId: 'vendor/model-0',
       contextWindow: { value: 128_000, source: 'provider_api' },
       maxOutputTokens: { value: 8_192, source: 'provider_api' },

@@ -6,13 +6,16 @@ const DETERMINISTIC_ROLES = JSON.stringify(['調査', '実装', 'レビュー'])
 const DETERMINISTIC_TEMPLATE = /が依頼「.*」を完了しました。/;
 
 async function selectCodexRuntime(page: Page): Promise<void> {
-  await expect(async () => {
-    await page.getByTestId('runtime-selector').click();
-    await expect(page.getByRole('menuitemradio', { name: /^Codex/ })).toBeVisible({
-      timeout: 2_000,
-    });
-  }).toPass({ timeout: 60_000 });
-  await page.getByRole('menuitemradio', { name: /^Codex/ }).click();
+  const unifiedPicker = page.getByTestId('model-picker-v2-trigger');
+  await expect(unifiedPicker).toBeVisible({ timeout: 60_000 });
+  await unifiedPicker.click();
+  const search = page.getByTestId('model-picker-v2-search');
+  await expect(search).toBeVisible();
+  await search.fill('gpt-5.6-terra');
+  const codexModel = page.getByTestId('model-picker-v2-option-gpt-5.6-terra');
+  await expect(codexModel).toBeVisible({ timeout: 60_000 });
+  await codexModel.click();
+  await expect(unifiedPicker).toContainText(/GPT-5\.6-Terra/i);
 }
 
 test.describe('leader MCP smoke (real Codex CLI)', () => {
@@ -39,8 +42,15 @@ test.describe('leader MCP smoke (real Codex CLI)', () => {
     removeUserDataDir(dir);
   });
 
-  test('Codex drives two real Worker reports over MCP in the packaged app', async () => {
-    app = await launchApp(dir, undefined, { SPRINT_CODER_TEAM_MCP_TRACE: '1' });
+  // Playwright requires object destructuring when the second `testInfo` argument is used.
+  // eslint-disable-next-line no-empty-pattern
+  test('Codex drives two real Worker reports over MCP in the packaged app', async ({}, testInfo) => {
+    const realRuntimeEnvironment = {
+      SPRINT_CODER_TEAM_MCP_TRACE: '1',
+      SPRINT_CODER_RUNTIME_ADOPT: '1',
+      SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS: '0',
+    };
+    app = await launchApp(dir, undefined, realRuntimeEnvironment);
     const runtimeDiagnostics: string[] = [];
     app.process().stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
@@ -51,6 +61,11 @@ test.describe('leader MCP smoke (real Codex CLI)', () => {
       if (text.includes('Runtime event handling failed')) runtimeDiagnostics.push(text);
     });
     const page = await firstWindow(app);
+    const rendererErrors: string[] = [];
+    page.on('console', (message) => {
+      if (message.type() === 'error') rendererErrors.push(message.text());
+    });
+    page.on('pageerror', (error) => rendererErrors.push(error.message));
     await page.getByTestId('sidebar-new-task-button').click();
     await selectCodexRuntime(page);
     await expect(page.getByTestId('team-list')).toHaveCount(0);
@@ -91,5 +106,68 @@ test.describe('leader MCP smoke (real Codex CLI)', () => {
     await expect(page.locator('.msg-assistant .bubble').last()).toContainText(/2|１＋１|1\+1/, {
       timeout: 300_000,
     });
+    const assistantMessage = page.getByTestId('assistant-message').last();
+    const paragraphs = assistantMessage.locator('.md-body > p');
+    await expect.poll(() => paragraphs.count(), { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
+    const paragraphTexts = (await paragraphs.allTextContents())
+      .map((text) => text.trim())
+      .filter((text) => text.length > 0);
+    expect(paragraphTexts.length).toBeGreaterThanOrEqual(2);
+    console.info('[leader-mcp-codex] assistant paragraphs:', JSON.stringify(paragraphTexts));
+    await testInfo.attach('assistant-paragraphs', {
+      body: Buffer.from(JSON.stringify(paragraphTexts, null, 2)),
+      contentType: 'application/json',
+    });
+
+    // Real Team trace UX: settled tool work is one compact row before the final answer, can be
+    // reopened, and returns collapsed after a production-app restart against the same SQLite DB.
+    const summary = page.getByTestId('team-activity-summary');
+    const group = page.getByTestId('team-activity-group');
+    await expect(summary).toContainText(/作業しました/, { timeout: 30_000 });
+    await expect(group).not.toHaveAttribute('open', '');
+    expect(
+      await summary.evaluate((node) => {
+        const answers = document.querySelectorAll('.msg-assistant');
+        const answer = answers.item(answers.length - 1);
+        return (
+          answer !== null &&
+          (node.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+        );
+      }),
+    ).toBe(true);
+    await summary.click();
+    await expect(group).toHaveAttribute('open', '');
+    await expect(page.getByTestId('team-activity-card').first()).toBeVisible();
+    await testInfo.attach('assistant-paragraphs-visible', {
+      body: await page.screenshot({ fullPage: true }),
+      contentType: 'image/png',
+    });
+
+    await closeApp(app);
+    app = await launchApp(dir, undefined, realRuntimeEnvironment);
+    const restoredPage = await firstWindow(app);
+    const restoredErrors: string[] = [];
+    restoredPage.on('console', (message) => {
+      if (message.type() === 'error') restoredErrors.push(message.text());
+    });
+    restoredPage.on('pageerror', (error) => restoredErrors.push(error.message));
+    await expect(restoredPage.getByTestId('team-activity-summary')).toContainText(/作業しました/, {
+      timeout: 30_000,
+    });
+    await expect(restoredPage.getByTestId('team-activity-group')).not.toHaveAttribute('open', '');
+    const restoredParagraphs = restoredPage
+      .getByTestId('assistant-message')
+      .last()
+      .locator('.md-body > p');
+    await expect(restoredParagraphs).toHaveCount(paragraphTexts.length);
+    expect((await restoredParagraphs.allTextContents()).map((text) => text.trim())).toEqual(
+      paragraphTexts,
+    );
+    await testInfo.attach('assistant-paragraphs-restored', {
+      body: await restoredPage.screenshot({ fullPage: true }),
+      contentType: 'image/png',
+    });
+    expect(rendererErrors).toEqual([]);
+    expect(restoredErrors).toEqual([]);
   });
 });

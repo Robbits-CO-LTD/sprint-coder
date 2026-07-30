@@ -466,6 +466,18 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('rejects queued input that cannot be read back', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      expect(() => persistence.queueInput(task.id, '   ', 'blank')).toThrow(
+        'Queued input text is invalid',
+      );
+      expect(() => persistence.queueInput(task.id, 'x'.repeat(100_001), 'too-long')).toThrow(
+        'Queued input text is invalid',
+      );
+      persistence.close();
+    });
+
     it('persists valid steering as a user message and rejects stale expectedTurnId', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();
@@ -504,6 +516,45 @@ if (runsWithElectronAbi)
         queued: [{ ordinal: 1, text: 'resume me' }],
       });
       expect(reopened.startNextQueued(task.id)?.started.text).toBe('resume me');
+      reopened.close();
+    });
+
+    it('pins Skill revisions for drafts, Turns, queued input, and restart recovery', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('skills');
+      const selection = {
+        kind: 'chat' as const,
+        ref: {
+          source: 'agents' as const,
+          skillId: 'reviewer',
+          digest: 'a'.repeat(64),
+        },
+      };
+      const resolved = {
+        selection,
+        name: 'Reviewer',
+        description: 'Review code',
+        content: '---\nname: reviewer\ndescription: Review code\n---\n\nReview carefully.',
+        packagePath: '/tmp/sprint-coder-skill-revisions/agents/reviewer/a',
+      };
+      persistence.setDraftSkillSelections(task.id, [selection]);
+      expect(persistence.getDraftSkillSelections(task.id)).toEqual([selection]);
+
+      const active = persistence.startTurn(task.id, 'review now', [resolved]);
+      expect(active.skills).toEqual([resolved]);
+      expect(persistence.getTurnSkills(task.id, active.turnId)).toEqual([resolved]);
+      persistence.cancelTurn(task.id, active.turnId);
+      persistence.queueInput(task.id, 'review later', 'q-skills', [resolved]);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getDraftSkillSelections(task.id)).toEqual([selection]);
+      expect(reopened.snapshot(task.id).queued).toEqual([
+        { ordinal: 1, text: 'review later', skills: [selection] },
+      ]);
+      const queued = reopened.startNextQueued(task.id)?.started;
+      expect(queued?.skills).toEqual([resolved]);
+      expect(reopened.getTurnSkills(task.id, queued!.turnId)).toEqual([resolved]);
       reopened.close();
     });
 
@@ -577,16 +628,22 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('names a new Task from its first message and returns the updated summary', () => {
+    it('names a new Task from its first message without implicitly setting its Goal', () => {
       // issue #4: the only path that ever set a Task title was the header's inline rename, so the
       // sidebar filled up with rows all reading "新しいタスク".
       const { persistence } = createPersistence();
       const task = persistence.createTask();
       expect(task.title).toBe('新しいタスク');
+      expect(task.hasConversation).toBe(false);
+      expect(persistence.listTasks()[0]?.hasConversation).toBe(false);
 
       const started = persistence.startTurn(task.id, 'ログイン画面のバグを直して');
       expect(started.renamedTask?.title).toBe('ログイン画面のバグを直して');
+      expect(started.renamedTask?.goal).toBeNull();
+      expect(started.renamedTask?.hasConversation).toBe(true);
       expect(persistence.getTask(task.id).title).toBe('ログイン画面のバグを直して');
+      expect(persistence.getTask(task.id).goal).toBeNull();
+      expect(persistence.listTasks()[0]?.hasConversation).toBe(true);
       persistence.close();
     });
 
@@ -599,6 +656,31 @@ if (runsWithElectronAbi)
       const second = persistence.startTurn(task.id, '全く違う二通目の内容');
       expect(second.renamedTask).toBeUndefined();
       expect(persistence.getTask(task.id).title).toBe('最初の依頼');
+      expect(persistence.getTask(task.id).goal).toBeNull();
+      persistence.close();
+    });
+
+    it('preserves an explicit Goal when the first message starts the Task', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.setGoal(task.id, '先に決めたGoal');
+
+      persistence.startTurn(task.id, '最初の依頼');
+
+      expect(persistence.getTask(task.id).goal).toBe('先に決めたGoal');
+      persistence.close();
+    });
+
+    it('does not derive a Goal from normal messages', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const first = persistence.startTurn(task.id, '最初の依頼');
+      finishTurn(persistence, task.id, first.turnId);
+      persistence.setGoal(task.id, '');
+
+      persistence.startTurn(task.id, '後続メッセージ');
+
+      expect(persistence.getTask(task.id).goal).toBe('');
       persistence.close();
     });
 
@@ -756,6 +838,57 @@ if (runsWithElectronAbi)
       persistence.setRuntime('claude');
       expect(persistence.getEffort()).toBe('xhigh');
       persistence.close();
+    });
+
+    it('defaults Team model Web research off and persists an explicit choice across restart', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getTeamModelResearchBeforeHiring()).toBe(false);
+      persistence.setTeamModelResearchBeforeHiring(true);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTeamModelResearchBeforeHiring()).toBe(true);
+      reopened.setTeamModelResearchBeforeHiring(false);
+      expect(reopened.getTeamModelResearchBeforeHiring()).toBe(false);
+      reopened.close();
+    });
+
+    it('applies default Team policy only when a new Team is promoted', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getDefaultTeamPolicy()).toEqual({
+        maxAgentDepth: 4,
+        maxConcurrentExecutions: 8,
+        allowWorkerDirectMessages: true,
+        budgetMode: 'bounded',
+      });
+      persistence.setDefaultTeamPolicy({
+        maxAgentDepth: 3,
+        maxConcurrentExecutions: 6,
+        allowWorkerDirectMessages: false,
+        budgetMode: 'unlimited',
+      });
+      const firstTask = persistence.createTask('first');
+      const firstTeam = persistence.promoteTaskToTeam(firstTask.id);
+      expect(firstTeam.policy).toEqual({
+        maxAgentDepth: 3,
+        maxConcurrentExecutions: 6,
+        allowWorkerDirectMessages: false,
+        budgetMode: 'unlimited',
+      });
+      persistence.setDefaultTeamPolicy({
+        maxAgentDepth: 2,
+        maxConcurrentExecutions: 4,
+        allowWorkerDirectMessages: true,
+        budgetMode: 'bounded',
+      });
+      expect(persistence.getTeam(firstTeam.id).policy.maxAgentDepth).toBe(3);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getDefaultTeamPolicy().maxAgentDepth).toBe(2);
+      const secondTask = reopened.createTask('second');
+      expect(reopened.promoteTaskToTeam(secondTask.id).policy.maxAgentDepth).toBe(2);
+      reopened.close();
     });
 
     it('pins the selected runtime and model when a Turn is accepted', () => {
@@ -4629,6 +4762,8 @@ if (runsWithElectronAbi)
         { version: 46 },
         { version: 47 },
         { version: 48 },
+        { version: 49 },
+        { version: 50 },
       ]);
       for (const [table, columns] of [
         [

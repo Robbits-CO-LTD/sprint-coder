@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type {
+  ModelCatalogAccessType,
+  ModelCatalogQueryInput,
   ModelCatalogQueryResult,
   ModelSelection,
   ProviderModel,
@@ -23,8 +25,9 @@ import {
 } from '../lib/model-picker-virtualization';
 
 /**
- * The multi-provider Model Picker (UI slice U1b), shown in place of the legacy `ModelChip` only
- * while Main reports `multiProviderModelPickerV2` for the Task.
+ * The multi-provider Model Picker (UI slice U1b), shown in place of the legacy Runtime *and* Model
+ * chips — one AI control instead of two — only while Main reports `multiProviderModelPickerV2` for
+ * the Task.
  *
  * It reads *nothing* Runtime-specific. No `runtime.kind`, no `codexAvailable`/`claudeAvailable`, no
  * per-CLI model list: the whole surface is `window.sprintCoder.models` — a Main-owned catalog query
@@ -45,6 +48,21 @@ const PAGE_LIMIT = 50;
 const SEARCH_DEBOUNCE_MS = 180;
 
 const UNKNOWN = '不明';
+
+/**
+ * The two ways a Task can reach a model: a subscription the user is already signed in to, or an API
+ * key they added. Which one a row is, is a property of its *connection* and only Main can classify
+ * it — the picker names the two and hands the choice back as a catalog filter, so a connection that
+ * changes category is Main's answer to change and not this component's.
+ *
+ * 「サブスク」 is the default because it is the access that works without the user configuring
+ * anything, so the picker opens on what the app can already use.
+ */
+export const MODEL_ACCESS_OPTIONS: readonly { id: ModelCatalogAccessType; label: string }[] = [
+  { id: 'api', label: 'API' },
+  { id: 'subscription', label: 'サブスク' },
+];
+export const DEFAULT_ACCESS_TYPE: ModelCatalogAccessType = 'subscription';
 
 type CatalogPage = {
   revision: number;
@@ -85,15 +103,161 @@ function contextLabel(value: number | null): string {
   return `コンテキスト: ${Math.round(value / 1000)}k`;
 }
 
-/** The one-line summary under a row's name: where the model comes from, then what it can do. */
-function describeModel(model: ProviderModel): string {
+/** How a row names the connection it came from.
+ *
+ * The name is the connection's own — the one the user gave it, or the one Main ships for a built-in
+ * CLI — so 「Claude Code」 and 「Codex CLI」 appear because the catalog says so, not because this file
+ * knows which connection ids are built in. A connection with no display name is shown by id: that is
+ * the most Main actually told us, and it beats inventing a friendlier name for it. */
+export function connectionLabel(model: ProviderModel): string {
+  return model.connectionDisplayName ?? model.connectionId;
+}
+
+/** A band of adjacent rows that come from the same provider, as the list draws it: `key` decides
+ * where one band ends and the next begins, `label` is what the rail prints. */
+export type ModelGroup = { key: string; label: string };
+
+/** Which provider a row belongs to — the only question this file asks about a row's origin, and it
+ * asks the catalog rather than answering from anything it knows about a vendor.
+ *
+ * The answer differs by access because "provider" means a different thing on each side:
+ *
+ *  - サブスク: a connection *is* the account the user thinks in, so one connection is one band.
+ *    Identity is `connectionId` and not the name shown, because two connections may legitimately
+ *    carry the same display name and they are still two different accounts to pick between.
+ *  - API: one key can reach many vendors' models — an aggregator connection is a whole catalog, so
+ *    the connection is too coarse to group by. `modelAuthor` is the catalog's own answer to "whose
+ *    model is this" and is used wherever the provider published it; where it did not, `providerId`
+ *    is the most Main actually told us. There the label *is* the identity: two adjacent bands the
+ *    user cannot tell apart would read as a bug, and only one access type is ever on screen, so
+ *    nothing else in the list can collide with those strings.
+ *
+ * `displayName` and `modelId` are never read here. A name is text a vendor chose for a product; it
+ * is not a statement about who serves it, and reading one to guess the other is the inference this
+ * slice exists to remove.
+ */
+export function modelGroup(model: ProviderModel, accessType: ModelCatalogAccessType): ModelGroup {
+  if (accessType === 'subscription') {
+    return { key: model.connectionId, label: connectionLabel(model) };
+  }
+  const label = model.modelAuthor?.value ?? model.providerId;
+  return { key: label, label };
+}
+
+/** Whether the row at `index` opens a band — that is, whether the row before it came from another
+ * provider.
+ *
+ * Asked against the whole loaded list, never the mounted window: a band that began above the
+ * scrollport is still the same band, and windowing decides what is on screen, not what the list
+ * means. Index 0 opens a band by definition — the caller decides whether the list's first band also
+ * draws a boundary above itself, since there is nothing there to separate it from. */
+export function startsGroup(
+  items: readonly ProviderModel[],
+  index: number,
+  accessType: ModelCatalogAccessType,
+): boolean {
+  const model = items[index];
+  if (model === undefined) return false;
+  const previous = items[index - 1];
+  if (previous === undefined) return true;
+  return modelGroup(previous, accessType).key !== modelGroup(model, accessType).key;
+}
+
+/** The band sitting at the scrollport's top edge, for the cue above the list.
+ *
+ * The rail names a band only where it starts, so a user who scrolled into the middle of a long one
+ * needs this to answer "whose models am I looking at". Rows are a constant tall, so the top row is
+ * arithmetic — nothing is measured, and the answer does not depend on which rows are mounted. */
+export function groupAtScrollTop(args: {
+  items: readonly ProviderModel[];
+  scrollTop: number;
+  rowHeightPx: number;
+  accessType: ModelCatalogAccessType;
+}): ModelGroup | null {
+  const { items, scrollTop, rowHeightPx, accessType } = args;
+  if (items.length === 0 || rowHeightPx <= 0) return null;
+  const index = Math.min(items.length - 1, Math.max(0, Math.floor(scrollTop / rowHeightPx)));
+  const model = items[index];
+  return model === undefined ? null : modelGroup(model, accessType);
+}
+
+/** The one-line summary under a row's name: which provider serves the model, then what it can do.
+ * The connection is named on the row's first line instead of repeated here. */
+export function describeModel(model: ProviderModel): string {
   return [
-    `${model.providerId} · ${model.connectionId}`,
+    model.providerId,
     contextLabel(model.contextWindow.value),
     capabilityLabel('ツール', model.toolCalling.value),
     capabilityLabel('推論', model.reasoning.value),
     capabilityLabel('画像入力', model.multimodalInput.value),
   ].join(' · ');
+}
+
+/** One page's worth of catalog query.
+ *
+ * Every field is stated, `accessTypes` included — that array is the toggle's entire effect. The
+ * narrowing happens in Main against the connection's access, so the picker never has to work out
+ * what kind of connection a row came from, only which kind the user asked to see. */
+export function catalogQuery(args: {
+  taskId: string;
+  text: string;
+  accessType: ModelCatalogAccessType;
+  cursor: string | null;
+}): ModelCatalogQueryInput {
+  return {
+    taskId: args.taskId,
+    text: args.text,
+    connectionIds: [],
+    providerIds: [],
+    accessTypes: [args.accessType],
+    capabilities: [],
+    availableOnly: true,
+    cursor: args.cursor,
+    limit: PAGE_LIMIT,
+  };
+}
+
+/** The API / サブスク segmented control.
+ *
+ * Two real `<button>`s in a group rather than a custom widget: they are keyboard-native already, and
+ * `aria-pressed` states which one is on, so nothing here reimplements focus or key handling. Escape
+ * is forwarded so the popup still closes while focus sits on the toggle — the same key the search
+ * field honours one row above. */
+export function AccessTypeToggle({
+  value,
+  onChange,
+  onDismiss,
+}: {
+  value: ModelCatalogAccessType;
+  onChange: (next: ModelCatalogAccessType) => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      className="mpv2-access"
+      role="group"
+      aria-label="モデルの利用形態"
+      data-testid="model-picker-v2-access"
+      onKeyDown={(e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        onDismiss();
+      }}
+    >
+      {MODEL_ACCESS_OPTIONS.map(({ id, label }) => (
+        <button
+          key={id}
+          type="button"
+          data-testid={`model-picker-v2-access-${id}`}
+          className={`mpv2-access-btn${value === id ? ' active' : ''}`}
+          aria-pressed={value === id}
+          onClick={() => onChange(id)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 export function ModelPickerV2({ taskId }: { taskId: string }) {
@@ -107,6 +271,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
   const [query, setQuery] = useState('');
+  const [accessType, setAccessType] = useState<ModelCatalogAccessType>(DEFAULT_ACCESS_TYPE);
   const [page, setPage] = useState<CatalogPage>(EMPTY_PAGE);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -146,6 +311,15 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     overscanRows: MODEL_LIST_OVERSCAN_ROWS,
   });
   const active = page.items[activeIndex];
+  // Which provider band the scrollport is on. Derived from `scrollTop` rather than stored, so it
+  // follows both wheel scrolling and keyboard movement (which scrolls through the same state)
+  // without a second source of truth to keep in step.
+  const topGroup = groupAtScrollTop({
+    items: page.items,
+    scrollTop,
+    rowHeightPx: MODEL_ROW_HEIGHT_PX,
+    accessType,
+  });
 
   function close(restoreFocus: boolean) {
     setOpen(false);
@@ -158,9 +332,14 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
    * invalidates every response still in flight; a cursor page inherits the context it was requested
    * under. Search, filtering and ordering are Main's — this never narrows the rows it already holds,
    * because they are one page of a catalog and filtering them here would hide the matches that live
-   * on pages this renderer has never seen. */
+   * on pages this renderer has never seen. The access type is passed per call rather than read from
+   * state, so a cursor page can only ever extend the list it was requested for. */
   const fetchPage = useCallback(
-    async (cursor: string | null, searchText: string): Promise<void> => {
+    async (
+      cursor: string | null,
+      searchText: string,
+      access: ModelCatalogAccessType,
+    ): Promise<void> => {
       const models = window.sprintCoder?.models;
       if (typeof models?.query !== 'function') {
         setFailed(true);
@@ -170,16 +349,9 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
       inFlightRef.current = request;
       setLoading(true);
       try {
-        const result: ModelCatalogQueryResult = await models.query({
-          taskId,
-          text: searchText,
-          connectionIds: [],
-          providerIds: [],
-          capabilities: [],
-          availableOnly: true,
-          cursor,
-          limit: PAGE_LIMIT,
-        });
+        const result: ModelCatalogQueryResult = await models.query(
+          catalogQuery({ taskId, text: searchText, accessType: access, cursor }),
+        );
         if (queryRef.current !== request) return;
         // Appending is only meaningful inside one catalog revision: a catalog that changed under
         // the cursor makes the offsets the cursor encodes meaningless, so the honest move is to
@@ -226,16 +398,36 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     if (!open || text === query) return;
     const timer = setTimeout(() => {
       setQuery(text);
-      void fetchPage(null, text);
+      void fetchPage(null, text, accessType);
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [open, text, query, fetchPage]);
+  }, [open, text, query, accessType, fetchPage]);
 
   /** Opening the picker loads the first page of whatever query it is showing — reopening re-reads
    * the catalog rather than presenting a page that may be minutes stale. */
   function openPicker() {
     setOpen(true);
-    void fetchPage(null, query);
+    void fetchPage(null, query, accessType);
+  }
+
+  /** Switching access is a different catalog, not a filter over the loaded one: the rows on screen
+   * belong to the access the user just left, and the cursor into them is an offset into a list that
+   * is about to be replaced. So the loaded page, the active row and the scroll offset all go back to
+   * their opening state and the first page is fetched for the search that is on screen — including
+   * text still inside the debounce window, which is committed here so the pending timer does not
+   * re-issue the same query a moment later. Starting a first page also invalidates any response
+   * still in flight for the access type being left. */
+  function selectAccessType(next: ModelCatalogAccessType) {
+    if (next === accessType) return;
+    setAccessType(next);
+    setQuery(text);
+    revisionRef.current = EMPTY_PAGE.revision;
+    setPage(EMPTY_PAGE);
+    setActiveIndex(0);
+    setScrollTop(0);
+    if (listRef.current) listRef.current.scrollTop = 0;
+    setFailed(false);
+    void fetchPage(null, text, next);
   }
 
   /** Moves the active option and brings it into the scrollport in the same handler.
@@ -281,7 +473,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
       })
     )
       return;
-    void fetchPage(cursor, query);
+    void fetchPage(cursor, query, accessType);
   }
 
   // Focus moves into the popup on open (NFR-A11Y-02): the search field is where the interaction
@@ -378,6 +570,11 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
             aria-autocomplete="list"
             aria-activedescendant={active ? optionId(activeIndex) : undefined}
           />
+          <AccessTypeToggle
+            value={accessType}
+            onChange={selectAccessType}
+            onDismiss={() => close(true)}
+          />
           <div
             className="mpv2-count"
             role="status"
@@ -386,6 +583,20 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
           >
             {countMessage}
           </div>
+          {/* The current band, named above the list. `aria-hidden` because it states nothing new:
+              it repeats the rail of a row that is already in the listbox, and the count line
+              directly above it is a live region — a second changing text node beside one is noise
+              a screen reader user did not ask for. The listbox itself still announces every row
+              through `aria-activedescendant`. */}
+          {topGroup !== null && (
+            <div
+              className="mpv2-group-cue"
+              data-testid="model-picker-v2-group-cue"
+              aria-hidden="true"
+            >
+              {topGroup.label}
+            </div>
+          )}
           <div
             ref={listRef}
             id={listboxId}
@@ -403,6 +614,12 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
             {page.items.slice(range.startIndex, range.endIndex).map((model, offset) => {
               const index = range.startIndex + offset;
               const selected = isSelected(model, selection);
+              // Grouping is drawn *inside* the row — a rail column that names its band where the
+              // band starts, and a hairline above that row. No header entry, because a header would
+              // be a list item of a different height and the window arithmetic rests on every row
+              // being exactly MODEL_ROW_HEIGHT_PX; it would also be a non-option child of the
+              // listbox for the keyboard and `aria-activedescendant` to step around.
+              const opensGroup = startsGroup(page.items, index, accessType);
               return (
                 <div
                   key={modelKey(model)}
@@ -412,13 +629,32 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
                   data-testid={`model-picker-v2-option-${model.modelId}`}
                   className={`mpv2-row${selected ? ' selected' : ''}${
                     index === activeIndex ? ' active' : ''
-                  }`}
+                  }${opensGroup && index > 0 ? ' group-break' : ''}`}
                   onMouseDown={(e) => e.preventDefault()}
                   onMouseEnter={() => setActiveIndex(index)}
                   onClick={() => choose(model)}
                 >
-                  <span className="mpv2-title">{model.displayName}</span>
-                  <span className="mpv2-meta">{describeModel(model)}</span>
+                  {/* The rail runs down every row so a band reads as one block; only the row that
+                      opens the band prints its name, so the same word is not repeated six times
+                      down the list. */}
+                  <span className="mpv2-rail">
+                    {opensGroup && (
+                      <span className="mpv2-rail-label">{modelGroup(model, accessType).label}</span>
+                    )}
+                  </span>
+                  <span className="mpv2-body">
+                    <span className="mpv2-head">
+                      <span className="mpv2-title">{model.displayName}</span>
+                      {/* Which connection this row is reached through, on the line the user reads
+                          first. It is the answer to "which of my accounts is this?" — two rows can
+                          otherwise carry the same model name — and under the サブスク toggle it is
+                          what makes the built-in rows legible as 「Claude Code」/「Codex CLI」. It
+                          stays on every row even where the rail names the same connection: a row
+                          the user arrows onto mid-band must still say which account it is. */}
+                      <span className="mpv2-conn">{connectionLabel(model)}</span>
+                    </span>
+                    <span className="mpv2-meta">{describeModel(model)}</span>
+                  </span>
                 </div>
               );
             })}

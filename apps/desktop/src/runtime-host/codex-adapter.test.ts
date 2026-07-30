@@ -1,13 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CodexAgentMessageBoundary,
   advanceCodexAppServerStage,
   buildCodexArgs,
   buildCodexPrompt,
   parseCodexModels,
   probeCodex,
 } from './codex-adapter';
+import { TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 
 describe('Codex runtime probe', () => {
+  it('preserves separate Codex agent-message items as Markdown paragraphs', () => {
+    const boundary = new CodexAgentMessageBoundary();
+    const content = [
+      boundary.push('commentary-1', 'まず調査'),
+      boundary.push('commentary-1', 'します。'),
+      boundary.push('commentary-2', '原因を確認しました。'),
+      boundary.push('final-1', '修正完了です。'),
+    ].join('');
+
+    expect(content).toBe('まず調査します。\n\n原因を確認しました。\n\n修正完了です。');
+  });
+
   it('advances app-server stages before assistant deltas can be persisted', () => {
     const events: unknown[] = [];
     const emit = (event: unknown): void => {
@@ -68,9 +82,7 @@ describe('Codex runtime probe', () => {
     expect(args).toContain('mcp_servers.team.command="node"');
     expect(args).toContain('mcp_servers.team.args=["/tmp/team-mcp-server.cjs"]');
     expect(args).toContain('mcp_servers.team.enabled=true');
-    expect(args).toContain(
-      'mcp_servers.team.enabled_tools=["team_list_models","team_hire_worker","team_assign_task","team_steer_execution","team_cancel_execution","team_get_status","team_wait_events","team_send_to_worker","team_send_message","team_read_messages","team_wait_reports","team_stop_worker"]',
-    );
+    expect(args).toContain(`mcp_servers.team.enabled_tools=${JSON.stringify(TEAM_MCP_TOOL_NAMES)}`);
     expect(args).toContain('mcp_servers.team.default_tools_approval_mode="approve"');
     expect(args).toContain('mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]');
     expect(args).toContain('features.tool_search_always_defer_mcp_tools=false');
@@ -78,10 +90,27 @@ describe('Codex runtime probe', () => {
     expect(args.slice(0, 2)).toEqual(['app-server', '--stdio']);
   });
 
+  it('enables live Web search only for an explicitly research-enabled Team turn', () => {
+    const base = { command: 'node', scriptPath: '/tmp/team-mcp-server.cjs' };
+    expect(buildCodexArgs('auto', undefined, 'read-only', base)).not.toContain('web_search="live"');
+    expect(
+      buildCodexArgs('auto', undefined, 'read-only', { ...base, enableWebSearch: true }),
+    ).toContain('web_search="live"');
+  });
+
   it('prepends Team guidance to the real Codex Leader prompt', () => {
     expect(buildCodexPrompt('user request', [], 'team guidance')).toBe(
       'team guidance\n\nuser request',
     );
+  });
+
+  it('adds explicit $skill invocation text for structured Skill inputs', () => {
+    expect(
+      buildCodexPrompt('review this change', [], undefined, [
+        { name: 'code-review', path: '/tmp/code-review' },
+        { name: 'accessibility', path: '/tmp/accessibility' },
+      ]),
+    ).toBe('$code-review $accessibility\n\nreview this change');
   });
 
   // issue #6: there is no `--effort` flag, but `-c model_reasoning_effort=` works. The value is

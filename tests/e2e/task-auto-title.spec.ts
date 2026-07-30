@@ -29,7 +29,8 @@ test.describe('automatic Task naming', () => {
     await expect(textarea).toBeVisible();
 
     const sidebar = page.locator('.sidebar');
-    await expect(sidebar.getByText(PLACEHOLDER, { exact: true }).first()).toBeVisible();
+    // A blank Task is a composer workspace, not conversation history.
+    await expect(sidebar.getByText(PLACEHOLDER, { exact: true })).toHaveCount(0);
 
     // First message names it. Sent as a multi-line message so the assertion also covers "only the
     // first line becomes the title", which is what makes a realistic paste usable as a label.

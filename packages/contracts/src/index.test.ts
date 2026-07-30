@@ -12,9 +12,11 @@ import {
   providerConnectionSchema,
   publicErrorSchema,
   runtimeSettingsSchema,
+  teamModelResearchSettingsSchema,
   taskRenameInputSchema,
   teamBudgetStatusSchema,
   teamActivitySummarySchema,
+  teamBlueprintSchema,
   teamDetailSchema,
   teamExecutionSummarySchema,
   teamEventSchema,
@@ -29,6 +31,7 @@ import {
   turnSnapshotSchema,
   workerCompletionSchema,
   workerSummarySchema,
+  skillDraftCreateInputSchema,
 } from './index';
 
 type Parser = { parse(value: unknown): unknown };
@@ -67,6 +70,46 @@ describe('public contracts', () => {
     budgetMode: 'bounded',
   } as const;
 
+  it('rejects cyclic Team Blueprint parent relationships', () => {
+    const role = {
+      title: 'Role',
+      responsibility: 'Investigate',
+      scope: [],
+      nonGoals: [],
+      doneCriteria: [],
+      required: true,
+      canDelegate: false,
+    };
+    expect(() =>
+      teamBlueprintSchema.parse({
+        version: 1,
+        kind: 'team',
+        policy: teamPolicy,
+        leaderInstructions: 'Lead the team',
+        roles: [
+          { ...role, key: 'a', parentKey: 'b' },
+          { ...role, key: 'b', parentKey: 'a' },
+        ],
+      }),
+    ).toThrow(/循環/);
+  });
+
+  it('rejects Skill Draft paths that escape the managed package', () => {
+    const input = {
+      kind: 'chat',
+      skillId: 'reviewer',
+      files: [{ path: 'SKILL.md', content: 'safe' }],
+    } as const;
+    expect(skillDraftCreateInputSchema.parse(input)).toEqual(input);
+    for (const path of ['../SKILL.md', '/tmp/SKILL.md', 'team/../../SKILL.md', 'team\\SKILL.md'])
+      expect(() =>
+        skillDraftCreateInputSchema.parse({
+          ...input,
+          files: [{ path, content: 'unsafe' }],
+        }),
+      ).toThrow();
+  });
+
   it('validates optimistic Team Policy updates', () => {
     expect(
       teamPolicyUpdateInputSchema.parse({
@@ -89,6 +132,13 @@ describe('public contracts', () => {
         expectedRevision: -1,
       }),
     ).toThrow();
+  });
+
+  it('validates the global Team model research setting without coercion', () => {
+    expect(teamModelResearchSettingsSchema.parse({ researchBeforeHiring: true })).toEqual({
+      researchBeforeHiring: true,
+    });
+    expect(() => teamModelResearchSettingsSchema.parse({ researchBeforeHiring: 'true' })).toThrow();
   });
 
   it('validates a declarative OpenAI-compatible Provider Profile', () => {

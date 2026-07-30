@@ -296,128 +296,138 @@ export default function App() {
   // who could otherwise still Tab into chrome that looks gone. List mode never sets this class, so
   // the sidebar/header stay fully interactive there.
   const chromeInert = teamCanvasActive || exiting;
+  const usesIntegratedMacTitlebar =
+    navigator.platform.toLowerCase().includes('mac') ||
+    navigator.userAgent.toLowerCase().includes('macintosh');
 
   return (
-    <div
-      className={[
-        'app-shell',
-        chromeInert ? 'team-mode' : '',
-        sidebarCollapsed ? 'sidebar-collapsed' : '',
-        narrowViewport ? 'sidebar-overlay' : '',
-      ]
-        .filter(Boolean)
-        .join(' ')}
-    >
-      <Sidebar
-        inert={chromeInert || sidebarCollapsed}
-        collapsed={sidebarCollapsed}
-        onOpenSettings={openSettings}
-      />
-      {/* Tapping outside an overlaid sidebar closes it, the usual expectation for a panel that
+    <div className="app-frame">
+      {usesIntegratedMacTitlebar && (
+        <header className="app-titlebar" data-testid="app-titlebar">
+          <span className="app-titlebar-name">Sprint Coder</span>
+        </header>
+      )}
+      <div
+        className={[
+          'app-shell',
+          chromeInert ? 'team-mode' : '',
+          sidebarCollapsed ? 'sidebar-collapsed' : '',
+          narrowViewport ? 'sidebar-overlay' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+      >
+        <Sidebar
+          inert={chromeInert || sidebarCollapsed}
+          collapsed={sidebarCollapsed}
+          onOpenSettings={openSettings}
+        />
+        {/* Tapping outside an overlaid sidebar closes it, the usual expectation for a panel that
           covers content. Only rendered in the overlay form, where the sidebar is not a layout
           sibling and so cannot be dismissed by simply looking away from it. */}
-      {narrowViewport && !sidebarCollapsed && (
-        <button
-          type="button"
-          className="sidebar-scrim"
-          data-testid="sidebar-scrim"
-          aria-label="Task履歴を閉じる"
-          onClick={toggleSidebar}
-        />
-      )}
-      <div className="main">
-        {selectedTask ? (
-          <>
-            <TaskHeader
-              task={selectedTask}
-              onToggleTeam={requestEnterTeam}
-              inert={chromeInert}
-              onToggleInspector={cycleInspector}
-              inspectorOpen={inspectorState !== 'hidden'}
-              onToggleSidebar={toggleSidebar}
-              sidebarCollapsed={sidebarCollapsed}
-            />
-            {/* SurfaceLayer portals the shared ChatSurface instance in here when `surfaceMode`
+        {narrowViewport && !sidebarCollapsed && (
+          <button
+            type="button"
+            className="sidebar-scrim"
+            data-testid="sidebar-scrim"
+            aria-label="Task履歴を閉じる"
+            onClick={toggleSidebar}
+          />
+        )}
+        <div className="main">
+          {selectedTask ? (
+            <>
+              <TaskHeader
+                task={selectedTask}
+                onToggleTeam={requestEnterTeam}
+                inert={chromeInert}
+                onToggleInspector={cycleInspector}
+                inspectorOpen={inspectorState !== 'hidden'}
+                onToggleSidebar={toggleSidebar}
+                sidebarCollapsed={sidebarCollapsed}
+              />
+              {/* SurfaceLayer portals the shared ChatSurface instance in here when `surfaceMode`
                 is 'main' — this anchor only reserves the slot, see the morph orchestration
                 above and SurfaceLayer.tsx. This is also where the Chat lives in List mode: List
                 view (below) is only ever an additional panel alongside the normal Chat layout,
                 never a replacement for it — see the `teamListActive` decision above. */}
-            <div className="surface-anchor" ref={mainAnchorRef} />
-          </>
-        ) : (
-          <div className="empty-state" style={{ margin: 'auto' }}>
-            {/* No TaskHeader in this branch, so the sidebar toggle would be unreachable once the
+              <div className="surface-anchor" ref={mainAnchorRef} />
+            </>
+          ) : (
+            <div className="empty-state" style={{ margin: 'auto' }}>
+              {/* No TaskHeader in this branch, so the sidebar toggle would be unreachable once the
                 sidebar is collapsed with no Task selected. */}
-            <button
-              type="button"
-              className="chip"
-              data-testid="empty-state-sidebar-toggle"
-              aria-expanded={!sidebarCollapsed}
-              onClick={toggleSidebar}
-            >
-              <List size={14} /> Task履歴を{sidebarCollapsed ? '開く' : '閉じる'}
-            </button>
-            <h2>Taskを選択してください</h2>
-            <p>左のTask履歴から選ぶか、新しいTaskを作成して会話を始めます。</p>
-            <div className="chips">
               <button
                 type="button"
                 className="chip"
-                data-testid="empty-state-create-task-button"
-                onClick={() => void createTask()}
+                data-testid="empty-state-sidebar-toggle"
+                aria-expanded={!sidebarCollapsed}
+                onClick={toggleSidebar}
               >
-                <Plus size={14} /> 新しいTaskを作成
+                <List size={14} /> Task履歴を{sidebarCollapsed ? '開く' : '閉じる'}
               </button>
+              <h2>Taskを選択してください</h2>
+              <p>左のTask履歴から選ぶか、新しいTaskを作成して会話を始めます。</p>
+              <div className="chips">
+                <button
+                  type="button"
+                  className="chip"
+                  data-testid="empty-state-create-task-button"
+                  onClick={() => void createTask()}
+                >
+                  <Plus size={14} /> 新しいTaskを作成
+                </button>
+              </div>
             </div>
-          </div>
+          )}
+        </div>
+        {showTeamCanvas && selectedTask && (
+          <TeamCanvas
+            key={selectedTask.id}
+            ref={teamCanvasHandleRef}
+            task={selectedTask}
+            leaderRef={leaderRef}
+            leaderAnchorRef={leaderAnchorRef}
+            onRequestExit={requestExitTeam}
+            onSwitchToListView={switchToListView}
+          />
         )}
-      </div>
-      {showTeamCanvas && selectedTask && (
-        <TeamCanvas
-          key={selectedTask.id}
-          ref={teamCanvasHandleRef}
-          task={selectedTask}
-          leaderRef={leaderRef}
-          leaderAnchorRef={leaderAnchorRef}
-          onRequestExit={requestExitTeam}
-          onSwitchToListView={switchToListView}
-        />
-      )}
-      {/* Flex sibling of `.main`, deliberately NOT inside `.surface-anchor`/`.leader-anchor`/
+        {/* Flex sibling of `.main`, deliberately NOT inside `.surface-anchor`/`.leader-anchor`/
           `.surface-host`: SurfaceLayer re-parents that host between anchors on every Chat<->Team
           morph (ADR-002), and anything nested inside it would be torn out and re-inserted with it,
           losing its own state. Asserted mechanically in the E2E. */}
-      <InspectorPanel
-        state={effectiveInspectorState}
-        onCycle={cycleInspector}
-        onHide={hideInspector}
-        overlay={inspectorOverlay}
-        onDirtyChange={setEditorDirty}
-      />
-      {teamListActive && selectedTask && (
-        <TeamListView
-          task={selectedTask}
-          onBack={requestExitTeamList}
-          onSwitchToCanvasView={switchToCanvasView}
+        <InspectorPanel
+          state={effectiveInspectorState}
+          onCycle={cycleInspector}
+          onHide={hideInspector}
+          overlay={inspectorOverlay}
+          onDirtyChange={setEditorDirty}
         />
-      )}
-      {/* Outside `.main` and every Team surface: <dialog showModal> renders in the browser's top
+        {teamListActive && selectedTask && (
+          <TeamListView
+            task={selectedTask}
+            onBack={requestExitTeamList}
+            onSwitchToCanvasView={switchToCanvasView}
+          />
+        )}
+        {/* Outside `.main` and every Team surface: <dialog showModal> renders in the browser's top
           layer, so it is never clipped by `.team-canvas`'s `overflow: clip`, and it stays mounted
           across the Chat<->Team morph. */}
-      <SettingsDialog open={settingsOpen} onClose={closeSettings} />
-      {selectedTask && (
-        <SurfaceLayer
-          task={selectedTask}
-          mode={surfaceMode}
-          mainAnchorRef={mainAnchorRef}
-          leaderAnchorRef={leaderAnchorRef}
-          surfaceRef={leaderRef}
-          surfaceId={
-            surfaceMode === 'node' && leaderAgentId ? `team-agent-${leaderAgentId}` : undefined
-          }
-          pendingCaptureRef={pendingCaptureRef}
-        />
-      )}
+        <SettingsDialog open={settingsOpen} onClose={closeSettings} />
+        {selectedTask && (
+          <SurfaceLayer
+            task={selectedTask}
+            mode={surfaceMode}
+            mainAnchorRef={mainAnchorRef}
+            leaderAnchorRef={leaderAnchorRef}
+            surfaceRef={leaderRef}
+            surfaceId={
+              surfaceMode === 'node' && leaderAgentId ? `team-agent-${leaderAgentId}` : undefined
+            }
+            pendingCaptureRef={pendingCaptureRef}
+          />
+        )}
+      </div>
     </div>
   );
 }
