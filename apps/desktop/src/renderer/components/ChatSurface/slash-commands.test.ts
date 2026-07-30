@@ -8,11 +8,12 @@ import {
 } from './slash-commands';
 
 describe('slash commands', () => {
-  it('recognizes a slash token at line start or after whitespace', () => {
+  it('preserves the legacy whole-draft query while cursor matching supports inline tokens', () => {
     expect(slashCommandQuery('/')).toBe('');
     expect(slashCommandQuery('/GO')).toBe('go');
-    expect(slashCommandQuery(' /goal')).toBe('goal');
-    expect(slashCommandQuery('hello /goal')).toBe('goal');
+    expect(slashCommandQuery(' /goal')).toBeNull();
+    expect(slashCommandQuery('hello /goal')).toBeNull();
+    expect(slashTokenAtCursor('hello /goal')?.query).toBe('goal');
     expect(slashTokenAtCursor('/goal now', 3)?.query).toBe('goal');
     expect(slashTokenAtCursor('/goal now', 9)).toBeNull();
     expect(slashCommandQuery('hello/not-a-command')).toBeNull();

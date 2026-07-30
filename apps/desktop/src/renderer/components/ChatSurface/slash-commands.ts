@@ -75,9 +75,10 @@ export function slashTokenAtCursor(draft: string, cursor = draft.length): SlashT
   };
 }
 
-/** Legacy export for callers that want the active slash token at the end of the draft. */
+/** Backward-compatible helper: the complete draft must be one slash-prefixed token. */
 export function slashCommandQuery(draft: string): string | null {
-  return slashTokenAtCursor(draft)?.query ?? null;
+  if (!draft.startsWith('/') || /\s/.test(draft)) return null;
+  return draft.slice(1).toLocaleLowerCase();
 }
 
 export function removeSlashToken(draft: string, match: SlashTokenMatch): string {
