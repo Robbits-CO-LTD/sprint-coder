@@ -62,6 +62,19 @@ describe('Claude runtime probe', () => {
     });
   });
 
+  it('publishes the curated model catalog for isolated E2E without spawning a CLI', async () => {
+    await expect(
+      probeClaude('__must_not_be_spawned__', { SPRINT_CODER_E2E_CLI_FIXTURES: '1' }),
+    ).resolves.toMatchObject({
+      available: true,
+      version: 'e2e-fixture',
+      models: expect.arrayContaining([
+        expect.objectContaining({ id: 'sonnet' }),
+        expect.objectContaining({ id: 'claude-opus-5' }),
+      ]),
+    });
+  });
+
   it('defaults to the read-only, no-write-tools, no-MCP profile when no scope is given', () => {
     // The default matters as much as the values: every caller that predates issue #37, and any
     // future one that forgets the argument, must land on the profile that cannot write.

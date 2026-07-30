@@ -87,7 +87,15 @@ const CLAUDE_MODELS: CodexModelOption[] = [
   },
 ];
 
-export async function probeClaude(command = 'claude'): Promise<ClaudeProbe> {
+export async function probeClaude(
+  command = 'claude',
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): Promise<ClaudeProbe> {
+  // These E2E cases validate settings/catalog behavior and never execute Claude. Keep that UI
+  // deterministic on credential-free CI runners without changing production discovery.
+  if (environment['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1') {
+    return { available: true, version: 'e2e-fixture', models: CLAUDE_MODELS };
+  }
   const availability = await new Promise<Omit<ClaudeProbe, 'models'>>((resolve) => {
     let settled = false;
     const resolvedCommand = resolveClaudeCommand(command);

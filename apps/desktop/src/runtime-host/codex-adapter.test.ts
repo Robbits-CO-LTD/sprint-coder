@@ -115,6 +115,18 @@ describe('Codex runtime probe', () => {
     });
   });
 
+  it('publishes a deterministic model catalog for isolated E2E without spawning a CLI', async () => {
+    const probe = await probeCodex('__must_not_be_spawned__', {
+      SPRINT_CODER_E2E_CLI_FIXTURES: '1',
+    });
+
+    expect(probe.available).toBe(true);
+    expect(probe.version).toBe('e2e-fixture');
+    expect(
+      probe.models.find(({ id }) => id === 'gpt-5.6-terra')?.efforts?.length,
+    ).toBeGreaterThanOrEqual(4);
+  });
+
   it('uses the interactive app-server transport for every write scope', () => {
     for (const scope of ['read-only', 'workspace-write', 'full'] as const)
       expect(buildCodexArgs('auto', undefined, scope).slice(0, 3)).toEqual([

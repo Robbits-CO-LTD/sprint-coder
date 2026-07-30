@@ -42,7 +42,32 @@ export type CodexProbe = {
   models: CodexModelOption[];
 };
 
-export async function probeCodex(command = 'codex'): Promise<CodexProbe> {
+const E2E_CODEX_MODELS: CodexModelOption[] = [
+  { id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' },
+  {
+    id: 'gpt-5.6-terra',
+    displayName: 'GPT-5.6-Terra',
+    description: 'E2E用のCodexモデルfixture',
+    defaultEffort: 'medium',
+    efforts: [
+      { id: 'low', description: '軽量な推論' },
+      { id: 'medium', description: '標準的な推論' },
+      { id: 'high', description: '深い推論' },
+      { id: 'xhigh', description: 'より深い推論' },
+    ],
+  },
+];
+
+export async function probeCodex(
+  command = 'codex',
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): Promise<CodexProbe> {
+  // Packaged E2E exercises model selection without executing the real CLI. CI runners deliberately
+  // have no Codex installation or credentials, so expose a deterministic catalog only to the
+  // isolated E2E process. Adapter execution remains untouched and would still fail closed.
+  if (environment['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1') {
+    return { available: true, version: 'e2e-fixture', models: E2E_CODEX_MODELS };
+  }
   const availability = await new Promise<Omit<CodexProbe, 'models'>>((resolve) => {
     let settled = false;
     const child = spawn(resolveCodexCommand(command), ['--version'], {
