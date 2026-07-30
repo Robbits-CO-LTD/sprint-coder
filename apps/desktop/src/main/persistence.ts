@@ -4201,6 +4201,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
            VALUES (?, ?, 'worker', ?, NULL)`,
         )
         .run(team.id, agentId, now);
+      const blueprintBinding = this.getTeamBlueprint(team.id);
       this.recordTeamV2Activity({
         teamId: team.id,
         type: 'worker_hired',
@@ -4210,11 +4211,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
           role: input.role.trim(),
           blueprintRoleKey: input.blueprintRoleKey ?? null,
           teamBlueprint:
-            this.getTeamBlueprint(team.id) === null
+            blueprintBinding === null
               ? null
               : {
-                  name: this.getTeamBlueprint(team.id)!.name,
-                  digest: this.getTeamBlueprint(team.id)!.selection.ref.digest,
+                  name: blueprintBinding.name,
+                  digest: blueprintBinding.selection.ref.digest,
                 },
           depth,
           canDelegate,
@@ -8647,6 +8648,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   ): { ordinal: number; event: TurnEvent } {
     return this.db.transaction(() => {
       this.assertTask(taskId);
+      if (typeof text !== 'string' || text.trim() === '' || text.length > 100_000)
+        throw new Error('Queued input text is invalid');
       const parsedSkills = validatePersistedTurnSkills(skills);
       const row = this.db
         .prepare(

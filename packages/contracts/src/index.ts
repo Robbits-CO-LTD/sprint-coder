@@ -4,6 +4,15 @@ const idSchema = z.string().min(1).max(128);
 const timestampSchema = z.string().datetime();
 const taskTextSchema = z.string().max(100_000);
 
+function isSafeSkillDraftPath(value: string): boolean {
+  if (value.startsWith('/') || value.includes('\\')) return false;
+  const parts = value.split('/');
+  return (
+    parts.length <= 9 &&
+    parts.every((part) => part !== '' && part !== '.' && part !== '..' && !part.startsWith('.'))
+  );
+}
+
 export const toolIdSchema = z
   .string()
   .regex(
@@ -198,6 +207,22 @@ export const teamBlueprintSchema = z
         });
       if (role.parentKey === role.key)
         context.addIssue({ code: 'custom', message: `Roleは自身を親にできません: ${role.key}` });
+    }
+    const parents = new Map(blueprint.roles.map((role) => [role.key, role.parentKey]));
+    for (const role of blueprint.roles) {
+      const visited = new Set<string>([role.key]);
+      let current = role.parentKey;
+      while (current !== 'leader' && parents.has(current)) {
+        if (visited.has(current)) {
+          context.addIssue({
+            code: 'custom',
+            message: `Roleの親子関係が循環しています: ${role.key}`,
+          });
+          break;
+        }
+        visited.add(current);
+        current = parents.get(current)!;
+      }
     }
   });
 export type TeamBlueprint = z.infer<typeof teamBlueprintSchema>;
@@ -685,7 +710,11 @@ export const turnSkillSelectionsSchema = z
   });
 export const skillDraftFileSchema = z
   .object({
-    path: z.string().min(1).max(500),
+    path: z
+      .string()
+      .min(1)
+      .max(500)
+      .refine(isSafeSkillDraftPath, 'Skill Draftのファイルパスが安全ではありません'),
     content: z.string().max(1024 * 1024),
   })
   .strict();

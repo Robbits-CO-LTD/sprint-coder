@@ -36,4 +36,13 @@ describe('skill picker index and virtualization', () => {
     expect(window.start).toBeGreaterThan(300);
     expect(window.paddingTop + window.paddingBottom).toBeGreaterThan(60_000);
   });
+
+  it('clamps a stale scroll position after filtering to fewer items', () => {
+    expect(virtualWindow(3, 1_000, 290, 58)).toEqual({
+      start: 2,
+      end: 3,
+      paddingTop: 116,
+      paddingBottom: 0,
+    });
+  });
 });

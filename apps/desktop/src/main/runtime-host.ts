@@ -291,9 +291,7 @@ function toRuntimeContextFragment(
           (fragment.source === 'skill' && fragment.trust === 'user') ||
           (fragment.source === 'history' && fragment.trust === 'user')
         ? 'user'
-        : fragment.source === 'skill' && fragment.trust === 'system'
-          ? 'system'
-          : 'none';
+        : 'none';
   return {
     id: fragment.id,
     source: fragment.source,

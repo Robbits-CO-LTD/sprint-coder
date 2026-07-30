@@ -10,6 +10,7 @@ import {
   type TurnStage,
 } from '@sprint-coder/contracts';
 import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
+import { isAbsolute, normalize, sep } from 'node:path';
 
 export const RUNTIME_PROTOCOL_VERSION = 5;
 
@@ -177,9 +178,27 @@ function isRuntimeSkillInputs(value: unknown): value is RuntimeSkillInput[] {
           (item as Record<string, unknown>)['name'] as string,
         ) &&
         typeof (item as Record<string, unknown>)['path'] === 'string' &&
-        ((item as Record<string, unknown>)['path'] as string).length > 0 &&
-        ((item as Record<string, unknown>)['path'] as string).length <= 4_096,
+        isManagedRuntimeSkillPath(
+          (item as Record<string, unknown>)['name'] as string,
+          (item as Record<string, unknown>)['path'] as string,
+        ),
     )
+  );
+}
+
+function isManagedRuntimeSkillPath(name: string, path: string): boolean {
+  if (path.length < 1 || path.length > 4_096 || !isAbsolute(path) || normalize(path) !== path)
+    return false;
+  const parts = path.split(sep);
+  const digest = parts.at(-1);
+  const skillId = parts.at(-2);
+  const source = parts.at(-3);
+  const revisions = parts.at(-4);
+  return (
+    revisions === 'revisions' &&
+    ['builtin', 'created', 'claude', 'agents'].includes(source ?? '') &&
+    skillId === name &&
+    /^[a-f0-9]{64}$/.test(digest ?? '')
   );
 }
 
@@ -235,10 +254,7 @@ function hasValidFragmentAuthority(fragment: Record<string, unknown>): boolean {
   if (fragment['source'] === 'system') return fragment['authority'] === 'system';
   if (fragment['source'] === 'goal') return fragment['authority'] === 'user';
   if (fragment['source'] === 'skill')
-    return (
-      fragment['authority'] ===
-      (fragment['trust'] === 'system' ? 'system' : fragment['trust'] === 'user' ? 'user' : 'none')
-    );
+    return fragment['authority'] === (fragment['trust'] === 'user' ? 'user' : 'none');
   if (fragment['source'] === 'history')
     return fragment['authority'] === (fragment['trust'] === 'user' ? 'user' : 'none');
   return fragment['authority'] === 'none';

@@ -1602,7 +1602,7 @@ export const useAppStore = create<AppState>((set, get) => {
         skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
       }));
       persistDraftDebounced(taskId, '');
-      void window.sprintCoder.skills?.setDraftSelection(taskId, []).catch(() => undefined);
+      persistSkillDraftSelection(taskId, []);
 
       try {
         const result = await window.sprintCoder.turns.start({
@@ -1641,9 +1641,7 @@ export const useAppStore = create<AppState>((set, get) => {
           },
           error: code === 'TURN_ACTIVE' ? null : describeError(err),
         }));
-        void window.sprintCoder.skills
-          ?.setDraftSelection(taskId, selectedSkills)
-          .catch(() => undefined);
+        persistSkillDraftSelection(taskId, selectedSkills);
         if (code === 'TURN_ACTIVE') {
           get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
         }
@@ -1660,7 +1658,7 @@ export const useAppStore = create<AppState>((set, get) => {
         skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
       }));
       persistDraftDebounced(taskId, '');
-      void window.sprintCoder.skills?.setDraftSelection(taskId, []).catch(() => undefined);
+      persistSkillDraftSelection(taskId, []);
       try {
         await window.sprintCoder.turns.queue({ taskId, text: trimmed, skills: selectedSkills });
         // queue.changed (delivered via subscription) reconciles the compact queued list.
@@ -1673,9 +1671,7 @@ export const useAppStore = create<AppState>((set, get) => {
           },
           error: describeError(err),
         }));
-        void window.sprintCoder.skills
-          ?.setDraftSelection(taskId, selectedSkills)
-          .catch(() => undefined);
+        persistSkillDraftSelection(taskId, selectedSkills);
       }
     },
 
@@ -1720,7 +1716,7 @@ export const useAppStore = create<AppState>((set, get) => {
         skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
       }));
       persistDraftDebounced(taskId, '');
-      void window.sprintCoder.skills?.setDraftSelection(taskId, []).catch(() => undefined);
+      persistSkillDraftSelection(taskId, []);
       try {
         await window.sprintCoder.turns.stopAndSend({
           taskId,
@@ -1736,9 +1732,7 @@ export const useAppStore = create<AppState>((set, get) => {
           },
           error: describeError(err),
         }));
-        void window.sprintCoder.skills
-          ?.setDraftSelection(taskId, selectedSkills)
-          .catch(() => undefined);
+        persistSkillDraftSelection(taskId, selectedSkills);
       }
     },
 
@@ -1785,4 +1779,9 @@ function errorCode(err: unknown): string | undefined {
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+function persistSkillDraftSelection(taskId: string, skills: readonly TurnSkillSelection[]): void {
+  const setter = window.sprintCoder?.skills?.setDraftSelection;
+  if (typeof setter !== 'function') return;
+  void setter(taskId, [...skills]).catch(() => undefined);
 }

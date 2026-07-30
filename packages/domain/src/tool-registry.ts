@@ -227,6 +227,11 @@ export function toolValueMatchesSchema(schema: JsonValue, value: unknown): boole
 
   const type = record['type'];
   if (type === undefined) {
+    if (record['minimum'] !== undefined || record['maximum'] !== undefined) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return false;
+      if (typeof record['minimum'] === 'number' && value < record['minimum']) return false;
+      if (typeof record['maximum'] === 'number' && value > record['maximum']) return false;
+    }
     if (record['properties'] === undefined && record['required'] === undefined) return true;
   } else if (type === 'string') return typeof value === 'string';
   else if (type === 'number' || type === 'integer') {

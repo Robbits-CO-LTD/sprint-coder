@@ -75,7 +75,7 @@ export function slashTokenAtCursor(draft: string, cursor = draft.length): SlashT
   };
 }
 
-/** Backward-compatible query helper used by existing callers and tests. */
+/** Legacy export for callers that want the active slash token at the end of the draft. */
 export function slashCommandQuery(draft: string): string | null {
   return slashTokenAtCursor(draft)?.query ?? null;
 }

@@ -43,7 +43,10 @@ export function virtualWindow(
 ): VirtualWindow {
   if (itemCount <= 0) return { start: 0, end: 0, paddingTop: 0, paddingBottom: 0 };
   const safeRowHeight = Math.max(1, rowHeight);
-  const start = Math.max(0, Math.floor(Math.max(0, scrollTop) / safeRowHeight) - overscan);
+  const start = Math.min(
+    itemCount - 1,
+    Math.max(0, Math.floor(Math.max(0, scrollTop) / safeRowHeight) - overscan),
+  );
   const visibleCount = Math.ceil(Math.max(0, viewportHeight) / safeRowHeight);
   const end = Math.min(itemCount, start + visibleCount + overscan * 2);
   return {

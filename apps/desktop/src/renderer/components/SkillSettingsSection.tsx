@@ -26,6 +26,7 @@ export function SkillSettingsSection({
   const [loading, setLoading] = useState(false);
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<SkillDraft[]>([]);
+  const [reviewedDrafts, setReviewedDrafts] = useState<Set<string>>(new Set());
   const [catalog, setCatalog] = useState<SkillCatalogItem[]>([]);
   const generation = useRef(0);
 
@@ -52,6 +53,7 @@ export function SkillSettingsSection({
       setStates(new Map());
       setStatus(`${result.claudeDetected + result.agentsDetected}件のSkillを検出しました。`);
       setDrafts(managedDrafts);
+      setReviewedDrafts(new Set());
       setCatalog(selectable?.items ?? []);
     } catch {
       if (request === generation.current)
@@ -120,6 +122,11 @@ export function SkillSettingsSection({
       if (api === undefined) throw new Error('Skill API unavailable');
       await api.installDraft(draft.id, draft.digest, true);
       setDrafts((current) => current.filter(({ id }) => id !== draft.id));
+      setReviewedDrafts((current) => {
+        const next = new Set(current);
+        next.delete(draft.id);
+        return next;
+      });
       const nextCatalog = await api.list();
       setCatalog(nextCatalog.items);
       setStatus(`${draft.name}をインストールしました。`);
@@ -135,6 +142,11 @@ export function SkillSettingsSection({
       if (api === undefined) throw new Error('Skill API unavailable');
       await api.discardDraft(draft.id);
       setDrafts((current) => current.filter(({ id }) => id !== draft.id));
+      setReviewedDrafts((current) => {
+        const next = new Set(current);
+        next.delete(draft.id);
+        return next;
+      });
       setStatus(`${draft.name}のDraftを破棄しました。`);
     } catch {
       setError(`${draft.name}のDraftを破棄できませんでした。`);
@@ -374,7 +386,17 @@ export function SkillSettingsSection({
                 </small>
                 <p>{draft.description}</p>
                 <code>{draft.digest.slice(0, 12)}</code>
-                <details className="settings-skill-draft-files">
+                <details
+                  className="settings-skill-draft-files"
+                  onToggle={(event) =>
+                    setReviewedDrafts((current) => {
+                      const next = new Set(current);
+                      if (event.currentTarget.open) next.add(draft.id);
+                      else next.delete(draft.id);
+                      return next;
+                    })
+                  }
+                >
                   <summary>ファイル内容を確認</summary>
                   {draft.files.map((file) => (
                     <div key={file.path}>
@@ -395,6 +417,12 @@ export function SkillSettingsSection({
                 <button
                   type="button"
                   className="settings-primary-button"
+                  disabled={!reviewedDrafts.has(draft.id)}
+                  title={
+                    reviewedDrafts.has(draft.id)
+                      ? undefined
+                      : 'ファイル内容を開いて確認してください'
+                  }
                   onClick={() => void installDraft(draft)}
                 >
                   内容を確認してインストール

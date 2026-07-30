@@ -660,10 +660,14 @@ export class SkillStore {
     assertSkillIdForSource(source, skillId);
     if (!/^[a-f0-9]{64}$/.test(digest))
       throw new SkillStoreError('INVALID_SKILL', 'Skill digest is invalid');
-    const current = (await this.listSelectable()).find(
-      (item) => item.source === source && item.skillId === skillId,
-    );
-    if (current === undefined || !current.enabled)
+    const enabled =
+      source === 'builtin'
+        ? true
+        : source === 'created'
+          ? !(await pathExists(join(this.currentPath(source, skillId), '.disabled')))
+          : ((await readExistingManifest(this.currentPath(source, skillId)))?.enabled ?? false);
+    const current = await this.readSelectableAt(source, skillId, enabled);
+    if (current === null || !current.enabled)
       throw new SkillStoreError('INVALID_SKILL', 'Skill is disabled or unavailable');
     if (current.digest !== digest)
       throw new SkillStoreError('SOURCE_CHANGED', 'Skill changed after it was selected');

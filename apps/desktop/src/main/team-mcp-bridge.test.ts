@@ -226,6 +226,27 @@ describe('TeamMcpBridge', () => {
     expect(createSkillDraft).toHaveBeenCalledOnce();
   });
 
+  it('does not expose Team tools to a Skill Creator-only turn', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-skill-creator', {
+      taskId: 'task-1',
+      token,
+      allowSkillDrafts: true,
+      allowTeamTools: false,
+    });
+    const response = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_stop_worker',
+      args: { workerId: 'worker-1' },
+    });
+    expect(JSON.parse(response.lines[0] as string)).toMatchObject({ ok: false });
+    expect(coordinator.stopWorker).not.toHaveBeenCalled();
+  });
+
   it('binds model catalog lookup to the registered Task instead of model arguments', async () => {
     const listModelCandidates = vi.fn(async (input: unknown) => ({
       revision: 1,

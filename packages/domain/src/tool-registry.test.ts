@@ -229,6 +229,18 @@ describe('Tool Registry domain', () => {
     expect(toolValueMatchesSchema(schema, { kind: 'manager', levels: 0 })).toBe(false);
   });
 
+  it('enforces numeric bounds even when a schema omits an explicit type', () => {
+    const schema = {
+      type: 'object',
+      properties: { levels: { minimum: 1, maximum: 4 } },
+      required: ['levels'],
+    } as const;
+    expect(() => definition({ inputSchema: schema })).not.toThrow();
+    expect(toolValueMatchesSchema(schema, { levels: 2 })).toBe(true);
+    expect(toolValueMatchesSchema(schema, { levels: 0 })).toBe(false);
+    expect(toolValueMatchesSchema(schema, { levels: '2' })).toBe(false);
+  });
+
   it('rejects duplicate ToolIds and ambiguous equal-priority provider names', () => {
     const duplicateRegistry = new ToolRegistry();
     const tool = definition();

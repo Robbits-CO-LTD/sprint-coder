@@ -32,6 +32,8 @@ import {
 } from '../../lib/runtime-labels';
 import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
+const EMPTY_SKILL_SELECTION: readonly TurnSkillSelection[] = [];
+
 export function Composer({ taskId }: { taskId: string }) {
   const draft = useAppStore((s) => s.draftByTask[taskId]) ?? '';
   const setDraft = useAppStore((s) => s.setDraft);
@@ -50,7 +52,8 @@ export function Composer({ taskId }: { taskId: string }) {
   const currentTeam = useAppStore((s) => s.teamByTask[taskId]);
   const skillCatalog = useAppStore((s) => s.skillCatalog);
   const skillCatalogRevision = useAppStore((s) => s.skillCatalogRevision);
-  const selectedSkills = useAppStore((s) => s.skillSelectionByTask[taskId]) ?? [];
+  const selectedSkills =
+    useAppStore((s) => s.skillSelectionByTask[taskId]) ?? EMPTY_SKILL_SELECTION;
   const loadSkills = useAppStore((s) => s.loadSkills);
   const setSkillSelection = useAppStore((s) => s.setSkillSelection);
   // The V2 Model Picker replaces the legacy chip only once Main has answered `true` for *this*
@@ -81,73 +84,98 @@ export function Composer({ taskId }: { taskId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [skillCatalogRevision],
   );
-  const slashCommands = slashQuery === null ? [] : filterSlashCommands(SLASH_COMMANDS, slashQuery);
-  const slashSkills = slashQuery === null ? [] : filterSkillSearchIndex(skillIndex, slashQuery);
-  const selectedSkillKeys = new Set(
-    selectedSkills.map(({ ref }) => `${ref.source}:${ref.skillId}:${ref.digest}`),
+  const slashCommands = useMemo(
+    () => (slashQuery === null ? [] : filterSlashCommands(SLASH_COMMANDS, slashQuery)),
+    [slashQuery],
   );
-  const chatSkillCount = selectedSkills.filter(({ kind }) => kind === 'chat').length;
-  const teamSkillCount = selectedSkills.filter(({ kind }) => kind === 'team').length;
+  const slashSkills = useMemo(
+    () => (slashQuery === null ? [] : filterSkillSearchIndex(skillIndex, slashQuery)),
+    [skillIndex, slashQuery],
+  );
+  const { selectedSkillKeys, chatSkillCount, teamSkillCount } = useMemo(
+    () => ({
+      selectedSkillKeys: new Set(
+        selectedSkills.map(({ ref }) => `${ref.source}:${ref.skillId}:${ref.digest}`),
+      ),
+      chatSkillCount: selectedSkills.filter(({ kind }) => kind === 'chat').length,
+      teamSkillCount: selectedSkills.filter(({ kind }) => kind === 'team').length,
+    }),
+    [selectedSkills],
+  );
   const goalSupported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
   const workspaceSupported =
     typeof window !== 'undefined' && window.sprintCoder?.workspace !== undefined;
   const teamSupported = typeof window !== 'undefined' && window.sprintCoder?.teams !== undefined;
-  const slashUnavailable: Partial<Record<SlashCommandId, string>> = {
-    ...(!goalSupported ? { goal: 'Goal設定に対応していません' } : {}),
-    ...(!workspaceSupported ? { workspace: 'Workspace選択に対応していません' } : {}),
-    ...(!teamSupported ? { team: 'Teamビューに対応していません' } : {}),
-    ...(runtime.kind === 'codex' && runtime.codexAvailable
-      ? {}
-      : {
-          image:
-            runtime.kind === 'codex'
-              ? 'Codex CLIが見つかりません'
-              : 'Codex Runtime選択時に画像生成を使えます',
-        }),
-  };
-  const slashItems: SlashMenuItem[] = [
-    ...slashCommands.map((command) => ({
-      key: `command:${command.id}`,
-      group: 'コマンド' as const,
-      command: command.command,
-      label: command.label,
-      description: command.description,
-      ...(slashUnavailable[command.id] === undefined
+  const slashUnavailable = useMemo<Partial<Record<SlashCommandId, string>>>(
+    () => ({
+      ...(!goalSupported ? { goal: 'Goal設定に対応していません' } : {}),
+      ...(!workspaceSupported ? { workspace: 'Workspace選択に対応していません' } : {}),
+      ...(!teamSupported ? { team: 'Teamビューに対応していません' } : {}),
+      ...(runtime.kind === 'codex' && runtime.codexAvailable
         ? {}
-        : { unavailable: slashUnavailable[command.id] }),
-    })),
-    ...slashSkills.map((skill) => {
-      const skillKey = `${skill.ref.source}:${skill.ref.skillId}:${skill.ref.digest}`;
-      const unavailable = !skill.enabled
-        ? 'このSkillは無効です'
-        : selectedSkillKeys.has(skillKey)
-          ? 'すでに選択されています'
-          : skill.kind === 'chat' && chatSkillCount >= 5
-            ? 'Chat Skillは最大5件です'
-            : skill.kind === 'team' && teamSkillCount >= 1
-              ? 'Team Skillは最大1件です'
-              : skill.kind === 'team' &&
-                  currentTeam !== null &&
-                  currentTeam !== undefined &&
-                  currentTeam.workers.some(({ kind }) => kind === 'worker')
-                ? 'このTaskではTeamが開始済みです。別のTeam Skillは新規Taskで使用してください'
-                : undefined;
-      return {
-        key: `skill:${skillKey}`,
-        group:
-          skill.ref.source === 'builtin'
-            ? ('Built-in Skills' as const)
-            : skill.kind === 'team'
-              ? ('Team Skills' as const)
-              : ('Chat Skills' as const),
-        command: `/${skill.ref.skillId}`,
-        label: skill.name,
-        description: skill.description,
-        ...(unavailable === undefined ? {} : { unavailable }),
-      };
+        : {
+            image:
+              runtime.kind === 'codex'
+                ? 'Codex CLIが見つかりません'
+                : 'Codex Runtime選択時に画像生成を使えます',
+          }),
     }),
-  ];
+    [goalSupported, runtime.codexAvailable, runtime.kind, teamSupported, workspaceSupported],
+  );
+  const slashItems = useMemo<SlashMenuItem[]>(
+    () => [
+      ...slashCommands.map((command) => ({
+        key: `command:${command.id}`,
+        group: 'コマンド' as const,
+        command: command.command,
+        label: command.label,
+        description: command.description,
+        ...(slashUnavailable[command.id] === undefined
+          ? {}
+          : { unavailable: slashUnavailable[command.id] }),
+      })),
+      ...slashSkills.map((skill) => {
+        const skillKey = `${skill.ref.source}:${skill.ref.skillId}:${skill.ref.digest}`;
+        const unavailable = !skill.enabled
+          ? 'このSkillは無効です'
+          : selectedSkillKeys.has(skillKey)
+            ? 'すでに選択されています'
+            : skill.kind === 'chat' && chatSkillCount >= 5
+              ? 'Chat Skillは最大5件です'
+              : skill.kind === 'team' && teamSkillCount >= 1
+                ? 'Team Skillは最大1件です'
+                : skill.kind === 'team' &&
+                    currentTeam !== null &&
+                    currentTeam !== undefined &&
+                    currentTeam.workers.some(({ kind }) => kind === 'worker')
+                  ? 'このTaskではTeamが開始済みです。別のTeam Skillは新規Taskで使用してください'
+                  : undefined;
+        return {
+          key: `skill:${skillKey}`,
+          group:
+            skill.ref.source === 'builtin'
+              ? ('Built-in Skills' as const)
+              : skill.kind === 'team'
+                ? ('Team Skills' as const)
+                : ('Chat Skills' as const),
+          command: `/${skill.ref.skillId}`,
+          label: skill.name,
+          description: skill.description,
+          ...(unavailable === undefined ? {} : { unavailable }),
+        };
+      }),
+    ],
+    [
+      chatSkillCount,
+      currentTeam,
+      selectedSkillKeys,
+      slashCommands,
+      slashSkills,
+      slashUnavailable,
+      teamSkillCount,
+    ],
+  );
   const slashOpen = slashQuery !== null && draft !== slashDismissedDraft;
   const activeSlashSelection = Math.min(slashSelection, Math.max(0, slashItems.length - 1));
 

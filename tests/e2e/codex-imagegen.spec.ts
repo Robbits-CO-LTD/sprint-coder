@@ -12,7 +12,7 @@ async function withApp(label: string, body: (page: Page) => Promise<void>): Prom
   const dir = createUserDataDir(label);
   let app: ElectronApplication | null = null;
   try {
-    // These scenarios intentionally exercise the rollback Picker's separate Runtime control. The
+    // These scenarios intentionally exercise the legacy Picker's separate Runtime control. The
     // V2 Picker combines Runtime and model in one control and has its own parity coverage.
     app = await launchApp(dir, undefined, LEGACY_PICKER_ENV);
     const page = await firstWindow(app);

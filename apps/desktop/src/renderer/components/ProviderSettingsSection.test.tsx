@@ -345,7 +345,7 @@ describe('createConnection', () => {
 });
 
 describe('providerCreateErrorMessage', () => {
-  it('shows a sanitized Main error instead of replacing it with a generic input error', () => {
+  it('shows the allowlisted secure-storage guidance without exposing arbitrary Main details', () => {
     const error = Object.assign(
       new Error(
         'OSの安全な保管領域を利用できません。macOSのログインキーチェーンを確認してから再試行してください。',
@@ -359,6 +359,12 @@ describe('providerCreateErrorMessage', () => {
 
   it('does not expose unexpected errors', () => {
     expect(providerCreateErrorMessage(new Error('internal detail'))).toBe(CREATE_ERROR);
+    expect(
+      providerCreateErrorMessage({
+        code: 'PROVIDER_FAILED',
+        message: 'secret=sk-sensitive-provider-detail',
+      }),
+    ).toBe(`${CREATE_ERROR}（コード: PROVIDER_FAILED）`);
   });
 
   it('recognizes a sanitized secure-storage error after contextBridge serialization', () => {

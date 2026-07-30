@@ -466,6 +466,18 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('rejects queued input that cannot be read back', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      expect(() => persistence.queueInput(task.id, '   ', 'blank')).toThrow(
+        'Queued input text is invalid',
+      );
+      expect(() => persistence.queueInput(task.id, 'x'.repeat(100_001), 'too-long')).toThrow(
+        'Queued input text is invalid',
+      );
+      persistence.close();
+    });
+
     it('persists valid steering as a user message and rejects stale expectedTurnId', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();

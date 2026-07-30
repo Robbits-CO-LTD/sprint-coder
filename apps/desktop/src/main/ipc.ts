@@ -1657,10 +1657,8 @@ export class IpcRouter {
     await this.teamMcpBridge.ensureStarted();
     try {
       const skillHome = process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home');
-      await Promise.all([
-        installBuiltinTeamSkill(skillHome),
-        installBuiltinSkillCreator(skillHome),
-      ]);
+      await installBuiltinTeamSkill(skillHome);
+      await installBuiltinSkillCreator(skillHome);
       this.teamSkillReady = true;
     } catch {
       this.teamSkillReady = false;
@@ -2180,6 +2178,7 @@ export class IpcRouter {
       token,
       requireModelResearch,
       ...(options.skillCreatorTurn ? { allowSkillDrafts: true } : {}),
+      allowTeamTools: options.teamTurn,
     });
     return {
       socketPath,
