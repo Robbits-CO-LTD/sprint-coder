@@ -12,6 +12,7 @@ import { ProviderRateLimitedError } from './provider-rate-limit-retry';
 import type { ProviderRegistry } from './provider-runtime';
 import type { ProviderVerificationService } from './provider-verification';
 import type {
+  TeamRuntimeConversationItem,
   TeamWorkerRuntime,
   WorkerActivityEvent,
   WorkerRuntimeResult,
@@ -74,6 +75,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult> {
     if (
@@ -93,7 +95,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
       );
-    const prompt = workerPrompt(input.worker, input.content);
+    const prompt = workerPrompt(input.worker, input.content, input.priorConversation);
     if (
       !this.deps.authorizeEgress({
         worker: input.worker,
@@ -339,7 +341,11 @@ function addNullable(left: number | null, right: number | null): number | null {
   return left === null && right === null ? null : (left ?? 0) + (right ?? 0);
 }
 
-function workerPrompt(worker: AgentRecord, content: string): string {
+function workerPrompt(
+  worker: AgentRecord,
+  content: string,
+  priorConversation: readonly TeamRuntimeConversationItem[] | undefined,
+): string {
   return [
     `あなたはチームの「${worker.role}」担当Workerです。`,
     `あなたのAgent ID: ${worker.id}`,
@@ -348,11 +354,27 @@ function workerPrompt(worker: AgentRecord, content: string): string {
     `Context継承: ${worker.contextInheritancePolicy}`,
     'Workspace書き込み: 公式API Workerでは利用不可',
     '以下の依頼を実行し、結果を日本語で簡潔に報告してください。',
+    formatPriorTeamConversation(priorConversation),
     '',
     `依頼: ${content}`,
   ]
     .filter((line) => line !== '')
     .join('\n');
+}
+
+function formatPriorTeamConversation(
+  conversation: readonly TeamRuntimeConversationItem[] | undefined,
+): string {
+  if (conversation === undefined || conversation.length === 0) return '';
+  return [
+    '以下は、このAgent自身が以前に受送信したTeam会話です。',
+    '現在の依頼を最優先し、過去の成果は参照資料としてそのまま利用してください。',
+    'この内容を取得し直すためにTeamツールを呼ぶ必要はありません。',
+    ...conversation.map(
+      (item) =>
+        `[${item.direction === 'received' ? '受信' : '送信'} / ${item.role}]\n${item.content}`,
+    ),
+  ].join('\n\n');
 }
 
 function costCents(usage: NormalizedProviderUsage | undefined): number {

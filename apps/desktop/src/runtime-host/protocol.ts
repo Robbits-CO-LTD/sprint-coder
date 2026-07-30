@@ -56,7 +56,7 @@ export type RuntimeCanonicalEvent =
   // claude-normalizer.ts), giving Main a way to surface the concrete model id the CLI actually
   // resolved for an `auto`/alias selection (see the ADR amendment). Codex's normalizer never sets
   // it, so this stays undefined for Codex turns.
-  | { type: 'completed'; resolvedModel?: string }
+  | { type: 'completed'; resolvedModel?: string; finalText?: string }
   // The model's own reasoning text (issue #17). Verified to arrive in the current profile:
   // `--effort max` on a prompt that needs reasoning produces `content_block_start type='thinking'`
   // followed by `thinking_delta` (codex-cli's Claude CLI 2.1.218). It does NOT arrive for a trivial
@@ -314,14 +314,21 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
 
 function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent {
   if (typeof value !== 'object' || value === null || !('type' in value)) return false;
-  if (value.type === 'completed')
-    return (
+  if (value.type === 'completed') {
+    const resolvedModelValid =
       !('resolvedModel' in value) ||
       value.resolvedModel === undefined ||
       (typeof value.resolvedModel === 'string' &&
         value.resolvedModel.length > 0 &&
-        value.resolvedModel.length <= 128)
-    );
+        value.resolvedModel.length <= 128);
+    const finalTextValid =
+      !('finalText' in value) ||
+      value.finalText === undefined ||
+      (typeof value.finalText === 'string' &&
+        value.finalText.length > 0 &&
+        value.finalText.length <= 1_000_000);
+    return resolvedModelValid && finalTextValid;
+  }
   if (value.type === 'stage')
     return 'stage' in value && turnStageSchema.safeParse(value.stage).success;
   if (value.type === 'reasoning')

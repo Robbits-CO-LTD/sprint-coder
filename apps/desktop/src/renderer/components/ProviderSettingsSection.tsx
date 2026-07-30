@@ -688,44 +688,67 @@ export function ProviderAddConnectionForm({
         onSubmit();
       }}
     >
+      <div className="settings-provider-form-heading">
+        <div>
+          <h4>新しいAPI接続</h4>
+          <p>プロバイダー、表示名、APIキーの3項目から設定できます。</p>
+        </div>
+        <span>APIキーは端末内に保存</span>
+      </div>
       <fieldset className="settings-group" disabled={submitting}>
-        <label className="settings-field" htmlFor="settings-provider-kind">
-          <span className="settings-field-label">プロバイダー</span>
-          <select
-            id="settings-provider-kind"
-            data-testid="settings-provider-kind"
-            value={providerSelectValue(form, profiles)}
-            aria-describedby={providerSelectDescribedBy({ profilesFailed, selectionUnavailable })}
-            onChange={(e) =>
-              onChange((current) => applyProviderSelection(current, e.target.value, profiles))
-            }
-          >
-            {/* Present only as the current value of a withdrawn selection, and disabled: it
+        <div className="settings-provider-basic-fields">
+          <label className="settings-field" htmlFor="settings-provider-kind">
+            <span className="settings-field-label">プロバイダー</span>
+            <select
+              id="settings-provider-kind"
+              data-testid="settings-provider-kind"
+              value={providerSelectValue(form, profiles)}
+              aria-describedby={providerSelectDescribedBy({ profilesFailed, selectionUnavailable })}
+              onChange={(e) =>
+                onChange((current) => applyProviderSelection(current, e.target.value, profiles))
+              }
+            >
+              {/* Present only as the current value of a withdrawn selection, and disabled: it
                 is not offered as a choice, it just stops the picker from displaying a
                 Provider the user never picked. */}
-            {selectionUnavailable && (
-              <option value={PROFILE_UNAVAILABLE_VALUE} disabled>
-                {PROFILE_UNAVAILABLE_OPTION_LABEL}
-              </option>
-            )}
-            {PROVIDER_FORM_OPTIONS.map((option) => (
-              <option key={option.key} value={option.key}>
-                {option.label}
-              </option>
-            ))}
-            {/* Whatever Main lists, in Main's order. The Renderer names no Provider of its
+              {selectionUnavailable && (
+                <option value={PROFILE_UNAVAILABLE_VALUE} disabled>
+                  {PROFILE_UNAVAILABLE_OPTION_LABEL}
+                </option>
+              )}
+              {PROVIDER_FORM_OPTIONS.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.label}
+                </option>
+              ))}
+              {/* Whatever Main lists, in Main's order. The Renderer names no Provider of its
                 own, so a Pack that gains or loses one needs no change here. */}
-            {profiles.length > 0 && (
-              <optgroup label={PROFILE_GROUP_LABEL}>
-                {profiles.map((profile) => (
-                  <option key={profile.id} value={`${PROFILE_OPTION_PREFIX}${profile.id}`}>
-                    {profile.displayName}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-          </select>
-        </label>
+              {profiles.length > 0 && (
+                <optgroup label={PROFILE_GROUP_LABEL}>
+                  {profiles.map((profile) => (
+                    <option key={profile.id} value={`${PROFILE_OPTION_PREFIX}${profile.id}`}>
+                      {profile.displayName}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          </label>
+
+          <label className="settings-field" htmlFor="settings-provider-name">
+            <span className="settings-field-label">表示名</span>
+            <input
+              id="settings-provider-name"
+              data-testid="settings-provider-name"
+              type="text"
+              className="settings-text-input"
+              autoComplete="off"
+              placeholder="例: 開発用 OpenAI"
+              value={form.displayName}
+              onChange={(e) => onChange((current) => ({ ...current, displayName: e.target.value }))}
+            />
+          </label>
+        </div>
 
         {/* Announced on arrival: the selection changed underneath the user, and only they
             can resolve it. Submit stays disabled until they do. */}
@@ -746,19 +769,6 @@ export function ProviderAddConnectionForm({
           </p>
         )}
 
-        <label className="settings-field" htmlFor="settings-provider-name">
-          <span className="settings-field-label">表示名</span>
-          <input
-            id="settings-provider-name"
-            data-testid="settings-provider-name"
-            type="text"
-            className="settings-text-input"
-            autoComplete="off"
-            value={form.displayName}
-            onChange={(e) => onChange((current) => ({ ...current, displayName: e.target.value }))}
-          />
-        </label>
-
         <div className="settings-field">
           <label className="settings-field-label" htmlFor="settings-provider-api-key">
             APIキー
@@ -774,6 +784,7 @@ export function ProviderAddConnectionForm({
               className="settings-text-input settings-key-input"
               autoComplete="off"
               spellCheck={false}
+              placeholder="APIキーを貼り付け"
               aria-describedby={KEY_HINT_ID}
               value={form.apiKey}
               onChange={(e) => onChange((current) => ({ ...current, apiKey: e.target.value }))}
@@ -1089,14 +1100,17 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
           <h3 id="settings-providers-title">プロバイダー接続</h3>
           <p>{SECTION_DESCRIPTION}</p>
         </div>
-        <button
-          type="button"
-          className="settings-secondary-button"
-          onClick={() => void refresh()}
-          disabled={busy || !supported}
-        >
-          再読み込み
-        </button>
+        <div className="settings-heading-actions">
+          {connections !== null && <span className="settings-count-badge">{listed.length}件</span>}
+          <button
+            type="button"
+            className="settings-secondary-button"
+            onClick={() => void refresh()}
+            disabled={busy || !supported}
+          >
+            再読み込み
+          </button>
+        </div>
       </div>
 
       {!supported ? (
@@ -1110,24 +1124,30 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
             // "loading" line that never resolves reads as a hang.
             error === null && <p className="settings-hint">{LOADING_TEXT}</p>
           ) : listed.length === 0 ? (
-            <p className="settings-hint">{EMPTY_TEXT}</p>
+            <div className="settings-provider-empty">
+              <strong>API接続はまだありません</strong>
+              <p>{EMPTY_TEXT}</p>
+            </div>
           ) : (
-            <ul className="settings-connection-list" aria-label={CONNECTION_LIST_LABEL}>
-              {listed.map((connection) => (
-                <ProviderConnectionCard
-                  key={connection.id}
-                  connection={connection}
-                  verifying={verifyingId === connection.id}
-                  disabled={busy}
-                  onRetry={(target) => void retryVerification(target)}
-                  rateLimit={{
-                    supported: rateLimitSupported,
-                    saving: savingRateLimitId === connection.id,
-                    onSave: (target, input) => void lowerRateLimit(target, input),
-                  }}
-                />
-              ))}
-            </ul>
+            <>
+              <p className="settings-list-label">{CONNECTION_LIST_LABEL}</p>
+              <ul className="settings-connection-list" aria-label={CONNECTION_LIST_LABEL}>
+                {listed.map((connection) => (
+                  <ProviderConnectionCard
+                    key={connection.id}
+                    connection={connection}
+                    verifying={verifyingId === connection.id}
+                    disabled={busy}
+                    onRetry={(target) => void retryVerification(target)}
+                    rateLimit={{
+                      supported: rateLimitSupported,
+                      saving: savingRateLimitId === connection.id,
+                      onSave: (target, input) => void lowerRateLimit(target, input),
+                    }}
+                  />
+                ))}
+              </ul>
+            </>
           )}
 
           {error !== null && (

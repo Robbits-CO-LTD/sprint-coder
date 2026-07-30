@@ -134,6 +134,28 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(runtimeHostMock.starts[0]?.[2]).toContain('Workspace書き込み: 許可範囲内で可');
   });
 
+  it('places the Agent own prior Team conversation before a tool-prohibited final instruction', async () => {
+    runtimeHostMock.starts.length = 0;
+    const subject = runtime();
+
+    await subject.execute({
+      worker: worker(false),
+      envelope: { ...envelope, targetAgentId: 'worker-1' },
+      content: 'すでに作成した論点を使って最終回答を書いてください。ツールは禁止です。',
+      priorConversation: [
+        { direction: 'received', role: 'Leader', content: 'AI便益論の論点を作成してください。' },
+        { direction: 'sent', role: 'Leader', content: '便益は生産性向上と知識アクセスです。' },
+      ],
+    });
+
+    const prompt = runtimeHostMock.starts[0]?.[2] as string;
+    expect(prompt).toContain('便益は生産性向上と知識アクセスです。');
+    expect(prompt).toContain('この内容を取得し直すためにTeamツールを呼ぶ必要はありません。');
+    expect(prompt.indexOf('便益は生産性向上と知識アクセスです。')).toBeLessThan(
+      prompt.indexOf('依頼: すでに作成した論点を使って'),
+    );
+  });
+
   it('does not inherit context for none or unselected selected_items', () => {
     const messages = [
       {

@@ -447,6 +447,36 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('stores Codex work updates separately from the final user-facing conclusion', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, '作業して');
+      const messageId = randomUUID();
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, turn.turnId, stage);
+      persistence.appendDelta(
+        task.id,
+        turn.turnId,
+        messageId,
+        '調査を開始します。\n\n原因を確認しました。\n\n修正完了です。',
+      );
+
+      const event = persistence.completeTurn(task.id, turn.turnId, 'completed', '修正完了です。');
+
+      expect(event).toMatchObject({
+        type: 'turn.completed',
+        message: {
+          content: '修正完了です。',
+          workContent: '調査を開始します。\n\n原因を確認しました。',
+        },
+      });
+      expect(persistence.listMessages(task.id).at(-1)).toMatchObject({
+        content: '修正完了です。',
+        workContent: '調査を開始します。\n\n原因を確認しました。',
+      });
+      persistence.close();
+    });
+
     it('rejects a second active turn and dequeues queued input in ordinal order', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();
@@ -850,6 +880,38 @@ if (runsWithElectronAbi)
       expect(reopened.getTeamModelResearchBeforeHiring()).toBe(true);
       reopened.setTeamModelResearchBeforeHiring(false);
       expect(reopened.getTeamModelResearchBeforeHiring()).toBe(false);
+      reopened.close();
+    });
+
+    it('defaults Team models to all and persists a selected-model restriction across restart', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getTeamModelRestriction()).toEqual({
+        mode: 'all',
+        allowedModels: [],
+      });
+      persistence.setTeamModelRestriction({
+        mode: 'selected',
+        allowedModels: [
+          {
+            connectionId: 'builtin:codex-cli',
+            providerId: 'openai',
+            modelId: 'gpt-5.6-sol',
+          },
+        ],
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTeamModelRestriction()).toEqual({
+        mode: 'selected',
+        allowedModels: [
+          {
+            connectionId: 'builtin:codex-cli',
+            providerId: 'openai',
+            modelId: 'gpt-5.6-sol',
+          },
+        ],
+      });
       reopened.close();
     });
 
@@ -4764,6 +4826,7 @@ if (runsWithElectronAbi)
         { version: 48 },
         { version: 49 },
         { version: 50 },
+        { version: 51 },
       ]);
       for (const [table, columns] of [
         [
@@ -4790,6 +4853,7 @@ if (runsWithElectronAbi)
           ],
         ],
         ['tasks', ['connection_id', 'requested_provider', 'requested_model']],
+        ['messages', ['work_content']],
         ['teams', ['policy_json']],
         ['team_messages', ['execution_id', 'attempt_id']],
       ] as const) {

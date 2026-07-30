@@ -95,6 +95,7 @@ test.describe('settings dialog', () => {
     const page: Page = await firstWindow(app!);
     await page.getByTestId('sidebar-settings-button').click();
     await expect(page.getByTestId('settings-dialog')).toBeVisible();
+    await page.getByTestId('settings-nav-advanced').click();
 
     for (const kind of ['codex', 'claude']) {
       const row = page.getByTestId(`settings-cli-${kind}`);
@@ -124,6 +125,7 @@ test.describe('settings dialog', () => {
   test('previews and imports a detected Skill using the typed settings bridge', async () => {
     const page: Page = await firstWindow(app!);
     await page.getByTestId('sidebar-settings-button').click();
+    await page.getByTestId('settings-nav-skills').click();
     await expect(page.getByRole('heading', { name: 'Skills' })).toBeVisible();
     await expect(page.getByText('1件検出', { exact: true })).toBeVisible();
 
@@ -205,6 +207,32 @@ test.describe('settings dialog', () => {
       fullPage: true,
     });
     expect(runtimeErrors).toEqual([]);
+    await page.keyboard.press('Escape');
+  });
+
+  test('shows one settings page at a time and persists a Team model restriction', async () => {
+    const page: Page = await firstWindow(app!);
+    await page.getByTestId('sidebar-settings-button').click();
+    await expect(page.getByTestId('settings-page-models')).toBeVisible();
+    await expect(page.getByTestId('settings-page-team')).toBeHidden();
+
+    await page.getByTestId('settings-nav-team').click();
+    await expect(page.getByTestId('settings-page-models')).toBeHidden();
+    await expect(page.getByTestId('settings-page-team')).toBeVisible();
+
+    const settings = page.getByTestId('settings-team-models');
+    await settings.getByRole('radio', { name: '選択したモデルのみ' }).check();
+    const modelChoices = settings.locator('.team-model-row input[type="checkbox"]');
+    const count = await modelChoices.count();
+    expect(count).toBeGreaterThan(1);
+    for (let index = 0; index < count - 1; index += 1) await modelChoices.nth(index).uncheck();
+    await settings.getByTestId('settings-team-models-save').click();
+    await expect(settings.getByTestId('settings-team-models-save')).toBeDisabled();
+
+    await page.keyboard.press('Escape');
+    await page.getByTestId('sidebar-settings-button').click();
+    await page.getByTestId('settings-nav-team').click();
+    await expect(settings.locator('.team-model-row input[type="checkbox"]:checked')).toHaveCount(1);
     await page.keyboard.press('Escape');
   });
 });

@@ -471,6 +471,7 @@ describe('<TeamActivityGroup />', () => {
         active={false}
         startedAtMs={Date.parse('2026-07-28T01:00:00.000Z')}
         finishedAtMs={Date.parse('2026-07-28T01:07:34.000Z')}
+        workContent={'調査を開始します。\n\n原因を確認しました。'}
       />,
     );
 
@@ -480,6 +481,23 @@ describe('<TeamActivityGroup />', () => {
     expect(completed).not.toContain('open=""');
     expect(completed).toContain('7m 34s作業しました');
     expect(completed).toContain('data-testid="team-activity-card"');
+    expect(completed).toContain('data-testid="team-work-transcript"');
+    expect(completed).toContain('調査を開始します。');
+  });
+
+  it('keeps work conversation available even when no Team activity was recorded', () => {
+    const completed = renderToStaticMarkup(
+      <TeamActivityGroup
+        activities={[]}
+        active={false}
+        startedAtMs={Date.parse('2026-07-28T01:00:00.000Z')}
+        finishedAtMs={Date.parse('2026-07-28T01:00:12.000Z')}
+        workContent="途中経過です。"
+      />,
+    );
+
+    expect(completed).toContain('12s作業しました');
+    expect(completed).toContain('途中経過です。');
   });
 
   it('formats short and long durations without zero-padding noise', () => {

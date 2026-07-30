@@ -156,6 +156,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       worker: providerWorker(),
       envelope,
       content: '調査してください',
+      priorConversation: [{ direction: 'sent', role: 'Leader', content: '前回まとめた調査論点' }],
     });
 
     expect(fallbackExecute).not.toHaveBeenCalled();
@@ -169,9 +170,15 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     expect(requests[0]).toMatchObject({
       messages: [
         { role: 'assistant', content: '[継承コンテキスト:compaction]\n親Taskの要約' },
-        expect.objectContaining({ role: 'user' }),
+        expect.objectContaining({
+          role: 'user',
+          content: expect.stringContaining('前回まとめた調査論点'),
+        }),
       ],
     });
+    expect(
+      (requests[0] as { messages: Array<{ content: string }> }).messages.at(-1)?.content,
+    ).toContain('この内容を取得し直すためにTeamツールを呼ぶ必要はありません。');
   });
 
   it('fails closed instead of pretending an external API Worker can write', async () => {

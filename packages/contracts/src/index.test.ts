@@ -13,6 +13,7 @@ import {
   publicErrorSchema,
   runtimeSettingsSchema,
   teamModelResearchSettingsSchema,
+  teamModelRestrictionSchema,
   taskRenameInputSchema,
   teamBudgetStatusSchema,
   teamActivitySummarySchema,
@@ -139,6 +140,30 @@ describe('public contracts', () => {
       researchBeforeHiring: true,
     });
     expect(() => teamModelResearchSettingsSchema.parse({ researchBeforeHiring: 'true' })).toThrow();
+  });
+
+  it('requires at least one unique model when Team models are restricted', () => {
+    const identity = {
+      connectionId: 'builtin:codex-cli',
+      providerId: 'openai',
+      modelId: 'gpt-5.6-sol',
+    };
+    expect(
+      teamModelRestrictionSchema.parse({ mode: 'selected', allowedModels: [identity] }),
+    ).toEqual({ mode: 'selected', allowedModels: [identity] });
+    expect(() =>
+      teamModelRestrictionSchema.parse({ mode: 'selected', allowedModels: [] }),
+    ).toThrow();
+    expect(() =>
+      teamModelRestrictionSchema.parse({
+        mode: 'selected',
+        allowedModels: [identity, identity],
+      }),
+    ).toThrow();
+    expect(teamModelRestrictionSchema.parse({ mode: 'all', allowedModels: [] })).toEqual({
+      mode: 'all',
+      allowedModels: [],
+    });
   });
 
   it('validates a declarative OpenAI-compatible Provider Profile', () => {

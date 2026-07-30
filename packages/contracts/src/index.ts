@@ -658,6 +658,7 @@ export const chatMessageSchema = z
     turnId: idSchema.nullable(),
     author: z.enum(['user', 'assistant', 'system']),
     content: z.string().max(1_000_000),
+    workContent: z.string().max(1_000_000).nullable().optional(),
     createdAt: timestampSchema,
   })
   .strict();
@@ -1903,6 +1904,48 @@ export const teamModelResearchSettingsSchema = z
   .strict();
 export type TeamModelResearchSettings = z.infer<typeof teamModelResearchSettingsSchema>;
 export const teamModelResearchSettingsSetInputSchema = teamModelResearchSettingsSchema;
+export const teamModelIdentitySchema = z
+  .object({
+    connectionId: connectionIdSchema,
+    providerId: providerIdSchema,
+    modelId: z.string().min(1).max(256),
+  })
+  .strict();
+export type TeamModelIdentity = z.infer<typeof teamModelIdentitySchema>;
+export const teamModelRestrictionSchema = z
+  .object({
+    mode: z.enum(['all', 'selected']),
+    allowedModels: z.array(teamModelIdentitySchema).max(512),
+  })
+  .strict()
+  .superRefine(({ mode, allowedModels }, context) => {
+    if (mode === 'selected' && allowedModels.length === 0)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['allowedModels'],
+        message: 'Select at least one Team model',
+      });
+    const identities = new Set<string>();
+    for (const [index, model] of allowedModels.entries()) {
+      const key = `${model.connectionId}\0${model.providerId}\0${model.modelId}`;
+      if (identities.has(key))
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['allowedModels', index],
+          message: 'Duplicate Team model identity',
+        });
+      identities.add(key);
+    }
+  });
+export type TeamModelRestriction = z.infer<typeof teamModelRestrictionSchema>;
+export const teamModelSettingsSchema = z
+  .object({
+    restriction: teamModelRestrictionSchema,
+    availableModels: z.array(providerModelSchema).max(512),
+  })
+  .strict();
+export type TeamModelSettings = z.infer<typeof teamModelSettingsSchema>;
+export const teamModelRestrictionSetInputSchema = teamModelRestrictionSchema;
 export const runtimeCodexEffortSetInputSchema = z
   .object({ effort: effortOptionSchema.shape.id })
   .strict();
@@ -2313,6 +2356,8 @@ export interface SprintCoderApi {
     setCodexEffort(effort: string): Promise<void>;
     getTeamModelResearch(): Promise<TeamModelResearchSettings>;
     setTeamModelResearch(input: TeamModelResearchSettings): Promise<void>;
+    getTeamModelSettings(): Promise<TeamModelSettings>;
+    setTeamModelRestriction(input: TeamModelRestriction): Promise<void>;
     getDefaultTeamPolicy(): Promise<TeamPolicy>;
     setDefaultTeamPolicy(policy: TeamPolicy): Promise<void>;
     scanSkills(): Promise<SkillScanResult>;
@@ -2459,6 +2504,8 @@ export const IPC_CHANNELS = {
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
   settingsGetTeamModelResearch: 'sprint-coder:settings:get-team-model-research',
   settingsSetTeamModelResearch: 'sprint-coder:settings:set-team-model-research',
+  settingsGetTeamModelSettings: 'sprint-coder:settings:get-team-model-settings',
+  settingsSetTeamModelRestriction: 'sprint-coder:settings:set-team-model-restriction',
   settingsGetDefaultTeamPolicy: 'sprint-coder:settings:get-default-team-policy',
   settingsSetDefaultTeamPolicy: 'sprint-coder:settings:set-default-team-policy',
   modelsCatalogQuery: 'sprint-coder:models:catalog-query',
