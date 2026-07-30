@@ -243,6 +243,20 @@ async function waitForCondition(
 
 export type DevServerHandle = { alreadyRunning: boolean; proc: ChildProcess | null };
 
+export type DevServerLaunch = Readonly<{ command: string; args: readonly string[] }>;
+
+export function devServerLaunch(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): DevServerLaunch {
+  return platform === 'win32'
+    ? {
+        command: environment['ComSpec'] ?? 'cmd.exe',
+        args: ['/d', '/s', '/c', 'npm.cmd start'],
+      }
+    : { command: 'npm', args: ['start'] };
+}
+
 /**
  * Ensures the Vite dev server + main/preload dev build (apps/desktop/.vite/build/index.js) are
  * ready for dev-mode E2E.
@@ -261,24 +275,44 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
   const previousPreloadMtime = existsSync(PRELOAD_BUILD_OUTPUT)
     ? statSync(PRELOAD_BUILD_OUTPUT).mtimeMs
     : 0;
-  const proc = spawn('npm', ['start'], {
+  const launch = devServerLaunch();
+  const proc = spawn(launch.command, launch.args, {
     cwd: REPO_ROOT,
-    detached: true, // its own process group, so we can signal the whole tree on teardown
+    // POSIX uses a process group for teardown. Windows has no negative-PID process-group signal,
+    // and .cmd shims require cmd.exe, so Node explicitly owns that shell PID and stopDevServer
+    // terminates its exact process tree with taskkill /T.
+    detached: process.platform !== 'win32',
     stdio: 'ignore',
     env: process.env,
+    windowsHide: true,
   });
+  let startupFailure: Error | null = null;
+  const onError = (error: Error): void => {
+    startupFailure = new Error(`Unable to start ${launch.command}: ${error.message}`, {
+      cause: error,
+    });
+  };
+  const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+    startupFailure = new Error(
+      `${launch.command} exited before the dev server was ready ` +
+        `(code=${code === null ? 'null' : String(code)}, signal=${signal ?? 'null'})`,
+    );
+  };
+  proc.once('error', onError);
+  proc.once('exit', onExit);
   proc.unref();
 
   try {
-    await waitForCondition(
-      async () =>
+    await waitForCondition(async () => {
+      if (startupFailure !== null) throw startupFailure;
+      return (
         (await isDevServerUp()) &&
         existsSync(MAIN_BUILD_OUTPUT) &&
         existsSync(PRELOAD_BUILD_OUTPUT) &&
         statSync(MAIN_BUILD_OUTPUT).mtimeMs > previousMainMtime &&
-        statSync(PRELOAD_BUILD_OUTPUT).mtimeMs > previousPreloadMtime,
-      timeoutMs,
-    );
+        statSync(PRELOAD_BUILD_OUTPUT).mtimeMs > previousPreloadMtime
+      );
+    }, timeoutMs);
   } catch (err) {
     stopDevServer({ alreadyRunning: false, proc });
     throw new Error(
@@ -286,6 +320,9 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
         `${err instanceof Error ? err.message : String(err)}`,
       { cause: err },
     );
+  } finally {
+    proc.off('error', onError);
+    proc.off('exit', onExit);
   }
 
   return { alreadyRunning: false, proc };
@@ -295,8 +332,21 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
  * instance (alreadyRunning: true) is left running untouched, per the E2E task's constraint. */
 export function stopDevServer(handle: DevServerHandle | null | undefined): void {
   if (!handle || handle.alreadyRunning || !handle.proc || handle.proc.pid === undefined) return;
-  const descendants =
-    process.platform === 'win32' ? [] : collectDescendantPids(handle.proc.pid).reverse();
+  if (process.platform === 'win32') {
+    // Do not target a PID after Node has observed the owned shell exit: Windows may eventually
+    // reuse that numeric PID for an unrelated process.
+    if (handle.proc.exitCode !== null || handle.proc.signalCode !== null) return;
+    try {
+      execFileSync('taskkill.exe', ['/PID', String(handle.proc.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch {
+      // taskkill exits non-zero when the exact owned process already stopped.
+    }
+    return;
+  }
+  const descendants = collectDescendantPids(handle.proc.pid).reverse();
   try {
     // `detached: true` put the spawned `npm start` in its own process group; signalling the
     // negative pid kills the whole tree (npm -> electron-forge start -> electron/vite/etc).
