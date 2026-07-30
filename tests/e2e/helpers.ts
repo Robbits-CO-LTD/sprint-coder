@@ -333,6 +333,9 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
 export function stopDevServer(handle: DevServerHandle | null | undefined): void {
   if (!handle || handle.alreadyRunning || !handle.proc || handle.proc.pid === undefined) return;
   if (process.platform === 'win32') {
+    // Do not target a PID after Node has observed the owned shell exit: Windows may eventually
+    // reuse that numeric PID for an unrelated process.
+    if (handle.proc.exitCode !== null || handle.proc.signalCode !== null) return;
     try {
       execFileSync('taskkill.exe', ['/PID', String(handle.proc.pid), '/T', '/F'], {
         stdio: 'ignore',
