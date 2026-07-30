@@ -168,7 +168,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download release ZIPs
+      - name: Download release artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: sprint-coder-*
@@ -182,10 +182,23 @@ jobs:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          shopt -s nullglob
-          assets=(release-assets/*.zip release-assets/*.exe)
-          if (( ${#assets[@]} != 3 )); then
-            echo "::error::Expected macOS ZIP, Windows ZIP, and Windows installer; found ${#assets[@]} artifacts."
+          assets=()
+          zip_count=0
+          exe_count=0
+          while IFS= read -r -d '' asset; do
+            assets+=("${asset}")
+            case "${asset}" in
+              *.zip) ((zip_count += 1)) ;;
+              *.exe) ((exe_count += 1)) ;;
+            esac
+          done < <(
+            find release-assets -type f \( -name '*.zip' -o -name '*.exe' \) -print0
+          )
+
+          printf 'Release asset: %s\n' "${assets[@]}"
+          if (( ${#assets[@]} != 3 || zip_count != 2 || exe_count != 1 )); then
+            echo "::error::Expected two ZIPs and one Windows installer; found ${zip_count} ZIP(s) and ${exe_count} installer(s)."
+            find release-assets -type f -print
             exit 1
           fi
 
