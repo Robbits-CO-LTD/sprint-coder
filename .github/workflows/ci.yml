@@ -12,6 +12,7 @@ concurrency:
 
 jobs:
   build:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -22,10 +23,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # @electron/packager 18.x depends on extract-zip 2.x/yauzl 2.x.
           # Its Electron archive extraction does not complete on Node 24+.

@@ -118,9 +118,17 @@ test.describe('axe: no serious/critical violations', () => {
           document.querySelector('.sidebar'),
           document.querySelector('.task-header'),
         ];
-        return hiddenChrome.every(
+        const chromeHidden = hiddenChrome.every(
           (element) => element !== null && Number(getComputedStyle(element).opacity) <= 0.01,
         );
+        // Worker-hire notices use the same finite msgIn fade as chat notices. A fast Worker can
+        // settle while a later notice is still fading, and axe would then sample its partial
+        // opacity as a contrast failure. Infinite canvas animations are unrelated, so wait only
+        // for these transient notice animations.
+        const cableNoticesSettled = [
+          ...document.querySelectorAll<HTMLElement>('.team-cable-event'),
+        ].every((element) => element.getAnimations().length === 0);
+        return chromeHidden && cableNoticesSettled;
       });
 
       const canvasViolations = await runAxeSerious(page);
