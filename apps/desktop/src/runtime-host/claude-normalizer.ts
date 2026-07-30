@@ -6,6 +6,7 @@ import type { RuntimeCanonicalEvent } from './protocol';
 const stages: TurnStage[] = ['understanding', 'planning', 'executing', 'synthesizing'];
 
 export class ClaudeOutputError extends Error {}
+export class ClaudeAuthenticationError extends ClaudeOutputError {}
 // Defense in depth: the fixed --tools ""/--strict-mcp-config invocation profile (buildClaudeArgs)
 // should make this structurally impossible, but the normalizer independently verifies the CLI's
 // own reported capabilities before trusting anything else in the stream, mirroring how the Codex
@@ -247,8 +248,12 @@ export class ClaudeJsonlNormalizer {
   }
 
   private pushResult(value: Record<string, unknown>): RuntimeCanonicalEvent[] {
-    if (value['is_error'] === true)
-      throw new ClaudeOutputError(readString(value, 'result') ?? 'Claude reported a failed turn');
+    if (value['is_error'] === true) {
+      const message = readString(value, 'result') ?? 'Claude reported a failed turn';
+      if (/not logged in|authentication[_ ]failed/iu.test(message))
+        throw new ClaudeAuthenticationError(message);
+      throw new ClaudeOutputError(message);
+    }
     if (this.completed) return [];
     this.completed = true;
     return [

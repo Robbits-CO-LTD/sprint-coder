@@ -1,11 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { lstatSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { CodexModelOption } from '@sprint-coder/contracts';
 import {
+  ClaudeAuthenticationError,
   ClaudeCapabilityViolationError,
   ClaudeJsonlNormalizer,
   type ClaudeExpectedCapabilities,
@@ -89,7 +90,8 @@ const CLAUDE_MODELS: CodexModelOption[] = [
 export async function probeClaude(command = 'claude'): Promise<ClaudeProbe> {
   const availability = await new Promise<Omit<ClaudeProbe, 'models'>>((resolve) => {
     let settled = false;
-    const child = spawn(command, ['--version'], {
+    const resolvedCommand = resolveClaudeCommand(command);
+    const child = spawn(resolvedCommand, ['--version'], {
       env: minimalEnvironment(),
       stdio: ['ignore', 'pipe', 'ignore'],
     });
@@ -189,7 +191,7 @@ export class ClaudeRuntimeAdapter {
       ),
     );
     const child = spawn(
-      'claude',
+      resolveClaudeCommand('claude'),
       buildClaudeArgs(model, teamMcpArgs, effort, effectiveScope, workspacePath),
       {
         cwd,
@@ -228,10 +230,13 @@ export class ClaudeRuntimeAdapter {
       } catch (error) {
         failed = true;
         const violation = error instanceof ClaudeCapabilityViolationError;
+        const authenticationRequired = error instanceof ClaudeAuthenticationError;
         fail(
           publicError(
-            violation ? 'RUNTIME_FAILED' : 'RUNTIME_PROTOCOL_ERROR',
-            violation
+            violation || authenticationRequired ? 'RUNTIME_FAILED' : 'RUNTIME_PROTOCOL_ERROR',
+            authenticationRequired
+              ? 'Claude Codeへのログインが必要です。ターミナルでclaudeを起動し、/loginを実行してください。'
+              : violation
               ? 'Claude runtimeが読み取り専用プロファイルを逸脱したため停止しました。'
               : 'Claude runtimeの出力を解釈できませんでした。',
             false,
@@ -449,6 +454,37 @@ export function buildClaudeArgs(
     ...(model === 'auto' ? [] : ['--model', model]),
     ...(effort === undefined ? [] : ['--effort', effort]),
   ];
+}
+
+export function resolveClaudeCommand(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+  searchPath: string | undefined = process.env['PATH'],
+  appData: string | null | undefined = process.env['APPDATA'],
+  userHome: string = homedir(),
+): string {
+  if (platform !== 'win32' || command !== 'claude') return command;
+  const roots = [
+    ...(searchPath ?? '')
+      .split(delimiter)
+      .map((entry) => entry.trim().replace(/^"(.*)"$/u, '$1'))
+      .filter((entry) => entry.length > 0),
+    ...(appData == null ? [] : [join(appData, 'npm')]),
+    join(userHome, 'AppData', 'Roaming', 'npm'),
+  ];
+  for (const root of new Set(roots)) {
+    for (const candidate of [
+      join(root, 'claude.exe'),
+      join(root, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+    ]) {
+      try {
+        if (lstatSync(candidate).isFile()) return candidate;
+      } catch {
+        // Continue searching the same locations Windows uses for npm global executables.
+      }
+    }
+  }
+  return command;
 }
 
 function minimalEnvironment(): NodeJS.ProcessEnv {

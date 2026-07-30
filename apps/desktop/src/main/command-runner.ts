@@ -23,6 +23,7 @@ import {
   closeOwnedJob,
   terminateOwnedJob,
   WINDOWS_JOB_WRAPPER,
+  windowsJobWrapperCommand,
 } from './windows-process-job';
 
 export type CommandOutputChunk = Readonly<{
@@ -238,7 +239,7 @@ export class CommandRunner {
     try {
       const windows = process.platform === 'win32';
       child = spawn(
-        windows ? process.execPath : spec.absoluteExecutable,
+        windows ? windowsJobWrapperCommand() : spec.absoluteExecutable,
         [...(windows ? ['-e', WINDOWS_JOB_WRAPPER] : spec.argv)],
         {
           cwd: spec.cwdIdentity.canonicalPath,

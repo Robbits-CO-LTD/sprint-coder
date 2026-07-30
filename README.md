@@ -4,6 +4,22 @@ Chatから始まり、必要になった瞬間だけ複数のAI Workerへ広が�
 
 このディレクトリは新規プロジェクトの設計起点であり、旧製品のコード・構成・設計判断を前提にしない。
 
+## Windowsで使う
+
+配布された `Sprint-Coder-Setup.exe` を開くと、Windowsへインストールできる。Node.jsやVisual Studioを利用者が別途インストールする必要はない。
+
+ソースコードからWindows用インストーラーを作る場合は、Node.js 22、Python 3、Visual Studio 2022 Build Tools（「C++によるデスクトップ開発」）を用意し、PowerShellで次を実行する。
+
+```powershell
+npm ci
+node node_modules/electron/install.js
+npm run make:windows
+```
+
+完成したインストーラーは `apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Setup.exe` に出力される。`apps/desktop/out/make/zip/win32/x64/` には、展開してそのまま起動できるZIP版も作られる。
+
+手元で作るインストーラーは未署名のため、Windowsから警告が表示されることがある。正式配布版ではコード署名証明書（`.pfx`）を用意し、`SPRINT_CODER_RELEASE=1`、`SPRINT_CODER_WINDOWS_CERTIFICATE_FILE`、`SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD` をビルド環境に設定する。この設定が不足した正式配布ビルドは、安全のためエラーで停止する。
+
 ## 文書
 
 - [プロダクト・詳細設計書](docs/PRODUCT_AND_TECHNICAL_DESIGN.md)

@@ -200,11 +200,15 @@ export class EditArtifactStore {
   }
 
   private async openSafeFile(name: string): Promise<FileHandle> {
+    const path = join(this.rootPath, name);
     try {
-      const path = join(this.rootPath, name);
+      // A missing artifact is an ordinary cache miss. Check that case before the Windows ACL
+      // verifier, whose PowerShell failure otherwise cannot distinguish "missing" from "unsafe".
+      await lstat(path);
       if (process.platform === 'win32') await verifyAcl(path, 'file');
       return await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    } catch {
+    } catch (error: unknown) {
+      if (error instanceof EditArtifactError) throw error;
       throw new EditArtifactError('ARTIFACT_NOT_FOUND', 'Edit artifact is unavailable');
     }
   }

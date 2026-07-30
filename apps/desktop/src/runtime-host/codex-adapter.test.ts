@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   CodexAgentMessageBoundary,
   advanceCodexAppServerStage,
@@ -6,10 +9,76 @@ import {
   buildCodexPrompt,
   parseCodexModels,
   probeCodex,
+  resolveCodexCommand,
 } from './codex-adapter';
 import { TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 
+const temporaryRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
+
 describe('Codex runtime probe', () => {
+  it('resolves the native Codex executable behind the Windows npm shim', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-command-'));
+    temporaryRoots.push(root);
+    const executable = join(
+      root,
+      'node_modules',
+      '@openai',
+      'codex',
+      'node_modules',
+      '@openai',
+      'codex-win32-x64',
+      'vendor',
+      'x86_64-pc-windows-msvc',
+      'codex',
+      'codex.exe',
+    );
+    await mkdir(join(executable, '..'), { recursive: true });
+    await writeFile(executable, '');
+
+    expect(resolveCodexCommand('codex', 'win32', root, null, '', 'x64', null)).toBe(executable);
+  });
+
+  it('prefers the current Codex desktop executable over an older npm installation', async () => {
+    const npmRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-npm-'));
+    const localAppData = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-desktop-'));
+    temporaryRoots.push(npmRoot, localAppData);
+    const npmExecutable = join(
+      npmRoot,
+      'node_modules',
+      '@openai',
+      'codex',
+      'node_modules',
+      '@openai',
+      'codex-win32-x64',
+      'vendor',
+      'x86_64-pc-windows-msvc',
+      'codex',
+      'codex.exe',
+    );
+    const desktopExecutable = join(
+      localAppData,
+      'OpenAI',
+      'Codex',
+      'bin',
+      'current-runtime',
+      'codex.exe',
+    );
+    await mkdir(join(npmExecutable, '..'), { recursive: true });
+    await mkdir(join(desktopExecutable, '..'), { recursive: true });
+    await writeFile(npmExecutable, '');
+    await writeFile(desktopExecutable, '');
+
+    expect(
+      resolveCodexCommand('codex', 'win32', npmRoot, null, '', 'x64', localAppData),
+    ).toBe(desktopExecutable);
+  });
+
   it('preserves separate Codex agent-message items as Markdown paragraphs', () => {
     const boundary = new CodexAgentMessageBoundary();
     const content = [
@@ -47,9 +116,10 @@ describe('Codex runtime probe', () => {
 
   it('uses the interactive app-server transport for every write scope', () => {
     for (const scope of ['read-only', 'workspace-write', 'full'] as const)
-      expect(buildCodexArgs('auto', undefined, scope).slice(0, 2)).toEqual([
+      expect(buildCodexArgs('auto', undefined, scope).slice(0, 3)).toEqual([
         'app-server',
-        '--stdio',
+        '--listen',
+        'stdio://',
       ]);
   });
 
@@ -63,7 +133,8 @@ describe('Codex runtime probe', () => {
   it('passes an explicit model without changing the immutable execution profile', () => {
     expect(buildCodexArgs('gpt-5.6-terra')).toEqual([
       'app-server',
-      '--stdio',
+      '--listen',
+      'stdio://',
       '-c',
       'approval_policy="never"',
       '-c',
@@ -87,7 +158,7 @@ describe('Codex runtime probe', () => {
     expect(args).toContain('mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]');
     expect(args).toContain('features.tool_search_always_defer_mcp_tools=false');
     expect(args.join(' ')).not.toContain('turn-token');
-    expect(args.slice(0, 2)).toEqual(['app-server', '--stdio']);
+    expect(args.slice(0, 3)).toEqual(['app-server', '--listen', 'stdio://']);
   });
 
   it('enables live Web search only for an explicitly research-enabled Team turn', () => {
@@ -124,7 +195,7 @@ describe('Codex runtime probe', () => {
     expect(args).toContain('model_reasoning_effort="xhigh"');
     expect(args).toContain('approval_policy="never"');
     expect(args).toContain('shell_environment_policy.inherit="core"');
-    expect(args.slice(0, 2)).toEqual(['app-server', '--stdio']);
+    expect(args.slice(0, 3)).toEqual(['app-server', '--listen', 'stdio://']);
   });
 
   it('omits the override entirely when no effort applies', () => {

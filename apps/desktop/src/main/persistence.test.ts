@@ -13,7 +13,6 @@ import {
 } from '@sprint-coder/domain';
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
-import type { CommandRunnerError } from './command-runner';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { ToolBroker } from './tool-broker';
@@ -4599,12 +4598,11 @@ if (runsWithElectronAbi)
     );
 
     windowsCommandGateIt(
-      'fails the command tool before spawning while Windows Job Object ownership is unavailable',
+      'runs the command tool inside an owned Windows Job Object',
       async () => {
         const { persistence, path } = createPersistence();
         const task = persistence.createTask();
         const workspacePath = join(path, '..');
-        const marker = join(workspacePath, 'must-not-spawn');
         persistence.setWorkspace(task.id, workspacePath);
         const started = startExecutingTurn(persistence, task.id);
         const published: string[] = [];
@@ -4623,32 +4621,27 @@ if (runsWithElectronAbi)
           policyEpoch: 0,
         });
 
-        await expect(
-          broker.dispatch({
+        const result = (await broker.dispatch({
             taskId: task.id,
             turnId: started.turnId,
             callId: 'command-windows-gate',
             providerName: 'run_command',
             input: {
-              executable: process.execPath,
-              argv: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`],
+              executable: 'C:\\Windows\\System32\\where.exe',
+              argv: ['cmd.exe'],
               cwd: '.',
               purpose: 'Windows gate test',
             },
-          }),
-        ).rejects.toMatchObject({
-          code: 'SPAWN_FAILED',
-          message: expect.stringContaining('Job Object'),
-        } satisfies Partial<CommandRunnerError>);
-        expect(existsSync(marker)).toBe(false);
+          })) as { exitCode: number; outputBytes: number };
+        expect(result).toMatchObject({ exitCode: 0 });
         expect(persistence.listCommands(task.id)).toEqual([
           expect.objectContaining({
             callId: 'command-windows-gate',
-            state: 'failed',
-            pid: null,
+            state: 'exited',
+            pid: expect.any(Number),
           }),
         ]);
-        expect(published).toEqual(['command.completed']);
+        expect(published).toEqual(['command.started', 'command.output', 'command.completed']);
         persistence.close();
       },
     );

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  ClaudeAuthenticationError,
   ClaudeCapabilityViolationError,
   ClaudeJsonlNormalizer,
   ClaudeOutputError,
@@ -48,6 +49,19 @@ describe('ClaudeJsonlNormalizer', () => {
     expect(() => {
       for (const line of lines) normalizer.push(line);
     }).toThrow(ClaudeOutputError);
+  });
+
+  it('identifies a Claude CLI login failure', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    expect(() =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'result',
+          is_error: true,
+          result: 'Not logged in · Please run /login',
+        }),
+      ),
+    ).toThrow(ClaudeAuthenticationError);
   });
 
   it('throws on unparsable JSONL instead of silently dropping the line', () => {

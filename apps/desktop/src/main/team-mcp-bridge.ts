@@ -38,23 +38,23 @@ $rule = [System.IO.Pipes.PipeAccessRule]::new(
   [System.Security.AccessControl.AccessControlType]::Allow
 )
 $security.SetAccessRule($rule)
+$pipe = [System.IO.Pipes.NamedPipeServerStream]::new(
+  $name,
+  [System.IO.Pipes.PipeDirection]::InOut,
+  1,
+  [System.IO.Pipes.PipeTransmissionMode]::Byte,
+  [System.IO.Pipes.PipeOptions]::Asynchronous,
+  65536,
+  65536,
+  $security
+)
+$actual = $pipe.GetAccessControl()
+$rules = @($actual.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))
+if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid.Value) {
+  throw 'Named pipe DACL verification failed'
+}
+[Console]::Out.WriteLine('READY')
 while ($true) {
-  $pipe = [System.IO.Pipes.NamedPipeServerStream]::new(
-    $name,
-    [System.IO.Pipes.PipeDirection]::InOut,
-    1,
-    [System.IO.Pipes.PipeTransmissionMode]::Byte,
-    [System.IO.Pipes.PipeOptions]::Asynchronous,
-    65536,
-    65536,
-    $security
-  )
-  $actual = $pipe.GetAccessControl()
-  $rules = @($actual.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))
-  if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid.Value) {
-    throw 'Named pipe DACL verification failed'
-  }
-  if (-not $script:ready) { [Console]::Out.WriteLine('READY'); $script:ready = $true }
   try {
     $pipe.WaitForConnection()
     $tcp = [System.Net.Sockets.TcpClient]::new()
@@ -70,7 +70,7 @@ while ($true) {
     [System.Threading.Tasks.Task]::WaitAny(@($toTcp, $toPipe)) | Out-Null
   } finally {
     if ($tcp) { $tcp.Dispose(); $tcp = $null }
-    $pipe.Dispose()
+    if ($pipe.IsConnected) { $pipe.Disconnect() }
   }
 }
 `;
