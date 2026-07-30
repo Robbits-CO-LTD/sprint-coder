@@ -3,6 +3,7 @@ import type { ChatMessage, RuntimeKind, RuntimeWriteScope } from '@sprint-coder/
 import { RuntimeHostClient } from './runtime-host';
 import {
   DeterministicTeamWorkerRuntime,
+  type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
   type WorkerActivityEvent,
   type WorkerRuntimeResult,
@@ -121,6 +122,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult> {
     const choice = this.deps.selectRuntime();
@@ -141,6 +143,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       `Context継承: ${input.worker.contextInheritancePolicy}`,
       `Workspace書き込み: ${input.worker.writeCapable ? '許可範囲内で可' : '禁止（読み取り専用）'}`,
       '以下のLeaderからの依頼に対応し、結果を日本語で簡潔に報告してください。',
+      formatPriorTeamConversation(input.priorConversation),
       '',
       `依頼: ${input.content}`,
     ]
@@ -230,6 +233,21 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
   }
+}
+
+export function formatPriorTeamConversation(
+  conversation: readonly TeamRuntimeConversationItem[] | undefined,
+): string {
+  if (conversation === undefined || conversation.length === 0) return '';
+  return [
+    '以下は、このAgent自身が以前に受送信したTeam会話です。',
+    '現在の依頼を最優先し、過去の成果は参照資料としてそのまま利用してください。',
+    'この内容を取得し直すためにTeamツールを呼ぶ必要はありません。',
+    ...conversation.map(
+      (item) =>
+        `[${item.direction === 'received' ? '受信' : '送信'} / ${item.role}]\n${item.content}`,
+    ),
+  ].join('\n\n');
 }
 
 export function buildInheritedWorkerContext(

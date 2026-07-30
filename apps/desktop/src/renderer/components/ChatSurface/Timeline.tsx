@@ -77,6 +77,19 @@ export function Timeline({ taskId }: { taskId: string }) {
     }
     return timestamps;
   }, [messages]);
+  const assistantWorkContentByTurn = useMemo(() => {
+    const content = new Map<string, string>();
+    for (const message of messages) {
+      if (
+        message.author === 'assistant' &&
+        message.turnId !== null &&
+        typeof message.workContent === 'string' &&
+        message.workContent.length > 0
+      )
+        content.set(message.turnId, message.workContent);
+    }
+    return content;
+  }, [messages]);
 
   const runtimeSummaryByTurn = useMemo(() => {
     const recordsByTurn = new Map<string, { changes: (typeof fileChanges)[number]['changes'] }[]>();
@@ -261,6 +274,10 @@ export function Timeline({ taskId }: { taskId: string }) {
               : message.turnId === null
                 ? null
                 : (assistantCreatedAtByTurn.get(message.turnId) ?? null);
+          const workContent =
+            message.author === 'user' && message.turnId !== null
+              ? (assistantWorkContentByTurn.get(message.turnId) ?? null)
+              : null;
           return (
             <div key={message.id} style={{ display: 'contents' }}>
               <MessageBubble author={message.author} content={message.content} />
@@ -303,12 +320,13 @@ export function Timeline({ taskId }: { taskId: string }) {
                   }
                 />
               )}
-              {messageActivities.length > 0 && (
+              {(messageActivities.length > 0 || workContent !== null) && (
                 <TeamActivityGroup
                   activities={messageActivities}
                   active={activityGroupActive}
                   startedAtMs={activityStartedAtMs}
                   finishedAtMs={activityFinishedAtMs}
+                  workContent={workContent}
                 />
               )}
             </div>

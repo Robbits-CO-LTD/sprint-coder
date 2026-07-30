@@ -5,7 +5,6 @@ import {
   SETTINGS_SECTIONS,
   SettingsDialog,
   WorkspaceBody,
-  activeSection,
   integerOptions,
   recoveryText,
   runtimeStatusText,
@@ -33,6 +32,12 @@ function stubBridge(): void {
         getRuntime: () => Promise.resolve(),
         getTeamModelResearch: () => Promise.resolve({ researchBeforeHiring: false }),
         setTeamModelResearch: () => Promise.resolve(),
+        getTeamModelSettings: () =>
+          Promise.resolve({
+            restriction: { mode: 'all', allowedModels: [] },
+            availableModels: [],
+          }),
+        setTeamModelRestriction: () => Promise.resolve(),
         getDefaultTeamPolicy: () => Promise.resolve(TEAM_POLICY),
         setDefaultTeamPolicy: () => Promise.resolve(),
       },
@@ -63,13 +68,16 @@ describe('which body the flag selects', () => {
       expect(html).toContain(`data-testid="settings-nav-${id}"`);
       expect(html).toContain(`>${label}</span>`);
     }
-    // Every section is mounted in the one scrollport, not swapped in by the nav: the controls a
-    // user opened settings for must not depend on having found the right page first.
+    // Pages stay mounted so form drafts survive navigation, but only the selected category is
+    // visible. This is page navigation, not one long settings document.
     expect(html).toContain('data-testid="settings-model"');
     expect(html).toContain('data-testid="settings-effort"');
     expect(html).toContain('data-testid="settings-cli-codex"');
     expect(html).toContain('data-testid="settings-team-research"');
     expect(html).toContain('data-testid="settings-team-defaults"');
+    expect(html).toContain('data-testid="settings-team-models"');
+    expect(html).toMatch(/data-testid="settings-page-models"[^>]*>/);
+    expect(html).toMatch(/data-testid="settings-page-team"[^>]*hidden=""/);
   });
 
   it('keeps the shipped one-column body as the fallback when the flag is off', () => {
@@ -106,31 +114,6 @@ describe('which body the flag selects', () => {
     stubBridge();
     const headings = workspace().match(/Skills<\/h[1-6]>/g) ?? [];
     expect(headings).toHaveLength(1);
-  });
-});
-
-describe('the nav row a scroll position lights up', () => {
-  const offsets = [
-    { id: 'models', top: 0 },
-    { id: 'team', top: 500 },
-    { id: 'skills', top: 1000 },
-    { id: 'advanced', top: 1300 },
-  ] as const;
-
-  it('names the last section whose heading has reached the top of the pane', () => {
-    expect(activeSection(offsets, 0, 600, 2000)).toBe('models');
-    expect(activeSection(offsets, 490, 600, 2000)).toBe('team');
-    expect(activeSection(offsets, 980, 600, 2000)).toBe('skills');
-  });
-
-  it('names the last section at the end of the scroll, however short that section is', () => {
-    // 詳細 is the shortest page and can never reach the top on its own; without this its nav row
-    // would be one the user can see but never light up.
-    expect(activeSection(offsets, 1400, 600, 2000)).toBe('advanced');
-  });
-
-  it('falls back to the first section before any section has been measured', () => {
-    expect(activeSection([], 0, 600, 600)).toBe('models');
   });
 });
 

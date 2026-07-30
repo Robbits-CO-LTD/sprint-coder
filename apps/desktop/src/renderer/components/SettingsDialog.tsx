@@ -12,7 +12,12 @@ import {
 import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/sprint-coder';
 import { ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
-import type { TeamPolicy } from '@sprint-coder/contracts';
+import type {
+  ProviderModel,
+  TeamModelIdentity,
+  TeamModelRestriction,
+  TeamPolicy,
+} from '@sprint-coder/contracts';
 import {
   readAccessPresetDefault,
   writeAccessPresetDefault,
@@ -41,7 +46,7 @@ import {
 
 type SettingsSection = 'models' | 'team' | 'skills' | 'advanced';
 
-/** The left-hand list, in order. It is the nav *and* the scroll-spy's source of truth, so a section
+/** The left-hand list, in order. It is the nav and the page switcher's source of truth, so a section
  * can never exist in one and not the other. `label` is both the nav row and the section's heading;
  * `eyebrow` is the Latin line above it. "Skill" is singular on purpose — SkillSettingsSection
  * already contributes a heading called "Skills", and two headings with one name is something a
@@ -182,6 +187,7 @@ export function LegacyBody({
           {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item, which
               is exactly where a user who cannot select a Runtime will not look. */}
           <CliDetectionGroup />
+          <TeamModelRestrictionSetting active={open} />
           <TeamResearchSetting active={open} />
           {/* Unmounting clears the renderer-local plaintext credential state. */}
           {open && <ProviderSettingsSection active={open} />}
@@ -195,11 +201,9 @@ export function LegacyBody({
   );
 }
 
-/** The flag-on body. Two panes: the section list on the left, one scrolling column on the right.
- *
- * The list scrolls that column rather than swapping its contents, so every section stays mounted —
- * a Skill scan is not restarted by looking at Runtime, a half-typed API key is not discarded by
- * navigating, and nothing is reachable only by having found the right page first. */
+/** The flag-on body. Two panes: the section list on the left and one settings page on the right.
+ * Pages stay mounted while hidden, so switching categories does not discard a half-typed API key,
+ * but unrelated settings no longer form one long document. */
 export function WorkspaceBody({
   open,
   supported,
@@ -213,34 +217,10 @@ export function WorkspaceBody({
 }) {
   const uid = useId();
   const [current, setCurrent] = useState<SettingsSection>('models');
-  const contentRef = useRef<HTMLDivElement>(null);
-
-  // Every open starts at the top: a dialog that reopens two-thirds of the way down its own content
-  // is disorienting, and a scroll position is not a setting worth remembering.
-  useEffect(() => {
-    if (!open) return;
-    contentRef.current?.scrollTo({ top: 0 });
-  }, [open]);
 
   function goTo(id: SettingsSection): void {
     setCurrent(id);
-    const pane = contentRef.current;
-    const element = document.getElementById(`${uid}-${id}`);
-    if (pane === null || element === null) return;
-    // Focus first, scroll second. Moving focus is what tells a screen reader where it now is;
-    // `preventScroll` keeps that from fighting the smooth scroll on the line below.
-    element.focus({ preventScroll: true });
-    pane.scrollTo({ top: Math.max(0, element.offsetTop - 8), behavior: scrollBehavior() });
-  }
-
-  function onScroll(): void {
-    const pane = contentRef.current;
-    if (pane === null) return;
-    const offsets = SETTINGS_SECTIONS.flatMap(({ id }) => {
-      const element = document.getElementById(`${uid}-${id}`);
-      return element === null ? [] : [{ id, top: element.offsetTop }];
-    });
-    setCurrent(activeSection(offsets, pane.scrollTop, pane.clientHeight, pane.scrollHeight));
+    requestAnimationFrame(() => document.getElementById(`${uid}-${id}`)?.focus());
   }
 
   function page(id: SettingsSection) {
@@ -290,13 +270,8 @@ export function WorkspaceBody({
             ))}
           </nav>
 
-          <div
-            className="settings-content"
-            data-testid="settings-content"
-            ref={contentRef}
-            onScroll={onScroll}
-          >
-            <WorkspacePage {...page('models')}>
+          <div className="settings-content" data-testid="settings-content">
+            <WorkspacePage {...page('models')} active={current === 'models'}>
               <ModelGroup />
               <EffortGroup />
               <AccessDefaultGroup />
@@ -304,19 +279,20 @@ export function WorkspaceBody({
               {open && <ProviderSettingsSection active={open} />}
             </WorkspacePage>
 
-            <WorkspacePage {...page('team')}>
+            <WorkspacePage {...page('team')} active={current === 'team'}>
               <TeamDefaultPolicySetting active={open} />
+              <TeamModelRestrictionSetting active={open} />
               <TeamResearchSetting active={open} />
             </WorkspacePage>
 
-            <WorkspacePage {...page('skills')}>
+            <WorkspacePage {...page('skills')} active={current === 'skills'}>
               <SkillSettingsSection
                 active={open}
                 {...(onCreateSkill === undefined ? {} : { onCreateWithAi: onCreateSkill })}
               />
             </WorkspacePage>
 
-            <WorkspacePage {...page('advanced')}>
+            <WorkspacePage {...page('advanced')} active={current === 'advanced'}>
               {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item,
                   which is exactly where a user who cannot select a Runtime will not look. */}
               <CliDetectionGroup />
@@ -332,17 +308,21 @@ export function WorkspaceBody({
 function WorkspacePage({
   meta,
   uid,
+  active,
   children,
 }: {
   meta: (typeof SETTINGS_SECTIONS)[number];
   uid: string;
+  active: boolean;
   children: React.ReactNode;
 }) {
   return (
     <section
       className="settings-page"
       id={`${uid}-${meta.id}`}
+      data-testid={`settings-page-${meta.id}`}
       aria-labelledby={`${uid}-${meta.id}-title`}
+      hidden={!active}
       // Focusable only programmatically, so activating a nav item can put a screen reader's cursor
       // where the eye already went without adding a Tab stop for anyone else.
       tabIndex={-1}
@@ -369,32 +349,6 @@ function CloseButton({ onClose }: { onClose: () => void }) {
       <X size={16} />
     </button>
   );
-}
-
-/** Which nav item is current for a scroll position. Pure, because a scroll-spy that highlights the
- * wrong row is otherwise only ever caught by hand. */
-export function activeSection(
-  offsets: readonly { id: SettingsSection; top: number }[],
-  scrollTop: number,
-  viewportHeight: number,
-  scrollHeight: number,
-): SettingsSection {
-  const first = offsets[0];
-  const last = offsets[offsets.length - 1];
-  if (first === undefined || last === undefined) return 'models';
-  // A short last section can never reach the top of the pane, so the end of the scroll always means
-  // the last one — otherwise the final nav row is one the scroll can never light up.
-  if (scrollTop + viewportHeight >= scrollHeight - 2) return last.id;
-  let current = first.id;
-  for (const { id, top } of offsets) if (top - 24 <= scrollTop) current = id;
-  return current;
-}
-
-function scrollBehavior(): ScrollBehavior {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'auto';
-  // The stylesheet's `prefers-reduced-motion` squash cannot reach a scroll asked for in JS with an
-  // explicit behavior, so this asks the media query the same question the CSS does.
-  return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
 }
 
 // ---------- Controls shared by both bodies ----------
@@ -822,6 +776,225 @@ const FALLBACK_POLICY: TeamPolicy = {
   budgetMode: 'bounded',
 };
 
+function teamModelKey(model: TeamModelIdentity): string {
+  return `${model.connectionId}\0${model.providerId}\0${model.modelId}`;
+}
+
+function providerModelIdentity(model: ProviderModel): TeamModelIdentity {
+  return {
+    connectionId: model.connectionId,
+    providerId: model.providerId,
+    modelId: model.modelId,
+  };
+}
+
+function sameModelRestriction(
+  left: TeamModelRestriction | null,
+  right: TeamModelRestriction | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  if (left.mode !== right.mode || left.allowedModels.length !== right.allowedModels.length)
+    return false;
+  const rightKeys = new Set(right.allowedModels.map(teamModelKey));
+  return left.allowedModels.every((model) => rightKeys.has(teamModelKey(model)));
+}
+
+function TeamModelRestrictionSetting({ active }: { active: boolean }) {
+  const [api] = useState(teamModelSettingsApi);
+  const [models, setModels] = useState<readonly ProviderModel[]>([]);
+  const [canonical, setCanonical] = useState<TeamModelRestriction | null>(null);
+  const [draft, setDraft] = useState<TeamModelRestriction | null>(null);
+  const [query, setQuery] = useState('');
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'saving'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+  const generation = useRef(0);
+
+  useEffect(() => {
+    if (!active || api === null) return;
+    const request = ++generation.current;
+    void (async () => {
+      await Promise.resolve();
+      if (request !== generation.current) return;
+      setPhase('loading');
+      setError(null);
+      try {
+        const result = await api.getTeamModelSettings();
+        if (request !== generation.current) return;
+        setModels(result.availableModels);
+        setCanonical(result.restriction);
+        setDraft(result.restriction);
+        setPhase('idle');
+      } catch {
+        if (request !== generation.current) return;
+        setError('Teamモデルの設定を読み込めませんでした。');
+        setPhase('idle');
+      }
+    })();
+    return () => {
+      if (request === generation.current) generation.current += 1;
+    };
+  }, [active, api]);
+
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleModels = models.filter((model) =>
+    `${model.displayName} ${model.modelId} ${model.connectionDisplayName ?? ''} ${model.providerId}`
+      .toLocaleLowerCase()
+      .includes(normalizedQuery),
+  );
+  const selectedKeys = new Set(draft?.allowedModels.map(teamModelKey) ?? []);
+  const dirty = !sameModelRestriction(draft, canonical);
+  const selectedCount = draft?.mode === 'selected' ? draft.allowedModels.length : models.length;
+
+  function chooseMode(mode: TeamModelRestriction['mode']): void {
+    setDraft((current) => {
+      if (current === null) return current;
+      return mode === 'all'
+        ? { mode: 'all', allowedModels: [] }
+        : { mode: 'selected', allowedModels: models.map(providerModelIdentity) };
+    });
+  }
+
+  function toggleModel(model: ProviderModel, checked: boolean): void {
+    const identity = providerModelIdentity(model);
+    const key = teamModelKey(identity);
+    setDraft((current) => {
+      if (current === null) return current;
+      const next = current.allowedModels.filter((candidate) => teamModelKey(candidate) !== key);
+      if (checked) next.push(identity);
+      return { mode: 'selected', allowedModels: next };
+    });
+  }
+
+  async function save(): Promise<void> {
+    if (api === null || draft === null || phase !== 'idle') return;
+    const request = ++generation.current;
+    setPhase('saving');
+    setError(null);
+    setStatus('');
+    try {
+      await api.setTeamModelRestriction(draft);
+      if (request !== generation.current) return;
+      setCanonical(draft);
+      setStatus('Teamで使用するモデルを保存しました。');
+    } catch {
+      if (request !== generation.current) return;
+      setError('Teamモデルの設定を保存できませんでした。1つ以上選択してください。');
+    } finally {
+      if (request === generation.current) setPhase('idle');
+    }
+  }
+
+  const disabled = api === null || draft === null || phase !== 'idle';
+
+  return (
+    <form
+      className="settings-group team-model-settings"
+      data-testid="settings-team-models"
+      aria-busy={phase === 'loading'}
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+    >
+      <div className="settings-section-heading">
+        <div>
+          <h3>Teamで使用するモデル</h3>
+          <p>LeaderとWorkerが選べるモデルを、この一覧に限定できます。</p>
+        </div>
+        <span className="settings-count-badge">
+          {phase === 'loading' ? '読み込み中' : `${selectedCount} / ${models.length}`}
+        </span>
+      </div>
+
+      <div className="team-model-mode" role="radiogroup" aria-label="Teamモデルの範囲">
+        <label>
+          <input
+            type="radio"
+            name="team-model-mode"
+            checked={draft?.mode === 'all'}
+            disabled={disabled}
+            onChange={() => chooseMode('all')}
+          />
+          すべての利用可能なモデル
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="team-model-mode"
+            checked={draft?.mode === 'selected'}
+            disabled={disabled || models.length === 0}
+            onChange={() => chooseMode('selected')}
+          />
+          選択したモデルのみ
+        </label>
+      </div>
+
+      {draft?.mode === 'selected' && (
+        <>
+          <label className="settings-field" htmlFor="settings-team-model-search">
+            <span className="settings-field-label">モデルを検索</span>
+            <input
+              id="settings-team-model-search"
+              className="settings-text-input"
+              type="search"
+              placeholder="モデル名、Provider、接続名"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <div className="team-model-list" aria-label="使用を許可するモデル">
+            {visibleModels.length === 0 ? (
+              <p className="settings-hint">条件に一致するモデルはありません。</p>
+            ) : (
+              visibleModels.map((model) => (
+                <label className="team-model-row" key={teamModelKey(providerModelIdentity(model))}>
+                  <input
+                    type="checkbox"
+                    checked={selectedKeys.has(teamModelKey(providerModelIdentity(model)))}
+                    disabled={phase !== 'idle'}
+                    onChange={(event) => toggleModel(model, event.target.checked)}
+                  />
+                  <span>
+                    <strong>{model.displayName}</strong>
+                    <small>
+                      {model.connectionDisplayName ?? model.connectionId} · {model.modelId}
+                    </small>
+                  </span>
+                </label>
+              ))
+            )}
+          </div>
+        </>
+      )}
+
+      <div className="settings-inline-actions">
+        <p className="settings-hint">
+          この制限は新しい採用だけでなく、Teamのモデル候補一覧にも適用されます。
+        </p>
+        <button
+          type="submit"
+          className="settings-secondary-button"
+          data-testid="settings-team-models-save"
+          disabled={
+            disabled || !dirty || (draft?.mode === 'selected' && draft.allowedModels.length === 0)
+          }
+        >
+          {phase === 'saving' ? '保存中…' : 'モデル設定を保存'}
+        </button>
+      </div>
+      {error !== null && (
+        <p className="settings-skill-error" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status}
+      </p>
+    </form>
+  );
+}
+
 // Global Team setting: whether a Leader/Manager researches the Web before hiring Workers. Kept in
 // this file rather than the store because it is a persisted backend value with no renderer-side
 // consumer — the canonical answer lives in Main, so the dialog reads it fresh on every open instead
@@ -972,6 +1145,17 @@ function defaultPolicyApi(): NonNullable<Window['sprintCoder']>['settings'] | nu
     settings === undefined ||
     typeof settings.getDefaultTeamPolicy !== 'function' ||
     typeof settings.setDefaultTeamPolicy !== 'function'
+  )
+    return null;
+  return settings;
+}
+
+function teamModelSettingsApi(): NonNullable<Window['sprintCoder']>['settings'] | null {
+  const settings = typeof window === 'undefined' ? undefined : window.sprintCoder?.settings;
+  if (
+    settings === undefined ||
+    typeof settings.getTeamModelSettings !== 'function' ||
+    typeof settings.setTeamModelRestriction !== 'function'
   )
     return null;
   return settings;

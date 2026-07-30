@@ -28,7 +28,7 @@ export class MainProviderProfileRegistry implements ProviderProfileRegistry {
 }
 
 export type OpenAICompatibleCredential = Readonly<{
-  apiKey: string;
+  apiKey?: string;
   baseUrl?: string;
   accountId?: string;
 }>;
@@ -36,7 +36,7 @@ export type OpenAICompatibleCredential = Readonly<{
 export function serializeOpenAICompatibleCredential(
   credential: OpenAICompatibleCredential,
 ): string {
-  if (credential.apiKey.trim().length === 0)
+  if (credential.apiKey !== undefined && credential.apiKey.trim().length === 0)
     throw new Error('OpenAI-compatible API key is missing');
   return JSON.stringify(credential);
 }
@@ -46,17 +46,27 @@ export function parseOpenAICompatibleCredential(value: string): OpenAICompatible
   if (parsed === null || typeof parsed !== 'object')
     throw new Error('OpenAI-compatible credential is invalid');
   const record = parsed as Record<string, unknown>;
-  if (typeof record.apiKey !== 'string' || record.apiKey.trim().length === 0)
+  if (
+    record.apiKey !== undefined &&
+    (typeof record.apiKey !== 'string' || record.apiKey.trim().length === 0)
+  )
     throw new Error('OpenAI-compatible API key is missing');
   if (record.baseUrl !== undefined && typeof record.baseUrl !== 'string')
     throw new Error('OpenAI-compatible base URL is invalid');
   if (record.accountId !== undefined && typeof record.accountId !== 'string')
     throw new Error('OpenAI-compatible account ID is invalid');
   return {
-    apiKey: record.apiKey,
+    ...(typeof record.apiKey === 'string' ? { apiKey: record.apiKey } : {}),
     ...(typeof record.baseUrl === 'string' ? { baseUrl: record.baseUrl } : {}),
     ...(typeof record.accountId === 'string' ? { accountId: record.accountId } : {}),
   };
+}
+
+export function profileRequiresCredential(
+  profile: ProviderProfile,
+  field: ProviderProfile['requiredCredentialFields'][number],
+): boolean {
+  return profile.requiredCredentialFields.includes(field);
 }
 
 export function resolveProfileBaseUrl(
@@ -81,4 +91,12 @@ export function resolveProfileBaseUrl(
   )
     throw new Error('Custom Provider base URL must use HTTPS or loopback HTTP');
   return baseUrl.replace(/\/+$/, '');
+}
+
+export function resolvedProfileEndpointTrust(
+  profile: ProviderProfile,
+  credential: OpenAICompatibleCredential,
+): 'trusted-local' | 'trusted-remote' {
+  const hostname = new URL(resolveProfileBaseUrl(profile, credential)).hostname.toLowerCase();
+  return hostname === 'localhost' || hostname === '127.0.0.1' ? 'trusted-local' : 'trusted-remote';
 }

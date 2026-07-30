@@ -108,4 +108,29 @@ describe('ModelCatalogService', () => {
       'openrouter:connection-1',
     ]);
   });
+
+  it('applies a Team model allowlist before pagination and total calculation', () => {
+    const service = new ModelCatalogService();
+    service.replaceCatalog([model(1), model(2), model(3)]);
+    const allowed = new Set(['builtin:codex-cli\u0000openai\u0000model-2']);
+
+    const result = service.query(
+      {
+        taskId: 'task-1',
+        text: '',
+        connectionIds: [],
+        providerIds: [],
+        accessTypes: [],
+        capabilities: [],
+        availableOnly: true,
+        cursor: null,
+        limit: 10,
+      },
+      allowed,
+    );
+
+    expect(result.total).toBe(1);
+    expect(result.items.map(({ modelId }) => modelId)).toEqual(['model-2']);
+    expect(result.nextCursor).toBeNull();
+  });
 });

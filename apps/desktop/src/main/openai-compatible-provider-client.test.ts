@@ -4,7 +4,7 @@ import type {
   ProviderConnection,
   ProviderProfile,
 } from '@sprint-coder/contracts';
-import { MainProviderProfileRegistry } from './provider-profile';
+import { MainProviderProfileRegistry, resolvedProfileEndpointTrust } from './provider-profile';
 import {
   OpenAICompatibleProviderClient,
   openAICompatibleChatCompletionRequest,
@@ -20,7 +20,7 @@ const profile: ProviderProfile = {
   curatedModels: [],
   verificationModel: null,
   authentication: { headerName: 'Authorization', scheme: 'Bearer' },
-  requiredCredentialFields: [],
+  requiredCredentialFields: ['api_key'],
   errorOverrides: [],
   sourceReference: 'https://docs.example.com/openai',
   reviewedAt: '2026-07-28T00:00:00.000Z',
@@ -75,6 +75,22 @@ async function collect(
 }
 
 describe('OpenAICompatibleProviderClient', () => {
+  it('classifies only resolved loopback endpoints as trusted local', () => {
+    const configurable = { ...profile, baseUrlConfigurable: true };
+    expect(
+      resolvedProfileEndpointTrust({ ...configurable, baseUrl: 'http://localhost:11434/v1' }, {}),
+    ).toBe('trusted-local');
+    expect(
+      resolvedProfileEndpointTrust(configurable, { baseUrl: 'http://127.0.0.1:8080/v1' }),
+    ).toBe('trusted-local');
+    expect(
+      resolvedProfileEndpointTrust(configurable, { baseUrl: 'https://local.example.test/v1' }),
+    ).toBe('trusted-remote');
+    expect(() =>
+      resolvedProfileEndpointTrust(configurable, { baseUrl: 'http://192.168.1.20:8080/v1' }),
+    ).toThrow('must use HTTPS or loopback HTTP');
+  });
+
   it('uses one Profile for authentication and model discovery without inventing capabilities', async () => {
     const requests: Array<{ url: string; authorization: string | null }> = [];
     const client = new OpenAICompatibleProviderClient(
@@ -119,6 +135,37 @@ describe('OpenAICompatibleProviderClient', () => {
       toolCalling: { value: null, source: 'unknown' },
       reasoning: { value: null, source: 'unknown' },
     });
+  });
+
+  it('omits authentication for a Profile whose API key is optional', async () => {
+    const optionalProfile: ProviderProfile = {
+      ...profile,
+      id: 'local',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      requiredCredentialFields: [],
+    };
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(optionalProfile);
+    const client = new OpenAICompatibleProviderClient(
+      profiles,
+      () => ({}),
+      async (input, init) => {
+        expect(String(input)).toBe('http://localhost:11434/v1/models');
+        expect(new Headers(init?.headers).has('authorization')).toBe(false);
+        return new Response(JSON.stringify({ object: 'list', data: [{ id: 'local-model' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    );
+
+    await expect(
+      client.listModels(
+        { ...connection, id: 'local:connection', providerId: 'local' },
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject([{ modelId: 'local-model' }]);
   });
 
   it('normalizes fragmented Chat Completions text, reasoning, tools, usage and resolution', async () => {

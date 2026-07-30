@@ -29,6 +29,7 @@ type SmokeCase = Readonly<{
   runtimeKind: ProviderRuntimeKind;
   keyEnvironment: string;
   modelEnvironment: string;
+  selectionEnvironment?: string;
   defaultModel?: string;
   credentialAvailable: () => boolean;
   createRuntime: () => ProviderRuntime;
@@ -112,23 +113,30 @@ const compatibleCases: readonly SmokeCase[] = BUNDLED_PROVIDER_PROFILES.map((pro
   const keyEnvironment =
     profile.id === 'cloudflare-workers-ai' ? 'CLOUDFLARE_API_TOKEN' : `${prefix}_API_KEY`;
   const modelEnvironment = `${prefix}_SMOKE_MODEL`;
+  const baseUrlEnvironment = `${prefix}_BASE_URL`;
   const defaultModel = profile.verificationModel ?? undefined;
+  const apiKeyRequired = profile.requiredCredentialFields.includes('api_key');
   return {
     providerId: profile.id,
     displayName: profile.displayName,
     runtimeKind: 'openai_compatible',
     keyEnvironment,
     modelEnvironment,
+    ...(!apiKeyRequired && defaultModel === undefined
+      ? { selectionEnvironment: modelEnvironment }
+      : {}),
     ...(defaultModel === undefined ? {} : { defaultModel }),
     credentialAvailable: () =>
-      hasEnvironment(keyEnvironment) &&
+      (!apiKeyRequired || hasEnvironment(keyEnvironment)) &&
       (profile.id !== 'cloudflare-workers-ai' || hasEnvironment('CLOUDFLARE_ACCOUNT_ID')),
     createRuntime: () =>
       new OpenAICompatibleProviderClient(profiles, () => {
-        const baseUrl =
-          profile.id === 'nvidia-nim' ? optionalEnvironment('NVIDIA_NIM_BASE_URL') : undefined;
+        const apiKey = optionalEnvironment(keyEnvironment);
+        const baseUrl = profile.baseUrlConfigurable
+          ? optionalEnvironment(baseUrlEnvironment)
+          : undefined;
         const credential: OpenAICompatibleCredential = {
-          apiKey: requireEnvironment(keyEnvironment),
+          ...(apiKey === undefined ? {} : { apiKey }),
           ...(profile.id === 'cloudflare-workers-ai'
             ? { accountId: requireEnvironment('CLOUDFLARE_ACCOUNT_ID') }
             : {}),
@@ -151,7 +159,12 @@ describe.skipIf(!SMOKE_ENABLED)('Provider release smoke', () => {
 
   for (const smokeCase of smokeCases) {
     const required = REQUIRED_PROVIDERS.has(smokeCase.providerId);
-    const selected = REQUIRED_PROVIDERS.size > 0 ? required : smokeCase.credentialAvailable();
+    const selected =
+      REQUIRED_PROVIDERS.size > 0
+        ? required
+        : smokeCase.selectionEnvironment === undefined
+          ? smokeCase.credentialAvailable()
+          : hasEnvironment(smokeCase.selectionEnvironment);
     const runnable = smokeCase.credentialAvailable();
 
     it.skipIf(!selected)(

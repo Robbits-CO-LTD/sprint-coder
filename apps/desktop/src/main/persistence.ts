@@ -11,6 +11,7 @@ import {
   normalizedProviderUsageSchema,
   providerConnectionSchema,
   taskSummarySchema,
+  teamModelRestrictionSchema,
   teamBlueprintSchema,
   turnSkillSelectionsSchema,
   turnSkillSelectionSchema,
@@ -43,6 +44,7 @@ import {
   type TaskSummary,
   type TeamBudgetStatus,
   type TeamBlueprint,
+  type TeamModelRestriction,
   type TeamUsageTotals,
   type TurnEvent,
   type TurnSnapshot,
@@ -551,6 +553,7 @@ type MessageRow = {
   turn_id: string | null;
   author: ChatMessage['author'];
   content: string;
+  work_content: string | null;
   created_at: string;
 };
 type TurnRow = {
@@ -2317,6 +2320,13 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 51,
+    checksum: 'chat-work-summary-v51-message-boundary',
+    sql: `
+      ALTER TABLE messages ADD COLUMN work_content TEXT;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2940,6 +2950,8 @@ export interface PersistenceClient {
   setCodexEffort(effort: string): void;
   getTeamModelResearchBeforeHiring(): boolean;
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
+  getTeamModelRestriction(): TeamModelRestriction;
+  setTeamModelRestriction(restriction: TeamModelRestriction): void;
   getDefaultTeamPolicy(): TeamPolicy;
   setDefaultTeamPolicy(policy: TeamPolicy): void;
   getPermissionPolicy(taskId: string): PermissionPolicyRecord;
@@ -3186,6 +3198,7 @@ export interface PersistenceClient {
     taskId: string,
     turnId: string,
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
+    finalText?: string,
   ): TurnEvent;
   cancelTurn(taskId: string, turnId: string): TurnEvent | null;
   snapshot(taskId: string): TurnSnapshot;
@@ -5960,6 +5973,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(enabled ? '1' : '0', new Date().toISOString());
+  }
+
+  getTeamModelRestriction(): TeamModelRestriction {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'team.model-restriction'")
+      .get() as { value: string } | undefined;
+    if (row === undefined) return { mode: 'all', allowedModels: [] };
+    try {
+      return teamModelRestrictionSchema.parse(JSON.parse(row.value));
+    } catch {
+      return { mode: 'all', allowedModels: [] };
+    }
+  }
+
+  setTeamModelRestriction(restriction: TeamModelRestriction): void {
+    const parsed = teamModelRestrictionSchema.parse(restriction);
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('team.model-restriction', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(JSON.stringify(parsed), new Date().toISOString());
   }
 
   getDefaultTeamPolicy(): TeamPolicy {
@@ -8792,8 +8827,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     taskId: string,
     turnId: string,
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
+    finalText?: string,
   ): TurnEvent {
-    return this.db.transaction(() => this.completeTurnInTransaction(taskId, turnId, state))();
+    return this.db.transaction(() =>
+      this.completeTurnInTransaction(taskId, turnId, state, finalText),
+    )();
   }
 
   cancelTurn(taskId: string, turnId: string): TurnEvent | null {
@@ -9560,6 +9598,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     taskId: string,
     turnId: string,
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
+    finalText?: string,
   ): TurnEvent {
     const turn = this.getTurn(taskId, turnId);
     if (state === 'completed') {
@@ -9573,6 +9612,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
     transitionTurn(turn.state, state);
     this.updateTurn(turnId, state);
     this.requeueUnacknowledgedBackgroundInTransaction(taskId, turnId);
+    if (state === 'completed' && turn.assistant_message_id !== null && finalText !== undefined) {
+      const message = this.db
+        .prepare('SELECT content FROM messages WHERE id = ?')
+        .get(turn.assistant_message_id) as { content: string } | undefined;
+      const split =
+        message === undefined ? null : splitAssistantConclusion(message.content, finalText);
+      if (split !== null)
+        this.db
+          .prepare('UPDATE messages SET content = ?, work_content = ? WHERE id = ?')
+          .run(split.content, split.workContent, turn.assistant_message_id);
+    }
     const row =
       turn.assistant_message_id === null
         ? undefined
@@ -10472,8 +10522,21 @@ function toMessage(row: MessageRow): ChatMessage {
     turnId: row.turn_id,
     author: row.author,
     content: row.content,
+    workContent: row.work_content,
     createdAt: row.created_at,
   });
+}
+
+export function splitAssistantConclusion(
+  content: string,
+  finalText: string,
+): { content: string; workContent: string | null } | null {
+  if (finalText.length === 0 || !content.endsWith(finalText)) return null;
+  const prefix = content.slice(0, content.length - finalText.length).replace(/\n\n$/, '');
+  return {
+    content: finalText,
+    workContent: prefix.length === 0 ? null : prefix,
+  };
 }
 
 function toStepSnapshot(row: IntelligenceStepRow): StepSnapshot {

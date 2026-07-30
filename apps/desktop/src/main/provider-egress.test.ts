@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { PermissionBroker } from './permission-broker';
 import { SqlitePersistenceClient } from './persistence';
-import { authorizeCodexProviderEgress, dispatchAfterCodexProviderEgress } from './provider-egress';
+import {
+  authorizeCodexProviderEgress,
+  authorizeOfficialApiProviderEgress,
+  dispatchAfterCodexProviderEgress,
+} from './provider-egress';
 import type { PreparedContext } from './context-ledger';
 
 const cleanup: string[] = [];
@@ -92,6 +96,58 @@ if (runsWithElectronAbi)
       );
       expect(decision.allowed).toBe(false);
       expect(dispatches).toBe(0);
+      fixture.persistence.close();
+    });
+
+    it('allows a trusted loopback Provider for a local-only Task', () => {
+      const fixture = createFixture(true);
+      const decision = authorizeOfficialApiProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'turn-local-provider',
+          prompt: 'must stay local',
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+        },
+        'ollama',
+        'trusted-local',
+      );
+
+      expect(decision).toMatchObject({
+        allowed: true,
+        evaluation: { decision: 'allow', reason: 'ollama_official_api_egress' },
+      });
+      expect(readAudit(fixture.path)).toEqual([
+        expect.objectContaining({ capability: 'provider.egress', decision: 'allow' }),
+        expect.objectContaining({
+          capability: 'provider.egress',
+          decision: 'allow',
+          reason: 'execution_revalidation_valid',
+        }),
+      ]);
+      fixture.persistence.close();
+    });
+
+    it('keeps the secret scan fail-closed for a trusted loopback Provider', () => {
+      const fixture = createFixture(true);
+      const decision = authorizeOfficialApiProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'turn-local-provider-secret',
+          prompt: 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+        },
+        'ollama',
+        'trusted-local',
+      );
+
+      expect(decision).toMatchObject({
+        allowed: false,
+        evaluation: { decision: 'deny', reason: 'parent_ceiling' },
+      });
       fixture.persistence.close();
     });
 

@@ -367,7 +367,7 @@ export default function App() {
                 <List size={14} /> Task履歴を{sidebarCollapsed ? '開く' : '閉じる'}
               </button>
               <h2>Taskを選択してください</h2>
-              <p>左のTask履歴から選ぶか、新しいTaskを作成して会話を始めます。</p>
+              <p>左のTask履歴から選ぶか、新しいタスクを作成して会話を始めます。</p>
               <div className="chips">
                 <button
                   type="button"
@@ -375,7 +375,7 @@ export default function App() {
                   data-testid="empty-state-create-task-button"
                   onClick={() => void createTask()}
                 >
-                  <Plus size={14} /> 新しいTaskを作成
+                  <Plus size={14} /> 新しいタスクを作成
                 </button>
               </div>
             </div>

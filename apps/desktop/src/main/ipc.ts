@@ -62,6 +62,8 @@ import {
   runtimeSettingsSchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
+  teamModelRestrictionSetInputSchema,
+  teamModelSettingsSchema,
   teamBlueprintSchema,
   skillCandidateInputSchema,
   skillCatalogSchema,
@@ -119,6 +121,7 @@ import {
   type CanonicalProviderEvent,
   type CodexModelOption,
   type ProviderExecutionRequest,
+  type ProviderConnection,
   type ProviderMessageToolCall,
   type ProviderModel,
   type PublicError,
@@ -203,7 +206,7 @@ import {
 import { installBuiltinSkillCreator } from './skill-creator-builtin';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
-import { ModelCatalogService } from './model-catalog-service';
+import { ModelCatalogService, teamModelIdentityKey } from './model-catalog-service';
 import { builtinRuntimeForModelSelection, modelSelectionForRuntime } from './connection-identity';
 import { multiProviderModelPickerV2Enabled, settingsWorkspaceV2Enabled } from './feature-flags';
 import {
@@ -220,7 +223,12 @@ import { GeminiProviderClient, parseGeminiCredential } from './gemini-provider-c
 import { XAIProviderClient, parseXAICredential } from './xai-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
 import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
-import { MainProviderProfileRegistry, parseOpenAICompatibleCredential } from './provider-profile';
+import {
+  MainProviderProfileRegistry,
+  parseOpenAICompatibleCredential,
+  resolvedProfileEndpointTrust,
+  type OpenAICompatibleCredential,
+} from './provider-profile';
 import { BUNDLED_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { OpenAICompatibleProviderClient } from './openai-compatible-provider-client';
 
@@ -289,6 +297,9 @@ export class IpcRouter {
   private readonly modelCatalog = new ModelCatalogService();
   private readonly providerRegistry = new MainProviderRegistry();
   private readonly providerProfiles = new MainProviderProfileRegistry();
+  private readonly providerEgressTrustForConnection: (
+    connection: ProviderConnection,
+  ) => 'trusted-local' | 'trusted-remote';
   private readonly providerVerification: ProviderVerificationService;
   private readonly providerConnections: ProviderConnectionService;
   private teamSkillReady = false;
@@ -306,11 +317,24 @@ export class IpcRouter {
       new ElectronProviderSecretCipher(),
     );
     for (const profile of BUNDLED_PROVIDER_PROFILES) this.providerProfiles.register(profile);
-    const compatible = new OpenAICompatibleProviderClient(this.providerProfiles, (connection) => {
+    const resolveCompatibleCredential = (
+      connection: ProviderConnection,
+    ): OpenAICompatibleCredential => {
       if (connection.secretReference === null)
         throw new Error('Provider Profile Connection has no secret reference');
       return parseOpenAICompatibleCredential(providerSecrets.get(connection.secretReference));
-    });
+    };
+    this.providerEgressTrustForConnection = (connection) => {
+      if (connection.runtimeKind !== 'openai_compatible') return 'trusted-remote';
+      return resolvedProfileEndpointTrust(
+        this.providerProfiles.get(connection.providerId),
+        resolveCompatibleCredential(connection),
+      );
+    };
+    const compatible = new OpenAICompatibleProviderClient(
+      this.providerProfiles,
+      resolveCompatibleCredential,
+    );
     this.providerRegistry.register({
       runtimeKind: 'openai_compatible',
       providerId: null,
@@ -428,7 +452,7 @@ export class IpcRouter {
       verification: this.providerVerification,
       registry: this.providerRegistry,
       getConnection: (connectionId) => this.persistence.getProviderConnection(connectionId),
-      authorizeEgress: ({ worker, executionId, providerId, prompt }) =>
+      authorizeEgress: ({ worker, executionId, connection, prompt }) =>
         authorizeOfficialApiProviderEgress(
           {
             broker: this.permissionBroker,
@@ -438,7 +462,8 @@ export class IpcRouter {
             context: { fragments: [], usageEvents: [], compacted: false },
             now: new Date().toISOString(),
           },
-          providerId,
+          connection.providerId,
+          this.providerEgressTrustForConnection(connection),
         ).allowed,
       contextFor: (worker) =>
         buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId)),
@@ -649,6 +674,44 @@ export class IpcRouter {
       (input, event, envelope) =>
         this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetTeamModelResearch, () =>
           this.persistence.setTeamModelResearchBeforeHiring(input.researchBeforeHiring),
+        ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetTeamModelSettings,
+      emptyPayloadSchema,
+      teamModelSettingsSchema,
+      async () => {
+        await this.refreshModelCatalog();
+        const availableModels: ProviderModel[] = [];
+        let cursor: string | null = null;
+        do {
+          const page = this.modelCatalog.query({
+            taskId: 'settings',
+            text: '',
+            connectionIds: [],
+            providerIds: [],
+            accessTypes: [],
+            capabilities: [],
+            availableOnly: true,
+            cursor,
+            limit: 100,
+          });
+          availableModels.push(...page.items.slice(0, 512 - availableModels.length));
+          cursor = availableModels.length >= 512 ? null : page.nextCursor;
+        } while (cursor !== null);
+        return {
+          restriction: this.persistence.getTeamModelRestriction(),
+          availableModels,
+        };
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetTeamModelRestriction,
+      teamModelRestrictionSetInputSchema,
+      z.undefined(),
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetTeamModelRestriction, () =>
+          this.persistence.setTeamModelRestriction(input),
         ).value,
     );
     this.handle(
@@ -1794,7 +1857,12 @@ export class IpcRouter {
     };
   }
 
-  private finishAndAdvance(taskId: string, turnId: string, state: 'completed' | 'failed'): void {
+  private finishAndAdvance(
+    taskId: string,
+    turnId: string,
+    state: 'completed' | 'failed',
+    finalText?: string,
+  ): void {
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
     // Flush the tail and stop the timer before the turn is finalised, so the last thought is not
@@ -1835,7 +1903,7 @@ export class IpcRouter {
         resolvedProvider: resolvedProvider ?? null,
         resolvedModel,
       });
-    const event = this.persistence.completeTurn(taskId, turnId, state);
+    const event = this.persistence.completeTurn(taskId, turnId, state, finalText);
     this.publish(
       event.type === 'turn.completed' && resolvedModel !== undefined
         ? { ...event, resolvedModel }
@@ -2284,17 +2352,20 @@ export class IpcRouter {
     input: Parameters<NonNullable<ExecuteTeamToolOptions['listModelCandidates']>>[0],
   ): Promise<unknown> {
     await this.refreshModelCatalog();
-    return this.modelCatalog.query({
-      taskId: input.taskId,
-      text: input.text,
-      connectionIds: [...input.connectionIds],
-      providerIds: [...input.providerIds],
-      accessTypes: [],
-      capabilities: [...input.capabilities],
-      availableOnly: true,
-      cursor: input.cursor,
-      limit: input.limit,
-    });
+    return this.modelCatalog.query(
+      {
+        taskId: input.taskId,
+        text: input.text,
+        connectionIds: [...input.connectionIds],
+        providerIds: [...input.providerIds],
+        accessTypes: [],
+        capabilities: [...input.capabilities],
+        availableOnly: true,
+        cursor: input.cursor,
+        limit: input.limit,
+      },
+      this.teamModelAllowedKeys(),
+    );
   }
 
   private async validateTeamModelSelection(
@@ -2308,17 +2379,22 @@ export class IpcRouter {
     )
       throw new Error('Team Worker model selection must identify a Connection and model');
     await this.refreshModelCatalog();
-    const result = this.modelCatalog.query({
-      taskId,
-      text: selection.requestedModel,
-      connectionIds: [selection.connectionId],
-      providerIds: [selection.requestedProvider],
-      accessTypes: [],
-      capabilities: [],
-      availableOnly: true,
-      cursor: null,
-      limit: 100,
-    });
+    if (!this.isTeamModelAllowed(selection))
+      throw new Error('Selected Team Worker model is not permitted by Team model settings');
+    const result = this.modelCatalog.query(
+      {
+        taskId,
+        text: selection.requestedModel,
+        connectionIds: [selection.connectionId],
+        providerIds: [selection.requestedProvider],
+        accessTypes: [],
+        capabilities: [],
+        availableOnly: true,
+        cursor: null,
+        limit: 100,
+      },
+      this.teamModelAllowedKeys(),
+    );
     if (
       !result.items.some(
         (model) =>
@@ -2328,6 +2404,31 @@ export class IpcRouter {
       )
     )
       throw new Error('Selected Team Worker model is not available on the requested Connection');
+  }
+
+  private teamModelAllowedKeys(): ReadonlySet<string> | undefined {
+    const restriction = this.persistence.getTeamModelRestriction();
+    return restriction.mode === 'all'
+      ? undefined
+      : new Set(restriction.allowedModels.map(teamModelIdentityKey));
+  }
+
+  private isTeamModelAllowed(selection: ModelSelection): boolean {
+    const allowed = this.teamModelAllowedKeys();
+    if (allowed === undefined) return true;
+    if (
+      selection.connectionId === null ||
+      selection.requestedProvider === null ||
+      selection.requestedModel === null
+    )
+      return false;
+    return allowed.has(
+      teamModelIdentityKey({
+        connectionId: selection.connectionId,
+        providerId: selection.requestedProvider,
+        modelId: selection.requestedModel,
+      }),
+    );
   }
 
   private prepareContext(taskId: string, turnId: string, teamSkill = false): PreparedContext {
@@ -2447,6 +2548,7 @@ export class IpcRouter {
           now: new Date().toISOString(),
         },
         connection.providerId,
+        this.providerEgressTrustForConnection(connection),
       );
       if (!egress.allowed) throw new Error('Provider egress was denied by policy');
       await this.mailbox.run(taskId, () => {
@@ -2653,7 +2755,7 @@ export class IpcRouter {
           }
           if (runtimeEvent.resolvedModel !== undefined)
             this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
-          this.finishAndAdvance(taskId, turnId, 'completed');
+          this.finishAndAdvance(taskId, turnId, 'completed', runtimeEvent.finalText);
         }
       })
       .catch((error: unknown) => {
