@@ -5,6 +5,7 @@ import {
   commandEnvelopeSchema,
   executionResolutionSchema,
   modelSelectionSchema,
+  providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   permissionSettingsSchema,
   permissionSetInputSchema,
@@ -178,12 +179,24 @@ describe('public contracts', () => {
         curatedModels: [],
         verificationModel: null,
         authentication: { headerName: 'Authorization', scheme: 'Bearer' },
-        requiredCredentialFields: [],
+        requiredCredentialFields: ['api_key'],
         errorOverrides: [{ status: 429, category: 'rate_limited', retryable: true }],
         sourceReference: 'https://docs.example.com/openai-compatibility',
         reviewedAt: '2026-07-28T00:00:00.000Z',
       }),
     ).toMatchObject({ id: 'example', protocol: 'chat_completions' });
+  });
+
+  it('allows an OpenAI-compatible Profile Connection to omit an optional API key', () => {
+    expect(
+      providerProfileConnectionCreateInputSchema.parse({
+        profileId: 'ollama',
+        displayName: 'Local Ollama',
+      }),
+    ).toEqual({
+      profileId: 'ollama',
+      displayName: 'Local Ollama',
+    });
   });
 
   it('keeps requested selection separate from observed execution resolution', () => {

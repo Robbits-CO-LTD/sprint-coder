@@ -202,6 +202,12 @@ test.describe('settings dialog', () => {
     await expect(page.getByTestId('settings-provider-name')).toHaveValue('');
     await expect(page.getByTestId('settings-provider-api-key')).toHaveValue('');
 
+    await page.getByTestId('settings-provider-kind').selectOption('profile:ollama');
+    await expect(page.getByText('APIキー（任意）', { exact: true })).toBeVisible();
+    await page.getByTestId('settings-provider-name').fill('ローカル Ollama');
+    await expect(page.getByTestId('settings-provider-api-key')).toHaveValue('');
+    await expect(page.getByTestId('settings-provider-submit')).toBeEnabled();
+
     await page.screenshot({
       path: testInfo.outputPath('provider-settings-reset.png'),
       fullPage: true,

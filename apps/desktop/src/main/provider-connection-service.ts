@@ -19,7 +19,9 @@ import { serializeAnthropicCredential } from './anthropic-provider-client';
 import { serializeGeminiCredential } from './gemini-provider-client';
 import { serializeXAICredential } from './xai-provider-client';
 import {
+  resolveProfileBaseUrl,
   serializeOpenAICompatibleCredential,
+  type OpenAICompatibleCredential,
   type ProviderProfileRegistry,
 } from './provider-profile';
 
@@ -230,15 +232,19 @@ export class ProviderConnectionService {
     if (parsed.baseUrl !== undefined && !profile.baseUrlConfigurable)
       throw new Error(`Provider Profile ${profile.id} does not allow a custom base URL`);
     for (const field of profile.requiredCredentialFields)
-      if (field === 'account_id' && parsed.accountId === undefined)
+      if (field === 'api_key' && parsed.apiKey === undefined)
+        throw new Error(`Provider Profile ${profile.id} requires an API key`);
+      else if (field === 'account_id' && parsed.accountId === undefined)
         throw new Error(`Provider Profile ${profile.id} requires an account ID`);
-    const secretReference = this.secrets.put(
-      serializeOpenAICompatibleCredential({
-        apiKey: parsed.apiKey,
-        ...(parsed.baseUrl === undefined ? {} : { baseUrl: parsed.baseUrl }),
-        ...(parsed.accountId === undefined ? {} : { accountId: parsed.accountId }),
-      }),
-    );
+    const credential: OpenAICompatibleCredential = {
+      ...(parsed.apiKey === undefined ? {} : { apiKey: parsed.apiKey }),
+      ...(parsed.baseUrl === undefined ? {} : { baseUrl: parsed.baseUrl }),
+      ...(parsed.accountId === undefined ? {} : { accountId: parsed.accountId }),
+    };
+    // Validate the effective endpoint before writing either the credential envelope or Connection.
+    // This prevents an insecure LAN HTTP URL from surviving as a permanently unavailable record.
+    resolveProfileBaseUrl(profile, credential);
+    const secretReference = this.secrets.put(serializeOpenAICompatibleCredential(credential));
     const timestamp = this.now().toISOString();
     try {
       return this.repository.createProviderConnection({

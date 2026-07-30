@@ -117,6 +117,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     const registry = new MainProviderRegistry();
     registry.register({ runtimeKind: 'official_api', providerId: 'openai', runtime });
     const fallbackExecute = vi.fn();
+    const authorizeEgress = vi.fn(() => true);
     const adapter = new ProviderAwareTeamWorkerRuntime({
       fallback: {
         start: async () => ({ pid: null }),
@@ -128,7 +129,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       } as unknown as ProviderVerificationService,
       registry,
       getConnection: () => connection,
-      authorizeEgress: () => true,
+      authorizeEgress,
       contextFor: () => ({
         fragments: [
           {
@@ -160,6 +161,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     });
 
     expect(fallbackExecute).not.toHaveBeenCalled();
+    expect(authorizeEgress).toHaveBeenCalledWith(expect.objectContaining({ connection }));
     expect(result.completion).toMatchObject({ status: 'succeeded', summary: '調査完了' });
     expect(result.resolution).toEqual({
       resolvedProvider: 'openai',

@@ -31,6 +31,7 @@ import {
   SUBMIT_BLOCKED_ACCOUNT_ID,
   SUBMIT_BLOCKED_BUSY,
   SUBMIT_BLOCKED_INPUT,
+  SUBMIT_BLOCKED_NAME,
   SUBMIT_BLOCKED_SELECTION,
   SUBMIT_HINT_ID,
   VERIFICATION_LABEL,
@@ -55,6 +56,7 @@ import {
   lowerConcurrencyLimit,
   parseConcurrencyLimit,
   profileRequiresAccountId,
+  profileRequiresApiKey,
   providerCreateErrorMessage,
   providerSelectDescribedBy,
   providerSelectValue,
@@ -133,7 +135,7 @@ function profile(overrides: Partial<ProviderProfile> = {}): ProviderProfile {
     curatedModels: [],
     verificationModel: null,
     authentication: { headerName: 'Authorization', scheme: 'Bearer' },
-    requiredCredentialFields: [],
+    requiredCredentialFields: ['api_key'],
     errorOverrides: [],
     sourceReference: 'https://docs.example-compat.test/openai',
     reviewedAt: '2026-07-28T00:00:00.000Z',
@@ -411,7 +413,7 @@ describe('Provider Profile selection', () => {
   });
 
   it('requires a declared credential field before the form can be submitted', () => {
-    const needsAccount = profile({ requiredCredentialFields: ['account_id'] });
+    const needsAccount = profile({ requiredCredentialFields: ['api_key', 'account_id'] });
     const offered = [needsAccount];
     expect(profileRequiresAccountId(needsAccount)).toBe(true);
     expect(profileRequiresAccountId(profile())).toBe(false);
@@ -425,6 +427,20 @@ describe('Provider Profile selection', () => {
     expect(canSubmitProviderForm(filled, true, offered)).toBe(false);
     // A Profile that declares nothing extra submits on name and key alone.
     expect(canSubmitProviderForm(profileForm(profile()), false, [profile()])).toBe(true);
+  });
+
+  it('allows a local Profile to omit its optional API key', () => {
+    const local = profile({
+      id: 'ollama',
+      displayName: 'Ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      requiredCredentialFields: [],
+    });
+    expect(profileRequiresApiKey(profile())).toBe(true);
+    expect(profileRequiresApiKey(local)).toBe(false);
+    expect(profileRequiresApiKey(null)).toBe(true);
+    expect(canSubmitProviderForm(profileForm(local, { apiKey: '' }), false, [local])).toBe(true);
   });
 });
 
@@ -595,6 +611,22 @@ describe('createConnection for a Provider Profile', () => {
       displayName: '本番',
       apiKey: FAKE_KEY,
       accountId: 'acct-1',
+    });
+  });
+
+  it('omits an optional API key instead of sending an empty or dummy value', async () => {
+    const api = fakeApi();
+    const local = profile({
+      id: 'ollama',
+      displayName: 'Ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      requiredCredentialFields: [],
+    });
+    await createConnection(api, profileForm(local, { apiKey: '' }), [local]);
+    expect(api.createProfileConnection).toHaveBeenCalledWith({
+      profileId: 'ollama',
+      displayName: '本番',
     });
   });
 });
@@ -1155,6 +1187,23 @@ describe('the add form, once the disclosure is open', () => {
     expect(html).toContain(KEY_BOUNDARY_HINT);
   });
 
+  it('labels the API key as optional for a local Profile and permits name-only submit', () => {
+    const local = profile({
+      id: 'ollama',
+      displayName: 'Ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      requiredCredentialFields: [],
+    });
+    const html = addFormMarkup({
+      form: profileForm(local, { apiKey: '' }),
+      profiles: [local],
+    });
+    expect(html).toContain('APIキー（任意）');
+    expect(html).not.toMatch(/data-testid="settings-provider-submit"[^>]*disabled/);
+    expect(html).not.toContain(SUBMIT_HINT_ID);
+  });
+
   it('flips the reveal to a pressed hide control once the key is shown', () => {
     const html = addFormMarkup({ showKey: true });
     expect(html).toContain('type="text"');
@@ -1229,6 +1278,18 @@ describe('providerSubmitBlockedReason', () => {
     );
     expect(providerSubmitBlockedReason(form(), true, [])).toBe(SUBMIT_BLOCKED_BUSY);
     expect(providerSubmitBlockedReason(form(), false, [])).toBeNull();
+  });
+
+  it('asks only for a name when the selected Profile makes the API key optional', () => {
+    const local = profile({ requiredCredentialFields: [] });
+    expect(
+      providerSubmitBlockedReason(profileForm(local, { displayName: '', apiKey: '' }), false, [
+        local,
+      ]),
+    ).toBe(SUBMIT_BLOCKED_NAME);
+    expect(
+      providerSubmitBlockedReason(profileForm(local, { apiKey: '' }), false, [local]),
+    ).toBeNull();
   });
 });
 

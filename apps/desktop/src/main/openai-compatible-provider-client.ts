@@ -9,7 +9,7 @@ import {
 } from '@sprint-coder/contracts';
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
 import type { OpenAICompatibleCredential, ProviderProfileRegistry } from './provider-profile';
-import { resolveProfileBaseUrl } from './provider-profile';
+import { profileRequiresCredential, resolveProfileBaseUrl } from './provider-profile';
 import type { ProviderFetch } from './openai-provider-client';
 import { openAICompatibleResponseRequest } from './openai-provider-client';
 import { normalizeOpenAIResponsesStream } from './openai-responses-stream';
@@ -274,12 +274,18 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
   ): Promise<Response> {
     const credential = await this.resolveCredential(connection);
     for (const field of profile.requiredCredentialFields)
-      if (field === 'account_id' && (credential.accountId?.trim().length ?? 0) === 0)
+      if (field === 'api_key' && (credential.apiKey?.trim().length ?? 0) === 0)
+        throw new Error(`Provider Profile ${profile.id} requires an API key`);
+      else if (field === 'account_id' && (credential.accountId?.trim().length ?? 0) === 0)
         throw new Error(`Provider Profile ${profile.id} requires an account ID`);
     const headers = new Headers(init.headers);
-    const prefix =
-      profile.authentication.scheme.length === 0 ? '' : `${profile.authentication.scheme} `;
-    headers.set(profile.authentication.headerName, `${prefix}${credential.apiKey}`);
+    if (credential.apiKey !== undefined) {
+      const prefix =
+        profile.authentication.scheme.length === 0 ? '' : `${profile.authentication.scheme} `;
+      headers.set(profile.authentication.headerName, `${prefix}${credential.apiKey}`);
+    } else if (profileRequiresCredential(profile, 'api_key')) {
+      throw new Error(`Provider Profile ${profile.id} requires an API key`);
+    }
     const baseUrl = resolveProfileBaseUrl(profile, credential);
     return this.providerFetch(`${baseUrl}${path}`, { ...init, headers, signal });
   }

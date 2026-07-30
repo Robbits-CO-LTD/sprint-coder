@@ -1519,7 +1519,7 @@ export const providerProfileSchema = z
         scheme: z.string().max(64),
       })
       .strict(),
-    requiredCredentialFields: z.array(z.enum(['account_id'])).max(8),
+    requiredCredentialFields: z.array(z.enum(['api_key', 'account_id'])).max(8),
     errorOverrides: z.array(providerProfileErrorOverrideSchema).max(32),
     sourceReference: z.string().url().max(2_048),
     reviewedAt: timestampSchema,
@@ -1540,7 +1540,7 @@ export const providerProfileConnectionCreateInputSchema = z
   .object({
     profileId: providerIdSchema,
     displayName: z.string().trim().min(1).max(100),
-    apiKey: z.string().min(1).max(16_384),
+    apiKey: z.string().min(1).max(16_384).optional(),
     baseUrl: z.string().url().max(2_048).optional(),
     accountId: z.string().trim().min(1).max(256).optional(),
   })

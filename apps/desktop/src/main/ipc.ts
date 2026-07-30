@@ -121,6 +121,7 @@ import {
   type CanonicalProviderEvent,
   type CodexModelOption,
   type ProviderExecutionRequest,
+  type ProviderConnection,
   type ProviderMessageToolCall,
   type ProviderModel,
   type PublicError,
@@ -222,7 +223,12 @@ import { GeminiProviderClient, parseGeminiCredential } from './gemini-provider-c
 import { XAIProviderClient, parseXAICredential } from './xai-provider-client';
 import { ProviderConnectionService } from './provider-connection-service';
 import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
-import { MainProviderProfileRegistry, parseOpenAICompatibleCredential } from './provider-profile';
+import {
+  MainProviderProfileRegistry,
+  parseOpenAICompatibleCredential,
+  resolvedProfileEndpointTrust,
+  type OpenAICompatibleCredential,
+} from './provider-profile';
 import { BUNDLED_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { OpenAICompatibleProviderClient } from './openai-compatible-provider-client';
 
@@ -291,6 +297,9 @@ export class IpcRouter {
   private readonly modelCatalog = new ModelCatalogService();
   private readonly providerRegistry = new MainProviderRegistry();
   private readonly providerProfiles = new MainProviderProfileRegistry();
+  private readonly providerEgressTrustForConnection: (
+    connection: ProviderConnection,
+  ) => 'trusted-local' | 'trusted-remote';
   private readonly providerVerification: ProviderVerificationService;
   private readonly providerConnections: ProviderConnectionService;
   private teamSkillReady = false;
@@ -308,11 +317,24 @@ export class IpcRouter {
       new ElectronProviderSecretCipher(),
     );
     for (const profile of BUNDLED_PROVIDER_PROFILES) this.providerProfiles.register(profile);
-    const compatible = new OpenAICompatibleProviderClient(this.providerProfiles, (connection) => {
+    const resolveCompatibleCredential = (
+      connection: ProviderConnection,
+    ): OpenAICompatibleCredential => {
       if (connection.secretReference === null)
         throw new Error('Provider Profile Connection has no secret reference');
       return parseOpenAICompatibleCredential(providerSecrets.get(connection.secretReference));
-    });
+    };
+    this.providerEgressTrustForConnection = (connection) => {
+      if (connection.runtimeKind !== 'openai_compatible') return 'trusted-remote';
+      return resolvedProfileEndpointTrust(
+        this.providerProfiles.get(connection.providerId),
+        resolveCompatibleCredential(connection),
+      );
+    };
+    const compatible = new OpenAICompatibleProviderClient(
+      this.providerProfiles,
+      resolveCompatibleCredential,
+    );
     this.providerRegistry.register({
       runtimeKind: 'openai_compatible',
       providerId: null,
@@ -430,7 +452,7 @@ export class IpcRouter {
       verification: this.providerVerification,
       registry: this.providerRegistry,
       getConnection: (connectionId) => this.persistence.getProviderConnection(connectionId),
-      authorizeEgress: ({ worker, executionId, providerId, prompt }) =>
+      authorizeEgress: ({ worker, executionId, connection, prompt }) =>
         authorizeOfficialApiProviderEgress(
           {
             broker: this.permissionBroker,
@@ -440,7 +462,8 @@ export class IpcRouter {
             context: { fragments: [], usageEvents: [], compacted: false },
             now: new Date().toISOString(),
           },
-          providerId,
+          connection.providerId,
+          this.providerEgressTrustForConnection(connection),
         ).allowed,
       contextFor: (worker) =>
         buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId)),
@@ -2525,6 +2548,7 @@ export class IpcRouter {
           now: new Date().toISOString(),
         },
         connection.providerId,
+        this.providerEgressTrustForConnection(connection),
       );
       if (!egress.allowed) throw new Error('Provider egress was denied by policy');
       await this.mailbox.run(taskId, () => {

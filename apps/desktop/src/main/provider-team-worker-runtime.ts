@@ -28,7 +28,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   authorizeEgress(input: {
     worker: AgentRecord;
     executionId: string;
-    providerId: string;
+    connection: ProviderConnection;
     prompt: string;
   }): boolean;
   contextFor?: (worker: AgentRecord) => PreparedContext;
@@ -100,7 +100,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       !this.deps.authorizeEgress({
         worker: input.worker,
         executionId,
-        providerId: connection.providerId,
+        connection,
         prompt,
       })
     )

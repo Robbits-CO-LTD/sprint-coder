@@ -247,6 +247,10 @@ export function profileRequiresAccountId(profile: ProviderProfile | null): boole
   return profile !== null && profile.requiredCredentialFields.includes('account_id');
 }
 
+export function profileRequiresApiKey(profile: ProviderProfile | null): boolean {
+  return profile === null || profile.requiredCredentialFields.includes('api_key');
+}
+
 /** A Connection whose credentials Main can re-check. Built-in CLIs authenticate themselves. */
 export function isExternalConnection(connection: ProviderConnection): boolean {
   return (
@@ -381,12 +385,11 @@ export function canSubmitProviderForm(
   busy: boolean,
   profiles: readonly ProviderProfile[] = [],
 ): boolean {
-  if (busy || form.displayName.trim() === '' || form.apiKey === '') return false;
+  if (busy || form.displayName.trim() === '') return false;
   if (isProviderSelectionUnavailable(form, profiles)) return false;
-  return (
-    !profileRequiresAccountId(selectedProviderProfile(form, profiles)) ||
-    form.accountId.trim() !== ''
-  );
+  const profile = selectedProviderProfile(form, profiles);
+  if (profileRequiresApiKey(profile) && form.apiKey === '') return false;
+  return !profileRequiresAccountId(profile) || form.accountId.trim() !== '';
 }
 
 /** Why the submit is unpressable, in the user's words, or null when it is pressable. The one gate is
@@ -395,6 +398,7 @@ export function canSubmitProviderForm(
  * is the form telling the user to guess. */
 export const SUBMIT_BLOCKED_SELECTION = 'プロバイダーを選び直すと追加できます。';
 export const SUBMIT_BLOCKED_INPUT = '表示名とAPIキーを入力すると追加できます。';
+export const SUBMIT_BLOCKED_NAME = '表示名を入力すると追加できます。';
 export const SUBMIT_BLOCKED_ACCOUNT_ID = 'このプロバイダーはアカウントIDが必須です。';
 export const SUBMIT_BLOCKED_BUSY = '他の処理が終わるまでお待ちください。';
 
@@ -404,11 +408,11 @@ export function providerSubmitBlockedReason(
   profiles: readonly ProviderProfile[] = [],
 ): string | null {
   if (isProviderSelectionUnavailable(form, profiles)) return SUBMIT_BLOCKED_SELECTION;
-  if (form.displayName.trim() === '' || form.apiKey === '') return SUBMIT_BLOCKED_INPUT;
-  if (
-    profileRequiresAccountId(selectedProviderProfile(form, profiles)) &&
-    form.accountId.trim() === ''
-  ) {
+  const profile = selectedProviderProfile(form, profiles);
+  if (form.displayName.trim() === '')
+    return profileRequiresApiKey(profile) ? SUBMIT_BLOCKED_INPUT : SUBMIT_BLOCKED_NAME;
+  if (profileRequiresApiKey(profile) && form.apiKey === '') return SUBMIT_BLOCKED_INPUT;
+  if (profileRequiresAccountId(profile) && form.accountId.trim() === '') {
     return SUBMIT_BLOCKED_ACCOUNT_ID;
   }
   return busy ? SUBMIT_BLOCKED_BUSY : null;
@@ -454,10 +458,11 @@ export async function createConnection(
   if (profile !== null) {
     const baseUrl = form.baseUrl.trim();
     const accountId = form.accountId.trim();
+    const apiKey = form.apiKey;
     return api.createProfileConnection({
       profileId: profile.id,
       displayName,
-      apiKey,
+      ...(apiKey === '' ? {} : { apiKey }),
       // Only what this Profile declares it takes. The input contract is strict, and a field the
       // Provider has no concept of would be rejected outright.
       ...(profile.baseUrlConfigurable && baseUrl !== '' ? { baseUrl } : {}),
@@ -691,7 +696,7 @@ export function ProviderAddConnectionForm({
       <div className="settings-provider-form-heading">
         <div>
           <h4>新しいAPI接続</h4>
-          <p>プロバイダー、表示名、APIキーの3項目から設定できます。</p>
+          <p>プロバイダーと表示名を設定し、必要な場合だけAPIキーを入力します。</p>
         </div>
         <span>APIキーは端末内に保存</span>
       </div>
@@ -771,7 +776,7 @@ export function ProviderAddConnectionForm({
 
         <div className="settings-field">
           <label className="settings-field-label" htmlFor="settings-provider-api-key">
-            APIキー
+            APIキー（{profileRequiresApiKey(selectedProfile) ? '必須' : '任意'}）
           </label>
           {/* The reveal sits inside the field's right edge, where a masked input is looked at,
               rather than as a second control competing with it in a row. */}
