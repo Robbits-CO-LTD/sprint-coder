@@ -51,7 +51,9 @@ async function readWorkerPosition(page: Page): Promise<WorldPosition> {
 }
 
 async function readWorldTransform(page: Page): Promise<{ x: number; y: number; s: number }> {
-  const transform = await page.locator('.team-world').evaluate((el: HTMLElement) => el.style.transform);
+  const transform = await page
+    .locator('.team-world')
+    .evaluate((el: HTMLElement) => el.style.transform);
   const match = /translate\(([-\d.]+)px, ([-\d.]+)px\) scale\(([-\d.]+)\)/.exec(transform);
   if (!match) throw new Error(`Unparseable transform: ${transform}`);
   return { x: Number(match[1]), y: Number(match[2]), s: Number(match[3]) };
@@ -109,9 +111,9 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
         for (let right = left + 1; right < rects.length; right += 1) {
           const a = rects[left]!;
           const b = rects[right]!;
-          expect(
-            a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y,
-          ).toBe(false);
+          expect(a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y).toBe(
+            false,
+          );
         }
       }
 
@@ -192,8 +194,12 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       await page.waitForTimeout(1_200); // let the saved-view redirect settle (async load + fly)
 
       const afterRestart = await readWorkerPosition(page);
-      expect(Math.abs(parseFloat(afterRestart.left) - parseFloat(afterDrag.left))).toBeLessThanOrEqual(5);
-      expect(Math.abs(parseFloat(afterRestart.top) - parseFloat(afterDrag.top))).toBeLessThanOrEqual(5);
+      expect(
+        Math.abs(parseFloat(afterRestart.left) - parseFloat(afterDrag.left)),
+      ).toBeLessThanOrEqual(5);
+      expect(
+        Math.abs(parseFloat(afterRestart.top) - parseFloat(afterDrag.top)),
+      ).toBeLessThanOrEqual(5);
 
       const cameraAfterRestart = await readWorldTransform(page);
       expect(Math.abs(cameraAfterRestart.x - cameraBeforeRestart.x)).toBeLessThanOrEqual(5);
@@ -228,7 +234,9 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       // No hire form here either (List is an accessible projection of the same state, not a
       // separate feature) — the empty-team guidance shows instead.
       await expect(page.getByTestId('team-hire')).toHaveCount(0);
-      await expect(page.getByText('Leaderに依頼すると、必要に応じてWorkerを雇用します')).toBeVisible();
+      await expect(
+        page.getByText('Leaderに依頼すると、必要に応じてWorkerを雇用します'),
+      ).toBeVisible();
 
       await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
@@ -329,9 +337,12 @@ test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
 
       const afterDrag = await readWorkerPosition(page);
       // Sanity check the drag actually landed near the intended world position — otherwise the
-      // rest of this test wouldn't be exercising the intended collision scenario at all.
-      expect(Math.abs(parseFloat(afterDrag.left) - targetWorldPos.x)).toBeLessThan(20);
-      expect(Math.abs(parseFloat(afterDrag.top) - targetWorldPos.y)).toBeLessThan(20);
+      // rest of this test wouldn't be exercising the intended collision scenario at all. Pointer
+      // coordinates are integer screen pixels and are converted back through a fitted fractional
+      // camera scale, so hosted renderers can land a few dozen world pixels apart; 64px still
+      // places a 480x260 Worker deeply inside the target slot.
+      expect(Math.abs(parseFloat(afterDrag.left) - targetWorldPos.x)).toBeLessThan(64);
+      expect(Math.abs(parseFloat(afterDrag.top) - targetWorldPos.y)).toBeLessThan(64);
 
       // Re-fit: the drag itself only moves the Worker in world space, and the camera view that
       // was fit for the pre-drag layout may no longer include everything — bring it back into
