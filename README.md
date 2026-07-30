@@ -1,14 +1,97 @@
 # Sprint Coder
 
-Chatから始まり、必要になった瞬間だけ複数のAI Workerへ広がる、ローカルファーストのElectronデスクトップアプリ。
+チャットから始め、必要なときだけ複数のAIへ仕事を分担できる、ローカルファーストのデスクトップAIコーディング環境です。
 
-このディレクトリは新規プロジェクトの設計起点であり、旧製品のコード・構成・設計判断を前提にしない。
+Sprint Coderは、1対1のAIチャット、ワークスペース上のファイル編集・コマンド実行、複数WorkerによるTeam実行をひとつのTaskにまとめます。Codex CLIやClaude Code CLIに加え、クラウドAPIとローカルLLMをTaskごとに選択できます。
 
-## Windowsで使う
+> [!WARNING]
+> 現在はearly betaです。機能、データ形式、配布方法は今後変更される可能性があります。
 
-配布された `Sprint-Coder-Setup.exe` を開くと、Windowsへインストールできる。Node.jsやVisual Studioを利用者が別途インストールする必要はない。
+## 主な機能
 
-ソースコードからWindows用インストーラーを作る場合は、Node.js 22、Python 3、Visual Studio 2022 Build Tools（「C++によるデスクトップ開発」）を用意し、PowerShellで次を実行する。
+- **ChatからTeamへ** — まず1人のAIと会話し、作業が大きくなったら同じTaskをLeaderと複数WorkerのTeamへ切り替えられます。
+- **モデルをTaskごとに選択** — 組み込みCLI、公式API、OpenAI互換API、ローカルLLMを同じモデルピッカーから利用できます。
+- **ワークスペースを安全に操作** — ファイル変更、差分、コマンド、承認履歴を画面上で追跡し、`Ask` / `Auto` / `Full` のAccess presetで実行範囲を制御します。
+- **ローカルに復元可能な履歴** — Task、メッセージ、Turn、Teamの状態を端末内へ保存し、再起動後も作業を再開できます。
+- **実行状況を可視化** — reasoning、進行stage、context使用量、Workerの活動、承認待ちをTask内で確認できます。
+- **Skill対応** — ローカルのSkillを読み込み、ChatやTeamへ追加できます。組み込みのSkill Creatorから新しいSkillの下書きも作成できます。
+
+## 対応するRuntime / Provider
+
+| 種別          | 対応先                                                                                     |
+| ------------- | ------------------------------------------------------------------------------------------ |
+| 組み込みCLI   | Codex CLI、Claude Code CLI                                                                 |
+| 公式API       | OpenAI、OpenRouter、Anthropic、Google Gemini、xAI                                          |
+| OpenAI互換API | Mistral、DeepSeek、Groq、Moonshot AI、MiniMax、Zhipu AI、NVIDIA NIM、Cloudflare Workers AI |
+| ローカルLLM   | Ollama、LM Studio、LocalAI                                                                 |
+| 開発・確認用  | Mock Runtime                                                                               |
+
+組み込みCLIは、端末にインストール済みのCLIとその認証を使用します。外部APIはアプリの「設定 → モデルと接続」から追加・検証します。利用できるモデルやtool capabilityは接続先によって異なり、外部APIの利用には各Providerの料金が発生する場合があります。
+
+## クイックスタート
+
+### 必要なもの
+
+- macOS、Windows、またはLinux
+- [Node.js 22](https://nodejs.org/) とnpm
+- Git
+- 実AIを使う場合は、認証済みのCodex CLI / Claude Code CLI、または対応ProviderのAPI key
+
+### ソースから起動
+
+```bash
+git clone https://github.com/Robbits-CO-LTD/sprint-coder.git
+cd sprint-coder
+nvm use
+npm ci
+npm start
+```
+
+`nvm`を使わない場合は、`node --version`が`v22.x`であることを確認してください。Providerを設定しなくても、Mock Runtimeで基本操作を試せます。
+
+### 最初のTask
+
+1. 「新しいTask」を作成します。
+2. 必要に応じてワークスペースを選択します。
+3. Composer下部でモデル、Effort、Access presetを選びます。
+4. メッセージを送り、ファイル変更やコマンドの内容を確認します。
+5. 並列作業が必要になったら「Team」へ切り替え、Leaderへ目的を伝えます。
+
+## Local-firstとセキュリティ
+
+Local-firstは、Task履歴、設定、実行状態を端末内で管理するという意味です。クラウドProviderを選択したTurnでは、生成に必要なpromptやcontextが選択先へ送信されます。完全にオフラインで使う場合は、Mock RuntimeまたはローカルLLMを選択してください。
+
+- API keyは送信後にRendererから消去し、Main processがElectron `safeStorage`を使って端末内へ保存します。
+- Rendererはsandbox / context isolationを有効にし、Node.js APIを直接公開しません。
+- ワークスペース操作とProviderへのegressは、Taskの権限設定と監査対象になります。
+- CLI Runtimeのsandbox境界はRuntimeとAccess presetによって異なるため、Composerに表示される実行モードを確認してください。
+
+セキュリティ設計と確認項目は[Security Checklist](docs/SECURITY_CHECKLIST.md)を参照してください。
+
+## 開発
+
+```bash
+npm ci
+npm start
+```
+
+主なコマンド:
+
+| コマンド                      | 内容                                             |
+| ----------------------------- | ------------------------------------------------ |
+| `npm start`                   | Electronアプリをdevelopment modeで起動           |
+| `npm run typecheck`           | 全workspaceのTypeScriptを検査                    |
+| `npm run lint`                | ESLintを実行                                     |
+| `npm run format:check`        | Prettierによる形式チェック                       |
+| `npm test`                    | Vitestのunit / integration testを実行            |
+| `npm run e2e`                 | production packageを作成し、Playwright E2Eを実行 |
+| `npm run test:provider-smoke` | opt-inの実Provider smoke testを実行              |
+
+E2Eはpackage作成とnative moduleの検証を含むため、通常の変更確認では対象test、typecheck、lintから先に実行してください。CIではmacOS、Windows、Linuxの各環境で検証します。
+
+### Windowsインストーラーの作成
+
+Node.js 22、Python 3、Visual Studio 2022 Build Tools（「C++によるデスクトップ開発」）を用意し、PowerShellで次を実行します。
 
 ```powershell
 npm ci
@@ -16,37 +99,33 @@ node node_modules/electron/install.js
 npm run make:windows
 ```
 
-完成したインストーラーは `apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Setup.exe` に出力される。`apps/desktop/out/make/zip/win32/x64/` には、展開してそのまま起動できるZIP版も作られる。
+インストーラーは`apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Setup.exe`、展開して起動できるZIP版は`apps/desktop/out/make/zip/win32/x64/`に出力されます。
 
-手元で作るインストーラーは未署名のため、Windowsから警告が表示されることがある。正式配布版ではコード署名証明書（`.pfx`）を用意し、`SPRINT_CODER_RELEASE=1`、`SPRINT_CODER_WINDOWS_CERTIFICATE_FILE`、`SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD` をビルド環境に設定する。この設定が不足した正式配布ビルドは、安全のためエラーで停止する。検証用betaに限り、workflowは`SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1`を明示して未署名artifactを作成する。
+手元で作るインストーラーは未署名のため、Windowsから警告が表示されることがあります。正式配布ではコード署名証明書（`.pfx`）を用意し、`SPRINT_CODER_RELEASE=1`、`SPRINT_CODER_WINDOWS_CERTIFICATE_FILE`、`SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD`を設定してください。検証用betaのworkflowのみ、`SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1`を明示して未署名artifactを作成します。
 
-## 文書
+## リポジトリ構成
+
+```text
+apps/desktop/       Electron Main / Preload / React Renderer / Runtime Host
+packages/contracts/ IPC・永続化・Provider間で共有するschemaと型
+packages/domain/    権限、Tool、Turnなどのpure domain logic
+tests/e2e/          packaged appを対象にしたPlaywright E2E
+docs/               プロダクト、設計、セキュリティ、計画
+tasks/              実装計画と設計レビュー記録
+```
+
+## 現在の配布状態
+
+- desktop packageのversionはbeta SemVerで管理しています。
+- GitHub ActionsはmacOS / WindowsのZIPとWindowsインストーラーをbeta prereleaseとして作成できます。
+- macOSのbeta artifactは現時点ではad-hoc署名で、Apple notarizationは未対応です。
+- 配布物が公開されている場合は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases)から取得できます。
+
+## 設計資料
 
 - [プロダクト・詳細設計書](docs/PRODUCT_AND_TECHNICAL_DESIGN.md)
-- [Codex CLI / Grok Build 参照アーキテクチャ分析](docs/REFERENCE_AGENT_ARCHITECTURE.md)
-- [Agent Intelligence詳細設計](tasks/designs/design-agent-intelligence-architecture-20260721.md)
+- [Team v2・Multi-Provider改訂計画](docs/plan/team-v2/README.md)
+- [参照Agentアーキテクチャ分析](docs/REFERENCE_AGENT_ARCHITECTURE.md)
 - [実装計画](tasks/IMPLEMENTATION_PLAN.md)
-- [設計レビュー記録](tasks/designs/design-sprint-coder-foundation-20260720.md)
-- [参照agent導入後のhardening review](tasks/designs/design-reference-agent-hardening-20260721.md)
-
-## 現在の状態
-
-3者レビュー済みの設計baseline。実装は `tasks/IMPLEMENTATION_PLAN.md` のPhase 0で、5 workstream・12実測項目の成立証拠と関連ADRを確定してから開始する。Phase 0は3–5日の調査timeboxであり、Gate未通過時はfallback、延長、No-Goのいずれかを記録する。
-
-## Codex runtimeの手動確認
-
-実CLIの確認は、隔離したuser dataで `SPRINT_CODER_USER_DATA_DIR=/tmp/sprint-coder-runtime-smoke SPRINT_CODER_RUNTIME_SMOKE=codex npm start` を実行し、Settings APIでCodexを選択して短いTurnを開始する。stageが順番に進み、応答がstreamして完了すること、実行中のSteerが`STEER_UNSUPPORTED`になること、CancelでCodexの子processが残らないことを確認する（`SPRINT_CODER_RUNTIME_SMOKE`は手動試験の意図を示すmarkerであり、runtime選択自体はSettings APIに保存される）。
-
-## Claude runtimeの手動確認
-
-実CLIの確認は、隔離したuser dataで `SPRINT_CODER_USER_DATA_DIR=/tmp/sprint-coder-claude-runtime-smoke SPRINT_CODER_RUNTIME_SMOKE=claude npm start` を実行し、Settings APIでClaude Codeを選択して短いTurnを開始する。stageが順番に進み、応答がstreamして完了すること、実行中のSteerが`STEER_UNSUPPORTED`になること、CancelでClaudeの子processが残らないことを確認する（`SPRINT_CODER_RUNTIME_SMOKE`は手動試験の意図を示すmarkerであり、runtime選択自体はSettings APIに保存される）。Claudeはローカルの`claude` CLI自身の認証（OAuth/keychain）を使い、アプリはAPIキーを一切扱わない。
-
-## Team Workerの実実行(実AI)
-
-WorkerをローカルのClaude Code CLIで実際に実行するには、opt-inマーカーを付けて起動する:
-
-```
-SPRINT_CODER_REAL_WORKERS=1 npm start
-```
-
-Mock Runtimeのまま「⬡ Team」で昇格し、Leaderに「チームテスト:〇〇」と依頼すると、Leader(Mockシナリオ)が雇用・指示した各Workerが実Claude(read-only/no-toolsプロファイル、`auto`モデル)で作業し、実際の生成結果を報告として返す。CLI未導入・probe失敗・egress拒否時は決定論シミュレータへ自動フォールバックする。Runtime設定でClaude/Codexを選択している場合、Workerはその選択に従う(Leaderの実tool useによる雇用はMCP経由の実装が次マイルストーン)。
+- [アクセシビリティ監査](docs/A11Y_AUDIT.md)
+- [Security Checklist](docs/SECURITY_CHECKLIST.md)
