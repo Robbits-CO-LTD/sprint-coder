@@ -1,7 +1,9 @@
 import type { ProviderProfile } from '@sprint-coder/contracts';
 
 const REVIEWED_AT = '2026-07-28T00:00:00.000Z';
+const LOCAL_REVIEWED_AT = '2026-07-30T00:00:00.000Z';
 const BEARER = { headerName: 'Authorization', scheme: 'Bearer' } as const;
+const requiredApiKey = (): ProviderProfile['requiredCredentialFields'] => ['api_key'];
 
 export const PACK_A_PROVIDER_PROFILES: readonly ProviderProfile[] = [
   {
@@ -14,7 +16,7 @@ export const PACK_A_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     curatedModels: [],
     verificationModel: null,
     authentication: BEARER,
-    requiredCredentialFields: [],
+    requiredCredentialFields: requiredApiKey(),
     errorOverrides: [],
     sourceReference: 'https://docs.mistral.ai/resources/migration-guides',
     reviewedAt: REVIEWED_AT,
@@ -29,7 +31,7 @@ export const PACK_A_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     curatedModels: [],
     verificationModel: null,
     authentication: BEARER,
-    requiredCredentialFields: [],
+    requiredCredentialFields: requiredApiKey(),
     errorOverrides: [],
     sourceReference: 'https://api-docs.deepseek.com/guides/function_calling/',
     reviewedAt: REVIEWED_AT,
@@ -44,7 +46,7 @@ export const PACK_A_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     curatedModels: [],
     verificationModel: null,
     authentication: BEARER,
-    requiredCredentialFields: [],
+    requiredCredentialFields: requiredApiKey(),
     errorOverrides: [],
     sourceReference: 'https://console.groq.com/docs/openai',
     reviewedAt: REVIEWED_AT,
@@ -62,7 +64,7 @@ export const PACK_B_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     curatedModels: [],
     verificationModel: null,
     authentication: BEARER,
-    requiredCredentialFields: [],
+    requiredCredentialFields: requiredApiKey(),
     errorOverrides: [],
     sourceReference: 'https://platform.kimi.ai/docs/api/overview',
     reviewedAt: REVIEWED_AT,
@@ -77,7 +79,7 @@ export const PACK_B_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     curatedModels: [],
     verificationModel: null,
     authentication: BEARER,
-    requiredCredentialFields: [],
+    requiredCredentialFields: requiredApiKey(),
     errorOverrides: [],
     sourceReference: 'https://platform.minimax.io/docs/api-reference/text-openai-api',
     reviewedAt: REVIEWED_AT,
@@ -92,7 +94,7 @@ export const PACK_B_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     curatedModels: [{ id: 'glm-4.7', displayName: 'GLM-4.7' }],
     verificationModel: 'glm-4.7',
     authentication: BEARER,
-    requiredCredentialFields: [],
+    requiredCredentialFields: requiredApiKey(),
     errorOverrides: [],
     sourceReference:
       'https://zhipu-ef7018ed.mintlify.app/api-reference/%E6%A8%A1%E5%9E%8B-api/%E5%AF%B9%E8%AF%9D%E8%A1%A5%E5%85%A8',
@@ -108,7 +110,7 @@ export const PACK_B_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     curatedModels: [],
     verificationModel: null,
     authentication: BEARER,
-    requiredCredentialFields: [],
+    requiredCredentialFields: requiredApiKey(),
     errorOverrides: [],
     sourceReference: 'https://docs.nvidia.com/nim/large-language-models/latest/api-reference.html',
     reviewedAt: REVIEWED_AT,
@@ -128,7 +130,7 @@ export const PACK_B_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     ],
     verificationModel: '@cf/meta/llama-3.1-8b-instruct',
     authentication: BEARER,
-    requiredCredentialFields: ['account_id'],
+    requiredCredentialFields: ['api_key', 'account_id'],
     errorOverrides: [],
     sourceReference:
       'https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/',
@@ -136,7 +138,56 @@ export const PACK_B_PROVIDER_PROFILES: readonly ProviderProfile[] = [
   },
 ];
 
+export const LOCAL_PROVIDER_PROFILES: readonly ProviderProfile[] = [
+  {
+    id: 'localai',
+    displayName: 'LocalAI',
+    baseUrl: 'http://localhost:8080/v1',
+    baseUrlConfigurable: true,
+    protocol: 'chat_completions',
+    modelsPath: '/models',
+    curatedModels: [],
+    verificationModel: null,
+    authentication: BEARER,
+    requiredCredentialFields: [],
+    errorOverrides: [],
+    sourceReference: 'https://localai.io/basics/getting_started/index.html',
+    reviewedAt: LOCAL_REVIEWED_AT,
+  },
+  {
+    id: 'lm-studio',
+    displayName: 'LM Studio',
+    baseUrl: 'http://localhost:1234/v1',
+    baseUrlConfigurable: true,
+    protocol: 'chat_completions',
+    modelsPath: '/models',
+    curatedModels: [],
+    verificationModel: null,
+    authentication: BEARER,
+    requiredCredentialFields: [],
+    errorOverrides: [],
+    sourceReference: 'https://lmstudio.ai/docs/developer/openai-compat',
+    reviewedAt: LOCAL_REVIEWED_AT,
+  },
+  {
+    id: 'ollama',
+    displayName: 'Ollama',
+    baseUrl: 'http://localhost:11434/v1',
+    baseUrlConfigurable: true,
+    protocol: 'chat_completions',
+    modelsPath: '/models',
+    curatedModels: [],
+    verificationModel: null,
+    authentication: BEARER,
+    requiredCredentialFields: [],
+    errorOverrides: [],
+    sourceReference: 'https://docs.ollama.com/api/openai-compatibility',
+    reviewedAt: LOCAL_REVIEWED_AT,
+  },
+];
+
 export const BUNDLED_PROVIDER_PROFILES: readonly ProviderProfile[] = [
   ...PACK_A_PROVIDER_PROFILES,
   ...PACK_B_PROVIDER_PROFILES,
+  ...LOCAL_PROVIDER_PROFILES,
 ];

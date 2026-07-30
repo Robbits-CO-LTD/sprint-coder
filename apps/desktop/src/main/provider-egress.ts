@@ -1,13 +1,10 @@
 import { Buffer } from 'node:buffer';
 import type { TaskSummary } from '@sprint-coder/contracts';
-import type { PermissionEvaluation, PermissionRequest } from '@sprint-coder/domain';
+import type { PermissionEvaluation, PermissionRequest, ProviderEgress } from '@sprint-coder/domain';
 import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
 import type { PermissionBroker } from './permission-broker';
 import { redactSecrets } from './secret-redactor';
-
-const PROVIDER_TRUST = 'trusted-remote' as const;
-const DATA_RESIDENCY = 'unspecified';
 
 export type ProviderEgressDecision = Readonly<{
   allowed: boolean;
@@ -33,7 +30,13 @@ export function dispatchAfterCodexProviderEgress(
 }
 
 export function authorizeCodexProviderEgress(input: ProviderEgressInput): ProviderEgressDecision {
-  return authorizeProviderEgress(input, 'openai-codex', 'codex', 'codex_provider_egress');
+  return authorizeProviderEgress(
+    input,
+    'openai-codex',
+    'codex',
+    'codex_provider_egress',
+    'trusted-remote',
+  );
 }
 
 // Additive twin for the Claude CLI runtime (Slice 3.4): same gate shape and same generic
@@ -54,18 +57,21 @@ export function authorizeClaudeProviderEgress(input: ProviderEgressInput): Provi
     'anthropic-claude-code',
     'claude',
     'claude_provider_egress',
+    'trusted-remote',
   );
 }
 
 export function authorizeOfficialApiProviderEgress(
   input: ProviderEgressInput,
   providerId: string,
+  providerTrust: Exclude<ProviderEgress, 'none'> = 'trusted-remote',
 ): ProviderEgressDecision {
   return authorizeProviderEgress(
     input,
     providerId,
     `official-api:${providerId}`,
     `${providerId}_official_api_egress`,
+    providerTrust,
   );
 }
 
@@ -74,6 +80,7 @@ function authorizeProviderEgress(
   providerId: string,
   subjectRuntime: string,
   auditReason: string,
+  providerTrust: Exclude<ProviderEgress, 'none'>,
 ): ProviderEgressDecision {
   const content = [
     input.prompt,
@@ -97,8 +104,8 @@ function authorizeProviderEgress(
     providerId,
     fragmentKind,
     byteCount,
-    providerTrust: PROVIDER_TRUST,
-    dataResidency: DATA_RESIDENCY,
+    providerTrust,
+    dataResidency: providerTrust === 'trusted-local' ? 'local-device' : 'unspecified',
     provenanceTrust,
     secretScan,
     localOnlyTask: input.task.localOnly,
@@ -118,7 +125,7 @@ function authorizeProviderEgress(
     capability: 'provider.egress' as const,
     resource,
     operation: 'egress' as const,
-    providerEgress: PROVIDER_TRUST,
+    providerEgress: providerTrust,
     sandboxProfile: 'read-only' as const,
     executionSpecDigest,
     risk: 'high' as const,
@@ -132,8 +139,8 @@ function authorizeProviderEgress(
     providerIds: [providerId],
     fragmentKinds: [fragmentKind],
     maxBytes: byteCount,
-    allowedProviderTrust: [PROVIDER_TRUST],
-    allowedResidencies: [DATA_RESIDENCY],
+    allowedProviderTrust: [providerTrust],
+    allowedResidencies: [providerTrust === 'trusted-local' ? 'local-device' : 'unspecified'],
     allowedProvenance: [provenanceTrust],
     requireSecretScanClean: true,
     allowLocalOnlyTaskRemote: false,
@@ -145,7 +152,7 @@ function authorizeProviderEgress(
         resourceSet,
         operations: ['egress' as const],
         expiresAt: new Date(Date.parse(input.now) + 60_000).toISOString(),
-        providerEgress: [PROVIDER_TRUST],
+        providerEgress: [providerTrust],
         sandboxProfiles: ['read-only' as const],
       },
     ],

@@ -73,7 +73,10 @@ export class ModelCatalogService {
     this.indexBuildCountValue += 1;
   }
 
-  query(input: ModelCatalogQueryInput): {
+  query(
+    input: ModelCatalogQueryInput,
+    allowedModelKeys?: ReadonlySet<string>,
+  ): {
     revision: number;
     total: number;
     items: readonly ProviderModel[];
@@ -83,6 +86,8 @@ export class ModelCatalogService {
     const text = query.text.trim().toLocaleLowerCase();
     const offset = query.cursor === null ? 0 : Number(query.cursor.slice('cursor:'.length));
     const filtered = this.indexed.filter(({ model, accessType, searchText }) => {
+      if (allowedModelKeys !== undefined && !allowedModelKeys.has(teamModelIdentityKey(model)))
+        return false;
       if (query.availableOnly && !model.available) return false;
       if (query.accessTypes.length > 0 && !query.accessTypes.includes(accessType)) return false;
       if (query.connectionIds.length > 0 && !query.connectionIds.includes(model.connectionId))
@@ -101,6 +106,14 @@ export class ModelCatalogService {
       nextCursor: nextOffset < filtered.length ? `cursor:${nextOffset}` : null,
     };
   }
+}
+
+export function teamModelIdentityKey(model: {
+  connectionId: string;
+  providerId: string;
+  modelId: string;
+}): string {
+  return `${model.connectionId}\0${model.providerId}\0${model.modelId}`;
 }
 
 function stableCatalogIdentity(model: ProviderModel): unknown {

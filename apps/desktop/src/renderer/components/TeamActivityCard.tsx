@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { TeamActivityDisplay } from '../lib/team-activity-display';
+import { Markdown } from './Markdown';
 
 /**
  * Team activity history card (Core C2b): one persisted `TeamActivitySummary` shown inline in the
@@ -65,14 +66,16 @@ export function TeamActivityGroup({
   active,
   startedAtMs,
   finishedAtMs,
+  workContent,
 }: {
   activities: readonly TeamActivityDisplay[];
   active: boolean;
   startedAtMs: number;
   finishedAtMs: number | null;
+  workContent?: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
-  if (activities.length === 0) return null;
+  if (activities.length === 0 && !workContent) return null;
 
   const recordedEnds = activities
     .map(({ recordedAt }) => Date.parse(recordedAt))
@@ -106,6 +109,12 @@ export function TeamActivityGroup({
         </span>
       </summary>
       <div className="team-activity-list">
+        {workContent && (
+          <div className="team-work-transcript" data-testid="team-work-transcript">
+            <p className="team-work-transcript-label">作業中の会話</p>
+            <Markdown content={workContent} />
+          </div>
+        )}
         {activities.map((activity) => (
           <TeamActivityCard key={activity.id} activity={activity} />
         ))}

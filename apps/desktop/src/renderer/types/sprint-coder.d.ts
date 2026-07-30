@@ -26,6 +26,7 @@ export type ChatMessage = {
   turnId: string | null;
   author: 'user' | 'assistant' | 'system';
   content: string;
+  workContent?: string | null;
   createdAt: string;
 };
 
@@ -673,6 +674,10 @@ export interface SprintCoderApi {
     setCodexEffort(effort: string): Promise<void>;
     getTeamModelResearch(): Promise<{ researchBeforeHiring: boolean }>;
     setTeamModelResearch(input: { researchBeforeHiring: boolean }): Promise<void>;
+    getTeamModelSettings(): Promise<import('@sprint-coder/contracts').TeamModelSettings>;
+    setTeamModelRestriction(
+      input: import('@sprint-coder/contracts').TeamModelRestriction,
+    ): Promise<void>;
     getDefaultTeamPolicy(): Promise<import('@sprint-coder/contracts').TeamPolicy>;
     setDefaultTeamPolicy(policy: import('@sprint-coder/contracts').TeamPolicy): Promise<void>;
     scanSkills(): Promise<import('@sprint-coder/contracts').SkillScanResult>;

@@ -94,12 +94,19 @@ export type WorkerActivityEvent =
   | { type: 'failed'; error: string }
   | { type: 'canceled'; reason: string };
 
+export type TeamRuntimeConversationItem = Readonly<{
+  direction: 'received' | 'sent';
+  role: string;
+  content: string;
+}>;
+
 export interface TeamWorkerRuntime {
   start(worker: AgentRecord): Promise<{ pid?: number | null }>;
   execute(input: {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult>;
   stop(agentId: string): Promise<void>;
@@ -116,6 +123,7 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult> {
     input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
@@ -1613,6 +1621,11 @@ export class TeamCoordinator {
         attempt: delivery.attempt,
         issuedAt: this.isoNow(),
       });
+      const priorConversation = priorConversationForAgent(
+        this.persistence.getTeamSnapshot(teamId),
+        worker.id,
+        seq,
+      );
       try {
         // Enter running before invoking the runtime so adapters that do not emit the optional
         // accepted event still follow the durable task lifecycle. An accepted event is then an
@@ -1623,6 +1636,7 @@ export class TeamCoordinator {
             worker,
             envelope,
             content,
+            priorConversation,
             onEvent: (event) =>
               this.handleWorkerActivity(leader.taskId, teamId, worker.id, teamTaskId, event),
           }),
@@ -1934,6 +1948,42 @@ export class TeamCoordinator {
   private isoNow(): string {
     return this.now().toISOString();
   }
+}
+
+const MAX_PRIOR_TEAM_CONVERSATION_ITEMS = 24;
+const MAX_PRIOR_TEAM_CONVERSATION_CHARS = 16_000;
+
+export function priorConversationForAgent(
+  snapshot: TeamSnapshot,
+  agentId: string,
+  beforeSeq: number,
+): readonly TeamRuntimeConversationItem[] {
+  const roles = new Map(snapshot.agents.map((agent) => [agent.id, agent.role]));
+  const conversation = snapshot.messages
+    .filter(
+      (message) =>
+        message.seq < beforeSeq &&
+        (message.sourceAgentId === agentId || message.targetAgentId === agentId),
+    )
+    .sort((left, right) => right.seq - left.seq);
+  const selected: TeamRuntimeConversationItem[] = [];
+  let remainingChars = MAX_PRIOR_TEAM_CONVERSATION_CHARS;
+
+  for (const message of conversation) {
+    if (selected.length >= MAX_PRIOR_TEAM_CONVERSATION_ITEMS || remainingChars <= 0) break;
+    const direction = message.sourceAgentId === agentId ? 'sent' : 'received';
+    const otherAgentId = direction === 'sent' ? message.targetAgentId : message.sourceAgentId;
+    const content = message.content.slice(-remainingChars);
+    if (content.length === 0) continue;
+    selected.push({
+      direction,
+      role: roles.get(otherAgentId) ?? 'Team Agent',
+      content,
+    });
+    remainingChars -= content.length;
+  }
+
+  return selected.reverse();
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

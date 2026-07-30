@@ -366,7 +366,8 @@ function handleCodexNotification(
     if (turn['status'] !== 'completed')
       throw new Error(`Codex turn failed with status ${String(turn['status'])}`);
     advanceStage('synthesizing');
-    emit({ type: 'completed' });
+    const finalText = agentMessageBoundary.finalText();
+    emit(finalText === null ? { type: 'completed' } : { type: 'completed', finalText });
     completed();
   }
 }
@@ -379,12 +380,18 @@ function handleCodexNotification(
  */
 export class CodexAgentMessageBoundary {
   private activeItemId: string | null = null;
+  private activeText = '';
 
   push(itemId: string, delta: string): string {
-    const separated =
-      this.activeItemId !== null && this.activeItemId !== itemId ? `\n\n${delta}` : delta;
+    const changedItem = this.activeItemId !== null && this.activeItemId !== itemId;
+    const separated = changedItem ? `\n\n${delta}` : delta;
+    this.activeText = changedItem ? delta : `${this.activeText}${delta}`;
     this.activeItemId = itemId;
     return separated;
+  }
+
+  finalText(): string | null {
+    return this.activeText.length === 0 ? null : this.activeText;
   }
 }
 

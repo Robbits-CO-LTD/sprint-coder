@@ -3,7 +3,7 @@ import type { ProviderConnection } from '@sprint-coder/contracts';
 import { ProviderConnectionService } from './provider-connection-service';
 import { parseOpenAICredential } from './openai-provider-client';
 import { MainProviderProfileRegistry, parseOpenAICompatibleCredential } from './provider-profile';
-import { PACK_A_PROVIDER_PROFILES } from './bundled-provider-profiles';
+import { LOCAL_PROVIDER_PROFILES, PACK_A_PROVIDER_PROFILES } from './bundled-provider-profiles';
 
 describe('ProviderConnectionService', () => {
   it('stores credentials outside the Connection record and applies safe API limits', () => {
@@ -153,4 +153,103 @@ describe('ProviderConnectionService', () => {
       });
     },
   );
+
+  it.each(LOCAL_PROVIDER_PROFILES)(
+    'creates the $displayName Connection without inventing an API key',
+    (profile) => {
+      const stored: string[] = [];
+      const profiles = new MainProviderProfileRegistry();
+      profiles.register(profile);
+      const service = new ProviderConnectionService(
+        {
+          listProviderConnections: () => [],
+          createProviderConnection: (connection) => connection,
+        },
+        {
+          put: (secret) => {
+            stored.push(secret);
+            return 'provider-secret:00000000-0000-4000-8000-000000000005';
+          },
+          delete: () => undefined,
+        },
+        () => new Date('2026-07-30T00:00:00.000Z'),
+        () => 'local-connection',
+        profiles,
+      );
+
+      const connection = service.createProfile({
+        profileId: profile.id,
+        displayName: profile.displayName,
+      });
+
+      expect(connection).toMatchObject({
+        id: `${profile.id}:local-connection`,
+        providerId: profile.id,
+        runtimeKind: 'openai_compatible',
+        secretReference: 'provider-secret:00000000-0000-4000-8000-000000000005',
+      });
+      expect(parseOpenAICompatibleCredential(stored[0] ?? '')).toEqual({});
+    },
+  );
+
+  it('rejects a cloud Profile before storing when its required API key is absent', () => {
+    let stored = false;
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(PACK_A_PROVIDER_PROFILES[0]!);
+    const service = new ProviderConnectionService(
+      {
+        listProviderConnections: () => [],
+        createProviderConnection: (connection) => connection,
+      },
+      {
+        put: () => {
+          stored = true;
+          return 'provider-secret:00000000-0000-4000-8000-000000000006';
+        },
+        delete: () => undefined,
+      },
+      undefined,
+      undefined,
+      profiles,
+    );
+
+    expect(() =>
+      service.createProfile({
+        profileId: PACK_A_PROVIDER_PROFILES[0]!.id,
+        displayName: PACK_A_PROVIDER_PROFILES[0]!.displayName,
+      }),
+    ).toThrow('requires an API key');
+    expect(stored).toBe(false);
+  });
+
+  it('rejects LAN HTTP before storing a local Profile Connection', () => {
+    let stored = false;
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(LOCAL_PROVIDER_PROFILES[0]!);
+    const service = new ProviderConnectionService(
+      {
+        listProviderConnections: () => [],
+        createProviderConnection: (connection) => connection,
+      },
+      {
+        put: () => {
+          stored = true;
+          return 'provider-secret:00000000-0000-4000-8000-000000000007';
+        },
+        delete: () => undefined,
+      },
+      undefined,
+      undefined,
+      profiles,
+    );
+
+    expect(() =>
+      service.createProfile({
+        profileId: LOCAL_PROVIDER_PROFILES[0]!.id,
+        displayName: 'LAN LocalAI',
+        baseUrl: 'http://192.168.1.20:8080/v1',
+      }),
+    ).toThrow('must use HTTPS or loopback HTTP');
+    expect(stored).toBe(false);
+  });
 });

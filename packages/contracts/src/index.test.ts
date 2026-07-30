@@ -5,6 +5,7 @@ import {
   commandEnvelopeSchema,
   executionResolutionSchema,
   modelSelectionSchema,
+  providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   permissionSettingsSchema,
   permissionSetInputSchema,
@@ -13,6 +14,7 @@ import {
   publicErrorSchema,
   runtimeSettingsSchema,
   teamModelResearchSettingsSchema,
+  teamModelRestrictionSchema,
   taskRenameInputSchema,
   teamBudgetStatusSchema,
   teamActivitySummarySchema,
@@ -141,6 +143,30 @@ describe('public contracts', () => {
     expect(() => teamModelResearchSettingsSchema.parse({ researchBeforeHiring: 'true' })).toThrow();
   });
 
+  it('requires at least one unique model when Team models are restricted', () => {
+    const identity = {
+      connectionId: 'builtin:codex-cli',
+      providerId: 'openai',
+      modelId: 'gpt-5.6-sol',
+    };
+    expect(
+      teamModelRestrictionSchema.parse({ mode: 'selected', allowedModels: [identity] }),
+    ).toEqual({ mode: 'selected', allowedModels: [identity] });
+    expect(() =>
+      teamModelRestrictionSchema.parse({ mode: 'selected', allowedModels: [] }),
+    ).toThrow();
+    expect(() =>
+      teamModelRestrictionSchema.parse({
+        mode: 'selected',
+        allowedModels: [identity, identity],
+      }),
+    ).toThrow();
+    expect(teamModelRestrictionSchema.parse({ mode: 'all', allowedModels: [] })).toEqual({
+      mode: 'all',
+      allowedModels: [],
+    });
+  });
+
   it('validates a declarative OpenAI-compatible Provider Profile', () => {
     expect(
       providerProfileSchema.parse({
@@ -153,12 +179,24 @@ describe('public contracts', () => {
         curatedModels: [],
         verificationModel: null,
         authentication: { headerName: 'Authorization', scheme: 'Bearer' },
-        requiredCredentialFields: [],
+        requiredCredentialFields: ['api_key'],
         errorOverrides: [{ status: 429, category: 'rate_limited', retryable: true }],
         sourceReference: 'https://docs.example.com/openai-compatibility',
         reviewedAt: '2026-07-28T00:00:00.000Z',
       }),
     ).toMatchObject({ id: 'example', protocol: 'chat_completions' });
+  });
+
+  it('allows an OpenAI-compatible Profile Connection to omit an optional API key', () => {
+    expect(
+      providerProfileConnectionCreateInputSchema.parse({
+        profileId: 'ollama',
+        displayName: 'Local Ollama',
+      }),
+    ).toEqual({
+      profileId: 'ollama',
+      displayName: 'Local Ollama',
+    });
   });
 
   it('keeps requested selection separate from observed execution resolution', () => {

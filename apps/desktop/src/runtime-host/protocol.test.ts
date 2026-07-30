@@ -207,10 +207,25 @@ describe('Runtime Host protocol', () => {
       }),
     ).toBe(true);
     expect(
+      isRuntimeToMainEnvelope({
+        ...event,
+        event: { type: 'completed', finalText: 'ユーザー向けの結論です。' },
+      }),
+    ).toBe(true);
+    expect(
       isRuntimeToMainEnvelope({ ...event, event: { type: 'completed', resolvedModel: '' } }),
     ).toBe(false);
     expect(
       isRuntimeToMainEnvelope({ ...event, event: { type: 'completed', resolvedModel: 42 } }),
+    ).toBe(false);
+    expect(isRuntimeToMainEnvelope({ ...event, event: { type: 'completed', finalText: '' } })).toBe(
+      false,
+    );
+    expect(
+      isRuntimeToMainEnvelope({
+        ...event,
+        event: { type: 'completed', finalText: 'x'.repeat(1_000_001) },
+      }),
     ).toBe(false);
   });
 

@@ -12,8 +12,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
     id: 'new',
     command: '/new',
-    label: '新しいTask',
-    description: '新しいTaskを作成します',
+    label: '新しいタスク',
+    description: '新しいタスクを作成します',
     keywords: ['task', 'タスク', '新規'],
   },
   {

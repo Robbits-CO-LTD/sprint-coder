@@ -93,7 +93,7 @@ export function Sidebar({
         data-testid="sidebar-new-task-button"
         onClick={() => void createTask()}
       >
-        <Plus size={15} /> 新しいTask
+        <Plus size={15} /> 新しいタスク
       </button>
       <div className="sb-search">
         <Search size={14} />

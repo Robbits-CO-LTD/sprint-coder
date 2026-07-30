@@ -4,10 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
-import type { AgentRecord } from './persistence';
+import type { AgentRecord, TeamSnapshot } from './persistence';
 import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import {
   TeamCoordinator,
+  priorConversationForAgent,
+  type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
   type WorkerRuntimeResult,
 } from './team-coordinator';
@@ -105,6 +107,9 @@ class BlockingWorkerRuntime extends TestWorkerRuntime {
 
 class InterruptibleWorkerRuntime extends TestWorkerRuntime {
   readonly contents: Array<{ agentId: string; content: string }> = [];
+  readonly priorConversations: Array<
+    readonly { direction: 'received' | 'sent'; role: string; content: string }[]
+  > = [];
   private readonly pending = new Map<
     string,
     {
@@ -117,8 +122,10 @@ class InterruptibleWorkerRuntime extends TestWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    priorConversation?: readonly TeamRuntimeConversationItem[];
   }): Promise<WorkerRuntimeResult> {
     this.contents.push({ agentId: input.worker.id, content: input.content });
+    this.priorConversations.push(input.priorConversation ?? []);
     await new Promise<void>((resolve, reject) => {
       this.pending.set(input.worker.id, { resolve, reject });
     }).finally(() => this.pending.delete(input.worker.id));
@@ -157,6 +164,49 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
+
+describe('priorConversationForAgent', () => {
+  it('includes only the addressed Agent conversation and preserves its order', () => {
+    const snapshot = {
+      agents: [
+        { id: 'leader', role: 'Leader' },
+        { id: 'worker-a', role: '調査' },
+        { id: 'worker-b', role: '実装' },
+      ],
+      messages: [
+        {
+          seq: 1,
+          sourceAgentId: 'leader',
+          targetAgentId: 'worker-a',
+          content: '最初の依頼',
+        },
+        {
+          seq: 2,
+          sourceAgentId: 'leader',
+          targetAgentId: 'worker-b',
+          content: '他Workerだけの秘密',
+        },
+        {
+          seq: 3,
+          sourceAgentId: 'worker-a',
+          targetAgentId: 'leader',
+          content: '作成済みの論点',
+        },
+        {
+          seq: 4,
+          sourceAgentId: 'leader',
+          targetAgentId: 'worker-a',
+          content: '現在の依頼',
+        },
+      ],
+    } as unknown as TeamSnapshot;
+
+    expect(priorConversationForAgent(snapshot, 'worker-a', 4)).toEqual([
+      { direction: 'received', role: 'Leader', content: '最初の依頼' },
+      { direction: 'sent', role: 'Leader', content: '作成済みの論点' },
+    ]);
+  });
+});
 
 if (runsWithElectronAbi)
   describe('TeamCoordinator', () => {
@@ -919,6 +969,60 @@ if (runsWithElectronAbi)
         .messages.find(({ executionId }) => executionId === canceled.executionId);
       expect(canceledMessage).toBeDefined();
       expect(persistence.getTeamDelivery(canceledMessage!.id)?.state).toBe('failed');
+      persistence.close();
+    });
+
+    it('carries earlier Agent work into a restarted execution without requiring a read tool', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Execution context continuity');
+      const runtime = new InterruptibleWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: '論点整理',
+        objective: 'AI便益論を整理する',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'AI便益論の論点を作成してください。',
+        doneCriteria: ['論点を作成する'],
+      });
+      await waitFor(() => runtime.contents.length === 1);
+      const team = persistence.getTeamByTask(task.id);
+      if (team === null) throw new Error('Expected active Team');
+      await coordinator.sendAgentMessageAs(
+        task.id,
+        worker.id,
+        team.leaderAgentId,
+        'AIの便益は生産性向上と知識アクセスの改善です。',
+      );
+      await coordinator.steerExecution(
+        task.id,
+        submission.executionId,
+        'すでに作成した論点を使って最終回答を書いてください。ツールは禁止です。',
+      );
+      await waitFor(() => runtime.contents.length === 2);
+
+      expect(runtime.priorConversations[1]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            direction: 'received',
+            content: 'AI便益論の論点を作成してください。',
+          }),
+          expect.objectContaining({
+            direction: 'sent',
+            content: expect.stringContaining('AIの便益は生産性向上と知識アクセスの改善です。'),
+          }),
+        ]),
+      );
+      runtime.complete(worker.id);
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+      );
       persistence.close();
     });
 

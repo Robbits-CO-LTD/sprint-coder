@@ -89,6 +89,7 @@ describe('Codex runtime probe', () => {
     ].join('');
 
     expect(content).toBe('まず調査します。\n\n原因を確認しました。\n\n修正完了です。');
+    expect(boundary.finalText()).toBe('修正完了です。');
   });
 
   it('advances app-server stages before assistant deltas can be persisted', () => {
