@@ -56,10 +56,21 @@ test.describe('timeline scroll follow', () => {
     await textarea.press('Enter');
     await expect(page.getByTestId('streaming-assistant-message')).toBeVisible({ timeout: 30_000 });
 
-    await scroll.evaluate((el) => {
-      el.scrollTop = 0;
-    });
     const jumpButton = page.getByTestId('timeline-jump-latest');
+    await expect
+      .poll(
+        async () => {
+          await scroll.evaluate((el) => {
+            el.scrollTop = 0;
+            // Setting scrollTop and the stream's own follow-to-bottom effect can race in one frame.
+            // Dispatch the user-observable event explicitly so React records that following ended.
+            el.dispatchEvent(new Event('scroll', { bubbles: true }));
+          });
+          return jumpButton.count();
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(1);
     await expect(jumpButton).toBeVisible();
 
     // Tokens keep arriving; the reader must stay exactly where they parked.

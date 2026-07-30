@@ -129,6 +129,10 @@ test.describe('axe: no serious/critical violations', () => {
       // --- Same settled Team, switched to List view. ---
       await page.getByTestId('team-view-toggle').click();
       await expect(page.locator('.team-list-view')).toBeVisible();
+      // The Canvas-to-List morph fades/reparents both the shared Chat surface and surrounding
+      // chrome. axe samples computed colours, so let the finite morph settle instead of auditing a
+      // partially transparent frame.
+      await page.waitForTimeout(700);
 
       const listViolations = await runAxeSerious(page);
       expect(listViolations, formatViolations(listViolations)).toEqual([]);
