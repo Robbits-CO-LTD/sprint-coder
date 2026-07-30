@@ -62,7 +62,10 @@ test.describe('live file edit', () => {
 
     const body = page.getByTestId('live-edit-body');
     await expect(body).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId('live-edit-path')).toContainText('src/parser.ts');
+    // The mock writes parser.ts and parser.test.ts concurrently. The panel follows whichever
+    // stream most recently emitted, so either is a valid active file at this instant (Windows
+    // scheduling commonly makes the test file win).
+    await expect(page.getByTestId('live-edit-path')).toHaveText(/src\/parser(?:\.test)?\.ts/u);
 
     // The body must actually grow — a single final frame would satisfy "is visible" while missing
     // the entire point of the feature. This is the assertion that proves liveness; the transient

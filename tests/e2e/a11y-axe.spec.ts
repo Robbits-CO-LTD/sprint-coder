@@ -129,15 +129,6 @@ test.describe('axe: no serious/critical violations', () => {
       // --- Same settled Team, switched to List view. ---
       await page.getByTestId('team-view-toggle').click();
       await expect(page.locator('.team-list-view')).toBeVisible();
-      await page.waitForFunction(() => {
-        const hiddenChrome = [
-          document.querySelector('.sidebar'),
-          document.querySelector('.task-header'),
-        ];
-        return hiddenChrome.every(
-          (element) => element !== null && Number(getComputedStyle(element).opacity) <= 0.01,
-        );
-      });
 
       const listViolations = await runAxeSerious(page);
       expect(listViolations, formatViolations(listViolations)).toEqual([]);

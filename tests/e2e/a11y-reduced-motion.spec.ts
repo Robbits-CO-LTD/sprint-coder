@@ -65,9 +65,10 @@ test.describe('Reduced motion (NFR-A11Y-04)', () => {
 
       const distinct = new Set(samples);
       expect(samples[0]).not.toBe('');
-      expect(distinct.size, `expected a single settled transform, saw: ${[...distinct].join(' | ')}`).toBe(
-        1,
-      );
+      expect(
+        distinct.size,
+        `expected a single settled transform, saw: ${[...distinct].join(' | ')}`,
+      ).toBe(1);
     } finally {
       await closeApp(app);
       removeUserDataDir(dir);
@@ -83,23 +84,38 @@ test.describe('Reduced motion (NFR-A11Y-04)', () => {
       await page.getByTestId('sidebar-new-task-button').click();
       await expect(page.getByTestId('composer-textarea')).toBeVisible();
 
+      // Arm before mounting TeamCanvas. On a busy hosted runner the whole entry animation can
+      // finish between click() and the visibility assertion, making post-entry sampling observe
+      // only the final frame.
+      await page.evaluate(() => {
+        const state = window as typeof window & {
+          __cameraMotionSamples?: string[];
+        };
+        state.__cameraMotionSamples = [];
+        const tick = (): void => {
+          const world = document.querySelector<HTMLElement>('.team-world');
+          if (world !== null) state.__cameraMotionSamples?.push(world.style.transform);
+          if ((state.__cameraMotionSamples?.length ?? 0) < 40) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
       await page.getByTestId('team-toggle').click();
       await expect(page.getByTestId('team-list')).toBeVisible();
-
+      await page.waitForFunction(
+        () =>
+          (
+            window as typeof window & {
+              __cameraMotionSamples?: string[];
+            }
+          ).__cameraMotionSamples?.length === 40,
+      );
       const samples = await page.evaluate(
         () =>
-          new Promise<string[]>((resolve) => {
-            const el = document.querySelector<HTMLElement>('.team-world');
-            const out: string[] = [];
-            let n = 0;
-            function tick() {
-              out.push(el?.style.transform ?? '');
-              n += 1;
-              if (n < 20) requestAnimationFrame(tick);
-              else resolve(out);
+          (
+            window as typeof window & {
+              __cameraMotionSamples?: string[];
             }
-            requestAnimationFrame(tick);
-          }),
+          ).__cameraMotionSamples ?? [],
       );
 
       const distinct = new Set(samples);
@@ -176,7 +192,8 @@ test.describe('Reduced motion (NFR-A11Y-04)', () => {
       });
       await reducedPage.getByTestId('team-back').click();
       await reducedPage.waitForFunction(
-        () => (window as unknown as { __exitAnimDuration: string | null }).__exitAnimDuration !== null,
+        () =>
+          (window as unknown as { __exitAnimDuration: string | null }).__exitAnimDuration !== null,
         { timeout: 5_000 },
       );
       const reducedDuration = await reducedPage.evaluate(
@@ -209,7 +226,8 @@ test.describe('Reduced motion (NFR-A11Y-04)', () => {
       });
       await normalPage.getByTestId('team-back').click();
       await normalPage.waitForFunction(
-        () => (window as unknown as { __exitAnimDuration: string | null }).__exitAnimDuration !== null,
+        () =>
+          (window as unknown as { __exitAnimDuration: string | null }).__exitAnimDuration !== null,
         { timeout: 5_000 },
       );
       const normalDuration = await normalPage.evaluate(
