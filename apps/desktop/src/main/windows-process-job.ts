@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 
@@ -9,6 +10,7 @@ type WindowsJobAddon = Readonly<{
 }>;
 
 let loadedAddon: WindowsJobAddon | null | undefined;
+let resolvedNodeCommand: string | undefined;
 
 export function assignProcessToOwnedJob(pid: number, jobId: string): void {
   if (!addon().assignProcessToOwnedJob(pid, jobId))
@@ -65,3 +67,24 @@ process.stdin.on('end', () => {
   });
 });
 `;
+
+/**
+ * Production packages deliberately disable Electron's RunAsNode fuse. Use the same Node runtime
+ * available to the supported Claude/Codex CLI workflow instead of weakening that fuse.
+ */
+export function windowsJobWrapperCommand(): string {
+  if (resolvedNodeCommand !== undefined) return resolvedNodeCommand;
+  const output = execFileSync('C:\\Windows\\System32\\where.exe', ['node.exe'], {
+    encoding: 'utf8',
+    env: process.env,
+    windowsHide: true,
+  });
+  const firstMatch = output
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (firstMatch === undefined)
+    throw new Error('Node.js is required for Windows command isolation');
+  resolvedNodeCommand = firstMatch;
+  return resolvedNodeCommand;
+}

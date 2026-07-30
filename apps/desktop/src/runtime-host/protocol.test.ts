@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import { dirname, join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from '@sprint-coder/domain';
 import {
@@ -136,16 +138,17 @@ describe('Runtime Host protocol', () => {
   it('accepts only normalized absolute Runtime Skill package paths', () => {
     const valid = startEnvelope();
     const digest = 'a'.repeat(64);
+    const managedPath = join(tmpdir(), 'skills', 'revisions', 'created', 'reviewer', digest);
     expect(
       isMainToRuntimeEnvelope({
         ...valid,
-        skills: [{ name: 'reviewer', path: `/tmp/skills/revisions/created/reviewer/${digest}` }],
+        skills: [{ name: 'reviewer', path: managedPath }],
       }),
     ).toBe(true);
     for (const path of [
       '../../secrets',
-      `/tmp/skills/revisions/created/reviewer/../${digest}`,
-      '/tmp/arbitrary/reviewer',
+      `${dirname(managedPath)}${sep}..${sep}${digest}`,
+      join(tmpdir(), 'arbitrary', 'reviewer'),
     ])
       expect(
         isMainToRuntimeEnvelope({

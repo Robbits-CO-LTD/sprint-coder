@@ -28,6 +28,10 @@ function testSocketPath(): () => string {
   return defaultSocketPathFactory(tmpdir());
 }
 
+function isExpectedWindowsPipeClose(error: Error & { code?: string }): boolean {
+  return process.platform === 'win32' && ['EPIPE', 'ECONNRESET'].includes(error.code ?? '');
+}
+
 /** Sends one line and collects every line the server writes back before the socket closes (or a
  * short grace period elapses with no more data), then closes the connection. */
 function roundTrip(
@@ -60,7 +64,14 @@ function roundTrip(
       closed = true;
       finish();
     });
-    socket.once('error', reject);
+    socket.once('error', (error: Error & { code?: string }) => {
+      if (!isExpectedWindowsPipeClose(error)) {
+        reject(error);
+        return;
+      }
+      closed = true;
+      finish();
+    });
   });
 }
 
@@ -124,7 +135,12 @@ describe('TeamMcpBridge', () => {
     const socket = createConnection(socketPath as string);
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('connection was not closed')), 500);
-      socket.once('error', reject);
+      socket.once('error', (error: Error & { code?: string }) => {
+        if (isExpectedWindowsPipeClose(error)) {
+          clearTimeout(timeout);
+          resolve();
+        } else reject(error);
+      });
       socket.once('close', () => {
         clearTimeout(timeout);
         resolve();
@@ -146,7 +162,12 @@ describe('TeamMcpBridge', () => {
         500,
       );
       socket.once('connect', () => socket.write(Buffer.alloc(1024 * 1024 + 1, 'x')));
-      socket.once('error', reject);
+      socket.once('error', (error: Error & { code?: string }) => {
+        if (isExpectedWindowsPipeClose(error)) {
+          clearTimeout(timeout);
+          resolve();
+        } else reject(error);
+      });
       socket.once('close', () => {
         clearTimeout(timeout);
         resolve();
@@ -417,5 +438,28 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
       ok: true,
       result: { authenticated: true },
     });
+  });
+
+  it('accepts rapid sequential reconnects on the same named pipe', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-windows-reconnect', { taskId: 'task-windows', token });
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const response = await roundTrip(socketPath as string, {
+        token,
+        tool: '__authenticate__',
+        args: {},
+      });
+      expect(response.lines.map((line) => JSON.parse(line))).toContainEqual({
+        ok: true,
+        result: { authenticated: true },
+      });
+    }
   });
 });

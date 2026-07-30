@@ -1,11 +1,77 @@
-import { describe, expect, it } from 'vitest';
-import { buildClaudeArgs, buildClaudePrompt, probeClaude } from './claude-adapter';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  buildClaudeArgs,
+  buildClaudePrompt,
+  probeClaude,
+  resolveClaudeCommand,
+} from './claude-adapter';
+
+const temporaryRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
 
 describe('Claude runtime probe', () => {
+  it('resolves the native Claude executable behind the Windows npm shim', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-command-'));
+    temporaryRoots.push(root);
+    const executable = join(
+      root,
+      'node_modules',
+      '@anthropic-ai',
+      'claude-code',
+      'bin',
+      'claude.exe',
+    );
+    await mkdir(join(executable, '..'), { recursive: true });
+    await writeFile(executable, '');
+
+    expect(resolveClaudeCommand('claude', 'win32', root)).toBe(executable);
+  });
+
+  it('falls back to the Windows user profile when APPDATA is absent', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-home-'));
+    temporaryRoots.push(home);
+    const executable = join(
+      home,
+      'AppData',
+      'Roaming',
+      'npm',
+      'node_modules',
+      '@anthropic-ai',
+      'claude-code',
+      'bin',
+      'claude.exe',
+    );
+    await mkdir(join(executable, '..'), { recursive: true });
+    await writeFile(executable, '');
+
+    expect(resolveClaudeCommand('claude', 'win32', '', null, home)).toBe(executable);
+  });
+
   it('degrades to unavailable when the CLI cannot be spawned', async () => {
     await expect(probeClaude('__sprint_coder_claude_cli_does_not_exist__')).resolves.toEqual({
       available: false,
       models: [],
+    });
+  });
+
+  it('publishes the curated model catalog for isolated E2E without spawning a CLI', async () => {
+    await expect(
+      probeClaude('__must_not_be_spawned__', { SPRINT_CODER_E2E_CLI_FIXTURES: '1' }),
+    ).resolves.toMatchObject({
+      available: true,
+      version: 'e2e-fixture',
+      models: expect.arrayContaining([
+        expect.objectContaining({ id: 'sonnet' }),
+        expect.objectContaining({ id: 'claude-opus-5' }),
+      ]),
     });
   });
 

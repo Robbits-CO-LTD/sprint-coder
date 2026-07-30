@@ -1,8 +1,16 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import {
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError } from '@sprint-coder/contracts';
 import type {
@@ -34,10 +42,35 @@ export type CodexProbe = {
   models: CodexModelOption[];
 };
 
-export async function probeCodex(command = 'codex'): Promise<CodexProbe> {
+const E2E_CODEX_MODELS: CodexModelOption[] = [
+  { id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' },
+  {
+    id: 'gpt-5.6-terra',
+    displayName: 'GPT-5.6-Terra',
+    description: 'E2E用のCodexモデルfixture',
+    defaultEffort: 'medium',
+    efforts: [
+      { id: 'low', description: '軽量な推論' },
+      { id: 'medium', description: '標準的な推論' },
+      { id: 'high', description: '深い推論' },
+      { id: 'xhigh', description: 'より深い推論' },
+    ],
+  },
+];
+
+export async function probeCodex(
+  command = 'codex',
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): Promise<CodexProbe> {
+  // Packaged E2E exercises model selection without executing the real CLI. CI runners deliberately
+  // have no Codex installation or credentials, so expose a deterministic catalog only to the
+  // isolated E2E process. Adapter execution remains untouched and would still fail closed.
+  if (environment['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1') {
+    return { available: true, version: 'e2e-fixture', models: E2E_CODEX_MODELS };
+  }
   const availability = await new Promise<Omit<CodexProbe, 'models'>>((resolve) => {
     let settled = false;
-    const child = spawn(command, ['--version'], {
+    const child = spawn(resolveCodexCommand(command), ['--version'], {
       env: minimalEnvironment(),
       stdio: ['ignore', 'pipe', 'ignore'],
     });
@@ -116,20 +149,24 @@ export class CodexRuntimeAdapter {
     // in that case; this is the adapter refusing independently, so the two would have to fail
     // together for a write to escape.
     const effectiveScope: RuntimeWriteScope = workspacePath === null ? 'read-only' : writeScope;
-    const child = spawn('codex', buildCodexArgs(model, effort, effectiveScope, teamMcpProfile), {
-      cwd,
-      env: {
-        ...minimalEnvironment(),
-        ...(teamMcp === undefined
-          ? {}
-          : {
-              TEAM_BRIDGE_SOCKET: teamMcp.socketPath,
-              TEAM_BRIDGE_TOKEN: teamMcp.token,
-            }),
+    const child = spawn(
+      resolveCodexCommand('codex'),
+      buildCodexArgs(model, effort, effectiveScope, teamMcpProfile),
+      {
+        cwd,
+        env: {
+          ...minimalEnvironment(),
+          ...(teamMcp === undefined
+            ? {}
+            : {
+                TEAM_BRIDGE_SOCKET: teamMcp.socketPath,
+                TEAM_BRIDGE_TOKEN: teamMcp.token,
+              }),
+        },
+        detached: process.platform !== 'win32',
+        stdio: ['pipe', 'pipe', 'pipe'],
       },
-      detached: process.platform !== 'win32',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    );
     const cleanup = (): void => {
       if (temporaryDirectory !== null) rmSync(temporaryDirectory, { recursive: true, force: true });
       if (teamMcpDirectory !== null) rmSync(teamMcpDirectory, { recursive: true, force: true });
@@ -520,7 +557,8 @@ export function buildCodexArgs(
 ): string[] {
   return [
     'app-server',
-    '--stdio',
+    '--listen',
+    'stdio://',
     // Stays "never" at every scope. `approval_policy` governs asking the *user* mid-turn, and
     // `codex exec` has no channel to ask on — verified: it is a one-shot stdin invocation, and
     // `on-request` in this mode simply stalls the tool rather than surfacing anything answerable.
@@ -650,6 +688,77 @@ function readCodexModels(): CodexModelOption[] {
     ];
   } catch {
     return [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }];
+  }
+}
+
+export function resolveCodexCommand(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+  searchPath: string | undefined = process.env['PATH'],
+  appData: string | null | undefined = process.env['APPDATA'],
+  userHome: string = homedir(),
+  architecture: NodeJS.Architecture = process.arch,
+  localAppData: string | null | undefined = process.env['LOCALAPPDATA'],
+): string {
+  if (platform !== 'win32' || command !== 'codex') return command;
+  const desktopCommand = resolveCodexDesktopCommand(localAppData);
+  if (desktopCommand !== null) return desktopCommand;
+  const packageArchitecture = architecture === 'arm64' ? 'arm64' : 'x64';
+  const targetTriple =
+    architecture === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
+  const roots = [
+    ...(searchPath ?? '')
+      .split(delimiter)
+      .map((entry) => entry.trim().replace(/^"(.*)"$/u, '$1'))
+      .filter((entry) => entry.length > 0),
+    ...(appData == null ? [] : [join(appData, 'npm')]),
+    join(userHome, 'AppData', 'Roaming', 'npm'),
+  ];
+  for (const root of new Set(roots)) {
+    for (const candidate of [
+      join(root, 'codex.exe'),
+      join(
+        root,
+        'node_modules',
+        '@openai',
+        'codex',
+        'node_modules',
+        '@openai',
+        `codex-win32-${packageArchitecture}`,
+        'vendor',
+        targetTriple,
+        'codex',
+        'codex.exe',
+      ),
+    ]) {
+      try {
+        if (lstatSync(candidate).isFile()) return candidate;
+      } catch {
+        // Continue searching Windows npm's native package locations.
+      }
+    }
+  }
+  return command;
+}
+
+function resolveCodexDesktopCommand(localAppData: string | null | undefined): string | null {
+  if (localAppData == null) return null;
+  const binDirectory = join(localAppData, 'OpenAI', 'Codex', 'bin');
+  try {
+    const candidates = readdirSync(binDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(binDirectory, entry.name, 'codex.exe'))
+      .filter((candidate) => {
+        try {
+          return lstatSync(candidate).isFile();
+        } catch {
+          return false;
+        }
+      })
+      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+    return candidates[0] ?? null;
+  } catch {
+    return null;
   }
 }
 

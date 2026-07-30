@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SkillStore, SkillStoreError, type SkillProvider } from './skill-store';
+import { verifyWindowsPathAcl } from './windows-acl';
 
 const roots: string[] = [];
 
@@ -337,5 +338,56 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     await store.removeCreated(installed.skillId, installed.digest);
     expect(await store.listSelectable()).toEqual([]);
     expect(await readFile(join(pinned, 'SKILL.md'), 'utf8')).toContain('Review files');
+  });
+});
+
+describe.runIf(process.platform === 'win32')('SkillStore Windows ACL', () => {
+  it('imports and updates a Skill while keeping managed files private', async () => {
+    const root = await tempRoot();
+    const source = join(root, 'skills');
+    const { path } = await fixture(source, 'windows-managed');
+    const storeRoot = join(root, 'store');
+    const store = await SkillStore.open({ rootPath: storeRoot });
+    let [candidate] = await store.scanSources({ claudePath: source });
+    let preview = await store.previewImport(candidate!);
+    const imported = await store.importSkill(preview);
+
+    await expect(verifyWindowsPathAcl(storeRoot, 'directory')).resolves.toBeUndefined();
+    await expect(verifyWindowsPathAcl(imported.path, 'directory')).resolves.toBeUndefined();
+    await expect(
+      verifyWindowsPathAcl(join(imported.path, 'SKILL.md'), 'file'),
+    ).resolves.toBeUndefined();
+
+    await writeFile(
+      join(path, 'SKILL.md'),
+      '---\nname: windows-managed\ndescription: Updated on Windows\n---\n',
+    );
+    [candidate] = await store.scanSources({ claudePath: source });
+    preview = await store.previewImport(candidate!);
+    const updated = await store.updateSkill(preview);
+
+    expect(await readFile(join(updated.path, 'SKILL.md'), 'utf8')).toContain('Updated on Windows');
+    await expect(verifyWindowsPathAcl(updated.path, 'directory')).resolves.toBeUndefined();
+    await expect(
+      verifyWindowsPathAcl(join(updated.path, 'SKILL.md'), 'file'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('does not replace inherited Windows permissions on a user-selected export folder', async () => {
+    const root = await tempRoot();
+    const store = await SkillStore.open({ rootPath: join(root, 'store') });
+    const installed = await store.installCreatedSkill('windows-export', [
+      {
+        path: 'SKILL.md',
+        content:
+          '---\nname: Windows Export\ndescription: Export permission test\n---\n\nInstructions.',
+      },
+    ]);
+    const exportRoot = join(root, 'export');
+    await mkdir(exportRoot);
+    const exported = await store.exportCreated(installed.skillId, installed.digest, exportRoot);
+
+    await expect(verifyWindowsPathAcl(exported, 'directory')).rejects.toBeDefined();
+    expect(await readFile(join(exported, 'SKILL.md'), 'utf8')).toContain('Instructions.');
   });
 });

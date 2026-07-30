@@ -1,4 +1,5 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
+import { MakerSquirrel } from '@electron-forge/maker-squirrel';
 import { MakerZIP } from '@electron-forge/maker-zip';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
@@ -45,6 +46,27 @@ const macCodeSignIdentity = process.env['SPRINT_CODER_CODESIGN_IDENTITY'] ?? '-'
 const releasePackage = process.env['SPRINT_CODER_RELEASE'] === '1';
 const ciPackage = process.env['CI'] === '1' || process.env['CI'] === 'true';
 const allowAdhocCodeSign = process.env['SPRINT_CODER_ALLOW_ADHOC_CODESIGN'] === '1';
+const allowUnsignedWindows = process.env['SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS'] === '1';
+const windowsCertificateFile = process.env['SPRINT_CODER_WINDOWS_CERTIFICATE_FILE'];
+const windowsCertificatePassword = process.env['SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD'];
+const windowsSign =
+  windowsCertificateFile !== undefined && windowsCertificatePassword !== undefined
+    ? {
+        certificateFile: windowsCertificateFile,
+        certificatePassword: windowsCertificatePassword,
+        description: 'Sprint Coder',
+      }
+    : undefined;
+
+if (
+  process.platform === 'win32' &&
+  releasePackage &&
+  !allowUnsignedWindows &&
+  (windowsCertificateFile === undefined || windowsCertificatePassword === undefined)
+)
+  throw new Error(
+    'SPRINT_CODER_WINDOWS_CERTIFICATE_FILE and SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD are required for a production Windows package unless SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1 is explicitly set',
+  );
 
 function copyHoistedRuntimeModules(buildPath: string): void {
   const rootNodeModules = resolve(__dirname, '..', '..', 'node_modules');
@@ -116,6 +138,7 @@ const config: ForgeConfig = {
             identity: macCodeSignIdentity,
           },
         }),
+    ...(windowsSign === undefined ? {} : { windowsSign }),
     afterCopy: [
       (buildPath, _electronVersion, _platform, _arch, done) => {
         try {
@@ -130,11 +153,7 @@ const config: ForgeConfig = {
   hooks: {
     postPackage: async (_forgeConfig, packageResult) => {
       if (packageResult.platform !== 'darwin') return;
-      if (
-        (releasePackage || ciPackage) &&
-        macCodeSignIdentity === '-' &&
-        !allowAdhocCodeSign
-      )
+      if ((releasePackage || ciPackage) && macCodeSignIdentity === '-' && !allowAdhocCodeSign)
         throw new Error(
           'SPRINT_CODER_CODESIGN_IDENTITY is required for a CI or production macOS package',
         );
@@ -153,19 +172,21 @@ const config: ForgeConfig = {
         if (macCodeSignIdentity === '-') signAdhocBundle(appPath);
         execFileSync(
           '/usr/bin/codesign',
-          [
-            '--verify',
-            '--deep',
-            '--strict',
-            '--verbose=2',
-            appPath,
-          ],
+          ['--verify', '--deep', '--strict', '--verbose=2', appPath],
           { stdio: 'inherit' },
         );
       }
     },
   },
-  makers: [new MakerZIP({}, ['darwin', 'win32', 'linux'])],
+  makers: [
+    new MakerSquirrel({
+      name: 'SprintCoder',
+      setupExe: 'Sprint-Coder-Setup.exe',
+      noMsi: true,
+      ...(windowsSign === undefined ? {} : { windowsSign }),
+    }),
+    new MakerZIP({}, ['darwin', 'win32', 'linux']),
+  ],
   plugins: [
     new VitePlugin({
       build: [

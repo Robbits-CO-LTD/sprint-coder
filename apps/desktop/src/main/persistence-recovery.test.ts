@@ -15,6 +15,10 @@ import { SqlitePersistenceClient } from './persistence';
 // (better-sqlite3 is rebuilt for Electron), so under plain vitest they are skipped and a bridge
 // test re-runs this file inside Electron with ELECTRON_RUN_AS_NODE.
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
+// Windows CI spends most of this time creating the 10k-row fixture. The measured reopen/projection
+// budget below remains 1.5s; this timeout only keeps fixture setup from masking that assertion.
+const projectionFixtureTimeoutMs = process.platform === 'win32' ? 120_000 : 60_000;
+const recoveryBridgeTimeoutMs = process.platform === 'win32' ? 150_000 : 90_000;
 
 const tempDirs: string[] = [];
 
@@ -76,54 +80,62 @@ if (runsWithElectronAbi)
 
 if (runsWithElectronAbi)
   describe('10k-event projection restore (NFR-PERF-04)', () => {
-    it('reopens and projects a 10,000-delta task within budget', () => {
-      const path = tempDatabasePath();
-      const seeded = new SqlitePersistenceClient(path);
-      const task = seeded.createTask('projection perf fixture');
-      const started = seeded.startTurn(task.id, '大量イベントの復元計測');
-      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
-        seeded.changeStage(task.id, started.turnId, stage);
-      const messageId = randomUUID();
-      for (let index = 0; index < 10_000; index += 1) {
-        seeded.appendDelta(task.id, started.turnId, messageId, `chunk-${index} `);
-      }
-      seeded.close();
+    it(
+      'reopens and projects a 10,000-delta task within budget',
+      () => {
+        const path = tempDatabasePath();
+        const seeded = new SqlitePersistenceClient(path);
+        const task = seeded.createTask('projection perf fixture');
+        const started = seeded.startTurn(task.id, '大量イベントの復元計測');
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          seeded.changeStage(task.id, started.turnId, stage);
+        const messageId = randomUUID();
+        for (let index = 0; index < 10_000; index += 1) {
+          seeded.appendDelta(task.id, started.turnId, messageId, `chunk-${index} `);
+        }
+        seeded.close();
 
-      const openStart = performance.now();
-      const reopened = new SqlitePersistenceClient(path);
-      const messages = reopened.listMessages(task.id);
-      const elapsedMs = performance.now() - openStart;
-      reopened.close();
+        const openStart = performance.now();
+        const reopened = new SqlitePersistenceClient(path);
+        const messages = reopened.listMessages(task.id);
+        const elapsedMs = performance.now() - openStart;
+        reopened.close();
 
-      expect(messages.some((message) => message.content.includes('chunk-9999'))).toBe(true);
-      // NFR-PERF-04 targets 500ms first render; the DB open + projection share of that budget is
-      // asserted with headroom for slow CI machines. The measured value is printed for the gate
-      // record.
-      console.info(`[perf] 10k-event reopen+projection: ${Math.round(elapsedMs)}ms`);
-      expect(elapsedMs).toBeLessThan(1500);
-    }, 60_000);
+        expect(messages.some((message) => message.content.includes('chunk-9999'))).toBe(true);
+        // NFR-PERF-04 targets 500ms first render; the DB open + projection share of that budget is
+        // asserted with headroom for slow CI machines. The measured value is printed for the gate
+        // record.
+        console.info(`[perf] 10k-event reopen+projection: ${Math.round(elapsedMs)}ms`);
+        expect(elapsedMs).toBeLessThan(1500);
+      },
+      projectionFixtureTimeoutMs,
+    );
   });
 
 describe('recovery suite Electron ABI bridge', () => {
-  it('runs the corruption-recovery and projection-perf suites with the Electron Node ABI', () => {
-    if (runsWithElectronAbi) return; // already inside the bridge run
-    const result = spawnSync(
-      electronTestExecutablePath(),
-      [
-        join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-        'run',
-        'src/main/persistence-recovery.test.ts',
-      ],
-      {
-        cwd: process.cwd(),
-        encoding: 'utf8',
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-        timeout: 90_000,
-      },
-    );
-    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    const perfLine = /\[perf\] 10k-event reopen\+projection: \d+ms/.exec(result.stdout ?? '');
-    // Surface the measured projection time in the outer run's output for the gate record.
-    if (perfLine) console.info(perfLine[0]);
-  }, 120_000);
+  it(
+    'runs the corruption-recovery and projection-perf suites with the Electron Node ABI',
+    () => {
+      if (runsWithElectronAbi) return; // already inside the bridge run
+      const result = spawnSync(
+        electronTestExecutablePath(),
+        [
+          join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+          'run',
+          'src/main/persistence-recovery.test.ts',
+        ],
+        {
+          cwd: process.cwd(),
+          encoding: 'utf8',
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
+          timeout: recoveryBridgeTimeoutMs,
+        },
+      );
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      const perfLine = /\[perf\] 10k-event reopen\+projection: \d+ms/.exec(result.stdout ?? '');
+      // Surface the measured projection time in the outer run's output for the gate record.
+      if (perfLine) console.info(perfLine[0]);
+    },
+    recoveryBridgeTimeoutMs + 30_000,
+  );
 });

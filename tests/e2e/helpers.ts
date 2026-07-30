@@ -364,6 +364,10 @@ export async function launchApp(
     // Team golden paths assert deterministic Worker reports. Production remains fail-closed:
     // simulated workers are enabled only inside this isolated E2E process.
     SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS: '1',
+    // Catalog/settings specs must be independent of which CLIs happen to be installed on a
+    // developer machine or credential-free CI runner. This only affects availability probes;
+    // mock remains the adopted execution runtime and no fixture can execute a turn.
+    SPRINT_CODER_E2E_CLI_FIXTURES: '1',
     ...environmentOverrides,
   };
 

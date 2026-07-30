@@ -1,3 +1,4 @@
+import { basename } from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import {
@@ -71,7 +72,7 @@ test.describe('command runner flow', () => {
       });
     }, REPO_ROOT);
     await page.getByRole('button', { name: 'Workspace未選択' }).first().click();
-    await expect(page.getByRole('button', { name: 'sprint-coder' }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: basename(REPO_ROOT) }).first()).toBeVisible();
 
     const textarea = page.getByTestId('composer-textarea');
     const card = page.getByTestId('approval-card');
@@ -120,7 +121,9 @@ test.describe('command runner flow', () => {
       timeout: 20_000,
     });
     await expect(commandCard).toContainText('exit 0');
-    await expect(commandCard).toContainText('command ok');
+    await expect(commandCard).toContainText(
+      process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : 'command ok',
+    );
     await expect(commandCard.getByTestId('command-duration')).toContainText(/\d/);
 
     const outputApiProof = await page.evaluate(async () => {
@@ -167,11 +170,10 @@ test.describe('command runner flow', () => {
         envKeys: Object.keys(command.envDelta),
       };
     });
-    expect(outputApiProof).toMatchObject({
-      text: 'command ok\n',
-      eof: true,
-      crossTaskRejected: true,
-    });
+    expect(outputApiProof).toMatchObject({ eof: true, crossTaskRejected: true });
+    expect(outputApiProof.text).toContain(
+      process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : 'command ok\n',
+    );
     expect(outputApiProof.cursor).toBeGreaterThan(0);
     expect(outputApiProof.tailCursor).toBe(outputApiProof.cursor);
     expect(outputApiProof.pageBytes).toBeLessThanOrEqual(65_536);
@@ -190,7 +192,9 @@ test.describe('command runner flow', () => {
       .last();
     await expect(restoredCard).toBeVisible();
     await expect(restoredCard).toContainText('exit 0');
-    await expect(restoredCard).toContainText('command ok');
+    await expect(restoredCard).toContainText(
+      process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : 'command ok',
+    );
 
     await restoredPage.getByTestId('access-selector').click();
     await restoredPage.getByTestId('access-option-auto').click();

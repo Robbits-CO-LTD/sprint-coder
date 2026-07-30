@@ -110,6 +110,18 @@ test.describe('axe: no serious/critical violations', () => {
           { timeout: 20_000 },
         );
       }
+      // Team mode fades the now-inert sidebar and task header out. On slower Linux runners that
+      // transition can begin after the final Worker settles; axe would otherwise sample the
+      // partially transparent text and report a contrast failure for a transient hidden frame.
+      await page.waitForFunction(() => {
+        const hiddenChrome = [
+          document.querySelector('.sidebar'),
+          document.querySelector('.task-header'),
+        ];
+        return hiddenChrome.every(
+          (element) => element !== null && Number(getComputedStyle(element).opacity) <= 0.01,
+        );
+      });
 
       const canvasViolations = await runAxeSerious(page);
       expect(canvasViolations, formatViolations(canvasViolations)).toEqual([]);

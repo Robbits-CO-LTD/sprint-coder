@@ -89,6 +89,20 @@ npm start
 
 E2Eはpackage作成とnative moduleの検証を含むため、通常の変更確認では対象test、typecheck、lintから先に実行してください。CIではmacOS、Windows、Linuxの各環境で検証します。
 
+### Windowsインストーラーの作成
+
+Node.js 22、Python 3、Visual Studio 2022 Build Tools（「C++によるデスクトップ開発」）を用意し、PowerShellで次を実行します。
+
+```powershell
+npm ci
+node node_modules/electron/install.js
+npm run make:windows
+```
+
+インストーラーは`apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Setup.exe`、展開して起動できるZIP版は`apps/desktop/out/make/zip/win32/x64/`に出力されます。
+
+手元で作るインストーラーは未署名のため、Windowsから警告が表示されることがあります。正式配布ではコード署名証明書（`.pfx`）を用意し、`SPRINT_CODER_RELEASE=1`、`SPRINT_CODER_WINDOWS_CERTIFICATE_FILE`、`SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD`を設定してください。検証用betaのworkflowのみ、`SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1`を明示して未署名artifactを作成します。
+
 ## リポジトリ構成
 
 ```text
@@ -103,7 +117,7 @@ tasks/              実装計画と設計レビュー記録
 ## 現在の配布状態
 
 - desktop packageのversionはbeta SemVerで管理しています。
-- GitHub ActionsはmacOS / WindowsのZIPをbeta prereleaseとして作成できます。
+- GitHub ActionsはmacOS / WindowsのZIPとWindowsインストーラーをbeta prereleaseとして作成できます。
 - macOSのbeta artifactは現時点ではad-hoc署名で、Apple notarizationは未対応です。
 - 配布物が公開されている場合は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases)から取得できます。
 

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, net, protocol, session } from 'electron';
+import squirrelStartup from 'electron-squirrel-startup';
 import { readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { extname, join, resolve } from 'node:path';
@@ -41,8 +42,8 @@ if (userDataOverride !== undefined && userDataOverride.length > 0) {
   app.setPath('userData', resolve(process.cwd(), '.vite-user-data'));
 }
 
-const hasLock = app.requestSingleInstanceLock();
-if (!hasLock) {
+const hasLock = !squirrelStartup && app.requestSingleInstanceLock();
+if (squirrelStartup || !hasLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -127,7 +128,7 @@ function createWindow(): BrowserWindow {
           titleBarStyle: 'hiddenInset' as const,
           trafficLightPosition: { x: 14, y: 13 },
         }
-      : {}),
+      : { autoHideMenuBar: true }),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       sandbox: true,
@@ -135,6 +136,7 @@ function createWindow(): BrowserWindow {
       nodeIntegration: false,
     },
   });
+  if (process.platform !== 'darwin') window.setMenu(null);
   window.webContents.on('will-navigate', (event) => event.preventDefault());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) =>

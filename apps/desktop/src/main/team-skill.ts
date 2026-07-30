@@ -16,7 +16,7 @@ Team利用が明示された依頼では、必ずMCPサーバー \`team\` の実
 CodexやClaude自身のsubagent／Agent Teams機能、外部skill、別MCPを代替として使ってはいけない。
 \`team_list_models\`が実際に呼び出せない場合は、代替実行へ進まず「Sprint Coder Team MCPを利用できない」と報告して終了する。
 
-1. \`team_list_models\` で利用可能なConnection／modelとsource付き能力を確認する。作業に必要な能力でfilterし、unknownを0やfalseと解釈せず、model名やProvider名から適性を推測しない。
+1. \`team_list_models\` で利用可能なConnection／modelとsource付き能力を確認する。まず作業に必要な能力でfilterする。0件なら、CLI modelのunknown能力がfilterで除外された可能性があるため、capabilitiesを空にして再検索し、source付きのunknownとして候補を確認する。unknownを0やfalseと解釈せず、model名やProvider名から能力を推測しない。
 2. \`team_hire_worker\` で重複しない役割のAgentを必要人数だけ採用する。leaf Workerは\`agentKind: "worker"\`を指定し、\`managerPolicy\`を付けない。再委譲するManagerは\`agentKind: "manager"\`を指定し、\`managerPolicy.maxDelegationLevels\`へそのManagerの直下から許す追加段数を指定する。たとえばSubLeaderに直属Workerだけを雇わせる場合は\`{ maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false }\`とする。各作業に選んだconnection ID、provider ID、model IDを\`modelSelection\`へ、その選定根拠を\`modelSelectionReason\`へ必ず明示する。
 3. \`team_assign_task\` には\`workerId\`、\`objective\`、\`doneCriteria\`だけを渡す。scope、nonGoals、targetPaths、constraintsなどは追加フィールドにせず\`objective\`本文へ含め、返されたexecution IDを記録する。queuedは失敗ではない。
 4. 実行中は \`team_get_status\` を繰り返してcurrentActivity、liveOutput、階層、待機理由を監視する。scope逸脱、誤った実装、重複作業を見つけた時点で、完了を待たず \`team_steer_execution\` を呼ぶ。

@@ -13,7 +13,6 @@ import {
 } from '@sprint-coder/domain';
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
-import type { CommandRunnerError } from './command-runner';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { ToolBroker } from './tool-broker';
@@ -64,6 +63,9 @@ import {
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
+// The Windows bridge runs the full SQLite integration suite in a child Electron process. Native
+// startup plus the Windows-only Job Object case can exceed the POSIX timeout on hosted runners.
+const persistenceBridgeTimeoutMs = process.platform === 'win32' ? 60_000 : 30_000;
 const artifactIt = it.skipIf(process.platform === 'win32');
 const commandExecutionIt = it.skipIf(process.platform === 'win32');
 const windowsCommandGateIt = it.runIf(process.platform === 'win32');
@@ -4660,60 +4662,51 @@ if (runsWithElectronAbi)
       },
     );
 
-    windowsCommandGateIt(
-      'fails the command tool before spawning while Windows Job Object ownership is unavailable',
-      async () => {
-        const { persistence, path } = createPersistence();
-        const task = persistence.createTask();
-        const workspacePath = join(path, '..');
-        const marker = join(workspacePath, 'must-not-spawn');
-        persistence.setWorkspace(task.id, workspacePath);
-        const started = startExecutingTurn(persistence, task.id);
-        const published: string[] = [];
-        const broker = createDefaultToolBroker(
-          () => persistence.getPermissionPolicy(task.id).policyEpoch,
-          () => ({ decision: 'allow', reason: 'integration_test' }),
-          {
-            persistence,
-            publish: (event) => published.push(event.type),
-          },
-        );
-        startMockTurnCatalog(broker, {
-          taskId: task.id,
-          turnId: started.turnId,
-          workspaceId: 'workspace-1',
-          policyEpoch: 0,
-        });
+    windowsCommandGateIt('runs the command tool inside an owned Windows Job Object', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const workspacePath = join(path, '..');
+      persistence.setWorkspace(task.id, workspacePath);
+      const started = startExecutingTurn(persistence, task.id);
+      const published: string[] = [];
+      const broker = createDefaultToolBroker(
+        () => persistence.getPermissionPolicy(task.id).policyEpoch,
+        () => ({ decision: 'allow', reason: 'integration_test' }),
+        {
+          persistence,
+          publish: (event) => published.push(event.type),
+        },
+      );
+      startMockTurnCatalog(broker, {
+        taskId: task.id,
+        turnId: started.turnId,
+        workspaceId: 'workspace-1',
+        policyEpoch: 0,
+      });
 
-        await expect(
-          broker.dispatch({
-            taskId: task.id,
-            turnId: started.turnId,
-            callId: 'command-windows-gate',
-            providerName: 'run_command',
-            input: {
-              executable: process.execPath,
-              argv: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`],
-              cwd: '.',
-              purpose: 'Windows gate test',
-            },
-          }),
-        ).rejects.toMatchObject({
-          code: 'SPAWN_FAILED',
-          message: expect.stringContaining('Job Object'),
-        } satisfies Partial<CommandRunnerError>);
-        expect(existsSync(marker)).toBe(false);
-        expect(persistence.listCommands(task.id)).toEqual([
-          expect.objectContaining({
-            callId: 'command-windows-gate',
-            state: 'failed',
-            pid: null,
-          }),
-        ]);
-        expect(published).toEqual(['command.completed']);
-        persistence.close();
-      },
-    );
+      const result = (await broker.dispatch({
+        taskId: task.id,
+        turnId: started.turnId,
+        callId: 'command-windows-gate',
+        providerName: 'run_command',
+        input: {
+          executable: 'C:\\Windows\\System32\\where.exe',
+          argv: ['cmd.exe'],
+          cwd: '.',
+          purpose: 'Windows gate test',
+        },
+      })) as { exitCode: number; outputBytes: number };
+      expect(result).toMatchObject({ exitCode: 0 });
+      expect(persistence.listCommands(task.id)).toEqual([
+        expect.objectContaining({
+          callId: 'command-windows-gate',
+          state: 'exited',
+          pid: expect.any(Number),
+        }),
+      ]);
+      expect(published).toEqual(['command.started', 'command.output', 'command.completed']);
+      persistence.close();
+    });
 
     it('terminalizes a prepared command when authorization is denied without failing the Turn', async () => {
       const { persistence, path } = createPersistence();
@@ -5196,23 +5189,27 @@ if (runsWithElectronAbi)
   });
 else
   describe('SqlitePersistenceClient v27 Electron ABI bridge', () => {
-    it('runs the SQLite integration suite with the bundled Electron Node ABI', () => {
-      const result = spawnSync(
-        electronTestExecutablePath(),
-        [
-          join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-          'run',
-          'src/main/persistence.test.ts',
-        ],
-        {
-          cwd: process.cwd(),
-          encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-          timeout: 30_000,
-        },
-      );
-      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    }, 35_000);
+    it(
+      'runs the SQLite integration suite with the bundled Electron Node ABI',
+      () => {
+        const result = spawnSync(
+          electronTestExecutablePath(),
+          [
+            join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+            'run',
+            'src/main/persistence.test.ts',
+          ],
+          {
+            cwd: process.cwd(),
+            encoding: 'utf8',
+            env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
+            timeout: persistenceBridgeTimeoutMs,
+          },
+        );
+        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      },
+      persistenceBridgeTimeoutMs + 5_000,
+    );
   });
 
 function persistedEditPlan(preImage = 'before', postImage = 'after'): PreparedStructuredPatch {

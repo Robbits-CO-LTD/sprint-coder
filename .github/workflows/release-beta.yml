@@ -76,6 +76,16 @@ jobs:
           }
           NODE
 
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Rebuild native modules for Electron ABI
+        working-directory: apps/desktop
+        run: npx --yes @electron/rebuild -f -w better-sqlite3
+
+      - name: Build NativeSafeFs for Electron ABI
+        run: npm run build:native-safe-fs
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -138,12 +148,15 @@ jobs:
           CI: 'true'
           SPRINT_CODER_RELEASE: '1'
           SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
+          SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS: '1'
 
-      - name: Upload release ZIP
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: sprint-coder-${{ matrix.artifact }}-${{ runner.arch }}
-          path: apps/desktop/out/make/zip/**/*.zip
+          path: |
+            apps/desktop/out/make/zip/**/*.zip
+            apps/desktop/out/make/squirrel.windows/**/*.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -170,9 +183,9 @@ jobs:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           shopt -s nullglob
-          assets=(release-assets/*.zip)
-          if (( ${#assets[@]} != 2 )); then
-            echo "::error::Expected two release ZIPs, found ${#assets[@]}."
+          assets=(release-assets/*.zip release-assets/*.exe)
+          if (( ${#assets[@]} != 3 )); then
+            echo "::error::Expected macOS ZIP, Windows ZIP, and Windows installer; found ${#assets[@]} artifacts."
             exit 1
           fi
 

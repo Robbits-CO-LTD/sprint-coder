@@ -10,6 +10,9 @@
   ],
   "scripts": {
     "start": "npm run start --workspace @sprint-coder/desktop",
+    "package": "npm run package --workspace @sprint-coder/desktop",
+    "make": "npm run make --workspace @sprint-coder/desktop",
+    "make:windows": "npm run make:windows --workspace @sprint-coder/desktop",
     "build:native-safe-fs": "node build-native-safe-fs.mjs",
     "build:native-safe-fs:test": "node build-native-safe-fs.mjs --test",
     "typecheck": "npm run typecheck --workspaces --if-present",
