@@ -58,6 +58,25 @@ test.describe('live file edit', () => {
 
     const textarea = page.getByTestId('composer-textarea');
     await textarea.fill('parser を書いてください');
+    // Arm the observer before submitting. The mock's file deltas can all land before Playwright's
+    // first post-visible poll on a busy Windows runner, even though Chromium rendered each update.
+    // Retaining the observed lengths lets the assertion prove liveness after the short stream ends.
+    await page.evaluate(() => {
+      const observedLengths: number[] = [];
+      const observer = new MutationObserver(() => {
+        const liveBody = document.querySelector<HTMLElement>('[data-testid="live-edit-body"]');
+        if (liveBody === null) return;
+        const length = liveBody.innerText.length;
+        if (observedLengths.at(-1) !== length) observedLengths.push(length);
+      });
+      observer.observe(document.body, { childList: true, characterData: true, subtree: true });
+      const state = globalThis as typeof globalThis & {
+        __sprintCoderLiveEditLengths?: number[];
+        __sprintCoderLiveEditObserver?: MutationObserver;
+      };
+      state.__sprintCoderLiveEditLengths = observedLengths;
+      state.__sprintCoderLiveEditObserver = observer;
+    });
     await textarea.press('Enter');
 
     const body = page.getByTestId('live-edit-body');
@@ -71,10 +90,23 @@ test.describe('live file edit', () => {
     // the entire point of the feature. This is the assertion that proves liveness; the transient
     // 書き込み中 label is deliberately NOT asserted mid-flight, because a fast file can stream in
     // less than one polling interval and the resulting flake would say nothing about the feature.
-    const first = (await body.innerText()).length;
     await expect
-      .poll(async () => (await body.innerText()).length, { timeout: 30_000 })
-      .toBeGreaterThan(first);
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const samples =
+              (
+                globalThis as typeof globalThis & {
+                  __sprintCoderLiveEditLengths?: number[];
+                }
+              ).__sprintCoderLiveEditLengths ?? [];
+            return samples.some((length, index) =>
+              samples.slice(0, index).some((previous) => length > previous),
+            );
+          }),
+        { timeout: 30_000 },
+      )
+      .toBe(true);
     // Streamed content is never labelled as disk-sourced: that label makes a claim about where the
     // bytes came from, and getting it wrong would misdescribe the Runtime.
     await expect(page.getByTestId('live-edit-state')).not.toHaveText('ファイルの現在の内容');
