@@ -237,8 +237,8 @@ export class ClaudeRuntimeAdapter {
             authenticationRequired
               ? 'Claude Codeへのログインが必要です。ターミナルでclaudeを起動し、/loginを実行してください。'
               : violation
-              ? 'Claude runtimeが読み取り専用プロファイルを逸脱したため停止しました。'
-              : 'Claude runtimeの出力を解釈できませんでした。',
+                ? 'Claude runtimeが読み取り専用プロファイルを逸脱したため停止しました。'
+                : 'Claude runtimeの出力を解釈できませんでした。',
             false,
           ),
         );

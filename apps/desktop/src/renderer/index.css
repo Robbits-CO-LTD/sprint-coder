@@ -1,52 +1,51 @@
-/* Sprint Coder renderer — Chat Alpha
-   Visual baseline: demo/index.html (§13 UI system). Chat layout only; Team/Canvas out of scope. */
+/* Sprint Coder renderer
+   Visual direction: dense graphite workbench, restrained blue state accent and quiet hairlines. */
 
 :root {
-  /* Warm-dark palette restored from the user-approved 59622a1 visual baseline. The original
-     atmosphere is preserved while the expanded token set added since that demo remains available
-     to newer features. Foregrounds and the essential border were lifted only where needed to keep
-     the renderer's WCAG 2.2 AA audit green. */
+  /* Beautiful UI-inspired graphite system. The reference uses restrained neutral surfaces,
+     hairline edges and one clear blue accent; Sprint Coder keeps that hierarchy while lifting
+     foregrounds enough for the renderer's WCAG 2.2 AA audit. */
 
   /* Surfaces */
-  --bg-app: #12110f;
-  --bg-sidebar: #1b1a17;
-  --bg-panel: #1b1a17;
-  --bg-elevated: #24221e;
-  --bg-hover: #2c2924;
-  --bg-selected: #35291f;
+  --bg-app: #151617;
+  --bg-sidebar: #191a1c;
+  --bg-panel: #1b1c1e;
+  --bg-elevated: #232427;
+  --bg-hover: #292b2f;
+  --bg-selected: #252d39;
 
   /* Text */
-  --text-primary: #f4efe6;
-  --text-secondary: #aaa49a;
-  --text-muted: #b8b1a7;
+  --text-primary: #f2f3f4;
+  --text-secondary: #b8bbc2;
+  --text-muted: #c9cbd0;
   /* Disabled text is exempt from WCAG 1.4.3, so this one keeps the specified value. Its use is
      confined to genuinely inactive controls; anything a user is expected to read uses
      --text-muted or above. */
-  --text-disabled: #625d55;
+  --text-disabled: #686b72;
 
   /* Borders. --border-subtle is decorative separation only (1.01-1.33, nowhere near 3:1) and must
      never be the sole indicator of a control's bounds; --border-strong is the one to reach for when
      the boundary carries meaning. */
-  --border-subtle: #34312d;
-  --border-strong: #81796f;
+  --border-subtle: #303236;
+  --border-strong: #858991;
 
   /* Brand / interaction */
-  --accent: #e39a62;
-  --accent-hover: #eda873;
-  /* An accent-tinted *fill*, not a foreground. Its sanctioned text colour is --text-primary
-     (9.48:1); accent-on-accent-muted is 4.10 and is not a pairing this palette offers. */
-  --accent-muted: #4a3022;
-  --focus-ring: #f0aa72;
+  --accent: #7ec0ff;
+  --accent-hover: #a4d3ff;
+  /* An accent-tinted *fill*, not a foreground. Use --text-primary for copy placed on this surface;
+     --accent remains an interaction/state colour rather than body text on its own tint. */
+  --accent-muted: #263b50;
+  --focus-ring: #8fc8ff;
 
   /* State */
-  --success: #79b58a;
-  --warning: #d5a85b;
-  --danger: #e8897c;
-  --info: #78a9c2;
+  --success: #7bd89c;
+  --warning: #f2c46d;
+  --danger: #ff938a;
+  --info: #8ec5e8;
 
   /* AI */
-  --ai-accent: #c39bea;
-  --ai-surface: #2c2330;
+  --ai-accent: #d4a7ff;
+  --ai-surface: #25212e;
 
   /* Radius scale. The UI is built from squares with softened corners — no pills, no circles.
      Five steps, one per structural level, so nothing lands between sizes and every control of the
@@ -75,9 +74,13 @@
 
   /* Elevation. Three steps, each pairing a tight contact shadow with a wider ambient one so cards
      read as lifted rather than as a grey blur. */
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28);
-  --shadow-2: 0 2px 4px rgba(0, 0, 0, 0.24), 0 10px 24px rgba(0, 0, 0, 0.34);
-  --shadow-3: 0 4px 8px rgba(0, 0, 0, 0.3), 0 24px 56px rgba(0, 0, 0, 0.46);
+  --shadow-1: 0 0 0 1px rgba(255, 255, 255, 0.025), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2:
+    0 0 0 1px rgba(255, 255, 255, 0.035), 0 2px 6px rgba(0, 0, 0, 0.28),
+    0 10px 28px rgba(0, 0, 0, 0.28);
+  --shadow-3:
+    0 0 0 1px rgba(255, 255, 255, 0.045), 0 8px 24px rgba(0, 0, 0, 0.32),
+    0 28px 72px rgba(0, 0, 0, 0.44);
 
   --ease-ui: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-spatial: cubic-bezier(0.22, 1, 0.36, 1);
@@ -88,8 +91,9 @@
   --t-cinematic: 560ms;
 
   --font-ui:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    Inter, -apple-system, BlinkMacSystemFont, 'system-ui', 'Segoe UI', Helvetica,
+    'Apple Color Emoji', Arial, sans-serif;
+  --font-mono: SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
 /* Inline SVG icon set (see components/icons.tsx). Nudged down 1px so the stroke's optical
@@ -117,8 +121,12 @@ body {
   color: var(--text-primary);
   font-family: var(--font-ui);
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.5;
+  font-feature-settings:
+    'lnum',
+    'locl' 0;
   -webkit-font-smoothing: antialiased;
+  overflow-wrap: break-word;
 }
 
 button,
@@ -183,21 +191,22 @@ button {
 }
 
 /* macOS keeps its native traffic lights, while the rest of the title bar belongs to the product.
-   The region is intentionally quiet: one app label, the same warm panel material as the working
-   chrome, and a single hairline before the task/navigation layer begins. */
+   The region is intentionally quiet: a compact product mark, graphite chrome and one hairline
+   before the task/navigation layer begins. */
 .app-titlebar {
   position: relative;
   z-index: 20;
   display: flex;
   flex: none;
   align-items: center;
-  height: 38px;
+  height: 40px;
   padding: 0 16px 0 78px;
   border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app));
+  background: var(--bg-sidebar);
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 650;
+  letter-spacing: 0.015em;
   line-height: 1;
   user-select: none;
   -webkit-app-region: drag;
@@ -211,7 +220,19 @@ button {
   pointer-events: none;
 }
 .app-titlebar-name {
-  opacity: 0.88;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.94;
+}
+.app-titlebar-name::before {
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--accent-line);
+  border-radius: 3px;
+  background: var(--accent-wash-strong);
+  box-shadow: inset 0 0 0 2px var(--bg-sidebar);
+  content: '';
 }
 
 .app-shell {
@@ -251,14 +272,14 @@ button {
 
 /* ---------- Sidebar ---------- */
 .sidebar {
-  width: 264px;
+  width: 288px;
   flex: none;
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  padding: 14px 10px;
-  gap: 4px;
+  padding: 14px 13px;
+  gap: 5px;
   transition:
     transform var(--t-standard) var(--ease-ui),
     opacity var(--t-standard) var(--ease-ui);
@@ -273,7 +294,7 @@ button {
 /* ---------- Sidebar collapse (issue #12) ----------
    Two distinct forms, because the problem is different at each size.
 
-   Wide: the sidebar is a flex sibling, so collapsing has to actually give its 264px back to the
+   Wide: the sidebar is a flex sibling, so collapsing has to actually give its 288px back to the
    conversation — width goes to 0 rather than the panel merely sliding out of sight.
 
    Narrow (<=900px, the same breakpoint the Team List View switches at): the sidebar stops being a
@@ -305,7 +326,7 @@ button {
   top: 0;
   bottom: 0;
   left: 0;
-  width: min(264px, 82vw);
+  width: min(288px, 82vw);
   z-index: 9;
   box-shadow: 12px 0 32px rgba(0, 0, 0, 0.45);
 }
@@ -353,17 +374,16 @@ button {
   color: var(--text-primary);
 }
 
-/* The sidebar's one primary action, so it is the one thing in here that carries the accent. It used
-   to be a neutral elevated box sitting directly above the search field, which gave an action and an
-   input identical visual weight. */
+/* The sidebar's primary action stays neutral until interaction. The blue rail is reserved for
+   current location, so the task list keeps a single unambiguous accent meaning. */
 .sb-new {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 12px;
+  padding: 9px 11px;
   border-radius: var(--r-sm);
-  background: var(--accent-wash);
-  border: 1px solid var(--accent-line-soft);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
   color: var(--text-primary);
   font-weight: 600;
   font-size: 13px;
@@ -373,13 +393,14 @@ button {
   transition:
     background var(--t-quick) var(--ease-ui),
     border-color var(--t-quick) var(--ease-ui);
+  box-shadow: var(--shadow-1);
 }
 .sb-new .icon {
   color: var(--accent);
 }
 .sb-new:hover:not(:disabled) {
-  background: var(--accent-wash-strong);
-  border-color: var(--accent-line);
+  background: var(--bg-hover);
+  border-color: var(--accent-line-soft);
 }
 .sb-new:disabled {
   opacity: 0.5;
@@ -392,16 +413,22 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 7px 9px;
   border-radius: var(--r-sm);
   margin-bottom: 8px;
   background: var(--bg-app);
   color: var(--text-secondary);
-  border: 1px solid transparent;
-  transition: border-color var(--t-quick) var(--ease-ui);
+  border: 1px solid var(--border-subtle);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.36);
+  transition:
+    border-color var(--t-quick) var(--ease-ui),
+    box-shadow var(--t-quick) var(--ease-ui);
 }
 .sb-search:focus-within {
-  border-color: var(--border-strong);
+  border-color: var(--accent-line);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.36),
+    0 0 0 2px var(--accent-wash);
 }
 .sb-search input {
   border: none;
@@ -429,7 +456,7 @@ button {
   font-weight: 600;
   letter-spacing: 0.08em;
   color: var(--text-secondary);
-  padding: 14px 12px 5px;
+  padding: 15px 10px 5px;
   text-transform: uppercase;
 }
 
@@ -447,11 +474,11 @@ button {
 .sb-row::before {
   content: '';
   position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 3px;
-  border-radius: 0 2px 2px 0;
+  left: -1px;
+  top: 5px;
+  bottom: 5px;
+  width: 2px;
+  border-radius: 2px;
   background: var(--accent);
   opacity: 0;
   transition: opacity var(--t-quick) var(--ease-ui);
@@ -461,6 +488,9 @@ button {
 }
 .sb-row.active {
   background: var(--bg-selected);
+  box-shadow:
+    inset 0 1px var(--accent-line-soft),
+    inset 0 -1px var(--accent-line-soft);
 }
 .sb-row.active::before {
   opacity: 1;
@@ -471,7 +501,7 @@ button {
   flex: 1;
   min-width: 0;
   text-align: left;
-  padding: 8px 12px;
+  padding: 8px 10px;
   font-size: 13px;
   line-height: 1.45;
   color: var(--text-secondary);
@@ -564,13 +594,13 @@ button {
 }
 
 .task-header {
-  height: 52px;
+  height: 50px;
   flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 0 16px;
-  background: var(--bg-panel);
+  background: color-mix(in srgb, var(--bg-panel) 92%, var(--bg-app));
   border-bottom: 1px solid var(--border-subtle);
   transition:
     transform var(--t-standard) var(--ease-ui),
@@ -597,7 +627,7 @@ button {
    cheapest way to make an editable label look editable without adding a second control. */
 .task-title {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -733,6 +763,14 @@ button {
   flex: 1;
   min-height: 0;
   position: relative;
+  background:
+    linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--text-primary) 1.5%, transparent) 25%,
+        transparent 25%
+      )
+      0 0 / 12px 12px,
+    var(--bg-app);
 }
 
 .surface-header {
@@ -805,6 +843,10 @@ button {
   box-shadow: var(--shadow-3);
   overflow: hidden;
 }
+.surface--node,
+.surface--node .surface {
+  background: var(--bg-panel);
+}
 .surface--node .surface-header {
   display: flex;
 }
@@ -823,9 +865,9 @@ button {
   min-height: 0;
 }
 .timeline {
-  max-width: 780px;
+  max-width: 800px;
   margin: 0 auto;
-  padding: 28px 24px 16px;
+  padding: 30px 28px 18px;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -898,12 +940,13 @@ button {
   display: grid;
   place-items: center;
   font-weight: 700;
-  background: linear-gradient(140deg, var(--accent), var(--ai-accent));
-  color: var(--bg-app);
-  box-shadow: var(--shadow-2);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-wash-strong);
+  color: var(--accent);
+  box-shadow: var(--shadow-1);
 }
 .empty-state h2 {
-  font-size: 21px;
+  font-size: 20px;
   font-weight: 600;
   letter-spacing: -0.01em;
   margin: 0;
@@ -973,6 +1016,7 @@ button {
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
+  box-shadow: var(--shadow-1);
 }
 .msg-assistant .bubble {
   font-size: 15px;
@@ -1012,6 +1056,7 @@ button {
   border-radius: var(--r-lg);
   background: var(--bg-panel);
   overflow: hidden;
+  box-shadow: var(--shadow-1);
   animation: msgIn var(--t-standard) var(--ease-ui);
 }
 .run-head {
@@ -1121,6 +1166,7 @@ button {
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-lg);
   background: var(--bg-panel);
+  box-shadow: var(--shadow-1);
   animation: msgIn var(--t-standard) var(--ease-ui);
 }
 .command-card__head {
@@ -1380,17 +1426,17 @@ button {
 /* ---------- ContextBar + Composer ---------- */
 .composer-zone {
   flex: none;
-  padding: 6px 24px 18px;
+  padding: 8px 28px 20px;
 }
 .composer-inner {
-  max-width: 780px;
+  max-width: 800px;
   margin: 0 auto;
 }
 .context-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 6px 7px;
+  padding: 0 5px 8px;
   font-size: 11.5px;
   color: var(--text-secondary);
   flex-wrap: wrap;
@@ -1402,7 +1448,7 @@ button {
   padding: 3px 9px;
   border-radius: var(--r-xs);
   border: 1px solid var(--border-subtle);
-  background: var(--bg-panel);
+  background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
 }
 /* A pressable context chip keeps the same surface as a static one — the difference between them is
    the hover, not a permanently brighter fill. */
@@ -1598,10 +1644,12 @@ button.composer-permission-chip[aria-expanded='true'] {
 .composer {
   position: relative;
   background: var(--bg-elevated);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-lg);
-  padding: 11px 12px 9px;
-  box-shadow: var(--shadow-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 12px 13px 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    var(--shadow-2);
   transition:
     border-color var(--t-quick) var(--ease-ui),
     box-shadow var(--t-quick) var(--ease-ui);
@@ -1690,8 +1738,9 @@ button.composer-permission-chip[aria-expanded='true'] {
 .composer:focus-within {
   border-color: var(--accent);
   box-shadow:
-    var(--shadow-1),
-    0 0 0 3px var(--accent-wash);
+    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    var(--shadow-2),
+    0 0 0 2px var(--accent-wash-strong);
 }
 .composer-input {
   width: 100%;
@@ -1701,8 +1750,8 @@ button.composer-permission-chip[aria-expanded='true'] {
   resize: none;
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.55;
   max-height: 140px;
   display: block;
 }
@@ -1757,8 +1806,8 @@ button.composer-permission-chip[aria-expanded='true'] {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-top: 8px;
-  padding-top: 8px;
+  margin-top: 9px;
+  padding-top: 9px;
   border-top: 1px solid var(--border-subtle);
 }
 .composer-run-controls {
@@ -3799,9 +3848,11 @@ button.composer-permission-chip[aria-expanded='true'] {
   width: min(520px, calc(100vw - 32px));
   max-height: min(680px, calc(100vh - 48px));
   box-shadow: var(--shadow-3);
+  overflow: hidden;
 }
 .settings-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(7, 8, 10, 0.7);
+  backdrop-filter: blur(3px);
 }
 .settings-dialog[open] {
   animation: settingsIn var(--t-standard) var(--ease-ui);
@@ -3919,7 +3970,7 @@ button.composer-permission-chip[aria-expanded='true'] {
    height rather than max-height: the nav is a column of its own, and a sheet that changes size as
    the section list moves the scroll is a sheet that moves under the pointer. */
 .settings-dialog-v2 {
-  width: min(900px, calc(100vw - 32px));
+  width: min(940px, calc(100vw - 32px));
   height: min(720px, calc(100vh - 48px));
   max-height: none;
   overflow: hidden;
@@ -3929,12 +3980,12 @@ button.composer-permission-chip[aria-expanded='true'] {
   grid-template:
     'header header' auto
     'nav content' minmax(0, 1fr)
-    / 220px minmax(0, 1fr);
+    / 240px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
 }
 /* No nav to place — the settings bridge is missing and the sheet is one notice. Without this the
-   empty 220px column stays behind and the notice sits in a gutter. */
+   empty navigation column stays behind and the notice sits in a gutter. */
 .settings-workspace:not(:has(.settings-nav)) {
   grid-template:
     'header' auto
@@ -3943,8 +3994,9 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .settings-workspace > .settings-header {
   grid-area: header;
-  padding: 17px 18px;
+  padding: 16px 18px;
   border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-panel) 92%, var(--bg-app));
 }
 .settings-workspace > .settings-header > div:first-child {
   min-width: 0;
@@ -3959,20 +4011,21 @@ button.composer-permission-chip[aria-expanded='true'] {
   grid-area: nav;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: 13px 12px;
   border-right: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-app) 58%, var(--bg-panel));
+  background: var(--bg-sidebar);
 }
 .settings-nav button {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
   width: 100%;
-  padding: 9px 10px;
+  padding: 9px 11px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   color: var(--text-secondary);
@@ -3988,6 +4041,19 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-primary);
   border-color: var(--accent-line-soft);
   background: var(--accent-wash);
+  box-shadow:
+    inset 0 1px var(--accent-line-soft),
+    inset 0 -1px var(--accent-line-soft);
+}
+.settings-nav button.active::before {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: -1px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  content: '';
 }
 .settings-nav button > span {
   font-size: 13px;
@@ -4006,12 +4072,13 @@ button.composer-permission-chip[aria-expanded='true'] {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  background: var(--bg-panel);
 }
 .settings-page {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 24px 26px 32px;
+  padding: 26px 28px 34px;
   min-height: 100%;
   animation: settings-page-in 140ms var(--ease-ui);
 }
@@ -4045,7 +4112,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   margin: 0;
 }
 .settings-page-heading h3 {
-  font-size: 18px;
+  font-size: 17px;
   line-height: 1.3;
 }
 .settings-page-heading > p:last-child {
@@ -4772,8 +4839,9 @@ button.composer-permission-chip[aria-expanded='true'] {
   padding: 10px 11px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-sm);
-  background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
+  background: var(--bg-elevated);
   font-size: 12.5px;
+  box-shadow: var(--shadow-1);
 }
 .settings-connection-main {
   display: flex;
@@ -4850,8 +4918,9 @@ button.composer-permission-chip[aria-expanded='true'] {
   padding: 0;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-md);
-  background: var(--bg-elevated);
+  background: var(--bg-panel);
   overflow: hidden;
+  box-shadow: var(--shadow-1);
 }
 .settings-provider-form .settings-group {
   gap: 10px;
@@ -4865,7 +4934,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 16px;
   padding: 13px 14px;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--neutral-wash);
+  background: var(--bg-elevated);
 }
 .settings-provider-form-heading h4,
 .settings-provider-form-heading p {
@@ -4922,6 +4991,10 @@ button.composer-permission-chip[aria-expanded='true'] {
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-sm);
   transition: border-color var(--t-quick) var(--ease-ui);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.28);
+}
+.settings-text-input:focus {
+  border-color: var(--accent-line);
 }
 .settings-text-input:disabled {
   opacity: 0.5;

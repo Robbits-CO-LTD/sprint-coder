@@ -74,9 +74,9 @@ describe('Codex runtime probe', () => {
     await writeFile(npmExecutable, '');
     await writeFile(desktopExecutable, '');
 
-    expect(
-      resolveCodexCommand('codex', 'win32', npmRoot, null, '', 'x64', localAppData),
-    ).toBe(desktopExecutable);
+    expect(resolveCodexCommand('codex', 'win32', npmRoot, null, '', 'x64', localAppData)).toBe(
+      desktopExecutable,
+    );
   });
 
   it('preserves separate Codex agent-message items as Markdown paragraphs', () => {

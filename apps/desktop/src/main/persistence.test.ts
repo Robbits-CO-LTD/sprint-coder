@@ -4659,54 +4659,51 @@ if (runsWithElectronAbi)
       },
     );
 
-    windowsCommandGateIt(
-      'runs the command tool inside an owned Windows Job Object',
-      async () => {
-        const { persistence, path } = createPersistence();
-        const task = persistence.createTask();
-        const workspacePath = join(path, '..');
-        persistence.setWorkspace(task.id, workspacePath);
-        const started = startExecutingTurn(persistence, task.id);
-        const published: string[] = [];
-        const broker = createDefaultToolBroker(
-          () => persistence.getPermissionPolicy(task.id).policyEpoch,
-          () => ({ decision: 'allow', reason: 'integration_test' }),
-          {
-            persistence,
-            publish: (event) => published.push(event.type),
-          },
-        );
-        startMockTurnCatalog(broker, {
-          taskId: task.id,
-          turnId: started.turnId,
-          workspaceId: 'workspace-1',
-          policyEpoch: 0,
-        });
+    windowsCommandGateIt('runs the command tool inside an owned Windows Job Object', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const workspacePath = join(path, '..');
+      persistence.setWorkspace(task.id, workspacePath);
+      const started = startExecutingTurn(persistence, task.id);
+      const published: string[] = [];
+      const broker = createDefaultToolBroker(
+        () => persistence.getPermissionPolicy(task.id).policyEpoch,
+        () => ({ decision: 'allow', reason: 'integration_test' }),
+        {
+          persistence,
+          publish: (event) => published.push(event.type),
+        },
+      );
+      startMockTurnCatalog(broker, {
+        taskId: task.id,
+        turnId: started.turnId,
+        workspaceId: 'workspace-1',
+        policyEpoch: 0,
+      });
 
-        const result = (await broker.dispatch({
-            taskId: task.id,
-            turnId: started.turnId,
-            callId: 'command-windows-gate',
-            providerName: 'run_command',
-            input: {
-              executable: 'C:\\Windows\\System32\\where.exe',
-              argv: ['cmd.exe'],
-              cwd: '.',
-              purpose: 'Windows gate test',
-            },
-          })) as { exitCode: number; outputBytes: number };
-        expect(result).toMatchObject({ exitCode: 0 });
-        expect(persistence.listCommands(task.id)).toEqual([
-          expect.objectContaining({
-            callId: 'command-windows-gate',
-            state: 'exited',
-            pid: expect.any(Number),
-          }),
-        ]);
-        expect(published).toEqual(['command.started', 'command.output', 'command.completed']);
-        persistence.close();
-      },
-    );
+      const result = (await broker.dispatch({
+        taskId: task.id,
+        turnId: started.turnId,
+        callId: 'command-windows-gate',
+        providerName: 'run_command',
+        input: {
+          executable: 'C:\\Windows\\System32\\where.exe',
+          argv: ['cmd.exe'],
+          cwd: '.',
+          purpose: 'Windows gate test',
+        },
+      })) as { exitCode: number; outputBytes: number };
+      expect(result).toMatchObject({ exitCode: 0 });
+      expect(persistence.listCommands(task.id)).toEqual([
+        expect.objectContaining({
+          callId: 'command-windows-gate',
+          state: 'exited',
+          pid: expect.any(Number),
+        }),
+      ]);
+      expect(published).toEqual(['command.started', 'command.output', 'command.completed']);
+      persistence.close();
+    });
 
     it('terminalizes a prepared command when authorization is denied without failing the Turn', async () => {
       const { persistence, path } = createPersistence();

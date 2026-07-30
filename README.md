@@ -18,7 +18,7 @@ npm run make:windows
 
 完成したインストーラーは `apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Setup.exe` に出力される。`apps/desktop/out/make/zip/win32/x64/` には、展開してそのまま起動できるZIP版も作られる。
 
-手元で作るインストーラーは未署名のため、Windowsから警告が表示されることがある。正式配布版ではコード署名証明書（`.pfx`）を用意し、`SPRINT_CODER_RELEASE=1`、`SPRINT_CODER_WINDOWS_CERTIFICATE_FILE`、`SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD` をビルド環境に設定する。この設定が不足した正式配布ビルドは、安全のためエラーで停止する。
+手元で作るインストーラーは未署名のため、Windowsから警告が表示されることがある。正式配布版ではコード署名証明書（`.pfx`）を用意し、`SPRINT_CODER_RELEASE=1`、`SPRINT_CODER_WINDOWS_CERTIFICATE_FILE`、`SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD` をビルド環境に設定する。この設定が不足した正式配布ビルドは、安全のためエラーで停止する。検証用betaに限り、workflowは`SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1`を明示して未署名artifactを作成する。
 
 ## 文書
 

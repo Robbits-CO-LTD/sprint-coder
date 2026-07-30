@@ -83,7 +83,8 @@ export function windowsJobWrapperCommand(): string {
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .find((line) => line.length > 0);
-  if (firstMatch === undefined) throw new Error('Node.js is required for Windows command isolation');
+  if (firstMatch === undefined)
+    throw new Error('Node.js is required for Windows command isolation');
   resolvedNodeCommand = firstMatch;
   return resolvedNodeCommand;
 }
