@@ -7,7 +7,7 @@ description: Windows（PowerShell / cmd）環境で sprint-coder の Playwright 
 
 このリポジトリの E2E は Playwright の **Electron** ドライバで実アプリを起動する。ブラウザテストではないので web の常識（`page.goto`、`--headed`、trace viewer、リトライで緑にする）はほぼ当てはまらない。そして Windows では、失敗の大半が**アプリのバグではなく起動の段取り**に由来する。走らせる前に段取りを確定させる。
 
-> **この文書の検証状況**: Windows 固有の記述は [tests/e2e/helpers.ts](../../../tests/e2e/helpers.ts) / [tests/e2e/global-setup.ts](../../../tests/e2e/global-setup.ts) / [playwright.config.ts](../../../playwright.config.ts) の実装（`process.platform === 'win32'` 分岐を含む）から導いたもので、Windows 実機での実行は未検証。実際に走らせて食い違いがあれば、推測を残さずこのファイルを直すこと。
+> **この文書の検証状況**: Windows 固有の記述は [tests/e2e/helpers.ts](../../../tests/e2e/helpers.ts) / [tests/e2e/global-setup.ts](../../../tests/e2e/global-setup.ts) / [playwright.config.ts](../../../playwright.config.ts) の実装（`process.platform === 'win32'` 分岐を含む）とWindows CIのdev-mode smokeから導いている。実際に走らせて食い違いがあれば、推測を残さずこのファイルを直すこと。
 
 ## 1. 実行前に確定させる 3 つのこと
 
@@ -29,25 +29,18 @@ npx playwright test tests/e2e/golden-path-2-cancel.spec.ts
 
 `$env:` はそのシェルセッションに残り続けるので、あとで packaged モードを試すときは `$env:SPRINT_CODER_E2E_MODE = 'packaged'` と明示的に上書きするか、`Remove-Item Env:SPRINT_CODER_E2E_MODE` で消す。**前のテストの残り値のまま走らせて結果を誤読するのが一番ありがちな事故。**
 
-### (b) dev モードで走らせるなら、dev server を自分で先に起動しておく
+### (b) dev serverはglobalSetupに所有させる
 
-globalSetup は 5173 に何か listen していればそれを再利用し、無ければ自分で `npm start` を起動しようとする。**この自動起動は Windows では成立しない**: `spawn('npm', ...)` を `shell` 無しで呼んでいるため、Windows では `npm.cmd` を解決できず ENOENT になる（helpers.ts の `ensureDevServerReady`。`error` ハンドラも無いので globalSetup ごと落ちる）。
+globalSetupは5173に何かlistenしていればそれを再利用し、無ければ`npm.cmd start`を自動起動する。自動起動したプロセスはテスト後に、その正確なPIDを`taskkill /PID <pid> /T /F`へ渡して子プロセスごと停止する。
 
-したがって Windows での正しい順序は:
-
-```powershell
-# ターミナル1: 先に起動して、Electron ウィンドウが出るまで待つ
-npm start
-```
+通常は1つのPowerShellからそのまま実行する:
 
 ```powershell
-# ターミナル2: 5173 が listen していることを確認してから流す
-Get-NetTCPConnection -LocalPort 5173 -State Listen
 $env:SPRINT_CODER_E2E_MODE = 'dev'
 npx playwright test tests/e2e/live-file-edit.spec.ts
 ```
 
-この順序なら globalSetup は「既存を再利用」パスに入り、自動起動の不発を踏まない。副作用として、**テストが終わっても dev server は落ちない**（自分で起動していないものには手を出さない設計。Windows では `stopDevServer` の後片付け自体も無効化されている ── 負の PID への signal は Windows に存在せず、`ps` ベースの子孫列挙も win32 では空配列を返す）。ターミナル1 の `npm start` は自分で Ctrl+C する。
+開発者が先に`npm start`している場合は既存serverを再利用し、globalSetupは停止しない。自分で起動していないプロセスへ触れない設計は維持される。
 
 ### (c) テスト同士・開発中インスタンスとの衝突は既に解決済み
 
@@ -58,14 +51,14 @@ npx playwright test tests/e2e/live-file-edit.spec.ts
 | | dev | packaged |
 |---|---|---|
 | 起動対象 | `node_modules/electron` の Electron が `apps/desktop` を直接ロード（renderer は Vite dev server） | `apps/desktop/out/<name>-win32-x64/*.exe` |
-| 事前準備 | 別ターミナルで `npm start`（上記 (b)） | 不要。ソースが新しければ globalSetup が `electron-forge package` を自動実行（数分〜10分） |
-| `a11y-axe.spec.ts` | **通る**（dev の CSP が `script-src 'self' http://localhost:*` を許可しており、axe をローカル HTTP で注入できる） | **原理的に通らない**（packaged の CSP に localhost 例外が無い） |
+| 事前準備 | 不要。globalSetupが`npm.cmd start`を自動実行 | 不要。ソースが新しければ globalSetup が `electron-forge package` を自動実行（数分〜10分） |
+| `a11y-axe.spec.ts` | 通る | 通る。axe sourceはPlaywright automation経由で評価し、production CSPは緩めない |
 | 使いどころ | 日常の開発・回帰確認 | リリース前に「配布物そのもの」を検証したいとき |
 
 macOS 側の手順書は「packaged は使うな」と言い切っているが、あれは **その環境固有**の話（`@electron/packager` の zip 展開が `electron.icns` で決定論的にハングする）。Windows でも同じ症状が出るとは限らないので、packaged を試すこと自体は妥当。ただし:
 
 - `apps/desktop/out/` に**古いビルドが残っていると、モード無指定のとき黙ってそれが起動する**（`resolveE2EMode()` は out/ の中身の有無だけを見て packaged を選び、`findPackagedExecutable()` はディレクトリ名に `win32` を含むものを拾う）。globalSetup がソース mtime と `.e2e-package-stamp` を比較して stale なら再パッケージするが、モードを明示しない限りそもそもどちらで走ったのか読み手に伝わらない。**常にモードを明示する。**
-- packaged で `a11y-axe` が落ちたら、それは環境の話であってアクセシビリティの退行ではない。
+- packagedの`a11y-axe`も通常の回帰として判定する。CSPを理由にskipしない。
 
 ## 3. 実行コマンド
 
@@ -116,10 +109,9 @@ Get-Content $env:TEMP\e2e.log -Tail 40
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
-| `Dev server / main build did not become ready within 90000ms`、または globalSetup が spawn 系のエラーで即死 | dev モードなのに `npm start` を先に起動していない（Windows では自動起動が効かない） | ターミナル1 で `npm start` → 5173 の listen を確認 → 再実行 |
+| `Dev server / main build did not become ready within 90000ms` | `npm.cmd start`が終了した、または5173を起動できない | 直前に表示されるexit code / signal / spawn errorを確認し、`npm start`単体でも再現するか切り分ける |
 | `Get-NetTCPConnection -LocalPort 5173` が何も返さない | dev server が落ちている | `npm start` を起動し直す |
 | 覚えのない `electron-forge package` が走り出す / 起動が異様に遅い | packaged モードで走っている（環境変数の消し忘れ・未指定） | モードを明示して再実行 |
-| `a11y-axe.spec.ts` だけ落ちる | packaged モードで走っている（CSP に localhost 例外が無い） | dev モードで再実行 |
 | `npm run format:check` が全ファイル未整形と言う | `core.autocrlf=true` で CRLF に変換された | `.gitattributes` が `eol=lf` を指定しているので、clone/checkout し直すか改行を LF に戻す（E2E とは別問題だが Windows で必ず踏む） |
 | 起動直後に全 spec が同じ形で即死 | ビルド壊れ | `npm run typecheck` を先に通す |
 
