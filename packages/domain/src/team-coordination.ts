@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { CapabilityCeiling } from './permission';
-import { assertLeaderRoutedMessage } from './team';
+import { assertTeamMessageAllowed } from './team';
 
 export const budgetScopes = ['global', 'team', 'worker'] as const;
 export type BudgetScope = (typeof budgetScopes)[number];
@@ -103,18 +102,6 @@ export function assertReservationWithinCap(input: {
     throw new TeamBudgetExceededError(input);
 }
 
-export function assertSpawnAuthority(requesterKind: 'leader' | 'worker'): void {
-  if (requesterKind === 'worker')
-    throw new Error('Workers cannot spawn sub-workers: max worker depth is 1');
-}
-
-export function assertWorkerCeilingForbidsSpawn(ceiling: CapabilityCeiling): void {
-  if (ceiling.maxWorkerDepth !== 0)
-    throw new Error(
-      'Worker capability ceilings must forbid further spawning (maxWorkerDepth must be 0)',
-    );
-}
-
 export const TEAM_MESSAGE_RATE_LIMIT = { limit: 30, windowMs: 60000 } as const;
 
 export class TeamMessageRateLimitError extends Error {
@@ -214,9 +201,11 @@ export type TeamEnvelope = Readonly<{
 }>;
 
 export function buildTeamEnvelope(input: Omit<TeamEnvelope, 'deliveryId'>): TeamEnvelope {
-  assertLeaderRoutedMessage(input.sourceKind, input.targetKind);
-  if (input.sourceAgentId === input.targetAgentId)
-    throw new Error('Team envelope source and target agents must differ');
+  assertTeamMessageAllowed({
+    source: { id: input.sourceAgentId, kind: input.sourceKind },
+    target: { id: input.targetAgentId, kind: input.targetKind },
+    allowWorkerDirectMessages: true,
+  });
   if (!Number.isSafeInteger(input.seq) || input.seq <= 0) throw new Error('Invalid envelope seq');
   if (!Number.isSafeInteger(input.attempt) || input.attempt < 1)
     throw new Error('Invalid envelope attempt');

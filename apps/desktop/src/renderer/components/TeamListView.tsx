@@ -1,9 +1,22 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
+import { TeamExecutionStatus } from './TeamExecutionStatus';
+import { TeamPolicyDialog, TeamPolicyTrigger } from './TeamPolicyDialog';
+import { latestExecutionForWorker } from '../lib/team-execution-display';
+import {
+  describeMessagePeer,
+  describeWorkerModel,
+  workerRuntimeLabel,
+} from '../lib/team-activity-display';
+// Hierarchy vocabulary is imported from the Canvas's placement module on purpose: it is a pure,
+// DOM-free helper, and sharing it (rather than re-wording the same facts here) is what keeps
+// List/Canvas parity true by construction — the same reason this view reuses the Canvas's testids.
+import { describeHierarchy, parentAgentOf } from './TeamCanvas/placement';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
 
-const MAX_WORKERS = 3;
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
 
 // Team List View (Slice 6.1 item 4): an accessible ALTERNATE projection of the exact same store
@@ -34,6 +47,9 @@ export function TeamListView({
   const stopTeamWorker = useAppStore((state) => state.stopTeamWorker);
   const stopAllTeamWorkers = useAppStore((state) => state.stopAllTeamWorkers);
   const sectionRef = useRef<HTMLElement>(null);
+  // Open state is local to the view, not the store: the dialog is a modal task (open, adjust,
+  // close), and each view owns its own instance of the SAME component — see TeamPolicyDialog.tsx.
+  const [policyOpen, setPolicyOpen] = useState(false);
 
   // Mount-time focus (a11y fix, Phase 7 / NFR-A11Y-02), mirroring TeamCanvas's own mount-focus
   // fix: switching from Canvas to List view (the "List表示" button, itself INSIDE TeamCanvas)
@@ -72,44 +88,57 @@ export function TeamListView({
     >
       <header
         className="tlv-header"
+        data-testid="team-list-header"
         id={`team-agent-${detail.team.leaderAgentId}`}
         tabIndex={-1}
         aria-label={`Leader · ${detail.team.state}`}
       >
-        <button type="button" className="team-back-btn" data-testid="team-back" onClick={onBack}>
-          <ArrowLeft size={14} /> Chatに戻る
-        </button>
-        <h2 id="team-list-title" className="team-title">
-          {task.title}
-        </h2>
-        <span className="team-status-chip">{`${detail.team.state} · Worker ${workers.length}/${MAX_WORKERS}`}</span>
-        <button
-          type="button"
-          className="team-view-toggle-btn"
-          data-testid="team-view-toggle"
-          onClick={onSwitchToCanvasView}
-          title="Team Canvasに切り替え"
-        >
-          <LayoutGrid size={14} /> Canvas表示
-        </button>
-        <button
-          type="button"
-          className="team-stop-all-btn"
-          data-testid="team-stop-all"
-          disabled={teamBusy || workers.length === 0 || detail.team.state === 'completed'}
-          onClick={() => void stopAllTeamWorkers(task.id)}
-        >
-          すべて停止
-        </button>
+        <div className="tlv-header-main">
+          <button type="button" className="team-back-btn" data-testid="team-back" onClick={onBack}>
+            <ArrowLeft size={14} /> Chatに戻る
+          </button>
+          <h2 id="team-list-title" className="team-title">
+            {task.title}
+          </h2>
+        </div>
+        <div className="tlv-header-actions">
+          {/* Same wording as TeamCanvas's chip (the a11y list/canvas parity spec compares the two
+              verbatim) and, like it, no denominator: the Worker count is dynamic — see the note on
+              TeamCanvas's `liveText`. */}
+          <span className="team-status-chip">{`${detail.team.state} · Worker ${workers.length}人`}</span>
+          <button
+            type="button"
+            className="team-view-toggle-btn"
+            data-testid="team-view-toggle"
+            onClick={onSwitchToCanvasView}
+            title="Team Canvasに切り替え"
+          >
+            <LayoutGrid size={14} /> Canvas表示
+          </button>
+          <TeamPolicyTrigger onOpen={() => setPolicyOpen(true)} />
+          <button
+            type="button"
+            className="team-stop-all-btn"
+            data-testid="team-stop-all"
+            disabled={teamBusy || workers.length === 0 || detail.team.state === 'completed'}
+            onClick={() => void stopAllTeamWorkers(task.id)}
+          >
+            すべて停止
+          </button>
+        </div>
       </header>
       <div aria-live="polite" className="visually-hidden">
-        {`Team status: ${detail.team.state}, workers ${workers.length} of ${MAX_WORKERS}`}
+        {`Team status: ${detail.team.state}, workers ${workers.length}`}
       </div>
 
       <div className="tlv-body">
         <ul className="tlv-workers" aria-label="Worker一覧">
           {workers.map((worker) => {
             const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
+            const model = describeWorkerModel(worker);
+            // Null when the parent is the Leader (it is not in `workers`) — exactly what the
+            // Canvas passes into WorkerNode, so both views name the same parent.
+            const hierarchy = describeHierarchy(worker, parentAgentOf(worker, workers));
             const relevant = detail.messages
               .filter((m) => m.targetAgentId === worker.id || m.sourceAgentId === worker.id)
               .sort((a, b) => a.seq - b.seq)
@@ -119,6 +148,8 @@ export function TeamListView({
                 key={worker.id}
                 className="tlv-worker"
                 data-testid="team-worker"
+                data-depth={worker.depth}
+                data-parent-agent-id={parentAgentOf(worker, workers)?.id ?? ''}
                 id={`team-agent-${worker.id}`}
                 tabIndex={-1}
                 aria-label={`Worker ${worker.role} · ${worker.state}`}
@@ -140,10 +171,45 @@ export function TeamListView({
                     停止
                   </button>
                 </div>
-                <p className="tlv-objective">{worker.objective}</p>
+                {/* Same text the Canvas renders in `.role-sub`, from the same pure helper — the
+                    a11y list/canvas parity spec diffs the two innerTexts verbatim, and the runtime
+                    name must come from `connectionId` (the execution identity) rather than from the
+                    compatibility field `engine`. A null objective renders as nothing on both sides
+                    ("Claude ·"), so there is no placeholder to invent here. */}
+                <p className="tlv-objective">
+                  {workerRuntimeLabel(worker)} · {worker.objective}
+                </p>
                 <p className="tlv-activity">
                   現在: {worker.currentActivity ?? (worker.state === 'done' ? '完了' : '待機')}
                 </p>
+                {/* Same helper, same wording, same testids as the Canvas's Worker card — only the
+                    variant class differs (see WorkerNode.tsx), so the two views never disagree
+                    about which model a Worker got. */}
+                <div className="team-exec team-exec-list" data-testid="team-worker-model">
+                  {/* Same helper, same wording, same testid as the Canvas's Worker card — the
+                      depth/parent/kind facts must read identically in both views. */}
+                  <p className="team-exec-row" data-testid="team-worker-hierarchy">
+                    <span className="team-exec-key">階層</span>
+                    <span className="team-exec-value team-exec-instruction">{hierarchy}</span>
+                  </p>
+                  <p className="team-exec-row" data-testid="team-worker-model-name">
+                    <span className="team-exec-key">モデル</span>
+                    <span className="team-exec-value team-exec-instruction">
+                      {model.modelLabel}
+                    </span>
+                  </p>
+                  <p className="team-exec-row" data-testid="team-worker-model-connection">
+                    <span className="team-exec-key">Connection</span>
+                    <span className="team-exec-value team-exec-instruction">
+                      {model.connectionLabel}
+                    </span>
+                  </p>
+                </div>
+                {/* Same component, same helper, same facts as the Canvas's Worker card. */}
+                <TeamExecutionStatus
+                  execution={latestExecutionForWorker(detail.executions, worker.id)}
+                  variant="list"
+                />
                 <dl className="tlv-usage">
                   <div>
                     <dt>Tokens</dt>
@@ -161,13 +227,31 @@ export function TeamListView({
                 {relevant.length > 0 && (
                   <ul className="tlv-recent" aria-label={`${worker.role}との最近のやり取り`}>
                     {relevant.map((m) => {
-                      const incoming = m.targetAgentId === worker.id;
+                      // Same helper, same context (`leaderAgentId` + the Team's Workers) as the
+                      // Canvas card, so a Worker-to-Worker message is tagged with the sibling's own
+                      // role in BOTH views instead of being attributed to the Leader in either.
+                      const peer = describeMessagePeer(m, {
+                        agentId: worker.id,
+                        leaderAgentId: detail.team.leaderAgentId,
+                        agents: workers,
+                      });
+                      const incoming = peer.direction === 'incoming';
                       return (
                         <li key={m.id} className={`w-line${incoming ? ' msg-in' : ''}`}>
-                          <span className={`tag${incoming ? '' : ' out'}`}>
-                            {incoming ? 'Leaderから' : '報告'}
-                          </span>
-                          {incoming ? m.content : summarize(m.content)}
+                          <span className={`tag${incoming ? '' : ' out'}`}>{peer.tagLabel}</span>
+                          {/* Same renderer/options as WorkerNode.tsx, deliberately: the parity
+                              spec diffs innerText, and plain text here collapsed the block break
+                              the Canvas's Markdown <p> produces ("Leaderから本文" vs
+                              "Leaderから\n\n本文"). `.w-line :where(p, …)` styles both alike, and
+                              raw HTML/images stay out of the DOM exactly as on the Canvas. */}
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            skipHtml
+                            disallowedElements={['img']}
+                            unwrapDisallowed
+                          >
+                            {incoming ? m.content : summarize(m.content)}
+                          </ReactMarkdown>
                         </li>
                       );
                     })}
@@ -206,6 +290,15 @@ export function TeamListView({
           )}
         </div>
       </div>
+
+      {policyOpen && (
+        <TeamPolicyDialog
+          open
+          taskId={task.id}
+          detail={detail}
+          onClose={() => setPolicyOpen(false)}
+        />
+      )}
     </section>
   );
 }

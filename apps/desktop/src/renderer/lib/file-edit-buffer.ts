@@ -12,6 +12,7 @@ import { changedLineIndices } from './changed-lines';
 // makes "did anything change" an integer compare rather than a string compare of a file body.
 
 export type LiveFileEdit = {
+  turnId: string;
   path: string;
   text: string;
   complete: boolean;
@@ -50,6 +51,7 @@ export function applyFileEditFrame(frame: FileEditFrame): void {
   const key = `${frame.turnId} ${frame.path}`;
   const existing = byKey.get(key);
   byKey.set(key, {
+    turnId: frame.turnId,
     path: frame.path,
     text: frame.text,
     complete: frame.complete,

@@ -1,6 +1,6 @@
 // Source for the ephemeral MCP stdio server the Codex/Claude adapter hands the real Leader when
-// SPRINT_CODER_LEADER_MCP=1 routes a team-intent turn through team-mcp-bridge.ts instead of the
-// deterministic mock scenario (see ADR amendment + tasks/todo.md). This is exported as a plain
+// Real CLI Team turns route through team-mcp-bridge.ts by default; SPRINT_CODER_LEADER_MCP=0 is
+// the rollback switch. This is exported as a plain
 // string — never as a file checked into the repo tree the CLI could stumble on — and written to
 // a fresh temp file by claude-adapter.ts at the start of every such turn, then deleted when the
 // turn ends.
@@ -15,6 +15,23 @@
 //    TEAM_BRIDGE_SOCKET, authenticating with TEAM_BRIDGE_TOKEN. It never talks to
 //    TeamCoordinator/persistence directly and holds no taskId of its own — the bridge is the only
 //    thing that knows which Task/turn this socket connection belongs to.
+export const TEAM_MCP_TOOL_NAMES = [
+  'skill_draft_create',
+  'team_list_models',
+  'team_record_model_research',
+  'team_hire_worker',
+  'team_assign_task',
+  'team_steer_execution',
+  'team_cancel_execution',
+  'team_get_status',
+  'team_wait_events',
+  'team_send_to_worker',
+  'team_send_message',
+  'team_read_messages',
+  'team_wait_reports',
+  'team_stop_worker',
+] as const;
+
 export const TEAM_MCP_SERVER_SOURCE = `'use strict';
 const net = require('net');
 
@@ -23,12 +40,103 @@ const TOKEN = process.env.TEAM_BRIDGE_TOKEN;
 
 const TOOLS = [
   {
-    name: 'team_hire_worker',
+    name: 'skill_draft_create',
     description:
-      'Hire a new team Worker with a role and objective you choose based on the user request. Hire only as many Workers as the task genuinely needs (max 3) -- fewer is fine, even one.',
+      'Create a validated, managed Skill Draft for user review. This never installs the Skill. Include SKILL.md and optional official package files; Team Skills must include team/blueprint.json.',
     inputSchema: {
       type: 'object',
       properties: {
+        kind: { type: 'string', enum: ['chat', 'team'] },
+        skillId: {
+          type: 'string',
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$',
+          maxLength: 128,
+        },
+        files: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 256,
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', minLength: 1, maxLength: 500 },
+              content: { type: 'string', maxLength: 1048576 },
+            },
+            required: ['path', 'content'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['kind', 'skillId', 'files'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_list_models',
+    description:
+      'Search available Provider Connections and models before hiring. Capability values include their source; unknown must not be treated as false or inferred from names.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' },
+        connectionIds: { type: 'array', items: { type: 'string' }, maxItems: 32 },
+        providerIds: { type: 'array', items: { type: 'string' }, maxItems: 32 },
+        capabilities: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['toolCalling', 'structuredOutput', 'multimodalInput', 'reasoning'],
+          },
+          maxItems: 4,
+        },
+        cursor: { type: ['string', 'null'], pattern: '^cursor:[0-9]+$' },
+        limit: { type: 'integer', minimum: 1, maximum: 100 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_record_model_research',
+    description:
+      'When model Web research is enabled, record source URLs and a factual summary for one exact catalog model after using live Web search and before hiring.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        modelSelection: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string' },
+            requestedProvider: { type: 'string' },
+            requestedModel: { type: 'string' },
+          },
+          required: ['connectionId', 'requestedProvider', 'requestedModel'],
+          additionalProperties: false,
+        },
+        summary: { type: 'string', minLength: 1, maxLength: 2000 },
+        sources: {
+          type: 'array',
+          items: { type: 'string', format: 'uri' },
+          minItems: 1,
+          maxItems: 8,
+        },
+      },
+      required: ['modelSelection', 'summary', 'sources'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_hire_worker',
+    description:
+      'Hire one direct report. Use agentKind=worker without managerPolicy for a leaf. Use agentKind=manager with a relative maxDelegationLevels policy for a Manager.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentKind: {
+          type: 'string',
+          enum: ['worker', 'manager'],
+          description:
+            'worker creates a non-delegating leaf and forbids managerPolicy; manager requires managerPolicy.',
+        },
         role: { type: 'string', description: 'Short role label you choose based on the request, e.g. researcher/implementer/reviewer or anything else fitting -- in the same language as the request.' },
         objective: { type: 'string', description: 'What this Worker should accomplish.' },
         contextInheritancePolicy: {
@@ -36,14 +144,61 @@ const TOOLS = [
           enum: ['none', 'summary', 'selected_items', 'full_fork'],
         },
         writeCapable: { type: 'boolean' },
+        modelSelection: {
+          type: 'object',
+          properties: {
+            connectionId: { type: ['string', 'null'] },
+            requestedProvider: { type: ['string', 'null'] },
+            requestedModel: { type: ['string', 'null'] },
+          },
+          required: ['connectionId', 'requestedProvider', 'requestedModel'],
+          additionalProperties: false,
+        },
+        modelSelectionReason: {
+          type: 'string',
+          description: 'Why this source-backed available model fits this Worker. Do not infer capability from names.',
+        },
+        blueprintRoleKey: {
+          type: 'string',
+          description:
+            'Required when a Team Skill Blueprint is active. Must exactly match one role key from the pinned Blueprint.',
+        },
+        managerPolicy: {
+          type: 'object',
+          description:
+            'Required only for agentKind=manager. maxDelegationLevels is the number of additional levels the new Manager may create below itself.',
+          properties: {
+            maxDirectChildren: { type: 'integer', minimum: 1 },
+            maxDelegationLevels: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 4,
+              description:
+                'Relative levels below the new Manager. Use 1 when the Manager only needs direct leaf children.',
+            },
+            allowManagerChildren: { type: 'boolean' },
+          },
+          required: ['maxDelegationLevels', 'allowManagerChildren'],
+          additionalProperties: false,
+        },
       },
-      required: ['role', 'objective'],
+      required: ['agentKind', 'role', 'objective', 'modelSelection', 'modelSelectionReason'],
+      allOf: [
+        {
+          if: { properties: { agentKind: { const: 'manager' } } },
+          then: { required: ['managerPolicy'] },
+        },
+        {
+          if: { properties: { agentKind: { const: 'worker' } } },
+          then: { not: { required: ['managerPolicy'] } },
+        },
+      ],
       additionalProperties: false,
     },
   },
   {
     name: 'team_assign_task',
-    description: 'Assign a formal task with explicit completion criteria to a hired Worker.',
+    description: 'Assign a formal task with explicit completion criteria. Returns an execution ID immediately; queued is not a failure.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -56,8 +211,31 @@ const TOOLS = [
     },
   },
   {
+    name: 'team_steer_execution',
+    description: 'Replace the instruction of a queued or running execution while preserving its execution ID and attempt history.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        executionId: { type: 'string' },
+        instruction: { type: 'string' },
+      },
+      required: ['executionId', 'instruction'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_cancel_execution',
+    description: 'Cancel a queued or running execution by its execution ID.',
+    inputSchema: {
+      type: 'object',
+      properties: { executionId: { type: 'string' } },
+      required: ['executionId'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'team_get_status',
-    description: 'Get the current Team, Worker, message, delivery, and budget snapshot.',
+    description: 'Get the current authority-scoped Team snapshot. Manager and Worker callers cannot inspect sibling branches.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -76,6 +254,30 @@ const TOOLS = [
       type: 'object',
       properties: { workerId: { type: 'string' }, content: { type: 'string' } },
       required: ['workerId', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_send_message',
+    description:
+      'Send an audited direct message to another Agent in the same Team. Worker-to-Worker delivery is controlled by Team Policy.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targetAgentId: { type: 'string' },
+        content: { type: 'string' },
+      },
+      required: ['targetAgentId', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_read_messages',
+    description:
+      'Read messages addressed to this authenticated Agent after an optional sequence cursor.',
+    inputSchema: {
+      type: 'object',
+      properties: { afterSeq: { type: 'integer', minimum: 0 } },
       additionalProperties: false,
     },
   },

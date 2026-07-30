@@ -73,11 +73,12 @@ test.describe('leader MCP smoke (real CLI)', () => {
     await expect(page.getByTestId('team-list')).toBeVisible({ timeout: 300_000 });
     await expect(page.getByTestId('team-worker').first()).toBeVisible({ timeout: 300_000 });
 
-    // 2) MCP-path proof: the role set must NOT be the deterministic trio, and at least one
-    //    report must exist that does not match the simulator template.
-    const reports = page.locator('.w-line:has(.tag.out)');
-    await expect(reports.first()).toBeVisible({ timeout: 300_000 });
+    // 2) MCP-path proof: the role set must NOT be the deterministic trio, and both requested
+    //    viewpoints must report (a delegated child may be nested rather than rendered as a direct
+    //    top-level role). None may be the simulator template.
     const roles = await page.locator('.w-head .role-name').allTextContents();
+    const reports = page.locator('.w-line:has(.tag.out)');
+    await expect.poll(() => reports.count(), { timeout: 300_000 }).toBeGreaterThanOrEqual(2);
     const reportTexts = await reports.allTextContents();
     console.info('[leader-mcp] roles:', JSON.stringify(roles));
     console.info('[leader-mcp] reports:', JSON.stringify(reportTexts));

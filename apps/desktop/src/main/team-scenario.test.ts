@@ -33,7 +33,7 @@ async function waitFor(check: () => boolean): Promise<void> {
 
 if (runsWithElectronAbi)
   describe('Deterministic mock team scenario', () => {
-    it('one Leader Turn produces 3 hires + 3 dispatches + 3 reports + a synthesized final answer', async () => {
+    it('one Leader Turn produces 3 hires + 3 formal assignments + 3 reports + a synthesized final answer', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Team scenario');
       const coordinator = new TeamCoordinator(persistence);
@@ -74,6 +74,8 @@ if (runsWithElectronAbi)
       expect(new Set(workers.map(({ role }) => role))).toEqual(
         new Set(['調査', '実装', 'レビュー']),
       );
+      expect(detail?.executions).toHaveLength(3);
+      expect(detail?.activities.filter(({ type }) => type === 'task_assigned')).toHaveLength(3);
 
       // 3 Leader→Worker dispatches + 3 Worker→Leader reports, in strictly increasing seq order.
       const messages = detail?.messages ?? [];

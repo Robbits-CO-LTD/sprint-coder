@@ -1,16 +1,24 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError } from '@sprint-coder/contracts';
-import type { CodexModelOption, EffortOption, RuntimeWriteScope } from '@sprint-coder/contracts';
+import type {
+  CodexModelOption,
+  EffortOption,
+  RuntimeWriteScope,
+  TurnStage,
+} from '@sprint-coder/contracts';
 import type {
   RuntimeCanonicalEvent,
   RuntimeContextFragment,
+  RuntimeSkillInput,
   RuntimeTeamMcpOption,
 } from './protocol';
-import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
+import { teamMcpNodeCommand } from './team-mcp-node-command';
+import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -82,6 +90,7 @@ export class CodexRuntimeAdapter {
     // model_reasoning_effort=` works — see buildCodexArgs.
     effort?: string,
     writeScope: RuntimeWriteScope = 'read-only',
+    skills: readonly RuntimeSkillInput[] = [],
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
@@ -97,8 +106,9 @@ export class CodexRuntimeAdapter {
       const scriptPath = join(teamMcpDirectory, 'team-mcp-server.cjs');
       writeFileSync(scriptPath, TEAM_MCP_SERVER_SOURCE, { mode: 0o600 });
       teamMcpProfile = {
-        command: process.execPath,
+        command: teamMcpNodeCommand(),
         scriptPath,
+        enableWebSearch: teamMcp.enableWebSearch === true,
       };
     }
     // No Workspace means the cwd is a throwaway temp directory, so a write scope there would
@@ -113,7 +123,6 @@ export class CodexRuntimeAdapter {
         ...(teamMcp === undefined
           ? {}
           : {
-              ELECTRON_RUN_AS_NODE: '1',
               TEAM_BRIDGE_SOCKET: teamMcp.socketPath,
               TEAM_BRIDGE_TOKEN: teamMcp.token,
             }),
@@ -131,6 +140,9 @@ export class CodexRuntimeAdapter {
 
     let failed = false;
     let sawCompletion = false;
+    let stageIndex = -1;
+    const assistantMessageId = randomUUID();
+    const agentMessageBoundary = new CodexAgentMessageBoundary();
     let nextRequestId = 1;
     const pending = new Map<
       number,
@@ -148,13 +160,14 @@ export class CodexRuntimeAdapter {
     const sendResponse = (id: number | string, result: unknown): void => {
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
     };
+    const effectiveTimeoutMs = teamMcp === undefined ? this.timeoutMs : 60 * 60_000;
     const timeout = setTimeout(() => {
       if (!failed && !control.canceled) {
         failed = true;
         fail(publicError('RUNTIME_TIMEOUT', 'Codex runtimeがタイムアウトしました。', true));
       }
       void terminateProcessTree(child);
-    }, this.timeoutMs);
+    }, effectiveTimeoutMs);
 
     createInterface({ input: child.stdout }).on('line', (line) => {
       if (failed || control.canceled || line.trim() === '') return;
@@ -177,10 +190,19 @@ export class CodexRuntimeAdapter {
           respondToCodexRequest(message['method'], message['id'], sendResponse);
           return;
         }
-        handleCodexNotification(message, emit, () => {
-          sawCompletion = true;
-          child.stdin.end();
-        });
+        handleCodexNotification(
+          message,
+          emit,
+          assistantMessageId,
+          agentMessageBoundary,
+          (stage) => {
+            stageIndex = advanceCodexAppServerStage(stageIndex, stage, emit);
+          },
+          () => {
+            sawCompletion = true;
+            child.stdin.end();
+          },
+        );
       } catch {
         failed = true;
         fail(
@@ -219,8 +241,9 @@ export class CodexRuntimeAdapter {
           input: [
             {
               type: 'text',
-              text: buildCodexPrompt(input, contextFragments, teamMcp?.guidance),
+              text: buildCodexPrompt(input, contextFragments, teamMcp?.guidance, skills),
             },
+            ...skills.map((skill) => ({ type: 'skill', name: skill.name, path: skill.path })),
           ],
           ...(effort === undefined || effort === '' ? {} : { effort }),
         });
@@ -276,26 +299,39 @@ export class CodexRuntimeAdapter {
 function handleCodexNotification(
   message: Record<string, unknown>,
   emit: EmitEvent,
+  assistantMessageId: string,
+  agentMessageBoundary: CodexAgentMessageBoundary,
+  advanceStage: (stage: TurnStage) => void,
   completed: () => void,
 ): void {
   const method = message['method'];
   if (typeof method !== 'string') return;
   const params = asRecord(message['params']);
+  if (method === 'turn/started') {
+    advanceStage('understanding');
+    return;
+  }
   if (method === 'item/agentMessage/delta') {
+    advanceStage('synthesizing');
+    const itemId = requiredString(params['itemId'], 'agent message item id');
     emit({
       type: 'delta',
-      messageId: requiredString(params['itemId'], 'message id'),
-      delta: requiredString(params['delta'], 'message delta'),
+      messageId: assistantMessageId,
+      delta: agentMessageBoundary.push(itemId, requiredString(params['delta'], 'message delta')),
     });
     return;
   }
   if (method === 'item/reasoning/textDelta' || method === 'item/reasoning/summaryTextDelta') {
+    advanceStage('planning');
     emit({ type: 'reasoning', text: requiredString(params['delta'], 'reasoning delta') });
     return;
   }
   if (method === 'item/completed') {
     const item = asRecord(params['item']);
+    if (item['type'] === 'mcpToolCall' || item['type'] === 'commandExecution')
+      advanceStage('executing');
     if (item['type'] === 'fileChange' && Array.isArray(item['changes'])) {
+      advanceStage('executing');
       const changes = item['changes']
         .map((change) => asRecord(change))
         .filter(
@@ -317,9 +353,47 @@ function handleCodexNotification(
     const turn = asRecord(params['turn']);
     if (turn['status'] !== 'completed')
       throw new Error(`Codex turn failed with status ${String(turn['status'])}`);
+    advanceStage('synthesizing');
     emit({ type: 'completed' });
     completed();
   }
+}
+
+/**
+ * Codex streams each commentary/final assistant message as its own `agentMessage` item. Chunks
+ * within one item are token continuations, while a new item is a new semantic paragraph. Sprint
+ * Coder persists one assistant message per Turn, so preserve that item boundary as Markdown's
+ * paragraph separator instead of flattening every progress update into one wall of text.
+ */
+export class CodexAgentMessageBoundary {
+  private activeItemId: string | null = null;
+
+  push(itemId: string, delta: string): string {
+    const separated =
+      this.activeItemId !== null && this.activeItemId !== itemId ? `\n\n${delta}` : delta;
+    this.activeItemId = itemId;
+    return separated;
+  }
+}
+
+const CODEX_APP_SERVER_STAGES: readonly TurnStage[] = [
+  'understanding',
+  'planning',
+  'executing',
+  'synthesizing',
+];
+
+export function advanceCodexAppServerStage(
+  currentIndex: number,
+  target: TurnStage,
+  emit: EmitEvent,
+): number {
+  const targetIndex = CODEX_APP_SERVER_STAGES.indexOf(target);
+  for (let index = currentIndex + 1; index <= targetIndex; index += 1) {
+    const stage = CODEX_APP_SERVER_STAGES[index];
+    if (stage !== undefined) emit({ type: 'stage', stage });
+  }
+  return Math.max(currentIndex, targetIndex);
 }
 
 function respondToCodexRequest(
@@ -371,8 +445,13 @@ export function buildCodexPrompt(
   input: string,
   contextFragments: readonly RuntimeContextFragment[],
   teamGuidance?: string,
+  skills: readonly RuntimeSkillInput[] = [],
 ): string {
-  const request = teamGuidance === undefined ? input : `${teamGuidance}\n\n${input}`;
+  const skillInvocation =
+    skills.length === 0 ? '' : `${skills.map((skill) => `$${skill.name}`).join(' ')}\n\n`;
+  const currentRequest = `${skillInvocation}${input}`;
+  const request =
+    teamGuidance === undefined ? currentRequest : `${teamGuidance}\n\n${currentRequest}`;
   if (contextFragments.length === 0) return request;
   const context = contextFragments.map((fragment) => ({
     id: fragment.id,
@@ -392,6 +471,7 @@ export function buildCodexPrompt(
 export type CodexTeamMcpProfile = Readonly<{
   command: string;
   scriptPath: string;
+  enableWebSearch?: boolean;
 }>;
 
 /**
@@ -453,21 +533,19 @@ export function buildCodexArgs(
           '-c',
           'mcp_servers.team.enabled=true',
           '-c',
-          `mcp_servers.team.enabled_tools=${JSON.stringify([
-            'team_hire_worker',
-            'team_assign_task',
-            'team_get_status',
-            'team_wait_events',
-            'team_send_to_worker',
-            'team_wait_reports',
-            'team_stop_worker',
-          ])}`,
+          `mcp_servers.team.enabled_tools=${JSON.stringify(TEAM_MCP_TOOL_NAMES)}`,
           '-c',
           'mcp_servers.team.default_tools_approval_mode="approve"',
           '-c',
           'mcp_servers.team.startup_timeout_sec=10',
           '-c',
-          'mcp_servers.team.env_vars=["ELECTRON_RUN_AS_NODE","TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
+          'mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
+          // Codex normally defers MCP tools behind tool_search. Sprint Coder's reserved Team
+          // capability must be directly callable: the embedded Skill names the exact tools and
+          // must fail closed rather than drifting into an unrelated native subagent feature.
+          '-c',
+          'features.tool_search_always_defer_mcp_tools=false',
+          ...(teamMcp.enableWebSearch === true ? ['-c', 'web_search="live"'] : []),
         ]),
     ...(effort === undefined || effort === '' ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
     ...(model === 'auto' ? [] : ['-c', `model="${model}"`]),

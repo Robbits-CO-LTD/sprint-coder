@@ -6,7 +6,7 @@ export const CONTEXT_HARD_CAP_TOKENS = 32_000;
 export const CONTEXT_SYSTEM_PROMPT =
   'あなたはSprint Coderの実行エージェントです。現在の依頼を最優先し、実際に観測したツール結果だけを使って簡潔かつ正確に回答してください。実行していないツール、存在しないWorker、届いていない報告を作ってはいけません。';
 
-export type ContextSource = 'system' | 'history' | 'goal' | 'compaction' | 'background';
+export type ContextSource = 'system' | 'history' | 'goal' | 'compaction' | 'background' | 'skill';
 export type ContextTrust = 'system' | 'user' | 'assistant';
 
 export type ContextFragment = {
@@ -184,7 +184,14 @@ export function aggregateContextUsage(
       fragment.source,
       (tokensBySource.get(fragment.source) ?? 0) + fragment.tokenEstimate,
     );
-  const sources: ContextSource[] = ['system', 'history', 'goal', 'compaction', 'background'];
+  const sources: ContextSource[] = [
+    'system',
+    'history',
+    'goal',
+    'compaction',
+    'background',
+    'skill',
+  ];
   const aggregated = sources.flatMap((source) => {
     const tokens = tokensBySource.get(source);
     return tokens === undefined ? [] : [{ source, tokens }];

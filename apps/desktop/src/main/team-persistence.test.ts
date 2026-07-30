@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
-import { SqlitePersistenceClient } from './persistence';
+import { SqlitePersistenceClient, TeamConflictError } from './persistence';
+import { DEFAULT_MANAGER_POLICY, DEFAULT_TEAM_POLICY } from '@sprint-coder/domain';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -40,11 +41,16 @@ if (runsWithElectronAbi)
         taskId: task.id,
         leaderAgentId: leaderBefore.id,
         state: 'draft',
+        policy: DEFAULT_TEAM_POLICY,
       });
       expect(persistence.getTaskLeader(task.id)).toMatchObject({
         id: leaderBefore.id,
         threadId: leaderBefore.threadId,
         teamId: team.id,
+        parentAgentId: null,
+        depth: 0,
+        canDelegate: true,
+        managerPolicy: DEFAULT_MANAGER_POLICY,
       });
       persistence.close();
 
@@ -52,6 +58,112 @@ if (runsWithElectronAbi)
       expect(reopened.getTeamByTask(task.id)).toEqual(team);
       expect(reopened.getTaskLeader(task.id).id).toBe(leaderBefore.id);
       reopened.close();
+    });
+
+    it('persists a Manager hierarchy through depth 4 and rejects depth 5', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const team = persistence.promoteTaskToTeam(task.id);
+      let parent = persistence.getTaskLeader(task.id);
+      const hierarchy = [parent];
+      const managerCeiling = {
+        entries: [],
+        maxWorkerDepth: 4,
+        maxConcurrentWorkers: 8,
+      } as const;
+      for (let depth = 1; depth <= 4; depth += 1) {
+        parent = persistence.registerTeamWorker({
+          teamId: team.id,
+          parentAgentId: parent.id,
+          role: `manager-${depth}`,
+          objective: `Manage depth ${depth}.`,
+          parentCapabilityCeiling: managerCeiling,
+          contextInheritancePolicy: 'summary',
+          canDelegate: true,
+          managerPolicy: DEFAULT_MANAGER_POLICY,
+        });
+        expect(parent.depth).toBe(depth);
+        hierarchy.push(parent);
+      }
+      expect(() =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          parentAgentId: parent.id,
+          role: 'too-deep',
+          objective: 'Must be rejected.',
+          parentCapabilityCeiling: managerCeiling,
+          contextInheritancePolicy: 'summary',
+        }),
+      ).toThrow('depth exceeds 4');
+
+      const leaf = persistence.registerTeamWorker({
+        teamId: team.id,
+        parentAgentId: hierarchy[0]!.id,
+        role: 'leaf',
+        objective: 'Cannot delegate.',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+      });
+      expect(() =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          parentAgentId: leaf.id,
+          role: 'forbidden-child',
+          objective: 'Must be rejected.',
+          parentCapabilityCeiling: emptyCeiling,
+          contextInheritancePolicy: 'summary',
+        }),
+      ).toThrow('Only a Manager');
+      persistence.transitionWorkerState(hierarchy[1]!.id, 'stopped');
+      expect(() =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          parentAgentId: hierarchy[1]!.id,
+          role: 'terminal-parent-child',
+          objective: 'Must be rejected.',
+          parentCapabilityCeiling: emptyCeiling,
+          contextInheritancePolicy: 'summary',
+        }),
+      ).toThrow('terminal Agent');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(
+        reopened
+          .getTeamSnapshot(team.id)
+          .agents.filter(({ id }) => hierarchy.some((agent) => agent.id === id))
+          .map(({ depth, parentAgentId, canDelegate }) => ({
+            depth,
+            parentAgentId,
+            canDelegate,
+          })),
+      ).toEqual(
+        hierarchy.map((agent) => ({
+          depth: agent.depth,
+          parentAgentId: agent.parentAgentId,
+          canDelegate: true,
+        })),
+      );
+      reopened.close();
+    });
+
+    it('updates Team Policy with optimistic concurrency and preserves valid hierarchy', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const team = persistence.promoteTaskToTeam(task.id);
+      const updatedPolicy = {
+        ...DEFAULT_TEAM_POLICY,
+        maxAgentDepth: 3,
+        maxConcurrentExecutions: 6,
+        allowWorkerDirectMessages: false,
+      } as const;
+      const updated = persistence.updateTeamPolicy(team.id, updatedPolicy, team.revision);
+      expect(updated).toMatchObject({ policy: updatedPolicy, revision: team.revision + 1 });
+      expect(persistence.getTaskLeader(task.id).managerPolicy?.maxDelegationDepth).toBe(3);
+      expect(() =>
+        persistence.updateTeamPolicy(team.id, DEFAULT_TEAM_POLICY, team.revision),
+      ).toThrow(TeamConflictError);
+      persistence.close();
     });
 
     it('stores a Worker as an Agent, AgentThread, and TeamMembership policy record', () => {
@@ -86,7 +198,139 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('persists ordered leader-routed delivery and rejects direct Worker messages', () => {
+    it('persists built-in Connection selection and observed model resolution additively', () => {
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('claude');
+      persistence.setModel('claude-opus-5');
+      const task = persistence.createTask();
+      const leader = persistence.getTaskLeader(task.id);
+      expect(leader.modelSelection).toEqual({
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-opus-5',
+      });
+
+      const team = persistence.promoteTaskToTeam(task.id);
+      const worker = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'researcher',
+        objective: 'Research the bounded slice.',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+      });
+      expect(worker.modelSelection).toEqual(leader.modelSelection);
+
+      const started = persistence.startTurn(task.id, 'record model identity');
+      expect(started.modelSelection).toEqual(leader.modelSelection);
+      expect(
+        persistence.recordTurnResolution(task.id, started.turnId, {
+          resolvedProvider: null,
+          resolvedModel: 'claude-opus-5-20260715',
+        }),
+      ).toEqual({
+        selection: leader.modelSelection,
+        resolution: {
+          resolvedProvider: null,
+          resolvedModel: 'claude-opus-5-20260715',
+        },
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTaskLeader(task.id).modelSelection).toEqual(leader.modelSelection);
+      expect(reopened.getTurnModelIdentity(task.id, started.turnId)).toEqual({
+        selection: leader.modelSelection,
+        resolution: {
+          resolvedProvider: null,
+          resolvedModel: 'claude-opus-5-20260715',
+        },
+      });
+      reopened.close();
+    });
+
+    it('uses a canonical Task selection while preserving the legacy global fallback', () => {
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('claude');
+      persistence.setModel('claude-opus-5');
+      const legacyTask = persistence.createTask();
+      expect(persistence.getTaskModelSelection(legacyTask.id)).toBeNull();
+
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const legacyTurn = persistence.startTurn(legacyTask.id, 'use the legacy picker fallback');
+      expect(legacyTurn).toMatchObject({
+        runtimeKind: 'codex',
+        model: 'gpt-5.6-terra',
+      });
+      persistence.cancelTurn(legacyTask.id, legacyTurn.turnId);
+
+      const explicitSelection = {
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-opus-5',
+      } as const;
+      expect(persistence.setTaskModelSelection(legacyTask.id, explicitSelection)).toEqual(
+        explicitSelection,
+      );
+      expect(persistence.getTaskLeader(legacyTask.id)).toMatchObject({
+        runtimeKind: 'claude',
+        modelSelection: explicitSelection,
+      });
+
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const explicitTurn = persistence.startTurn(legacyTask.id, 'use the Task selection');
+      expect(explicitTurn).toMatchObject({
+        runtimeKind: 'claude',
+        model: 'claude-opus-5',
+        modelSelection: explicitSelection,
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTaskModelSelection(legacyTask.id)).toEqual(explicitSelection);
+      expect(reopened.getTaskLeader(legacyTask.id)).toMatchObject({
+        runtimeKind: 'claude',
+        modelSelection: explicitSelection,
+      });
+      expect(reopened.getTurnModelIdentity(legacyTask.id, explicitTurn.turnId).selection).toEqual(
+        explicitSelection,
+      );
+      reopened.close();
+    });
+
+    it('updates a Worker Agent and AgentThread selection atomically', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const team = persistence.promoteTaskToTeam(task.id);
+      const worker = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'implementer',
+        objective: 'Implement.',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+      });
+      const selection = {
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-5.6-terra',
+      } as const;
+
+      expect(persistence.setAgentModelSelection(worker.id, selection)).toMatchObject({
+        id: worker.id,
+        runtimeKind: 'codex',
+        modelSelection: selection,
+      });
+      expect(
+        persistence.getTeamSnapshot(team.id).agents.find((agent) => agent.id === worker.id),
+      ).toMatchObject({
+        runtimeKind: 'codex',
+        modelSelection: selection,
+      });
+      persistence.close();
+    });
+
+    it('persists direct Worker message audit links and enforces Team Policy', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
       const team = persistence.promoteTaskToTeam(task.id);
@@ -108,14 +352,53 @@ if (runsWithElectronAbi)
       });
       persistence.transitionTeamState(team.id, 'active');
 
+      const execution = persistence.createTeamExecution({
+        teamId: team.id,
+        assigneeAgentId: firstWorker.id,
+        createdByAgentId: leader.id,
+        instruction: 'Implement.',
+        now: '2026-07-28T12:00:00.000Z',
+      });
+      persistence.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'queued',
+        now: '2026-07-28T12:00:01.000Z',
+        queueReason: 'global_concurrency',
+      });
+      persistence.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'running',
+        now: '2026-07-28T12:00:02.000Z',
+      });
+      const attempt = persistence.createTeamAttempt(execution.id, '2026-07-28T12:00:02.000Z');
+      const direct = persistence.createTeamMessage({
+        teamId: team.id,
+        sourceAgentId: firstWorker.id,
+        targetAgentId: secondWorker.id,
+        content: 'Please review this execution.',
+        executionId: execution.id,
+        attemptId: attempt.id,
+      });
+      expect(direct).toMatchObject({
+        seq: 1,
+        executionId: execution.id,
+        attemptId: attempt.id,
+      });
+
+      const currentTeam = persistence.getTeam(team.id);
+      persistence.updateTeamPolicy(
+        team.id,
+        { ...currentTeam.policy, allowWorkerDirectMessages: false },
+        currentTeam.revision,
+      );
       expect(() =>
         persistence.createTeamMessage({
           teamId: team.id,
           sourceAgentId: firstWorker.id,
           targetAgentId: secondWorker.id,
-          content: 'Direct message',
+          content: 'This direct message is disabled.',
         }),
-      ).toThrow('must be routed between the leader and a worker');
+      ).toThrow('Team Policy forbids');
 
       const first = persistence.createTeamMessage({
         teamId: team.id,
@@ -129,7 +412,7 @@ if (runsWithElectronAbi)
         targetAgentId: leader.id,
         content: 'Review complete.',
       });
-      expect([first.seq, second.seq]).toEqual([1, 2]);
+      expect([first.seq, second.seq]).toEqual([2, 3]);
       expect(persistence.transitionTeamMessageState(first.id, 'dispatching').state).toBe(
         'dispatching',
       );
@@ -144,8 +427,15 @@ if (runsWithElectronAbi)
 
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.getTeamSnapshot(team.id).messages).toMatchObject([
-        { id: first.id, seq: 1, state: 'acknowledged' },
-        { id: second.id, seq: 2, state: 'persisted' },
+        {
+          id: direct.id,
+          seq: 1,
+          state: 'persisted',
+          executionId: execution.id,
+          attemptId: attempt.id,
+        },
+        { id: first.id, seq: 2, state: 'acknowledged' },
+        { id: second.id, seq: 3, state: 'persisted' },
       ]);
       reopened.close();
     });

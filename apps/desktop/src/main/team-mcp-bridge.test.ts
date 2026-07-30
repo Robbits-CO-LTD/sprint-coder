@@ -7,10 +7,12 @@ import type { TeamCoordinator } from './team-coordinator';
 function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordinator {
   return {
     hireWorker: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
+    hireWorkerAs: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
     sendToWorker: vi.fn(async () => {
       throw new Error('not used in this test');
     }),
     listWorkerReports: vi.fn(() => []),
+    assignTaskAs: vi.fn(async () => ({ executionId: 'execution-1', state: 'queued' }) as never),
     hasBusyWorkers: vi.fn(() => false),
     stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
     ...overrides,
@@ -84,6 +86,35 @@ describe('defaultSocketPathFactory', () => {
 });
 
 describe('TeamMcpBridge', () => {
+  it('closes accepted sockets during dispose instead of hanging app shutdown', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    expect(socketPath).not.toBeNull();
+    const socket = createConnection(socketPath as string);
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+    const clientClosed = new Promise<string>((resolve) =>
+      socket.once('close', () => resolve('closed')),
+    );
+
+    await expect(
+      Promise.race([
+        bridge.dispose().then(() => 'disposed'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 500)),
+      ]),
+    ).resolves.toBe('disposed');
+    await expect(
+      Promise.race([
+        clientClosed,
+        new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 500)),
+      ]),
+    ).resolves.toBe('closed');
+    expect(socket.destroyed).toBe(true);
+  });
+
   it('closes an unauthenticated connection after a bounded grace period', async () => {
     const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath(), 25);
     bridges.push(bridge);
@@ -152,6 +183,138 @@ describe('TeamMcpBridge', () => {
     expect(response.ok).toBe(true);
     expect(response.result.workerId).toBe('worker-1');
     expect(coordinator.stopWorker).toHaveBeenCalledWith('task-1', 'worker-1');
+  });
+
+  it('allows Draft creation only for a turn explicitly bound to skill-creator', async () => {
+    const createSkillDraft = vi.fn(async (input: unknown) => ({
+      id: 'draft-1',
+      input,
+    }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      undefined,
+      createSkillDraft,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const deniedToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-denied', { taskId: 'task-1', token: deniedToken });
+    const denied = await roundTrip(socketPath as string, {
+      token: deniedToken,
+      tool: 'skill_draft_create',
+      args: { kind: 'chat', skillId: 'reviewer', files: [] },
+    });
+    expect(JSON.parse(denied.lines[0] as string)).toMatchObject({ ok: false });
+
+    const allowedToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-allowed', {
+      taskId: 'task-1',
+      token: allowedToken,
+      allowSkillDrafts: true,
+    });
+    const allowed = await roundTrip(socketPath as string, {
+      token: allowedToken,
+      tool: 'skill_draft_create',
+      args: { kind: 'chat', skillId: 'reviewer', files: [{ path: 'SKILL.md', content: 'x' }] },
+    });
+    expect(JSON.parse(allowed.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { id: 'draft-1' },
+    });
+    expect(createSkillDraft).toHaveBeenCalledOnce();
+  });
+
+  it('does not expose Team tools to a Skill Creator-only turn', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-skill-creator', {
+      taskId: 'task-1',
+      token,
+      allowSkillDrafts: true,
+      allowTeamTools: false,
+    });
+    const response = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_stop_worker',
+      args: { workerId: 'worker-1' },
+    });
+    expect(JSON.parse(response.lines[0] as string)).toMatchObject({ ok: false });
+    expect(coordinator.stopWorker).not.toHaveBeenCalled();
+  });
+
+  it('binds model catalog lookup to the registered Task instead of model arguments', async () => {
+    const listModelCandidates = vi.fn(async (input: unknown) => ({
+      revision: 1,
+      total: 1,
+      items: [{ connectionId: 'builtin:codex-cli', modelId: 'gpt-5.6-sol' }],
+      nextCursor: null,
+      query: input,
+    }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      listModelCandidates,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-models', { taskId: 'task-trusted', token });
+
+    const { lines } = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_list_models',
+      args: { capabilities: ['reasoning'], limit: 20 },
+    });
+
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { total: 1 },
+    });
+    expect(listModelCandidates).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'task-trusted',
+        capabilities: ['reasoning'],
+        limit: 20,
+      }),
+    );
+  });
+
+  it('binds Manager authority to the registered token rather than request arguments', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-manager', {
+      taskId: 'task-1',
+      token,
+      requesterAgentId: 'manager-1',
+    });
+
+    const { lines } = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_assign_task',
+      args: { workerId: 'worker-1', objective: '実装する', doneCriteria: ['完了'] },
+    });
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { executionId: 'execution-1', state: 'queued' },
+    });
+    expect(coordinator.assignTaskAs).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        targetAgentId: 'worker-1',
+        content: '実装する',
+        doneCriteria: ['完了'],
+      },
+      'manager-1',
+    );
   });
 
   it('closes the connection without responding to an unknown token', async () => {

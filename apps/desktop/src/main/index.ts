@@ -14,6 +14,7 @@ import {
   evaluateNativeMutationPlatformGate,
   type NativeMutationPackagedLoadEvidence,
 } from './native-mutation-platform-gate';
+import { secureLogger } from './secure-logger';
 
 const isDevelopment = !app.isPackaged;
 app.setName('Sprint Coder');
@@ -98,13 +99,16 @@ app.on('before-quit', (event) => {
     try {
       await router?.dispose();
     } catch (error) {
-      console.error('CommandRunner shutdown did not fully drain', error);
+      secureLogger.error('CommandRunner shutdown did not fully drain', error);
     } finally {
       try {
         persistence?.close();
       } finally {
         shutdownCommitted = true;
-        app.quit();
+        // The original quit event was canceled while async Runtime/MCP cleanup drained. Calling
+        // app.quit() again from that canceled lifecycle can leave a headless Electron main process
+        // alive on macOS. Cleanup is complete here, so exit deterministically.
+        app.exit(0);
       }
     }
   })();
@@ -117,6 +121,13 @@ function createWindow(): BrowserWindow {
     minWidth: 760,
     minHeight: 560,
     show: false,
+    backgroundColor: '#12110f',
+    ...(process.platform === 'darwin'
+      ? {
+          titleBarStyle: 'hiddenInset' as const,
+          trafficLightPosition: { x: 14, y: 13 },
+        }
+      : {}),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       sandbox: true,
@@ -194,14 +205,14 @@ async function wireEditSagaRecovery(
     if (gate.allowed) {
       await executor.reconcileAll();
     } else {
-      console.log(
-        `Native mutation platform gate denied reconciliation: ${gate.reasons.join(', ')}`,
-      );
+      secureLogger.info('Native mutation platform gate denied reconciliation', {
+        reasons: gate.reasons,
+      });
     }
   } catch (error) {
     // Fail-closed dormant wiring: a recovery-wiring failure must neither enable
     // mutation nor block the read-only application from starting.
-    console.error('Edit Saga recovery wiring did not initialize', error);
+    secureLogger.error('Edit Saga recovery wiring did not initialize', error);
   }
 }
 

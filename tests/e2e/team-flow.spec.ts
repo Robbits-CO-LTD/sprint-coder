@@ -23,7 +23,7 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
     removeUserDataDir(userDataDir);
   });
 
-  test('promotes a Task, the Leader hires and dispatches three Workers on its own, and stops all', async () => {
+  test('promotes a Task, and the Leader hires, dispatches, and completes three Workers', async () => {
     app = await launchApp(userDataDir);
     const page: Page = await firstWindow(app);
     await page.getByTestId('sidebar-new-task-button').click();
@@ -32,7 +32,9 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
 
     // No manual hire UI exists anymore (FR-TEAM-06/13): with 0 Workers, the Canvas explains the
     // new model instead of offering a hire form.
-    await expect(page.getByText('Leaderに依頼すると、必要に応じてWorkerを雇用します')).toBeVisible();
+    await expect(
+      page.getByText('Leaderに依頼すると、必要に応じてWorkerを雇用します'),
+    ).toBeVisible();
     await expect(page.getByTestId('team-hire')).toHaveCount(0);
 
     // The user only ever talks to the Leader — through the exact same composer a normal chat
@@ -53,7 +55,9 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
     await expect(page.getByTestId('team-cable-announcer')).toContainText('を雇用しました', {
       timeout: 20_000,
     });
-    await expect(page.locator('.team-cable-event', { hasText: 'を雇用しました' }).first()).toBeVisible();
+    await expect(
+      page.locator('.team-cable-event', { hasText: 'を雇用しました' }).first(),
+    ).toBeVisible();
 
     // Each Worker shows exactly one Leaderから dispatch line and one 報告 line (6 total) — the
     // Leader dispatched to and received a report from every Worker on its own.
@@ -61,15 +65,17 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
       timeout: 20_000,
     });
     for (let index = 0; index < 3; index += 1) {
-      await expect(cards.nth(index).locator('.team-status')).toHaveText('done', { timeout: 20_000 });
+      await expect(cards.nth(index).locator('.team-status')).toHaveText('done', {
+        timeout: 20_000,
+      });
     }
 
     // The Leader's own timeline carries the synthesized final answer (main/team-tools.ts's
     // createTeamScenarioSampler final text).
     await expect(page.getByText('以上の報告を統合した結論です。')).toBeVisible({ timeout: 20_000 });
 
-    await page.getByTestId('team-stop-all').click();
-    await expect(page.getByText('completed · Worker 3/3')).toBeVisible();
+    await expect(page.getByText('completed · Worker 3人')).toBeVisible();
+    await expect(page.getByTestId('team-stop-all')).toBeDisabled();
   });
 
   test('restores an active Team as paused after restart', async () => {
@@ -111,7 +117,7 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
       restartApp = await launchApp(restartDir);
       page = await firstWindow(restartApp);
       await page.getByTestId('team-toggle').click();
-      await expect(page.getByText('paused · Worker 1/3')).toBeVisible();
+      await expect(page.getByText('paused · Worker 1人')).toBeVisible();
       await expect(page.locator('.team-status')).toHaveText('stopped');
     } finally {
       await closeApp(restartApp);

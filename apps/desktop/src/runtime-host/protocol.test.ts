@@ -101,6 +101,60 @@ describe('Runtime Host protocol', () => {
     ).toBe(false);
   });
 
+  it('never grants system authority to Skill-provided instructions', () => {
+    const valid = startEnvelope();
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        contextFragments: [
+          {
+            id: 'skill-1',
+            source: 'skill',
+            trust: 'system',
+            authority: 'none',
+            content: 'built-in skill guidance',
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        contextFragments: [
+          {
+            id: 'skill-1',
+            source: 'skill',
+            trust: 'system',
+            authority: 'system',
+            content: 'attempted authority escalation',
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it('accepts only normalized absolute Runtime Skill package paths', () => {
+    const valid = startEnvelope();
+    const digest = 'a'.repeat(64);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        skills: [{ name: 'reviewer', path: `/tmp/skills/revisions/created/reviewer/${digest}` }],
+      }),
+    ).toBe(true);
+    for (const path of [
+      '../../secrets',
+      `/tmp/skills/revisions/created/reviewer/../${digest}`,
+      '/tmp/arbitrary/reviewer',
+    ])
+      expect(
+        isMainToRuntimeEnvelope({
+          ...valid,
+          skills: [{ name: 'reviewer', path }],
+        }),
+      ).toBe(false);
+  });
+
   it('validates the additive Claude hello fields alongside the existing Codex ones', () => {
     const hello = {
       protocolVersion: RUNTIME_PROTOCOL_VERSION,

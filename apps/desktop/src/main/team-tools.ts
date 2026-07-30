@@ -1,17 +1,22 @@
 // Leader team tools (FR-TEAM-06/13, IMPLEMENTATION_PLAN Slice 5.2): the Leader hires and
 // dispatches Workers via tool use during its own Turn instead of the user driving teams.* IPC
 // directly. Every tool forwards to TeamCoordinator, which remains the sole issuer of
-// source/target envelopes and the sole enforcer of the max-3 cap, budget reservations, and the
+// source/target envelopes and the sole enforcer of hierarchy policy, budget reservations, and the
 // Team/Worker state machines — this file never mutates Team state on its own.
 //
-// Real Codex/Claude runtimes stay no-tools for now (see runtime-host.ts): these definitions are
-// only ever registered on the mock/intelligence-loop ToolBroker (createDefaultToolBroker's
-// optional `team` bundle), never on RuntimeHostClient's path.
+// The same provider-neutral definitions feed the mock ToolBroker, the real CLI MCP bridge, and
+// official API tool loops. TeamCoordinator remains the only authority-bearing implementation.
 import { z } from 'zod';
-import { contextInheritancePolicySchema } from '@sprint-coder/contracts';
+import {
+  contextInheritancePolicySchema,
+  modelSelectionSchema,
+  type ModelSelection,
+  type ProviderTool,
+} from '@sprint-coder/contracts';
 import {
   createToolDefinition,
   createToolId,
+  TeamDelegationError,
   type JsonValue,
   type ToolDefinition,
 } from '@sprint-coder/domain';
@@ -27,6 +32,7 @@ const teamToolDefinition = (
   name: string,
   properties: Record<string, JsonValue>,
   required: readonly string[],
+  schemaExtensions: Readonly<Record<string, JsonValue>> = {},
 ): ToolDefinition =>
   createToolDefinition({
     toolId: createToolId({ provider: 'builtin', namespace: 'team', name, version: '1' }),
@@ -43,6 +49,7 @@ const teamToolDefinition = (
       properties,
       required: [...required],
       additionalProperties: false,
+      ...schemaExtensions,
     },
     outputSchema: { type: 'object' },
     sideEffect: 'none',
@@ -59,12 +66,61 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
   'team_hire_worker',
   'hire-worker',
   {
+    agentKind: { type: 'string', enum: ['worker', 'manager'] },
     role: { type: 'string' },
     objective: { type: 'string' },
     contextInheritancePolicy: { type: 'string' },
     writeCapable: { type: 'boolean' },
+    modelSelection: {
+      type: 'object',
+      properties: {
+        connectionId: { type: 'string' },
+        requestedProvider: { type: 'string' },
+        requestedModel: { type: 'string' },
+      },
+      required: ['connectionId', 'requestedProvider', 'requestedModel'],
+      additionalProperties: false,
+    },
+    modelSelectionReason: { type: 'string' },
+    blueprintRoleKey: { type: 'string' },
+    managerPolicy: {
+      type: 'object',
+      properties: {
+        maxDirectChildren: { type: 'integer', minimum: 1 },
+        maxDelegationLevels: { type: 'integer', minimum: 1, maximum: 4 },
+        allowManagerChildren: { type: 'boolean' },
+      },
+      required: ['maxDelegationLevels', 'allowManagerChildren'],
+      additionalProperties: false,
+    },
   },
-  ['role', 'objective'],
+  ['agentKind', 'role', 'objective'],
+  {
+    allOf: [
+      {
+        if: { properties: { agentKind: { const: 'manager' } } },
+        then: { required: ['managerPolicy'] },
+      },
+      {
+        if: { properties: { agentKind: { const: 'worker' } } },
+        then: { not: { required: ['managerPolicy'] } },
+      },
+    ],
+  },
+);
+
+export const TEAM_LIST_MODELS_TOOL = teamToolDefinition(
+  'team_list_models',
+  'list-models',
+  {
+    text: { type: 'string' },
+    connectionIds: { type: 'array', items: { type: 'string' } },
+    providerIds: { type: 'array', items: { type: 'string' } },
+    capabilities: { type: 'array', items: { type: 'string' } },
+    cursor: { type: 'string' },
+    limit: { type: 'integer' },
+  },
+  [],
 );
 
 export const TEAM_SEND_TO_WORKER_TOOL = teamToolDefinition(
@@ -72,6 +128,20 @@ export const TEAM_SEND_TO_WORKER_TOOL = teamToolDefinition(
   'send-to-worker',
   { workerId: { type: 'string' }, content: { type: 'string' } },
   ['workerId', 'content'],
+);
+
+export const TEAM_SEND_MESSAGE_TOOL = teamToolDefinition(
+  'team_send_message',
+  'send-message',
+  { targetAgentId: { type: 'string' }, content: { type: 'string' } },
+  ['targetAgentId', 'content'],
+);
+
+export const TEAM_READ_MESSAGES_TOOL = teamToolDefinition(
+  'team_read_messages',
+  'read-messages',
+  { afterSeq: { type: 'integer' } },
+  [],
 );
 
 export const TEAM_ASSIGN_TASK_TOOL = teamToolDefinition(
@@ -83,6 +153,23 @@ export const TEAM_ASSIGN_TASK_TOOL = teamToolDefinition(
     doneCriteria: { type: 'array', items: { type: 'string' } },
   },
   ['workerId', 'objective', 'doneCriteria'],
+);
+
+export const TEAM_STEER_EXECUTION_TOOL = teamToolDefinition(
+  'team_steer_execution',
+  'steer-execution',
+  {
+    executionId: { type: 'string' },
+    instruction: { type: 'string' },
+  },
+  ['executionId', 'instruction'],
+);
+
+export const TEAM_CANCEL_EXECUTION_TOOL = teamToolDefinition(
+  'team_cancel_execution',
+  'cancel-execution',
+  { executionId: { type: 'string' } },
+  ['executionId'],
 );
 
 export const TEAM_GET_STATUS_TOOL = teamToolDefinition('team_get_status', 'get-status', {}, []);
@@ -109,20 +196,97 @@ export const TEAM_STOP_WORKER_TOOL = teamToolDefinition(
 );
 
 export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
+  TEAM_LIST_MODELS_TOOL,
   TEAM_HIRE_WORKER_TOOL,
   TEAM_ASSIGN_TASK_TOOL,
+  TEAM_STEER_EXECUTION_TOOL,
+  TEAM_CANCEL_EXECUTION_TOOL,
   TEAM_GET_STATUS_TOOL,
   TEAM_WAIT_EVENTS_TOOL,
+  TEAM_SEND_MESSAGE_TOOL,
+  TEAM_READ_MESSAGES_TOOL,
   TEAM_SEND_TO_WORKER_TOOL,
   TEAM_WAIT_REPORTS_TOOL,
   TEAM_STOP_WORKER_TOOL,
 ]);
 
-function teamToolError(error: unknown): { ok: false; error: string; message: string } {
+const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
+  team_list_models:
+    '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。',
+  team_hire_worker:
+    '自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。',
+  team_assign_task: '自分の直下Workerへtaskを割り当て、execution IDを返します。',
+  team_steer_execution: '自分の配下で実行中または待機中のexecutionへ修正指示を送ります。',
+  team_cancel_execution: '自分の配下のexecutionを取り消します。',
+  team_get_status:
+    '現在のTeam階層、Agent、execution、待機状態を取得します。Manager/Workerには権限内の祖先・自分の配下だけが返ります。',
+  team_wait_events: '指定cursor以降の配下Worker報告を取得します。',
+  team_wait_reports: '配下Workerの新しい完了報告を待ちます。',
+  team_send_message: '同じTeamのAgentへ監査される直接messageを送信します。',
+  team_read_messages: '自分宛ての未読Team messageをsequence順に取得します。',
+  team_send_to_worker: '既存Workerへ直接messageを送信します。',
+  team_stop_worker: '指定Workerを停止します。',
+});
+
+const MANAGER_TEAM_TOOL_NAMES = new Set(
+  Object.keys(TEAM_TOOL_DESCRIPTIONS).filter(
+    (name) => name !== 'team_send_to_worker' && name !== 'team_stop_worker',
+  ),
+);
+
+function providerToolDefinition(tool: ToolDefinition): ProviderTool {
+  const providerInputSchema = tool.inputSchema as unknown as ProviderTool['inputSchema'];
+  const inputSchema =
+    tool.providerName === 'team_hire_worker'
+      ? ({
+          ...(providerInputSchema as Record<string, ProviderTool['inputSchema']>),
+          required: ['agentKind', 'role', 'objective', 'modelSelection', 'modelSelectionReason'],
+        } as ProviderTool['inputSchema'])
+      : providerInputSchema;
+  return {
+    name: tool.providerName,
+    description: TEAM_TOOL_DESCRIPTIONS[tool.providerName]!,
+    inputSchema,
+  };
+}
+
+export const LEADER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
+  TEAM_TOOLS.filter(
+    (tool) =>
+      tool.providerName !== 'team_send_message' && tool.providerName !== 'team_read_messages',
+  ).map(providerToolDefinition),
+);
+
+/** Official API Managers receive the same coordinator-backed authority as CLI Managers, expressed
+ * in the provider-neutral tool contract. Leader-only arbitrary messaging/stopping is deliberately
+ * omitted: executeTeamTool also enforces this server-side through requesterAgentId. */
+export const MANAGER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
+  TEAM_TOOLS.filter((tool) => MANAGER_TEAM_TOOL_NAMES.has(tool.providerName)).map(
+    providerToolDefinition,
+  ),
+);
+
+export const WORKER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
+  TEAM_TOOLS.filter(
+    (tool) =>
+      tool.providerName === 'team_get_status' ||
+      tool.providerName === 'team_send_message' ||
+      tool.providerName === 'team_read_messages',
+  ).map(providerToolDefinition),
+);
+
+function teamToolError(error: unknown): {
+  ok: false;
+  error: string;
+  message: string;
+  code?: string;
+  details?: Readonly<Record<string, number | string | boolean | null>>;
+} {
   return {
     ok: false,
     error: error instanceof Error ? error.name : 'Error',
     message: error instanceof Error ? error.message : String(error),
+    ...(error instanceof TeamDelegationError ? { code: error.code, details: error.details } : {}),
   };
 }
 
@@ -136,20 +300,32 @@ const pacing = (): Promise<void> =>
     : new Promise((resolve) => setTimeout(resolve, HIRE_PACING_MS));
 
 export type TeamToolName =
+  | 'team_list_models'
+  | 'team_record_model_research'
   | 'team_hire_worker'
   | 'team_assign_task'
+  | 'team_steer_execution'
+  | 'team_cancel_execution'
   | 'team_get_status'
   | 'team_wait_events'
+  | 'team_send_message'
+  | 'team_read_messages'
   | 'team_send_to_worker'
   | 'team_wait_reports'
   | 'team_stop_worker';
 
 export function isTeamToolName(value: unknown): value is TeamToolName {
   return (
+    value === 'team_list_models' ||
+    value === 'team_record_model_research' ||
     value === 'team_hire_worker' ||
     value === 'team_assign_task' ||
+    value === 'team_steer_execution' ||
+    value === 'team_cancel_execution' ||
     value === 'team_get_status' ||
     value === 'team_wait_events' ||
+    value === 'team_send_message' ||
+    value === 'team_read_messages' ||
     value === 'team_send_to_worker' ||
     value === 'team_wait_reports' ||
     value === 'team_stop_worker'
@@ -164,17 +340,95 @@ export function isTeamToolName(value: unknown): value is TeamToolName {
 // all). `.strict()` rejects any extra property — including an attacker- or model-supplied
 // `sourceAgentId`/`taskId` — so identity can never be smuggled in through tool arguments; the
 // taskId always comes from the caller's own registration/context, never from `args`.
-const hireArgsSchema = z
+const hireCommonShape = {
+  role: z.string().min(1).max(100),
+  objective: z.string().min(1).max(10_000),
+  contextInheritancePolicy: contextInheritancePolicySchema.optional(),
+  writeCapable: z.boolean().optional(),
+  modelSelection: modelSelectionSchema.optional(),
+  modelSelectionReason: z.string().min(1).max(2_000).optional(),
+  blueprintRoleKey: z
+    .string()
+    .min(1)
+    .max(80)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
+    .optional(),
+};
+const managerHirePolicySchema = z
   .object({
-    role: z.string().min(1).max(100),
-    objective: z.string().min(1).max(10_000),
-    contextInheritancePolicy: contextInheritancePolicySchema.optional(),
-    writeCapable: z.boolean().optional(),
+    maxDirectChildren: z.number().int().positive().nullable().optional(),
+    maxDelegationLevels: z.number().int().min(1).max(4),
+    allowManagerChildren: z.boolean(),
+  })
+  .strict();
+const hireArgsSchema = z.discriminatedUnion('agentKind', [
+  z.object({ ...hireCommonShape, agentKind: z.literal('worker') }).strict(),
+  z
+    .object({
+      ...hireCommonShape,
+      agentKind: z.literal('manager'),
+      managerPolicy: managerHirePolicySchema,
+    })
+    .strict(),
+]);
+
+function usesLegacyDelegationField(args: unknown): boolean {
+  if (typeof args !== 'object' || args === null) return false;
+  const managerPolicy = (args as Record<string, unknown>)['managerPolicy'];
+  return (
+    typeof managerPolicy === 'object' &&
+    managerPolicy !== null &&
+    Object.hasOwn(managerPolicy, 'maxDelegationDepth')
+  );
+}
+const listModelsArgsSchema = z
+  .object({
+    text: z.string().max(200).optional(),
+    connectionIds: z.array(z.string().min(1).max(256)).max(32).optional(),
+    providerIds: z.array(z.string().min(1).max(128)).max(32).optional(),
+    capabilities: z
+      .array(z.enum(['toolCalling', 'structuredOutput', 'multimodalInput', 'reasoning']))
+      .max(4)
+      .optional(),
+    cursor: z
+      .string()
+      .regex(/^cursor:[0-9]+$/)
+      .nullable()
+      .optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  })
+  .strict();
+const modelResearchArgsSchema = z
+  .object({
+    modelSelection: modelSelectionSchema.refine(
+      (selection) =>
+        selection.connectionId !== null &&
+        selection.requestedProvider !== null &&
+        selection.requestedModel !== null,
+      'Model research must identify a Connection, Provider, and model',
+    ),
+    summary: z.string().min(1).max(2_000),
+    sources: z
+      .array(
+        z
+          .string()
+          .url()
+          .refine((value) => value.startsWith('https://') || value.startsWith('http://')),
+      )
+      .min(1)
+      .max(8),
   })
   .strict();
 const sendArgsSchema = z
   .object({ workerId: z.string().min(1).max(128), content: z.string().min(1).max(20_000) })
   .strict();
+const directMessageArgsSchema = z
+  .object({
+    targetAgentId: z.string().min(1).max(128),
+    content: z.string().min(1).max(20_000),
+  })
+  .strict();
+const readMessagesArgsSchema = z.object({ afterSeq: z.number().int().min(0).optional() }).strict();
 const assignArgsSchema = z
   .object({
     workerId: z.string().min(1).max(128),
@@ -182,6 +436,13 @@ const assignArgsSchema = z
     doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(20),
   })
   .strict();
+const steerExecutionArgsSchema = z
+  .object({
+    executionId: z.string().min(1).max(128),
+    instruction: z.string().min(1).max(100_000),
+  })
+  .strict();
+const cancelExecutionArgsSchema = z.object({ executionId: z.string().min(1).max(128) }).strict();
 const getStatusArgsSchema = z.object({}).strict();
 const waitEventsArgsSchema = z.object({ cursor: z.number().int().min(0).optional() }).strict();
 const waitArgsSchema = z.object({}).strict();
@@ -193,6 +454,8 @@ export type TeamWaitReportsCursor = Readonly<{
 }>;
 
 export type ExecuteTeamToolOptions = Readonly<{
+  /** Trusted caller identity supplied by the token registration, never by model arguments. */
+  requesterAgentId?: string;
   /** Long-poll team_wait_reports instead of returning immediately (real Leader over MCP). The
    * mock ToolBroker path always omits this (or passes false) to keep its synchronous,
    * replay-since-cursor semantics exactly as tested. */
@@ -203,6 +466,31 @@ export type ExecuteTeamToolOptions = Readonly<{
   waitReportsCursor?: TeamWaitReportsCursor;
   longPollTimeoutMs?: number;
   longPollIntervalMs?: number;
+  listModelCandidates?(input: {
+    taskId: string;
+    text: string;
+    connectionIds: readonly string[];
+    providerIds: readonly string[];
+    capabilities: readonly ('toolCalling' | 'structuredOutput' | 'multimodalInput' | 'reasoning')[];
+    cursor: string | null;
+    limit: number;
+  }): Promise<unknown> | unknown;
+  /** Per real Leader/Manager turn. A successful catalog read must precede an audited hire. */
+  modelCatalogAudit?: Readonly<{
+    wasQueried(): boolean;
+    markQueried(): void;
+  }>;
+  /** Present only when the user's Team model-research setting is enabled for this Leader/Manager
+   * turn. Recording is a separate audited step after native Web search and before hiring. */
+  modelResearchAudit?: Readonly<{
+    required: boolean;
+    record(input: {
+      modelSelection: ModelSelection;
+      summary: string;
+      sources: readonly string[];
+    }): void;
+    hasEvidence(modelSelection: ModelSelection): boolean;
+  }>;
 }>;
 
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 60_000;
@@ -212,8 +500,20 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function reportPayload(report: { sourceAgentId: string; seq: number; content: string }) {
-  return { workerId: report.sourceAgentId, seq: report.seq, content: report.content };
+function reportPayload(report: {
+  sourceAgentId: string;
+  seq: number;
+  content: string;
+  executionId: string | null;
+  attemptId: string | null;
+}) {
+  return {
+    workerId: report.sourceAgentId,
+    seq: report.seq,
+    content: report.content,
+    executionId: report.executionId,
+    attemptId: report.attemptId,
+  };
 }
 
 async function executeWaitReports(
@@ -228,7 +528,7 @@ async function executeWaitReports(
   const intervalMs = options.longPollIntervalMs ?? DEFAULT_LONG_POLL_INTERVAL_MS;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const reports = coordinator.listWorkerReports(taskId, after);
+    const reports = coordinator.listWorkerReports(taskId, after, options.requesterAgentId);
     if (reports.length > 0) {
       cursor?.advance(Math.max(after, ...reports.map((report) => report.seq)));
       return { ok: true, reports: reports.map(reportPayload) };
@@ -244,7 +544,8 @@ async function executeWaitReports(
  * Leader's tool calls. `taskId` always comes from the caller's own trusted binding (ToolBroker's
  * ToolExecutionContext, or the bridge's per-turn registration) — it is never read from `args` —
  * so a tool call can never spoof which Task/Team it targets, let alone the source/target agent
- * identity inside it (TeamCoordinator resolves the Leader/Worker itself). */
+ * identity inside it. Leader, Manager, and Worker callers share this entry point; non-Leader
+ * identity is supplied only by the trusted MCP/provider runtime context, never model arguments. */
 export async function executeTeamTool(
   coordinator: TeamCoordinator,
   taskId: string,
@@ -254,18 +555,118 @@ export async function executeTeamTool(
 ): Promise<unknown> {
   if (!isTeamToolName(toolName)) throw new Error(`Unknown team tool: ${toolName}`);
   switch (toolName) {
+    case 'team_list_models': {
+      const request = listModelsArgsSchema.parse(args);
+      if (options.listModelCandidates === undefined)
+        return teamToolError(new Error('Team model catalog is unavailable'));
+      const result = await options.listModelCandidates({
+        taskId,
+        text: request.text ?? '',
+        connectionIds: request.connectionIds ?? [],
+        providerIds: request.providerIds ?? [],
+        capabilities: request.capabilities ?? [],
+        cursor: request.cursor ?? null,
+        limit: request.limit ?? 50,
+      });
+      options.modelCatalogAudit?.markQueried();
+      return result;
+    }
+    case 'team_record_model_research': {
+      const request = modelResearchArgsSchema.parse(args);
+      if (options.modelResearchAudit?.required !== true)
+        return teamToolError(new Error('Model Web research is not enabled for this Team turn'));
+      options.modelResearchAudit.record(request);
+      return {
+        ok: true,
+        modelSelection: request.modelSelection,
+        sourcesRecorded: request.sources.length,
+      };
+    }
     case 'team_hire_worker': {
-      const request = hireArgsSchema.parse(args);
+      if (usesLegacyDelegationField(args))
+        return teamToolError(
+          new TeamDelegationError(
+            'legacy_delegation_field',
+            'managerPolicy.maxDelegationDepth is no longer accepted; use relative maxDelegationLevels',
+          ),
+        );
+      const parsed = hireArgsSchema.safeParse(args);
+      if (!parsed.success) return teamToolError(parsed.error);
+      const request = parsed.data;
+      if (
+        options.listModelCandidates !== undefined &&
+        (request.modelSelection === undefined ||
+          request.modelSelectionReason === undefined ||
+          options.modelCatalogAudit?.wasQueried() !== true)
+      )
+        return teamToolError(
+          new Error(
+            'Real Team Leaders and Managers must query the model catalog, select an available model, and record the selection reason',
+          ),
+        );
+      if (
+        options.modelResearchAudit?.required === true &&
+        (request.modelSelection === undefined ||
+          !options.modelResearchAudit.hasEvidence(request.modelSelection))
+      )
+        return teamToolError(
+          new Error(
+            'Web research evidence for this exact model must be recorded before hiring the Worker',
+          ),
+        );
       await pacing();
       try {
-        const worker = await coordinator.hireWorker({
+        const hireInput = {
           taskId,
           role: request.role,
           objective: request.objective,
           contextInheritancePolicy: request.contextInheritancePolicy ?? 'summary',
           writeCapable: request.writeCapable ?? false,
-        });
-        return { ok: true, workerId: worker.id, role: worker.role, state: worker.state };
+          ...(request.modelSelection === undefined
+            ? {}
+            : { modelSelection: request.modelSelection }),
+          ...(request.modelSelectionReason === undefined
+            ? {}
+            : { modelSelectionReason: request.modelSelectionReason }),
+          ...(request.blueprintRoleKey === undefined
+            ? {}
+            : { blueprintRoleKey: request.blueprintRoleKey }),
+        };
+        const worker =
+          options.requesterAgentId === undefined
+            ? await coordinator.hireWorker(
+                hireInput,
+                request.agentKind === 'worker'
+                  ? null
+                  : {
+                      ...request.managerPolicy,
+                      maxDirectChildren: request.managerPolicy.maxDirectChildren ?? null,
+                    },
+              )
+            : await coordinator.hireWorkerAs(
+                hireInput,
+                options.requesterAgentId,
+                request.agentKind === 'worker'
+                  ? null
+                  : {
+                      ...request.managerPolicy,
+                      maxDirectChildren: request.managerPolicy.maxDirectChildren ?? null,
+                    },
+              );
+        return {
+          ok: true,
+          workerId: worker.id,
+          role: worker.role,
+          state: worker.state,
+          agentKind: request.agentKind,
+          parentAgentId: worker.parentAgentId,
+          depth: worker.depth,
+          canDelegate: worker.canDelegate,
+          remainingDelegationLevels:
+            worker.managerPolicy == null
+              ? 0
+              : Math.max(0, worker.managerPolicy.maxDelegationDepth - worker.depth),
+        };
       } catch (error) {
         return teamToolError(error);
       }
@@ -273,6 +674,8 @@ export async function executeTeamTool(
     case 'team_send_to_worker': {
       const request = sendArgsSchema.parse(args);
       try {
+        if (options.requesterAgentId !== undefined)
+          throw new Error('Manager must use team_assign_task for child work');
         const message = await coordinator.sendToWorker({
           taskId,
           targetAgentId: request.workerId,
@@ -289,29 +692,113 @@ export async function executeTeamTool(
         return teamToolError(error);
       }
     }
+    case 'team_send_message': {
+      const request = directMessageArgsSchema.parse(args);
+      if (options.requesterAgentId === undefined)
+        return teamToolError(new Error('team_send_message requires a caller-bound Agent identity'));
+      try {
+        const message = await coordinator.sendAgentMessageAs(
+          taskId,
+          options.requesterAgentId,
+          request.targetAgentId,
+          request.content,
+        );
+        return {
+          ok: true,
+          messageId: message.id,
+          targetAgentId: message.targetAgentId,
+          seq: message.seq,
+          state: message.state,
+        };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
+    case 'team_read_messages': {
+      const request = readMessagesArgsSchema.parse(args);
+      if (options.requesterAgentId === undefined)
+        return teamToolError(
+          new Error('team_read_messages requires a caller-bound Agent identity'),
+        );
+      try {
+        const messages = coordinator.listAgentMessages(
+          taskId,
+          options.requesterAgentId,
+          request.afterSeq ?? 0,
+        );
+        return {
+          ok: true,
+          messages: messages.map((message) => ({
+            messageId: message.id,
+            sourceAgentId: message.sourceAgentId,
+            seq: message.seq,
+            content: message.content,
+            createdAt: message.createdAt,
+          })),
+        };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
     case 'team_assign_task': {
       const request = assignArgsSchema.parse(args);
       try {
-        const message = await coordinator.assignTask({
+        const assignInput = {
           taskId,
           targetAgentId: request.workerId,
           content: request.objective,
           doneCriteria: request.doneCriteria,
-        });
+        };
+        const execution =
+          options.requesterAgentId === undefined
+            ? await coordinator.assignTask(assignInput)
+            : await coordinator.assignTaskAs(assignInput, options.requesterAgentId);
         return {
           ok: true,
           workerId: request.workerId,
-          messageId: message.id,
-          state: message.state,
-          deliveryState: message.deliveryState,
+          executionId: execution.executionId,
+          state: execution.state,
         };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
+    case 'team_steer_execution': {
+      const request = steerExecutionArgsSchema.parse(args);
+      try {
+        const execution = await coordinator.steerExecution(
+          taskId,
+          request.executionId,
+          request.instruction,
+          options.requesterAgentId ?? null,
+        );
+        return { ok: true, executionId: execution.executionId, state: execution.state };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
+    case 'team_cancel_execution': {
+      const request = cancelExecutionArgsSchema.parse(args);
+      try {
+        const execution = await coordinator.cancelExecution(
+          taskId,
+          request.executionId,
+          options.requesterAgentId ?? null,
+        );
+        return { ok: true, executionId: execution.executionId, state: execution.state };
       } catch (error) {
         return teamToolError(error);
       }
     }
     case 'team_get_status': {
       getStatusArgsSchema.parse(args);
-      return { ok: true, team: coordinator.get(taskId) };
+      return {
+        ok: true,
+        team:
+          options.requesterAgentId === undefined
+            ? coordinator.get(taskId)
+            : coordinator.getForAgent(taskId, options.requesterAgentId),
+      };
     }
     case 'team_wait_events': {
       const request = waitEventsArgsSchema.parse(args);
@@ -329,6 +816,10 @@ export async function executeTeamTool(
     case 'team_stop_worker': {
       const request = stopArgsSchema.parse(args);
       try {
+        if (options.requesterAgentId !== undefined)
+          throw new Error(
+            'Manager must cancel its execution instead of stopping arbitrary Workers',
+          );
         const worker = await coordinator.stopWorker(taskId, request.workerId);
         return { ok: true, workerId: worker.id, state: worker.state };
       } catch (error) {
@@ -354,6 +845,18 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
     implementationKind: 'built-in',
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_assign_task', input),
+  });
+  broker.registerImplementation({
+    toolId: TEAM_STEER_EXECUTION_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_steer_execution', input),
+  });
+  broker.registerImplementation({
+    toolId: TEAM_CANCEL_EXECUTION_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_cancel_execution', input),
   });
   broker.registerImplementation({
     toolId: TEAM_GET_STATUS_TOOL.toolId,
@@ -409,11 +912,31 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
 // --- Leader MCP guidance ----------------------------------------------------------------------
 //
 // Appended to the real Codex/Claude Leader's prompt only when
-// SPRINT_CODER_LEADER_MCP=1 routes the turn through the MCP bridge instead of the deterministic
-// mock scenario. Concise and in Japanese to match the rest of the in-app leader/worker copy.
+// The MCP bridge is the default for real CLI Team turns; SPRINT_CODER_LEADER_MCP=0 is the explicit
+// rollback switch. Concise and in Japanese to match the rest of the in-app leader/worker copy.
 /** Compatibility export for adapters while the authority-bearing copy travels as a context
  * fragment. The content's source of truth is the versioned builtin skill, not this module. */
 export const LEADER_MCP_SYSTEM_PROMPT = BUILTIN_TEAM_SKILL_CONTENT;
+export const MANAGER_MCP_SYSTEM_PROMPT = `${BUILTIN_TEAM_SKILL_CONTENT}
+
+あなたはTeamのManagerです。team_hire_workerで自分の直下Agentだけを雇用し、
+team_assign_taskで直下Agentへ正式taskを割り当ててください。requester identityを引数へ
+追加しないでください。作業開始時、配下の待機中、最終報告前にteam_read_messagesを確認し、
+必要な情報はteam_send_messageで同じTeamのAgentへ共有してください。配下Agentの終端reportを
+確認・統合したら、必ず自分の親Agentへ結果をteam_send_messageで報告してください。
+直下のleaf Workerを雇う場合はagentKind: "worker"を指定し、managerPolicyを付けないでください。
+再委譲するManagerを雇う場合だけagentKind: "manager"とmanagerPolicyを指定します。
+managerPolicy.maxDelegationLevelsはその子Managerの直下から許す追加段数で、直属Workerだけなら1です。
+雇用可否はTeam Policyと自分のManager Policyで判断してください。
+権限はMCP tokenへ固定されています。
+`;
+export const WORKER_MCP_SYSTEM_PROMPT = `あなたはTeamのWorkerです。
+作業開始時と最終報告前、長い作業では区切りごとにteam_read_messagesで自分宛てのmessageを確認し、
+他Agentとの情報共有には親から渡された永続Agent IDを使ってteam_send_messageを呼び出してください。
+team_get_statusには自分の権限範囲だけが表示されます。宛先IDが不明なら親へ確認してください。
+taskIdや送信元identityを引数へ追加しないでください。
+権限はMCP tokenへ固定されています。Team管理ツールを呼び出してはいけません。
+`;
 
 // --- Deterministic mock team scenario -------------------------------------------------------
 //
@@ -425,7 +948,7 @@ const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 // Natural team intent (「チームで進めて」「teamでお願い」…) auto-routes the turn into the team
 // orchestration path — the user should not need to know the fixture keyword or press ⬡ Team.
 const TEAM_INTENT =
-  /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|\s)[1-3一二三]人(?:で|雇って|を雇)/i;
+  /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
 
 export function isTeamScenarioInput(input: string): boolean {
   return TEAM_INTENT.test(input);
@@ -473,15 +996,15 @@ function teamCallId(kind: string, input: string, key: string, index: number): st
   return `team-${kind}-${index}-${digestCanonical({ input, kind, key }).slice(0, 12)}`;
 }
 
-/** A fully deterministic mock Leader turn: hire 調査/実装/レビュー, dispatch a task derived from
- * the user message to each, wait for their (simulated, synchronous) reports, then synthesize a
+/** A fully deterministic mock Leader turn: hire 調査/実装/レビュー, formally assign a task derived
+ * from the user message to each, wait for their reports, then synthesize a
  * final answer. Mirrors createDeterministicMockSampler's shape but drives the multi-step
- * hire → send → wait → answer flow instead of a single mock tool call. */
+ * hire → assign → wait → answer flow instead of a single mock tool call. */
 export function createTeamScenarioSampler(input: string): ModelSampler {
   const excerpt = input.replace(/\s+/g, ' ').trim().slice(0, 160);
   return ({ transcript }) => {
     const hires = callResults(transcript, 'team_hire_worker');
-    const sends = callResults(transcript, 'team_send_to_worker');
+    const assignments = callResults(transcript, 'team_assign_task');
     const waits = callResults(transcript, 'team_wait_reports');
 
     if (hires.length === 0)
@@ -490,31 +1013,44 @@ export function createTeamScenarioSampler(input: string): ModelSampler {
         calls: TEAM_SCENARIO_ROLES.map((role, index) => ({
           callId: teamCallId('hire', input, role, index),
           toolName: 'team_hire_worker',
-          arguments: { role, objective: `${role}: ${excerpt}` },
+          arguments: { agentKind: 'worker', role, objective: `${role}: ${excerpt}` },
         })),
       };
 
-    if (sends.length === 0) {
+    if (assignments.length === 0) {
       const calls: ModelToolCall[] = [];
       hires.forEach(({ arguments: args, result }, index) => {
         const workerId = asRecord(result)?.workerId;
         const role = asRecord(args)?.role;
         if (typeof workerId !== 'string' || typeof role !== 'string') return;
         calls.push({
-          callId: teamCallId('send', input, workerId, index),
-          toolName: 'team_send_to_worker',
-          arguments: { workerId, content: `${role}として「${excerpt}」に対応してください。` },
+          callId: teamCallId('assign', input, workerId, index),
+          toolName: 'team_assign_task',
+          arguments: {
+            workerId,
+            objective: `${role}として「${excerpt}」に対応してください。`,
+            doneCriteria: ['検証可能な結果をLeaderへ報告する'],
+          },
         });
       });
       return { kind: 'tool-calls', calls };
     }
 
-    if (waits.length === 0)
+    const reports = waits.flatMap(({ result }) => {
+      const value = asRecord(result)?.reports;
+      return Array.isArray(value) ? value : [];
+    });
+    const reportedWorkerIds = new Set(
+      reports
+        .map((entry) => asRecord(entry)?.workerId)
+        .filter((workerId): workerId is string => typeof workerId === 'string'),
+    );
+    if (reportedWorkerIds.size < hires.length)
       return {
         kind: 'tool-calls',
         calls: [
           {
-            callId: teamCallId('wait', input, 'reports', 0),
+            callId: teamCallId('wait', input, 'reports', waits.length),
             toolName: 'team_wait_reports',
             arguments: {},
           },
@@ -528,10 +1064,6 @@ export function createTeamScenarioSampler(input: string): ModelSampler {
       if (typeof workerId === 'string' && typeof role === 'string')
         roleByWorkerId.set(workerId, role);
     }
-    const latestWait = waits.at(-1);
-    const reports = Array.isArray(asRecord(latestWait?.result)?.reports)
-      ? (asRecord(latestWait?.result)?.reports as unknown[])
-      : [];
     const lines = reports.map((entry) => {
       const record = asRecord(entry);
       const workerId = typeof record?.workerId === 'string' ? record.workerId : '';

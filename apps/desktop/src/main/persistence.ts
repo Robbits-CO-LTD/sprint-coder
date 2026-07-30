@@ -6,7 +6,14 @@ import {
   chatMessageSchema,
   approvalSummarySchema,
   commandSummarySchema,
+  executionResolutionSchema,
+  modelSelectionSchema,
+  normalizedProviderUsageSchema,
+  providerConnectionSchema,
   taskSummarySchema,
+  teamBlueprintSchema,
+  turnSkillSelectionsSchema,
+  turnSkillSelectionSchema,
   turnEventSchema,
   turnSnapshotSchema,
   workerReportSchema,
@@ -20,8 +27,14 @@ import {
   type CommandSummary,
   type CommandOutputPage,
   type ContextUsage,
+  type ExecutionResolution,
+  type ModelSelection,
+  type NormalizedProviderUsage,
+  type ProviderConnection,
+  type ProviderRuntimeKind,
   type QueuedInput,
   type RuntimeKind,
+  type SkillDraft,
   type DatabaseRecovery,
   type FileChange,
   type FileChangeRecord,
@@ -29,9 +42,11 @@ import {
   generatedImageSchema,
   type TaskSummary,
   type TeamBudgetStatus,
+  type TeamBlueprint,
   type TeamUsageTotals,
   type TurnEvent,
   type TurnSnapshot,
+  type TurnSkillSelection,
   type TurnStage,
 } from '@sprint-coder/contracts';
 import {
@@ -65,12 +80,22 @@ import {
   type BackgroundCompletionState,
   type BackgroundEpochs,
   type BackgroundWakePolicy,
-  assertLeaderRoutedMessage,
+  assertTeamMessageAllowed,
+  assertDelegationAllowed,
+  assertManagerPolicy,
+  assertTeamPolicy,
   assertWorkerPersistenceInput,
   transitionTeam,
   transitionTeamMessage,
   transitionWorker,
+  createExecutionInstruction,
+  nextTeamAttemptOrdinal,
+  reviseQueuedExecutionInstruction,
+  transitionTeamAttempt,
+  transitionTeamExecution,
   DEFAULT_TEAM_BUDGET_LIMITS,
+  DEFAULT_MANAGER_POLICY,
+  DEFAULT_TEAM_POLICY,
   assertReservationWithinCap,
   transitionBudgetReservation,
   assertDeliveryRetryAllowed,
@@ -84,12 +109,19 @@ import {
   type TeamDeliveryState,
   type CapabilityCeiling,
   type ContextInheritancePolicy,
+  type ManagerPolicy,
   type TeamMessageState,
   type TeamState,
+  type TeamPolicy,
+  type TeamAttemptState,
+  type TeamExecutionState,
+  type TeamQueueReason,
+  type ExecutionInstruction,
   type WorkerState,
 } from '@sprint-coder/domain';
 import {
   ContextLedger,
+  aggregateContextUsage,
   defaultContextUsage,
   estimateTokens,
   type ContextFragment,
@@ -101,6 +133,12 @@ import type { LiveState } from './context-reminder';
 import { deriveLiveState } from './live-state';
 import { redactSecrets } from './secret-redactor';
 import { deriveTaskTitle } from './task-title';
+import {
+  BUILTIN_CLAUDE_CONNECTION_ID,
+  BUILTIN_CODEX_CONNECTION_ID,
+  builtinRuntimeForModelSelection,
+  modelSelectionForRuntime,
+} from './connection-identity';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
 import {
   legacyMutationWorkspaceKey,
@@ -261,6 +299,34 @@ type TaskRow = {
   branch_epoch: number;
   context_epoch: number;
   title_source: 'default' | 'auto' | 'manual';
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type ProviderConnectionRow = {
+  id: string;
+  provider_id: string;
+  runtime_kind: ProviderRuntimeKind;
+  display_name: string;
+  enabled: number;
+  secret_reference: string | null;
+  verification_status:
+    | 'not_required'
+    | 'unverified'
+    | 'verified'
+    | 'verification_expired'
+    | 'invalid_credentials'
+    | 'unavailable';
+  verified_at: string | null;
+  verification_expires_at: string | null;
+  verification_message: string | null;
+  rate_limit_mode: 'bypass' | 'auto' | 'manual';
+  max_concurrent_requests: number | null;
+  requests_per_minute: number | null;
+  tokens_per_minute: number | null;
+  last_observed_rate_limit_headers_json: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -270,6 +336,7 @@ type TeamRow = {
   state: TeamState;
   leader_agent_id: string;
   budget_json: string;
+  policy_json: string;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -288,6 +355,14 @@ type AgentRow = {
   write_capable: number;
   current_activity: string | null;
   runtime_kind: RuntimeKind;
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
+  parent_agent_id: string | null;
+  depth: number;
+  can_delegate: number;
+  manager_policy_json: string | null;
+  blueprint_role_key: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -334,6 +409,8 @@ type TeamMessageRow = {
   seq: number;
   state: TeamMessageState;
   content: string;
+  execution_id: string | null;
+  attempt_id: string | null;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -351,6 +428,79 @@ type TeamTaskRow = {
   revision: number;
   created_at: string;
   updated_at: string;
+};
+type TeamExecutionRow = {
+  id: string;
+  team_id: string;
+  assignee_agent_id: string;
+  created_by_agent_id: string;
+  state: TeamExecutionState;
+  instruction_revision: number;
+  queue_ordinal: number | null;
+  queue_reason: TeamQueueReason | null;
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
+  revision: number;
+  assigned_at: string;
+  queued_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+};
+type TeamInstructionRow = {
+  execution_id: string;
+  revision: number;
+  content: string;
+  created_by_agent_id: string;
+  reason: 'initial' | 'steer';
+  created_at: string;
+};
+type TeamAttemptRow = {
+  id: string;
+  execution_id: string;
+  ordinal: number;
+  state: TeamAttemptState;
+  instruction_revision: number;
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
+  provider_call_ordinal: number;
+  terminal_reason: string | null;
+  resolved_provider: string | null;
+  resolved_model: string | null;
+  resolution_json: string | null;
+  provider_usage_json: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+};
+export const teamV2ActivityTypes = [
+  'worker_hired',
+  'task_assigned',
+  'execution_queued',
+  'execution_waiting',
+  'execution_started',
+  'execution_finished',
+  'steered',
+  'attempt_started',
+  'attempt_finished',
+  'worker_reported',
+  'worker_stopped',
+] as const;
+export type TeamV2ActivityType = (typeof teamV2ActivityTypes)[number];
+type TeamV2ActivityRow = {
+  id: string;
+  team_id: string;
+  seq: number;
+  type: TeamV2ActivityType;
+  actor_agent_id: string | null;
+  subject_agent_id: string | null;
+  execution_id: string | null;
+  attempt_id: string | null;
+  payload_json: string;
+  recorded_at: string;
 };
 type BackgroundActivityRow = {
   id: string;
@@ -410,9 +560,28 @@ type TurnRow = {
   assistant_message_id: string | null;
   runtime_kind: RuntimeKind;
   model: string;
+  connection_id: string | null;
+  requested_provider: string | null;
+  requested_model: string | null;
+  resolved_provider: string | null;
+  resolved_model: string | null;
+  resolution_json: string | null;
+  provider_usage_json: string | null;
   created_at: string;
 };
 type QueueRow = { ordinal: number; payload_json: string };
+type SkillBindingIdentityRow = {
+  source: TurnSkillSelection['ref']['source'];
+  skill_id: string;
+  digest: string;
+  kind: TurnSkillSelection['kind'];
+};
+type TurnSkillBindingRow = SkillBindingIdentityRow & {
+  name: string;
+  description: string;
+  content: string;
+  package_path: string;
+};
 type OperationRow = { request_hash: string; state: string; result_json: string | null };
 type IntelligenceStepRow = {
   id: string;
@@ -623,6 +792,8 @@ const TEAM_BUDGET_STRUCTURED_SEED = JSON.stringify({
   team: DEFAULT_TEAM_BUDGET_LIMITS.team,
   worker: DEFAULT_TEAM_BUDGET_LIMITS.worker,
 });
+const TEAM_POLICY_SEED = JSON.stringify(DEFAULT_TEAM_POLICY);
+const MANAGER_POLICY_SEED = JSON.stringify(DEFAULT_MANAGER_POLICY);
 
 const migrations = [
   {
@@ -1699,6 +1870,453 @@ const migrations = [
       WHERE kind = 'spawnSlots' AND state = 'settled';
     `,
   },
+  {
+    version: 35,
+    checksum: 'team-v2-core-v35-connection-model-identity',
+    sql: `
+      ALTER TABLE turns ADD COLUMN connection_id TEXT;
+      ALTER TABLE turns ADD COLUMN requested_provider TEXT;
+      ALTER TABLE turns ADD COLUMN requested_model TEXT;
+      ALTER TABLE turns ADD COLUMN resolved_provider TEXT;
+      ALTER TABLE turns ADD COLUMN resolved_model TEXT;
+
+      ALTER TABLE agent_threads ADD COLUMN connection_id TEXT;
+      ALTER TABLE agent_threads ADD COLUMN requested_provider TEXT;
+      ALTER TABLE agent_threads ADD COLUMN requested_model TEXT;
+
+      ALTER TABLE agents ADD COLUMN connection_id TEXT;
+      ALTER TABLE agents ADD COLUMN requested_provider TEXT;
+      ALTER TABLE agents ADD COLUMN requested_model TEXT;
+    `,
+  },
+  {
+    version: 36,
+    checksum: 'team-v2-core-v36-task-model-selection',
+    sql: `
+      ALTER TABLE tasks ADD COLUMN connection_id TEXT;
+      ALTER TABLE tasks ADD COLUMN requested_provider TEXT;
+      ALTER TABLE tasks ADD COLUMN requested_model TEXT;
+    `,
+  },
+  {
+    version: 37,
+    checksum: 'team-v2-core-v37-hierarchy-team-policy',
+    sql: `
+      ALTER TABLE teams ADD COLUMN policy_json TEXT NOT NULL DEFAULT '${TEAM_POLICY_SEED}';
+
+      ALTER TABLE agents ADD COLUMN parent_agent_id TEXT REFERENCES agents(id) ON DELETE RESTRICT;
+      ALTER TABLE agents ADD COLUMN depth INTEGER NOT NULL DEFAULT 0
+        CHECK (depth BETWEEN 0 AND 4);
+      ALTER TABLE agents ADD COLUMN can_delegate INTEGER NOT NULL DEFAULT 0
+        CHECK (can_delegate IN (0, 1));
+      ALTER TABLE agents ADD COLUMN manager_policy_json TEXT;
+
+      UPDATE agents
+      SET can_delegate = 1, manager_policy_json = '${MANAGER_POLICY_SEED}'
+      WHERE kind = 'leader';
+      UPDATE agents
+      SET parent_agent_id = (
+            SELECT teams.leader_agent_id FROM teams WHERE teams.id = agents.team_id
+          ),
+          depth = 1
+      WHERE kind = 'worker';
+
+      CREATE INDEX agents_parent_idx
+        ON agents(team_id, parent_agent_id, depth, created_at, id);
+    `,
+  },
+  {
+    version: 38,
+    checksum: 'team-v2-core-v38-execution-attempt-queue',
+    sql: `
+      CREATE TABLE team_executions (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        assignee_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        created_by_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        state TEXT NOT NULL CHECK (state IN (
+          'assigned', 'queued', 'waiting_verification', 'waiting_rate_limit',
+          'running', 'completed', 'failed', 'canceled'
+        )),
+        instruction_revision INTEGER NOT NULL DEFAULT 1 CHECK (instruction_revision >= 1),
+        queue_ordinal INTEGER,
+        queue_reason TEXT CHECK (
+          queue_reason IS NULL OR queue_reason IN (
+            'global_concurrency', 'connection_concurrency', 'verification',
+            'rate_limit', 'budget', 'recovery'
+          )
+        ),
+        connection_id TEXT,
+        requested_provider TEXT,
+        requested_model TEXT,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        assigned_at TEXT NOT NULL,
+        queued_at TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        updated_at TEXT NOT NULL,
+        UNIQUE(team_id, queue_ordinal)
+      );
+      CREATE INDEX team_executions_queue_idx
+        ON team_executions(state, queue_ordinal, queued_at, id);
+      CREATE INDEX team_executions_assignee_idx
+        ON team_executions(assignee_agent_id, state, assigned_at, id);
+
+      CREATE TABLE team_execution_instructions (
+        execution_id TEXT NOT NULL REFERENCES team_executions(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        content TEXT NOT NULL,
+        created_by_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        reason TEXT NOT NULL CHECK (reason IN ('initial', 'steer')),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(execution_id, revision)
+      );
+
+      CREATE TABLE team_attempts (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL REFERENCES team_executions(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+        state TEXT NOT NULL CHECK (state IN (
+          'created', 'waiting_verification', 'waiting_rate_limit', 'running',
+          'completed', 'failed', 'canceled', 'interrupted'
+        )),
+        instruction_revision INTEGER NOT NULL CHECK (instruction_revision >= 1),
+        connection_id TEXT,
+        requested_provider TEXT,
+        requested_model TEXT,
+        provider_call_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (provider_call_ordinal >= 0),
+        terminal_reason TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        updated_at TEXT NOT NULL,
+        UNIQUE(execution_id, ordinal)
+      );
+      CREATE INDEX team_attempts_execution_idx
+        ON team_attempts(execution_id, ordinal);
+      CREATE INDEX team_attempts_active_idx
+        ON team_attempts(state, updated_at, id);
+    `,
+  },
+  {
+    version: 39,
+    checksum: 'team-v2-core-v39-direct-message-audit-links',
+    sql: `
+      ALTER TABLE team_messages
+        ADD COLUMN execution_id TEXT REFERENCES team_executions(id) ON DELETE SET NULL;
+      ALTER TABLE team_messages
+        ADD COLUMN attempt_id TEXT REFERENCES team_attempts(id) ON DELETE SET NULL;
+      CREATE INDEX team_messages_execution_idx
+        ON team_messages(execution_id, attempt_id, seq);
+    `,
+  },
+  {
+    version: 40,
+    checksum: 'team-v2-core-v40-activity-timeline',
+    sql: `
+      CREATE TABLE team_v2_activity_events (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL CHECK (seq >= 1),
+        type TEXT NOT NULL CHECK (type IN (
+          'worker_hired', 'task_assigned', 'execution_queued', 'execution_waiting',
+          'execution_started', 'execution_finished', 'steered', 'attempt_started',
+          'attempt_finished', 'worker_reported', 'worker_stopped'
+        )),
+        actor_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        subject_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        execution_id TEXT REFERENCES team_executions(id) ON DELETE SET NULL,
+        attempt_id TEXT REFERENCES team_attempts(id) ON DELETE SET NULL,
+        payload_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        UNIQUE(team_id, seq)
+      );
+      CREATE INDEX team_v2_activity_timeline_idx
+        ON team_v2_activity_events(team_id, seq);
+      CREATE INDEX team_v2_activity_execution_idx
+        ON team_v2_activity_events(execution_id, attempt_id, seq);
+    `,
+  },
+  {
+    version: 41,
+    checksum: 'provider-p1a-v41-connection-domain-builtins',
+    sql: `
+      CREATE TABLE provider_connections (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN (
+          'builtin_cli', 'official_api', 'openai_compatible', 'mock'
+        )),
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 100),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX provider_connections_provider_idx
+        ON provider_connections(provider_id, runtime_kind, enabled, id);
+
+      INSERT INTO provider_connections(
+        id, provider_id, runtime_kind, display_name, enabled, created_at, updated_at
+      ) VALUES
+        ('${BUILTIN_CLAUDE_CONNECTION_ID}', 'anthropic', 'builtin_cli', 'Claude CLI', 1,
+         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        ('${BUILTIN_CODEX_CONNECTION_ID}', 'openai', 'builtin_cli', 'Codex CLI', 1,
+         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    `,
+  },
+  {
+    version: 42,
+    checksum: 'provider-p1a-v42-legacy-builtin-identity-backfill',
+    sql: `
+      UPDATE turns
+      SET connection_id = CASE runtime_kind
+            WHEN 'claude' THEN '${BUILTIN_CLAUDE_CONNECTION_ID}'
+            WHEN 'codex' THEN '${BUILTIN_CODEX_CONNECTION_ID}'
+          END,
+          requested_provider = CASE runtime_kind
+            WHEN 'claude' THEN 'anthropic'
+            WHEN 'codex' THEN 'openai'
+          END,
+          requested_model = model
+      WHERE runtime_kind IN ('claude', 'codex')
+        AND (connection_id IS NULL OR requested_provider IS NULL OR requested_model IS NULL);
+
+      UPDATE agent_threads
+      SET connection_id = CASE runtime_kind
+            WHEN 'claude' THEN '${BUILTIN_CLAUDE_CONNECTION_ID}'
+            WHEN 'codex' THEN '${BUILTIN_CODEX_CONNECTION_ID}'
+          END,
+          requested_provider = CASE runtime_kind
+            WHEN 'claude' THEN 'anthropic'
+            WHEN 'codex' THEN 'openai'
+          END,
+          requested_model = COALESCE(
+            (
+              SELECT turns.model
+              FROM turns
+              WHERE turns.task_id = agent_threads.task_id
+                AND turns.runtime_kind = agent_threads.runtime_kind
+              ORDER BY turns.created_at DESC, turns.rowid DESC
+              LIMIT 1
+            ),
+            (
+              SELECT settings.value
+              FROM settings
+              WHERE settings.key = CASE agent_threads.runtime_kind
+                WHEN 'claude' THEN 'runtime.claude.model'
+                ELSE 'runtime.codex.model'
+              END
+            ),
+            'auto'
+          )
+      WHERE runtime_kind IN ('claude', 'codex')
+        AND (connection_id IS NULL OR requested_provider IS NULL OR requested_model IS NULL);
+
+      UPDATE agents
+      SET connection_id = (
+            SELECT agent_threads.connection_id
+            FROM agent_threads
+            WHERE agent_threads.id = agents.thread_id
+          ),
+          requested_provider = (
+            SELECT agent_threads.requested_provider
+            FROM agent_threads
+            WHERE agent_threads.id = agents.thread_id
+          ),
+          requested_model = (
+            SELECT agent_threads.requested_model
+            FROM agent_threads
+            WHERE agent_threads.id = agents.thread_id
+          )
+      WHERE EXISTS (
+        SELECT 1
+        FROM agent_threads
+        WHERE agent_threads.id = agents.thread_id
+          AND agent_threads.runtime_kind IN ('claude', 'codex')
+      )
+        AND (connection_id IS NULL OR requested_provider IS NULL OR requested_model IS NULL);
+
+      UPDATE tasks
+      SET connection_id = (
+            SELECT turns.connection_id
+            FROM turns
+            WHERE turns.task_id = tasks.id AND turns.connection_id IS NOT NULL
+            ORDER BY turns.created_at DESC, turns.rowid DESC
+            LIMIT 1
+          ),
+          requested_provider = (
+            SELECT turns.requested_provider
+            FROM turns
+            WHERE turns.task_id = tasks.id AND turns.connection_id IS NOT NULL
+            ORDER BY turns.created_at DESC, turns.rowid DESC
+            LIMIT 1
+          ),
+          requested_model = (
+            SELECT turns.requested_model
+            FROM turns
+            WHERE turns.task_id = tasks.id AND turns.connection_id IS NOT NULL
+            ORDER BY turns.created_at DESC, turns.rowid DESC
+            LIMIT 1
+          )
+      WHERE connection_id IS NULL
+        AND EXISTS (
+          SELECT 1 FROM turns
+          WHERE turns.task_id = tasks.id AND turns.connection_id IS NOT NULL
+        );
+
+      UPDATE tasks
+      SET connection_id = CASE (
+            SELECT value FROM settings WHERE key = 'runtime.kind'
+          )
+            WHEN 'claude' THEN '${BUILTIN_CLAUDE_CONNECTION_ID}'
+            WHEN 'codex' THEN '${BUILTIN_CODEX_CONNECTION_ID}'
+          END,
+          requested_provider = CASE (
+            SELECT value FROM settings WHERE key = 'runtime.kind'
+          )
+            WHEN 'claude' THEN 'anthropic'
+            WHEN 'codex' THEN 'openai'
+          END,
+          requested_model = COALESCE(
+            (
+              SELECT value
+              FROM settings
+              WHERE key = CASE (
+                SELECT value FROM settings WHERE key = 'runtime.kind'
+              )
+                WHEN 'claude' THEN 'runtime.claude.model'
+                ELSE 'runtime.codex.model'
+              END
+            ),
+            'auto'
+          )
+      WHERE connection_id IS NULL
+        AND (SELECT value FROM settings WHERE key = 'runtime.kind') IN ('claude', 'codex');
+    `,
+  },
+  {
+    version: 43,
+    checksum: 'provider-p1b-v43-secret-reference',
+    sql: `
+      ALTER TABLE provider_connections ADD COLUMN secret_reference TEXT;
+    `,
+  },
+  {
+    version: 44,
+    checksum: 'provider-p1b-v44-connection-verification',
+    sql: `
+      ALTER TABLE provider_connections
+        ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (verification_status IN (
+          'not_required', 'unverified', 'verified', 'verification_expired',
+          'invalid_credentials', 'unavailable'
+        ));
+      ALTER TABLE provider_connections ADD COLUMN verified_at TEXT;
+      ALTER TABLE provider_connections ADD COLUMN verification_expires_at TEXT;
+      ALTER TABLE provider_connections ADD COLUMN verification_message TEXT;
+      UPDATE provider_connections
+      SET verification_status = 'not_required'
+      WHERE runtime_kind = 'builtin_cli';
+    `,
+  },
+  {
+    version: 45,
+    checksum: 'provider-p1b-v45-connection-rate-limits',
+    sql: `
+      ALTER TABLE provider_connections
+        ADD COLUMN rate_limit_mode TEXT NOT NULL DEFAULT 'auto'
+        CHECK (rate_limit_mode IN ('bypass', 'auto', 'manual'));
+      ALTER TABLE provider_connections
+        ADD COLUMN max_concurrent_requests INTEGER DEFAULT 2
+        CHECK (max_concurrent_requests IS NULL OR max_concurrent_requests >= 1);
+      ALTER TABLE provider_connections
+        ADD COLUMN requests_per_minute INTEGER
+        CHECK (requests_per_minute IS NULL OR requests_per_minute >= 1);
+      ALTER TABLE provider_connections
+        ADD COLUMN tokens_per_minute INTEGER
+        CHECK (tokens_per_minute IS NULL OR tokens_per_minute >= 1);
+      ALTER TABLE provider_connections ADD COLUMN last_observed_rate_limit_headers_json TEXT;
+      UPDATE provider_connections
+      SET rate_limit_mode = 'bypass', max_concurrent_requests = NULL,
+          requests_per_minute = NULL, tokens_per_minute = NULL
+      WHERE runtime_kind = 'builtin_cli';
+    `,
+  },
+  {
+    version: 46,
+    checksum: 'provider-p2-v46-turn-usage',
+    sql: `
+      ALTER TABLE turns ADD COLUMN provider_usage_json TEXT;
+    `,
+  },
+  {
+    version: 47,
+    checksum: 'provider-p2-v47-team-attempt-result',
+    sql: `
+      ALTER TABLE team_attempts ADD COLUMN resolved_provider TEXT;
+      ALTER TABLE team_attempts ADD COLUMN resolved_model TEXT;
+      ALTER TABLE team_attempts ADD COLUMN provider_usage_json TEXT;
+    `,
+  },
+  {
+    version: 48,
+    checksum: 'provider-p3-v48-routing-resolution',
+    sql: `
+      ALTER TABLE turns ADD COLUMN resolution_json TEXT;
+      ALTER TABLE team_attempts ADD COLUMN resolution_json TEXT;
+    `,
+  },
+  {
+    version: 49,
+    checksum: 'skills-v2-v49-turn-draft-bindings',
+    sql: `
+      CREATE TABLE task_draft_skill_bindings (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 6),
+        source TEXT NOT NULL CHECK (source IN ('builtin', 'created', 'agents', 'claude')),
+        skill_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('chat', 'team')),
+        PRIMARY KEY(task_id, ordinal),
+        UNIQUE(task_id, source, skill_id, digest)
+      );
+
+      CREATE TABLE turn_skill_bindings (
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 6),
+        source TEXT NOT NULL CHECK (source IN ('builtin', 'created', 'agents', 'claude')),
+        skill_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('chat', 'team')),
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        content TEXT NOT NULL,
+        package_path TEXT NOT NULL,
+        PRIMARY KEY(turn_id, ordinal),
+        UNIQUE(turn_id, source, skill_id, digest)
+      );
+      CREATE INDEX turn_skill_bindings_turn_idx
+        ON turn_skill_bindings(turn_id, ordinal);
+    `,
+  },
+  {
+    version: 50,
+    checksum: 'team-blueprint-v50-pinned-binding',
+    sql: `
+      ALTER TABLE agents ADD COLUMN blueprint_role_key TEXT;
+
+      CREATE TABLE team_blueprint_bindings (
+        team_id TEXT PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
+        source TEXT NOT NULL CHECK (source IN ('builtin', 'created', 'agents', 'claude')),
+        skill_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        name TEXT NOT NULL,
+        package_path TEXT NOT NULL,
+        blueprint_json TEXT NOT NULL,
+        bound_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -1833,12 +2451,21 @@ export type StartedTurn = {
   text: string;
   runtimeKind: RuntimeKind;
   model: string;
+  modelSelection: ModelSelection;
+  skills: PersistedTurnSkill[];
   event: TurnEvent;
   /** Present only when this Turn's message triggered automatic naming (issue #4), so the caller
    * can push the new title to the renderer without a dedicated event. */
   renamedTask?: TaskSummary;
 };
 export type QueueTransition = { started: StartedTurn; queueEvent: TurnEvent } | null;
+export type PersistedTurnSkill = Readonly<{
+  selection: TurnSkillSelection;
+  name: string;
+  description: string;
+  content: string;
+  packagePath: string;
+}>;
 export type BackgroundActivityRecord = Readonly<{
   id: string;
   taskId: string;
@@ -1877,12 +2504,20 @@ export type BackgroundCompletionRecord = Readonly<{
   attachedAt: string | null;
   runtimeAckedAt: string | null;
 }>;
+type PersistedJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly PersistedJsonValue[]
+  | Readonly<{ [key: string]: PersistedJsonValue }>;
 export type TeamRecord = Readonly<{
   id: string;
   taskId: string;
   state: TeamState;
   leaderAgentId: string;
-  budget: Readonly<Record<string, unknown>>;
+  budget: Readonly<Record<string, PersistedJsonValue>>;
+  policy: TeamPolicy;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -1901,8 +2536,26 @@ export type AgentRecord = Readonly<{
   writeCapable: boolean;
   currentActivity: string | null;
   runtimeKind: RuntimeKind;
+  modelSelection: ModelSelection;
+  parentAgentId: string | null;
+  depth: number;
+  canDelegate: boolean;
+  managerPolicy: ManagerPolicy | null;
+  blueprintRoleKey: string | null;
   createdAt: string;
   updatedAt: string;
+}>;
+export type TeamBlueprintBindingRecord = Readonly<{
+  teamId: string;
+  selection: TurnSkillSelection;
+  name: string;
+  packagePath: string;
+  blueprint: TeamBlueprint;
+  boundAt: string;
+}>;
+export type TurnModelIdentity = Readonly<{
+  selection: ModelSelection;
+  resolution: ExecutionResolution;
 }>;
 export type TeamBudgetReservationRecord = Readonly<{
   id: string;
@@ -1947,6 +2600,8 @@ export type TeamMessageRecord = Readonly<{
   seq: number;
   state: TeamMessageState;
   content: string;
+  executionId: string | null;
+  attemptId: string | null;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -1973,6 +2628,57 @@ export type TeamTaskRecord = Readonly<{
   createdAt: string;
   updatedAt: string;
 }>;
+export type TeamExecutionRecord = Readonly<{
+  id: string;
+  teamId: string;
+  assigneeAgentId: string;
+  createdByAgentId: string;
+  state: TeamExecutionState;
+  instruction: ExecutionInstruction;
+  queueOrdinal: number | null;
+  queueReason: TeamQueueReason | null;
+  modelSelection: ModelSelection;
+  revision: number;
+  assignedAt: string;
+  queuedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+}>;
+export type TeamAttemptRecord = Readonly<{
+  id: string;
+  executionId: string;
+  ordinal: number;
+  state: TeamAttemptState;
+  instructionRevision: number;
+  modelSelection: ModelSelection;
+  providerCallOrdinal: number;
+  terminalReason: string | null;
+  resolution: ExecutionResolution;
+  providerUsage: NormalizedProviderUsage | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+}>;
+export type TeamV2ActivityRecord = Readonly<{
+  id: string;
+  teamId: string;
+  seq: number;
+  type: TeamV2ActivityType;
+  actorAgentId: string | null;
+  subjectAgentId: string | null;
+  executionId: string | null;
+  attemptId: string | null;
+  payload: unknown;
+  recordedAt: string;
+}>;
+export type TeamExecutionDispatchRecord = Readonly<{
+  messageId: string;
+  messageSeq: number;
+  teamTaskId: string;
+  doneCriteria: readonly string[];
+}>;
 export type TeamSnapshot = Readonly<{
   team: TeamRecord;
   agents: readonly AgentRecord[];
@@ -1983,15 +2689,47 @@ export type TeamSnapshot = Readonly<{
 export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
 
 export interface PersistenceClient {
+  listProviderConnections(): readonly ProviderConnection[];
+  getProviderConnection(connectionId: string): ProviderConnection;
+  createProviderConnection(connection: ProviderConnection): ProviderConnection;
+  setProviderConnectionSecretReference(
+    connectionId: string,
+    secretReference: string | null,
+  ): ProviderConnection;
+  updateProviderConnectionVerification(
+    connectionId: string,
+    verification: ProviderConnection['verification'],
+  ): ProviderConnection;
+  lowerProviderConnectionRateLimits(
+    connectionId: string,
+    limits: Partial<
+      Pick<
+        ProviderConnection['rateLimit'],
+        'maxConcurrentRequests' | 'requestsPerMinute' | 'tokensPerMinute'
+      >
+    >,
+  ): ProviderConnection;
   listTasks(): TaskSummary[];
   getTask(taskId: string): TaskSummary;
   createTask(title?: string, localOnly?: boolean): TaskSummary;
+  getTaskModelSelection(taskId: string): ModelSelection | null;
+  setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null;
   getTaskLeader(taskId: string): AgentRecord;
+  setAgentModelSelection(agentId: string, selection: ModelSelection): AgentRecord;
   promoteTaskToTeam(taskId: string): TeamRecord;
   getTeam(teamId: string): TeamRecord;
   getTeamByTask(taskId: string): TeamRecord | null;
   getTeamSnapshot(teamId: string): TeamSnapshot;
   transitionTeamState(teamId: string, to: TeamState): TeamRecord;
+  updateTeamPolicy(teamId: string, policy: TeamPolicy, expectedRevision: number): TeamRecord;
+  getTeamBlueprint(teamId: string): TeamBlueprintBindingRecord | null;
+  bindTeamBlueprint(input: {
+    teamId: string;
+    selection: TurnSkillSelection;
+    name: string;
+    packagePath: string;
+    blueprint: TeamBlueprint;
+  }): TeamBlueprintBindingRecord;
   registerTeamWorker(input: {
     teamId: string;
     role: string;
@@ -1999,15 +2737,79 @@ export interface PersistenceClient {
     parentCapabilityCeiling: CapabilityCeiling;
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
+    modelSelection?: ModelSelection;
+    modelSelectionReason?: string;
     writeCapable?: boolean;
+    parentAgentId?: string;
+    canDelegate?: boolean;
+    managerPolicy?: ManagerPolicy | null;
+    blueprintRoleKey?: string;
   }): AgentRecord;
   transitionWorkerState(agentId: string, to: WorkerState): AgentRecord;
+  createTeamExecution(input: {
+    teamId: string;
+    assigneeAgentId: string;
+    createdByAgentId: string;
+    instruction: string;
+    now: string;
+  }): TeamExecutionRecord;
+  getTeamExecution(executionId: string): TeamExecutionRecord;
+  listTeamExecutions(teamId: string): readonly TeamExecutionRecord[];
+  listQueuedTeamExecutions(teamId: string): readonly TeamExecutionRecord[];
+  getTeamExecutionDispatch(executionId: string): TeamExecutionDispatchRecord;
+  transitionTeamExecution(input: {
+    executionId: string;
+    to: TeamExecutionState;
+    now: string;
+    queueReason?: TeamQueueReason | null;
+  }): TeamExecutionRecord;
+  reviseQueuedTeamExecution(input: {
+    executionId: string;
+    createdByAgentId: string;
+    instruction: string;
+    now: string;
+  }): TeamExecutionRecord;
+  cancelQueuedTeamExecution(executionId: string, now: string): TeamExecutionRecord;
+  createTeamAttempt(executionId: string, now: string): TeamAttemptRecord;
+  getTeamAttempt(attemptId: string): TeamAttemptRecord;
+  listTeamAttempts(executionId: string): readonly TeamAttemptRecord[];
+  transitionTeamAttempt(input: {
+    attemptId: string;
+    to: TeamAttemptState;
+    now: string;
+    terminalReason?: string | null;
+  }): TeamAttemptRecord;
+  recordTeamAttemptRateLimited(attemptId: string, now: string): TeamAttemptRecord;
+  recordTeamAttemptProviderResult(
+    attemptId: string,
+    resolution: ExecutionResolution | undefined,
+    usage: NormalizedProviderUsage | undefined,
+  ): TeamAttemptRecord;
+  recoverInterruptedTeamExecutions(now: string): number;
+  recordTeamV2Activity(input: {
+    teamId: string;
+    type: TeamV2ActivityType;
+    actorAgentId?: string | null;
+    subjectAgentId?: string | null;
+    executionId?: string | null;
+    attemptId?: string | null;
+    payload: unknown;
+    now: string;
+  }): TeamV2ActivityRecord;
+  listTeamV2Activity(
+    teamId: string,
+    afterSeq?: number,
+    limit?: number,
+  ): readonly TeamV2ActivityRecord[];
+  listLatestTeamV2Activity(teamId: string, limit?: number): readonly TeamV2ActivityRecord[];
   setWorkerCurrentActivity(agentId: string, activity: string | null, now: string): AgentRecord;
   createTeamMessage(input: {
     teamId: string;
     sourceAgentId: string;
     targetAgentId: string;
     content: string;
+    executionId?: string;
+    attemptId?: string;
   }): TeamMessageRecord;
   transitionTeamMessageState(messageId: string, to: TeamMessageState): TeamMessageRecord;
   createTeamTask(input: {
@@ -2019,6 +2821,7 @@ export interface PersistenceClient {
     doneCriteria: readonly string[];
     now: string;
   }): TeamTaskRecord;
+  getTeamTask(taskId: string): TeamTaskRecord;
   transitionTeamTask(taskId: string, status: TeamTaskRecord['status'], now: string): TeamTaskRecord;
   recordTeamActivity(input: {
     teamTaskId: string;
@@ -2091,6 +2894,8 @@ export interface PersistenceClient {
   setGoal(taskId: string, goal: string): TaskSummary;
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
+  getDraftSkillSelections(taskId: string): TurnSkillSelection[];
+  setDraftSkillSelections(taskId: string, skills: readonly TurnSkillSelection[]): void;
   getCanvasView(taskId: string): CanvasViewRecord | null;
   saveCanvasView(input: {
     taskId: string;
@@ -2133,6 +2938,10 @@ export interface PersistenceClient {
   setEffort(effort: ClaudeEffort): void;
   getCodexEffort(): string;
   setCodexEffort(effort: string): void;
+  getTeamModelResearchBeforeHiring(): boolean;
+  setTeamModelResearchBeforeHiring(enabled: boolean): void;
+  getDefaultTeamPolicy(): TeamPolicy;
+  setDefaultTeamPolicy(policy: TeamPolicy): void;
   getPermissionPolicy(taskId: string): PermissionPolicyRecord;
   setAccessPreset(
     taskId: string,
@@ -2347,11 +3156,26 @@ export interface PersistenceClient {
   ): NativeMutationIntentSnapshot;
   listRecoverableNativeMutationIntents(): readonly NativeMutationIntentSnapshot[];
   listMessages(taskId: string): ChatMessage[];
-  startTurn(taskId: string, text: string): StartedTurn;
+  startTurn(taskId: string, text: string, skills?: readonly PersistedTurnSkill[]): StartedTurn;
+  getTurnSkills(taskId: string, turnId: string): PersistedTurnSkill[];
+  recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent;
+  getTurnModelIdentity(taskId: string, turnId: string): TurnModelIdentity;
+  recordTurnResolution(
+    taskId: string,
+    turnId: string,
+    resolution: ExecutionResolution,
+  ): TurnModelIdentity;
+  recordTurnProviderUsage(
+    taskId: string,
+    turnId: string,
+    usage: NormalizedProviderUsage,
+  ): NormalizedProviderUsage;
+  getTurnProviderUsage(taskId: string, turnId: string): NormalizedProviderUsage | null;
   queueInput(
     taskId: string,
     text: string,
     operationId: string,
+    skills?: readonly PersistedTurnSkill[],
   ): { ordinal: number; event: TurnEvent };
   steerTurn(taskId: string, text: string, expectedTurnId: string): void;
   startNextQueued(taskId: string): QueueTransition;
@@ -2570,6 +3394,155 @@ export class SqlitePersistenceClient implements PersistenceClient {
     } catch {
       return [];
     }
+  }
+
+  listProviderConnections(): readonly ProviderConnection[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM provider_connections
+         ORDER BY runtime_kind, provider_id, display_name, id`,
+      )
+      .all() as ProviderConnectionRow[];
+    return rows.map(toProviderConnection);
+  }
+
+  getProviderConnection(connectionId: string): ProviderConnection {
+    const row = this.db
+      .prepare('SELECT * FROM provider_connections WHERE id = ?')
+      .get(connectionId) as ProviderConnectionRow | undefined;
+    if (row === undefined) throw new NotFoundError('Provider connection not found');
+    return toProviderConnection(row);
+  }
+
+  createProviderConnection(connection: ProviderConnection): ProviderConnection {
+    const parsed = providerConnectionSchema.parse(connection);
+    if (parsed.runtimeKind === 'builtin_cli')
+      throw new Error('Built-in Provider Connections are migration-owned');
+    this.db
+      .prepare(
+        `INSERT INTO provider_connections(
+           id, provider_id, runtime_kind, display_name, enabled, secret_reference,
+           verification_status, verified_at, verification_expires_at, verification_message,
+           rate_limit_mode, max_concurrent_requests, requests_per_minute, tokens_per_minute,
+           last_observed_rate_limit_headers_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        parsed.id,
+        parsed.providerId,
+        parsed.runtimeKind,
+        parsed.displayName,
+        parsed.enabled ? 1 : 0,
+        parsed.secretReference,
+        parsed.verification.status,
+        parsed.verification.verifiedAt,
+        parsed.verification.expiresAt,
+        parsed.verification.message,
+        parsed.rateLimit.mode,
+        parsed.rateLimit.maxConcurrentRequests,
+        parsed.rateLimit.requestsPerMinute,
+        parsed.rateLimit.tokensPerMinute,
+        parsed.rateLimit.lastObservedRateLimitHeaders === null
+          ? null
+          : JSON.stringify(parsed.rateLimit.lastObservedRateLimitHeaders),
+        parsed.createdAt,
+        parsed.updatedAt,
+      );
+    return this.getProviderConnection(parsed.id);
+  }
+
+  setProviderConnectionSecretReference(
+    connectionId: string,
+    secretReference: string | null,
+  ): ProviderConnection {
+    if (
+      secretReference !== null &&
+      !/^provider-secret:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        secretReference,
+      )
+    )
+      throw new Error('Invalid Provider secret reference');
+    const result = this.db
+      .prepare(
+        `UPDATE provider_connections
+         SET secret_reference = ?,
+             verification_status = CASE
+               WHEN runtime_kind = 'builtin_cli' THEN 'not_required'
+               ELSE 'unverified'
+             END,
+             verified_at = NULL, verification_expires_at = NULL, verification_message = NULL,
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(secretReference, new Date().toISOString(), connectionId);
+    if (result.changes !== 1) throw new NotFoundError('Provider connection not found');
+    return this.getProviderConnection(connectionId);
+  }
+
+  updateProviderConnectionVerification(
+    connectionId: string,
+    verification: ProviderConnection['verification'],
+  ): ProviderConnection {
+    const result = this.db
+      .prepare(
+        `UPDATE provider_connections
+         SET verification_status = ?, verified_at = ?, verification_expires_at = ?,
+             verification_message = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        verification.status,
+        verification.verifiedAt,
+        verification.expiresAt,
+        verification.message,
+        new Date().toISOString(),
+        connectionId,
+      );
+    if (result.changes !== 1) throw new NotFoundError('Provider connection not found');
+    return this.getProviderConnection(connectionId);
+  }
+
+  lowerProviderConnectionRateLimits(
+    connectionId: string,
+    limits: Partial<
+      Pick<
+        ProviderConnection['rateLimit'],
+        'maxConcurrentRequests' | 'requestsPerMinute' | 'tokensPerMinute'
+      >
+    >,
+  ): ProviderConnection {
+    const current = this.getProviderConnection(connectionId);
+    if (current.runtimeKind === 'builtin_cli')
+      throw new Error('Built-in CLI concurrency is controlled by Team Policy, not API rate limits');
+    const lower = (name: keyof typeof limits, next: number | null | undefined): number | null => {
+      const existing = current.rateLimit[name];
+      if (next === undefined) return existing;
+      if (next === null || !Number.isSafeInteger(next) || next < 1)
+        throw new Error(`Provider ${name} must be a positive integer`);
+      if (existing !== null && next > existing)
+        throw new Error(`Provider ${name} can only be lowered from this screen`);
+      return next;
+    };
+    const maxConcurrentRequests = lower('maxConcurrentRequests', limits.maxConcurrentRequests);
+    const requestsPerMinute = lower('requestsPerMinute', limits.requestsPerMinute);
+    const tokensPerMinute = lower('tokensPerMinute', limits.tokensPerMinute);
+    const result = this.db
+      .prepare(
+        `UPDATE provider_connections
+         SET rate_limit_mode = 'manual', max_concurrent_requests = ?,
+             requests_per_minute = ?, tokens_per_minute = ?, updated_at = ?
+         WHERE id = ? AND runtime_kind != 'builtin_cli'`,
+      )
+      .run(
+        maxConcurrentRequests,
+        requestsPerMinute,
+        tokensPerMinute,
+        new Date().toISOString(),
+        connectionId,
+      );
+    if (result.changes !== 1) throw new NotFoundError('Provider connection not found');
+    return this.getProviderConnection(connectionId);
   }
 
   private runMigrations(databasePath: string): void {
@@ -2792,19 +3765,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
   listTasks(): TaskSummary[] {
     return (
       this.db
-        .prepare('SELECT * FROM tasks WHERE archived = 0 ORDER BY pinned DESC, updated_at DESC')
-        .all() as TaskRow[]
-    ).map(toTask);
+        .prepare(
+          `SELECT tasks.*,
+             EXISTS(
+               SELECT 1 FROM messages
+               WHERE messages.task_id = tasks.id AND messages.author = 'user'
+             ) AS has_conversation
+           FROM tasks
+           WHERE archived = 0
+           ORDER BY pinned DESC, updated_at DESC`,
+        )
+        .all() as (TaskRow & { has_conversation: number })[]
+    ).map((row) => toTask(row, row.has_conversation === 1));
   }
 
   getTask(taskId: string): TaskSummary {
-    return toTask(this.getTaskRow(taskId));
+    return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
   }
 
   createTask(title?: string, localOnly = false): TaskSummary {
     const now = new Date().toISOString();
     const primaryThreadId = randomUUID();
     const leaderAgentId = randomUUID();
+    const runtimeKind = this.getRuntime();
+    const modelSelection = modelSelectionForRuntime(runtimeKind, this.getModel());
     // An explicit title is the caller's choice and must survive the first message, so it is
     // recorded as 'manual'. Only the placeholder is eligible for auto-naming (issue #4).
     const titleSource = title === undefined ? 'default' : 'manual';
@@ -2816,6 +3800,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       goal: null,
       workspacePath: null,
       localOnly,
+      hasConversation: false,
       createdAt: now,
       updatedAt: now,
     });
@@ -2831,23 +3816,86 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare(
           `INSERT INTO agent_threads(
-             id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
-           ) VALUES (?, ?, ?, 'active', NULL, 0, ?, ?)`,
+             id, task_id, runtime_kind, state, active_turn_id, revision,
+             connection_id, requested_provider, requested_model, created_at, updated_at
+           ) VALUES (?, ?, ?, 'active', NULL, 0, ?, ?, ?, ?, ?)`,
         )
-        .run(primaryThreadId, task.id, this.getRuntime(), now, now);
+        .run(
+          primaryThreadId,
+          task.id,
+          runtimeKind,
+          modelSelection.connectionId,
+          modelSelection.requestedProvider,
+          modelSelection.requestedModel,
+          now,
+          now,
+        );
       this.db
         .prepare(
           `INSERT INTO agents(
              id, team_id, thread_id, task_id, kind, role, state, objective,
-             parent_capability_ceiling_json, context_inheritance_policy, created_at, updated_at
-           ) VALUES (?, NULL, ?, ?, 'leader', 'leader', 'ready', NULL, NULL, NULL, ?, ?)`,
+             parent_capability_ceiling_json, context_inheritance_policy,
+             connection_id, requested_provider, requested_model,
+             parent_agent_id, depth, can_delegate, manager_policy_json, created_at, updated_at
+           ) VALUES (
+             ?, NULL, ?, ?, 'leader', 'leader', 'ready', NULL, NULL, NULL, ?, ?, ?,
+             NULL, 0, 1, ?, ?, ?
+           )`,
         )
-        .run(leaderAgentId, primaryThreadId, task.id, now, now);
+        .run(
+          leaderAgentId,
+          primaryThreadId,
+          task.id,
+          modelSelection.connectionId,
+          modelSelection.requestedProvider,
+          modelSelection.requestedModel,
+          MANAGER_POLICY_SEED,
+          now,
+          now,
+        );
       this.db
         .prepare('UPDATE tasks SET primary_thread_id = ? WHERE id = ?')
         .run(primaryThreadId, task.id);
     })();
     return task;
+  }
+
+  getTaskModelSelection(taskId: string): ModelSelection | null {
+    const row = this.getTaskRow(taskId);
+    return readCanonicalModelSelection({
+      connectionId: row.connection_id,
+      requestedProvider: row.requested_provider,
+      requestedModel: row.requested_model,
+    });
+  }
+
+  setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null {
+    const parsed = modelSelectionSchema.parse(selection);
+    const runtime = builtinRuntimeForModelSelection(parsed);
+    return this.db.transaction(() => {
+      const task = this.getTaskRow(taskId);
+      const now = new Date().toISOString();
+      const updated = this.db
+        .prepare(
+          `UPDATE tasks
+           SET connection_id = ?, requested_provider = ?, requested_model = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(parsed.connectionId, parsed.requestedProvider, parsed.requestedModel, now, task.id);
+      if (updated.changes !== 1) throw new TeamConflictError();
+      const leader = this.getTaskLeader(taskId);
+      const effectiveRuntime =
+        runtime ?? ({ runtimeKind: this.getRuntime(), model: this.getModel() } as const);
+      this.updateAgentModelSelectionInTransaction(
+        leader.id,
+        runtime === null
+          ? modelSelectionForRuntime(effectiveRuntime.runtimeKind, effectiveRuntime.model)
+          : parsed,
+        effectiveRuntime.runtimeKind,
+        now,
+      );
+      return this.getTaskModelSelection(taskId);
+    })();
   }
 
   getTaskLeader(taskId: string): AgentRecord {
@@ -2863,6 +3911,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toAgent(row);
   }
 
+  setAgentModelSelection(agentId: string, selection: ModelSelection): AgentRecord {
+    const parsed = modelSelectionSchema.parse(selection);
+    const runtime = builtinRuntimeForModelSelection(parsed);
+    if (runtime === null) throw new Error('Agent model selection cannot be cleared');
+    return this.db.transaction(() => {
+      this.updateAgentModelSelectionInTransaction(
+        agentId,
+        parsed,
+        runtime.runtimeKind,
+        new Date().toISOString(),
+      );
+      return this.getAgent(agentId);
+    })();
+  }
+
   promoteTaskToTeam(taskId: string): TeamRecord {
     return this.db.transaction(() => {
       this.getTaskRow(taskId);
@@ -2875,10 +3938,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare(
           `INSERT INTO teams(
-             id, task_id, state, leader_agent_id, budget_json, revision, created_at, updated_at
-           ) VALUES (?, ?, 'draft', ?, ?, 0, ?, ?)`,
+             id, task_id, state, leader_agent_id, budget_json, policy_json,
+             revision, created_at, updated_at
+           ) VALUES (?, ?, 'draft', ?, ?, ?, 0, ?, ?)`,
         )
-        .run(teamId, taskId, leader.id, TEAM_BUDGET_STRUCTURED_SEED, now, now);
+        .run(
+          teamId,
+          taskId,
+          leader.id,
+          TEAM_BUDGET_STRUCTURED_SEED,
+          JSON.stringify(this.getDefaultTeamPolicy()),
+          now,
+          now,
+        );
       const assigned = this.db
         .prepare('UPDATE agents SET team_id = ?, updated_at = ? WHERE id = ? AND team_id IS NULL')
         .run(teamId, now, leader.id);
@@ -2913,7 +3985,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `SELECT a.*, t.runtime_kind FROM agents a
            JOIN agent_threads t ON t.id = a.thread_id
-           WHERE a.team_id = ? ORDER BY a.kind, a.created_at, a.id`,
+           WHERE a.team_id = ? ORDER BY a.depth, a.created_at, a.id`,
         )
         .all(teamId) as AgentRow[]
     ).map(toAgent);
@@ -2949,6 +4021,117 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  updateTeamPolicy(teamId: string, policy: TeamPolicy, expectedRevision: number): TeamRecord {
+    const parsed = assertTeamPolicy(policy);
+    return this.db.transaction(() => {
+      const current = this.getTeam(teamId);
+      if (current.revision !== expectedRevision) throw new TeamConflictError();
+      const agents = this.getTeamSnapshot(teamId).agents;
+      if (agents.some(({ depth }) => depth > parsed.maxAgentDepth))
+        throw new Error('Team Policy cannot exclude an existing Agent depth');
+      const now = new Date().toISOString();
+      for (const agent of agents) {
+        if (agent.managerPolicy === null) continue;
+        const managerPolicy = {
+          ...agent.managerPolicy,
+          maxDelegationDepth: Math.min(
+            agent.managerPolicy.maxDelegationDepth,
+            parsed.maxAgentDepth,
+          ),
+        };
+        assertManagerPolicy(managerPolicy, parsed);
+        if (managerPolicy.maxDelegationDepth !== agent.managerPolicy.maxDelegationDepth)
+          this.db
+            .prepare('UPDATE agents SET manager_policy_json = ?, updated_at = ? WHERE id = ?')
+            .run(JSON.stringify(managerPolicy), now, agent.id);
+      }
+      const updated = this.db
+        .prepare(
+          `UPDATE teams
+           SET policy_json = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(JSON.stringify(parsed), now, teamId, expectedRevision);
+      if (updated.changes !== 1) throw new TeamConflictError();
+      return this.getTeam(teamId);
+    })();
+  }
+
+  getTeamBlueprint(teamId: string): TeamBlueprintBindingRecord | null {
+    this.getTeam(teamId);
+    const row = this.db
+      .prepare(
+        `SELECT source, skill_id, digest, name, package_path, blueprint_json, bound_at
+         FROM team_blueprint_bindings WHERE team_id = ?`,
+      )
+      .get(teamId) as
+      | {
+          source: TurnSkillSelection['ref']['source'];
+          skill_id: string;
+          digest: string;
+          name: string;
+          package_path: string;
+          blueprint_json: string;
+          bound_at: string;
+        }
+      | undefined;
+    if (row === undefined) return null;
+    return {
+      teamId,
+      selection: turnSkillSelectionSchema.parse({
+        kind: 'team',
+        ref: { source: row.source, skillId: row.skill_id, digest: row.digest },
+      }),
+      name: row.name,
+      packagePath: row.package_path,
+      blueprint: teamBlueprintSchema.parse(JSON.parse(row.blueprint_json)),
+      boundAt: row.bound_at,
+    };
+  }
+
+  bindTeamBlueprint(input: {
+    teamId: string;
+    selection: TurnSkillSelection;
+    name: string;
+    packagePath: string;
+    blueprint: TeamBlueprint;
+  }): TeamBlueprintBindingRecord {
+    if (input.selection.kind !== 'team') throw new Error('Team Blueprint requires a Team Skill');
+    const blueprint = teamBlueprintSchema.parse(input.blueprint);
+    return this.db.transaction(() => {
+      const existing = this.getTeamBlueprint(input.teamId);
+      if (existing !== null) {
+        if (existing.selection.ref.digest !== input.selection.ref.digest)
+          throw new Error('Team Blueprint revision is already pinned');
+        return existing;
+      }
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO team_blueprint_bindings(
+             team_id, source, skill_id, digest, name, package_path, blueprint_json, bound_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.teamId,
+          input.selection.ref.source,
+          input.selection.ref.skillId,
+          input.selection.ref.digest,
+          input.name,
+          input.packagePath,
+          JSON.stringify(blueprint),
+          now,
+        );
+      this.db
+        .prepare(
+          `UPDATE teams SET policy_json = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(JSON.stringify(blueprint.policy), now, input.teamId);
+      return this.getTeamBlueprint(input.teamId)!;
+    })();
+  }
+
   registerTeamWorker(input: {
     teamId: string;
     role: string;
@@ -2956,30 +4139,73 @@ export class SqlitePersistenceClient implements PersistenceClient {
     parentCapabilityCeiling: CapabilityCeiling;
     contextInheritancePolicy: ContextInheritancePolicy;
     runtimeKind?: RuntimeKind;
+    modelSelection?: ModelSelection;
+    modelSelectionReason?: string;
     writeCapable?: boolean;
+    parentAgentId?: string;
+    canDelegate?: boolean;
+    managerPolicy?: ManagerPolicy | null;
+    blueprintRoleKey?: string;
   }): AgentRecord {
     assertWorkerPersistenceInput(input);
     return this.db.transaction(() => {
       const team = this.getTeam(input.teamId);
       if (!['draft', 'forming', 'active', 'paused'].includes(team.state))
         throw new Error('Team does not accept new workers');
+      const parent = this.getAgent(input.parentAgentId ?? team.leaderAgentId);
+      if (parent.teamId !== team.id) throw new Error('Parent Agent must belong to the same Team');
+      if (['done', 'failed', 'stopped'].includes(parent.state))
+        throw new Error('A terminal Agent cannot hire child Agents');
+      const directChildCount = (
+        this.db
+          .prepare('SELECT COUNT(*) AS count FROM agents WHERE team_id = ? AND parent_agent_id = ?')
+          .get(team.id, parent.id) as { count: number }
+      ).count;
+      const canDelegate = input.canDelegate === true;
+      const managerPolicy = input.managerPolicy ?? null;
+      if (canDelegate !== (managerPolicy !== null))
+        throw new Error('A delegating Agent requires an explicit Manager Policy');
+      if (managerPolicy !== null) assertManagerPolicy(managerPolicy, team.policy);
+      const depth = assertDelegationAllowed({
+        requester: parent,
+        requestedChildCanDelegate: canDelegate,
+        directChildCount,
+        teamPolicy: team.policy,
+      });
       const now = new Date().toISOString();
       const threadId = randomUUID();
       const agentId = randomUUID();
+      const modelSelection = input.modelSelection ?? parent.modelSelection;
+      const builtinRuntime = builtinRuntimeForModelSelection(modelSelection);
+      const runtimeKind = input.runtimeKind ?? builtinRuntime?.runtimeKind ?? parent.runtimeKind;
       this.db
         .prepare(
           `INSERT INTO agent_threads(
-             id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
-           ) VALUES (?, ?, ?, 'idle', NULL, 0, ?, ?)`,
+             id, task_id, runtime_kind, state, active_turn_id, revision,
+             connection_id, requested_provider, requested_model, created_at, updated_at
+           ) VALUES (?, ?, ?, 'idle', NULL, 0, ?, ?, ?, ?, ?)`,
         )
-        .run(threadId, team.taskId, input.runtimeKind ?? this.getRuntime(), now, now);
+        .run(
+          threadId,
+          team.taskId,
+          runtimeKind,
+          modelSelection.connectionId,
+          modelSelection.requestedProvider,
+          modelSelection.requestedModel,
+          now,
+          now,
+        );
       this.db
         .prepare(
           `INSERT INTO agents(
              id, team_id, thread_id, task_id, kind, role, state, objective,
              parent_capability_ceiling_json, context_inheritance_policy,
-             write_capable, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?, ?)`,
+             write_capable, connection_id, requested_provider, requested_model,
+             parent_agent_id, depth, can_delegate, manager_policy_json, blueprint_role_key,
+             created_at, updated_at
+           ) VALUES (
+             ?, ?, ?, ?, 'worker', ?, 'invited', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           )`,
         )
         .run(
           agentId,
@@ -2991,6 +4217,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
           JSON.stringify(input.parentCapabilityCeiling),
           input.contextInheritancePolicy,
           input.writeCapable === true ? 1 : 0,
+          modelSelection.connectionId,
+          modelSelection.requestedProvider,
+          modelSelection.requestedModel,
+          parent.id,
+          depth,
+          canDelegate ? 1 : 0,
+          managerPolicy === null ? null : JSON.stringify(managerPolicy),
+          input.blueprintRoleKey ?? null,
           now,
           now,
         );
@@ -3000,6 +4234,33 @@ export class SqlitePersistenceClient implements PersistenceClient {
            VALUES (?, ?, 'worker', ?, NULL)`,
         )
         .run(team.id, agentId, now);
+      const blueprintBinding = this.getTeamBlueprint(team.id);
+      this.recordTeamV2Activity({
+        teamId: team.id,
+        type: 'worker_hired',
+        actorAgentId: parent.id,
+        subjectAgentId: agentId,
+        payload: {
+          role: input.role.trim(),
+          blueprintRoleKey: input.blueprintRoleKey ?? null,
+          teamBlueprint:
+            blueprintBinding === null
+              ? null
+              : {
+                  name: blueprintBinding.name,
+                  digest: blueprintBinding.selection.ref.digest,
+                },
+          depth,
+          canDelegate,
+          modelSelection,
+          modelSelectionReason:
+            input.modelSelectionReason ??
+            (input.modelSelection === undefined
+              ? '親Agentのmodel selectionを継承'
+              : '呼び出し元がmodel selectionを明示'),
+        },
+        now,
+      });
       return this.getAgent(agentId);
     })();
   }
@@ -3009,12 +4270,624 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const current = this.getAgent(agentId);
       if (current.kind !== 'worker') throw new Error('Leader lifecycle is owned by the Team');
       transitionWorker(current.state, to);
+      const now = new Date().toISOString();
       const result = this.db
         .prepare('UPDATE agents SET state = ?, updated_at = ? WHERE id = ? AND state = ?')
-        .run(to, new Date().toISOString(), agentId, current.state);
+        .run(to, now, agentId, current.state);
       if (result.changes !== 1) throw new TeamConflictError();
+      if (to === 'stopped' && current.teamId !== null)
+        this.recordTeamV2Activity({
+          teamId: current.teamId,
+          type: 'worker_stopped',
+          subjectAgentId: current.id,
+          payload: { from: current.state, to },
+          now,
+        });
       return this.getAgent(agentId);
     })();
+  }
+
+  createTeamExecution(input: {
+    teamId: string;
+    assigneeAgentId: string;
+    createdByAgentId: string;
+    instruction: string;
+    now: string;
+  }): TeamExecutionRecord {
+    const instruction = createExecutionInstruction(input.instruction, input.now);
+    return this.db.transaction(() => {
+      const team = this.getTeam(input.teamId);
+      if (!['forming', 'active', 'paused'].includes(team.state))
+        throw new Error('Team does not accept executions');
+      const assignee = this.getAgent(input.assigneeAgentId);
+      const creator = this.getAgent(input.createdByAgentId);
+      if (assignee.teamId !== team.id || creator.teamId !== team.id)
+        throw new Error('Execution Agents must belong to the same Team');
+      if (['done', 'failed', 'stopped'].includes(assignee.state))
+        throw new Error('A terminal Agent cannot receive an execution');
+      const id = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO team_executions(
+             id, team_id, assignee_agent_id, created_by_agent_id, state,
+             instruction_revision, queue_ordinal, queue_reason,
+             connection_id, requested_provider, requested_model,
+             revision, assigned_at, queued_at, started_at, completed_at, updated_at
+           ) VALUES (
+             ?, ?, ?, ?, 'assigned', 1, NULL, NULL, ?, ?, ?, 1, ?, NULL, NULL, NULL, ?
+           )`,
+        )
+        .run(
+          id,
+          team.id,
+          assignee.id,
+          creator.id,
+          assignee.modelSelection.connectionId,
+          assignee.modelSelection.requestedProvider,
+          assignee.modelSelection.requestedModel,
+          input.now,
+          input.now,
+        );
+      this.db
+        .prepare(
+          `INSERT INTO team_execution_instructions(
+             execution_id, revision, content, created_by_agent_id, reason, created_at
+           ) VALUES (?, 1, ?, ?, 'initial', ?)`,
+        )
+        .run(id, instruction.content, creator.id, input.now);
+      this.recordTeamV2Activity({
+        teamId: team.id,
+        type: 'task_assigned',
+        actorAgentId: creator.id,
+        subjectAgentId: assignee.id,
+        executionId: id,
+        payload: {
+          instructionRevision: instruction.revision,
+          modelSelection: assignee.modelSelection,
+        },
+        now: input.now,
+      });
+      return this.getTeamExecution(id);
+    })();
+  }
+
+  getTeamExecution(executionId: string): TeamExecutionRecord {
+    const row = this.db.prepare('SELECT * FROM team_executions WHERE id = ?').get(executionId) as
+      TeamExecutionRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team execution not found');
+    return this.toTeamExecution(row);
+  }
+
+  listTeamExecutions(teamId: string): readonly TeamExecutionRecord[] {
+    this.getTeam(teamId);
+    return (
+      this.db
+        .prepare('SELECT * FROM team_executions WHERE team_id = ? ORDER BY assigned_at, id')
+        .all(teamId) as TeamExecutionRow[]
+    ).map((row) => this.toTeamExecution(row));
+  }
+
+  listQueuedTeamExecutions(teamId: string): readonly TeamExecutionRecord[] {
+    this.getTeam(teamId);
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM team_executions
+           WHERE team_id = ?
+             AND state IN ('queued', 'waiting_verification', 'waiting_rate_limit')
+           ORDER BY queue_ordinal, queued_at, id`,
+        )
+        .all(teamId) as TeamExecutionRow[]
+    ).map((row) => this.toTeamExecution(row));
+  }
+
+  getTeamExecutionDispatch(executionId: string): TeamExecutionDispatchRecord {
+    this.getTeamExecution(executionId);
+    const row = this.db
+      .prepare(
+        `SELECT m.id AS message_id, m.seq AS message_seq,
+                tt.id AS team_task_id, tt.done_criteria_json
+         FROM team_messages m
+         JOIN team_tasks tt ON tt.message_id = m.id
+         WHERE m.execution_id = ?
+         ORDER BY m.seq DESC
+         LIMIT 1`,
+      )
+      .get(executionId) as
+      | {
+          message_id: string;
+          message_seq: number;
+          team_task_id: string;
+          done_criteria_json: string;
+        }
+      | undefined;
+    if (row === undefined) throw new NotFoundError('Team execution dispatch not found');
+    return {
+      messageId: row.message_id,
+      messageSeq: row.message_seq,
+      teamTaskId: row.team_task_id,
+      doneCriteria: JSON.parse(row.done_criteria_json) as string[],
+    };
+  }
+
+  transitionTeamExecution(input: {
+    executionId: string;
+    to: TeamExecutionState;
+    now: string;
+    queueReason?: TeamQueueReason | null;
+  }): TeamExecutionRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamExecution(input.executionId);
+      if (current.state === input.to) return current;
+      transitionTeamExecution(current.state, input.to);
+      const queueReason =
+        input.to === 'waiting_verification'
+          ? 'verification'
+          : input.to === 'waiting_rate_limit'
+            ? (input.queueReason ?? 'rate_limit')
+            : (input.queueReason ?? null);
+      if (input.to === 'queued' && queueReason === null)
+        throw new Error('A queued execution requires a queue reason');
+      if (
+        !['queued', 'waiting_verification', 'waiting_rate_limit'].includes(input.to) &&
+        queueReason !== null
+      )
+        throw new Error('A non-queued execution cannot retain a queue reason');
+      let queueOrdinal = current.queueOrdinal;
+      if (
+        queueOrdinal === null &&
+        ['queued', 'waiting_verification', 'waiting_rate_limit'].includes(input.to)
+      )
+        queueOrdinal = (
+          this.db
+            .prepare(
+              `SELECT COALESCE(MAX(queue_ordinal), 0) + 1 AS ordinal
+               FROM team_executions WHERE team_id = ?`,
+            )
+            .get(current.teamId) as { ordinal: number }
+        ).ordinal;
+      const terminal = ['completed', 'failed', 'canceled'].includes(input.to);
+      const updated = this.db
+        .prepare(
+          `UPDATE team_executions
+           SET state = ?, queue_ordinal = ?, queue_reason = ?,
+               queued_at = CASE
+                 WHEN ? IN ('queued', 'waiting_verification', 'waiting_rate_limit')
+                   THEN COALESCE(queued_at, ?)
+                 ELSE queued_at
+               END,
+               started_at = CASE WHEN ? = 'running' THEN COALESCE(started_at, ?) ELSE started_at END,
+               completed_at = CASE WHEN ? = 1 THEN ? ELSE completed_at END,
+               revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(
+          input.to,
+          queueOrdinal,
+          queueReason,
+          input.to,
+          input.now,
+          input.to,
+          input.now,
+          terminal ? 1 : 0,
+          input.now,
+          input.now,
+          current.id,
+          current.revision,
+        );
+      if (updated.changes !== 1) throw new TeamConflictError();
+      const next = this.getTeamExecution(current.id);
+      const type =
+        input.to === 'queued'
+          ? 'execution_queued'
+          : ['waiting_verification', 'waiting_rate_limit'].includes(input.to)
+            ? 'execution_waiting'
+            : input.to === 'running'
+              ? 'execution_started'
+              : 'execution_finished';
+      this.recordTeamV2Activity({
+        teamId: next.teamId,
+        type,
+        subjectAgentId: next.assigneeAgentId,
+        executionId: next.id,
+        payload: { from: current.state, to: next.state, queueReason: next.queueReason },
+        now: input.now,
+      });
+      return next;
+    })();
+  }
+
+  reviseQueuedTeamExecution(input: {
+    executionId: string;
+    createdByAgentId: string;
+    instruction: string;
+    now: string;
+  }): TeamExecutionRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamExecution(input.executionId);
+      const creator = this.getAgent(input.createdByAgentId);
+      if (creator.teamId !== current.teamId)
+        throw new Error('Instruction author must belong to the execution Team');
+      const next = reviseQueuedExecutionInstruction({
+        executionState: current.state,
+        current: current.instruction,
+        content: input.instruction,
+        updatedAt: input.now,
+      });
+      this.db
+        .prepare(
+          `INSERT INTO team_execution_instructions(
+             execution_id, revision, content, created_by_agent_id, reason, created_at
+           ) VALUES (?, ?, ?, ?, 'steer', ?)`,
+        )
+        .run(current.id, next.revision, next.content, creator.id, input.now);
+      const updated = this.db
+        .prepare(
+          `UPDATE team_executions
+           SET instruction_revision = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(next.revision, input.now, current.id, current.revision);
+      if (updated.changes !== 1) throw new TeamConflictError();
+      const revised = this.getTeamExecution(current.id);
+      this.recordTeamV2Activity({
+        teamId: revised.teamId,
+        type: 'steered',
+        actorAgentId: creator.id,
+        subjectAgentId: revised.assigneeAgentId,
+        executionId: revised.id,
+        payload: { instructionRevision: revised.instruction.revision },
+        now: input.now,
+      });
+      return revised;
+    })();
+  }
+
+  cancelQueuedTeamExecution(executionId: string, now: string): TeamExecutionRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamExecution(executionId);
+      if (
+        !['assigned', 'queued', 'waiting_verification', 'waiting_rate_limit'].includes(
+          current.state,
+        )
+      )
+        throw new Error('Only a queued Team execution can be canceled without interruption');
+      const canceled = this.transitionTeamExecution({
+        executionId: current.id,
+        to: 'canceled',
+        now,
+      });
+      const message = this.db
+        .prepare(
+          `SELECT id FROM team_messages
+           WHERE execution_id = ? AND source_agent_id = ?
+           ORDER BY seq LIMIT 1`,
+        )
+        .get(current.id, current.createdByAgentId) as { id: string } | undefined;
+      if (message !== undefined) {
+        const delivery = this.getTeamDelivery(message.id);
+        if (delivery !== null && ['persisted', 'dispatched', 'timedOut'].includes(delivery.state))
+          this.transitionTeamDelivery({
+            messageId: message.id,
+            to: 'failed',
+            now,
+            error: 'execution_canceled',
+          });
+        const task = this.db
+          .prepare('SELECT id FROM team_tasks WHERE message_id = ?')
+          .get(message.id) as { id: string } | undefined;
+        if (task !== undefined) {
+          const currentTask = this.getTeamTask(task.id);
+          if (!['completed', 'failed', 'canceled'].includes(currentTask.status))
+            this.transitionTeamTask(task.id, 'canceled', now);
+        }
+      }
+      return canceled;
+    })();
+  }
+
+  createTeamAttempt(executionId: string, now: string): TeamAttemptRecord {
+    return this.db.transaction(() => {
+      const execution = this.getTeamExecution(executionId);
+      if (execution.state !== 'running')
+        throw new Error('A Team attempt requires a running execution');
+      const existing = this.listTeamAttempts(execution.id);
+      if (
+        existing.some(
+          ({ state }) => !['completed', 'failed', 'canceled', 'interrupted'].includes(state),
+        )
+      )
+        throw new Error('Execution already has an active attempt');
+      const ordinal = nextTeamAttemptOrdinal(existing.map((attempt) => attempt.ordinal));
+      const id = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO team_attempts(
+             id, execution_id, ordinal, state, instruction_revision,
+             connection_id, requested_provider, requested_model,
+             provider_call_ordinal, terminal_reason, created_at, started_at, finished_at, updated_at
+           ) VALUES (?, ?, ?, 'created', ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          id,
+          execution.id,
+          ordinal,
+          execution.instruction.revision,
+          execution.modelSelection.connectionId,
+          execution.modelSelection.requestedProvider,
+          execution.modelSelection.requestedModel,
+          now,
+          now,
+        );
+      return this.getTeamAttempt(id);
+    })();
+  }
+
+  getTeamAttempt(attemptId: string): TeamAttemptRecord {
+    const row = this.db.prepare('SELECT * FROM team_attempts WHERE id = ?').get(attemptId) as
+      TeamAttemptRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team attempt not found');
+    return toTeamAttempt(row);
+  }
+
+  listTeamAttempts(executionId: string): readonly TeamAttemptRecord[] {
+    this.getTeamExecution(executionId);
+    return (
+      this.db
+        .prepare('SELECT * FROM team_attempts WHERE execution_id = ? ORDER BY ordinal')
+        .all(executionId) as TeamAttemptRow[]
+    ).map(toTeamAttempt);
+  }
+
+  transitionTeamAttempt(input: {
+    attemptId: string;
+    to: TeamAttemptState;
+    now: string;
+    terminalReason?: string | null;
+  }): TeamAttemptRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamAttempt(input.attemptId);
+      if (current.state === input.to) return current;
+      transitionTeamAttempt(current.state, input.to);
+      const terminal = ['completed', 'failed', 'canceled', 'interrupted'].includes(input.to);
+      const terminalReason = input.terminalReason ?? null;
+      if (
+        terminal &&
+        input.to !== 'completed' &&
+        (terminalReason === null || terminalReason.trim() === '')
+      )
+        throw new Error('A terminal Team attempt requires a reason');
+      if (input.to === 'completed' && terminalReason !== null)
+        throw new Error('A completed Team attempt cannot have a failure reason');
+      if (!terminal && terminalReason !== null)
+        throw new Error('An active Team attempt cannot have a terminal reason');
+      const updated = this.db
+        .prepare(
+          `UPDATE team_attempts
+           SET state = ?, terminal_reason = ?,
+               started_at = CASE WHEN ? = 'running' THEN COALESCE(started_at, ?) ELSE started_at END,
+               finished_at = CASE WHEN ? = 1 THEN ? ELSE finished_at END,
+               updated_at = ?
+           WHERE id = ? AND state = ?`,
+        )
+        .run(
+          input.to,
+          terminalReason,
+          input.to,
+          input.now,
+          terminal ? 1 : 0,
+          input.now,
+          input.now,
+          current.id,
+          current.state,
+        );
+      if (updated.changes !== 1) throw new TeamConflictError();
+      const next = this.getTeamAttempt(current.id);
+      if (input.to === 'running' || terminal) {
+        const execution = this.getTeamExecution(next.executionId);
+        this.recordTeamV2Activity({
+          teamId: execution.teamId,
+          type: input.to === 'running' ? 'attempt_started' : 'attempt_finished',
+          subjectAgentId: execution.assigneeAgentId,
+          executionId: execution.id,
+          attemptId: next.id,
+          payload: {
+            ordinal: next.ordinal,
+            state: next.state,
+            terminalReason: next.terminalReason,
+          },
+          now: input.now,
+        });
+      }
+      return next;
+    })();
+  }
+
+  recordTeamAttemptRateLimited(attemptId: string, now: string): TeamAttemptRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeamAttempt(attemptId);
+      if (current.state !== 'running')
+        throw new Error('Only a running attempt can be rate limited');
+      this.transitionTeamAttempt({ attemptId, to: 'waiting_rate_limit', now });
+      const updated = this.db
+        .prepare(
+          `UPDATE team_attempts
+           SET provider_call_ordinal = provider_call_ordinal + 1, updated_at = ?
+           WHERE id = ? AND state = 'waiting_rate_limit'`,
+        )
+        .run(now, attemptId);
+      if (updated.changes !== 1) throw new TeamConflictError();
+      const execution = this.getTeamExecution(current.executionId);
+      this.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'waiting_rate_limit',
+        now,
+      });
+      return this.getTeamAttempt(attemptId);
+    })();
+  }
+
+  recordTeamAttemptProviderResult(
+    attemptId: string,
+    resolution: ExecutionResolution | undefined,
+    usage: NormalizedProviderUsage | undefined,
+  ): TeamAttemptRecord {
+    const parsedResolution =
+      resolution === undefined ? undefined : executionResolutionSchema.parse(resolution);
+    const parsedUsage =
+      usage === undefined ? undefined : normalizedProviderUsageSchema.parse(usage);
+    const result = this.db
+      .prepare(
+        `UPDATE team_attempts
+         SET resolved_provider = COALESCE(?, resolved_provider),
+             resolved_model = COALESCE(?, resolved_model),
+             resolution_json = COALESCE(?, resolution_json),
+             provider_usage_json = COALESCE(?, provider_usage_json),
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        parsedResolution?.resolvedProvider ?? null,
+        parsedResolution?.resolvedModel ?? null,
+        parsedResolution === undefined ? null : JSON.stringify(parsedResolution),
+        parsedUsage === undefined ? null : JSON.stringify(parsedUsage),
+        new Date().toISOString(),
+        attemptId,
+      );
+    if (result.changes !== 1) throw new NotFoundError('Team attempt not found');
+    return this.getTeamAttempt(attemptId);
+  }
+
+  recoverInterruptedTeamExecutions(now: string): number {
+    return this.db.transaction(() => {
+      const running = this.db
+        .prepare("SELECT id, execution_id FROM team_attempts WHERE state = 'running'")
+        .all() as { id: string; execution_id: string }[];
+      for (const attempt of running) {
+        this.transitionTeamAttempt({
+          attemptId: attempt.id,
+          to: 'interrupted',
+          now,
+          terminalReason: 'app_restart',
+        });
+        const execution = this.getTeamExecution(attempt.execution_id);
+        if (execution.state === 'running')
+          this.transitionTeamExecution({
+            executionId: execution.id,
+            to: 'queued',
+            now,
+            queueReason: 'recovery',
+          });
+      }
+      return running.length;
+    })();
+  }
+
+  recordTeamV2Activity(input: {
+    teamId: string;
+    type: TeamV2ActivityType;
+    actorAgentId?: string | null;
+    subjectAgentId?: string | null;
+    executionId?: string | null;
+    attemptId?: string | null;
+    payload: unknown;
+    now: string;
+  }): TeamV2ActivityRecord {
+    return this.db.transaction(() => this.recordTeamV2ActivityInTransaction(input))();
+  }
+
+  private recordTeamV2ActivityInTransaction(input: {
+    teamId: string;
+    type: TeamV2ActivityType;
+    actorAgentId?: string | null;
+    subjectAgentId?: string | null;
+    executionId?: string | null;
+    attemptId?: string | null;
+    payload: unknown;
+    now: string;
+  }): TeamV2ActivityRecord {
+    this.getTeam(input.teamId);
+    if (!teamV2ActivityTypes.includes(input.type)) throw new Error('Invalid Team activity type');
+    for (const agentId of [input.actorAgentId, input.subjectAgentId]) {
+      if (agentId === undefined || agentId === null) continue;
+      if (this.getAgent(agentId).teamId !== input.teamId)
+        throw new Error('Team activity Agent must belong to the same Team');
+    }
+    const execution =
+      input.executionId === undefined || input.executionId === null
+        ? null
+        : this.getTeamExecution(input.executionId);
+    if (execution !== null && execution.teamId !== input.teamId)
+      throw new Error('Team activity execution must belong to the same Team');
+    const attempt =
+      input.attemptId === undefined || input.attemptId === null
+        ? null
+        : this.getTeamAttempt(input.attemptId);
+    if (attempt !== null && (execution === null || attempt.executionId !== execution.id))
+      throw new Error('Team activity attempt requires its execution');
+    const payloadJson = JSON.stringify(input.payload);
+    if (payloadJson === undefined)
+      throw new Error('Team activity payload must be JSON serializable');
+    const seq = (
+      this.db
+        .prepare(
+          'SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM team_v2_activity_events WHERE team_id = ?',
+        )
+        .get(input.teamId) as { seq: number }
+    ).seq;
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO team_v2_activity_events(
+           id, team_id, seq, type, actor_agent_id, subject_agent_id,
+           execution_id, attempt_id, payload_json, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.teamId,
+        seq,
+        input.type,
+        input.actorAgentId ?? null,
+        input.subjectAgentId ?? null,
+        execution?.id ?? null,
+        attempt?.id ?? null,
+        payloadJson,
+        input.now,
+      );
+    return this.getTeamV2Activity(id);
+  }
+
+  listTeamV2Activity(teamId: string, afterSeq = 0, limit = 100): readonly TeamV2ActivityRecord[] {
+    this.getTeam(teamId);
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0)
+      throw new Error('Invalid Team activity cursor');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+      throw new Error('Invalid Team activity page size');
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM team_v2_activity_events
+           WHERE team_id = ? AND seq > ? ORDER BY seq LIMIT ?`,
+        )
+        .all(teamId, afterSeq, limit) as TeamV2ActivityRow[]
+    ).map(toTeamV2Activity);
+  }
+
+  listLatestTeamV2Activity(teamId: string, limit = 100): readonly TeamV2ActivityRecord[] {
+    this.getTeam(teamId);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+      throw new Error('Invalid Team activity page size');
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM (
+             SELECT * FROM team_v2_activity_events
+             WHERE team_id = ? ORDER BY seq DESC LIMIT ?
+           ) ORDER BY seq`,
+        )
+        .all(teamId, limit) as TeamV2ActivityRow[]
+    ).map(toTeamV2Activity);
   }
 
   createTeamMessage(input: {
@@ -3022,6 +4895,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     sourceAgentId: string;
     targetAgentId: string;
     content: string;
+    executionId?: string;
+    attemptId?: string;
   }): TeamMessageRecord {
     if (input.content.length < 1 || input.content.length > 100_000)
       throw new Error('Invalid team message content');
@@ -3032,7 +4907,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const target = this.getAgent(input.targetAgentId);
       if (source.teamId !== team.id || target.teamId !== team.id)
         throw new Error('Team message agent is not an active member');
-      assertLeaderRoutedMessage(source.kind, target.kind);
+      assertTeamMessageAllowed({
+        source,
+        target,
+        allowWorkerDirectMessages: team.policy.allowWorkerDirectMessages,
+      });
+      const execution =
+        input.executionId === undefined ? null : this.getTeamExecution(input.executionId);
+      if (execution !== null && execution.teamId !== team.id)
+        throw new Error('Message execution must belong to the same Team');
+      const attempt = input.attemptId === undefined ? null : this.getTeamAttempt(input.attemptId);
+      if (attempt !== null && execution === null)
+        throw new Error('Message attempt requires an execution');
+      if (attempt !== null && attempt.executionId !== execution?.id)
+        throw new Error('Message attempt must belong to the linked execution');
       const now = new Date().toISOString();
       const id = randomUUID();
       const nextSeq = (
@@ -3045,10 +4933,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `INSERT INTO team_messages(
              id, team_id, source_agent_id, target_agent_id, seq, state, content,
-             revision, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, 'persisted', ?, 1, ?, ?)`,
+             execution_id, attempt_id, revision, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, 'persisted', ?, ?, ?, 1, ?, ?)`,
         )
-        .run(id, team.id, source.id, target.id, nextSeq, input.content, now, now);
+        .run(
+          id,
+          team.id,
+          source.id,
+          target.id,
+          nextSeq,
+          input.content,
+          execution?.id ?? null,
+          attempt?.id ?? null,
+          now,
+          now,
+        );
       const insertEvent = this.db.prepare(
         `INSERT INTO team_message_events(
            id, message_id, revision, from_state, to_state, recorded_at
@@ -3249,16 +5148,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
       );
       for (const entry of input.entries) {
         const agentId = entry.scope === 'worker' ? (entry.agentId ?? null) : null;
-        const cap = this.budgetCap(team, globalLimits, entry.scope, entry.kind);
-        const totals = this.budgetTotals(entry.scope, entry.kind, team.id, agentId);
-        assertReservationWithinCap({
-          scope: entry.scope,
-          kind: entry.kind,
-          cap,
-          committed: totals.committed,
-          reserved: totals.reserved,
-          requested: entry.amount,
-        });
+        if (team.policy.budgetMode !== 'unlimited') {
+          const cap = this.budgetCap(team, globalLimits, entry.scope, entry.kind);
+          const totals = this.budgetTotals(entry.scope, entry.kind, team.id, agentId);
+          assertReservationWithinCap({
+            scope: entry.scope,
+            kind: entry.kind,
+            cap,
+            committed: totals.committed,
+            reserved: totals.reserved,
+            requested: entry.amount,
+          });
+        }
         const id = randomUUID();
         insert.run(
           id,
@@ -3358,6 +5259,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .all(team.id) as { id: string }[];
     for (const worker of workers) {
       for (const kind of budgetKinds) {
+        if (kind === 'spawnSlots') continue;
         const totals = this.budgetTotals('worker', kind, team.id, worker.id);
         statuses.push({
           scope: 'worker',
@@ -3534,6 +5436,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
     deliveries: number;
   } {
     return this.db.transaction(() => {
+      const recoverableTeamIds = new Set(
+        (
+          this.db
+            .prepare(
+              `SELECT DISTINCT team_id FROM team_executions
+               WHERE state IN ('assigned', 'queued', 'waiting_verification', 'waiting_rate_limit')`,
+            )
+            .all() as { team_id: string }[]
+        ).map(({ team_id }) => team_id),
+      );
+      const recoverableAssigneeIds = new Set(
+        (
+          this.db
+            .prepare(
+              `SELECT DISTINCT assignee_agent_id FROM team_executions
+               WHERE state IN ('assigned', 'queued', 'waiting_verification', 'waiting_rate_limit')`,
+            )
+            .all() as { assignee_agent_id: string }[]
+        ).map(({ assignee_agent_id }) => assignee_agent_id),
+      );
       let teams = 0;
       const teamRows = this.db
         .prepare(
@@ -3542,6 +5464,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .all() as { id: string; state: TeamState; revision: number }[];
       for (const team of teamRows) {
+        if (recoverableTeamIds.has(team.id)) continue;
         const to: TeamState = team.state === 'active' ? 'paused' : 'failed';
         transitionTeam(team.state, to);
         const result = this.db
@@ -3562,6 +5485,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .all() as { id: string; state: WorkerState }[];
       for (const worker of workerRows) {
+        if (recoverableAssigneeIds.has(worker.id)) {
+          if (worker.state === 'busy')
+            this.db
+              .prepare(`UPDATE agents SET state = 'waiting', updated_at = ? WHERE id = ?`)
+              .run(now, worker.id);
+          continue;
+        }
         transitionWorker(worker.state, 'stopped');
         const result = this.db
           .prepare(`UPDATE agents SET state = 'stopped', updated_at = ? WHERE id = ? AND state = ?`)
@@ -3581,7 +5511,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `UPDATE team_tasks
            SET status = 'failed', revision = revision + 1, updated_at = ?
-           WHERE status IN ('created', 'assigned', 'running', 'waiting', 'blocked')`,
+           WHERE status IN ('created', 'assigned', 'running', 'waiting', 'blocked')
+             AND NOT EXISTS (
+               SELECT 1
+               FROM team_messages m
+               JOIN team_executions e ON e.id = m.execution_id
+               WHERE m.id = team_tasks.message_id
+                 AND e.state IN (
+                   'assigned', 'queued', 'waiting_verification', 'waiting_rate_limit'
+                 )
+             )`,
         )
         .run(now);
 
@@ -3652,7 +5591,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .run(new Date().toISOString(), taskId);
       if (result.changes !== 1) throw new NotFoundError('Task not found');
       this.quarantineStaleBackgroundInTransaction(taskId);
-      return toTask(this.getTaskRow(taskId));
+      return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
     })();
   }
   setGoal(taskId: string, goal: string): TaskSummary {
@@ -3666,7 +5605,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .run(goal, current.goal === goal ? 0 : 1, new Date().toISOString(), taskId);
       if (result.changes !== 1) throw new NotFoundError('Task not found');
       this.quarantineStaleBackgroundInTransaction(taskId);
-      return toTask(this.getTaskRow(taskId));
+      return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
     })();
   }
 
@@ -3679,6 +5618,45 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('UPDATE tasks SET draft = ?, updated_at = ? WHERE id = ?')
       .run(draft, new Date().toISOString(), taskId);
     if (result.changes !== 1) throw new NotFoundError('Task not found');
+  }
+
+  getDraftSkillSelections(taskId: string): TurnSkillSelection[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT source, skill_id, digest, kind
+         FROM task_draft_skill_bindings
+         WHERE task_id = ?
+         ORDER BY ordinal`,
+      )
+      .all(taskId) as SkillBindingIdentityRow[];
+    return turnSkillSelectionsSchema.parse(rows.map(toTurnSkillSelection));
+  }
+
+  setDraftSkillSelections(taskId: string, skills: readonly TurnSkillSelection[]): void {
+    const parsed = turnSkillSelectionsSchema.parse(skills);
+    this.db.transaction(() => {
+      this.assertTask(taskId);
+      this.db.prepare('DELETE FROM task_draft_skill_bindings WHERE task_id = ?').run(taskId);
+      const insert = this.db.prepare(
+        `INSERT INTO task_draft_skill_bindings(
+           task_id, ordinal, source, skill_id, digest, kind
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      parsed.forEach((selection, index) =>
+        insert.run(
+          taskId,
+          index + 1,
+          selection.ref.source,
+          selection.ref.skillId,
+          selection.ref.digest,
+          selection.kind,
+        ),
+      );
+      this.db
+        .prepare('UPDATE tasks SET updated_at = ? WHERE id = ?')
+        .run(new Date().toISOString(), taskId);
+    })();
   }
 
   getCanvasView(taskId: string): CanvasViewRecord | null {
@@ -3966,6 +5944,46 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(effort, new Date().toISOString());
+  }
+
+  getTeamModelResearchBeforeHiring(): boolean {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'team.model-research-before-hiring'")
+      .get() as { value: string } | undefined;
+    return row?.value === '1';
+  }
+
+  setTeamModelResearchBeforeHiring(enabled: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('team.model-research-before-hiring', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(enabled ? '1' : '0', new Date().toISOString());
+  }
+
+  getDefaultTeamPolicy(): TeamPolicy {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'team.default-policy'")
+      .get() as { value: string } | undefined;
+    if (row === undefined) return { ...DEFAULT_TEAM_POLICY };
+    try {
+      const parsed = JSON.parse(row.value) as TeamPolicy;
+      assertTeamPolicy(parsed);
+      return { ...parsed };
+    } catch {
+      return { ...DEFAULT_TEAM_POLICY };
+    }
+  }
+
+  setDefaultTeamPolicy(policy: TeamPolicy): void {
+    assertTeamPolicy(policy);
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('team.default-policy', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(JSON.stringify(policy), new Date().toISOString());
   }
 
   getBackgroundEpochs(taskId: string): BackgroundEpochs {
@@ -5620,6 +7638,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // Retained rather than discarded: the count is the only evidence a user has that a Turn they
       // left running was reaped by a crash, and the SurfaceFooter reports it (issue #9).
       this.startupInterruptedTurns = this.interruptActiveTurns();
+      this.recoverInterruptedTeamExecutions(now);
       return quarantines;
     })();
   }
@@ -6570,22 +8589,101 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ).map(toMessage);
   }
 
-  startTurn(taskId: string, text: string): StartedTurn {
+  startTurn(taskId: string, text: string, skills: readonly PersistedTurnSkill[] = []): StartedTurn {
     return this.db.transaction(() => {
       this.assertTask(taskId);
       this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
-      return this.startTurnInTransaction(taskId, text);
+      return this.startTurnInTransaction(taskId, text, skills);
     })();
+  }
+
+  getTurnModelIdentity(taskId: string, turnId: string): TurnModelIdentity {
+    return toTurnModelIdentity(this.getTurn(taskId, turnId));
+  }
+
+  getTurnSkills(taskId: string, turnId: string): PersistedTurnSkill[] {
+    this.getTurn(taskId, turnId);
+    const rows = this.db
+      .prepare(
+        `SELECT source, skill_id, digest, kind, name, description, content, package_path
+         FROM turn_skill_bindings
+         WHERE turn_id = ?
+         ORDER BY ordinal`,
+      )
+      .all(turnId) as TurnSkillBindingRow[];
+    return rows.map((row) => ({
+      selection: toTurnSkillSelection(row),
+      name: row.name,
+      description: row.description,
+      content: row.content,
+      packagePath: row.package_path,
+    }));
+  }
+
+  recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent {
+    this.getTurn(taskId, turnId);
+    return this.appendEvent({ type: 'skill.draft.created', taskId, turnId, draft });
+  }
+
+  recordTurnResolution(
+    taskId: string,
+    turnId: string,
+    resolution: ExecutionResolution,
+  ): TurnModelIdentity {
+    const parsed = executionResolutionSchema.parse(resolution);
+    const result = this.db
+      .prepare(
+        `UPDATE turns
+         SET resolved_provider = ?, resolved_model = ?, resolution_json = ?, updated_at = ?
+         WHERE id = ? AND task_id = ?`,
+      )
+      .run(
+        parsed.resolvedProvider,
+        parsed.resolvedModel,
+        JSON.stringify(parsed),
+        new Date().toISOString(),
+        turnId,
+        taskId,
+      );
+    if (result.changes !== 1) throw new NotFoundError('Turn not found');
+    return this.getTurnModelIdentity(taskId, turnId);
+  }
+
+  recordTurnProviderUsage(
+    taskId: string,
+    turnId: string,
+    usage: NormalizedProviderUsage,
+  ): NormalizedProviderUsage {
+    const parsed = normalizedProviderUsageSchema.parse(usage);
+    const result = this.db
+      .prepare(
+        `UPDATE turns SET provider_usage_json = ?, updated_at = ?
+         WHERE id = ? AND task_id = ?`,
+      )
+      .run(JSON.stringify(parsed), new Date().toISOString(), turnId, taskId);
+    if (result.changes !== 1) throw new NotFoundError('Turn not found');
+    return parsed;
+  }
+
+  getTurnProviderUsage(taskId: string, turnId: string): NormalizedProviderUsage | null {
+    const row = this.getTurn(taskId, turnId);
+    return row.provider_usage_json === null
+      ? null
+      : normalizedProviderUsageSchema.parse(JSON.parse(row.provider_usage_json));
   }
 
   queueInput(
     taskId: string,
     text: string,
     operationId: string,
+    skills: readonly PersistedTurnSkill[] = [],
   ): { ordinal: number; event: TurnEvent } {
     return this.db.transaction(() => {
       this.assertTask(taskId);
+      if (typeof text !== 'string' || text.trim() === '' || text.length > 100_000)
+        throw new Error('Queued input text is invalid');
+      const parsedSkills = validatePersistedTurnSkills(skills);
       const row = this.db
         .prepare(
           'SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM input_queue WHERE task_id = ?',
@@ -6596,7 +8694,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
           `INSERT INTO input_queue(task_id, ordinal, operation_id, mode, payload_json, state, created_at)
         VALUES (?, ?, ?, 'queue', ?, 'queued', ?)`,
         )
-        .run(taskId, row.ordinal, operationId, JSON.stringify({ text }), new Date().toISOString());
+        .run(
+          taskId,
+          row.ordinal,
+          operationId,
+          JSON.stringify({ text, skills: parsedSkills }),
+          new Date().toISOString(),
+        );
       const event = this.queueChangedEvent(taskId);
       return { ordinal: row.ordinal, event };
     })();
@@ -6629,11 +8733,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .get(taskId) as QueueRow | undefined;
       if (row === undefined) return null;
-      const parsed = JSON.parse(row.payload_json) as { text: string };
+      const parsed = parseQueuedPayload(row.payload_json);
       this.db
         .prepare("UPDATE input_queue SET state = 'dequeued' WHERE task_id = ? AND ordinal = ?")
         .run(taskId, row.ordinal);
-      const started = this.startTurnInTransaction(taskId, parsed.text);
+      const started = this.startTurnInTransaction(taskId, parsed.text, parsed.skills);
       return { started, queueEvent: this.queueChangedEvent(taskId) };
     })();
   }
@@ -6766,7 +8870,37 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   prepareContext(taskId: string, turnId: string): PreparedContext {
-    return this.db.transaction(() => this.contextLedger.prepare(taskId, turnId))();
+    return this.db.transaction(() => {
+      const prepared = this.contextLedger.prepare(taskId, turnId);
+      const skillFragments: ContextFragment[] = this.getTurnSkills(taskId, turnId).map((skill) => {
+        const trust = skill.selection.ref.source === 'builtin' ? 'system' : 'user';
+        const id = `skill:${createHash('sha256')
+          .update(
+            `${skill.selection.ref.source}:${skill.selection.ref.skillId}:${skill.selection.ref.digest}`,
+          )
+          .digest('hex')}`;
+        return {
+          id,
+          taskId,
+          source: 'skill',
+          trust,
+          tokenEstimate: estimateTokens(skill.content),
+          content: skill.content,
+          createdAt: new Date().toISOString(),
+          messageId: null,
+        };
+      });
+      if (skillFragments.length === 0) return prepared;
+      const fragments = [...prepared.fragments, ...skillFragments];
+      return {
+        ...prepared,
+        fragments,
+        usageEvents: [
+          ...prepared.usageEvents,
+          this.recordContextUsage(taskId, turnId, aggregateContextUsage(fragments)),
+        ],
+      };
+    })();
   }
 
   createIntelligenceStep(input: {
@@ -7096,11 +9230,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.close();
   }
 
-  private startTurnInTransaction(taskId: string, text: string): StartedTurn {
+  private startTurnInTransaction(
+    taskId: string,
+    text: string,
+    skills: readonly PersistedTurnSkill[] = [],
+  ): StartedTurn {
     const now = new Date().toISOString();
     const turnId = randomUUID();
-    const runtimeKind = this.getRuntime();
-    const model = this.getModel();
+    const parsedSkills = validatePersistedTurnSkills(skills);
+    const taskSelection = this.getTaskModelSelection(taskId);
+    const explicitRuntime =
+      taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+    const runtimeKind = explicitRuntime?.runtimeKind ?? this.getRuntime();
+    const model = explicitRuntime?.model ?? this.getModel();
+    const modelSelection = taskSelection ?? modelSelectionForRuntime(runtimeKind, model);
     const userMessage = chatMessageSchema.parse({
       id: randomUUID(),
       taskId,
@@ -7117,10 +9260,43 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare(
         `INSERT INTO turns(
-          id, task_id, user_message_id, state, seq, runtime_kind, model, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+          id, task_id, user_message_id, state, seq, runtime_kind, model,
+          connection_id, requested_provider, requested_model, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(turnId, taskId, userMessage.id, 'queued', runtimeKind, model, now, now);
+      .run(
+        turnId,
+        taskId,
+        userMessage.id,
+        'queued',
+        runtimeKind,
+        model,
+        modelSelection.connectionId,
+        modelSelection.requestedProvider,
+        modelSelection.requestedModel,
+        now,
+        now,
+      );
+    const insertSkill = this.db.prepare(
+      `INSERT INTO turn_skill_bindings(
+         turn_id, ordinal, source, skill_id, digest, kind,
+         name, description, content, package_path
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    parsedSkills.forEach((skill, index) =>
+      insertSkill.run(
+        turnId,
+        index + 1,
+        skill.selection.ref.source,
+        skill.selection.ref.skillId,
+        skill.selection.ref.digest,
+        skill.selection.kind,
+        skill.name,
+        skill.description,
+        skill.content,
+        skill.packagePath,
+      ),
+    );
     this.insertAcceptanceContract(
       createInitialAcceptanceContract({
         taskId,
@@ -7138,6 +9314,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       text,
       runtimeKind,
       model,
+      modelSelection,
+      skills: parsedSkills,
       event,
       ...(renamedTask === null ? {} : { renamedTask }),
     };
@@ -7166,7 +9344,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare("UPDATE tasks SET title = ?, title_source = 'auto', updated_at = ? WHERE id = ?")
       .run(derived, now, taskId);
-    return toTask(this.getTaskRow(taskId));
+    return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
   }
 
   private attachBackgroundCompletionsInTransaction(
@@ -7455,7 +9633,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .all(taskId) as QueueRow[]
     ).map((row) => ({
       ordinal: row.ordinal,
-      text: (JSON.parse(row.payload_json) as { text: string }).text,
+      ...(() => {
+        const payload = parseQueuedPayload(row.payload_json);
+        return {
+          text: payload.text,
+          ...(payload.skills.length === 0
+            ? {}
+            : { skills: payload.skills.map((skill) => skill.selection) }),
+        };
+      })(),
     }));
   }
 
@@ -7686,7 +9872,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare(`UPDATE tasks SET ${column} = ?, updated_at = ? WHERE id = ?`)
       .run(value, new Date().toISOString(), taskId);
     if (result.changes !== 1) throw new NotFoundError('Task not found');
-    return toTask(this.getTaskRow(taskId));
+    return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
   }
 
   private updateTurn(turnId: string, state: TurnState): void {
@@ -7700,6 +9886,52 @@ export class SqlitePersistenceClient implements PersistenceClient {
       TaskRow | undefined;
     if (row === undefined) throw new NotFoundError('Task not found');
     return row;
+  }
+
+  private hasConversation(taskId: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 AS present FROM messages WHERE task_id = ? AND author = 'user' LIMIT 1")
+        .get(taskId) !== undefined
+    );
+  }
+
+  private updateAgentModelSelectionInTransaction(
+    agentId: string,
+    selection: ModelSelection,
+    runtimeKind: RuntimeKind,
+    now: string,
+  ): void {
+    const current = this.getAgent(agentId);
+    const agentUpdate = this.db
+      .prepare(
+        `UPDATE agents
+         SET connection_id = ?, requested_provider = ?, requested_model = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        selection.connectionId,
+        selection.requestedProvider,
+        selection.requestedModel,
+        now,
+        current.id,
+      );
+    const threadUpdate = this.db
+      .prepare(
+        `UPDATE agent_threads
+         SET runtime_kind = ?, connection_id = ?, requested_provider = ?, requested_model = ?,
+             revision = revision + 1, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        runtimeKind,
+        selection.connectionId,
+        selection.requestedProvider,
+        selection.requestedModel,
+        now,
+        current.threadId,
+      );
+    if (agentUpdate.changes !== 1 || threadUpdate.changes !== 1) throw new TeamConflictError();
   }
 
   private getAgent(agentId: string): AgentRecord {
@@ -7720,11 +9952,55 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toTeamMessage(row);
   }
 
-  private getTeamTask(taskId: string): TeamTaskRecord {
+  getTeamTask(taskId: string): TeamTaskRecord {
     const row = this.db.prepare('SELECT * FROM team_tasks WHERE id = ?').get(taskId) as
       TeamTaskRow | undefined;
     if (row === undefined) throw new NotFoundError('Team task not found');
     return toTeamTask(row);
+  }
+
+  private getTeamV2Activity(activityId: string): TeamV2ActivityRecord {
+    const row = this.db
+      .prepare('SELECT * FROM team_v2_activity_events WHERE id = ?')
+      .get(activityId) as TeamV2ActivityRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team activity not found');
+    return toTeamV2Activity(row);
+  }
+
+  private toTeamExecution(row: TeamExecutionRow): TeamExecutionRecord {
+    const instruction = this.db
+      .prepare(
+        `SELECT * FROM team_execution_instructions
+         WHERE execution_id = ? AND revision = ?`,
+      )
+      .get(row.id, row.instruction_revision) as TeamInstructionRow | undefined;
+    if (instruction === undefined)
+      throw new Error('Team execution instruction revision is missing');
+    return {
+      id: row.id,
+      teamId: row.team_id,
+      assigneeAgentId: row.assignee_agent_id,
+      createdByAgentId: row.created_by_agent_id,
+      state: row.state,
+      instruction: {
+        revision: instruction.revision,
+        content: instruction.content,
+        updatedAt: instruction.created_at,
+      },
+      queueOrdinal: row.queue_ordinal,
+      queueReason: row.queue_reason,
+      modelSelection: {
+        connectionId: row.connection_id,
+        requestedProvider: row.requested_provider,
+        requestedModel: row.requested_model,
+      },
+      revision: row.revision,
+      assignedAt: row.assigned_at,
+      queuedAt: row.queued_at,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   private getBudgetReservation(id: string): TeamBudgetReservationRecord {
@@ -7878,7 +10154,63 @@ export class AcceptanceEvidenceMissingError extends Error {
   }
 }
 
-function toTask(row: TaskRow): TaskSummary {
+function toTurnSkillSelection(row: SkillBindingIdentityRow): TurnSkillSelection {
+  return {
+    kind: row.kind,
+    ref: {
+      source: row.source,
+      skillId: row.skill_id,
+      digest: row.digest,
+    },
+  };
+}
+
+function validatePersistedTurnSkills(skills: readonly PersistedTurnSkill[]): PersistedTurnSkill[] {
+  const selections = turnSkillSelectionsSchema.parse(skills.map((skill) => skill.selection));
+  return skills.map((skill, index) => {
+    if (
+      typeof skill.name !== 'string' ||
+      skill.name.length < 1 ||
+      skill.name.length > 200 ||
+      typeof skill.description !== 'string' ||
+      skill.description.length < 1 ||
+      skill.description.length > 2_000 ||
+      typeof skill.content !== 'string' ||
+      skill.content.length < 1 ||
+      skill.content.length > 40_000 ||
+      typeof skill.packagePath !== 'string' ||
+      !isAbsolute(skill.packagePath) ||
+      skill.packagePath.length > 4_096
+    )
+      throw new Error('Resolved Skill payload is invalid');
+    return {
+      selection: selections[index]!,
+      name: skill.name,
+      description: skill.description,
+      content: skill.content,
+      packagePath: skill.packagePath,
+    };
+  });
+}
+
+function parseQueuedPayload(payloadJson: string): {
+  text: string;
+  skills: PersistedTurnSkill[];
+} {
+  const parsed: unknown = JSON.parse(payloadJson);
+  if (typeof parsed !== 'object' || parsed === null) throw new Error('Queued input is invalid');
+  const value = parsed as { text?: unknown; skills?: unknown };
+  if (typeof value.text !== 'string' || value.text.trim() === '' || value.text.length > 100_000)
+    throw new Error('Queued input text is invalid');
+  if (value.skills === undefined) return { text: value.text, skills: [] };
+  if (!Array.isArray(value.skills)) throw new Error('Queued Skill payload is invalid');
+  return {
+    text: value.text,
+    skills: validatePersistedTurnSkills(value.skills as PersistedTurnSkill[]),
+  };
+}
+
+function toTask(row: TaskRow, hasConversation: boolean): TaskSummary {
   return taskSummarySchema.parse({
     id: row.id,
     title: row.title,
@@ -7887,6 +10219,36 @@ function toTask(row: TaskRow): TaskSummary {
     goal: row.goal,
     workspacePath: row.workspace_path,
     localOnly: row.local_only === 1,
+    hasConversation,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {
+  return providerConnectionSchema.parse({
+    id: row.id,
+    providerId: row.provider_id,
+    runtimeKind: row.runtime_kind satisfies ProviderRuntimeKind,
+    displayName: row.display_name,
+    enabled: row.enabled === 1,
+    secretReference: row.secret_reference,
+    verification: {
+      status: row.verification_status,
+      verifiedAt: row.verified_at,
+      expiresAt: row.verification_expires_at,
+      message: row.verification_message,
+    },
+    rateLimit: {
+      mode: row.rate_limit_mode,
+      maxConcurrentRequests: row.max_concurrent_requests,
+      requestsPerMinute: row.requests_per_minute,
+      tokensPerMinute: row.tokens_per_minute,
+      lastObservedRateLimitHeaders:
+        row.last_observed_rate_limit_headers_json === null
+          ? null
+          : (JSON.parse(row.last_observed_rate_limit_headers_json) as Record<string, string>),
+    },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -7898,7 +10260,8 @@ function toTeam(row: TeamRow): TeamRecord {
     taskId: row.task_id,
     state: row.state,
     leaderAgentId: row.leader_agent_id,
-    budget: JSON.parse(row.budget_json) as Record<string, unknown>,
+    budget: JSON.parse(row.budget_json) as Record<string, PersistedJsonValue>,
+    policy: assertTeamPolicy(JSON.parse(row.policy_json) as TeamPolicy),
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -7923,9 +10286,55 @@ function toAgent(row: AgentRow): AgentRecord {
     writeCapable: row.write_capable === 1,
     currentActivity: row.current_activity,
     runtimeKind: row.runtime_kind,
+    modelSelection:
+      readCanonicalModelSelection({
+        connectionId: row.connection_id,
+        requestedProvider: row.requested_provider,
+        requestedModel: row.requested_model,
+      }) ?? modelSelectionForRuntime(row.runtime_kind, row.requested_model ?? 'auto'),
+    parentAgentId: row.parent_agent_id,
+    depth: row.depth,
+    canDelegate: row.can_delegate === 1,
+    managerPolicy:
+      row.manager_policy_json === null
+        ? null
+        : (JSON.parse(row.manager_policy_json) as ManagerPolicy),
+    blueprintRoleKey: row.blueprint_role_key,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function toTurnModelIdentity(row: TurnRow): TurnModelIdentity {
+  return {
+    selection:
+      readCanonicalModelSelection({
+        connectionId: row.connection_id,
+        requestedProvider: row.requested_provider,
+        requestedModel: row.requested_model,
+      }) ?? modelSelectionForRuntime(row.runtime_kind, row.model),
+    resolution:
+      row.resolution_json === null
+        ? {
+            resolvedProvider: row.resolved_provider,
+            resolvedModel: row.resolved_model,
+          }
+        : executionResolutionSchema.parse(JSON.parse(row.resolution_json)),
+  };
+}
+
+function readCanonicalModelSelection(input: {
+  connectionId: string | null;
+  requestedProvider: string | null;
+  requestedModel: string | null;
+}): ModelSelection | null {
+  if (
+    input.connectionId === null ||
+    input.requestedProvider === null ||
+    input.requestedModel === null
+  )
+    return null;
+  return modelSelectionSchema.parse(input);
 }
 
 function toTeamBudgetReservation(row: TeamBudgetReservationRow): TeamBudgetReservationRecord {
@@ -7981,6 +10390,8 @@ function toTeamMessage(row: TeamMessageRow): TeamMessageRecord {
     seq: row.seq,
     state: row.state,
     content: row.content,
+    executionId: row.execution_id,
+    attemptId: row.attempt_id,
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -8004,6 +10415,53 @@ function toTeamTask(row: TeamTaskRow): TeamTaskRecord {
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toTeamAttempt(row: TeamAttemptRow): TeamAttemptRecord {
+  return {
+    id: row.id,
+    executionId: row.execution_id,
+    ordinal: row.ordinal,
+    state: row.state,
+    instructionRevision: row.instruction_revision,
+    modelSelection: {
+      connectionId: row.connection_id,
+      requestedProvider: row.requested_provider,
+      requestedModel: row.requested_model,
+    },
+    providerCallOrdinal: row.provider_call_ordinal,
+    terminalReason: row.terminal_reason,
+    resolution:
+      row.resolution_json === null
+        ? {
+            resolvedProvider: row.resolved_provider,
+            resolvedModel: row.resolved_model,
+          }
+        : executionResolutionSchema.parse(JSON.parse(row.resolution_json)),
+    providerUsage:
+      row.provider_usage_json === null
+        ? null
+        : normalizedProviderUsageSchema.parse(JSON.parse(row.provider_usage_json)),
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toTeamV2Activity(row: TeamV2ActivityRow): TeamV2ActivityRecord {
+  return {
+    id: row.id,
+    teamId: row.team_id,
+    seq: row.seq,
+    type: row.type,
+    actorAgentId: row.actor_agent_id,
+    subjectAgentId: row.subject_agent_id,
+    executionId: row.execution_id,
+    attemptId: row.attempt_id,
+    payload: JSON.parse(row.payload_json) as unknown,
+    recordedAt: row.recorded_at,
   };
 }
 

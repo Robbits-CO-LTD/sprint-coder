@@ -37,6 +37,7 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
       data.teamMcp,
       data.effort,
       data.writeScope,
+      data.skills ?? [],
     );
   } else if (data.type === 'cancel') {
     adapter.cancel(data.turnId);

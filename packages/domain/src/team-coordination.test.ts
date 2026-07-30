@@ -9,9 +9,7 @@ import {
   assertDeliveryRetryAllowed,
   assertEnvelopeMatchesClaims,
   assertReservationWithinCap,
-  assertSpawnAuthority,
   assertTeamMessageRate,
-  assertWorkerCeilingForbidsSpawn,
   buildTeamEnvelope,
   teamDeliveryId,
   transitionBudgetReservation,
@@ -139,24 +137,6 @@ describe('team budget domain', () => {
   });
 });
 
-describe('spawn authority', () => {
-  it('forbids workers from requesting spawns', () => {
-    expect(() => assertSpawnAuthority('worker')).toThrow(
-      'Workers cannot spawn sub-workers: max worker depth is 1',
-    );
-    expect(() => assertSpawnAuthority('leader')).not.toThrow();
-  });
-
-  it('requires worker capability ceilings to forbid further spawning', () => {
-    expect(() =>
-      assertWorkerCeilingForbidsSpawn({ entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 }),
-    ).not.toThrow();
-    expect(() =>
-      assertWorkerCeilingForbidsSpawn({ entries: [], maxWorkerDepth: 1, maxConcurrentWorkers: 0 }),
-    ).toThrow('maxWorkerDepth must be 0');
-  });
-});
-
 describe('team message rate limit', () => {
   it('exposes the default limit constants', () => {
     expect(TEAM_MESSAGE_RATE_LIMIT.limit).toBe(30);
@@ -270,15 +250,18 @@ describe('team envelope', () => {
     );
   });
 
-  it('rejects leader-to-leader and worker-to-worker routing', () => {
+  it('rejects leader-to-leader routing and permits a Worker direct envelope', () => {
     expect(() =>
       buildTeamEnvelope({ ...base, sourceKind: 'leader', targetKind: 'leader' }),
-    ).toThrow('must be routed between the leader and a worker');
+    ).toThrow('multiple Leaders');
+    expect(
+      buildTeamEnvelope({ ...base, sourceKind: 'worker', targetKind: 'worker' }),
+    ).toMatchObject({ sourceKind: 'worker', targetKind: 'worker' });
   });
 
   it('rejects a source and target that are the same agent', () => {
     expect(() => buildTeamEnvelope({ ...base, targetAgentId: base.sourceAgentId })).toThrow(
-      'source and target agents must differ',
+      'source and target Agents must differ',
     );
   });
 

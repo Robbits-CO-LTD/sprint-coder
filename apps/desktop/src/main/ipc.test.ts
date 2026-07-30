@@ -1,23 +1,38 @@
 import { describe, expect, it } from 'vitest';
-import type { z } from 'zod';
+import { z } from 'zod';
 import {
   IPC_CHANNELS,
+  anthropicConnectionCreateInputSchema,
   approvalResolveInputSchema,
   canvasViewSaveInputSchema,
   commandEnvelopeSchema,
   commandOutputPageInputSchema,
   commandOutputTailInputSchema,
+  connectionIdSchema,
   emptyPayloadSchema,
-  permissionSetInputSchema,
-  runtimeModelSetInputSchema,
-  runtimeEffortSetInputSchema,
+  geminiConnectionCreateInputSchema,
   generatedImageRefSchema,
+  modelCatalogQueryInputSchema,
+  modelCatalogSelectionSetInputSchema,
+  openAIConnectionCreateInputSchema,
+  openRouterConnectionCreateInputSchema,
+  permissionSetInputSchema,
+  providerConnectionRateLimitLowerInputSchema,
+  providerProfileConnectionCreateInputSchema,
   runtimeCodexEffortSetInputSchema,
+  runtimeEffortSetInputSchema,
+  runtimeModelSetInputSchema,
   runtimeSetInputSchema,
   skillCandidateInputSchema,
+  skillDraftCreateInputSchema,
+  skillDraftIdInputSchema,
+  skillDraftInstallInputSchema,
   skillEnabledInputSchema,
   skillImportInputSchema,
   skillInstalledInputSchema,
+  createdSkillEnabledInputSchema,
+  createdSkillMutationInputSchema,
+  taskSkillSelectionInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -28,6 +43,9 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   teamHireWorkerInputSchema,
+  teamPolicySchema,
+  teamPolicyUpdateInputSchema,
+  teamModelResearchSettingsSetInputSchema,
   teamSendMessageInputSchema,
   teamWorkerRefSchema,
   turnCancelInputSchema,
@@ -36,8 +54,36 @@ import {
   turnSteerInputSchema,
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
+  xAIConnectionCreateInputSchema,
 } from '@sprint-coder/contracts';
-import { clampCodexEffort, isTrustedIpcSender } from './ipc';
+import {
+  clampCodexEffort,
+  invalidModelUserMessage,
+  isTrustedIpcSender,
+  shouldBlockProviderLeaderCompletion,
+  shouldFailRequiredTeamTurn,
+} from './ipc';
+
+describe('Provider Team completion and model errors', () => {
+  it('does not mislabel an external Provider model error as a Codex CLI error', () => {
+    expect(invalidModelUserMessage('provider')).toBe(
+      '選択したモデルは現在のProvider Connectionで利用できません。',
+    );
+    expect(invalidModelUserMessage('provider')).not.toContain('Codex CLI');
+  });
+
+  it('blocks only Team Leader completion while Team work remains unfinished', () => {
+    expect(shouldBlockProviderLeaderCompletion(true, true)).toBe(true);
+    expect(shouldBlockProviderLeaderCompletion(true, false)).toBe(false);
+    expect(shouldBlockProviderLeaderCompletion(false, true)).toBe(false);
+  });
+
+  it('fails closed when an explicit Team turn completes without creating a Worker', () => {
+    expect(shouldFailRequiredTeamTurn(true, 0)).toBe(true);
+    expect(shouldFailRequiredTeamTurn(true, 1)).toBe(false);
+    expect(shouldFailRequiredTeamTurn(false, 0)).toBe(false);
+  });
+});
 
 // Adversarial IPC hardening (Phase 7, IMPLEMENTATION_PLAN §10.4, NFR-SEC-03). Two independent
 // properties are proven here without needing a live BrowserWindow/WebContents:
@@ -178,12 +224,34 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.settingsSkillsUpdate]: skillImportInputSchema,
   [IPC_CHANNELS.settingsSkillsSetEnabled]: skillEnabledInputSchema,
   [IPC_CHANNELS.settingsSkillsRemove]: skillInstalledInputSchema,
+  [IPC_CHANNELS.skillsList]: emptyPayloadSchema,
+  [IPC_CHANNELS.skillsGetDraftSelection]: taskIdPayloadSchema,
+  [IPC_CHANNELS.skillsSetDraftSelection]: taskSkillSelectionInputSchema,
+  [IPC_CHANNELS.skillsListDrafts]: emptyPayloadSchema,
+  [IPC_CHANNELS.skillsCreateDraft]: skillDraftCreateInputSchema,
+  [IPC_CHANNELS.skillsInstallDraft]: skillDraftInstallInputSchema,
+  [IPC_CHANNELS.skillsDiscardDraft]: skillDraftIdInputSchema,
+  [IPC_CHANNELS.skillsRemoveCreated]: createdSkillMutationInputSchema,
+  [IPC_CHANNELS.skillsSetCreatedEnabled]: createdSkillEnabledInputSchema,
+  [IPC_CHANNELS.skillsExportCreated]: createdSkillMutationInputSchema,
   [IPC_CHANNELS.filesList]: taskIdPayloadSchema,
   [IPC_CHANNELS.filesOpen]: filePathPayloadSchema,
   [IPC_CHANNELS.filesSave]: fileSaveInputSchema,
   [IPC_CHANNELS.imagesList]: taskIdPayloadSchema,
   [IPC_CHANNELS.imagesRead]: generatedImageRefSchema,
   [IPC_CHANNELS.settingsSetCodexEffort]: runtimeCodexEffortSetInputSchema,
+  [IPC_CHANNELS.modelsCatalogQuery]: modelCatalogQueryInputSchema,
+  [IPC_CHANNELS.modelsSetSelection]: modelCatalogSelectionSetInputSchema,
+  [IPC_CHANNELS.providersListConnections]: emptyPayloadSchema,
+  [IPC_CHANNELS.providersListProfiles]: emptyPayloadSchema,
+  [IPC_CHANNELS.providersCreateOpenAIConnection]: openAIConnectionCreateInputSchema,
+  [IPC_CHANNELS.providersCreateOpenRouterConnection]: openRouterConnectionCreateInputSchema,
+  [IPC_CHANNELS.providersCreateAnthropicConnection]: anthropicConnectionCreateInputSchema,
+  [IPC_CHANNELS.providersCreateGeminiConnection]: geminiConnectionCreateInputSchema,
+  [IPC_CHANNELS.providersCreateXAIConnection]: xAIConnectionCreateInputSchema,
+  [IPC_CHANNELS.providersCreateProfileConnection]: providerProfileConnectionCreateInputSchema,
+  [IPC_CHANNELS.providersVerifyConnection]: z.object({ connectionId: connectionIdSchema }).strict(),
+  [IPC_CHANNELS.providersLowerRateLimits]: providerConnectionRateLimitLowerInputSchema,
   [IPC_CHANNELS.permissionsGet]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsListAutoDecisions]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsSet]: permissionSetInputSchema,
@@ -204,6 +272,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.tasksSetDraft]: taskDraftInputSchema,
   [IPC_CHANNELS.teamsPromote]: taskIdPayloadSchema,
   [IPC_CHANNELS.teamsGet]: taskIdPayloadSchema,
+  [IPC_CHANNELS.teamsUpdatePolicy]: teamPolicyUpdateInputSchema,
   [IPC_CHANNELS.teamsHireWorker]: teamHireWorkerInputSchema,
   [IPC_CHANNELS.teamsSend]: teamSendMessageInputSchema,
   [IPC_CHANNELS.teamsStopWorker]: teamWorkerRefSchema,
@@ -214,6 +283,10 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.teamsSaveCanvasView]: canvasViewSaveInputSchema,
   [IPC_CHANNELS.workspaceGet]: taskIdPayloadSchema,
   [IPC_CHANNELS.workspaceSelect]: taskIdPayloadSchema,
+  [IPC_CHANNELS.settingsGetTeamModelResearch]: emptyPayloadSchema,
+  [IPC_CHANNELS.settingsSetTeamModelResearch]: teamModelResearchSettingsSetInputSchema,
+  [IPC_CHANNELS.settingsGetDefaultTeamPolicy]: emptyPayloadSchema,
+  [IPC_CHANNELS.settingsSetDefaultTeamPolicy]: teamPolicySchema,
   [IPC_CHANNELS.turnsStart]: turnStartInputSchema,
   [IPC_CHANNELS.turnsQueue]: turnQueueInputSchema,
   [IPC_CHANNELS.turnsSteer]: turnSteerInputSchema,

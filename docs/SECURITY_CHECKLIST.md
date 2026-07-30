@@ -45,7 +45,7 @@ Source: `apps/desktop/forge.config.ts:49-58` (`@electron/fuses` v1.8.0 via `@ele
 | `EnableNodeOptionsEnvironmentVariable` | `false` | Prevents an attacker (or a misconfigured launch environment) from injecting arbitrary Node.js CLI flags (e.g. `--require`, `--inspect`) into the packaged app via the `NODE_OPTIONS` environment variable. |
 | `EnableNodeCliInspectArguments` | `false` | Disables `--inspect`/`--inspect-brk`-style debugger attachment to the packaged app, closing a remote-debugging-based code-execution/data-exfiltration vector. |
 | `EnableEmbeddedAsarIntegrityValidation` | `true` | Verifies the `app.asar` archive's contents against embedded hashes at load time, so a tampered/patched packaged app fails closed instead of silently running modified code. |
-| `OnlyLoadAppFromAsar` | `true` | Refuses to load app code from an unpacked/sibling directory that isn't the verified `app.asar` (paired with `asar.unpack: 'sprint_coder_native_safe_fs.node'` in `packagerConfig`, `forge.config.ts:36` — only the native addon binary is allowed to live outside the archive, and only because native `.node` files cannot be loaded from inside an asar at all). |
+| `OnlyLoadAppFromAsar` | `true` | Refuses to load app code from an unpacked/sibling directory that isn't the verified `app.asar` (paired with `asar.unpack: '*.node'` in `packagerConfig` — only native addon binaries are allowed outside the archive, because Electron cannot load `.node` files from inside an asar). |
 
 No fuse here is left at an insecure default; all five available V1 fuses are explicitly pinned. This
 list was produced by reading `forge.config.ts` directly (Electronegativity does not fully evaluate

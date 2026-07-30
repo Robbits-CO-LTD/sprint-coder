@@ -8,11 +8,13 @@ import {
   type MessagePortMain,
 } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, relative as relativePath, resolve as resolvePath } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join, relative as relativePath, resolve as resolvePath } from 'node:path';
 import { workspaceMutationBinding } from './path-guard';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
+  anthropicConnectionCreateInputSchema,
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
@@ -33,15 +35,41 @@ import {
   fileOpenResultSchema,
   fileSaveInputSchema,
   fileSaveResultSchema,
+  geminiConnectionCreateInputSchema,
   type FileChange,
   permissionSetInputSchema,
   permissionSettingsSchema,
+  modelCatalogQueryInputSchema,
+  modelCatalogQueryResultSchema,
+  modelCatalogSelectionSetInputSchema,
+  modelSelectionSchema,
+  type ModelSelection,
+  type NormalizedProviderUsage,
+  openAIConnectionCreateInputSchema,
+  openRouterConnectionCreateInputSchema,
+  providerConnectionSchema,
+  providerConnectionRateLimitLowerInputSchema,
+  providerProfileConnectionCreateInputSchema,
+  providerProfileSchema,
+  connectionIdSchema,
+  createdSkillMutationInputSchema,
+  createdSkillEnabledInputSchema,
   runtimeSetInputSchema,
+  runtimeSettingsGetInputSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeSettingsSchema,
+  teamModelResearchSettingsSchema,
+  teamModelResearchSettingsSetInputSchema,
+  teamBlueprintSchema,
   skillCandidateInputSchema,
+  skillCatalogSchema,
+  skillCatalogItemSchema,
+  skillDraftSchema,
+  skillDraftCreateInputSchema,
+  skillDraftInstallInputSchema,
+  skillDraftIdInputSchema,
   skillEnabledInputSchema,
   skillImportInputSchema,
   skillImportResultSchema,
@@ -61,21 +89,26 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
+  taskSkillSelectionInputSchema,
   teamDetailSchema,
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
+  teamPolicyUpdateInputSchema,
+  teamPolicySchema,
   teamSendMessageInputSchema,
   teamSummarySchema,
   teamWorkerRefSchema,
   workerSummarySchema,
   turnCancelInputSchema,
   turnEventSchema,
+  xAIConnectionCreateInputSchema,
   turnQueueInputSchema,
   turnQueueResultSchema,
   turnSnapshotSchema,
   turnStartInputSchema,
   turnStartResultSchema,
+  turnSkillSelectionsSchema,
   turnSteerInputSchema,
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
@@ -83,7 +116,11 @@ import {
   type CommandEnvelope,
   type CommandResult,
   type AccessPreset,
+  type CanonicalProviderEvent,
   type CodexModelOption,
+  type ProviderExecutionRequest,
+  type ProviderMessageToolCall,
+  type ProviderModel,
   type PublicError,
   type RuntimeKind,
   type TurnEvent,
@@ -118,6 +155,7 @@ import {
 
 /** sha256 of nothing, used when a refusal has no file to hash. */
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
+const MAX_PROVIDER_LEADER_ROUNDS = 32;
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
@@ -129,15 +167,31 @@ import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lea
 import {
   authorizeClaudeProviderEgress,
   authorizeCodexProviderEgress,
+  authorizeOfficialApiProviderEgress,
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
 } from './provider-egress';
 import { ReasoningBatcher } from './reasoning-batcher';
 import { createStreamingSecretRedactor } from './secret-redactor';
+import { secureLogger } from './secure-logger';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
-import { RuntimeHostTeamWorkerRuntime, chooseWorkerRuntime } from './team-worker-runtime';
-import { isTeamScenarioInput, LEADER_MCP_SYSTEM_PROMPT } from './team-tools';
+import {
+  RuntimeHostTeamWorkerRuntime,
+  buildInheritedWorkerContext,
+  chooseWorkerRuntime,
+} from './team-worker-runtime';
+import {
+  isTeamScenarioInput,
+  LEADER_MCP_SYSTEM_PROMPT,
+  LEADER_PROVIDER_TOOLS,
+  MANAGER_PROVIDER_TOOLS,
+  MANAGER_MCP_SYSTEM_PROMPT,
+  WORKER_MCP_SYSTEM_PROMPT,
+  WORKER_PROVIDER_TOOLS,
+  executeTeamTool,
+  type ExecuteTeamToolOptions,
+} from './team-tools';
 import {
   attachBuiltinTeamSkill,
   BUILTIN_TEAM_SKILL_AUDIT,
@@ -146,25 +200,61 @@ import {
   verifyBuiltinTeamSkillAcceptance,
   type TeamSkillResolutionAudit,
 } from './team-skill';
+import { installBuiltinSkillCreator } from './skill-creator-builtin';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
+import { ModelCatalogService } from './model-catalog-service';
+import { builtinRuntimeForModelSelection, modelSelectionForRuntime } from './connection-identity';
+import { multiProviderModelPickerV2Enabled, settingsWorkspaceV2Enabled } from './feature-flags';
+import {
+  ProviderSecretStorage,
+  ProviderSecretStorageUnavailableError,
+} from './provider-secret-storage';
+import { ElectronProviderSecretCipher } from './electron-provider-secret-cipher';
+import { MainProviderRegistry } from './provider-runtime';
+import { ProviderVerificationService } from './provider-verification';
+import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
+import { OpenRouterCatalogClient } from './openrouter-provider-client';
+import { AnthropicProviderClient, parseAnthropicCredential } from './anthropic-provider-client';
+import { GeminiProviderClient, parseGeminiCredential } from './gemini-provider-client';
+import { XAIProviderClient, parseXAICredential } from './xai-provider-client';
+import { ProviderConnectionService } from './provider-connection-service';
+import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
+import { MainProviderProfileRegistry, parseOpenAICompatibleCredential } from './provider-profile';
+import { BUNDLED_PROVIDER_PROFILES } from './bundled-provider-profiles';
+import { OpenAICompatibleProviderClient } from './openai-compatible-provider-client';
+
+const MODEL_RESEARCH_GUIDANCE = `
+このTeamでは「Worker採用前にモデルをWeb調査」が有効です。各Workerを雇う前に必ず次の順序を守ってください。
+1. team_list_modelsで候補を絞る。
+2. 候補モデルごとに、公式Provider文書または信頼できる一次情報をlive Web検索し、今回の作業への適性、制約、価格または速度に関する確認可能な事実を調べる。
+3. 採用する正確なconnection ID、provider ID、model IDについてteam_record_model_researchを呼び、調査要約と実際に参照したURLを記録する。
+4. その後にだけteam_hire_workerを呼び、modelSelectionReasonへWeb調査の根拠を明示する。
+Web検索できない、または信頼できる根拠が見つからない場合は、そのモデルを推測で採用しないでください。`;
+
+function teamGuidance(base: string, requireModelResearch: boolean): string {
+  return requireModelResearch ? `${base}\n${MODEL_RESEARCH_GUIDANCE}` : base;
+}
 
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
+type ActiveRuntimeKind = RuntimeKind | 'provider';
 
 export class IpcRouter {
   private readonly ports = new Set<PortBinding>();
   private readonly mailbox = new TaskMailbox();
   private readonly mockRuntime: MockRuntimeAdapter;
   private readonly codexRuntime: RuntimeHostClient;
-  private readonly teamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
+  private readonly teamWorkerRuntime: ProviderAwareTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
-  private readonly turnRuntimes = new Map<string, RuntimeKind>();
+  private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
   // The concrete model id the Claude CLI actually resolved for a turn (captured from the
   // stream-json `system/init` event by ClaudeJsonlNormalizer), keyed by turnId until
-  // finishAndAdvance folds it into the outgoing `turn.completed` event. Not persisted — see the
-  // `resolvedModel` doc comment on turnEventSchema.
+  // finishAndAdvance persists it as execution resolution and folds it into the outgoing
+  // `turn.completed` event.
   private readonly resolvedModelByTurn = new Map<string, string>();
+  private readonly resolvedProviderByTurn = new Map<string, string>();
+  private readonly providerAbortByTurn = new Map<string, AbortController>();
   // One reasoning batcher per active turn (issue #17). Keyed by turnId and disposed in
   // finishAndAdvance, so a turn cannot leave a timer behind.
   private readonly reasoningByTurn = new Map<string, ReasoningBatcher>();
@@ -196,19 +286,101 @@ export class IpcRouter {
   private readonly teamEventSeqByTask = new Map<string, number>();
   private readonly teamMcpBridge: TeamMcpBridge;
   private readonly skillSettings: SkillSettingsService;
+  private readonly modelCatalog = new ModelCatalogService();
+  private readonly providerRegistry = new MainProviderRegistry();
+  private readonly providerProfiles = new MainProviderProfileRegistry();
+  private readonly providerVerification: ProviderVerificationService;
+  private readonly providerConnections: ProviderConnectionService;
   private teamSkillReady = false;
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
+  private readonly teamRequiredTurns = new Set<string>();
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
   ) {
+    const providerSecrets = new ProviderSecretStorage(
+      join(app.getPath('userData'), 'provider-secrets'),
+      new ElectronProviderSecretCipher(),
+    );
+    for (const profile of BUNDLED_PROVIDER_PROFILES) this.providerProfiles.register(profile);
+    const compatible = new OpenAICompatibleProviderClient(this.providerProfiles, (connection) => {
+      if (connection.secretReference === null)
+        throw new Error('Provider Profile Connection has no secret reference');
+      return parseOpenAICompatibleCredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'openai_compatible',
+      providerId: null,
+      runtime: compatible,
+    });
+    const openAI = new OpenAIProviderClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('OpenAI Connection has no secret reference');
+      return parseOpenAICredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'openai',
+      runtime: openAI,
+    });
+    const openRouter = new OpenRouterCatalogClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('OpenRouter Connection has no secret reference');
+      return parseOpenAICredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'openrouter',
+      runtime: openRouter,
+    });
+    const anthropic = new AnthropicProviderClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('Anthropic Connection has no secret reference');
+      return parseAnthropicCredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'anthropic',
+      runtime: anthropic,
+    });
+    const gemini = new GeminiProviderClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('Gemini Connection has no secret reference');
+      return parseGeminiCredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'google',
+      runtime: gemini,
+    });
+    const xai = new XAIProviderClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('xAI Connection has no secret reference');
+      return parseXAICredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'xai',
+      runtime: xai,
+    });
+    this.providerVerification = new ProviderVerificationService(
+      this.persistence,
+      this.providerRegistry,
+    );
+    this.providerConnections = new ProviderConnectionService(
+      this.persistence,
+      providerSecrets,
+      undefined,
+      undefined,
+      this.providerProfiles,
+    );
     this.skillSettings = new SkillSettingsService({
       homePath: process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'),
     });
-    this.teamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
+    const cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
       // Real worker execution is opt-in when the selected chat runtime is mock. Runtime probe or
       // policy failures remain explicit and are never replaced with simulated Team output.
       selectRuntime: () =>
@@ -235,13 +407,63 @@ export class IpcRouter {
           now: new Date().toISOString(),
         }).allowed;
       },
+      contextFor: (worker) =>
+        buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId)),
+      writeScopeFor: (worker, workspacePath) =>
+        worker.writeCapable
+          ? resolveWriteScope(
+              this.persistence.getPermissionPolicy(worker.taskId).preset,
+              workspacePath,
+            )
+          : 'read-only',
+      teamMcpFor: (worker, turnId) =>
+        worker.canDelegate
+          ? this.registerManagerMcp(turnId, worker.taskId, worker.id)
+          : this.registerWorkerMcp(turnId, worker.taskId, worker.id),
+      releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
+    });
+    this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
+      fallback: cliTeamWorkerRuntime,
+      verification: this.providerVerification,
+      registry: this.providerRegistry,
+      getConnection: (connectionId) => this.persistence.getProviderConnection(connectionId),
+      authorizeEgress: ({ worker, executionId, providerId, prompt }) =>
+        authorizeOfficialApiProviderEgress(
+          {
+            broker: this.permissionBroker,
+            task: this.persistence.getTask(worker.taskId),
+            turnId: executionId,
+            prompt,
+            context: { fragments: [], usageEvents: [], compacted: false },
+            now: new Date().toISOString(),
+          },
+          providerId,
+        ).allowed,
+      contextFor: (worker) =>
+        buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId)),
+      managerGuidance: MANAGER_MCP_SYSTEM_PROMPT,
+      managerTools: MANAGER_PROVIDER_TOOLS,
+      workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
+      workerTools: WORKER_PROVIDER_TOOLS,
+      executeManagerTool: ({ worker, name, input, reportCursor, modelCatalogAudit }) =>
+        executeTeamTool(this.teamCoordinator, worker.taskId, name, input, {
+          requesterAgentId: worker.id,
+          longPoll: name === 'team_wait_reports',
+          waitReportsCursor: reportCursor,
+          listModelCandidates: (query) => this.listTeamModelCandidates(query),
+          modelCatalogAudit,
+        }),
     });
     this.teamCoordinator = new TeamCoordinator(
       persistence,
       this.teamWorkerRuntime,
       (taskId, detail) => {
-        if (this.teamSubscriptions.has(taskId) && !this.window.isDestroyed()) {
+        if (
+          this.teamSubscriptions.has(taskId) &&
+          !this.window.isDestroyed() &&
+          !this.window.webContents.isDestroyed()
+        ) {
           const seq = (this.teamEventSeqByTask.get(taskId) ?? 0) + 1;
           this.teamEventSeqByTask.set(taskId, seq);
           this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
@@ -254,8 +476,28 @@ export class IpcRouter {
       // Real worker turns run a full provider CLI invocation; the deterministic 10s default is
       // far too tight for that.
       180_000,
+      undefined,
+      (selection, taskId) => this.validateTeamModelSelection(selection, taskId),
+      (taskId) => {
+        const activeTurnId = this.persistence.getActiveTurnId(taskId);
+        if (activeTurnId === null) return null;
+        const teamSkill = this.persistence
+          .getTurnSkills(taskId, activeTurnId)
+          .find(({ selection }) => selection.kind === 'team');
+        if (teamSkill === undefined) return null;
+        const blueprintPath = join(teamSkill.packagePath, 'team', 'blueprint.json');
+        const blueprint = teamBlueprintSchema.parse(
+          JSON.parse(readFileSync(blueprintPath, 'utf8')),
+        );
+        return {
+          selection: teamSkill.selection,
+          name: teamSkill.name,
+          packagePath: teamSkill.packagePath,
+          blueprint,
+        };
+      },
     );
-    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): the socket the real Claude Leader's MCP server
+    // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than
     // lazily on first team turn) means `initialize()` can await it once at app startup; a failed
     // start degrades to `socketPath === null`, which startSelectedRuntime treats as "fall back to
@@ -263,6 +505,15 @@ export class IpcRouter {
     this.teamMcpBridge = new TeamMcpBridge(
       this.teamCoordinator,
       defaultSocketPathFactory(app.getPath('userData')),
+      undefined,
+      (query) => this.listTeamModelCandidates(query),
+      async (input, context) => {
+        const draft = await this.skillSettings
+          .createDraft(skillDraftCreateInputSchema.parse(input))
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        this.publish(this.persistence.recordSkillDraft(context.taskId, context.turnId, draft));
+        return draft;
+      },
     );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
@@ -340,22 +591,27 @@ export class IpcRouter {
     this.handle(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, () => ({
       version: app.getVersion(),
       platform: process.platform,
+      settingsWorkspaceV2: settingsWorkspaceV2Enabled(),
       // Startup recovery outcome (issue #9). Already computed before the window existed — this is
       // just the first path that ever carried it to the renderer.
       recovery: this.persistence.getStartupRecovery(),
     }));
     this.handle(
       IPC_CHANNELS.settingsGetRuntime,
-      emptyPayloadSchema,
+      runtimeSettingsGetInputSchema,
       runtimeSettingsSchema,
-      async () => {
+      async (input) => {
         const [codexCapability, claudeCapability] = await Promise.all([
           this.codexRuntime.probe(),
           this.claudeRuntime.probe(),
         ]);
-        const kind = this.persistence.getRuntime();
+        const taskSelection =
+          input.taskId === undefined ? null : this.persistence.getTaskModelSelection(input.taskId);
+        const taskRuntime =
+          taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+        const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
         const activeCapability = kind === 'claude' ? claudeCapability : codexCapability;
-        const storedModel = this.persistence.getModel();
+        const storedModel = taskRuntime?.model ?? this.persistence.getModel();
         const model = activeCapability.models.some(({ id }) => id === storedModel)
           ? storedModel
           : 'auto';
@@ -377,6 +633,38 @@ export class IpcRouter {
           ),
         };
       },
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetTeamModelResearch,
+      emptyPayloadSchema,
+      teamModelResearchSettingsSchema,
+      () => ({
+        researchBeforeHiring: this.persistence.getTeamModelResearchBeforeHiring(),
+      }),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetTeamModelResearch,
+      teamModelResearchSettingsSetInputSchema,
+      z.undefined(),
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetTeamModelResearch, () =>
+          this.persistence.setTeamModelResearchBeforeHiring(input.researchBeforeHiring),
+        ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetDefaultTeamPolicy,
+      emptyPayloadSchema,
+      teamPolicySchema,
+      () => this.persistence.getDefaultTeamPolicy(),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetDefaultTeamPolicy,
+      teamPolicySchema,
+      z.undefined(),
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetDefaultTeamPolicy, () =>
+          this.persistence.setDefaultTeamPolicy(input),
+        ).value,
     );
     this.handle(IPC_CHANNELS.settingsSkillsScan, emptyPayloadSchema, skillScanResultSchema, () =>
       this.skillSettings.scan().catch((error) => Promise.reject(skillSettingsPublicError(error))),
@@ -426,6 +714,275 @@ export class IpcRouter {
           .remove(input.provider, input.skillId)
           .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
+    this.handle(IPC_CHANNELS.skillsList, emptyPayloadSchema, skillCatalogSchema, () =>
+      this.skillSettings
+        .listCatalog()
+        .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
+      IPC_CHANNELS.skillsGetDraftSelection,
+      taskIdPayloadSchema,
+      turnSkillSelectionsSchema,
+      (input) => this.persistence.getDraftSkillSelections(input.taskId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.skillsSetDraftSelection,
+      taskSkillSelectionInputSchema,
+      z.undefined(),
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.skillsSetDraftSelection, () =>
+          this.persistence.setDraftSkillSelections(input.taskId, input.skills),
+        ).value,
+    );
+    this.handle(IPC_CHANNELS.skillsListDrafts, emptyPayloadSchema, z.array(skillDraftSchema), () =>
+      this.skillSettings.listDrafts(),
+    );
+    this.handle(
+      IPC_CHANNELS.skillsCreateDraft,
+      skillDraftCreateInputSchema,
+      skillDraftSchema,
+      (input) =>
+        this.skillSettings
+          .createDraft(input)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
+      IPC_CHANNELS.skillsInstallDraft,
+      skillDraftInstallInputSchema,
+      skillCatalogItemSchema,
+      (input) =>
+        this.skillSettings
+          .installDraft(input.draftId, input.expectedDigest)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(IPC_CHANNELS.skillsDiscardDraft, skillDraftIdInputSchema, z.undefined(), (input) =>
+      this.skillSettings.discardDraft(input.draftId),
+    );
+    this.handle(
+      IPC_CHANNELS.skillsRemoveCreated,
+      createdSkillMutationInputSchema,
+      z.undefined(),
+      (input) =>
+        this.skillSettings
+          .removeCreated(input.skillId, input.digest)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
+      IPC_CHANNELS.skillsSetCreatedEnabled,
+      createdSkillEnabledInputSchema,
+      z.undefined(),
+      (input) =>
+        this.skillSettings
+          .setCreatedEnabled(input.skillId, input.digest, input.enabled)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
+      IPC_CHANNELS.skillsExportCreated,
+      createdSkillMutationInputSchema,
+      z.string().nullable(),
+      async (input) => {
+        const result = await dialog.showOpenDialog(this.window, {
+          title: `${input.skillId}のExport先を選択`,
+          properties: ['openDirectory', 'createDirectory'],
+        });
+        const destinationParent = result.filePaths[0];
+        if (result.canceled || destinationParent === undefined) return null;
+        return this.skillSettings
+          .exportCreated(input.skillId, input.digest, destinationParent)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.modelsCatalogQuery,
+      modelCatalogQueryInputSchema,
+      modelCatalogQueryResultSchema,
+      async (input) => {
+        await this.refreshModelCatalog();
+        const result = this.modelCatalog.query(input);
+        const runtimeKind = this.persistence.getRuntime();
+        const selection =
+          this.persistence.getTaskModelSelection(input.taskId) ??
+          modelSelectionForRuntime(runtimeKind, this.persistence.getModel());
+        return {
+          ...result,
+          selection,
+          multiProviderModelPickerV2: multiProviderModelPickerV2Enabled(),
+        };
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.providersListConnections,
+      emptyPayloadSchema,
+      z.array(providerConnectionSchema),
+      () => [...this.providerConnections.list()],
+    );
+    this.handle(
+      IPC_CHANNELS.providersListProfiles,
+      emptyPayloadSchema,
+      z.array(providerProfileSchema),
+      () => [...this.providerProfiles.list()],
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateOpenAIConnection,
+      openAIConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateOpenAIConnection,
+          () => this.providerConnections.createOpenAI(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateOpenRouterConnection,
+      openRouterConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateOpenRouterConnection,
+          () => this.providerConnections.createOpenRouter(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateAnthropicConnection,
+      anthropicConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateAnthropicConnection,
+          () => this.providerConnections.createAnthropic(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateGeminiConnection,
+      geminiConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateGeminiConnection,
+          () => this.providerConnections.createGemini(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateXAIConnection,
+      xAIConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateXAIConnection,
+          () => this.providerConnections.createXAI(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateProfileConnection,
+      providerProfileConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateProfileConnection,
+          () => this.providerConnections.createProfile(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.providersVerifyConnection,
+      z.object({ connectionId: connectionIdSchema }).strict(),
+      providerConnectionSchema,
+      (input) =>
+        this.providerVerification.verify(
+          this.persistence.getProviderConnection(input.connectionId),
+        ),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersLowerRateLimits,
+      providerConnectionRateLimitLowerInputSchema,
+      providerConnectionSchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.providersLowerRateLimits, () =>
+          this.persistence.lowerProviderConnectionRateLimits(input.connectionId, {
+            ...(input.maxConcurrentRequests === undefined
+              ? {}
+              : { maxConcurrentRequests: input.maxConcurrentRequests }),
+            ...(input.requestsPerMinute === undefined
+              ? {}
+              : { requestsPerMinute: input.requestsPerMinute }),
+            ...(input.tokensPerMinute === undefined
+              ? {}
+              : { tokensPerMinute: input.tokensPerMinute }),
+          }),
+        ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.modelsSetSelection,
+      modelCatalogSelectionSetInputSchema,
+      modelSelectionSchema,
+      async (input, event, envelope) => {
+        const runtime = builtinRuntimeForModelSelection(input.selection);
+        if (runtime === null) {
+          if (input.selection.connectionId === null || input.selection.requestedModel === null)
+            throw new InvalidModelError('provider');
+          const connection = await this.providerVerification.requireVerifiedForExecution(
+            input.selection.connectionId,
+          );
+          if (connection.providerId !== input.selection.requestedProvider || !connection.enabled)
+            throw new InvalidModelError('provider');
+          const models = await this.providerRegistry
+            .resolve(connection)
+            .listModels(connection, new AbortController().signal);
+          if (!models.some(({ modelId }) => modelId === input.selection.requestedModel))
+            throw new InvalidModelError('provider');
+        } else {
+          const capability = await this.runtimeFor(runtime.runtimeKind).probe();
+          if (!capability.available) throw new RuntimeUnavailableError(runtime.runtimeKind);
+          if (!capability.models.some(({ id }) => id === runtime.model))
+            throw new InvalidModelError(runtime.runtimeKind);
+        }
+        return this.runMutation(
+          event,
+          envelope,
+          input.taskId,
+          IPC_CHANNELS.modelsSetSelection,
+          () => {
+            if (runtime !== null) {
+              this.persistence.setRuntime(runtime.runtimeKind);
+              this.persistence.setModel(runtime.model);
+            }
+            return (
+              this.persistence.setTaskModelSelection(input.taskId, input.selection) ??
+              input.selection
+            );
+          },
+        ).value;
+      },
+    );
     this.handleMutation(
       IPC_CHANNELS.settingsSetRuntime,
       runtimeSetInputSchema,
@@ -435,8 +992,19 @@ export class IpcRouter {
           const capability = await this.runtimeFor(input.kind).probe();
           if (!capability.available) throw new RuntimeUnavailableError(input.kind);
         }
-        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetRuntime, () =>
-          this.persistence.setRuntime(input.kind),
+        return this.runMutation(
+          event,
+          envelope,
+          input.taskId ?? '',
+          IPC_CHANNELS.settingsSetRuntime,
+          () => {
+            this.persistence.setRuntime(input.kind);
+            if (input.taskId !== undefined)
+              this.persistence.setTaskModelSelection(
+                input.taskId,
+                modelSelectionForRuntime(input.kind, this.persistence.getModel()),
+              );
+          },
         ).value;
       },
     );
@@ -448,23 +1016,40 @@ export class IpcRouter {
         // Model membership is validated against the currently *active* Runtime kind's own
         // capability list — Codex and Claude have disjoint model spaces (Main-side scoping per
         // the ADR), so a Codex model id can never leak into a Claude turn or vice versa.
-        const kind = this.persistence.getRuntime();
+        const taskSelection =
+          input.taskId === undefined ? null : this.persistence.getTaskModelSelection(input.taskId);
+        const taskRuntime =
+          taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+        const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
         const runtimeKind = kind === 'claude' ? 'claude' : 'codex';
         const capability = await this.runtimeFor(runtimeKind).probe();
         if (!capability.available) throw new RuntimeUnavailableError(runtimeKind);
         if (!capability.models.some(({ id }) => id === input.model))
           throw new InvalidModelError(runtimeKind);
-        return this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetModel, () => {
-          this.persistence.setModel(input.model);
-          // Models advertise different reasoning levels, so a model change can strand the stored
-          // Codex level (Sol advertises `ultra`, GPT-5.5 does not). Re-clamp and persist here so
-          // the synchronous turn dispatch can trust `getCodexEffort()` without a probe — leaving
-          // it stale would fail the next turn outright rather than degrade.
-          if (runtimeKind === 'codex')
-            this.persistence.setCodexEffort(
-              clampCodexEffort(this.persistence.getCodexEffort(), capability.models, input.model),
-            );
-        }).value;
+        return this.runMutation(
+          event,
+          envelope,
+          input.taskId ?? '',
+          IPC_CHANNELS.settingsSetModel,
+          () => {
+            if (this.persistence.getRuntime() !== runtimeKind)
+              this.persistence.setRuntime(runtimeKind);
+            this.persistence.setModel(input.model);
+            if (input.taskId !== undefined)
+              this.persistence.setTaskModelSelection(
+                input.taskId,
+                modelSelectionForRuntime(runtimeKind, input.model),
+              );
+            // Models advertise different reasoning levels, so a model change can strand the stored
+            // Codex level (Sol advertises `ultra`, GPT-5.5 does not). Re-clamp and persist here so
+            // the synchronous turn dispatch can trust `getCodexEffort()` without a probe — leaving
+            // it stale would fail the next turn outright rather than degrade.
+            if (runtimeKind === 'codex')
+              this.persistence.setCodexEffort(
+                clampCodexEffort(this.persistence.getCodexEffort(), capability.models, input.model),
+              );
+          },
+        ).value;
       },
     );
     this.handle(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, (input) => {
@@ -768,6 +1353,12 @@ export class IpcRouter {
     this.handle(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), (input) =>
       this.teamCoordinator.get(input.taskId),
     );
+    this.handleMutation(
+      IPC_CHANNELS.teamsUpdatePolicy,
+      teamPolicyUpdateInputSchema,
+      teamDetailSchema,
+      (input) => this.teamCoordinator.updatePolicy(input),
+    );
     // hireWorker/sendToWorker IPC handlers remain wired for the current UI, but the primary path
     // is now the Leader's own tool use during its Turn (team_hire_worker/team_send_to_worker in
     // team-tools.ts, going through this same TeamCoordinator) per FR-TEAM-06/13 — the user
@@ -877,7 +1468,10 @@ export class IpcRouter {
       IPC_CHANNELS.turnsStart,
       turnStartInputSchema,
       turnStartResultSchema,
-      (input, event, envelope) => {
+      async (input, event, envelope) => {
+        const skills = await this.skillSettings
+          .resolveSelections(input.skills)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -885,7 +1479,7 @@ export class IpcRouter {
           input.taskId,
           IPC_CHANNELS.turnsStart,
           () => {
-            started = this.persistence.startTurn(input.taskId, input.text);
+            started = this.persistence.startTurn(input.taskId, input.text, skills);
             return {
               turnId: started.turnId,
               ...(started.renamedTask === undefined ? {} : { renamedTask: started.renamedTask }),
@@ -900,7 +1494,10 @@ export class IpcRouter {
       IPC_CHANNELS.turnsQueue,
       turnQueueInputSchema,
       turnQueueResultSchema,
-      (input, event, envelope) => {
+      async (input, event, envelope) => {
+        const skills = await this.skillSettings
+          .resolveSelections(input.skills)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
         let queueEvent: TurnEvent | undefined;
         const result = this.runMutation(
           event,
@@ -912,6 +1509,7 @@ export class IpcRouter {
               input.taskId,
               input.text,
               envelope.operationId,
+              skills,
             );
             queueEvent = queued.event;
             return { ordinal: queued.ordinal };
@@ -927,7 +1525,11 @@ export class IpcRouter {
       z.undefined(),
       (input, event, envelope) => {
         const activeRuntimeKind = this.turnRuntimes.get(input.expectedTurnId);
-        if (activeRuntimeKind === 'codex' || activeRuntimeKind === 'claude')
+        if (
+          activeRuntimeKind === 'codex' ||
+          activeRuntimeKind === 'claude' ||
+          activeRuntimeKind === 'provider'
+        )
           throw new SteerUnsupportedError();
         const result = this.runMutation(
           event,
@@ -945,6 +1547,9 @@ export class IpcRouter {
       turnStopAndSendInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
+        const skills = await this.skillSettings
+          .resolveSelections(input.skills)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
         const principal = principalFor(event);
         const hash = requestHash(envelope.payload);
         const cached = this.persistence.getOperationResult<void>(
@@ -971,7 +1576,7 @@ export class IpcRouter {
           () => {
             if (canceledTurnId !== null)
               canceledEvent = this.persistence.cancelTurn(input.taskId, canceledTurnId);
-            started = this.persistence.startTurn(input.taskId, input.text);
+            started = this.persistence.startTurn(input.taskId, input.text, skills);
           },
         );
         if (result.executed) {
@@ -1049,9 +1654,11 @@ export class IpcRouter {
   async initialize(): Promise<void> {
     this.teamCoordinator.recoverOnStartup();
     await this.permissionBroker.drainPolicyEpochOutbox();
-    if (process.env['SPRINT_CODER_LEADER_MCP'] === '1') await this.teamMcpBridge.ensureStarted();
+    await this.teamMcpBridge.ensureStarted();
     try {
-      await installBuiltinTeamSkill(process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'));
+      const skillHome = process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home');
+      await installBuiltinTeamSkill(skillHome);
+      await installBuiltinSkillCreator(skillHome);
       this.teamSkillReady = true;
     } catch {
       this.teamSkillReady = false;
@@ -1203,7 +1810,7 @@ export class IpcRouter {
       if (key.startsWith(`${turnId}\u0000`)) this.fileEditByKey.delete(key);
     // Back to idle on a clean finish. A failure already pushed its own `failed` status with the
     // reason attached (see handleRuntimeFailure), and must not be overwritten by an idle here.
-    if (kind !== undefined && state === 'completed')
+    if (kind !== undefined && kind !== 'provider' && state === 'completed')
       this.pushRuntimeStatus({
         kind,
         state: 'idle',
@@ -1215,9 +1822,20 @@ export class IpcRouter {
     // `turn.completed` and the timeline shows the image inside the Turn that produced it.
     this.ingestGeneratedImages(taskId, turnId);
     this.teamMcpBridge.unregister(turnId);
-    const event = this.persistence.completeTurn(taskId, turnId, state);
+    this.teamRequiredTurns.delete(turnId);
+    this.teamSkillExpectedTurns.delete(turnId);
+    this.teamSkillResolutionByTurn.delete(turnId);
     const resolvedModel = this.resolvedModelByTurn.get(turnId);
+    const resolvedProvider = this.resolvedProviderByTurn.get(turnId);
     this.resolvedModelByTurn.delete(turnId);
+    this.resolvedProviderByTurn.delete(turnId);
+    if (resolvedModel !== undefined)
+      this.persistence.recordTurnResolution(taskId, turnId, {
+        // CLI Runtimes do not report a canonical provider. Official API Runtimes do.
+        resolvedProvider: resolvedProvider ?? null,
+        resolvedModel,
+      });
+    const event = this.persistence.completeTurn(taskId, turnId, state);
     this.publish(
       event.type === 'turn.completed' && resolvedModel !== undefined
         ? { ...event, resolvedModel }
@@ -1394,25 +2012,42 @@ export class IpcRouter {
   }
 
   private startSelectedRuntime(started: StartedTurn): void {
+    const taskId = started.event.taskId;
+    const externalConnectionId =
+      builtinRuntimeForModelSelection(started.modelSelection) === null
+        ? started.modelSelection.connectionId
+        : null;
+    if (externalConnectionId !== null) {
+      this.turnRuntimes.set(started.turnId, 'provider');
+      void this.startProviderTurn(started, externalConnectionId, isTeamScenarioInput(started.text));
+      return;
+    }
     this.pushRuntimeStatus({
       kind: started.runtimeKind,
       state: 'running',
-      taskId: started.event.taskId,
+      taskId,
       errorCode: null,
       userMessage: null,
     });
-    const taskId = started.event.taskId;
     let kind = started.runtimeKind;
-    // Leader MCP (SPRINT_CODER_LEADER_MCP=1): a real Codex/Claude Leader drives team_* tools itself
+    // Leader MCP is enabled by default: a real Codex/Claude Leader drives team_* tools itself
     // over the MCP bridge instead of the deterministic mock scenario. Team tools are offered on
     // every real-runtime turn so the model itself senses
     // when a request warrants a team (the guidance says to hire only when genuinely beneficial);
     // hiring auto-promotes the task and the renderer auto-opens the canvas, so "the AI decided a
     // team is needed" becomes visible without any keyword or button.
-    const teamTurn = isTeamScenarioInput(started.text);
+    const teamTurn =
+      isTeamScenarioInput(started.text) ||
+      started.skills.some(({ selection }) => selection.kind === 'team');
+    const skillCreatorTurn = started.skills.some(
+      ({ selection }) =>
+        selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
+    );
     const wantsLeaderMcp =
-      process.env['SPRINT_CODER_LEADER_MCP'] === '1' && kind !== 'mock' && teamTurn;
-    if (wantsLeaderMcp && !this.teamSkillReady) {
+      process.env['SPRINT_CODER_LEADER_MCP'] !== '0' &&
+      kind !== 'mock' &&
+      (teamTurn || skillCreatorTurn);
+    if (teamTurn && wantsLeaderMcp && !this.teamSkillReady) {
       this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
         code: 'RUNTIME_FAILED',
         userMessage: '組み込みTeam Skillを検証できないためTeamを開始できません。',
@@ -1422,11 +2057,19 @@ export class IpcRouter {
     }
     let teamMcp: RuntimeTeamMcpOption | undefined;
     if (wantsLeaderMcp) {
-      teamMcp = this.registerLeaderMcp(started.turnId, taskId);
-      // Bridge failed to start on this platform (e.g. socket bind failure): degrade to the same
-      // deterministic mock leader every other Claude/Codex team turn already uses, rather than
-      // silently running a real Claude turn with no team tools available at all.
-      if (teamMcp === undefined) kind = 'mock';
+      teamMcp = this.registerLeaderMcp(started.turnId, taskId, {
+        teamTurn,
+        skillCreatorTurn,
+      });
+      if (teamMcp === undefined) {
+        this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage: 'Team MCPへ接続できないためTeamを開始できません。',
+          retryable: true,
+        });
+        return;
+      }
+      if (teamTurn) this.teamRequiredTurns.add(started.turnId);
     } else if (kind !== 'mock' && teamTurn) {
       // Team intent without Leader MCP always runs the leader orchestration
       // (hire→dispatch→reports→synthesis): the production adapters are no-tools by default, so a
@@ -1464,7 +2107,7 @@ export class IpcRouter {
     const workspacePath = turnWorkspace;
     const workspaceId =
       workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
-    const context = this.prepareContext(taskId, started.turnId, wantsLeaderMcp);
+    const context = this.prepareContext(taskId, started.turnId, teamTurn && wantsLeaderMcp);
     // What this Turn may write (issue #37). Both inputs matter: the Access preset is the user's
     // choice, and the Workspace is what makes a write meaningful at all — without one the Runtime's
     // cwd is a throwaway temp directory, so an edit would land somewhere the user can never see.
@@ -1501,6 +2144,10 @@ export class IpcRouter {
             ? this.persistence.getEffort()
             : this.persistence.getCodexEffort() || undefined,
           writeScope,
+          started.skills.map((skill) => ({
+            name: skill.selection.ref.skillId,
+            path: skill.packagePath,
+          })),
         ),
     );
     if (!egress.allowed) {
@@ -1517,12 +2164,170 @@ export class IpcRouter {
   /** Starts the bridge's socket if needed and mints a fresh bearer token bound to this one turn.
    * Returns undefined when the bridge is unavailable (never blocks the turn on it — see the
    * fallback in startSelectedRuntime). */
-  private registerLeaderMcp(turnId: string, taskId: string): RuntimeTeamMcpOption | undefined {
+  private registerLeaderMcp(
+    turnId: string,
+    taskId: string,
+    options: { teamTurn: boolean; skillCreatorTurn: boolean },
+  ): RuntimeTeamMcpOption | undefined {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
     const token = TeamMcpBridge.generateToken();
-    this.teamMcpBridge.register(turnId, { taskId, token });
-    return { socketPath, token, guidance: LEADER_MCP_SYSTEM_PROMPT };
+    const requireModelResearch = this.persistence.getTeamModelResearchBeforeHiring();
+    this.teamMcpBridge.register(turnId, {
+      taskId,
+      token,
+      requireModelResearch,
+      ...(options.skillCreatorTurn ? { allowSkillDrafts: true } : {}),
+      allowTeamTools: options.teamTurn,
+    });
+    return {
+      socketPath,
+      token,
+      guidance: options.teamTurn
+        ? teamGuidance(LEADER_MCP_SYSTEM_PROMPT, requireModelResearch)
+        : 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。',
+      enableWebSearch: options.teamTurn && requireModelResearch,
+    };
+  }
+
+  private registerManagerMcp(
+    turnId: string,
+    taskId: string,
+    requesterAgentId: string,
+  ): RuntimeTeamMcpOption | undefined {
+    const socketPath = this.teamMcpBridge.socketPath;
+    if (socketPath === null) return undefined;
+    const token = TeamMcpBridge.generateToken();
+    const requireModelResearch = this.persistence.getTeamModelResearchBeforeHiring();
+    this.teamMcpBridge.register(turnId, {
+      taskId,
+      token,
+      requesterAgentId,
+      requireModelResearch,
+    });
+    return {
+      socketPath,
+      token,
+      guidance: teamGuidance(MANAGER_MCP_SYSTEM_PROMPT, requireModelResearch),
+      enableWebSearch: requireModelResearch,
+    };
+  }
+
+  private registerWorkerMcp(
+    turnId: string,
+    taskId: string,
+    requesterAgentId: string,
+  ): RuntimeTeamMcpOption | undefined {
+    const socketPath = this.teamMcpBridge.socketPath;
+    if (socketPath === null) return undefined;
+    const token = TeamMcpBridge.generateToken();
+    this.teamMcpBridge.register(turnId, { taskId, token, requesterAgentId });
+    return { socketPath, token, guidance: WORKER_MCP_SYSTEM_PROMPT };
+  }
+
+  private async refreshModelCatalog(): Promise<void> {
+    const [codexCapability, claudeCapability] = await Promise.all([
+      this.codexRuntime.probe(),
+      this.claudeRuntime.probe(),
+    ]);
+    const checkedAt = new Date().toISOString();
+    const externalResults = await Promise.allSettled(
+      this.providerConnections
+        .list()
+        .filter(
+          (connection) =>
+            connection.enabled &&
+            connection.runtimeKind !== 'builtin_cli' &&
+            connection.secretReference !== null,
+        )
+        .map(async (connection) => {
+          const verified = await this.providerVerification.requireVerifiedForExecution(
+            connection.id,
+          );
+          const models = await this.providerRegistry
+            .resolve(verified)
+            .listModels(verified, new AbortController().signal);
+          return models.map((model) => ({
+            ...model,
+            connectionDisplayName: connection.displayName,
+          }));
+        }),
+    );
+    const externalModels = externalResults.flatMap((result) =>
+      result.status === 'fulfilled' ? [...result.value] : [],
+    );
+    this.modelCatalog.replaceCatalog(
+      [
+        ...providerModelsForBuiltin(
+          'builtin:codex-cli',
+          'Codex CLI',
+          'openai',
+          codexCapability.models,
+          codexCapability.available,
+          checkedAt,
+        ),
+        ...providerModelsForBuiltin(
+          'builtin:claude-cli',
+          'Claude Code',
+          'anthropic',
+          claudeCapability.models,
+          claudeCapability.available,
+          checkedAt,
+        ),
+        ...externalModels,
+      ],
+      new Set(['builtin:codex-cli', 'builtin:claude-cli']),
+    );
+  }
+
+  private async listTeamModelCandidates(
+    input: Parameters<NonNullable<ExecuteTeamToolOptions['listModelCandidates']>>[0],
+  ): Promise<unknown> {
+    await this.refreshModelCatalog();
+    return this.modelCatalog.query({
+      taskId: input.taskId,
+      text: input.text,
+      connectionIds: [...input.connectionIds],
+      providerIds: [...input.providerIds],
+      accessTypes: [],
+      capabilities: [...input.capabilities],
+      availableOnly: true,
+      cursor: input.cursor,
+      limit: input.limit,
+    });
+  }
+
+  private async validateTeamModelSelection(
+    selection: ModelSelection,
+    taskId: string,
+  ): Promise<void> {
+    if (
+      selection.connectionId === null ||
+      selection.requestedProvider === null ||
+      selection.requestedModel === null
+    )
+      throw new Error('Team Worker model selection must identify a Connection and model');
+    await this.refreshModelCatalog();
+    const result = this.modelCatalog.query({
+      taskId,
+      text: selection.requestedModel,
+      connectionIds: [selection.connectionId],
+      providerIds: [selection.requestedProvider],
+      accessTypes: [],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 100,
+    });
+    if (
+      !result.items.some(
+        (model) =>
+          model.connectionId === selection.connectionId &&
+          model.providerId === selection.requestedProvider &&
+          model.modelId === selection.requestedModel,
+      )
+    )
+      throw new Error('Selected Team Worker model is not available on the requested Connection');
   }
 
   private prepareContext(taskId: string, turnId: string, teamSkill = false): PreparedContext {
@@ -1578,8 +2383,225 @@ export class IpcRouter {
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
     this.teamMcpBridge.unregister(turnId);
+    this.teamRequiredTurns.delete(turnId);
+    this.teamSkillExpectedTurns.delete(turnId);
+    this.teamSkillResolutionByTurn.delete(turnId);
     if (kind === 'codex' || kind === 'claude') this.runtimeFor(kind).cancel(taskId, turnId);
-    else await this.mockRuntime.cancel(turnId);
+    else if (kind === 'provider') {
+      this.providerAbortByTurn.get(turnId)?.abort();
+      this.providerAbortByTurn.delete(turnId);
+      const identity = this.persistence.getTurnModelIdentity(taskId, turnId);
+      if (identity.selection.connectionId !== null) {
+        const connection = this.persistence.getProviderConnection(identity.selection.connectionId);
+        await this.providerRegistry.resolve(connection).cancel(turnId);
+      }
+    } else await this.mockRuntime.cancel(turnId);
+  }
+
+  private async startProviderTurn(
+    started: StartedTurn,
+    connectionId: string,
+    teamTurn = false,
+  ): Promise<void> {
+    const taskId = started.event.taskId;
+    const controller = new AbortController();
+    this.providerAbortByTurn.set(started.turnId, controller);
+    let synthesizing = false;
+    const messageId = randomUUID();
+    let reportCursorValue = 0;
+    let modelCatalogQueried = false;
+    const reportCursor = {
+      read: () => reportCursorValue,
+      advance: (seq: number) => {
+        reportCursorValue = Math.max(reportCursorValue, seq);
+      },
+    };
+    const modelCatalogAudit = {
+      wasQueried: () => modelCatalogQueried,
+      markQueried: () => {
+        modelCatalogQueried = true;
+      },
+    };
+    try {
+      const connection = await this.providerVerification.requireVerifiedForExecution(
+        connectionId,
+        controller.signal,
+      );
+      const modelId = started.modelSelection.requestedModel;
+      if (modelId === null || connection.providerId !== started.modelSelection.requestedProvider)
+        throw new Error('Provider Turn model selection is invalid');
+      const context = this.prepareContext(taskId, started.turnId, teamTurn);
+      if (teamTurn)
+        this.acknowledgeRuntimeContext(
+          taskId,
+          started.turnId,
+          context.fragments.map((fragment) => fragment.id),
+        );
+      const egress = authorizeOfficialApiProviderEgress(
+        {
+          broker: this.permissionBroker,
+          task: this.persistence.getTask(taskId),
+          turnId: started.turnId,
+          prompt: started.text,
+          context,
+          now: new Date().toISOString(),
+        },
+        connection.providerId,
+      );
+      if (!egress.allowed) throw new Error('Provider egress was denied by policy');
+      await this.mailbox.run(taskId, () => {
+        if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+        this.publish(this.persistence.changeStage(taskId, started.turnId, 'understanding'));
+        this.publish(this.persistence.changeStage(taskId, started.turnId, 'planning'));
+        this.publish(this.persistence.changeStage(taskId, started.turnId, 'executing'));
+      });
+      const runtime = this.providerRegistry.resolve(connection);
+      const messages: ProviderExecutionRequest['messages'] = context.fragments.map((fragment) => ({
+        role: fragment.trust,
+        content: fragment.content,
+      }));
+      let aggregateUsage: NormalizedProviderUsage | undefined;
+      let finished = false;
+      for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
+        const roundToolCalls: ProviderMessageToolCall[] = [];
+        const roundOutput: string[] = [];
+        let roundCompleted = false;
+        for await (const providerEvent of runtime.execute(
+          connection,
+          {
+            executionId: providerTurnCallId(started.turnId, ordinal),
+            connectionId,
+            modelId,
+            messages,
+            ...(teamTurn ? { tools: [...LEADER_PROVIDER_TOOLS] } : {}),
+          },
+          controller.signal,
+        )) {
+          if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+          if (providerEvent.type === 'tool_call') {
+            if (!teamTurn)
+              throw new Error('Provider requested a tool that is not available for this Turn');
+            if (!LEADER_PROVIDER_TOOLS.some((tool) => tool.name === providerEvent.name))
+              throw new Error(`Provider Leader requested unknown Team tool: ${providerEvent.name}`);
+            if (roundToolCalls.some((toolCall) => toolCall.callId === providerEvent.callId))
+              throw new Error(`Provider Leader repeated tool call ID: ${providerEvent.callId}`);
+            roundToolCalls.push({
+              callId: providerEvent.callId,
+              name: providerEvent.name,
+              input: providerEvent.input,
+            });
+            continue;
+          }
+          if (providerEvent.type === 'usage')
+            aggregateUsage = mergeProviderTurnUsage(aggregateUsage, providerEvent.usage);
+          await this.mailbox.run(taskId, () => {
+            if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+            if (providerEvent.type === 'reasoning_delta') {
+              this.pushReasoning(taskId, started.turnId, providerEvent.text);
+              return;
+            }
+            if (providerEvent.type === 'output_delta') {
+              roundOutput.push(providerEvent.text);
+              if (!synthesizing) {
+                synthesizing = true;
+                this.publish(this.persistence.changeStage(taskId, started.turnId, 'synthesizing'));
+              }
+              this.publish(
+                this.persistence.appendDelta(taskId, started.turnId, messageId, providerEvent.text),
+              );
+              return;
+            }
+            if (providerEvent.type !== 'usage')
+              this.applyProviderTurnEvent(taskId, started.turnId, providerEvent);
+            if (providerEvent.type === 'completed') roundCompleted = true;
+          });
+        }
+        if (!roundCompleted) throw new Error('Provider stream ended without a completion event');
+        if (
+          roundToolCalls.length === 0 &&
+          shouldBlockProviderLeaderCompletion(
+            teamTurn,
+            this.teamCoordinator.hasUnfinishedTeamWork(taskId),
+          )
+        ) {
+          messages.push({ role: 'assistant', content: roundOutput.join('') });
+          messages.push({
+            role: 'system',
+            content:
+              'Teamには未終端のWorkerまたはexecutionがあります。最終回答へ進まず、team_get_statusとteam_wait_reportsを使って終端状態を確認し、未割当Workerは正式に割り当てるか停止してください。',
+          });
+          continue;
+        }
+        if (roundToolCalls.length === 0) {
+          finished = true;
+          break;
+        }
+        messages.push({
+          role: 'assistant',
+          content: roundOutput.join(''),
+          toolCalls: roundToolCalls,
+        });
+        for (const toolCall of roundToolCalls) {
+          const result = await executeTeamTool(
+            this.teamCoordinator,
+            taskId,
+            toolCall.name,
+            toolCall.input,
+            {
+              longPoll:
+                toolCall.name === 'team_wait_reports' || toolCall.name === 'team_wait_events',
+              waitReportsCursor: reportCursor,
+              listModelCandidates: (query) => this.listTeamModelCandidates(query),
+              modelCatalogAudit,
+            },
+          );
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify(result ?? null),
+            toolCallId: toolCall.callId,
+            toolName: toolCall.name,
+          });
+        }
+      }
+      if (!finished)
+        throw new Error(`Provider Leader exceeded ${MAX_PROVIDER_LEADER_ROUNDS} provider rounds`);
+      if (aggregateUsage !== undefined)
+        this.persistence.recordTurnProviderUsage(taskId, started.turnId, aggregateUsage);
+      await this.mailbox.run(taskId, () => {
+        if (this.turnRuntimes.get(started.turnId) === 'provider')
+          this.finishAndAdvance(taskId, started.turnId, 'completed');
+      });
+    } catch {
+      if (controller.signal.aborted || this.turnRuntimes.get(started.turnId) !== 'provider') return;
+      await this.mailbox.run(taskId, () => {
+        if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+        this.finishAndAdvance(taskId, started.turnId, 'failed');
+      });
+    } finally {
+      if (this.providerAbortByTurn.get(started.turnId) === controller)
+        this.providerAbortByTurn.delete(started.turnId);
+    }
+  }
+
+  private applyProviderTurnEvent(
+    taskId: string,
+    turnId: string,
+    event: CanonicalProviderEvent,
+  ): void {
+    if (event.type === 'resolution') {
+      if (event.resolution.resolvedProvider !== null)
+        this.resolvedProviderByTurn.set(turnId, event.resolution.resolvedProvider);
+      if (event.resolution.resolvedModel !== null)
+        this.resolvedModelByTurn.set(turnId, event.resolution.resolvedModel);
+      return;
+    }
+    if (event.type === 'usage') {
+      this.persistence.recordTurnProviderUsage(taskId, turnId, event.usage);
+      return;
+    }
+    if (event.type === 'tool_call')
+      throw new Error('Provider requested a tool that is not available for this Turn');
+    if (event.type === 'error') throw new Error(event.error.message);
   }
 
   private handleRuntimeEvent(
@@ -1614,12 +2636,36 @@ export class IpcRouter {
             source: 'stream',
           });
         else {
+          if (
+            shouldFailRequiredTeamTurn(
+              this.teamRequiredTurns.has(turnId),
+              this.teamCoordinator.get(taskId)?.workers.filter(({ kind }) => kind === 'worker')
+                .length ?? 0,
+            )
+          ) {
+            this.handleRuntimeFailure(kind, taskId, turnId, {
+              code: 'RUNTIME_PROTOCOL_ERROR',
+              userMessage:
+                'Team MCP Workerが1名も作成されませんでした。外部のsubagent機能へfallbackせず終了します。',
+              retryable: true,
+            });
+            return;
+          }
           if (runtimeEvent.resolvedModel !== undefined)
             this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
           this.finishAndAdvance(taskId, turnId, 'completed');
         }
       })
-      .catch(() => this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError()));
+      .catch((error: unknown) => {
+        secureLogger.error('Runtime event handling failed', {
+          kind,
+          taskId,
+          turnId,
+          eventType: runtimeEvent.type,
+          error,
+        });
+        this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError());
+      });
   }
 
   /**
@@ -1716,7 +2762,7 @@ export class IpcRouter {
     options: { complete: boolean; source: 'stream' | 'disk' },
     baseline: string | null,
   ): void {
-    if (this.window.isDestroyed()) return;
+    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
     this.window.webContents.send(
       IPC_CHANNELS.fileEditEvent,
       fileEditFrameSchema.parse({
@@ -1792,7 +2838,7 @@ export class IpcRouter {
     let batcher = this.reasoningByTurn.get(turnId);
     if (batcher === undefined) {
       batcher = new ReasoningBatcher(({ text: batch, truncated }) => {
-        if (this.window.isDestroyed()) return;
+        if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
         this.window.webContents.send(
           IPC_CHANNELS.reasoningEvent,
           reasoningBatchSchema.parse({ taskId, turnId, text: batch, truncated }),
@@ -1859,7 +2905,7 @@ export class IpcRouter {
     errorCode: string | null;
     userMessage: string | null;
   }): void {
-    if (this.window.isDestroyed()) return;
+    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
     this.window.webContents.send(
       IPC_CHANNELS.runtimeStatusEvent,
       runtimeStatusSchema.parse(status),
@@ -1899,6 +2945,42 @@ export class IpcRouter {
   private closeAllPorts(): void {
     for (const binding of [...this.ports]) this.closePort(binding);
   }
+}
+
+function providerTurnCallId(turnId: string, ordinal: number): string {
+  const suffix = `:provider-call:${ordinal}`;
+  return `${turnId.slice(0, 256 - suffix.length)}${suffix}`;
+}
+
+function mergeProviderTurnUsage(
+  current: NormalizedProviderUsage | undefined,
+  next: NormalizedProviderUsage,
+): NormalizedProviderUsage {
+  if (current === undefined) return next;
+  const add = (left: number | null, right: number | null): number | null =>
+    left === null && right === null ? null : (left ?? 0) + (right ?? 0);
+  return {
+    inputTokens: add(current.inputTokens, next.inputTokens),
+    outputTokens: add(current.outputTokens, next.outputTokens),
+    cacheReadTokens: add(current.cacheReadTokens, next.cacheReadTokens),
+    cacheWriteTokens: add(current.cacheWriteTokens, next.cacheWriteTokens),
+    reasoningTokens: add(current.reasoningTokens, next.reasoningTokens),
+    providerCost:
+      current.providerCost !== null &&
+      next.providerCost !== null &&
+      current.providerCost.currency === next.providerCost.currency
+        ? {
+            amount: current.providerCost.amount + next.providerCost.amount,
+            currency: current.providerCost.currency,
+          }
+        : (current.providerCost ?? next.providerCost),
+    source:
+      current.source === 'unknown'
+        ? next.source
+        : next.source === 'unknown' || current.source === next.source
+          ? current.source
+          : 'runtime_observed',
+  };
 }
 
 export class TaskMailbox {
@@ -1988,9 +3070,26 @@ export function clampCodexEffort(
 }
 
 class InvalidModelError extends Error {
-  constructor(readonly kind: 'codex' | 'claude' = 'codex') {
+  constructor(readonly kind: 'codex' | 'claude' | 'provider' = 'codex') {
     super();
   }
+}
+
+export function invalidModelUserMessage(kind: 'codex' | 'claude' | 'provider'): string {
+  if (kind === 'claude') return '選択したモデルは現在のClaude CLIで利用できません。';
+  if (kind === 'provider') return '選択したモデルは現在のProvider Connectionで利用できません。';
+  return '選択したモデルは現在のCodex CLIで利用できません。';
+}
+
+export function shouldBlockProviderLeaderCompletion(
+  teamTurn: boolean,
+  hasUnfinishedTeamWork: boolean,
+): boolean {
+  return teamTurn && hasUnfinishedTeamWork;
+}
+
+export function shouldFailRequiredTeamTurn(teamRequired: boolean, workerCount: number): boolean {
+  return teamRequired && workerCount === 0;
 }
 /**
  * A Codex reasoning level the selected model does not advertise.
@@ -2029,6 +3128,32 @@ function sortValue(value: unknown): unknown {
     );
   }
   return value;
+}
+
+function providerModelsForBuiltin(
+  connectionId: string,
+  connectionDisplayName: string,
+  providerId: string,
+  models: readonly CodexModelOption[],
+  available: boolean,
+  checkedAt: string,
+): ProviderModel[] {
+  const unknown = { value: null, source: 'unknown' as const };
+  return models.map((model) => ({
+    connectionId,
+    connectionDisplayName,
+    providerId,
+    modelId: model.id,
+    displayName: model.displayName,
+    available,
+    availabilityCheckedAt: checkedAt,
+    contextWindow: unknown,
+    maxOutputTokens: unknown,
+    toolCalling: unknown,
+    structuredOutput: unknown,
+    multimodalInput: unknown,
+    reasoning: unknown,
+  }));
 }
 
 function getRequestId(raw: unknown): string {
@@ -2105,13 +3230,17 @@ function toPublicError(error: unknown): PublicError {
           : 'Codex CLIが利用できないため、このruntimeを選択できません。',
       retryable: false,
     };
+  if (error instanceof ProviderSecretStorageUnavailableError)
+    return {
+      code: 'RUNTIME_UNAVAILABLE',
+      userMessage:
+        'OSの安全な保管領域を利用できません。macOSのログインキーチェーンを確認してから再試行してください。',
+      retryable: true,
+    };
   if (error instanceof InvalidModelError)
     return {
       code: 'INVALID_REQUEST',
-      userMessage:
-        error.kind === 'claude'
-          ? '選択したモデルは現在のClaude CLIで利用できません。'
-          : '選択したモデルは現在のCodex CLIで利用できません。',
+      userMessage: invalidModelUserMessage(error.kind),
       retryable: false,
     };
   if (error instanceof InvalidEffortError)

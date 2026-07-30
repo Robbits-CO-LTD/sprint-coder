@@ -214,6 +214,46 @@ describe('Tool Registry domain', () => {
       expect(() => definition({ inputSchema })).toThrow();
   });
 
+  it('validates discriminated contracts with conditional and numeric schema keywords', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['leaf', 'manager'] },
+        levels: { type: 'integer', minimum: 1, maximum: 4 },
+      },
+      required: ['kind'],
+      additionalProperties: false,
+      allOf: [
+        {
+          if: { properties: { kind: { const: 'manager' } } },
+          then: { required: ['levels'] },
+        },
+        {
+          if: { properties: { kind: { const: 'leaf' } } },
+          then: { not: { required: ['levels'] } },
+        },
+      ],
+    } as const;
+    expect(() => definition({ inputSchema: schema })).not.toThrow();
+    expect(toolValueMatchesSchema(schema, { kind: 'leaf' })).toBe(true);
+    expect(toolValueMatchesSchema(schema, { kind: 'leaf', levels: 1 })).toBe(false);
+    expect(toolValueMatchesSchema(schema, { kind: 'manager', levels: 1 })).toBe(true);
+    expect(toolValueMatchesSchema(schema, { kind: 'manager' })).toBe(false);
+    expect(toolValueMatchesSchema(schema, { kind: 'manager', levels: 0 })).toBe(false);
+  });
+
+  it('enforces numeric bounds even when a schema omits an explicit type', () => {
+    const schema = {
+      type: 'object',
+      properties: { levels: { minimum: 1, maximum: 4 } },
+      required: ['levels'],
+    } as const;
+    expect(() => definition({ inputSchema: schema })).not.toThrow();
+    expect(toolValueMatchesSchema(schema, { levels: 2 })).toBe(true);
+    expect(toolValueMatchesSchema(schema, { levels: 0 })).toBe(false);
+    expect(toolValueMatchesSchema(schema, { levels: '2' })).toBe(false);
+  });
+
   it('rejects duplicate ToolIds and ambiguous equal-priority provider names', () => {
     const duplicateRegistry = new ToolRegistry();
     const tool = definition();

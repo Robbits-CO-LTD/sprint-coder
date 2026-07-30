@@ -3,16 +3,26 @@ import * as contracts from './index';
 import {
   claudeEffortSchema,
   commandEnvelopeSchema,
+  executionResolutionSchema,
+  modelSelectionSchema,
+  providerProfileSchema,
   permissionSettingsSchema,
   permissionSetInputSchema,
+  providerConnectionRateLimitLowerInputSchema,
+  providerConnectionSchema,
   publicErrorSchema,
   runtimeSettingsSchema,
+  teamModelResearchSettingsSchema,
   taskRenameInputSchema,
   teamBudgetStatusSchema,
+  teamActivitySummarySchema,
+  teamBlueprintSchema,
   teamDetailSchema,
+  teamExecutionSummarySchema,
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
+  teamPolicyUpdateInputSchema,
   teamSendMessageInputSchema,
   teamSummarySchema,
   teamWorkerRefSchema,
@@ -21,6 +31,7 @@ import {
   turnSnapshotSchema,
   workerCompletionSchema,
   workerSummarySchema,
+  skillDraftCreateInputSchema,
 } from './index';
 
 type Parser = { parse(value: unknown): unknown };
@@ -52,6 +63,203 @@ const pendingApproval = {
 } as const;
 
 describe('public contracts', () => {
+  const teamPolicy = {
+    maxAgentDepth: 4,
+    maxConcurrentExecutions: 8,
+    allowWorkerDirectMessages: true,
+    budgetMode: 'bounded',
+  } as const;
+
+  it('rejects cyclic Team Blueprint parent relationships', () => {
+    const role = {
+      title: 'Role',
+      responsibility: 'Investigate',
+      scope: [],
+      nonGoals: [],
+      doneCriteria: [],
+      required: true,
+      canDelegate: false,
+    };
+    expect(() =>
+      teamBlueprintSchema.parse({
+        version: 1,
+        kind: 'team',
+        policy: teamPolicy,
+        leaderInstructions: 'Lead the team',
+        roles: [
+          { ...role, key: 'a', parentKey: 'b' },
+          { ...role, key: 'b', parentKey: 'a' },
+        ],
+      }),
+    ).toThrow(/循環/);
+  });
+
+  it('rejects Skill Draft paths that escape the managed package', () => {
+    const input = {
+      kind: 'chat',
+      skillId: 'reviewer',
+      files: [{ path: 'SKILL.md', content: 'safe' }],
+    } as const;
+    expect(skillDraftCreateInputSchema.parse(input)).toEqual(input);
+    for (const path of ['../SKILL.md', '/tmp/SKILL.md', 'team/../../SKILL.md', 'team\\SKILL.md'])
+      expect(() =>
+        skillDraftCreateInputSchema.parse({
+          ...input,
+          files: [{ path, content: 'unsafe' }],
+        }),
+      ).toThrow();
+  });
+
+  it('validates optimistic Team Policy updates', () => {
+    expect(
+      teamPolicyUpdateInputSchema.parse({
+        taskId: 'task-1',
+        policy: teamPolicy,
+        expectedRevision: 3,
+      }),
+    ).toEqual({ taskId: 'task-1', policy: teamPolicy, expectedRevision: 3 });
+    expect(() =>
+      teamPolicyUpdateInputSchema.parse({
+        taskId: 'task-1',
+        policy: { ...teamPolicy, maxConcurrentExecutions: 9 },
+        expectedRevision: 3,
+      }),
+    ).toThrow();
+    expect(() =>
+      teamPolicyUpdateInputSchema.parse({
+        taskId: 'task-1',
+        policy: teamPolicy,
+        expectedRevision: -1,
+      }),
+    ).toThrow();
+  });
+
+  it('validates the global Team model research setting without coercion', () => {
+    expect(teamModelResearchSettingsSchema.parse({ researchBeforeHiring: true })).toEqual({
+      researchBeforeHiring: true,
+    });
+    expect(() => teamModelResearchSettingsSchema.parse({ researchBeforeHiring: 'true' })).toThrow();
+  });
+
+  it('validates a declarative OpenAI-compatible Provider Profile', () => {
+    expect(
+      providerProfileSchema.parse({
+        id: 'example',
+        displayName: 'Example API',
+        baseUrl: 'https://api.example.com/v1',
+        baseUrlConfigurable: false,
+        protocol: 'chat_completions',
+        modelsPath: '/models',
+        curatedModels: [],
+        verificationModel: null,
+        authentication: { headerName: 'Authorization', scheme: 'Bearer' },
+        requiredCredentialFields: [],
+        errorOverrides: [{ status: 429, category: 'rate_limited', retryable: true }],
+        sourceReference: 'https://docs.example.com/openai-compatibility',
+        reviewedAt: '2026-07-28T00:00:00.000Z',
+      }),
+    ).toMatchObject({ id: 'example', protocol: 'chat_completions' });
+  });
+
+  it('keeps requested selection separate from observed execution resolution', () => {
+    expect(
+      modelSelectionSchema.parse({
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-opus-5',
+      }),
+    ).toMatchObject({ connectionId: 'builtin:claude-cli' });
+    expect(
+      executionResolutionSchema.parse({
+        resolvedProvider: null,
+        resolvedModel: 'claude-opus-5-20260715',
+      }),
+    ).toMatchObject({ resolvedProvider: null });
+    expect(() =>
+      modelSelectionSchema.parse({
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: null,
+        requestedModel: 'gpt-5.6-sol',
+      }),
+    ).toThrow();
+  });
+
+  it('validates Provider Connections independently from legacy Chat runtime kinds', () => {
+    expect(
+      providerConnectionSchema.parse({
+        id: 'builtin:claude-cli',
+        providerId: 'anthropic',
+        runtimeKind: 'builtin_cli',
+        displayName: 'Claude CLI',
+        enabled: true,
+        secretReference: null,
+        verification: {
+          status: 'not_required',
+          verifiedAt: null,
+          expiresAt: null,
+          message: null,
+        },
+        rateLimit: {
+          mode: 'bypass',
+          maxConcurrentRequests: null,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: '2026-07-28T00:00:00.000Z',
+        updatedAt: '2026-07-28T00:00:00.000Z',
+      }),
+    ).toMatchObject({ runtimeKind: 'builtin_cli' });
+    expect(() =>
+      providerConnectionSchema.parse({
+        id: 'bad connection id',
+        providerId: 'Anthropic',
+        runtimeKind: 'claude',
+        displayName: '',
+        enabled: true,
+        secretReference: null,
+        verification: {
+          status: 'unverified',
+          verifiedAt: null,
+          expiresAt: null,
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: 2,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: 'invalid',
+        updatedAt: 'invalid',
+      }),
+    ).toThrow();
+  });
+
+  it('requires a positive lower-only Provider rate-limit patch', () => {
+    expect(
+      providerConnectionRateLimitLowerInputSchema.parse({
+        connectionId: 'connection:openai-primary',
+        maxConcurrentRequests: 1,
+      }),
+    ).toEqual({
+      connectionId: 'connection:openai-primary',
+      maxConcurrentRequests: 1,
+    });
+    expect(() =>
+      providerConnectionRateLimitLowerInputSchema.parse({
+        connectionId: 'connection:openai-primary',
+      }),
+    ).toThrow();
+    expect(() =>
+      providerConnectionRateLimitLowerInputSchema.parse({
+        connectionId: 'connection:openai-primary',
+        maxConcurrentRequests: 0,
+      }),
+    ).toThrow();
+  });
+
   it('validates the bounded Team promotion result', () => {
     expect(
       teamSummarySchema.parse({
@@ -60,6 +268,7 @@ describe('public contracts', () => {
         state: 'draft',
         leaderAgentId: 'agent-1',
         budget: {},
+        policy: teamPolicy,
         revision: 0,
         createdAt: '2026-07-23T00:00:00.000Z',
         updatedAt: '2026-07-23T00:00:00.000Z',
@@ -72,6 +281,7 @@ describe('public contracts', () => {
         state: 'running',
         leaderAgentId: 'agent-1',
         budget: {},
+        policy: teamPolicy,
         revision: 0,
         createdAt: '2026-07-23T00:00:00.000Z',
         updatedAt: '2026-07-23T00:00:00.000Z',
@@ -92,6 +302,13 @@ describe('public contracts', () => {
     writeCapable: true,
     currentActivity: null,
     engine: 'codex',
+    connectionId: null,
+    requestedProvider: null,
+    requestedModel: null,
+    parentAgentId: 'leader-1',
+    depth: 1,
+    canDelegate: false,
+    managerPolicy: null,
     liveOutput: '',
     reasoningActive: false,
     usage: teamUsage,
@@ -108,6 +325,8 @@ describe('public contracts', () => {
     seq: 1,
     state: 'delivered',
     content: 'status update',
+    executionId: null,
+    attemptId: null,
     deliveryState: 'acked',
     attempt: 1,
     createdAt: '2026-07-23T00:00:00.000Z',
@@ -119,6 +338,7 @@ describe('public contracts', () => {
     state: 'active',
     leaderAgentId: 'leader-1',
     budget: {},
+    policy: teamPolicy,
     revision: 1,
     createdAt: '2026-07-23T00:00:00.000Z',
     updatedAt: '2026-07-23T00:00:00.000Z',
@@ -129,6 +349,45 @@ describe('public contracts', () => {
     cap: 1000,
     committed: 100,
     reserved: 0,
+  } as const;
+  const execution = {
+    id: 'execution-1',
+    teamId: 'team-1',
+    assigneeAgentId: 'worker-1',
+    createdByAgentId: 'leader-1',
+    state: 'queued',
+    instructionPreview: 'status update',
+    instructionRevision: 1,
+    queueOrdinal: 1,
+    queueReason: 'global_concurrency',
+    connectionId: 'builtin:claude-cli',
+    requestedModel: 'claude-opus-5',
+    assignedAt: '2026-07-23T00:00:00.000Z',
+    queuedAt: '2026-07-23T00:00:00.000Z',
+    startedAt: null,
+    completedAt: null,
+    updatedAt: '2026-07-23T00:00:00.000Z',
+  } as const;
+  const teamActivity = {
+    id: 'activity-1',
+    teamId: 'team-1',
+    seq: 1,
+    type: 'worker_hired',
+    actorAgentId: 'leader-1',
+    actorRole: 'Leader',
+    subjectAgentId: 'worker-1',
+    subjectRole: 'implementer',
+    executionId: null,
+    attemptId: null,
+    status: null,
+    queueReason: null,
+    attemptOrdinal: null,
+    terminalReason: null,
+    connectionId: null,
+    requestedProvider: null,
+    requestedModel: null,
+    modelSelectionReason: null,
+    recordedAt: '2026-07-23T00:00:00.000Z',
   } as const;
 
   it('validates worker summaries and rejects unknown worker states or extra fields', () => {
@@ -154,8 +413,38 @@ describe('public contracts', () => {
     expect(() => teamBudgetStatusSchema.parse({ ...budget, cap: -1 })).toThrow();
   });
 
-  it('validates a team detail aggregate of workers, messages, and budgets', () => {
-    const detail = { team, workers: [worker], messages: [teamMessage], budgets: [budget] };
+  it('validates bounded execution summaries for the Team activity surface', () => {
+    expect(teamExecutionSummarySchema.parse(execution)).toMatchObject({
+      state: 'queued',
+      queueReason: 'global_concurrency',
+    });
+    expect(() =>
+      teamExecutionSummarySchema.parse({ ...execution, instructionPreview: 'x'.repeat(501) }),
+    ).toThrow();
+    expect(() =>
+      teamExecutionSummarySchema.parse({ ...execution, queueReason: 'provider_guess' }),
+    ).toThrow();
+  });
+
+  it('validates normalized durable Team activity summaries', () => {
+    expect(teamActivitySummarySchema.parse(teamActivity)).toMatchObject({
+      type: 'worker_hired',
+      subjectRole: 'implementer',
+    });
+    expect(() =>
+      teamActivitySummarySchema.parse({ ...teamActivity, queueReason: 'provider_guess' }),
+    ).toThrow();
+  });
+
+  it('validates a team detail aggregate of workers, messages, executions, activities, and budgets', () => {
+    const detail = {
+      team,
+      workers: [worker],
+      messages: [teamMessage],
+      executions: [execution],
+      activities: [teamActivity],
+      budgets: [budget],
+    };
     expect(teamDetailSchema.parse(detail)).toMatchObject({ team: { id: 'team-1' } });
     expect(() => teamDetailSchema.parse({ ...detail, unknown: true })).toThrow();
   });
@@ -234,7 +523,14 @@ describe('public contracts', () => {
   });
 
   it('validates the team event shape and rejects unknown event types', () => {
-    const detail = { team, workers: [worker], messages: [teamMessage], budgets: [budget] };
+    const detail = {
+      team,
+      workers: [worker],
+      messages: [teamMessage],
+      executions: [execution],
+      activities: [teamActivity],
+      budgets: [budget],
+    };
     const event = { type: 'updated', seq: 1, detail };
     expect(teamEventSchema.parse(event)).toMatchObject({ type: 'updated' });
     expect(() => teamEventSchema.parse({ ...event, type: 'deleted' })).toThrow();

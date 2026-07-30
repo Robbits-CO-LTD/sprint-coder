@@ -2,7 +2,12 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { isTeamScenarioInput, LEADER_MCP_SYSTEM_PROMPT } from './team-tools';
+import {
+  isTeamScenarioInput,
+  LEADER_MCP_SYSTEM_PROMPT,
+  LEADER_PROVIDER_TOOLS,
+  TEAM_HIRE_WORKER_TOOL,
+} from './team-tools';
 import {
   attachBuiltinTeamSkill,
   BUILTIN_TEAM_SKILL_CONTENT,
@@ -21,16 +26,48 @@ afterEach(async () => {
 describe('builtin Team skill', () => {
   it('is the single source of Leader guidance', () => {
     expect(LEADER_MCP_SYSTEM_PROMPT).toBe(BUILTIN_TEAM_SKILL_CONTENT);
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_list_models');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_send_message');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_read_messages');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_hire_worker');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('agentKind: "manager"');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('maxDelegationLevels: 1');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).not.toContain('maxDelegationDepth');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_get_status');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_steer_execution');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('liveOutput');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_wait_reports');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('未着report');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('全execution ID');
   });
 
   it('recognizes explicit Team and worker-count intent without activating ordinary turns', () => {
-    for (const input of ['チームで進めて', 'Teamでお願い', '2人雇って調査して'])
+    for (const input of [
+      'チームで進めて',
+      'Teamでお願い',
+      '2人雇って調査して',
+      '数学と実装の観点を2人体制で並行に検討して',
+      '5人で作業して',
+      '八人でレビューして',
+      '10人で監査して',
+      '１０人で実装して',
+      '合計10名構成で検証して',
+      '合計10名（深度0×1・1×3・2×6）を作成して',
+    ])
       expect(isTeamScenarioInput(input), input).toBe(true);
     for (const input of ['簡単に説明して', '一人称を直して', 'teamworkについて説明して'])
       expect(isTeamScenarioInput(input), input).toBe(false);
+  });
+
+  it('keeps the built-in and Provider hire schemas on the same discriminated contract', () => {
+    const builtInSchema = TEAM_HIRE_WORKER_TOOL.inputSchema as Record<string, unknown>;
+    const providerSchema = LEADER_PROVIDER_TOOLS.find(({ name }) => name === 'team_hire_worker')
+      ?.inputSchema as unknown as Record<string, unknown>;
+    expect(providerSchema['properties']).toEqual(builtInSchema['properties']);
+    expect(providerSchema['allOf']).toEqual(builtInSchema['allOf']);
+    expect(providerSchema['required']).toEqual(
+      expect.arrayContaining(['agentKind', 'role', 'objective']),
+    );
   });
 
   it('injects the authority-bearing fragment only for a Team turn', () => {

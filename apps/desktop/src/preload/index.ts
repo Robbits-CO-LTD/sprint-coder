@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
+  anthropicConnectionCreateInputSchema,
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
@@ -19,12 +20,32 @@ import {
   emptyPayloadSchema,
   permissionSetInputSchema,
   permissionSettingsSchema,
+  modelCatalogQueryInputSchema,
+  modelCatalogQueryResultSchema,
+  modelCatalogSelectionSetInputSchema,
+  modelSelectionSchema,
+  openAIConnectionCreateInputSchema,
+  openRouterConnectionCreateInputSchema,
+  providerConnectionSchema,
+  providerConnectionRateLimitLowerInputSchema,
+  providerProfileConnectionCreateInputSchema,
+  providerProfileSchema,
+  connectionIdSchema,
+  createdSkillMutationInputSchema,
+  createdSkillEnabledInputSchema,
   runtimeModelSetInputSchema,
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeSetInputSchema,
+  runtimeSettingsGetInputSchema,
   runtimeSettingsSchema,
   skillCandidateInputSchema,
+  skillCatalogSchema,
+  skillCatalogItemSchema,
+  skillDraftSchema,
+  skillDraftCreateInputSchema,
+  skillDraftInstallInputSchema,
+  skillDraftIdInputSchema,
   skillEnabledInputSchema,
   skillImportInputSchema,
   skillImportResultSchema,
@@ -38,6 +59,7 @@ import {
   fileOpenResultSchema,
   fileSaveInputSchema,
   fileSaveResultSchema,
+  geminiConnectionCreateInputSchema,
   fileEditFrameSchema,
   generatedImageSchema,
   generatedImageBytesSchema,
@@ -50,21 +72,28 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
+  taskSkillSelectionInputSchema,
   teamDetailSchema,
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
+  teamPolicyUpdateInputSchema,
+  teamPolicySchema,
+  teamModelResearchSettingsSchema,
+  teamModelResearchSettingsSetInputSchema,
   teamSendMessageInputSchema,
   teamSummarySchema,
   teamWorkerRefSchema,
   workerSummarySchema,
   turnCancelInputSchema,
   turnEventSchema,
+  xAIConnectionCreateInputSchema,
   turnQueueInputSchema,
   turnQueueResultSchema,
   turnSnapshotSchema,
   turnStartInputSchema,
   turnStartResultSchema,
+  turnSkillSelectionsSchema,
   turnSteerInputSchema,
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
@@ -160,6 +189,8 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.teamsPromote, taskIdPayloadSchema, teamSummarySchema, { taskId }),
     get: (taskId) =>
       invoke(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), { taskId }),
+    updatePolicy: (input) =>
+      invoke(IPC_CHANNELS.teamsUpdatePolicy, teamPolicyUpdateInputSchema, teamDetailSchema, input),
     hireWorker: (input) =>
       invoke(IPC_CHANNELS.teamsHireWorker, teamHireWorkerInputSchema, workerSummarySchema, input),
     sendToWorker: (input) =>
@@ -266,12 +297,27 @@ const api: SprintCoderApi = {
       }),
   },
   settings: {
-    getRuntime: () =>
-      invoke(IPC_CHANNELS.settingsGetRuntime, emptyPayloadSchema, runtimeSettingsSchema, {}),
-    setRuntime: (kind) =>
-      invoke(IPC_CHANNELS.settingsSetRuntime, runtimeSetInputSchema, z.undefined(), { kind }),
-    setModel: (model) =>
-      invoke(IPC_CHANNELS.settingsSetModel, runtimeModelSetInputSchema, z.undefined(), { model }),
+    getRuntime: (taskId) =>
+      invoke(
+        IPC_CHANNELS.settingsGetRuntime,
+        runtimeSettingsGetInputSchema,
+        runtimeSettingsSchema,
+        taskId === undefined ? {} : { taskId },
+      ),
+    setRuntime: (kind, taskId) =>
+      invoke(
+        IPC_CHANNELS.settingsSetRuntime,
+        runtimeSetInputSchema,
+        z.undefined(),
+        taskId === undefined ? { kind } : { kind, taskId },
+      ),
+    setModel: (model, taskId) =>
+      invoke(
+        IPC_CHANNELS.settingsSetModel,
+        runtimeModelSetInputSchema,
+        z.undefined(),
+        taskId === undefined ? { model } : { model, taskId },
+      ),
     setEffort: (effort) =>
       invoke(IPC_CHANNELS.settingsSetEffort, runtimeEffortSetInputSchema, z.undefined(), {
         effort,
@@ -284,6 +330,24 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.settingsSetCodexEffort, runtimeCodexEffortSetInputSchema, z.undefined(), {
         effort,
       }),
+    getTeamModelResearch: () =>
+      invoke(
+        IPC_CHANNELS.settingsGetTeamModelResearch,
+        emptyPayloadSchema,
+        teamModelResearchSettingsSchema,
+        {},
+      ),
+    setTeamModelResearch: (input) =>
+      invoke(
+        IPC_CHANNELS.settingsSetTeamModelResearch,
+        teamModelResearchSettingsSetInputSchema,
+        z.undefined(),
+        input,
+      ),
+    getDefaultTeamPolicy: () =>
+      invoke(IPC_CHANNELS.settingsGetDefaultTeamPolicy, emptyPayloadSchema, teamPolicySchema, {}),
+    setDefaultTeamPolicy: (policy) =>
+      invoke(IPC_CHANNELS.settingsSetDefaultTeamPolicy, teamPolicySchema, z.undefined(), policy),
     scanSkills: () =>
       invoke(IPC_CHANNELS.settingsSkillsScan, emptyPayloadSchema, skillScanResultSchema, {}),
     previewSkill: (provider, skillId) =>
@@ -312,6 +376,137 @@ const api: SprintCoderApi = {
         provider,
         skillId,
       }),
+  },
+  skills: {
+    list: () => invoke(IPC_CHANNELS.skillsList, emptyPayloadSchema, skillCatalogSchema, {}),
+    getDraftSelection: (taskId) =>
+      invoke(IPC_CHANNELS.skillsGetDraftSelection, taskIdPayloadSchema, turnSkillSelectionsSchema, {
+        taskId,
+      }),
+    setDraftSelection: (taskId, skills) =>
+      invoke(IPC_CHANNELS.skillsSetDraftSelection, taskSkillSelectionInputSchema, z.undefined(), {
+        taskId,
+        skills,
+      }),
+    listDrafts: () =>
+      invoke(IPC_CHANNELS.skillsListDrafts, emptyPayloadSchema, z.array(skillDraftSchema), {}),
+    createDraft: (input) =>
+      invoke(IPC_CHANNELS.skillsCreateDraft, skillDraftCreateInputSchema, skillDraftSchema, input),
+    installDraft: (draftId, expectedDigest, confirmed) =>
+      invoke(
+        IPC_CHANNELS.skillsInstallDraft,
+        skillDraftInstallInputSchema,
+        skillCatalogItemSchema,
+        { draftId, expectedDigest, confirmed },
+      ),
+    discardDraft: (draftId) =>
+      invoke(IPC_CHANNELS.skillsDiscardDraft, skillDraftIdInputSchema, z.undefined(), { draftId }),
+    removeCreated: (skillId, digest) =>
+      invoke(IPC_CHANNELS.skillsRemoveCreated, createdSkillMutationInputSchema, z.undefined(), {
+        skillId,
+        digest,
+      }),
+    setCreatedEnabled: (skillId, digest, enabled) =>
+      invoke(IPC_CHANNELS.skillsSetCreatedEnabled, createdSkillEnabledInputSchema, z.undefined(), {
+        skillId,
+        digest,
+        enabled,
+      }),
+    exportCreated: (skillId, digest) =>
+      invoke(
+        IPC_CHANNELS.skillsExportCreated,
+        createdSkillMutationInputSchema,
+        z.string().nullable(),
+        { skillId, digest },
+      ),
+  },
+  models: {
+    query: (input) =>
+      invoke(
+        IPC_CHANNELS.modelsCatalogQuery,
+        modelCatalogQueryInputSchema,
+        modelCatalogQueryResultSchema,
+        input,
+      ),
+    setSelection: (taskId, selection) =>
+      invoke(
+        IPC_CHANNELS.modelsSetSelection,
+        modelCatalogSelectionSetInputSchema,
+        modelSelectionSchema,
+        { taskId, selection },
+      ),
+  },
+  providers: {
+    listConnections: () =>
+      invoke(
+        IPC_CHANNELS.providersListConnections,
+        emptyPayloadSchema,
+        z.array(providerConnectionSchema),
+        {},
+      ),
+    listProfiles: () =>
+      invoke(
+        IPC_CHANNELS.providersListProfiles,
+        emptyPayloadSchema,
+        z.array(providerProfileSchema),
+        {},
+      ),
+    createOpenAIConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateOpenAIConnection,
+        openAIConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createOpenRouterConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateOpenRouterConnection,
+        openRouterConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createAnthropicConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateAnthropicConnection,
+        anthropicConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createGeminiConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateGeminiConnection,
+        geminiConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createXAIConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateXAIConnection,
+        xAIConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createProfileConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateProfileConnection,
+        providerProfileConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    verifyConnection: (connectionId) =>
+      invoke(
+        IPC_CHANNELS.providersVerifyConnection,
+        z.object({ connectionId: connectionIdSchema }).strict(),
+        providerConnectionSchema,
+        { connectionId },
+      ),
+    lowerRateLimits: (input) =>
+      invoke(
+        IPC_CHANNELS.providersLowerRateLimits,
+        providerConnectionRateLimitLowerInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
   },
   permissions: {
     get: (taskId) =>

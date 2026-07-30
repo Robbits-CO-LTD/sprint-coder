@@ -10,8 +10,9 @@ import { chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { executeTeamTool } from './team-tools';
+import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
+import { secureLogger } from './secure-logger';
 
 // macOS's sockaddr_un.sun_path is 104 bytes (Linux allows 108); staying comfortably under that
 // keeps bind() from failing on long app-data paths (a real, previously-hit failure mode on this
@@ -98,12 +99,32 @@ function isWindowsNamedPipe(path: string): boolean {
   return path.startsWith('\\\\.\\pipe\\') || path.startsWith('\\\\?\\pipe\\');
 }
 
-export type TeamMcpRegistration = Readonly<{ taskId: string; token: string }>;
+export type TeamMcpRegistration = Readonly<{
+  taskId: string;
+  token: string;
+  requesterAgentId?: string;
+  requireModelResearch?: boolean;
+  allowSkillDrafts?: boolean;
+  allowTeamTools?: boolean;
+}>;
 
-type Registered = TeamMcpRegistration & { waitCursor: number };
+type Registered = TeamMcpRegistration & {
+  waitCursor: number;
+  modelCatalogQueried: boolean;
+  researchedModels: Set<string>;
+};
+
+function modelSelectionKey(selection: {
+  connectionId: string | null;
+  requestedProvider: string | null;
+  requestedModel: string | null;
+}): string {
+  return `${selection.connectionId ?? ''}\0${selection.requestedProvider ?? ''}\0${selection.requestedModel ?? ''}`;
+}
 
 export class TeamMcpBridge {
   private readonly registrations = new Map<string, Registered>();
+  private readonly sockets = new Set<Socket>();
   private server: Server | null = null;
   private windowsBroker: ChildProcess | null = null;
   private socketPathValue: string | null = null;
@@ -113,6 +134,13 @@ export class TeamMcpBridge {
     private readonly coordinator: TeamCoordinator,
     private readonly socketPathFactory: () => string,
     private readonly authenticationTimeoutMs = DEFAULT_AUTHENTICATION_TIMEOUT_MS,
+    private readonly listModelCandidates?: NonNullable<
+      ExecuteTeamToolOptions['listModelCandidates']
+    >,
+    private readonly createSkillDraft?: (
+      input: unknown,
+      context: { taskId: string; turnId: string },
+    ) => Promise<unknown>,
   ) {}
 
   get socketPath(): string | null {
@@ -128,7 +156,7 @@ export class TeamMcpBridge {
       this.startPromise = null;
       // A bridge that fails to start is a soft failure: callers (ipc.ts) treat a null socketPath
       // as "fall back to the mock leader path" rather than crashing turn dispatch.
-      console.error('[team-mcp-bridge] failed to start', error);
+      secureLogger.error('Team MCP bridge failed to start', error);
       return null as unknown as string;
     });
     return this.startPromise;
@@ -226,7 +254,12 @@ export class TeamMcpBridge {
    * Call this before starting the Claude runtime for that turn, and always pair it with
    * `unregister` on completion/failure/cancel — an un-unregistered turn keeps its token live. */
   register(turnId: string, registration: TeamMcpRegistration): void {
-    this.registrations.set(turnId, { ...registration, waitCursor: 0 });
+    this.registrations.set(turnId, {
+      ...registration,
+      waitCursor: 0,
+      modelCatalogQueried: false,
+      researchedModels: new Set(),
+    });
   }
 
   unregister(turnId: string): void {
@@ -238,6 +271,8 @@ export class TeamMcpBridge {
   }
 
   private handleConnection(socket: Socket, requiredBridgeToken: string | null): void {
+    this.sockets.add(socket);
+    socket.once('close', () => this.sockets.delete(socket));
     let buffer = '';
     let authenticated = false;
     let bridgeAuthenticated = requiredBridgeToken === null;
@@ -300,21 +335,66 @@ export class TeamMcpBridge {
     }
     const [turnId, registration] = found;
     try {
-      const result = await executeTeamTool(
-        this.coordinator,
-        registration.taskId,
-        request.tool,
-        request.args,
-        {
-          longPoll: request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
-          waitReportsCursor: {
-            read: () => registration.waitCursor,
-            advance: (seq) => {
-              registration.waitCursor = seq;
-            },
-          },
-        },
-      );
+      if (process.env['SPRINT_CODER_TEAM_MCP_TRACE'] === '1')
+        secureLogger.debug('Team MCP tool received', { tool: request.tool });
+      const result =
+        request.tool === 'skill_draft_create'
+          ? await this.executeSkillDraftTool(turnId, registration, request.args)
+          : registration.allowTeamTools === false
+            ? (() => {
+                throw new Error('Team tools are not available for this Turn');
+              })()
+            : await executeTeamTool(
+                this.coordinator,
+                registration.taskId,
+                request.tool,
+                request.args,
+                {
+                  ...(registration.requesterAgentId === undefined
+                    ? {}
+                    : { requesterAgentId: registration.requesterAgentId }),
+                  longPoll:
+                    request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
+                  waitReportsCursor: {
+                    read: () => registration.waitCursor,
+                    advance: (seq) => {
+                      registration.waitCursor = seq;
+                    },
+                  },
+                  ...(this.listModelCandidates === undefined
+                    ? {}
+                    : { listModelCandidates: this.listModelCandidates }),
+                  modelCatalogAudit: {
+                    wasQueried: () => registration.modelCatalogQueried,
+                    markQueried: () => {
+                      registration.modelCatalogQueried = true;
+                    },
+                  },
+                  ...(registration.requireModelResearch === true
+                    ? {
+                        modelResearchAudit: {
+                          required: true,
+                          record: (input: {
+                            modelSelection: {
+                              connectionId: string | null;
+                              requestedProvider: string | null;
+                              requestedModel: string | null;
+                            };
+                          }) => {
+                            registration.researchedModels.add(
+                              modelSelectionKey(input.modelSelection),
+                            );
+                          },
+                          hasEvidence: (selection: {
+                            connectionId: string | null;
+                            requestedProvider: string | null;
+                            requestedModel: string | null;
+                          }) => registration.researchedModels.has(modelSelectionKey(selection)),
+                        },
+                      }
+                    : {}),
+                },
+              );
       socket.write(`${JSON.stringify({ ok: true, result })}\n`);
     } catch (error) {
       socket.write(
@@ -322,6 +402,20 @@ export class TeamMcpBridge {
       );
     }
     void turnId;
+  }
+
+  private async executeSkillDraftTool(
+    turnId: string,
+    registration: Registered,
+    input: unknown,
+  ): Promise<unknown> {
+    if (
+      registration.allowSkillDrafts !== true ||
+      registration.requesterAgentId !== undefined ||
+      this.createSkillDraft === undefined
+    )
+      throw new Error('skill_draft_create is not available for this Turn');
+    return this.createSkillDraft(input, { taskId: registration.taskId, turnId });
   }
 
   /** Constant-time token compare: every registered token is compared with `timingSafeEqual`
@@ -350,6 +444,11 @@ export class TeamMcpBridge {
     this.windowsBroker?.kill();
     this.windowsBroker = null;
     if (server === null) return;
+    // net.Server.close waits for every accepted connection. Claude/Codex may keep an authenticated
+    // bridge socket open after a completed turn, so destroy those sockets before waiting or app
+    // quit can hang indefinitely.
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (socketPath !== null && !isWindowsNamedPipe(socketPath)) {
       try {

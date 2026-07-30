@@ -1,5 +1,9 @@
 # Sprint Coder プロダクト・詳細設計書
 
+> **Team v2 notice:** この文書のTeam固有仕様（3 Worker、depth 1、Worker間直接通信禁止を含む）は
+> [Team v2・Multi-Provider改訂計画](plan/team-v2/README.md)と、その配下の最新ADRにより
+> supersedeされた。Chat、Permission、Electron security等の非競合部分は引き続き有効である。
+
 - 文書ID: VE3-DESIGN-001
 - 状態: Reviewed design baseline
 - 作成日: 2026-07-20
@@ -880,7 +884,10 @@ UIは分類に応じて「修正」「再試行」「Runtime再起動」「安�
 - Alternatives: Node integration有効、汎用IPC bridge。
 - Consequences: IPC contractは増えるが、侵害時のblast radiusを小さくできる。
 
-### ADR-005: MVPのWorker間直接通信を禁止する
+### ADR-005: MVPのWorker間直接通信を禁止する（Team v2でSuperseded）
+
+Team v2では[ADR-001](plan/team-v2/adrs/ADR-001-team-hierarchy-messaging-steering.md)がこの判断を
+置き換える。この節は旧MVP判断の履歴として残す。
 
 - Status: Accepted
 - Context: 自由なmesh通信は因果関係、権限、予算制御を難しくする。

@@ -1,5 +1,11 @@
 import { create } from 'zustand';
 import type {
+  ModelSelection,
+  SkillCatalogItem,
+  SkillDraft,
+  TurnSkillSelection,
+} from '@sprint-coder/contracts';
+import type {
   AccessPreset,
   AutoPermissionDecision,
   ApprovalDecision,
@@ -28,6 +34,12 @@ import { advanceStageIndex } from '../lib/turn-progress';
 import { appendReasoning, pruneReasoning } from '../lib/reasoning-buffer';
 import { applyFileEditFrame, clearFileEdits } from '../lib/file-edit-buffer';
 import {
+  canApplyOptimisticSelection,
+  rollbackModelPicker,
+  shouldApplyModelPickerAnswer,
+  type ModelPickerSnapshot,
+} from '../lib/model-picker-parity';
+import {
   appendCommandOutput,
   projectCommandTail,
   type CommandTailProjection,
@@ -46,6 +58,9 @@ export type TurnRuntimeState = {
   reachedStageIndex: number;
   status: TurnStatus;
   startedAt: number;
+  /** Set when the terminal event arrives so completed-work duration freezes truthfully. Historical
+   * snapshots do not currently carry this timestamp; restored turns omit it instead of guessing. */
+  finishedAt?: number;
   streamingMessageId: string | null;
   streamingContent: string;
 };
@@ -77,6 +92,11 @@ export type CommandCardState = Readonly<{
   tail: CommandTailProjection;
 }>;
 
+/** The Model Picker slice's shape (UI slice U1b). Declared in lib/model-picker-parity.ts alongside
+ * the staleness rules that operate on it, so the picker and the store cannot disagree about what a
+ * snapshot means; re-exported here because this is where callers already look for it. */
+export type ModelPickerState = ModelPickerSnapshot;
+
 // Re-exported so existing importers keep working; the definitions moved to lib/stages.ts to break
 // the cycle with lib/turn-progress.ts (issue #16).
 export { STAGE_LABEL, STAGE_ORDER } from '../lib/stages';
@@ -95,6 +115,18 @@ function finalStateLabel(status: TurnStatus): string {
       return '';
   }
 }
+
+/** The Team policy record, mirroring `teamPolicySchema` in packages/contracts (Team v2 Core C4b).
+ *
+ * Spelled out here rather than imported from the renderer's ambient `TeamSummary`, which does not
+ * describe the field's shape — and declared in the store, not in the dialog that edits it, so the
+ * component can import it as a type without the store ever depending on a component. */
+export type TeamPolicyValues = {
+  maxAgentDepth: number;
+  maxConcurrentExecutions: number;
+  allowWorkerDirectMessages: boolean;
+  budgetMode: 'bounded' | 'unlimited';
+};
 
 type AppState = {
   sprintCoderAvailable: boolean;
@@ -115,6 +147,10 @@ type AppState = {
   lastSeqByTask: Record<string, number>;
   sendingByTask: Record<string, boolean>;
   draftByTask: Record<string, string>;
+  skillCatalog: SkillCatalogItem[];
+  skillCatalogRevision: string | null;
+  skillSelectionByTask: Record<string, TurnSkillSelection[] | undefined>;
+  skillDraftsByTask: Record<string, { turnId: string; draft: SkillDraft }[]>;
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   permissionByTask: Record<string, PermissionSettings | undefined>;
   approvalsByTask: Record<string, ApprovalSummary[]>;
@@ -148,6 +184,9 @@ type AppState = {
    * backend hasn't wired the `settings` API yet — see `loadRuntime`). */
   runtime: RuntimeState;
 
+  /** Flag + canonical selection for the multi-provider Model Picker (UI slice U1b). */
+  modelPicker: ModelPickerState;
+
   /** Whether any reasoning has arrived for a turn (issue #17). Only a boolean and a truncation flag
    * live in the store — the text itself stays in lib/reasoning-buffer.ts, because putting it here
    * would make every fragment a store update and every update a re-render of every subscriber. */
@@ -158,6 +197,7 @@ type AppState = {
   /** Whether the recovery notice has been dismissed. A launch-scoped fact, so acknowledging it
    * should not require persistence — it simply stops being shown for this session. */
   recoveryAcknowledged: boolean;
+  settingsWorkspaceV2: boolean;
   /** Latest Runtime process liveness, pushed by main. Null until the first transition. */
   runtimeStatus: RuntimeStatus | null;
 
@@ -168,6 +208,8 @@ type AppState = {
 
   init(): Promise<void>;
   loadRuntime(): Promise<void>;
+  loadModelPicker(taskId: string): Promise<void>;
+  setModelSelection(taskId: string, selection: ModelSelection): Promise<void>;
   acknowledgeRecovery(): void;
   setRuntime(kind: RuntimeKind): Promise<void>;
   setModel(model: string): Promise<void>;
@@ -191,11 +233,25 @@ type AppState = {
   // user override.
   stopTeamWorker(taskId: string, agentId: string): Promise<void>;
   stopAllTeamWorkers(taskId: string): Promise<void>;
+  /** Writes the whole policy under an optimistic-concurrency check (Team v2 Core C4b).
+   *
+   * Resolves rather than throws, and reports the failure to the CALLER instead of the global
+   * `error` banner: the only caller is a modal form that has to stay open, keep the user's edits
+   * and show the reason inline. A rejected save writes nothing to `teamByTask`. */
+  updateTeamPolicy(
+    taskId: string,
+    policy: TeamPolicyValues,
+    expectedRevision: number,
+  ): Promise<{ ok: true } | { ok: false; message: string }>;
   setDraft(taskId: string, text: string): void;
-  startTurn(taskId: string, text: string): Promise<void>;
-  queueMessage(taskId: string, text: string): Promise<void>;
+  loadSkills(): Promise<void>;
+  setSkillSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
+  installSkillDraft(taskId: string, draft: SkillDraft): Promise<void>;
+  discardSkillDraft(taskId: string, draftId: string): Promise<void>;
+  startTurn(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
+  queueMessage(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
   steerMessage(taskId: string, text: string, expectedTurnId: string): Promise<void>;
-  stopAndSend(taskId: string, text: string): Promise<void>;
+  stopAndSend(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
   cancelActiveTurn(taskId: string): Promise<void>;
   showToast(message: string): void;
   dismissToast(): void;
@@ -241,6 +297,28 @@ async function restoreDraft(
     }
   } catch {
     // Non-fatal: leave the draft empty rather than blocking task selection.
+  }
+}
+
+async function restoreSkillSelection(
+  taskId: string,
+  apply: (fn: (state: AppState) => Partial<AppState>) => void,
+  get: () => AppState,
+) {
+  if (
+    !window.sprintCoder ||
+    typeof window.sprintCoder.skills?.getDraftSelection !== 'function' ||
+    get().skillSelectionByTask[taskId] !== undefined
+  )
+    return;
+  try {
+    const skills = await window.sprintCoder.skills.getDraftSelection(taskId);
+    if (get().selectedTaskId === taskId && get().skillSelectionByTask[taskId] === undefined)
+      apply((state) => ({
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: skills },
+      }));
+  } catch {
+    // A missing optional API must not block the composer.
   }
 }
 
@@ -290,6 +368,27 @@ async function loadPermission(
   } catch {
     // Non-fatal: keep the deny-by-default Ask preset while task data remains usable.
   }
+}
+
+/** Hands out a start-order token to every canonical-selection read and write (UI slice U2).
+ *
+ * The `models` calls are plain promises with no ordering guarantee of their own, and three things
+ * race for the same one-slot snapshot: the per-Task read on switch, the re-read after a legacy
+ * Runtime/Model write, and the V2 picker's own write. Comparing the token an answer was issued
+ * under against the newest one issued makes "an older intent must not land on a newer one"
+ * decidable without the callers knowing about each other. */
+let modelPickerToken = 0;
+
+/** Re-reads the canonical selection after a *legacy* Runtime/Model write (UI slice U1b).
+ *
+ * Both surfaces can be on screen at once — the Settings dialog's native model select and the V2
+ * picker in the Composer — and Main derives one from the other, so a legacy write silently moves
+ * what the V2 picker should be showing as selected. No-ops before a Task is selected, because there
+ * is no per-Task selection to re-read yet. */
+async function refreshModelPicker(get: () => AppState): Promise<void> {
+  const taskId = get().selectedTaskId;
+  if (taskId === null) return;
+  await get().loadModelPicker(taskId);
 }
 
 function subscribeToTask(
@@ -535,6 +634,20 @@ function handleTurnEvent(
       });
       break;
     }
+    case 'skill.draft.created': {
+      apply((state) => ({
+        skillDraftsByTask: {
+          ...state.skillDraftsByTask,
+          [taskId]: [
+            ...(state.skillDraftsByTask[taskId] ?? []).filter(
+              ({ draft }) => draft.id !== ev.draft.id,
+            ),
+            { turnId: ev.turnId, draft: ev.draft },
+          ],
+        },
+      }));
+      break;
+    }
     case 'turn.completed': {
       apply((state) => {
         const turn = state.turnByTask[taskId];
@@ -557,7 +670,10 @@ function handleTurnEvent(
         }
         return {
           messagesByTask: { ...state.messagesByTask, [taskId]: nextMessages },
-          turnByTask: { ...state.turnByTask, [taskId]: { ...turn, status: ev.state } },
+          turnByTask: {
+            ...state.turnByTask,
+            [taskId]: { ...turn, status: ev.state, finishedAt: Date.now() },
+          },
           turnDiffByTask: {
             ...state.turnDiffByTask,
             [taskId]: { turnId: ev.turnId, entries: ev.diff },
@@ -641,6 +757,10 @@ export const useAppStore = create<AppState>((set, get) => {
     lastSeqByTask: {},
     sendingByTask: {},
     draftByTask: {},
+    skillCatalog: [],
+    skillCatalogRevision: null,
+    skillSelectionByTask: {},
+    skillDraftsByTask: {},
     workspaceByTask: {},
     permissionByTask: {},
     approvalsByTask: {},
@@ -666,9 +786,11 @@ export const useAppStore = create<AppState>((set, get) => {
       effort: 'medium',
       codexEffort: '',
     },
+    modelPicker: { taskId: null, enabled: null, selection: null },
     reasoningSeenByTurn: {},
     recovery: null,
     recoveryAcknowledged: false,
+    settingsWorkspaceV2: true,
     runtimeStatus: null,
     stageAnnouncement: '',
     toast: null,
@@ -728,7 +850,11 @@ export const useAppStore = create<AppState>((set, get) => {
         void window.sprintCoder.app
           .getInfo()
           .then((info) => {
-            if (info.recovery !== undefined) set({ recovery: info.recovery });
+            if (info.recovery !== undefined)
+              set({
+                recovery: info.recovery,
+                settingsWorkspaceV2: info.settingsWorkspaceV2 ?? true,
+              });
           })
           .catch(() => undefined);
       if (typeof window.sprintCoder.runtime?.subscribeStatus === 'function')
@@ -749,14 +875,121 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ recoveryAcknowledged: true });
     },
 
+    // Every legacy runtime read/write below carries the selected Task id (UI slice U1b). Main
+    // resolves that against the same per-Task canonical model selection the V2 picker writes
+    // through `models.setSelection`, so the old chips and the new one cannot drift into two
+    // different notions of "the model this Task uses" — a Task-less call would read and write the
+    // global fallback instead. The id is taken from the store rather than added to each action's
+    // signature so the callers that predate this (SettingsDialog, the Composer chips) get the
+    // canonical behaviour without changing.
     async loadRuntime() {
       if (!window.sprintCoder || typeof window.sprintCoder.settings?.getRuntime !== 'function')
         return;
+      const taskId = get().selectedTaskId;
       try {
-        const runtime = await window.sprintCoder.settings.getRuntime();
+        const runtime = await window.sprintCoder.settings.getRuntime(taskId ?? undefined);
+        // A slow answer for a Task the user has already left would overwrite the newer one.
+        if (get().selectedTaskId !== taskId) return;
         set({ runtime });
       } catch {
         // Non-fatal: keep the last-known (or default) runtime state.
+      }
+    },
+
+    /** Resolves the Model Picker flag and Main's canonical selection for `taskId`.
+     *
+     * Uses the smallest possible catalog query (one row) — the answer this needs is the envelope,
+     * not the page. The picker fetches real pages itself, and only while it is open. */
+    async loadModelPicker(taskId: string) {
+      // Claimed before the call so a read started earlier can no longer win, even on the
+      // synchronous path below.
+      const token = (modelPickerToken += 1);
+      if (!window.sprintCoder || typeof window.sprintCoder.models?.query !== 'function') {
+        // No `models` API at all: the Composer must keep the legacy chip forever, not wait.
+        set({ modelPicker: { taskId, enabled: false, selection: null } });
+        return;
+      }
+      const applies = () =>
+        shouldApplyModelPickerAnswer({
+          requestTaskId: taskId,
+          requestToken: token,
+          currentTaskId: get().selectedTaskId,
+          latestToken: modelPickerToken,
+        });
+      try {
+        const result = await window.sprintCoder.models.query({
+          taskId,
+          text: '',
+          connectionIds: [],
+          providerIds: [],
+          accessTypes: [],
+          capabilities: [],
+          availableOnly: true,
+          cursor: null,
+          limit: 1,
+        });
+        // Stale two ways: the Task moved on, or a newer read/write was started while this was in
+        // flight — a read that predates the user's latest choice would silently undo it.
+        if (!applies()) return;
+        set({
+          modelPicker: {
+            taskId,
+            enabled: result.multiProviderModelPickerV2,
+            selection: result.selection,
+          },
+        });
+      } catch {
+        // A failed probe degrades to the legacy chip rather than to no picker at all.
+        if (!applies()) return;
+        set({ modelPicker: { taskId, enabled: false, selection: null } });
+      }
+    },
+
+    /** Writes the canonical per-Task model selection (UI slice U1b).
+     *
+     * Optimistic like the other selectors here, and followed by `loadRuntime()` so the legacy
+     * Runtime/Effort chips reflect the same choice — Main derives the built-in runtime kind and
+     * model from the selection, so leaving them stale would show two answers at once. */
+    async setModelSelection(taskId: string, selection: ModelSelection) {
+      if (!window.sprintCoder || typeof window.sprintCoder.models?.setSelection !== 'function')
+        return;
+      const previous = get().modelPicker;
+      // A write is an intent too, so it takes a token: an in-flight read issued before it must not
+      // land afterwards and undo the choice the user just made.
+      const token = (modelPickerToken += 1);
+      // Optimistic only against this Task's own snapshot — writing it over another Task's would
+      // have to invent that Task's `enabled`, and guessing there swaps the whole picker.
+      if (canApplyOptimisticSelection(previous, taskId))
+        set({ modelPicker: { taskId, enabled: previous.enabled, selection } });
+      try {
+        const saved = await window.sprintCoder.models.setSelection(taskId, selection);
+        if (
+          shouldApplyModelPickerAnswer({
+            requestTaskId: taskId,
+            requestToken: token,
+            currentTaskId: get().selectedTaskId,
+            latestToken: modelPickerToken,
+          })
+        )
+          // `enabled` is re-read rather than reused from `previous`: a read may have resolved the
+          // flag while this write was in flight, and reinstating the older value would flip the
+          // Composer back to the legacy chip for no reason.
+          set({ modelPicker: { taskId, enabled: get().modelPicker.enabled, selection: saved } });
+        await get().loadRuntime();
+      } catch (err) {
+        // Task-safe: only undoes this write, and only while the store still holds it. A rejection
+        // that arrives after the user switched Tasks must not restore the old Task's snapshot over
+        // the new one — that would strand the Composer on another Task's selection (or on its
+        // `enabled`, dropping it back to the legacy chip).
+        set({
+          modelPicker: rollbackModelPicker({
+            current: get().modelPicker,
+            previous,
+            taskId,
+            attempted: selection,
+          }),
+        });
+        set({ error: describeError(err) });
       }
     },
 
@@ -767,8 +1000,9 @@ export const useAppStore = create<AppState>((set, get) => {
       if (previous.kind === kind) return;
       set({ runtime: { ...previous, kind } });
       try {
-        await window.sprintCoder.settings.setRuntime(kind);
+        await window.sprintCoder.settings.setRuntime(kind, get().selectedTaskId ?? undefined);
         await get().loadRuntime();
+        await refreshModelPicker(get);
       } catch (err) {
         set({ runtime: previous });
         const code = errorCode(err);
@@ -791,8 +1025,9 @@ export const useAppStore = create<AppState>((set, get) => {
       if (previous.model === model || !previous.models.some(({ id }) => id === model)) return;
       set({ runtime: { ...previous, model } });
       try {
-        await window.sprintCoder.settings.setModel(model);
+        await window.sprintCoder.settings.setModel(model, get().selectedTaskId ?? undefined);
         await get().loadRuntime();
+        await refreshModelPicker(get);
       } catch (err) {
         set({ runtime: previous });
         set({ error: describeError(err) });
@@ -934,8 +1169,14 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       set({ teamViewOpen: false });
       void restoreDraft(taskId, apply, get);
+      void restoreSkillSelection(taskId, apply, get);
+      void get().loadSkills();
       void loadWorkspace(taskId, apply, get);
       void loadPermission(taskId, apply, get);
+      // The model selection is per-Task (UI slice U1b), so both the legacy chips' source and the
+      // V2 picker's flag/selection have to be re-read on every switch — not just at init.
+      void get().loadRuntime();
+      void get().loadModelPicker(taskId);
       // Fetched alongside the other per-task reads rather than reconstructed from replayed events:
       // metadata only, so this stays cheap even for a Task with many images (issue #11).
       // Read rather than replayed: the event port only carries events newer than the snapshot's
@@ -1240,14 +1481,108 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    async updateTeamPolicy(
+      taskId: string,
+      policy: TeamPolicyValues,
+      expectedRevision: number,
+    ): Promise<{ ok: true } | { ok: false; message: string }> {
+      if (typeof window.sprintCoder?.teams?.updatePolicy !== 'function')
+        return { ok: false, message: 'この環境ではTeamのポリシーを変更できません。' };
+      try {
+        // `updatePolicy` returns the canonical TeamDetail, revision already bumped — so the store
+        // takes the BACKEND's version wholesale rather than merging the form's values into the
+        // detail it already had. There is no path here that writes a value the backend did not
+        // confirm, which is what keeps the next save's `expectedRevision` honest.
+        const detail = await window.sprintCoder.teams.updatePolicy({
+          taskId,
+          policy,
+          expectedRevision,
+        });
+        set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
+        return { ok: true };
+      } catch (err) {
+        // Stale revision and invalid hierarchy both land here. The backend's own message names
+        // which one it was; the added sentence is the recovery step, because "何番目の版" is not
+        // something a user can act on by itself.
+        return {
+          ok: false,
+          message: `保存できませんでした: ${describeError(err)} — Teamの状態が変わっている可能性があります。いったん閉じて最新の内容を読み込んでから、もう一度お試しください。`,
+        };
+      }
+    },
+
     setDraft(taskId: string, text: string) {
       set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: text } }));
       persistDraftDebounced(taskId, text);
     },
 
-    async startTurn(taskId: string, text: string) {
+    async loadSkills() {
+      if (!window.sprintCoder || typeof window.sprintCoder.skills?.list !== 'function') return;
+      try {
+        const catalog = await window.sprintCoder.skills.list();
+        if (get().skillCatalogRevision === catalog.revision) return;
+        set({ skillCatalog: catalog.items, skillCatalogRevision: catalog.revision });
+      } catch {
+        // Skills are additive. Chat remains usable when the catalog cannot be loaded.
+      }
+    },
+
+    async setSkillSelection(taskId: string, skills: TurnSkillSelection[]) {
+      const previous = get().skillSelectionByTask[taskId] ?? [];
+      set((state) => ({
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [...skills] },
+      }));
+      if (!window.sprintCoder || typeof window.sprintCoder.skills?.setDraftSelection !== 'function')
+        return;
+      try {
+        await window.sprintCoder.skills.setDraftSelection(taskId, [...skills]);
+      } catch (err) {
+        set((state) => ({
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: previous },
+          error: describeError(err),
+        }));
+      }
+    },
+
+    async installSkillDraft(taskId: string, draft: SkillDraft) {
+      if (typeof window.sprintCoder?.skills?.installDraft !== 'function') return;
+      try {
+        await window.sprintCoder.skills.installDraft(draft.id, draft.digest, true);
+        set((state) => ({
+          skillDraftsByTask: {
+            ...state.skillDraftsByTask,
+            [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
+              ({ draft: item }) => item.id !== draft.id,
+            ),
+          },
+        }));
+        await get().loadSkills();
+      } catch (err) {
+        set({ error: describeError(err) });
+      }
+    },
+
+    async discardSkillDraft(taskId: string, draftId: string) {
+      if (typeof window.sprintCoder?.skills?.discardDraft !== 'function') return;
+      try {
+        await window.sprintCoder.skills.discardDraft(draftId);
+        set((state) => ({
+          skillDraftsByTask: {
+            ...state.skillDraftsByTask,
+            [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
+              ({ draft }) => draft.id !== draftId,
+            ),
+          },
+        }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      }
+    },
+
+    async startTurn(taskId: string, text: string, skills) {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder) return;
+      const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const turn = get().turnByTask[taskId];
       if (turn && (turn.status === 'running' || turn.status === 'canceling')) return;
 
@@ -1268,18 +1603,32 @@ export const useAppStore = create<AppState>((set, get) => {
         pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: optimisticId },
         sendingByTask: { ...state.sendingByTask, [taskId]: true },
         draftByTask: { ...state.draftByTask, [taskId]: '' },
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
       }));
       persistDraftDebounced(taskId, '');
+      persistSkillDraftSelection(taskId, []);
 
       try {
-        const result = await window.sprintCoder.turns.start({ taskId, text: trimmed });
+        const result = await window.sprintCoder.turns.start({
+          taskId,
+          text: trimmed,
+          skills: selectedSkills,
+        });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
-        // `renamedTask` is present only when this was the Task's first message and it was still
-        // carrying the placeholder title (issue #4) — merge it so the sidebar updates immediately
-        // instead of at the next full `tasks.list()`.
+        // A DB Task exists before this point so per-Task settings have a stable id, but it becomes
+        // conversation history only after this acceptance succeeds. `renamedTask` is present only
+        // when the first message also produced an automatic title (issue #4).
         const renamed = result?.renamedTask;
-        if (renamed !== undefined)
-          set((state) => ({ tasks: state.tasks.map((t) => (t.id === renamed.id ? renamed : t)) }));
+        set((state) => ({
+          tasks: state.tasks.map((task) =>
+            task.id === taskId
+              ? {
+                  ...(renamed ?? task),
+                  hasConversation: true,
+                }
+              : task,
+          ),
+        }));
       } catch (err) {
         const code = errorCode(err);
         set((state) => ({
@@ -1290,30 +1639,43 @@ export const useAppStore = create<AppState>((set, get) => {
           pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: undefined },
           sendingByTask: { ...state.sendingByTask, [taskId]: false },
           draftByTask: { ...state.draftByTask, [taskId]: trimmed },
+          skillSelectionByTask: {
+            ...state.skillSelectionByTask,
+            [taskId]: selectedSkills,
+          },
           error: code === 'TURN_ACTIVE' ? null : describeError(err),
         }));
+        persistSkillDraftSelection(taskId, selectedSkills);
         if (code === 'TURN_ACTIVE') {
-          get().showToast(
-            'すでに実行中です。キューに追加するか、Steer/Stop & Sendを選んでください',
-          );
+          get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
         }
       }
     },
 
-    async queueMessage(taskId: string, text: string) {
+    async queueMessage(taskId: string, text: string, skills) {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.queue !== 'function')
         return;
-      set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
+      const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
+      set((state) => ({
+        draftByTask: { ...state.draftByTask, [taskId]: '' },
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+      }));
       persistDraftDebounced(taskId, '');
+      persistSkillDraftSelection(taskId, []);
       try {
-        await window.sprintCoder.turns.queue({ taskId, text: trimmed });
+        await window.sprintCoder.turns.queue({ taskId, text: trimmed, skills: selectedSkills });
         // queue.changed (delivered via subscription) reconciles the compact queued list.
       } catch (err) {
         set((state) => ({
           draftByTask: { ...state.draftByTask, [taskId]: trimmed },
+          skillSelectionByTask: {
+            ...state.skillSelectionByTask,
+            [taskId]: selectedSkills,
+          },
           error: describeError(err),
         }));
+        persistSkillDraftSelection(taskId, selectedSkills);
       }
     },
 
@@ -1344,7 +1706,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async stopAndSend(taskId: string, text: string) {
+    async stopAndSend(taskId: string, text: string, skills) {
       const trimmed = text.trim();
       if (
         !trimmed ||
@@ -1352,15 +1714,29 @@ export const useAppStore = create<AppState>((set, get) => {
         typeof window.sprintCoder.turns.stopAndSend !== 'function'
       )
         return;
-      set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
+      const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
+      set((state) => ({
+        draftByTask: { ...state.draftByTask, [taskId]: '' },
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+      }));
       persistDraftDebounced(taskId, '');
+      persistSkillDraftSelection(taskId, []);
       try {
-        await window.sprintCoder.turns.stopAndSend({ taskId, text: trimmed });
+        await window.sprintCoder.turns.stopAndSend({
+          taskId,
+          text: trimmed,
+          skills: selectedSkills,
+        });
       } catch (err) {
         set((state) => ({
           draftByTask: { ...state.draftByTask, [taskId]: trimmed },
+          skillSelectionByTask: {
+            ...state.skillSelectionByTask,
+            [taskId]: selectedSkills,
+          },
           error: describeError(err),
         }));
+        persistSkillDraftSelection(taskId, selectedSkills);
       }
     },
 
@@ -1407,4 +1783,9 @@ function errorCode(err: unknown): string | undefined {
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+function persistSkillDraftSelection(taskId: string, skills: readonly TurnSkillSelection[]): void {
+  const setter = window.sprintCoder?.skills?.setDraftSelection;
+  if (typeof setter !== 'function') return;
+  void setter(taskId, [...skills]).catch(() => undefined);
 }

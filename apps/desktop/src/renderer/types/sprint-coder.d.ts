@@ -15,6 +15,7 @@ export type TaskSummary = {
   goal: string | null;
   workspacePath: string | null;
   localOnly: boolean;
+  hasConversation?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -276,6 +277,13 @@ export type TurnEvent =
       completionId: string;
       fragmentId: string;
     }
+  | {
+      type: 'skill.draft.created';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      draft: import('@sprint-coder/contracts').SkillDraft;
+    }
   | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
   | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage }
   | {
@@ -351,12 +359,23 @@ export type CodexModelOption = {
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultracode';
 export type AccessPreset = 'ask' | 'auto' | 'full';
 export type PermissionSettings = { preset: AccessPreset; policyEpoch: number };
+/** Team-wide execution limits (contracts' `teamPolicySchema`). One per Team, always present — not
+ * to be confused with `ManagerPolicy`, which is the per-Manager-Worker delegation cap. */
+export type TeamPolicy = {
+  /** 1-4. How deep the hierarchy under the Leader may grow. */
+  maxAgentDepth: number;
+  /** 1-8. How many Workers the Team may run at once. */
+  maxConcurrentExecutions: number;
+  allowWorkerDirectMessages: boolean;
+  budgetMode: 'bounded' | 'unlimited';
+};
 export type TeamSummary = {
   id: string;
   taskId: string;
   state: 'draft' | 'forming' | 'active' | 'paused' | 'winding_down' | 'completed' | 'failed';
   leaderAgentId: string;
   budget: Record<string, unknown>;
+  policy: TeamPolicy;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -366,6 +385,15 @@ export type TeamUsageTotals = {
   tokens: number;
   timeMs: number;
   toolCalls: number;
+};
+/** Delegation limits recorded for a Manager Worker (contracts' `managerPolicySchema`). Null on a
+ * plain Worker — see `WorkerSummary.managerPolicy`. */
+export type ManagerPolicy = {
+  /** How many direct children this Manager may hire, or null for "no explicit cap". */
+  maxDirectChildren: number | null;
+  /** 1-4, matching the Team policy's own `maxAgentDepth` range. */
+  maxDelegationDepth: number;
+  allowManagerChildren: boolean;
 };
 export type WorkerSummary = {
   id: string;
@@ -379,6 +407,22 @@ export type WorkerSummary = {
   writeCapable: boolean;
   currentActivity: string | null;
   engine: 'mock' | 'codex' | 'claude';
+  /** Provider Connection the Worker was hired against, or null when the backend recorded none. */
+  connectionId: string | null;
+  /** Provider id exactly as the backend persisted it — never derived from `engine` or the model. */
+  requestedProvider: string | null;
+  /** Model id the Worker was hired with, or null when the backend recorded none. */
+  requestedModel: string | null;
+  /** The agent that hired this Worker — the Leader's agent id, or a Manager Worker's id. Null when
+   * the backend recorded none (pre-hierarchy rows); display and layout then treat the Leader as
+   * the parent, since it is the only possible root. Never inferred from engine/provider/model. */
+  parentAgentId: string | null;
+  /** Distance from the Leader: 0 is the Leader itself, Workers are 1-4 (contracts clamp at 4). */
+  depth: number;
+  /** Whether this Worker may hire/delegate to children of its own — i.e. it is a Manager. */
+  canDelegate: boolean;
+  /** Delegation limits for a Manager, or null for a plain Worker. */
+  managerPolicy: ManagerPolicy | null;
   liveOutput: string;
   reasoningActive: boolean;
   usage: TeamUsageTotals;
@@ -395,15 +439,93 @@ export type TeamMessageSummary = {
   seq: number;
   state: 'created' | 'persisted' | 'dispatching' | 'delivered' | 'acknowledged';
   content: string;
+  executionId: string | null;
+  attemptId: string | null;
   deliveryState: 'persisted' | 'dispatched' | 'acked' | 'timedOut' | 'failed' | null;
   attempt: number;
   createdAt: string;
   updatedAt: string;
 };
+export type TeamExecutionSummary = {
+  id: string;
+  teamId: string;
+  assigneeAgentId: string;
+  createdByAgentId: string;
+  state:
+    | 'assigned'
+    | 'queued'
+    | 'waiting_verification'
+    | 'waiting_rate_limit'
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'canceled';
+  instructionPreview: string;
+  instructionRevision: number;
+  queueOrdinal: number | null;
+  queueReason:
+    | 'global_concurrency'
+    | 'connection_concurrency'
+    | 'verification'
+    | 'rate_limit'
+    | 'budget'
+    | 'recovery'
+    | null;
+  connectionId: string | null;
+  requestedModel: string | null;
+  assignedAt: string;
+  queuedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+};
+export type TeamActivitySummary = {
+  id: string;
+  teamId: string;
+  seq: number;
+  type:
+    | 'worker_hired'
+    | 'task_assigned'
+    | 'execution_queued'
+    | 'execution_waiting'
+    | 'execution_started'
+    | 'execution_finished'
+    | 'steered'
+    | 'attempt_started'
+    | 'attempt_finished'
+    | 'worker_reported'
+    | 'worker_stopped';
+  actorAgentId: string | null;
+  actorRole: string | null;
+  subjectAgentId: string | null;
+  subjectRole: string | null;
+  executionId: string | null;
+  attemptId: string | null;
+  status: string | null;
+  queueReason:
+    | 'global_concurrency'
+    | 'connection_concurrency'
+    | 'verification'
+    | 'rate_limit'
+    | 'budget'
+    | 'recovery'
+    | null;
+  attemptOrdinal: number | null;
+  terminalReason: string | null;
+  connectionId: string | null;
+  requestedProvider: string | null;
+  requestedModel: string | null;
+  /** Free text the backend recorded for why this model/Connection was chosen. Up to 2,000
+   * characters, so display surfaces clamp it rather than rendering it whole. */
+  modelSelectionReason: string | null;
+  recordedAt: string;
+};
 export type TeamDetail = {
   team: TeamSummary;
   workers: WorkerSummary[];
   messages: TeamMessageSummary[];
+  executions: TeamExecutionSummary[];
+  activities: TeamActivitySummary[];
   budgets: {
     scope: 'global' | 'team' | 'worker';
     kind: 'costCents' | 'tokens' | 'timeMs' | 'toolCalls' | 'spawnSlots';
@@ -432,7 +554,12 @@ export type CanvasViewSaveResult = { revision: number };
 
 export interface SprintCoderApi {
   app: {
-    getInfo(): Promise<{ version: string; platform: string; recovery: DatabaseRecovery }>;
+    getInfo(): Promise<{
+      version: string;
+      platform: string;
+      recovery: DatabaseRecovery;
+      settingsWorkspaceV2?: boolean;
+    }>;
   };
   runtime: {
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
@@ -451,6 +578,11 @@ export interface SprintCoderApi {
   teams: {
     promote(taskId: string): Promise<TeamSummary>;
     get(taskId: string): Promise<TeamDetail | null>;
+    updatePolicy(input: {
+      taskId: string;
+      policy: TeamSummary['policy'];
+      expectedRevision: number;
+    }): Promise<TeamDetail>;
     hireWorker(input: {
       taskId: string;
       role: string;
@@ -480,11 +612,20 @@ export interface SprintCoderApi {
     start(input: {
       taskId: string;
       text: string;
+      skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
-    queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
+    queue(input: {
+      taskId: string;
+      text: string;
+      skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
+    }): Promise<{ ordinal: number }>;
     steer(input: { taskId: string; text: string; expectedTurnId: string }): Promise<void>;
-    stopAndSend(input: { taskId: string; text: string }): Promise<void>;
+    stopAndSend(input: {
+      taskId: string;
+      text: string;
+      skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
+    }): Promise<void>;
     snapshot(taskId: string): Promise<TurnSnapshot>;
     subscribe(
       taskId: string,
@@ -515,7 +656,7 @@ export interface SprintCoderApi {
   /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
    * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
   settings: {
-    getRuntime(): Promise<{
+    getRuntime(taskId?: string): Promise<{
       kind: RuntimeKind;
       codexAvailable: boolean;
       claudeAvailable: boolean;
@@ -526,10 +667,14 @@ export interface SprintCoderApi {
        * '' means no override (the `auto` model sentinel, or a model publishing no set). */
       codexEffort: string;
     }>;
-    setRuntime(kind: RuntimeKind): Promise<void>;
-    setModel(model: string): Promise<void>;
+    setRuntime(kind: RuntimeKind, taskId?: string): Promise<void>;
+    setModel(model: string, taskId?: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
     setCodexEffort(effort: string): Promise<void>;
+    getTeamModelResearch(): Promise<{ researchBeforeHiring: boolean }>;
+    setTeamModelResearch(input: { researchBeforeHiring: boolean }): Promise<void>;
+    getDefaultTeamPolicy(): Promise<import('@sprint-coder/contracts').TeamPolicy>;
+    setDefaultTeamPolicy(policy: import('@sprint-coder/contracts').TeamPolicy): Promise<void>;
     scanSkills(): Promise<import('@sprint-coder/contracts').SkillScanResult>;
     previewSkill(
       provider: import('@sprint-coder/contracts').SkillProvider,
@@ -546,6 +691,66 @@ export interface SprintCoderApi {
       provider: import('@sprint-coder/contracts').SkillProvider,
       skillId: string,
     ): Promise<void>;
+  };
+  skills: {
+    list(): Promise<import('@sprint-coder/contracts').SkillCatalog>;
+    getDraftSelection(
+      taskId: string,
+    ): Promise<import('@sprint-coder/contracts').TurnSkillSelection[]>;
+    setDraftSelection(
+      taskId: string,
+      skills: import('@sprint-coder/contracts').TurnSkillSelection[],
+    ): Promise<void>;
+    listDrafts(): Promise<import('@sprint-coder/contracts').SkillDraft[]>;
+    createDraft(
+      input: import('@sprint-coder/contracts').SkillDraftCreateInput,
+    ): Promise<import('@sprint-coder/contracts').SkillDraft>;
+    installDraft(
+      draftId: string,
+      expectedDigest: string,
+      confirmed: true,
+    ): Promise<import('@sprint-coder/contracts').SkillCatalogItem>;
+    discardDraft(draftId: string): Promise<void>;
+    removeCreated(skillId: string, digest: string): Promise<void>;
+    setCreatedEnabled(skillId: string, digest: string, enabled: boolean): Promise<void>;
+    exportCreated(skillId: string, digest: string): Promise<string | null>;
+  };
+  models: {
+    query(
+      input: import('@sprint-coder/contracts').ModelCatalogQueryInput,
+    ): Promise<import('@sprint-coder/contracts').ModelCatalogQueryResult>;
+    setSelection(
+      taskId: string,
+      selection: import('@sprint-coder/contracts').ModelSelection,
+    ): Promise<import('@sprint-coder/contracts').ModelSelection>;
+  };
+  providers: {
+    listConnections(): Promise<import('@sprint-coder/contracts').ProviderConnection[]>;
+    listProfiles(): Promise<import('@sprint-coder/contracts').ProviderProfile[]>;
+    createOpenAIConnection(
+      input: import('@sprint-coder/contracts').OpenAIConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createOpenRouterConnection(
+      input: import('@sprint-coder/contracts').OpenRouterConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createAnthropicConnection(
+      input: import('@sprint-coder/contracts').AnthropicConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createGeminiConnection(
+      input: import('@sprint-coder/contracts').GeminiConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createXAIConnection(
+      input: import('@sprint-coder/contracts').XAIConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createProfileConnection(
+      input: import('@sprint-coder/contracts').ProviderProfileConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    verifyConnection(
+      connectionId: string,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    lowerRateLimits(
+      input: import('@sprint-coder/contracts').ProviderConnectionRateLimitLowerInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;

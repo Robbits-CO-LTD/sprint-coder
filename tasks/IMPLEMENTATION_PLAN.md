@@ -1,5 +1,9 @@
 # Sprint Coder 実装計画
 
+> **Team v2 notice:** Phase 5–6のTeam固有scope、順序、完成条件は
+> [`docs/plan/team-v2/README.md`](../docs/plan/team-v2/README.md)によりsupersedeされた。
+> 非Team Phaseの計画はこの文書を引き続き参照する。
+
 - 計画ID: VE3-PLAN-001
 - 作成日: 2026-07-20
 - 前提設計: `docs/PRODUCT_AND_TECHNICAL_DESIGN.md`

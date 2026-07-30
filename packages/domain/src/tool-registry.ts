@@ -204,12 +204,48 @@ export function toolValueMatchesSchema(schema: JsonValue, value: unknown): boole
   if (!isPlainJsonValue(value)) return false;
   if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) return false;
   const record = schema as Record<string, JsonValue>;
+  const enumValues = record['enum'];
+  if (
+    Array.isArray(enumValues) &&
+    !enumValues.some((candidate) => stableStringify(candidate) === stableStringify(value))
+  )
+    return false;
+  if (record['const'] !== undefined && stableStringify(record['const']) !== stableStringify(value))
+    return false;
+  const allOf = record['allOf'];
+  if (Array.isArray(allOf) && !allOf.every((entry) => toolValueMatchesSchema(entry, value)))
+    return false;
+  const condition = record['if'];
+  if (
+    condition !== undefined &&
+    toolValueMatchesSchema(condition, value) &&
+    record['then'] !== undefined &&
+    !toolValueMatchesSchema(record['then'], value)
+  )
+    return false;
+  if (record['not'] !== undefined && toolValueMatchesSchema(record['not'], value)) return false;
+
   const type = record['type'];
-  if (type === 'string') return typeof value === 'string';
-  if (type === 'number') return typeof value === 'number' && Number.isFinite(value);
-  if (type === 'integer') return typeof value === 'number' && Number.isInteger(value);
-  if (type === 'boolean') return typeof value === 'boolean';
-  if (type === 'null') return value === null;
+  if (type === undefined) {
+    if (record['minimum'] !== undefined || record['maximum'] !== undefined) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return false;
+      if (typeof record['minimum'] === 'number' && value < record['minimum']) return false;
+      if (typeof record['maximum'] === 'number' && value > record['maximum']) return false;
+    }
+    if (record['properties'] === undefined && record['required'] === undefined) return true;
+  } else if (type === 'string') return typeof value === 'string';
+  else if (type === 'number' || type === 'integer') {
+    if (
+      typeof value !== 'number' ||
+      !Number.isFinite(value) ||
+      (type === 'integer' && !Number.isInteger(value))
+    )
+      return false;
+    if (typeof record['minimum'] === 'number' && value < record['minimum']) return false;
+    if (typeof record['maximum'] === 'number' && value > record['maximum']) return false;
+    return true;
+  } else if (type === 'boolean') return typeof value === 'boolean';
+  else if (type === 'null') return value === null;
   if (type === 'array') {
     if (!Array.isArray(value)) return false;
     const items = record['items'];
@@ -217,8 +253,13 @@ export function toolValueMatchesSchema(schema: JsonValue, value: unknown): boole
     if (typeof minItems === 'number' && value.length < minItems) return false;
     return items === undefined || value.every((item) => toolValueMatchesSchema(items, item));
   }
-  if (type !== 'object' || typeof value !== 'object' || value === null || Array.isArray(value))
+  if (
+    type !== undefined &&
+    type !== 'object' &&
+    (record['properties'] !== undefined || record['required'] !== undefined)
+  )
     return false;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const object = value as Record<string, unknown>;
   const properties = (record['properties'] ?? {}) as Record<string, JsonValue>;
   const required = (record['required'] ?? []) as readonly JsonValue[];
@@ -499,16 +540,43 @@ function validateSupportedSchema(schema: JsonValue, label: string): void {
     'additionalProperties',
     'items',
     'minItems',
+    'enum',
+    'const',
+    'minimum',
+    'maximum',
+    'allOf',
+    'if',
+    'then',
+    'not',
   ]);
   if (Object.keys(record).some((key) => !allowedKeys.has(key)))
     throw new Error(`Invalid ${label}: unsupported schema keyword`);
   if (
+    record['type'] !== undefined &&
     !['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(
       String(record['type']),
     )
   )
     throw new Error(`Invalid ${label}: unsupported schema type`);
-  if (record['type'] === 'object') {
+  if (record['enum'] !== undefined && (!Array.isArray(record['enum']) || record['enum'].length < 1))
+    throw new Error(`Invalid ${label}: malformed enum`);
+  for (const keyword of ['minimum', 'maximum'] as const)
+    if (
+      record[keyword] !== undefined &&
+      (typeof record[keyword] !== 'number' || !Number.isFinite(record[keyword]))
+    )
+      throw new Error(`Invalid ${label}: malformed numeric bound`);
+  if (
+    record['minimum'] !== undefined &&
+    record['maximum'] !== undefined &&
+    Number(record['minimum']) > Number(record['maximum'])
+  )
+    throw new Error(`Invalid ${label}: minimum exceeds maximum`);
+  if (
+    record['type'] === 'object' ||
+    record['properties'] !== undefined ||
+    record['required'] !== undefined
+  ) {
     const properties = record['properties'] ?? {};
     const required = record['required'] ?? [];
     if (
@@ -522,7 +590,10 @@ function validateSupportedSchema(schema: JsonValue, label: string): void {
     )
       throw new Error(`Invalid ${label}: malformed object schema`);
     for (const nested of Object.values(properties)) validateSupportedSchema(nested, label);
-    if ((required as readonly string[]).some((key) => !Object.hasOwn(properties, key)))
+    if (
+      record['properties'] !== undefined &&
+      (required as readonly string[]).some((key) => !Object.hasOwn(properties, key))
+    )
       throw new Error(`Invalid ${label}: required property has no schema`);
   }
   if (record['type'] === 'array') {
@@ -538,6 +609,15 @@ function validateSupportedSchema(schema: JsonValue, label: string): void {
   } else if (record['minItems'] !== undefined) {
     throw new Error(`Invalid ${label}: minItems requires an array schema`);
   }
+  if (record['allOf'] !== undefined) {
+    if (!Array.isArray(record['allOf']) || record['allOf'].length < 1)
+      throw new Error(`Invalid ${label}: malformed allOf`);
+    for (const nested of record['allOf']) validateSupportedSchema(nested, label);
+  }
+  for (const keyword of ['if', 'then', 'not'] as const)
+    if (record[keyword] !== undefined) validateSupportedSchema(record[keyword], label);
+  if (record['then'] !== undefined && record['if'] === undefined)
+    throw new Error(`Invalid ${label}: then requires if`);
 }
 
 export function digestToolCatalogValue(value: JsonValue): string {

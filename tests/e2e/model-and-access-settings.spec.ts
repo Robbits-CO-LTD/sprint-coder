@@ -2,6 +2,8 @@ import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
+const LEGACY_PICKER_ENV = { SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2: '0' };
+
 test.describe('runtime model and access settings', () => {
   let userDataDir: string;
   let app: ElectronApplication | null = null;
@@ -16,7 +18,7 @@ test.describe('runtime model and access settings', () => {
   });
 
   test('selects and restores a Codex model and an Access preset', async () => {
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
     let page: Page = await firstWindow(app);
     if ((await page.getByTestId('runtime-selector').count()) === 0)
       await page.getByTestId('empty-state-create-task-button').click();
@@ -36,7 +38,7 @@ test.describe('runtime model and access settings', () => {
     await expect(page.getByTestId('access-selector')).toHaveText('安全時は自動');
 
     await closeApp(app);
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
     page = await firstWindow(app);
     await expect(page.getByTestId('runtime-selector')).toHaveText('Codex');
     await expect(page.getByTestId('model-selector')).toHaveText('GPT-5.6-Terra');
@@ -61,7 +63,7 @@ test.describe('claude model clarity and effort settings', () => {
   });
 
   test('shows clarified Claude model labels and persists a selected effort level', async () => {
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
     let page: Page = await firstWindow(app);
     if ((await page.getByTestId('runtime-selector').count()) === 0)
       await page.getByTestId('empty-state-create-task-button').click();
@@ -103,7 +105,7 @@ test.describe('claude model clarity and effort settings', () => {
     await expect(page.getByTestId('effort-selector')).toHaveText('effort: Ultracode');
 
     await closeApp(app);
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
     page = await firstWindow(app);
     await expect(page.getByTestId('runtime-selector')).toHaveText('Claude Code');
     await expect(page.getByTestId('effort-selector')).toHaveText('effort: Ultracode');
@@ -150,7 +152,7 @@ test.describe('codex per-model effort settings', () => {
   // `supported_reasoning_levels` in models_cache.json, not a fixed list — so what this asserts is
   // the *rule*, not a specific level set, which differs per install and per CLI version.
   test('offers the selected model own levels, and nothing at all for Auto', async () => {
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
     let page: Page = await firstWindow(app);
     if ((await page.getByTestId('runtime-selector').count()) === 0)
       await page.getByTestId('empty-state-create-task-button').click();
@@ -198,7 +200,7 @@ test.describe('codex per-model effort settings', () => {
     const labelAfterPick = await effortChip.textContent();
 
     await closeApp(app);
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, LEGACY_PICKER_ENV);
     page = await firstWindow(app);
     await expect(page.getByTestId('runtime-selector')).toHaveText('Codex');
     await expect(page.getByTestId('model-selector')).toHaveText('GPT-5.6-Terra');

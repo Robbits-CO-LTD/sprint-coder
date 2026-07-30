@@ -10,6 +10,7 @@ import {
   type MainToRuntimeEnvelope,
   type RuntimeCanonicalEvent,
   type RuntimeContextFragment,
+  type RuntimeSkillInput,
   type RuntimeTeamMcpOption,
 } from '../runtime-host/protocol';
 
@@ -69,6 +70,7 @@ export class RuntimeHostClient {
     // How much this Turn may write (issue #37). Decided by the caller from the Task's Access preset
     // and whether a Workspace exists — never defaulted to anything permissive here.
     writeScope?: RuntimeWriteScope,
+    skills: readonly RuntimeSkillInput[] = [],
   ): void {
     const contextFragments = (
       preparedContext?.fragments ??
@@ -98,6 +100,7 @@ export class RuntimeHostClient {
       workspacePath,
       model,
       contextFragments,
+      skills: [...skills],
       toolCatalogSnapshot,
       ...(teamMcp === undefined ? {} : { teamMcp }),
       ...(effort === undefined ? {} : { effort }),
@@ -284,7 +287,9 @@ function toRuntimeContextFragment(
   const authority =
     fragment.source === 'system'
       ? 'system'
-      : fragment.source === 'goal' || (fragment.source === 'history' && fragment.trust === 'user')
+      : fragment.source === 'goal' ||
+          (fragment.source === 'skill' && fragment.trust === 'user') ||
+          (fragment.source === 'history' && fragment.trust === 'user')
         ? 'user'
         : 'none';
   return {

@@ -13,9 +13,11 @@ import {
 import type {
   RuntimeCanonicalEvent,
   RuntimeContextFragment,
+  RuntimeSkillInput,
   RuntimeTeamMcpOption,
 } from './protocol';
-import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
+import { teamMcpNodeCommand } from './team-mcp-node-command';
+import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -137,6 +139,7 @@ export class ClaudeRuntimeAdapter {
     teamMcp?: RuntimeTeamMcpOption,
     effort?: string,
     writeScope: RuntimeWriteScope = 'read-only',
+    _skills: readonly RuntimeSkillInput[] = [],
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
@@ -146,7 +149,7 @@ export class ClaudeRuntimeAdapter {
     const cwd =
       workspacePath ?? (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-')));
     let teamMcpDirectory: string | null = null;
-    let teamMcpArgs: { configPath: string; guidance: string } | undefined;
+    let teamMcpArgs: { configPath: string; guidance: string; enableWebSearch: boolean } | undefined;
     if (teamMcp !== undefined) {
       teamMcpDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-mcp-'));
       const scriptPath = join(teamMcpDirectory, 'team-mcp-server.cjs');
@@ -158,10 +161,9 @@ export class ClaudeRuntimeAdapter {
           mcpServers: {
             team: {
               type: 'stdio',
-              command: process.execPath,
+              command: teamMcpNodeCommand(),
               args: [scriptPath],
               env: {
-                ELECTRON_RUN_AS_NODE: '1',
                 TEAM_BRIDGE_SOCKET: teamMcp.socketPath,
                 TEAM_BRIDGE_TOKEN: teamMcp.token,
               },
@@ -170,13 +172,21 @@ export class ClaudeRuntimeAdapter {
         }),
         { mode: 0o600 },
       );
-      teamMcpArgs = { configPath, guidance: teamMcp.guidance };
+      teamMcpArgs = {
+        configPath,
+        guidance: teamMcp.guidance,
+        enableWebSearch: teamMcp.enableWebSearch === true,
+      };
     }
     // Same independent refusal as the Codex adapter: with no Workspace the cwd is a throwaway temp
     // directory, so nothing may be written there whatever Main asked for.
     const effectiveScope: RuntimeWriteScope = workspacePath === null ? 'read-only' : writeScope;
     const normalizer = new ClaudeJsonlNormalizer(
-      claudeExpectedCapabilities(effectiveScope, teamMcp !== undefined),
+      claudeExpectedCapabilities(
+        effectiveScope,
+        teamMcp !== undefined,
+        teamMcp?.enableWebSearch === true,
+      ),
     );
     const child = spawn(
       'claude',
@@ -199,13 +209,14 @@ export class ClaudeRuntimeAdapter {
 
     let failed = false;
     let sawCompletion = false;
+    const effectiveTimeoutMs = teamMcp === undefined ? this.timeoutMs : 60 * 60_000;
     const timeout = setTimeout(() => {
       if (!failed && !control.canceled) {
         failed = true;
         fail(publicError('RUNTIME_TIMEOUT', 'Claude runtimeがタイムアウトしました。', true));
       }
       void terminateProcessTree(child);
-    }, this.timeoutMs);
+    }, effectiveTimeoutMs);
 
     createInterface({ input: child.stdout }).on('line', (line) => {
       if (failed || control.canceled || line.trim() === '') return;
@@ -274,25 +285,22 @@ export class ClaudeRuntimeAdapter {
 // Kept as a small local constant rather than importing team-tools.ts's tool name list: the
 // Runtime Host boundary is deliberately self-contained (see the ADR's rationale for duplicating
 // terminateProcessTree/signalTree instead of sharing a cross-file utility), and the MCP server
-// under `mcpServers.team` always fully-qualifies its 4 tool names as `mcp__team__<name>` per the
+// under `mcpServers.team` always fully-qualifies its tool names as `mcp__team__<name>` per the
 // MCP naming convention — verified directly against the installed CLI.
 const TEAM_MCP_SERVER_NAME = 'team';
-const TEAM_MCP_TOOL_NAMES = [
-  'team_hire_worker',
-  'team_assign_task',
-  'team_get_status',
-  'team_wait_events',
-  'team_send_to_worker',
-  'team_wait_reports',
-  'team_stop_worker',
-] as const;
 
 function claudeExpectedCapabilities(
   writeScope: RuntimeWriteScope,
   teamMcpEnabled: boolean,
+  enableWebSearch: boolean,
 ): ClaudeExpectedCapabilities {
+  const configuredTools = CLAUDE_TOOLS_BY_SCOPE[writeScope];
+  const builtInTools =
+    configuredTools === 'default' || !enableWebSearch
+      ? configuredTools
+      : [...configuredTools, 'WebSearch'];
   return {
-    builtInTools: CLAUDE_TOOLS_BY_SCOPE[writeScope],
+    builtInTools,
     ...(teamMcpEnabled
       ? {
           teamMcp: {
@@ -393,13 +401,16 @@ const CLAUDE_PERMISSION_MODE_BY_SCOPE: Record<RuntimeWriteScope, string> = {
 
 export function buildClaudeArgs(
   model: string,
-  teamMcp?: { configPath: string; guidance: string },
+  teamMcp?: { configPath: string; guidance: string; enableWebSearch?: boolean },
   effort?: string,
   writeScope: RuntimeWriteScope = 'read-only',
   workspacePath?: string | null,
 ): string[] {
   const configuredTools = CLAUDE_TOOLS_BY_SCOPE[writeScope];
-  const tools = configuredTools === 'default' ? configuredTools : configuredTools.join(',');
+  const tools =
+    configuredTools === 'default'
+      ? configuredTools
+      : [...configuredTools, ...(teamMcp?.enableWebSearch === true ? ['WebSearch'] : [])].join(',');
   return [
     '-p',
     '--output-format',
@@ -431,7 +442,7 @@ export function buildClaudeArgs(
           '--mcp-config',
           teamMcp.configPath,
           '--allowedTools',
-          'mcp__team__*',
+          teamMcp.enableWebSearch === true ? 'mcp__team__*,WebSearch' : 'mcp__team__*',
           '--append-system-prompt',
           teamMcp.guidance,
         ]),

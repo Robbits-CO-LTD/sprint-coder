@@ -248,4 +248,94 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     expect(await store.listImported()).toEqual([]);
     expect(await readFile(join(path, 'SKILL.md'), 'utf8')).toContain('Updated');
   });
+
+  it('lists executable skills, detects Team blueprints, and pins an immutable revision', async () => {
+    const root = await tempRoot();
+    const source = join(root, 'skills');
+    const { path } = await fixture(source, 'company-team');
+    await mkdir(join(path, 'team'));
+    await writeFile(
+      join(path, 'team', 'blueprint.json'),
+      JSON.stringify({
+        version: 1,
+        kind: 'team',
+        policy: {
+          maxAgentDepth: 4,
+          maxConcurrentExecutions: 8,
+          allowWorkerDirectMessages: true,
+          budgetMode: 'bounded',
+        },
+        leaderInstructions: 'Lead',
+        roles: [
+          {
+            key: 'worker',
+            title: 'Worker',
+            parentKey: 'leader',
+            responsibility: 'Work',
+            scope: [],
+            nonGoals: [],
+            doneCriteria: ['Done'],
+            required: true,
+            canDelegate: false,
+          },
+        ],
+      }),
+    );
+    const store = await SkillStore.open({ rootPath: join(root, 'store') });
+    const [candidate] = await store.scanSources({ claudePath: source });
+    const preview = await store.previewImport(candidate!);
+    await store.importSkill(preview);
+
+    expect(await store.listSelectable()).toEqual([
+      expect.objectContaining({
+        source: 'claude',
+        skillId: 'company-team',
+        kind: 'team',
+        digest: preview.digest,
+        enabled: true,
+      }),
+    ]);
+    const resolved = await store.resolveSelectable('claude', 'company-team', preview.digest);
+    expect(resolved.content).toContain('Test skill company-team');
+    expect(resolved.content).toContain('Pinned Team Blueprint');
+    expect(await readFile(join(resolved.packagePath, 'SKILL.md'), 'utf8')).toContain(
+      'Test skill company-team',
+    );
+
+    await store.setEnabled('claude', 'company-team', false);
+    await expect(
+      store.resolveSelectable('claude', 'company-team', preview.digest),
+    ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+    expect(await readFile(join(resolved.packagePath, 'SKILL.md'), 'utf8')).toContain(
+      'Test skill company-team',
+    );
+  });
+
+  it('exports and removes a created Skill without deleting its pinned revision', async () => {
+    const root = await tempRoot();
+    const store = await SkillStore.open({ rootPath: join(root, 'store') });
+    const installed = await store.installCreatedSkill('created-reviewer', [
+      {
+        path: 'SKILL.md',
+        content:
+          '---\nname: Created Reviewer\ndescription: Review created code\n---\n\nReview files.',
+      },
+    ]);
+    const exportRoot = join(root, 'export');
+    await mkdir(exportRoot);
+    const exported = await store.exportCreated(installed.skillId, installed.digest, exportRoot);
+    expect(await readFile(join(exported, 'SKILL.md'), 'utf8')).toContain('Review files');
+
+    const pinned = (await store.resolveSelectable('created', installed.skillId, installed.digest))
+      .packagePath;
+    await store.setCreatedEnabled(installed.skillId, installed.digest, false);
+    expect((await store.listSelectable())[0]?.enabled).toBe(false);
+    await expect(
+      store.resolveSelectable('created', installed.skillId, installed.digest),
+    ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+    await store.setCreatedEnabled(installed.skillId, installed.digest, true);
+    await store.removeCreated(installed.skillId, installed.digest);
+    expect(await store.listSelectable()).toEqual([]);
+    expect(await readFile(join(pinned, 'SKILL.md'), 'utf8')).toContain('Review files');
+  });
 });

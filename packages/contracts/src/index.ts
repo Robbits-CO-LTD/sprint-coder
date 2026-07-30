@@ -4,6 +4,15 @@ const idSchema = z.string().min(1).max(128);
 const timestampSchema = z.string().datetime();
 const taskTextSchema = z.string().max(100_000);
 
+function isSafeSkillDraftPath(value: string): boolean {
+  if (value.startsWith('/') || value.includes('\\')) return false;
+  const parts = value.split('/');
+  return (
+    parts.length <= 9 &&
+    parts.every((part) => part !== '' && part !== '.' && part !== '..' && !part.startsWith('.'))
+  );
+}
+
 export const toolIdSchema = z
   .string()
   .regex(
@@ -123,6 +132,9 @@ export const taskSummarySchema = z
     goal: z.string().nullable(),
     workspacePath: z.string().nullable(),
     localOnly: z.boolean(),
+    /** Whether the Task has accepted at least one user message. Older backends may omit this;
+     * renderers must treat absence as an established Task for compatibility. */
+    hasConversation: z.boolean().optional(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })
@@ -138,6 +150,98 @@ export const teamStateSchema = z.enum([
   'completed',
   'failed',
 ]);
+export const teamPolicySchema = z
+  .object({
+    maxAgentDepth: z.number().int().min(1).max(4),
+    maxConcurrentExecutions: z.number().int().min(1).max(8),
+    allowWorkerDirectMessages: z.boolean(),
+    budgetMode: z.enum(['bounded', 'unlimited']),
+  })
+  .strict();
+export type TeamPolicy = z.infer<typeof teamPolicySchema>;
+export const teamBlueprintRoleSchema = z
+  .object({
+    key: z
+      .string()
+      .min(1)
+      .max(80)
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+    title: z.string().min(1).max(100),
+    parentKey: z.string().min(1).max(80),
+    responsibility: z.string().min(1).max(2_000),
+    scope: z.array(z.string().min(1).max(500)).max(64),
+    nonGoals: z.array(z.string().min(1).max(500)).max(64),
+    doneCriteria: z.array(z.string().min(1).max(500)).max(64),
+    required: z.boolean(),
+    canDelegate: z.boolean(),
+    modelRequirements: z
+      .object({
+        capabilities: z.array(z.string().min(1).max(100)).max(32),
+        preferredProviders: z.array(z.string().min(1).max(64)).max(16).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export const teamBlueprintSchema = z
+  .object({
+    version: z.literal(1),
+    kind: z.literal('team'),
+    policy: teamPolicySchema,
+    leaderInstructions: z.string().min(1).max(20_000),
+    roles: z.array(teamBlueprintRoleSchema).min(1).max(64),
+  })
+  .strict()
+  .superRefine((blueprint, context) => {
+    const keys = new Set<string>();
+    for (const role of blueprint.roles) {
+      if (keys.has(role.key))
+        context.addIssue({ code: 'custom', message: `Role keyが重複しています: ${role.key}` });
+      keys.add(role.key);
+    }
+    for (const role of blueprint.roles) {
+      if (role.parentKey !== 'leader' && !keys.has(role.parentKey))
+        context.addIssue({
+          code: 'custom',
+          message: `親Roleが存在しません: ${role.parentKey}`,
+        });
+      if (role.parentKey === role.key)
+        context.addIssue({ code: 'custom', message: `Roleは自身を親にできません: ${role.key}` });
+    }
+    const parents = new Map(blueprint.roles.map((role) => [role.key, role.parentKey]));
+    for (const role of blueprint.roles) {
+      const visited = new Set<string>([role.key]);
+      let current = role.parentKey;
+      while (current !== 'leader' && parents.has(current)) {
+        if (visited.has(current)) {
+          context.addIssue({
+            code: 'custom',
+            message: `Roleの親子関係が循環しています: ${role.key}`,
+          });
+          break;
+        }
+        visited.add(current);
+        current = parents.get(current)!;
+      }
+    }
+  });
+export type TeamBlueprint = z.infer<typeof teamBlueprintSchema>;
+export const teamPolicyUpdateInputSchema = z
+  .object({
+    taskId: idSchema,
+    policy: teamPolicySchema,
+    expectedRevision: z.number().int().nonnegative(),
+  })
+  .strict();
+export type TeamPolicyUpdateInput = z.infer<typeof teamPolicyUpdateInputSchema>;
+export const managerPolicySchema = z
+  .object({
+    maxDirectChildren: z.number().int().positive().nullable(),
+    maxDelegationDepth: z.number().int().min(1).max(4),
+    allowManagerChildren: z.boolean(),
+  })
+  .strict();
+export type ManagerPolicy = z.infer<typeof managerPolicySchema>;
 export const teamSummarySchema = z
   .object({
     id: idSchema,
@@ -145,6 +249,7 @@ export const teamSummarySchema = z
     state: teamStateSchema,
     leaderAgentId: idSchema,
     budget: z.record(z.string(), z.json()),
+    policy: teamPolicySchema,
     revision: z.number().int().nonnegative(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
@@ -182,6 +287,16 @@ export const contextInheritancePolicySchema = z.enum([
   'selected_items',
   'full_fork',
 ]);
+const teamConnectionIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+const teamProviderIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9][a-z0-9._-]*$/);
 
 export const teamUsageTotalsSchema = z
   .object({
@@ -217,6 +332,13 @@ export const workerSummarySchema = z
     writeCapable: z.boolean(),
     currentActivity: z.string().nullable(),
     engine: z.enum(['mock', 'codex', 'claude']),
+    connectionId: teamConnectionIdSchema.nullable(),
+    requestedProvider: teamProviderIdSchema.nullable(),
+    requestedModel: z.string().min(1).max(256).nullable(),
+    parentAgentId: idSchema.nullable(),
+    depth: z.number().int().min(0).max(4),
+    canDelegate: z.boolean(),
+    managerPolicy: managerPolicySchema.nullable(),
     liveOutput: z.string().max(20_000),
     reasoningActive: z.boolean(),
     usage: teamUsageTotalsSchema,
@@ -237,6 +359,8 @@ export const teamMessageSummarySchema = z
     seq: z.number().int().min(1),
     state: teamMessageStateSchema,
     content: z.string(),
+    executionId: idSchema.nullable(),
+    attemptId: idSchema.nullable(),
     deliveryState: teamDeliveryStateSchema.nullable(),
     attempt: z.number().int().min(0),
     createdAt: timestampSchema,
@@ -245,11 +369,99 @@ export const teamMessageSummarySchema = z
   .strict();
 export type TeamMessageSummary = z.infer<typeof teamMessageSummarySchema>;
 
+export const teamExecutionSummarySchema = z
+  .object({
+    id: idSchema,
+    teamId: idSchema,
+    assigneeAgentId: idSchema,
+    createdByAgentId: idSchema,
+    state: z.enum([
+      'assigned',
+      'queued',
+      'waiting_verification',
+      'waiting_rate_limit',
+      'running',
+      'completed',
+      'failed',
+      'canceled',
+    ]),
+    instructionPreview: z.string().max(500),
+    instructionRevision: z.number().int().min(1),
+    queueOrdinal: z.number().int().min(1).nullable(),
+    queueReason: z
+      .enum([
+        'global_concurrency',
+        'connection_concurrency',
+        'verification',
+        'rate_limit',
+        'budget',
+        'recovery',
+      ])
+      .nullable(),
+    connectionId: z.string().min(1).max(128).nullable(),
+    requestedModel: z.string().min(1).max(128).nullable(),
+    assignedAt: timestampSchema,
+    queuedAt: timestampSchema.nullable(),
+    startedAt: timestampSchema.nullable(),
+    completedAt: timestampSchema.nullable(),
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type TeamExecutionSummary = z.infer<typeof teamExecutionSummarySchema>;
+
+export const teamActivitySummarySchema = z
+  .object({
+    id: idSchema,
+    teamId: idSchema,
+    seq: z.number().int().min(1),
+    type: z.enum([
+      'worker_hired',
+      'task_assigned',
+      'execution_queued',
+      'execution_waiting',
+      'execution_started',
+      'execution_finished',
+      'steered',
+      'attempt_started',
+      'attempt_finished',
+      'worker_reported',
+      'worker_stopped',
+    ]),
+    actorAgentId: idSchema.nullable(),
+    actorRole: z.string().min(1).nullable(),
+    subjectAgentId: idSchema.nullable(),
+    subjectRole: z.string().min(1).nullable(),
+    executionId: idSchema.nullable(),
+    attemptId: idSchema.nullable(),
+    status: z.string().min(1).max(64).nullable(),
+    queueReason: z
+      .enum([
+        'global_concurrency',
+        'connection_concurrency',
+        'verification',
+        'rate_limit',
+        'budget',
+        'recovery',
+      ])
+      .nullable(),
+    attemptOrdinal: z.number().int().min(1).nullable(),
+    terminalReason: z.string().min(1).max(128).nullable(),
+    connectionId: teamConnectionIdSchema.nullable(),
+    requestedProvider: teamProviderIdSchema.nullable(),
+    requestedModel: z.string().min(1).max(256).nullable(),
+    modelSelectionReason: z.string().min(1).max(2_000).nullable(),
+    recordedAt: timestampSchema,
+  })
+  .strict();
+export type TeamActivitySummary = z.infer<typeof teamActivitySummarySchema>;
+
 export const teamDetailSchema = z
   .object({
     team: teamSummarySchema,
     workers: z.array(workerSummarySchema),
     messages: z.array(teamMessageSummarySchema),
+    executions: z.array(teamExecutionSummarySchema),
+    activities: z.array(teamActivitySummarySchema),
     budgets: z.array(teamBudgetStatusSchema),
   })
   .strict();
@@ -320,6 +532,31 @@ export const workerReportSchema = z
   .strict();
 export type WorkerReport = z.infer<typeof workerReportSchema>;
 
+export const connectionIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+export const providerIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9][a-z0-9._-]*$/);
+export const modelSelectionSchema = z
+  .object({
+    connectionId: connectionIdSchema.nullable(),
+    requestedProvider: providerIdSchema.nullable(),
+    requestedModel: z.string().min(1).max(128).nullable(),
+  })
+  .strict()
+  .refine(
+    ({ connectionId, requestedProvider, requestedModel }) =>
+      (connectionId === null && requestedProvider === null && requestedModel === null) ||
+      (connectionId !== null && requestedProvider !== null && requestedModel !== null),
+    { message: 'Model selection identity must be either complete or entirely unknown' },
+  );
+export type ModelSelection = z.infer<typeof modelSelectionSchema>;
+
 export const teamHireWorkerInputSchema = z
   .object({
     taskId: idSchema,
@@ -327,6 +564,14 @@ export const teamHireWorkerInputSchema = z
     objective: z.string().min(1).max(10_000),
     contextInheritancePolicy: contextInheritancePolicySchema,
     writeCapable: z.boolean(),
+    modelSelection: modelSelectionSchema.optional(),
+    modelSelectionReason: z.string().min(1).max(2_000).optional(),
+    blueprintRoleKey: z
+      .string()
+      .min(1)
+      .max(80)
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
+      .optional(),
   })
   .strict();
 export type TeamHireWorkerInput = z.infer<typeof teamHireWorkerInputSchema>;
@@ -421,10 +666,101 @@ export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export const turnStageSchema = z.enum(['understanding', 'planning', 'executing', 'synthesizing']);
 export type TurnStage = z.infer<typeof turnStageSchema>;
 
+export const skillSourceSchema = z.enum(['builtin', 'created', 'agents', 'claude']);
+export const skillKindSchema = z.enum(['chat', 'team']);
+export const skillIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/);
+export const skillDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export const skillRefSchema = z
+  .object({
+    skillId: skillIdSchema,
+    source: skillSourceSchema,
+    digest: skillDigestSchema,
+  })
+  .strict();
+export const turnSkillSelectionSchema = z
+  .object({
+    kind: skillKindSchema,
+    ref: skillRefSchema,
+  })
+  .strict();
+export const turnSkillSelectionsSchema = z
+  .array(turnSkillSelectionSchema)
+  .max(6)
+  .superRefine((selections, context) => {
+    const refs = new Set<string>();
+    let chatCount = 0;
+    let teamCount = 0;
+    for (const selection of selections) {
+      const key = `${selection.ref.source}:${selection.ref.skillId}:${selection.ref.digest}`;
+      if (refs.has(key))
+        context.addIssue({
+          code: 'custom',
+          message: '同じSkillを複数回選択できません',
+        });
+      refs.add(key);
+      if (selection.kind === 'chat') chatCount += 1;
+      else teamCount += 1;
+    }
+    if (chatCount > 5) context.addIssue({ code: 'custom', message: 'Chat Skillは最大5件です' });
+    if (teamCount > 1) context.addIssue({ code: 'custom', message: 'Team Skillは最大1件です' });
+  });
+export const skillDraftFileSchema = z
+  .object({
+    path: z
+      .string()
+      .min(1)
+      .max(500)
+      .refine(isSafeSkillDraftPath, 'Skill Draftのファイルパスが安全ではありません'),
+    content: z.string().max(1024 * 1024),
+  })
+  .strict();
+export const skillDraftSchema = z
+  .object({
+    id: idSchema,
+    kind: skillKindSchema,
+    skillId: skillIdSchema,
+    name: z.string().min(1).max(200),
+    description: z.string().min(1).max(2_000),
+    digest: skillDigestSchema,
+    files: z.array(skillDraftFileSchema).min(1).max(256),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export const skillDraftCreateInputSchema = z
+  .object({
+    kind: skillKindSchema,
+    skillId: skillIdSchema,
+    files: z.array(skillDraftFileSchema).min(1).max(256),
+  })
+  .strict();
+export const skillDraftInstallInputSchema = z
+  .object({
+    draftId: idSchema,
+    expectedDigest: skillDigestSchema,
+    confirmed: z.literal(true),
+  })
+  .strict();
+export const skillDraftIdInputSchema = z.object({ draftId: idSchema }).strict();
+export const createdSkillMutationInputSchema = z
+  .object({ skillId: skillIdSchema, digest: skillDigestSchema })
+  .strict();
+export const createdSkillEnabledInputSchema = createdSkillMutationInputSchema
+  .extend({ enabled: z.boolean() })
+  .strict();
+export type SkillDraftFile = z.infer<typeof skillDraftFileSchema>;
+export type SkillDraft = z.infer<typeof skillDraftSchema>;
+export type SkillDraftCreateInput = z.infer<typeof skillDraftCreateInputSchema>;
+
 export const queuedInputSchema = z
   .object({
     ordinal: z.number().int().positive(),
     text: taskTextSchema,
+    skills: turnSkillSelectionsSchema.optional(),
   })
   .strict();
 export type QueuedInput = z.infer<typeof queuedInputSchema>;
@@ -436,7 +772,7 @@ export const contextUsageSchema = z
     fragments: z.array(
       z
         .object({
-          source: z.enum(['system', 'history', 'goal', 'compaction', 'background']),
+          source: z.enum(['system', 'history', 'goal', 'compaction', 'background', 'skill']),
           tokens: z.number().int().nonnegative(),
         })
         .strict(),
@@ -882,6 +1218,13 @@ export const turnEventSchema = z.discriminatedUnion('type', [
     .strict(),
   z
     .object({
+      type: z.literal('skill.draft.created'),
+      ...turnEventBase,
+      draft: skillDraftSchema,
+    })
+    .strict(),
+  z
+    .object({
       type: z.literal('delivery.acknowledged'),
       ...turnEventBase,
       deliveryId: digestSchema,
@@ -1019,6 +1362,426 @@ export type PublicError = z.infer<typeof publicErrorSchema>;
 
 export const runtimeKindSchema = z.enum(['mock', 'codex', 'claude']);
 export type RuntimeKind = z.infer<typeof runtimeKindSchema>;
+export const providerRuntimeKindSchema = z.enum([
+  'builtin_cli',
+  'official_api',
+  'openai_compatible',
+  'mock',
+]);
+export type ProviderRuntimeKind = z.infer<typeof providerRuntimeKindSchema>;
+export const providerVerificationStatusSchema = z.enum([
+  'not_required',
+  'unverified',
+  'verified',
+  'verification_expired',
+  'invalid_credentials',
+  'unavailable',
+]);
+export type ProviderVerificationStatus = z.infer<typeof providerVerificationStatusSchema>;
+export const providerConnectionVerificationSchema = z
+  .object({
+    status: providerVerificationStatusSchema,
+    verifiedAt: timestampSchema.nullable(),
+    expiresAt: timestampSchema.nullable(),
+    message: z.string().min(1).max(500).nullable(),
+  })
+  .strict();
+export type ProviderConnectionVerification = z.infer<typeof providerConnectionVerificationSchema>;
+export const providerRateLimitModeSchema = z.enum(['bypass', 'auto', 'manual']);
+export type ProviderRateLimitMode = z.infer<typeof providerRateLimitModeSchema>;
+export const providerConnectionRateLimitSchema = z
+  .object({
+    mode: providerRateLimitModeSchema,
+    maxConcurrentRequests: z.number().int().positive().nullable(),
+    requestsPerMinute: z.number().int().positive().nullable(),
+    tokensPerMinute: z.number().int().positive().nullable(),
+    lastObservedRateLimitHeaders: z.record(z.string(), z.string().max(256)).nullable(),
+  })
+  .strict();
+export type ProviderConnectionRateLimit = z.infer<typeof providerConnectionRateLimitSchema>;
+export const providerConnectionRateLimitLowerInputSchema = z
+  .object({
+    connectionId: connectionIdSchema,
+    maxConcurrentRequests: z.number().int().positive().optional(),
+    requestsPerMinute: z.number().int().positive().optional(),
+    tokensPerMinute: z.number().int().positive().optional(),
+  })
+  .strict()
+  .refine(
+    (input) =>
+      input.maxConcurrentRequests !== undefined ||
+      input.requestsPerMinute !== undefined ||
+      input.tokensPerMinute !== undefined,
+    { message: 'At least one Provider rate limit must be supplied' },
+  );
+export type ProviderConnectionRateLimitLowerInput = z.infer<
+  typeof providerConnectionRateLimitLowerInputSchema
+>;
+export const providerConnectionSchema = z
+  .object({
+    id: connectionIdSchema,
+    providerId: providerIdSchema,
+    runtimeKind: providerRuntimeKindSchema,
+    displayName: z.string().min(1).max(100),
+    enabled: z.boolean(),
+    secretReference: z
+      .string()
+      .regex(
+        /^provider-secret:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      )
+      .nullable(),
+    verification: providerConnectionVerificationSchema,
+    rateLimit: providerConnectionRateLimitSchema,
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type ProviderConnection = z.infer<typeof providerConnectionSchema>;
+export const openAIConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+    organizationId: z.string().trim().min(1).max(128).optional(),
+    projectId: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict();
+export type OpenAIConnectionCreateInput = z.infer<typeof openAIConnectionCreateInputSchema>;
+export const openRouterConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+  })
+  .strict();
+export type OpenRouterConnectionCreateInput = z.infer<typeof openRouterConnectionCreateInputSchema>;
+export const anthropicConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+  })
+  .strict();
+export type AnthropicConnectionCreateInput = z.infer<typeof anthropicConnectionCreateInputSchema>;
+export const geminiConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+  })
+  .strict();
+export type GeminiConnectionCreateInput = z.infer<typeof geminiConnectionCreateInputSchema>;
+export const xAIConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+  })
+  .strict();
+export type XAIConnectionCreateInput = z.infer<typeof xAIConnectionCreateInputSchema>;
+export const providerProfileProtocolSchema = z.enum(['chat_completions', 'responses']);
+export type ProviderProfileProtocol = z.infer<typeof providerProfileProtocolSchema>;
+export const providerProfileErrorOverrideSchema = z
+  .object({
+    status: z.number().int().min(400).max(599),
+    category: z.enum([
+      'credentials',
+      'not_found',
+      'rate_limited',
+      'timeout',
+      'network',
+      'canceled',
+      'invalid_request',
+      'provider_unavailable',
+      'internal',
+    ]),
+    retryable: z.boolean(),
+  })
+  .strict();
+export const providerProfileSchema = z
+  .object({
+    id: providerIdSchema,
+    displayName: z.string().min(1).max(100),
+    baseUrl: z.string().url().max(2_048),
+    baseUrlConfigurable: z.boolean(),
+    protocol: providerProfileProtocolSchema,
+    modelsPath: z.string().startsWith('/').max(256).nullable(),
+    curatedModels: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(256),
+            displayName: z.string().min(1).max(256),
+          })
+          .strict(),
+      )
+      .max(500),
+    verificationModel: z.string().min(1).max(256).nullable(),
+    authentication: z
+      .object({
+        headerName: z.string().min(1).max(128),
+        scheme: z.string().max(64),
+      })
+      .strict(),
+    requiredCredentialFields: z.array(z.enum(['account_id'])).max(8),
+    errorOverrides: z.array(providerProfileErrorOverrideSchema).max(32),
+    sourceReference: z.string().url().max(2_048),
+    reviewedAt: timestampSchema,
+  })
+  .strict()
+  .superRefine((profile, context) => {
+    if (
+      profile.modelsPath === null &&
+      (profile.curatedModels.length === 0 || profile.verificationModel === null)
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'A curated Profile requires models and a verification model',
+      });
+  });
+export type ProviderProfile = z.infer<typeof providerProfileSchema>;
+export const providerProfileConnectionCreateInputSchema = z
+  .object({
+    profileId: providerIdSchema,
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+    baseUrl: z.string().url().max(2_048).optional(),
+    accountId: z.string().trim().min(1).max(256).optional(),
+  })
+  .strict();
+export type ProviderProfileConnectionCreateInput = z.infer<
+  typeof providerProfileConnectionCreateInputSchema
+>;
+export const capabilitySourceSchema = z.enum(['provider_api', 'official_curated', 'unknown']);
+export type CapabilitySource = z.infer<typeof capabilitySourceSchema>;
+export type CatalogValue<T> = Readonly<{
+  value: T | null;
+  source: CapabilitySource;
+  sourceReference?: string;
+  observedAt?: string;
+}>;
+export function catalogValueSchema<T extends z.ZodType>(
+  valueSchema: T,
+): z.ZodObject<{
+  value: z.ZodNullable<T>;
+  source: typeof capabilitySourceSchema;
+  sourceReference: z.ZodOptional<z.ZodString>;
+  observedAt: z.ZodOptional<typeof timestampSchema>;
+}> {
+  return z
+    .object({
+      value: valueSchema.nullable(),
+      source: capabilitySourceSchema,
+      sourceReference: z.string().min(1).max(2_048).optional(),
+      observedAt: timestampSchema.optional(),
+    })
+    .strict();
+}
+export const providerModelSchema = z
+  .object({
+    connectionId: connectionIdSchema,
+    connectionDisplayName: z.string().min(1).max(100).optional(),
+    providerId: providerIdSchema,
+    modelAuthor: catalogValueSchema(z.string().min(1).max(128)).optional(),
+    modelId: z.string().min(1).max(256),
+    displayName: z.string().min(1).max(256),
+    available: z.boolean(),
+    availabilityCheckedAt: timestampSchema,
+    contextWindow: catalogValueSchema(z.number().int().positive()),
+    maxOutputTokens: catalogValueSchema(z.number().int().positive()),
+    toolCalling: catalogValueSchema(z.boolean()),
+    structuredOutput: catalogValueSchema(z.boolean()),
+    multimodalInput: catalogValueSchema(z.boolean()),
+    reasoning: catalogValueSchema(z.boolean()),
+    gateway: z
+      .object({
+        providerId: providerIdSchema,
+        upstreamProvider: catalogValueSchema(z.string().min(1).max(128)),
+      })
+      .strict()
+      .optional(),
+    pricing: z
+      .object({
+        promptPerToken: catalogValueSchema(z.string().min(1).max(64)),
+        completionPerToken: catalogValueSchema(z.string().min(1).max(64)),
+        currency: z.literal('USD'),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type ProviderModel = z.infer<typeof providerModelSchema>;
+export const normalizedProviderUsageSchema = z
+  .object({
+    inputTokens: z.number().int().nonnegative().nullable(),
+    outputTokens: z.number().int().nonnegative().nullable(),
+    cacheReadTokens: z.number().int().nonnegative().nullable(),
+    cacheWriteTokens: z.number().int().nonnegative().nullable(),
+    reasoningTokens: z.number().int().nonnegative().nullable(),
+    providerCost: z
+      .object({
+        amount: z.number().nonnegative(),
+        currency: z.string().regex(/^[A-Z]{3}$/),
+      })
+      .strict()
+      .nullable(),
+    source: z.enum(['provider_api', 'runtime_observed', 'unknown']),
+  })
+  .strict();
+export type NormalizedProviderUsage = z.infer<typeof normalizedProviderUsageSchema>;
+export const normalizedProviderErrorSchema = z
+  .object({
+    category: z.enum([
+      'credentials',
+      'not_found',
+      'rate_limited',
+      'timeout',
+      'network',
+      'canceled',
+      'invalid_request',
+      'provider_unavailable',
+      'internal',
+    ]),
+    message: z.string().min(1).max(1_000),
+    retryable: z.boolean(),
+    retryAfterMs: z.number().int().nonnegative().nullable(),
+    providerCode: z.string().min(1).max(128).nullable(),
+  })
+  .strict();
+export type NormalizedProviderError = z.infer<typeof normalizedProviderErrorSchema>;
+export const executionResolutionSchema = z
+  .object({
+    resolvedProvider: providerIdSchema.nullable(),
+    resolvedModel: z.string().min(1).max(128).nullable(),
+    gatewayProvider: providerIdSchema.nullable().optional(),
+    upstreamProvider: z.string().min(1).max(128).nullable().optional(),
+    routing: z.record(z.string(), z.json()).nullable().optional(),
+  })
+  .strict();
+export type ExecutionResolution = z.infer<typeof executionResolutionSchema>;
+export const canonicalProviderEventSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('output_delta'), text: z.string() }).strict(),
+  z.object({ type: z.literal('reasoning_delta'), text: z.string() }).strict(),
+  z
+    .object({
+      type: z.literal('tool_call'),
+      callId: z.string().min(1).max(256),
+      name: z.string().min(1).max(256),
+      input: z.json(),
+    })
+    .strict(),
+  z.object({ type: z.literal('usage'), usage: normalizedProviderUsageSchema }).strict(),
+  z.object({ type: z.literal('resolution'), resolution: executionResolutionSchema }).strict(),
+  z
+    .object({
+      type: z.literal('rate_limit'),
+      retryAfterMs: z.number().int().nonnegative().nullable(),
+      observedAt: timestampSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('completed'),
+      stopReason: z.string().min(1).max(256).nullable(),
+    })
+    .strict(),
+  z.object({ type: z.literal('error'), error: normalizedProviderErrorSchema }).strict(),
+]);
+export type CanonicalProviderEvent = z.infer<typeof canonicalProviderEventSchema>;
+export const providerToolSchema = z
+  .object({
+    name: z.string().min(1).max(256),
+    description: z.string().min(1).max(2_000),
+    inputSchema: z.json(),
+  })
+  .strict();
+export type ProviderTool = z.infer<typeof providerToolSchema>;
+export const providerStructuredOutputSchema = z
+  .object({
+    name: z.string().min(1).max(64),
+    schema: z.json(),
+    strict: z.boolean(),
+  })
+  .strict();
+export type ProviderStructuredOutput = z.infer<typeof providerStructuredOutputSchema>;
+export const providerInlineImageSchema = z
+  .object({
+    mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+    base64: z
+      .string()
+      .min(1)
+      .max(16 * 1024 * 1024)
+      .regex(/^[A-Za-z0-9+/]+={0,2}$/),
+  })
+  .strict();
+export type ProviderInlineImage = z.infer<typeof providerInlineImageSchema>;
+export const providerMessageToolCallSchema = z
+  .object({
+    callId: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+    input: z.json(),
+  })
+  .strict();
+export type ProviderMessageToolCall = z.infer<typeof providerMessageToolCallSchema>;
+export const providerExecutionRequestSchema = z
+  .object({
+    executionId: z.string().min(1).max(256),
+    connectionId: connectionIdSchema,
+    modelId: z.string().min(1).max(256),
+    messages: z
+      .array(
+        z
+          .object({
+            role: z.enum(['system', 'user', 'assistant', 'tool']),
+            content: z.string(),
+            toolCallId: z.string().min(1).max(256).optional(),
+            toolName: z.string().min(1).max(256).optional(),
+            toolCalls: z.array(providerMessageToolCallSchema).max(128).optional(),
+            inlineImages: z.array(providerInlineImageSchema).max(8).optional(),
+          })
+          .strict()
+          .superRefine((message, context) => {
+            if (message.role === 'tool' && message.toolCallId === undefined)
+              context.addIssue({
+                code: 'custom',
+                path: ['toolCallId'],
+                message: 'Tool result messages require toolCallId',
+              });
+            if (message.role !== 'tool' && message.toolCallId !== undefined)
+              context.addIssue({
+                code: 'custom',
+                path: ['toolCallId'],
+                message: 'toolCallId is only valid for tool result messages',
+              });
+            if (message.role !== 'tool' && message.toolName !== undefined)
+              context.addIssue({
+                code: 'custom',
+                path: ['toolName'],
+                message: 'toolName is only valid for tool result messages',
+              });
+            if (
+              message.role !== 'assistant' &&
+              message.toolCalls !== undefined &&
+              message.toolCalls.length > 0
+            )
+              context.addIssue({
+                code: 'custom',
+                path: ['toolCalls'],
+                message: 'toolCalls are only valid on assistant messages',
+              });
+            if (
+              message.role !== 'user' &&
+              message.inlineImages !== undefined &&
+              message.inlineImages.length > 0
+            )
+              context.addIssue({
+                code: 'custom',
+                path: ['inlineImages'],
+                message: 'Inline images are only valid on user messages',
+              });
+          }),
+      )
+      .min(1),
+    tools: z.array(providerToolSchema).max(128).optional(),
+    structuredOutput: providerStructuredOutputSchema.optional(),
+  })
+  .strict();
+export type ProviderExecutionRequest = z.infer<typeof providerExecutionRequestSchema>;
 // Model id/option shape is provider-agnostic (Codex slugs and Claude aliases/full ids both fit
 // this format) and is kept under its original "codex" name for additive, non-breaking evolution.
 export const codexModelIdSchema = z
@@ -1125,11 +1888,70 @@ export const runtimeSettingsSchema = z
   })
   .strict();
 export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;
-export const runtimeSetInputSchema = z.object({ kind: runtimeKindSchema }).strict();
-export const runtimeModelSetInputSchema = z.object({ model: codexModelIdSchema }).strict();
+export const runtimeSettingsGetInputSchema = z.object({ taskId: idSchema.optional() }).strict();
+export const runtimeSetInputSchema = z
+  .object({ kind: runtimeKindSchema, taskId: idSchema.optional() })
+  .strict();
+export const runtimeModelSetInputSchema = z
+  .object({ model: codexModelIdSchema, taskId: idSchema.optional() })
+  .strict();
 export const runtimeEffortSetInputSchema = z.object({ effort: claudeEffortSchema }).strict();
+export const teamModelResearchSettingsSchema = z
+  .object({
+    researchBeforeHiring: z.boolean(),
+  })
+  .strict();
+export type TeamModelResearchSettings = z.infer<typeof teamModelResearchSettingsSchema>;
+export const teamModelResearchSettingsSetInputSchema = teamModelResearchSettingsSchema;
 export const runtimeCodexEffortSetInputSchema = z
   .object({ effort: effortOptionSchema.shape.id })
+  .strict();
+export const modelCatalogCapabilitySchema = z.enum([
+  'toolCalling',
+  'structuredOutput',
+  'multimodalInput',
+  'reasoning',
+]);
+export type ModelCatalogCapability = z.infer<typeof modelCatalogCapabilitySchema>;
+export const modelCatalogAccessTypeSchema = z.enum(['subscription', 'api']);
+export type ModelCatalogAccessType = z.infer<typeof modelCatalogAccessTypeSchema>;
+export const modelCatalogQueryInputSchema = z
+  .object({
+    taskId: idSchema,
+    text: z.string().max(200).default(''),
+    connectionIds: z.array(connectionIdSchema).max(32).default([]),
+    providerIds: z.array(providerIdSchema).max(32).default([]),
+    accessTypes: z.array(modelCatalogAccessTypeSchema).max(2).default([]),
+    capabilities: z.array(modelCatalogCapabilitySchema).max(4).default([]),
+    availableOnly: z.boolean().default(true),
+    cursor: z
+      .string()
+      .regex(/^cursor:[0-9]+$/)
+      .nullable()
+      .default(null),
+    limit: z.number().int().min(1).max(100).default(50),
+  })
+  .strict();
+export type ModelCatalogQueryInput = z.infer<typeof modelCatalogQueryInputSchema>;
+export const modelCatalogQueryResultSchema = z
+  .object({
+    revision: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+    items: z.array(providerModelSchema).max(100),
+    nextCursor: z
+      .string()
+      .regex(/^cursor:[0-9]+$/)
+      .nullable(),
+    selection: modelSelectionSchema,
+    multiProviderModelPickerV2: z.boolean(),
+  })
+  .strict();
+export type ModelCatalogQueryResult = z.infer<typeof modelCatalogQueryResultSchema>;
+export const modelCatalogSelectionSetInputSchema = z
+  .object({
+    taskId: idSchema,
+    selection: modelSelectionSchema,
+  })
   .strict();
 
 export const accessPresetSchema = z.enum(['ask', 'auto', 'full']);
@@ -1182,11 +2004,29 @@ export const commandResultSchema = <T extends z.ZodType>(value: T) =>
 
 export const emptyPayloadSchema = z.object({}).strict();
 export const skillProviderSchema = z.enum(['claude', 'agents']);
-export const skillIdSchema = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/);
+export const skillCatalogItemSchema = z
+  .object({
+    ref: skillRefSchema,
+    kind: skillKindSchema,
+    name: z.string().min(1).max(200),
+    description: z.string().min(1).max(2_000),
+    enabled: z.boolean(),
+    removable: z.boolean(),
+    exportable: z.boolean(),
+  })
+  .strict();
+export const skillCatalogSchema = z
+  .object({
+    revision: z.string().min(1).max(128),
+    items: z.array(skillCatalogItemSchema).max(4_096),
+  })
+  .strict();
+export const taskSkillSelectionInputSchema = z
+  .object({
+    taskId: idSchema,
+    skills: turnSkillSelectionsSchema,
+  })
+  .strict();
 export const skillCandidateSummarySchema = z
   .object({
     provider: skillProviderSchema,
@@ -1252,6 +2092,12 @@ export const skillImportResultSchema = z
   })
   .strict();
 export type SkillProvider = z.infer<typeof skillProviderSchema>;
+export type SkillSource = z.infer<typeof skillSourceSchema>;
+export type SkillKind = z.infer<typeof skillKindSchema>;
+export type SkillRef = z.infer<typeof skillRefSchema>;
+export type TurnSkillSelection = z.infer<typeof turnSkillSelectionSchema>;
+export type SkillCatalogItem = z.infer<typeof skillCatalogItemSchema>;
+export type SkillCatalog = z.infer<typeof skillCatalogSchema>;
 export type SkillCandidateSummary = z.infer<typeof skillCandidateSummarySchema>;
 export type SkillScanResult = z.infer<typeof skillScanResultSchema>;
 export type SkillPreviewResult = z.infer<typeof skillPreviewResultSchema>;
@@ -1278,7 +2124,11 @@ export const taskArchivedInputSchema = z
 export const taskGoalInputSchema = z.object({ taskId: idSchema, goal: taskTextSchema }).strict();
 export const taskDraftInputSchema = z.object({ taskId: idSchema, draft: taskTextSchema }).strict();
 export const turnStartInputSchema = z
-  .object({ taskId: idSchema, text: z.string().trim().min(1).max(100_000) })
+  .object({
+    taskId: idSchema,
+    text: z.string().trim().min(1).max(100_000),
+    skills: turnSkillSelectionsSchema.default([]),
+  })
   .strict();
 export const turnQueueInputSchema = turnStartInputSchema;
 export const turnQueueResultSchema = z.object({ ordinal: z.number().int().positive() }).strict();
@@ -1344,7 +2194,12 @@ export const databaseRecoverySchema = z
 export type DatabaseRecovery = z.infer<typeof databaseRecoverySchema>;
 
 export const appInfoSchema = z
-  .object({ version: z.string(), platform: z.string(), recovery: databaseRecoverySchema })
+  .object({
+    version: z.string(),
+    platform: z.string(),
+    recovery: databaseRecoverySchema,
+    settingsWorkspaceV2: z.boolean().optional(),
+  })
   .strict();
 
 /**
@@ -1404,6 +2259,7 @@ export interface SprintCoderApi {
   teams: {
     promote(taskId: string): Promise<TeamSummary>;
     get(taskId: string): Promise<TeamDetail | null>;
+    updatePolicy(input: TeamPolicyUpdateInput): Promise<TeamDetail>;
     hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary>;
     sendToWorker(input: TeamSendMessageInput): Promise<TeamMessageSummary>;
     stopWorker(input: TeamWorkerRef): Promise<WorkerSummary>;
@@ -1448,19 +2304,57 @@ export interface SprintCoderApi {
     read(imageId: string): Promise<{ id: string; mimeType: 'image/png'; base64: string }>;
   };
   settings: {
-    getRuntime(): Promise<RuntimeSettings>;
-    setRuntime(kind: RuntimeKind): Promise<void>;
-    setModel(model: string): Promise<void>;
+    getRuntime(taskId?: string): Promise<RuntimeSettings>;
+    setRuntime(kind: RuntimeKind, taskId?: string): Promise<void>;
+    setModel(model: string, taskId?: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
     /** Codex reasoning level. Rejects a level the selected model does not advertise (see
      * `effortOptionSchema`) — Codex fails the whole turn on an unsupported one. */
     setCodexEffort(effort: string): Promise<void>;
+    getTeamModelResearch(): Promise<TeamModelResearchSettings>;
+    setTeamModelResearch(input: TeamModelResearchSettings): Promise<void>;
+    getDefaultTeamPolicy(): Promise<TeamPolicy>;
+    setDefaultTeamPolicy(policy: TeamPolicy): Promise<void>;
     scanSkills(): Promise<SkillScanResult>;
     previewSkill(provider: SkillProvider, skillId: string): Promise<SkillPreviewResult>;
     importSkill(previewId: string): Promise<SkillImportResult>;
     updateSkill(previewId: string): Promise<SkillImportResult>;
     setSkillEnabled(provider: SkillProvider, skillId: string, enabled: boolean): Promise<void>;
     removeSkill(provider: SkillProvider, skillId: string): Promise<void>;
+  };
+  skills: {
+    list(): Promise<SkillCatalog>;
+    getDraftSelection(taskId: string): Promise<TurnSkillSelection[]>;
+    setDraftSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
+    listDrafts(): Promise<SkillDraft[]>;
+    createDraft(input: SkillDraftCreateInput): Promise<SkillDraft>;
+    installDraft(
+      draftId: string,
+      expectedDigest: string,
+      confirmed: true,
+    ): Promise<SkillCatalogItem>;
+    discardDraft(draftId: string): Promise<void>;
+    removeCreated(skillId: string, digest: string): Promise<void>;
+    setCreatedEnabled(skillId: string, digest: string, enabled: boolean): Promise<void>;
+    exportCreated(skillId: string, digest: string): Promise<string | null>;
+  };
+  models: {
+    query(input: ModelCatalogQueryInput): Promise<ModelCatalogQueryResult>;
+    setSelection(taskId: string, selection: ModelSelection): Promise<ModelSelection>;
+  };
+  providers: {
+    listConnections(): Promise<ProviderConnection[]>;
+    listProfiles(): Promise<ProviderProfile[]>;
+    createOpenAIConnection(input: OpenAIConnectionCreateInput): Promise<ProviderConnection>;
+    createOpenRouterConnection(input: OpenRouterConnectionCreateInput): Promise<ProviderConnection>;
+    createAnthropicConnection(input: AnthropicConnectionCreateInput): Promise<ProviderConnection>;
+    createGeminiConnection(input: GeminiConnectionCreateInput): Promise<ProviderConnection>;
+    createXAIConnection(input: XAIConnectionCreateInput): Promise<ProviderConnection>;
+    createProfileConnection(
+      input: ProviderProfileConnectionCreateInput,
+    ): Promise<ProviderConnection>;
+    verifyConnection(connectionId: string): Promise<ProviderConnection>;
+    lowerRateLimits(input: ProviderConnectionRateLimitLowerInput): Promise<ProviderConnection>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
@@ -1485,10 +2379,19 @@ export interface SprintCoderApi {
     start(input: {
       taskId: string;
       text: string;
+      skills?: TurnSkillSelection[];
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
-    queue(input: { taskId: string; text: string }): Promise<{ ordinal: number }>;
+    queue(input: {
+      taskId: string;
+      text: string;
+      skills?: TurnSkillSelection[];
+    }): Promise<{ ordinal: number }>;
     steer(input: { taskId: string; text: string; expectedTurnId: string }): Promise<void>;
-    stopAndSend(input: { taskId: string; text: string }): Promise<void>;
+    stopAndSend(input: {
+      taskId: string;
+      text: string;
+      skills?: TurnSkillSelection[];
+    }): Promise<void>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
     snapshot(taskId: string): Promise<TurnSnapshot>;
     subscribe(
@@ -1512,6 +2415,7 @@ export const IPC_CHANNELS = {
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
   teamsPromote: 'sprint-coder:teams:promote',
   teamsGet: 'sprint-coder:teams:get',
+  teamsUpdatePolicy: 'sprint-coder:teams:update-policy',
   teamsHireWorker: 'sprint-coder:teams:hire-worker',
   teamsSend: 'sprint-coder:teams:send',
   teamsStopWorker: 'sprint-coder:teams:stop-worker',
@@ -1533,6 +2437,16 @@ export const IPC_CHANNELS = {
   settingsSkillsUpdate: 'sprint-coder:settings:skills:update',
   settingsSkillsSetEnabled: 'sprint-coder:settings:skills:set-enabled',
   settingsSkillsRemove: 'sprint-coder:settings:skills:remove',
+  skillsList: 'sprint-coder:skills:list',
+  skillsGetDraftSelection: 'sprint-coder:skills:get-draft-selection',
+  skillsSetDraftSelection: 'sprint-coder:skills:set-draft-selection',
+  skillsListDrafts: 'sprint-coder:skills:list-drafts',
+  skillsCreateDraft: 'sprint-coder:skills:create-draft',
+  skillsInstallDraft: 'sprint-coder:skills:install-draft',
+  skillsDiscardDraft: 'sprint-coder:skills:discard-draft',
+  skillsRemoveCreated: 'sprint-coder:skills:remove-created',
+  skillsSetCreatedEnabled: 'sprint-coder:skills:set-created-enabled',
+  skillsExportCreated: 'sprint-coder:skills:export-created',
   /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */
   reasoningEvent: 'sprint-coder:turns:reasoning',
   fileEditEvent: 'sprint-coder:turns:file-edit',
@@ -1543,6 +2457,22 @@ export const IPC_CHANNELS = {
   filesSave: 'sprint-coder:files:save',
   imagesRead: 'sprint-coder:images:read',
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
+  settingsGetTeamModelResearch: 'sprint-coder:settings:get-team-model-research',
+  settingsSetTeamModelResearch: 'sprint-coder:settings:set-team-model-research',
+  settingsGetDefaultTeamPolicy: 'sprint-coder:settings:get-default-team-policy',
+  settingsSetDefaultTeamPolicy: 'sprint-coder:settings:set-default-team-policy',
+  modelsCatalogQuery: 'sprint-coder:models:catalog-query',
+  modelsSetSelection: 'sprint-coder:models:set-selection',
+  providersListConnections: 'sprint-coder:providers:list-connections',
+  providersListProfiles: 'sprint-coder:providers:list-profiles',
+  providersCreateOpenAIConnection: 'sprint-coder:providers:create-openai-connection',
+  providersCreateOpenRouterConnection: 'sprint-coder:providers:create-openrouter-connection',
+  providersCreateAnthropicConnection: 'sprint-coder:providers:create-anthropic-connection',
+  providersCreateGeminiConnection: 'sprint-coder:providers:create-gemini-connection',
+  providersCreateXAIConnection: 'sprint-coder:providers:create-xai-connection',
+  providersCreateProfileConnection: 'sprint-coder:providers:create-profile-connection',
+  providersVerifyConnection: 'sprint-coder:providers:verify-connection',
+  providersLowerRateLimits: 'sprint-coder:providers:lower-rate-limits',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { ModelSelection } from '@sprint-coder/contracts';
 import { executeTeamTool } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 
@@ -9,15 +10,51 @@ import type { TeamCoordinator } from './team-coordinator';
 // without any Electron ABI dependency at all.
 function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordinator {
   return {
-    hireWorker: vi.fn(async () => ({ id: 'worker-1', role: 'role', state: 'ready' }) as never),
+    hireWorker: vi.fn(
+      async () =>
+        ({
+          id: 'worker-1',
+          role: 'role',
+          state: 'ready',
+          parentAgentId: 'leader-1',
+          depth: 1,
+          canDelegate: false,
+          managerPolicy: null,
+        }) as never,
+    ),
+    hireWorkerAs: vi.fn(
+      async () =>
+        ({
+          id: 'worker-1',
+          role: 'role',
+          state: 'ready',
+          parentAgentId: 'manager-1',
+          depth: 2,
+          canDelegate: false,
+          managerPolicy: null,
+        }) as never,
+    ),
     sendToWorker: vi.fn(
       async () => ({ id: 'message-1', state: 'delivered', deliveryState: 'acked' }) as never,
     ),
-    assignTask: vi.fn(
-      async () => ({ id: 'message-2', state: 'delivered', deliveryState: 'acked' }) as never,
+    assignTask: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
+    assignTaskAs: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
+    steerExecution: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
+    cancelExecution: vi.fn(
+      async () => ({ executionId: 'execution-2', state: 'canceled' }) as never,
     ),
     get: vi.fn(() => null),
     listWorkerReports: vi.fn(() => []),
+    listAgentMessages: vi.fn(() => []),
+    sendAgentMessageAs: vi.fn(
+      async () =>
+        ({
+          id: 'message-direct-1',
+          targetAgentId: 'worker-2',
+          seq: 3,
+          state: 'delivered',
+        }) as never,
+    ),
     hasBusyWorkers: vi.fn(() => false),
     stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
     ...overrides,
@@ -34,17 +71,215 @@ describe('executeTeamTool routing', () => {
   it('routes team_hire_worker to TeamCoordinator.hireWorker with the caller-bound taskId', async () => {
     const coordinator = fakeCoordinator();
     const result = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'worker',
       role: '調査',
       objective: '調べる',
     });
-    expect(coordinator.hireWorker).toHaveBeenCalledWith({
-      taskId: 'task-1',
-      role: '調査',
-      objective: '調べる',
-      contextInheritancePolicy: 'summary',
-      writeCapable: false,
+    expect(coordinator.hireWorker).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        role: '調査',
+        objective: '調べる',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      },
+      null,
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      workerId: 'worker-1',
+      agentKind: 'worker',
+      parentAgentId: 'leader-1',
+      depth: 1,
+      canDelegate: false,
+      remainingDelegationLevels: 0,
     });
-    expect(result).toMatchObject({ ok: true, workerId: 'worker-1' });
+  });
+
+  it('enforces the discriminated worker/manager hire contract and rejects the legacy field', async () => {
+    const coordinator = fakeCoordinator();
+    const leafWithPolicy = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'worker',
+      role: 'leaf',
+      objective: 'work',
+      managerPolicy: {
+        maxDirectChildren: 2,
+        maxDelegationLevels: 1,
+        allowManagerChildren: false,
+      },
+    });
+    const managerWithoutPolicy = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'manager',
+      role: 'manager',
+      objective: 'manage',
+    });
+    const zeroLevels = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'manager',
+      role: 'manager',
+      objective: 'manage',
+      managerPolicy: {
+        maxDirectChildren: 2,
+        maxDelegationLevels: 0,
+        allowManagerChildren: false,
+      },
+    });
+    const legacy = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'manager',
+      role: 'manager',
+      objective: 'manage',
+      managerPolicy: {
+        maxDirectChildren: 2,
+        maxDelegationDepth: 2,
+        allowManagerChildren: false,
+      },
+    });
+
+    expect(leafWithPolicy).toMatchObject({ ok: false, error: 'ZodError' });
+    expect(managerWithoutPolicy).toMatchObject({ ok: false, error: 'ZodError' });
+    expect(zeroLevels).toMatchObject({ ok: false, error: 'ZodError' });
+    expect(legacy).toMatchObject({
+      ok: false,
+      code: 'legacy_delegation_field',
+      message: expect.stringContaining('maxDelegationLevels'),
+    });
+    expect(coordinator.hireWorker).not.toHaveBeenCalled();
+  });
+
+  it('requires an audited catalog selection on the real Leader and Manager path', async () => {
+    const coordinator = fakeCoordinator();
+    let queried = false;
+    const result = (await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      {
+        agentKind: 'worker',
+        role: '調査',
+        objective: '調べる',
+      },
+      {
+        listModelCandidates: vi.fn(),
+        modelCatalogAudit: {
+          wasQueried: () => queried,
+          markQueried: () => {
+            queried = true;
+          },
+        },
+      },
+    )) as { ok: false; message: string };
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.message).toContain('query the model catalog');
+    expect(coordinator.hireWorker).not.toHaveBeenCalled();
+  });
+
+  it('allows the audited real path after catalog lookup and persists its selection reason', async () => {
+    const coordinator = fakeCoordinator();
+    let queried = false;
+    const options = {
+      listModelCandidates: vi.fn(async () => ({ items: [] })),
+      modelCatalogAudit: {
+        wasQueried: () => queried,
+        markQueried: () => {
+          queried = true;
+        },
+      },
+    };
+    await executeTeamTool(coordinator, 'task-1', 'team_list_models', {}, options);
+    const selection = {
+      connectionId: 'builtin:codex-cli',
+      requestedProvider: 'openai',
+      requestedModel: 'gpt-5.6-sol',
+    };
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      {
+        agentKind: 'worker',
+        role: '実装',
+        objective: '実装する',
+        modelSelection: selection,
+        modelSelectionReason: 'catalogのtoolCalling情報を確認した',
+      },
+      options,
+    );
+
+    expect(coordinator.hireWorker).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelSelection: selection,
+        modelSelectionReason: 'catalogのtoolCalling情報を確認した',
+      }),
+      null,
+    );
+  });
+
+  it('requires Web research evidence for the exact selected model when the setting is enabled', async () => {
+    const coordinator = fakeCoordinator();
+    const researched = new Set<string>();
+    const selection = {
+      connectionId: 'openrouter:primary',
+      requestedProvider: 'openrouter',
+      requestedModel: 'anthropic/claude-opus-5',
+    };
+    const key = (value: ModelSelection) =>
+      `${value.connectionId}\0${value.requestedProvider}\0${value.requestedModel}`;
+    const options = {
+      listModelCandidates: vi.fn(async () => ({ items: [] })),
+      modelCatalogAudit: {
+        wasQueried: () => true,
+        markQueried: vi.fn(),
+      },
+      modelResearchAudit: {
+        required: true,
+        record: (input: { modelSelection: ModelSelection }) => {
+          researched.add(key(input.modelSelection));
+        },
+        hasEvidence: (candidate: ModelSelection) => researched.has(key(candidate)),
+      },
+    };
+
+    const before = (await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      {
+        agentKind: 'worker',
+        role: '実装',
+        objective: '実装する',
+        modelSelection: selection,
+        modelSelectionReason: 'Web調査に基づく',
+      },
+      options,
+    )) as { ok: false; message: string };
+    expect(before.message).toContain('Web research evidence');
+    expect(coordinator.hireWorker).not.toHaveBeenCalled();
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_record_model_research',
+      {
+        modelSelection: selection,
+        summary: '公式情報でtool useと長いcontextを確認した',
+        sources: ['https://openrouter.ai/models/anthropic/claude-opus-5'],
+      },
+      options,
+    );
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      {
+        agentKind: 'worker',
+        role: '実装',
+        objective: '実装する',
+        modelSelection: selection,
+        modelSelectionReason: '公式情報のWeb調査に基づく',
+      },
+      options,
+    );
+    expect(coordinator.hireWorker).toHaveBeenCalledOnce();
   });
 
   it('maps a TeamCoordinator rejection to an {ok:false} tool result instead of throwing', async () => {
@@ -54,6 +289,7 @@ describe('executeTeamTool routing', () => {
       }),
     });
     const result = (await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'worker',
       role: 'x',
       objective: 'y',
     })) as { ok: false; message: string };
@@ -74,14 +310,170 @@ describe('executeTeamTool routing', () => {
       content: '実装する',
       doneCriteria: ['targeted test passes'],
     });
-    expect(assigned).toMatchObject({ ok: true, messageId: 'message-2' });
+    expect(assigned).toMatchObject({ ok: true, executionId: 'execution-2', state: 'queued' });
+
+    expect(
+      await executeTeamTool(coordinator, 'task-1', 'team_steer_execution', {
+        executionId: 'execution-2',
+        instruction: 'add the regression test',
+      }),
+    ).toMatchObject({ ok: true, executionId: 'execution-2', state: 'queued' });
+    expect(coordinator.steerExecution).toHaveBeenCalledWith(
+      'task-1',
+      'execution-2',
+      'add the regression test',
+      null,
+    );
+    expect(
+      await executeTeamTool(coordinator, 'task-1', 'team_cancel_execution', {
+        executionId: 'execution-2',
+      }),
+    ).toMatchObject({ ok: true, executionId: 'execution-2', state: 'canceled' });
+    expect(coordinator.cancelExecution).toHaveBeenCalledWith('task-1', 'execution-2', null);
 
     expect(await executeTeamTool(coordinator, 'task-1', 'team_get_status', {})).toEqual({
       ok: true,
       team: null,
     });
     await executeTeamTool(coordinator, 'task-1', 'team_wait_events', { cursor: 7 });
-    expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 7);
+    expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 7, undefined);
+  });
+
+  it('routes Manager tools with only the caller identity bound to the MCP registration', async () => {
+    const coordinator = fakeCoordinator();
+    const options = { requesterAgentId: 'manager-1' };
+    const managerPolicy = {
+      maxDirectChildren: 2,
+      maxDelegationLevels: 1,
+      allowManagerChildren: false,
+    };
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      { agentKind: 'manager', role: '実装担当', objective: '実装する', managerPolicy },
+      options,
+    );
+    expect(coordinator.hireWorkerAs).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        role: '実装担当',
+        objective: '実装する',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      },
+      'manager-1',
+      managerPolicy,
+    );
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_assign_task',
+      { workerId: 'worker-1', objective: '実装する', doneCriteria: ['完了'] },
+      options,
+    );
+    expect(coordinator.assignTaskAs).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        targetAgentId: 'worker-1',
+        content: '実装する',
+        doneCriteria: ['完了'],
+      },
+      'manager-1',
+    );
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_steer_execution',
+      { executionId: 'execution-2', instruction: '修正する' },
+      options,
+    );
+    expect(coordinator.steerExecution).toHaveBeenCalledWith(
+      'task-1',
+      'execution-2',
+      '修正する',
+      'manager-1',
+    );
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_cancel_execution',
+      { executionId: 'execution-2' },
+      options,
+    );
+    expect(coordinator.cancelExecution).toHaveBeenCalledWith('task-1', 'execution-2', 'manager-1');
+
+    await executeTeamTool(coordinator, 'task-1', 'team_wait_reports', {}, options);
+    expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 0, 'manager-1');
+  });
+
+  it('routes Worker communication with caller identity fixed outside model arguments', async () => {
+    const coordinator = fakeCoordinator();
+    const options = { requesterAgentId: 'worker-1' };
+
+    expect(
+      await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_send_message',
+        { targetAgentId: 'worker-2', content: 'APIの契約は確定しました' },
+        options,
+      ),
+    ).toMatchObject({ ok: true, messageId: 'message-direct-1', seq: 3 });
+    expect(coordinator.sendAgentMessageAs).toHaveBeenCalledWith(
+      'task-1',
+      'worker-1',
+      'worker-2',
+      'APIの契約は確定しました',
+    );
+
+    await executeTeamTool(coordinator, 'task-1', 'team_read_messages', { afterSeq: 2 }, options);
+    expect(coordinator.listAgentMessages).toHaveBeenCalledWith('task-1', 'worker-1', 2);
+  });
+
+  it('rejects Manager identity forgery and Manager-only legacy control calls', async () => {
+    const coordinator = fakeCoordinator();
+    const options = { requesterAgentId: 'manager-1' };
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_task',
+        {
+          workerId: 'worker-1',
+          objective: '実装する',
+          doneCriteria: [],
+          requesterAgentId: 'forged-manager',
+        },
+        options,
+      ),
+    ).rejects.toThrow();
+    expect(coordinator.assignTaskAs).not.toHaveBeenCalled();
+
+    expect(
+      await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_send_to_worker',
+        { workerId: 'worker-1', content: 'legacy direct call' },
+        options,
+      ),
+    ).toMatchObject({ ok: false });
+    expect(
+      await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_stop_worker',
+        { workerId: 'worker-1' },
+        options,
+      ),
+    ).toMatchObject({ ok: false });
+    expect(coordinator.sendToWorker).not.toHaveBeenCalled();
+    expect(coordinator.stopWorker).not.toHaveBeenCalled();
   });
 
   it('rejects a forged identity/taskId field in the wire args before TeamCoordinator ever sees it', async () => {
@@ -95,13 +487,13 @@ describe('executeTeamTool routing', () => {
     ).rejects.toThrow();
     expect(coordinator.sendToWorker).not.toHaveBeenCalled();
 
-    await expect(
-      executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
-        role: 'r',
-        objective: 'o',
-        taskId: 'attacker-supplied-task-id',
-      }),
-    ).rejects.toThrow();
+    const rejected = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+      agentKind: 'worker',
+      role: 'r',
+      objective: 'o',
+      taskId: 'attacker-supplied-task-id',
+    });
+    expect(rejected).toMatchObject({ ok: false, error: 'ZodError' });
     expect(coordinator.hireWorker).not.toHaveBeenCalled();
   });
 
@@ -129,7 +521,15 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
       listWorkerReports: vi.fn(() => {
         calls += 1;
         return calls >= 3
-          ? [{ sourceAgentId: 'worker-1', seq: 1, content: '{"status":"succeeded"}' }]
+          ? [
+              {
+                sourceAgentId: 'worker-1',
+                seq: 1,
+                content: '{"status":"succeeded"}',
+                executionId: 'execution-1',
+                attemptId: 'attempt-1',
+              },
+            ]
           : [];
       }) as never,
     });
@@ -146,7 +546,11 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
     )) as { ok: true; reports: readonly { workerId: string }[] };
     expect(result.ok).toBe(true);
     expect(result.reports).toHaveLength(1);
-    expect(result.reports[0]?.workerId).toBe('worker-1');
+    expect(result.reports[0]).toMatchObject({
+      workerId: 'worker-1',
+      executionId: 'execution-1',
+      attemptId: 'attempt-1',
+    });
     expect(calls).toBeGreaterThanOrEqual(3);
   });
 

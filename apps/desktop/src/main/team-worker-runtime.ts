@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { RuntimeKind } from '@sprint-coder/contracts';
+import type { ChatMessage, RuntimeKind, RuntimeWriteScope } from '@sprint-coder/contracts';
 import { RuntimeHostClient } from './runtime-host';
 import {
   DeterministicTeamWorkerRuntime,
@@ -8,7 +8,9 @@ import {
   type WorkerRuntimeResult,
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
+import type { PreparedContext } from './context-ledger';
 import type { TeamEnvelope } from '@sprint-coder/domain';
+import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 
 // Real Worker execution (Phase 7 follow-up: "Team must work without mocks"). Each dispatched
 // Worker task runs one ephemeral, read-only/no-tools turn on a production runtime (Claude/Codex)
@@ -31,6 +33,10 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     turnId: string,
     prompt: string,
   ) => boolean;
+  contextFor?: (worker: AgentRecord) => PreparedContext;
+  writeScopeFor?: (worker: AgentRecord, workspacePath: string | null) => RuntimeWriteScope;
+  teamMcpFor?: (worker: AgentRecord, turnId: string) => RuntimeTeamMcpOption | undefined;
+  releaseTeamMcp?: (turnId: string) => void;
   /** Explicit development/test opt-in. Production callers leave this false. */
   allowSimulation?: boolean;
 }>;
@@ -129,7 +135,11 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     const turnId = randomUUID();
     const prompt = [
       `あなたはチームの「${input.worker.role}」担当Workerです。`,
+      `あなたのAgent ID: ${input.worker.id}`,
+      `親Agent ID: ${input.worker.parentAgentId ?? 'Leader'}`,
       input.worker.objective === null ? '' : `目的: ${input.worker.objective}`,
+      `Context継承: ${input.worker.contextInheritancePolicy}`,
+      `Workspace書き込み: ${input.worker.writeCapable ? '許可範囲内で可' : '禁止（読み取り専用）'}`,
       '以下のLeaderからの依頼に対応し、結果を日本語で簡潔に報告してください。',
       '',
       `依頼: ${input.content}`,
@@ -138,8 +148,16 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       .join('\n');
     if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, prompt))
       throw new Error(`${choice.kind} Team Worker egress was denied`);
+    const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId);
+    if (input.worker.canDelegate === true && teamMcp === undefined)
+      throw new Error('Manager Team MCP is unavailable');
 
     const workspacePath = this.deps.workspaceFor(taskId);
+    const context = this.deps.contextFor?.(input.worker);
+    const writeScope =
+      input.worker.writeCapable === true
+        ? (this.deps.writeScopeFor?.(input.worker, workspacePath) ?? 'read-only')
+        : 'read-only';
     const startedAt = Date.now();
     const finalText = await new Promise<string>((resolve, reject) => {
       this.pending.set(turnId, {
@@ -160,10 +178,15 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         workspacePath,
         choice.model,
         this.deps.catalogFor(choice.kind, workspacePath) as never,
+        context,
+        teamMcp,
+        undefined,
+        writeScope,
       );
     }).finally(() => {
       this.pending.delete(turnId);
       this.activeByAgent.delete(input.worker.id);
+      if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
     });
 
     const summary = finalText.trim() === '' ? '(空の応答)' : finalText.trim();
@@ -207,6 +230,58 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
   }
+}
+
+export function buildInheritedWorkerContext(
+  worker: AgentRecord,
+  messages: readonly ChatMessage[],
+): PreparedContext {
+  const relevant = messages.filter(({ author }) => author === 'user' || author === 'assistant');
+  if (
+    worker.contextInheritancePolicy === 'none' ||
+    worker.contextInheritancePolicy === 'selected_items'
+  )
+    return { fragments: [], usageEvents: [], compacted: false };
+  if (worker.contextInheritancePolicy === 'summary') {
+    const content = relevant
+      .slice(-6)
+      .map(
+        ({ author, content: message }) => `${author === 'user' ? 'User' : 'Assistant'}: ${message}`,
+      )
+      .join('\n')
+      .slice(-8_000);
+    if (content.length === 0) return { fragments: [], usageEvents: [], compacted: false };
+    return {
+      fragments: [
+        {
+          id: `team-context-summary:${worker.id}`,
+          taskId: worker.taskId,
+          source: 'compaction',
+          trust: 'assistant',
+          tokenEstimate: Math.max(1, Math.ceil(content.length / 4)),
+          content: `親Taskの直近要約コンテキスト:\n${content}`,
+          createdAt: relevant.at(-1)?.createdAt ?? worker.createdAt,
+          messageId: null,
+        },
+      ],
+      usageEvents: [],
+      compacted: true,
+    };
+  }
+  return {
+    fragments: relevant.slice(-128).map((message) => ({
+      id: `team-context:${message.id}`,
+      taskId: worker.taskId,
+      source: 'history' as const,
+      trust: message.author,
+      tokenEstimate: Math.max(1, Math.ceil(message.content.length / 4)),
+      content: message.content,
+      createdAt: message.createdAt,
+      messageId: message.id,
+    })),
+    usageEvents: [],
+    compacted: false,
+  };
 }
 
 function flushDelta(run: PendingRun): void {

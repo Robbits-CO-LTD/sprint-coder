@@ -106,7 +106,7 @@ export function RunCard({
         {/* aria-hidden: this ticks every 500ms and would otherwise be announced each time
             (NFR-A11Y-03). Stage changes are announced by ChatSurface's own live region. */}
         <span className="run-elapsed" aria-hidden="true">
-          {formatElapsed(now - turn.startedAt)}
+          {formatElapsed((turn.finishedAt ?? now) - turn.startedAt)}
         </span>
         {isActive && (
           // Sibling of the disclosure, never nested inside it: a button inside a button is invalid

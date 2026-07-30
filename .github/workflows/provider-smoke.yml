@@ -1,0 +1,67 @@
+name: Provider release smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: Comma-separated Provider IDs that must pass
+        required: true
+        default: openai,openrouter,anthropic,google,xai
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    environment: provider-smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run required Provider smoke
+        run: npm run test:provider-smoke
+        env:
+          SPRINT_CODER_PROVIDER_SMOKE: '1'
+          SPRINT_CODER_PROVIDER_SMOKE_REQUIRED: ${{ inputs.providers }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_ORGANIZATION_ID: ${{ vars.OPENAI_ORGANIZATION_ID }}
+          OPENAI_PROJECT_ID: ${{ vars.OPENAI_PROJECT_ID }}
+          OPENAI_SMOKE_MODEL: ${{ vars.OPENAI_SMOKE_MODEL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_SMOKE_MODEL: ${{ vars.OPENROUTER_SMOKE_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_SMOKE_MODEL: ${{ vars.ANTHROPIC_SMOKE_MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_SMOKE_MODEL: ${{ vars.GEMINI_SMOKE_MODEL }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          XAI_SMOKE_MODEL: ${{ vars.XAI_SMOKE_MODEL }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          MISTRAL_SMOKE_MODEL: ${{ vars.MISTRAL_SMOKE_MODEL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_SMOKE_MODEL: ${{ vars.DEEPSEEK_SMOKE_MODEL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_SMOKE_MODEL: ${{ vars.GROQ_SMOKE_MODEL }}
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+          MOONSHOT_SMOKE_MODEL: ${{ vars.MOONSHOT_SMOKE_MODEL }}
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          MINIMAX_SMOKE_MODEL: ${{ vars.MINIMAX_SMOKE_MODEL }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          ZHIPU_SMOKE_MODEL: ${{ vars.ZHIPU_SMOKE_MODEL }}
+          NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
+          NVIDIA_NIM_SMOKE_MODEL: ${{ vars.NVIDIA_NIM_SMOKE_MODEL }}
+          NVIDIA_NIM_BASE_URL: ${{ vars.NVIDIA_NIM_BASE_URL }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_WORKERS_AI_SMOKE_MODEL: ${{ vars.CLOUDFLARE_WORKERS_AI_SMOKE_MODEL }}

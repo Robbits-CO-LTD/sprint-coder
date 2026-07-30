@@ -115,6 +115,213 @@ function bindMutationWorkspace(
   return workspaceKey;
 }
 
+if (runsWithElectronAbi)
+  describe('provider connections', () => {
+    it('seeds stable built-in CLI connections and restores them from SQLite', () => {
+      const { persistence, path } = createPersistence();
+
+      expect(persistence.listProviderConnections()).toEqual([
+        expect.objectContaining({
+          id: 'builtin:claude-cli',
+          providerId: 'anthropic',
+          runtimeKind: 'builtin_cli',
+          displayName: 'Claude CLI',
+          enabled: true,
+        }),
+        expect.objectContaining({
+          id: 'builtin:codex-cli',
+          providerId: 'openai',
+          runtimeKind: 'builtin_cli',
+          displayName: 'Codex CLI',
+          enabled: true,
+        }),
+      ]);
+      expect(persistence.getProviderConnection('builtin:codex-cli')).toEqual(
+        expect.objectContaining({
+          id: 'builtin:codex-cli',
+          providerId: 'openai',
+        }),
+      );
+      expect(() => persistence.getProviderConnection('missing:connection')).toThrow(NotFoundError);
+      const secretReference = 'provider-secret:123e4567-e89b-42d3-a456-426614174000';
+      expect(
+        persistence.setProviderConnectionSecretReference('builtin:codex-cli', secretReference),
+      ).toMatchObject({ id: 'builtin:codex-cli', secretReference });
+
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listProviderConnections().map(({ id }) => id)).toEqual([
+        'builtin:claude-cli',
+        'builtin:codex-cli',
+      ]);
+      expect(reopened.getProviderConnection('builtin:codex-cli').secretReference).toBe(
+        secretReference,
+      );
+      reopened.close();
+    });
+
+    it('backfills legacy built-in identity without inferring resolved model', () => {
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-sol');
+      const task = persistence.createTask('legacy codex task');
+      const turn = persistence.startTurn(task.id, 'legacy identity');
+      persistence.close();
+
+      const legacy = new Database(path);
+      legacy.exec(`
+      UPDATE tasks
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      UPDATE turns
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL,
+          resolved_provider = NULL, resolved_model = NULL;
+      UPDATE agent_threads
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      UPDATE agents
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      DELETE FROM schema_migrations WHERE version = 42;
+    `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      const selection = {
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-5.6-sol',
+      };
+      expect(migrated.getTaskModelSelection(task.id)).toEqual(selection);
+      expect(migrated.getTaskLeader(task.id).modelSelection).toEqual(selection);
+      expect(migrated.getTurnModelIdentity(task.id, turn.turnId)).toEqual({
+        selection,
+        resolution: { resolvedProvider: null, resolvedModel: null },
+      });
+      migrated.close();
+    });
+
+    it('migrates mixed Claude, Codex, and unknown-model history idempotently', () => {
+      const { persistence, path } = createPersistence();
+      persistence.setRuntime('claude');
+      persistence.setModel('claude-opus-history');
+      const claudeTask = persistence.createTask('legacy Claude');
+      const claudeTurn = persistence.startTurn(claudeTask.id, 'Claude history');
+      persistence.promoteTaskToTeam(claudeTask.id);
+
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-codex-history');
+      const codexTask = persistence.createTask('legacy Codex');
+      const codexTurn = persistence.startTurn(codexTask.id, 'Codex history');
+      persistence.promoteTaskToTeam(codexTask.id);
+
+      persistence.setRuntime('claude');
+      persistence.setModel('legacy-model-id-that-is-not-in-any-catalog');
+      const unknownTask = persistence.createTask('legacy unknown model');
+      const unknownTurn = persistence.startTurn(unknownTask.id, 'Unknown model history');
+      persistence.promoteTaskToTeam(unknownTask.id);
+      persistence.close();
+
+      const legacy = new Database(path);
+      legacy.exec(`
+      UPDATE tasks
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      UPDATE turns
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL,
+          resolved_provider = NULL, resolved_model = NULL;
+      UPDATE agent_threads
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      UPDATE agents
+      SET connection_id = NULL, requested_provider = NULL, requested_model = NULL;
+      DELETE FROM schema_migrations WHERE version = 42;
+    `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.getTurnModelIdentity(claudeTask.id, claudeTurn.turnId).selection).toEqual({
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-opus-history',
+      });
+      expect(migrated.getTurnModelIdentity(codexTask.id, codexTurn.turnId).selection).toEqual({
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-codex-history',
+      });
+      expect(migrated.getTurnModelIdentity(unknownTask.id, unknownTurn.turnId).selection).toEqual({
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'legacy-model-id-that-is-not-in-any-catalog',
+      });
+      expect(migrated.getTaskLeader(claudeTask.id).modelSelection.connectionId).toBe(
+        'builtin:claude-cli',
+      );
+      expect(migrated.getTaskLeader(codexTask.id).modelSelection.connectionId).toBe(
+        'builtin:codex-cli',
+      );
+      migrated.close();
+
+      // Reopening after every migration row is present is the idempotency fixture: it must preserve
+      // the exact unknown value rather than trying to curate or replace it on a second pass.
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTaskModelSelection(unknownTask.id)?.requestedModel).toBe(
+        'legacy-model-id-that-is-not-in-any-catalog',
+      );
+      expect(reopened.getTeamByTask(claudeTask.id)).not.toBeNull();
+      expect(reopened.getTeamByTask(codexTask.id)).not.toBeNull();
+      reopened.close();
+    });
+
+    it('allows only external Provider rate limits to be lowered', () => {
+      const { persistence } = createPersistence();
+      const now = new Date().toISOString();
+      const external = persistence.createProviderConnection({
+        id: 'connection:rate-limit-test',
+        providerId: 'openai',
+        runtimeKind: 'official_api',
+        displayName: 'Rate limit test',
+        enabled: true,
+        secretReference: null,
+        verification: {
+          status: 'unverified',
+          verifiedAt: null,
+          expiresAt: null,
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: 2,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      expect(
+        persistence.lowerProviderConnectionRateLimits(external.id, {
+          maxConcurrentRequests: 1,
+          requestsPerMinute: 30,
+        }),
+      ).toMatchObject({
+        rateLimit: {
+          mode: 'manual',
+          maxConcurrentRequests: 1,
+          requestsPerMinute: 30,
+        },
+      });
+      expect(() =>
+        persistence.lowerProviderConnectionRateLimits(external.id, {
+          maxConcurrentRequests: 2,
+        }),
+      ).toThrow('can only be lowered');
+      expect(() =>
+        persistence.lowerProviderConnectionRateLimits('builtin:codex-cli', {
+          maxConcurrentRequests: 1,
+        }),
+      ).toThrow('Built-in CLI concurrency');
+      persistence.close();
+    });
+  });
+
 class PersistenceTestArtifacts implements EditArtifactRepository {
   readonly values = new Map<string, Buffer>();
   async put(input: { owner: EditArtifactOwner; bytes: Buffer }): Promise<EditArtifactRef> {
@@ -259,6 +466,18 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('rejects queued input that cannot be read back', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      expect(() => persistence.queueInput(task.id, '   ', 'blank')).toThrow(
+        'Queued input text is invalid',
+      );
+      expect(() => persistence.queueInput(task.id, 'x'.repeat(100_001), 'too-long')).toThrow(
+        'Queued input text is invalid',
+      );
+      persistence.close();
+    });
+
     it('persists valid steering as a user message and rejects stale expectedTurnId', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();
@@ -297,6 +516,45 @@ if (runsWithElectronAbi)
         queued: [{ ordinal: 1, text: 'resume me' }],
       });
       expect(reopened.startNextQueued(task.id)?.started.text).toBe('resume me');
+      reopened.close();
+    });
+
+    it('pins Skill revisions for drafts, Turns, queued input, and restart recovery', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('skills');
+      const selection = {
+        kind: 'chat' as const,
+        ref: {
+          source: 'agents' as const,
+          skillId: 'reviewer',
+          digest: 'a'.repeat(64),
+        },
+      };
+      const resolved = {
+        selection,
+        name: 'Reviewer',
+        description: 'Review code',
+        content: '---\nname: reviewer\ndescription: Review code\n---\n\nReview carefully.',
+        packagePath: '/tmp/sprint-coder-skill-revisions/agents/reviewer/a',
+      };
+      persistence.setDraftSkillSelections(task.id, [selection]);
+      expect(persistence.getDraftSkillSelections(task.id)).toEqual([selection]);
+
+      const active = persistence.startTurn(task.id, 'review now', [resolved]);
+      expect(active.skills).toEqual([resolved]);
+      expect(persistence.getTurnSkills(task.id, active.turnId)).toEqual([resolved]);
+      persistence.cancelTurn(task.id, active.turnId);
+      persistence.queueInput(task.id, 'review later', 'q-skills', [resolved]);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getDraftSkillSelections(task.id)).toEqual([selection]);
+      expect(reopened.snapshot(task.id).queued).toEqual([
+        { ordinal: 1, text: 'review later', skills: [selection] },
+      ]);
+      const queued = reopened.startNextQueued(task.id)?.started;
+      expect(queued?.skills).toEqual([resolved]);
+      expect(reopened.getTurnSkills(task.id, queued!.turnId)).toEqual([resolved]);
       reopened.close();
     });
 
@@ -370,16 +628,22 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('names a new Task from its first message and returns the updated summary', () => {
+    it('names a new Task from its first message without implicitly setting its Goal', () => {
       // issue #4: the only path that ever set a Task title was the header's inline rename, so the
       // sidebar filled up with rows all reading "新しいタスク".
       const { persistence } = createPersistence();
       const task = persistence.createTask();
       expect(task.title).toBe('新しいタスク');
+      expect(task.hasConversation).toBe(false);
+      expect(persistence.listTasks()[0]?.hasConversation).toBe(false);
 
       const started = persistence.startTurn(task.id, 'ログイン画面のバグを直して');
       expect(started.renamedTask?.title).toBe('ログイン画面のバグを直して');
+      expect(started.renamedTask?.goal).toBeNull();
+      expect(started.renamedTask?.hasConversation).toBe(true);
       expect(persistence.getTask(task.id).title).toBe('ログイン画面のバグを直して');
+      expect(persistence.getTask(task.id).goal).toBeNull();
+      expect(persistence.listTasks()[0]?.hasConversation).toBe(true);
       persistence.close();
     });
 
@@ -392,6 +656,31 @@ if (runsWithElectronAbi)
       const second = persistence.startTurn(task.id, '全く違う二通目の内容');
       expect(second.renamedTask).toBeUndefined();
       expect(persistence.getTask(task.id).title).toBe('最初の依頼');
+      expect(persistence.getTask(task.id).goal).toBeNull();
+      persistence.close();
+    });
+
+    it('preserves an explicit Goal when the first message starts the Task', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.setGoal(task.id, '先に決めたGoal');
+
+      persistence.startTurn(task.id, '最初の依頼');
+
+      expect(persistence.getTask(task.id).goal).toBe('先に決めたGoal');
+      persistence.close();
+    });
+
+    it('does not derive a Goal from normal messages', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const first = persistence.startTurn(task.id, '最初の依頼');
+      finishTurn(persistence, task.id, first.turnId);
+      persistence.setGoal(task.id, '');
+
+      persistence.startTurn(task.id, '後続メッセージ');
+
+      expect(persistence.getTask(task.id).goal).toBe('');
       persistence.close();
     });
 
@@ -549,6 +838,57 @@ if (runsWithElectronAbi)
       persistence.setRuntime('claude');
       expect(persistence.getEffort()).toBe('xhigh');
       persistence.close();
+    });
+
+    it('defaults Team model Web research off and persists an explicit choice across restart', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getTeamModelResearchBeforeHiring()).toBe(false);
+      persistence.setTeamModelResearchBeforeHiring(true);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTeamModelResearchBeforeHiring()).toBe(true);
+      reopened.setTeamModelResearchBeforeHiring(false);
+      expect(reopened.getTeamModelResearchBeforeHiring()).toBe(false);
+      reopened.close();
+    });
+
+    it('applies default Team policy only when a new Team is promoted', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getDefaultTeamPolicy()).toEqual({
+        maxAgentDepth: 4,
+        maxConcurrentExecutions: 8,
+        allowWorkerDirectMessages: true,
+        budgetMode: 'bounded',
+      });
+      persistence.setDefaultTeamPolicy({
+        maxAgentDepth: 3,
+        maxConcurrentExecutions: 6,
+        allowWorkerDirectMessages: false,
+        budgetMode: 'unlimited',
+      });
+      const firstTask = persistence.createTask('first');
+      const firstTeam = persistence.promoteTaskToTeam(firstTask.id);
+      expect(firstTeam.policy).toEqual({
+        maxAgentDepth: 3,
+        maxConcurrentExecutions: 6,
+        allowWorkerDirectMessages: false,
+        budgetMode: 'unlimited',
+      });
+      persistence.setDefaultTeamPolicy({
+        maxAgentDepth: 2,
+        maxConcurrentExecutions: 4,
+        allowWorkerDirectMessages: true,
+        budgetMode: 'bounded',
+      });
+      expect(persistence.getTeam(firstTeam.id).policy.maxAgentDepth).toBe(3);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getDefaultTeamPolicy().maxAgentDepth).toBe(2);
+      const secondTask = reopened.createTask('second');
+      expect(reopened.promoteTaskToTeam(secondTask.id).policy.maxAgentDepth).toBe(2);
+      reopened.close();
     });
 
     it('pins the selected runtime and model when a Turn is accepted', () => {
@@ -4408,7 +4748,60 @@ if (runsWithElectronAbi)
         { version: 32 },
         { version: 33 },
         { version: 34 },
+        { version: 35 },
+        { version: 36 },
+        { version: 37 },
+        { version: 38 },
+        { version: 39 },
+        { version: 40 },
+        { version: 41 },
+        { version: 42 },
+        { version: 43 },
+        { version: 44 },
+        { version: 45 },
+        { version: 46 },
+        { version: 47 },
+        { version: 48 },
+        { version: 49 },
+        { version: 50 },
       ]);
+      for (const [table, columns] of [
+        [
+          'turns',
+          [
+            'connection_id',
+            'requested_provider',
+            'requested_model',
+            'resolved_provider',
+            'resolved_model',
+          ],
+        ],
+        ['agent_threads', ['connection_id', 'requested_provider', 'requested_model']],
+        [
+          'agents',
+          [
+            'connection_id',
+            'requested_provider',
+            'requested_model',
+            'parent_agent_id',
+            'depth',
+            'can_delegate',
+            'manager_policy_json',
+          ],
+        ],
+        ['tasks', ['connection_id', 'requested_provider', 'requested_model']],
+        ['teams', ['policy_json']],
+        ['team_messages', ['execution_id', 'attempt_id']],
+      ] as const) {
+        const actual = new Set(
+          (
+            migrated.prepare(`PRAGMA table_info(${table})`).all() as {
+              name: string;
+            }[]
+          ).map(({ name }) => name),
+        );
+        for (const column of columns) expect(actual.has(column)).toBe(true);
+      }
       const migratedTables = new Set(
         (
           migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
@@ -4423,6 +4816,11 @@ if (runsWithElectronAbi)
         'team_delivery_events',
         'worker_worktrees',
         'canvas_views',
+        'team_executions',
+        'team_execution_instructions',
+        'team_attempts',
+        'team_v2_activity_events',
+        'provider_connections',
       ])
         expect(migratedTables.has(table)).toBe(true);
       expect(

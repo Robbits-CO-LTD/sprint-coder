@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import type { AgentRecord } from './persistence';
-import { SqlitePersistenceClient } from './persistence';
+import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import {
   TeamCoordinator,
   type TeamWorkerRuntime,
   type WorkerRuntimeResult,
 } from './team-coordinator';
 import type { TeamEnvelope } from '@sprint-coder/domain';
+import { TeamExecutionScheduler } from './team-execution-scheduler';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -68,9 +69,245 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
   }
 }
 
+class BlockingWorkerRuntime extends TestWorkerRuntime {
+  activeExecutions = 0;
+  maxActiveExecutions = 0;
+  readonly releases: Array<() => void> = [];
+  readonly contents: string[] = [];
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+  }): Promise<WorkerRuntimeResult> {
+    this.contents.push(input.content);
+    this.activeExecutions += 1;
+    this.maxActiveExecutions = Math.max(this.maxActiveExecutions, this.activeExecutions);
+    await new Promise<void>((resolve) => this.releases.push(resolve));
+    this.activeExecutions -= 1;
+    return {
+      claims: {
+        deliveryId: input.envelope.deliveryId,
+        sourceAgentId: input.envelope.sourceAgentId,
+        targetAgentId: input.envelope.targetAgentId,
+      },
+      completion: {
+        status: 'succeeded',
+        summary: `${input.worker.role}: ${input.content}`,
+        artifacts: [],
+        verification: [{ name: 'blocking-runtime', outcome: 'pass' }],
+        risks: [],
+      },
+      usage: { costCents: 1, tokens: 2, timeMs: 3, toolCalls: 4 },
+    };
+  }
+}
+
+class InterruptibleWorkerRuntime extends TestWorkerRuntime {
+  readonly contents: Array<{ agentId: string; content: string }> = [];
+  private readonly pending = new Map<
+    string,
+    {
+      resolve(): void;
+      reject(error: Error): void;
+    }
+  >();
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+  }): Promise<WorkerRuntimeResult> {
+    this.contents.push({ agentId: input.worker.id, content: input.content });
+    await new Promise<void>((resolve, reject) => {
+      this.pending.set(input.worker.id, { resolve, reject });
+    }).finally(() => this.pending.delete(input.worker.id));
+    return {
+      claims: {
+        deliveryId: input.envelope.deliveryId,
+        sourceAgentId: input.envelope.sourceAgentId,
+        targetAgentId: input.envelope.targetAgentId,
+      },
+      completion: {
+        status: 'succeeded',
+        summary: `${input.worker.role}: ${input.content}`,
+        artifacts: [],
+        verification: [{ name: 'interruptible-runtime', outcome: 'pass' }],
+        risks: [],
+      },
+      usage: { costCents: 1, tokens: 2, timeMs: 3, toolCalls: 4 },
+    };
+  }
+
+  complete(agentId: string): void {
+    const pending = this.pending.get(agentId);
+    if (pending === undefined) throw new Error('Agent does not have a running execution');
+    pending.resolve();
+  }
+
+  override async stop(agentId: string): Promise<void> {
+    this.pending.get(agentId)?.reject(new Error('Worker execution stopped'));
+  }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 if (runsWithElectronAbi)
   describe('TeamCoordinator', () => {
-    it('starts exactly three Workers sequentially and returns each result to the Leader', async () => {
+    it('updates Team Policy with optimistic revision and publishes canonical detail', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Team Policy');
+      const team = persistence.promoteTaskToTeam(task.id);
+      const published: ReturnType<TeamCoordinator['get']>[] = [];
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        (_taskId, detail) => {
+          published.push(detail);
+        },
+      );
+      const policy = {
+        ...team.policy,
+        maxAgentDepth: 3,
+        maxConcurrentExecutions: 5,
+        allowWorkerDirectMessages: false,
+        budgetMode: 'unlimited' as const,
+      };
+
+      const detail = await coordinator.updatePolicy({
+        taskId: task.id,
+        policy,
+        expectedRevision: team.revision,
+      });
+
+      expect(detail.team).toMatchObject({ policy, revision: team.revision + 1 });
+      expect(published.at(-1)?.team).toMatchObject({
+        id: team.id,
+        policy,
+        revision: team.revision + 1,
+      });
+      await expect(
+        coordinator.updatePolicy({
+          taskId: task.id,
+          policy: team.policy,
+          expectedRevision: team.revision,
+        }),
+      ).rejects.toBeInstanceOf(TeamConflictError);
+      persistence.close();
+    });
+
+    it('pins a Team Skill Blueprint and enforces role, hierarchy, and required roles', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Blueprint Team');
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => ({
+          selection: {
+            kind: 'team',
+            ref: {
+              source: 'created',
+              skillId: 'company-team',
+              digest: 'a'.repeat(64),
+            },
+          },
+          name: 'Company Team',
+          packagePath: '/managed/revisions/company-team',
+          blueprint: {
+            version: 1,
+            kind: 'team',
+            policy: {
+              maxAgentDepth: 4,
+              maxConcurrentExecutions: 8,
+              allowWorkerDirectMessages: true,
+              budgetMode: 'bounded',
+            },
+            leaderInstructions: 'Managerを先に採用する',
+            roles: [
+              {
+                key: 'engineering-manager',
+                title: '開発部長',
+                parentKey: 'leader',
+                responsibility: '開発を統括する',
+                scope: ['apps/'],
+                nonGoals: [],
+                doneCriteria: ['報告する'],
+                required: true,
+                canDelegate: true,
+              },
+              {
+                key: 'implementer',
+                title: '実装担当',
+                parentKey: 'engineering-manager',
+                responsibility: '実装する',
+                scope: ['apps/'],
+                nonGoals: [],
+                doneCriteria: ['テストする'],
+                required: true,
+                canDelegate: false,
+              },
+            ],
+          },
+        }),
+      );
+
+      await expect(
+        coordinator.hireWorker({
+          taskId: task.id,
+          role: '任意の役職',
+          objective: '実装',
+          contextInheritancePolicy: 'summary',
+          writeCapable: false,
+        }),
+      ).rejects.toThrow('blueprintRoleKey');
+
+      const manager = await coordinator.hireWorker(
+        {
+          taskId: task.id,
+          role: '開発部長',
+          objective: '統括',
+          contextInheritancePolicy: 'summary',
+          writeCapable: false,
+          blueprintRoleKey: 'engineering-manager',
+        },
+        {
+          maxDirectChildren: 3,
+          maxDelegationLevels: 3,
+          allowManagerChildren: false,
+        },
+      );
+      expect(persistence.getTeamByTask(task.id)?.state).toBe('forming');
+
+      await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: '実装担当',
+          objective: '実装',
+          contextInheritancePolicy: 'summary',
+          writeCapable: true,
+          blueprintRoleKey: 'implementer',
+        },
+        manager.id,
+      );
+      expect(persistence.getTeamByTask(task.id)?.state).toBe('active');
+      expect(persistence.getTeamBlueprint(manager.teamId!)?.selection.ref.digest).toBe(
+        'a'.repeat(64),
+      );
+      persistence.close();
+    });
+
+    it('starts five Workers sequentially and returns each result to the Leader', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Team');
       const runtime = new TestWorkerRuntime();
@@ -80,7 +317,7 @@ if (runsWithElectronAbi)
       });
 
       const workers = await Promise.all(
-        ['implementer', 'reviewer', 'verifier'].map((role) =>
+        ['researcher', 'implementer', 'reviewer', 'verifier', 'documenter'].map((role) =>
           coordinator.hireWorker({
             taskId: task.id,
             role,
@@ -91,23 +328,19 @@ if (runsWithElectronAbi)
         ),
       );
       expect(runtime.maxActiveStarts).toBe(1);
-      expect(workers.map(({ state }) => state)).toEqual(['ready', 'ready', 'ready']);
+      expect(workers.map(({ state }) => state)).toEqual([
+        'ready',
+        'ready',
+        'ready',
+        'ready',
+        'ready',
+      ]);
       expect(workers.every(({ engine }) => engine === 'mock')).toBe(true);
       expect(
         persistence
           .getTeamBudgetStatus(workers[0]!.teamId)
           .find(({ scope, kind }) => scope === 'global' && kind === 'spawnSlots'),
       ).toMatchObject({ committed: 0, reserved: 0 });
-      await expect(
-        coordinator.hireWorker({
-          taskId: task.id,
-          role: 'fourth',
-          objective: 'must fail',
-          contextInheritancePolicy: 'none',
-          writeCapable: false,
-        }),
-      ).rejects.toThrow('hard cap');
-
       for (const worker of workers)
         await coordinator.sendToWorker({
           taskId: task.id,
@@ -119,15 +352,796 @@ if (runsWithElectronAbi)
       expect(detail?.team.state).toBe('completed');
       expect(
         detail?.workers.filter(({ kind }) => kind === 'worker').map(({ state }) => state),
-      ).toEqual(['done', 'done', 'done']);
-      expect(detail?.messages).toHaveLength(6);
+      ).toEqual(['done', 'done', 'done', 'done', 'done']);
+      expect(detail?.messages).toHaveLength(10);
       expect(
         detail?.messages.filter(
           ({ sourceKind, targetKind }) => sourceKind === 'worker' && targetKind === 'leader',
         ),
-      ).toHaveLength(3);
+      ).toHaveLength(5);
       expect(events.length).toBeGreaterThanOrEqual(6);
       persistence.close();
+    });
+
+    it('allows an explicitly identified Manager to hire a child within persisted policy', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Manager delegation');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const team = persistence.promoteTaskToTeam(task.id);
+
+      const manager = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: '部長',
+          objective: '実装部門を管理する',
+          contextInheritancePolicy: 'summary',
+          writeCapable: false,
+        },
+        team.leaderAgentId,
+        {
+          maxDirectChildren: 2,
+          maxDelegationLevels: 2,
+          allowManagerChildren: false,
+        },
+      );
+      const child = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: '実装担当',
+          objective: '機能を実装する',
+          contextInheritancePolicy: 'selected_items',
+          writeCapable: true,
+        },
+        manager.id,
+      );
+      const sibling = await coordinator.hireWorker({
+        taskId: task.id,
+        role: '別部門',
+        objective: '別の作業をする',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+
+      expect(manager).toMatchObject({
+        parentAgentId: team.leaderAgentId,
+        depth: 1,
+        canDelegate: true,
+      });
+      expect(child).toMatchObject({
+        parentAgentId: manager.id,
+        depth: 2,
+        canDelegate: false,
+      });
+      await coordinator.sendAgentMessageAs(
+        task.id,
+        sibling.id,
+        team.leaderAgentId,
+        '別部門だけの非公開メッセージ',
+      );
+      const childView = coordinator.getForAgent(task.id, child.id);
+      expect(childView?.workers.map(({ id }) => id)).toEqual(
+        expect.arrayContaining([team.leaderAgentId, manager.id, child.id]),
+      );
+      expect(childView?.workers.map(({ id }) => id)).not.toContain(sibling.id);
+      expect(childView?.messages).toEqual([]);
+      expect(childView?.budgets).toEqual([]);
+      expect(
+        coordinator.getForAgent(task.id, manager.id)?.workers.map(({ id }) => id),
+      ).not.toContain(sibling.id);
+      await expect(
+        coordinator.hireWorkerAs(
+          {
+            taskId: task.id,
+            role: '偽Manager',
+            objective: '許可なく再委譲する',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          },
+          child.id,
+        ),
+      ).rejects.toThrow('Only a Manager with canDelegate');
+      const submission = await coordinator.assignTaskAs(
+        {
+          taskId: task.id,
+          targetAgentId: child.id,
+          content: 'Managerからの正式な依頼',
+          doneCriteria: ['結果をManagerへ報告する'],
+        },
+        manager.id,
+      );
+      expect(persistence.getTeamExecution(submission.executionId)).toMatchObject({
+        createdByAgentId: manager.id,
+        assigneeAgentId: child.id,
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+      );
+      expect(coordinator.get(task.id)?.executions).toEqual([
+        expect.objectContaining({
+          id: submission.executionId,
+          assigneeAgentId: child.id,
+          createdByAgentId: manager.id,
+          state: 'completed',
+          instructionPreview: 'Managerからの正式な依頼',
+          connectionId: null,
+        }),
+      ]);
+      expect(coordinator.get(task.id)?.activities).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'worker_hired',
+            actorRole: '部長',
+            subjectRole: '実装担当',
+          }),
+          expect.objectContaining({
+            type: 'task_assigned',
+            actorRole: '部長',
+            subjectRole: '実装担当',
+            executionId: submission.executionId,
+          }),
+          expect.objectContaining({
+            type: 'execution_finished',
+            subjectRole: '実装担当',
+            status: 'completed',
+          }),
+        ]),
+      );
+      expect(coordinator.listWorkerReports(task.id, 0, manager.id)).toEqual([
+        expect.objectContaining({
+          sourceAgentId: child.id,
+          targetAgentId: manager.id,
+        }),
+      ]);
+      await coordinator.sendAgentMessageAs(
+        task.id,
+        child.id,
+        manager.id,
+        'これは通常連絡であり終端reportではない',
+      );
+      const terminalReportSeq = coordinator.listWorkerReports(task.id, 0, manager.id)[0]?.seq ?? 0;
+      expect(coordinator.listWorkerReports(task.id, terminalReportSeq, manager.id)).toEqual([]);
+      await expect(
+        coordinator.assignTaskAs(
+          {
+            taskId: task.id,
+            targetAgentId: sibling.id,
+            content: '別部門へ越権する',
+            doneCriteria: [],
+          },
+          manager.id,
+        ),
+      ).rejects.toThrow('direct child');
+      persistence.close();
+    });
+
+    it('supports Leader 1 → SubLeader 3 → Worker 6 and queues the ninth execution', async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-ten-agent-'));
+      cleanup.push(directory);
+      const databasePath = join(directory, 'test.sqlite3');
+      const persistence = new SqlitePersistenceClient(databasePath);
+      const task = persistence.createTask('Ten Agent hierarchy');
+      const runtime = new BlockingWorkerRuntime();
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        () => undefined,
+        () => new Date(),
+        120_000,
+        new TeamExecutionScheduler(8),
+      );
+      const team = persistence.promoteTaskToTeam(task.id);
+      const managers = [];
+      const childrenByManager = new Map<
+        string,
+        Awaited<ReturnType<typeof coordinator.hireWorkerAs>>[]
+      >();
+
+      for (let managerIndex = 0; managerIndex < 3; managerIndex += 1) {
+        const manager = await coordinator.hireWorkerAs(
+          {
+            taskId: task.id,
+            role: `SubLeader-${managerIndex + 1}`,
+            objective: '直属Workerを2名管理する',
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          },
+          team.leaderAgentId,
+          {
+            maxDirectChildren: 2,
+            maxDelegationLevels: 1,
+            allowManagerChildren: false,
+          },
+        );
+        managers.push(manager);
+        const children = [];
+        for (let childIndex = 0; childIndex < 2; childIndex += 1)
+          children.push(
+            await coordinator.hireWorkerAs(
+              {
+                taskId: task.id,
+                role: `Worker-${managerIndex + 1}-${childIndex + 1}`,
+                objective: '担当作業を完了する',
+                contextInheritancePolicy: 'summary',
+                writeCapable: false,
+              },
+              manager.id,
+            ),
+          );
+        childrenByManager.set(manager.id, children);
+      }
+
+      const snapshot = persistence.getTeamSnapshot(team.id);
+      expect(snapshot.agents).toHaveLength(10);
+      expect(snapshot.agents.filter(({ depth }) => depth === 0)).toHaveLength(1);
+      expect(snapshot.agents.filter(({ depth }) => depth === 1)).toHaveLength(3);
+      expect(snapshot.agents.filter(({ depth }) => depth === 2)).toHaveLength(6);
+      for (const manager of managers) {
+        expect(manager).toMatchObject({
+          parentAgentId: team.leaderAgentId,
+          depth: 1,
+          canDelegate: true,
+          managerPolicy: {
+            maxDirectChildren: 2,
+            maxDelegationDepth: 2,
+            allowManagerChildren: false,
+          },
+        });
+        const children = childrenByManager.get(manager.id) ?? [];
+        expect(children).toHaveLength(2);
+        expect(children).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ parentAgentId: manager.id, depth: 2, canDelegate: false }),
+            expect.objectContaining({ parentAgentId: manager.id, depth: 2, canDelegate: false }),
+          ]),
+        );
+      }
+      const firstManager = managers[0]!;
+      const otherBranchChild = childrenByManager.get(managers[1]!.id)![0]!;
+      await expect(
+        coordinator.assignTaskAs(
+          {
+            taskId: task.id,
+            targetAgentId: otherBranchChild.id,
+            content: '他部門へ越権割当',
+            doneCriteria: ['拒否される'],
+          },
+          firstManager.id,
+        ),
+      ).rejects.toThrow('direct child');
+
+      const submissions = [];
+      for (const manager of managers) {
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: manager.id,
+            content: `${manager.role}の統括報告`,
+            doneCriteria: ['終端報告する'],
+          }),
+        );
+        for (const child of childrenByManager.get(manager.id) ?? [])
+          submissions.push(
+            await coordinator.assignTaskAs(
+              {
+                taskId: task.id,
+                targetAgentId: child.id,
+                content: `${child.role}の担当作業`,
+                doneCriteria: ['終端報告する'],
+              },
+              manager.id,
+            ),
+          );
+      }
+      expect(submissions).toHaveLength(9);
+      await waitFor(() => runtime.activeExecutions === 8);
+      expect(
+        persistence.listTeamExecutions(team.id).filter(({ state }) => state === 'running'),
+      ).toHaveLength(8);
+      expect(
+        persistence.listTeamExecutions(team.id).filter(({ state }) => state === 'queued'),
+      ).toHaveLength(1);
+
+      for (const release of runtime.releases.splice(0, 8)) release();
+      await waitFor(() => runtime.activeExecutions === 1 && runtime.releases.length === 1);
+      runtime.releases.shift()?.();
+      await waitFor(() =>
+        persistence.listTeamExecutions(team.id).every(({ state }) => state === 'completed'),
+      );
+      expect(coordinator.listWorkerReports(task.id, 0)).toHaveLength(3);
+      for (const manager of managers)
+        expect(coordinator.listWorkerReports(task.id, 0, manager.id)).toHaveLength(2);
+
+      const budgets = persistence.getTeamBudgetStatus(team.id);
+      expect(
+        budgets.filter(({ scope, kind }) => scope === 'worker' && kind === 'spawnSlots'),
+      ).toHaveLength(0);
+      for (const scope of ['global', 'team'] as const)
+        expect(
+          budgets.find(
+            ({ scope: candidate, kind }) => candidate === scope && kind === 'spawnSlots',
+          ),
+        ).toMatchObject({ committed: 0, reserved: 0 });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(databasePath);
+      expect(reopened.getTeamSnapshot(team.id).agents).toHaveLength(10);
+      expect(reopened.listTeamExecutions(team.id)).toHaveLength(9);
+      expect(reopened.listTeamExecutions(team.id).every(({ state }) => state === 'completed')).toBe(
+        true,
+      );
+      reopened.close();
+    });
+
+    it('keeps child Manager delegation inside the parent ceiling with distinct error codes', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Delegation error codes');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const team = persistence.promoteTaskToTeam(task.id);
+      const parent = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: 'Parent Manager',
+          objective: 'Delegate one level',
+          contextInheritancePolicy: 'summary',
+          writeCapable: false,
+        },
+        team.leaderAgentId,
+        {
+          maxDirectChildren: 2,
+          maxDelegationLevels: 1,
+          allowManagerChildren: true,
+        },
+      );
+
+      await expect(
+        coordinator.hireWorkerAs(
+          {
+            taskId: task.id,
+            role: 'Escaping Manager',
+            objective: 'Attempt to exceed the parent ceiling',
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          },
+          parent.id,
+          {
+            maxDirectChildren: 1,
+            maxDelegationLevels: 1,
+            allowManagerChildren: false,
+          },
+        ),
+      ).rejects.toMatchObject({ code: 'manager_delegation_limit' });
+      await expect(
+        coordinator.hireWorkerAs(
+          {
+            taskId: task.id,
+            role: 'Too deep',
+            objective: 'Attempt to exceed Team depth',
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          },
+          team.leaderAgentId,
+          {
+            maxDirectChildren: 1,
+            maxDelegationLevels: 4,
+            allowManagerChildren: false,
+          },
+        ),
+      ).rejects.toMatchObject({ code: 'team_depth_limit' });
+      expect(persistence.getTeamSnapshot(team.id).agents).toHaveLength(2);
+      persistence.close();
+    });
+
+    it('rejects a zero-level relative Manager policy before creating an Agent', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Manager absolute delegation depth');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const team = persistence.promoteTaskToTeam(task.id);
+
+      await expect(
+        coordinator.hireWorkerAs(
+          {
+            taskId: task.id,
+            role: '調査部長',
+            objective: '直属Workerへ再委譲する',
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          },
+          team.leaderAgentId,
+          {
+            maxDirectChildren: 2,
+            maxDelegationLevels: 0,
+            allowManagerChildren: false,
+          },
+        ),
+      ).rejects.toThrow('maxDelegationLevels must be a positive integer');
+      expect(persistence.getTeamSnapshot(team.id).agents).toHaveLength(1);
+      persistence.close();
+    });
+
+    it('requires re-hiring a legacy Manager whose persisted ceiling equals its own depth', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Legacy Manager re-hire');
+      const team = persistence.promoteTaskToTeam(task.id);
+      const legacyManager = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'Legacy Manager',
+        objective: 'Old absolute-depth contract',
+        parentCapabilityCeiling: {
+          entries: [],
+          maxWorkerDepth: 0,
+          maxConcurrentWorkers: 2,
+        },
+        contextInheritancePolicy: 'summary',
+        parentAgentId: team.leaderAgentId,
+        canDelegate: true,
+        managerPolicy: {
+          maxDirectChildren: 2,
+          maxDelegationDepth: 1,
+          allowManagerChildren: false,
+        },
+      });
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+
+      await expect(
+        coordinator.hireWorkerAs(
+          {
+            taskId: task.id,
+            role: 'Blocked child',
+            objective: 'Must not inherit auto-granted authority',
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          },
+          legacyManager.id,
+        ),
+      ).rejects.toMatchObject({
+        code: 'manager_delegation_limit',
+        message: expect.stringContaining('re-hire'),
+        details: { requiresRehire: true },
+      });
+      expect(persistence.getTeamSnapshot(team.id).agents).toHaveLength(2);
+      persistence.close();
+    });
+
+    it('returns durable execution IDs before completion and runs at most eight in parallel', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Eight parallel executions');
+      const runtime = new BlockingWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const workers = [];
+      for (let index = 0; index < 10; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker-${index}`,
+            objective: `objective-${index}`,
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          }),
+        );
+
+      const submissions = await Promise.all(
+        workers.map((worker) =>
+          coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: `execute-${worker.role}`,
+            doneCriteria: ['runtime completes'],
+          }),
+        ),
+      );
+      expect(new Set(submissions.map(({ executionId }) => executionId)).size).toBe(10);
+      await waitFor(() => runtime.activeExecutions === 8);
+      expect(runtime.maxActiveExecutions).toBe(8);
+      const teamId = workers[0]!.teamId;
+      expect(
+        persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'running'),
+      ).toHaveLength(8);
+      expect(
+        persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
+      ).toHaveLength(2);
+
+      for (const release of runtime.releases.splice(0, 8)) release();
+      await waitFor(() => runtime.releases.length === 2 && runtime.activeExecutions === 2);
+      for (const release of runtime.releases.splice(0)) release();
+      await waitFor(() =>
+        persistence.listTeamExecutions(teamId).every(({ state }) => state === 'completed'),
+      );
+      expect(
+        persistence
+          .listTeamExecutions(teamId)
+          .every((execution) => persistence.listTeamAttempts(execution.id).length === 1),
+      ).toBe(true);
+      expect(
+        persistence
+          .getTeamSnapshot(teamId)
+          .messages.filter(({ executionId }) => executionId !== null),
+      ).toHaveLength(20);
+      persistence.close();
+    });
+
+    it('steers and cancels queued executions before they consume a runtime slot', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Queued execution control');
+      const runtime = new BlockingWorkerRuntime();
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        () => undefined,
+        () => new Date(),
+        120_000,
+        new TeamExecutionScheduler(1),
+      );
+      const workers = [];
+      for (const role of ['first', 'steered', 'canceled'])
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: role,
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          }),
+        );
+      const [first, steered, canceled] = await Promise.all(
+        workers.map((worker) =>
+          coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: `initial-${worker.role}`,
+            doneCriteria: ['runtime completes'],
+          }),
+        ),
+      );
+      if (first === undefined || steered === undefined || canceled === undefined)
+        throw new Error('Expected three submissions');
+      await waitFor(() => runtime.activeExecutions === 1);
+
+      await expect(
+        coordinator.steerExecution(task.id, steered.executionId, 'revised-steered'),
+      ).resolves.toMatchObject({ executionId: steered.executionId, state: 'queued' });
+      await expect(
+        coordinator.cancelExecution(task.id, canceled.executionId),
+      ).resolves.toMatchObject({ executionId: canceled.executionId, state: 'canceled' });
+      expect(persistence.getTeamExecution(steered.executionId).instruction).toMatchObject({
+        revision: 2,
+        content: 'revised-steered',
+      });
+      expect(persistence.listTeamAttempts(canceled.executionId)).toHaveLength(0);
+
+      runtime.releases.shift()?.();
+      await waitFor(() => runtime.contents.includes('revised-steered'));
+      expect(runtime.contents).toEqual(['initial-first', 'revised-steered']);
+      runtime.releases.shift()?.();
+      await waitFor(() => persistence.getTeamExecution(steered.executionId).state === 'completed');
+      expect(persistence.getTeamExecution(canceled.executionId).state).toBe('canceled');
+      const canceledMessage = persistence
+        .getTeamSnapshot(workers[0]!.teamId)
+        .messages.find(({ executionId }) => executionId === canceled.executionId);
+      expect(canceledMessage).toBeDefined();
+      expect(persistence.getTeamDelivery(canceledMessage!.id)?.state).toBe('failed');
+      persistence.close();
+    });
+
+    it('cancels a queued execution when its Worker is stopped', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Stop queued Worker');
+      const runtime = new BlockingWorkerRuntime();
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        () => undefined,
+        () => new Date(),
+        120_000,
+        new TeamExecutionScheduler(1),
+      );
+      const firstWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'running',
+        objective: 'hold the only slot',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      const queuedWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'queued',
+        objective: 'must be canceled',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      const first = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: firstWorker.id,
+        content: 'running',
+        doneCriteria: ['complete'],
+      });
+      const queued = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: queuedWorker.id,
+        content: 'must-not-run',
+        doneCriteria: ['complete'],
+      });
+      await waitFor(() => runtime.activeExecutions === 1);
+
+      await expect(coordinator.stopWorker(task.id, queuedWorker.id)).resolves.toMatchObject({
+        id: queuedWorker.id,
+        state: 'stopped',
+      });
+      expect(persistence.getTeamExecution(queued.executionId).state).toBe('canceled');
+      expect(persistence.listTeamAttempts(queued.executionId)).toHaveLength(0);
+
+      runtime.releases.shift()?.();
+      await waitFor(() => persistence.getTeamExecution(first.executionId).state === 'completed');
+      expect(runtime.contents).toEqual(['running']);
+      persistence.close();
+    });
+
+    it('persists a terminal, identity-bound report when a scheduled runtime fails', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Runtime failure report');
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          throw new Error('deliberate runtime failure');
+        },
+        async stop() {},
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'failing worker',
+        objective: 'prove failure reporting',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'fail now',
+        doneCriteria: ['never satisfied'],
+      });
+
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+      const attempt = persistence.listTeamAttempts(submission.executionId)[0];
+      const reports = coordinator.listWorkerReports(task.id, 0);
+      expect(attempt).toMatchObject({ state: 'failed', terminalReason: 'runtime_failure' });
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({
+        sourceAgentId: worker.id,
+        executionId: submission.executionId,
+        attemptId: attempt?.id,
+      });
+      expect(JSON.parse(reports[0]!.content)).toMatchObject({
+        status: 'failed',
+        summary: 'deliberate runtime failure',
+      });
+      persistence.close();
+    });
+
+    it('interrupts running executions for steer or cancel without changing execution identity', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Running execution control');
+      const runtime = new InterruptibleWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const workers = [];
+      for (const role of ['steered', 'canceled'])
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: role,
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          }),
+        );
+      const [steeredWorker, canceledWorker] = workers;
+      if (steeredWorker === undefined || canceledWorker === undefined)
+        throw new Error('Expected two workers');
+      const [steered, canceled] = await Promise.all([
+        coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: steeredWorker.id,
+          content: 'initial-steered',
+          doneCriteria: ['runtime completes'],
+        }),
+        coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: canceledWorker.id,
+          content: 'initial-canceled',
+          doneCriteria: ['runtime completes'],
+        }),
+      ]);
+      await waitFor(() => runtime.contents.length === 2);
+
+      await expect(
+        coordinator.steerExecution(task.id, steered.executionId, 'revised-running'),
+      ).resolves.toMatchObject({ executionId: steered.executionId, state: 'queued' });
+      await waitFor(
+        () => runtime.contents.filter(({ agentId }) => agentId === steeredWorker.id).length === 2,
+      );
+      await expect(
+        coordinator.cancelExecution(task.id, canceled.executionId),
+      ).resolves.toMatchObject({ executionId: canceled.executionId, state: 'canceled' });
+
+      expect(persistence.listTeamAttempts(steered.executionId)).toMatchObject([
+        { ordinal: 1, state: 'interrupted', terminalReason: 'steered' },
+        { ordinal: 2, state: 'running', terminalReason: null },
+      ]);
+      expect(persistence.listTeamAttempts(canceled.executionId)).toMatchObject([
+        { ordinal: 1, state: 'canceled', terminalReason: 'user_canceled' },
+      ]);
+      expect(
+        runtime.contents
+          .filter(({ agentId }) => agentId === steeredWorker.id)
+          .map(({ content }) => content),
+      ).toEqual(['initial-steered', 'revised-running']);
+
+      runtime.complete(steeredWorker.id);
+      await waitFor(() => persistence.getTeamExecution(steered.executionId).state === 'completed');
+      expect(persistence.listTeamAttempts(steered.executionId)).toMatchObject([
+        { ordinal: 1, state: 'interrupted' },
+        { ordinal: 2, state: 'completed' },
+      ]);
+      expect(persistence.getTeamExecution(canceled.executionId).state).toBe('canceled');
+      const messagesByContent = new Map(
+        coordinator.get(task.id)?.messages.map((message) => [message.content, message]) ?? [],
+      );
+      expect(messagesByContent.get('initial-steered')?.deliveryState).toBe('acked');
+      expect(messagesByContent.get('revised-running')?.deliveryState).toBe('acked');
+      expect(messagesByContent.get('initial-canceled')?.deliveryState).toBe('failed');
+      persistence.close();
+    });
+
+    it('rehydrates an interrupted attempt into the Scheduler after app restart', async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-rehydrate-'));
+      cleanup.push(directory);
+      const path = join(directory, 'test.sqlite3');
+      const firstPersistence = new SqlitePersistenceClient(path);
+      const task = firstPersistence.createTask('Restart execution recovery');
+      const firstRuntime = new InterruptibleWorkerRuntime();
+      const firstCoordinator = new TeamCoordinator(firstPersistence, firstRuntime);
+      const worker = await firstCoordinator.hireWorker({
+        taskId: task.id,
+        role: 'recoverable',
+        objective: 'resume after restart',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      const submission = await firstCoordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'continue this exact instruction',
+        doneCriteria: ['runtime completes after restart'],
+      });
+      await waitFor(() => firstRuntime.contents.length === 1);
+      const firstAttempt = firstPersistence.listTeamAttempts(submission.executionId)[0];
+      expect(firstAttempt?.state).toBe('running');
+      firstPersistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('replacement-instance', '2026-07-28T12:00:00.000Z');
+      const secondRuntime = new InterruptibleWorkerRuntime();
+      const secondCoordinator = new TeamCoordinator(reopened, secondRuntime);
+      secondCoordinator.recoverOnStartup();
+      await waitFor(() => secondRuntime.contents.length === 1);
+
+      expect(reopened.getTeam(worker.teamId).state).toBe('active');
+      expect(reopened.listTeamAttempts(submission.executionId)).toMatchObject([
+        { id: firstAttempt?.id, ordinal: 1, state: 'interrupted', terminalReason: 'app_restart' },
+        { ordinal: 2, state: 'running', terminalReason: null },
+      ]);
+      expect(secondRuntime.contents[0]).toMatchObject({
+        agentId: worker.id,
+        content: 'continue this exact instruction',
+      });
+      secondRuntime.complete(worker.id);
+      await waitFor(() => reopened.getTeamExecution(submission.executionId).state === 'completed');
+      expect(reopened.listTeamAttempts(submission.executionId)).toMatchObject([
+        { ordinal: 1, state: 'interrupted' },
+        { ordinal: 2, state: 'completed' },
+      ]);
+      reopened.close();
     });
 
     it('rejects runtime identity spoofing and fails the delivery closed', async () => {

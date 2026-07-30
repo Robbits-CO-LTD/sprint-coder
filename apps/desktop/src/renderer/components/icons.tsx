@@ -212,6 +212,27 @@ export function Circle(props: IconProps) {
   );
 }
 
+// The pair a masked field toggles between. Decorative: the button around them carries the label.
+export function Eye(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </Icon>
+  );
+}
+
+export function EyeOff(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M10.7 5.1A10.5 10.5 0 0 1 12 5c6.4 0 10 7 10 7a13.2 13.2 0 0 1-2.2 3.2" />
+      <path d="M6.6 6.6A13.5 13.5 0 0 0 2 12s3.6 7 10 7a9.8 9.8 0 0 0 4.3-1" />
+      <path d="M14.1 14.1a3 3 0 1 1-4.2-4.2" />
+      <path d="m3 3 18 18" />
+    </Icon>
+  );
+}
+
 // Filled dot (no stroke) — used for the "current stage" marker, mirroring the old `●` glyph.
 export function Dot(props: IconProps) {
   return (
@@ -259,6 +280,16 @@ export function TriangleAlert(props: IconProps) {
       <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
       <path d="M12 9v4" />
       <path d="M12 17h.01" />
+    </Icon>
+  );
+}
+
+export function ShieldAlert(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z" />
+      <path d="M12 8v4" />
+      <path d="M12 16h.01" />
     </Icon>
   );
 }

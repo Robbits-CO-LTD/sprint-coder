@@ -13,8 +13,18 @@ import { WorkerNode } from './WorkerNode';
 import { useCamera } from './useCamera';
 import type { CamState, Rect } from './useCamera';
 import { sendCable } from './cables';
-import { findFreePosition } from './placement';
+import {
+  LEADER_RECT,
+  PLACEMENT_MARGIN,
+  WORKER_SIZE,
+  computeHierarchyLayout,
+  findFreePosition,
+  hierarchySlot,
+  parentAgentOf,
+} from './placement';
 import { ArrowLeft, List } from '../icons';
+import { TeamPolicyDialog, TeamPolicyTrigger } from '../TeamPolicyDialog';
+import { latestExecutionForWorker } from '../../lib/team-execution-display';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
 // Team Canvas: the spatial "promoted chat" experience from demo/index.html (§Team mode,
@@ -24,26 +34,28 @@ import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sp
 // and the cable overlay between them. Camera state lives in refs (useCamera) so pan/zoom stays
 // smooth.
 
-const LEADER_RECT: Rect = { x: 0, y: 0, w: 720, h: 620 };
-const WORKER_SLOTS: readonly Rect[] = [
-  { x: 960, y: -70, w: 480, h: 260 },
-  { x: 1000, y: 420, w: 480, h: 260 },
-  { x: 440, y: 760, w: 480, h: 260 },
-];
-const MAX_WORKERS = WORKER_SLOTS.length;
-// Fixed card footprint (Slice 6.3 item 1) — every WORKER_SLOTS entry uses this same w/h, so a new
-// Worker's placement can be collision-checked before it has ever mounted.
-const WORKER_SIZE = { w: 480, h: 260 };
-const PLACEMENT_MARGIN = 40;
-
-function slotFor(index: number): { x: number; y: number } {
-  const clamped = Math.max(0, Math.min(index, WORKER_SLOTS.length - 1));
-  const slot = WORKER_SLOTS[clamped];
-  return slot ? { x: slot.x, y: slot.y } : { x: 0, y: 0 };
-}
+// Node geometry and default slots live in ./placement (pure, unit-tested). A Team is neither
+// capped at three Workers nor flat any more: `computeHierarchyLayout` lays the recorded agent tree
+// out as depth columns x sibling rows, so Leader -> Manager -> Worker reads left to right.
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Static parent -> child connector geometry. Same anchor convention and the same +2000 world
+// offset the animated cables use (cables.ts, matching `.team-cables`' left/top:-2000px in
+// index.css), so a message cable travels along the connector it belongs to instead of a parallel
+// line of its own.
+const EDGE_OFFSET = 2000;
+function hierarchyEdgePath(from: Rect, to: Rect): string {
+  const a = { x: from.x + from.w, y: from.y + Math.min(90, from.h / 2) };
+  const b = { x: to.x, y: to.y + Math.min(60, to.h / 2) };
+  const dx = Math.max(70, Math.abs(b.x - a.x) * 0.45);
+  const o = EDGE_OFFSET;
+  return (
+    `M ${a.x + o} ${a.y + o} C ${a.x + o + dx} ${a.y + o}, ` +
+    `${b.x + o - dx} ${b.y + o}, ${b.x + o} ${b.y + o}`
+  );
 }
 
 // The seed camera state (docs §4.6 step 3 / demo/index.html lines 936-951): positions the world
@@ -103,6 +115,7 @@ export function TeamCanvas({
   const teamBusy = useAppStore((s) => s.teamBusy);
   const stopTeamWorker = useAppStore((s) => s.stopTeamWorker);
   const stopAllTeamWorkers = useAppStore((s) => s.stopAllTeamWorkers);
+  const [policyOpen, setPolicyOpen] = useState(false);
 
   // Stable indirection into the (not-yet-defined-at-this-point) autosave scheduler, so it can be
   // passed into useCamera() before `scheduleSave` itself exists — see the `useEffect` near
@@ -218,6 +231,26 @@ export function TeamCanvas({
     [detail],
   );
   const workerCount = workers.length;
+  const leaderAgentId = detail?.team.leaderAgentId;
+  // Default (pre-drag, pre-restore) positions for every Worker, from the Team's recorded agent
+  // tree — `workers` is already in stable creation order, which is the sibling order the layout
+  // uses. A Worker with a saved/dragged position in `nodePositions` keeps that instead; this only
+  // ever answers "where does a card go if nothing else has decided".
+  const hierarchyLayout = useMemo(
+    () => computeHierarchyLayout(leaderAgentId ?? null, workers),
+    [leaderAgentId, workers],
+  );
+  const defaultPositionFor = useCallback(
+    (workerId: string): { x: number; y: number } => {
+      const placement = hierarchyLayout.get(workerId);
+      if (placement) return { x: placement.x, y: placement.y };
+      // Unreachable in practice (the layout is built from this same list), but a card must never
+      // fall back to (0,0) — that is the Leader's own slot.
+      const index = workers.findIndex((w) => w.id === workerId);
+      return hierarchySlot(1, index < 0 ? 0 : index);
+    },
+    [hierarchyLayout, workers],
+  );
   // Empty-team guidance (FR-TEAM-03/06): the Leader hires on its own once it decides a Task
   // needs a Team — there is nothing for the user to do here but ask the Leader for something, so
   // this hint only shows while there is genuinely nothing else to look at yet.
@@ -274,8 +307,7 @@ export function TeamCanvas({
       // up to 3 Workers back-to-back within one Turn, so several placements may be decided before
       // any of them has actually landed in `workerElsRef` — `reservedPositionsRef` covers that.
       if (!nodePositionsRef.current[workerId]) {
-        const index = workers.findIndex((w) => w.id === workerId);
-        const defaultPos = slotFor(Math.max(0, index));
+        const defaultPos = defaultPositionFor(workerId);
         const occupied = collectPlacementRects();
         const resolved = findFreePosition(defaultPos, WORKER_SIZE, occupied, PLACEMENT_MARGIN);
         reservedPositionsRef.current.set(workerId, resolved);
@@ -308,6 +340,7 @@ export function TeamCanvas({
       scheduleFit,
       isSystemOwned,
       workers,
+      defaultPositionFor,
       collectPlacementRects,
       announceCableEvent,
     ],
@@ -555,8 +588,7 @@ export function TeamCanvas({
       const card = head.closest<HTMLElement>('.worker');
       const agentId = card?.dataset.agentId;
       if (!card || !agentId) return;
-      const index = workers.findIndex((w) => w.id === agentId);
-      const current = nodePositionsRef.current[agentId] ?? slotFor(Math.max(0, index));
+      const current = nodePositionsRef.current[agentId] ?? defaultPositionFor(agentId);
       nodeDraggingRef.current = {
         agentId,
         pointerId: e.pointerId,
@@ -600,7 +632,7 @@ export function TeamCanvas({
       canvas.removeEventListener('pointerup', onPointerEnd);
       canvas.removeEventListener('pointercancel', onPointerEnd);
     };
-  }, [canvasRef, camRef, draggingRef, workers, scheduleSave, claimUserOwnership]);
+  }, [canvasRef, camRef, draggingRef, defaultPositionFor, scheduleSave, claimUserOwnership]);
 
   // Live message-by-id lookup (Slice 6.4 item 4), kept fresh on EVERY store update regardless of
   // whether anything is currently enqueued — a cable holding on a pre-ack message needs to see an
@@ -718,7 +750,6 @@ export function TeamCanvas({
   }, []);
 
   // --- Canvas keyboard navigation (Slice 6.1) ---
-  const leaderAgentId = detail?.team.leaderAgentId;
   const nodeIds = useMemo(() => {
     const ids: string[] = [];
     if (leaderAgentId) ids.push(leaderAgentId);
@@ -820,6 +851,7 @@ export function TeamCanvas({
     if (!canvas) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== 'Escape') return;
+      if ((e.target as HTMLElement).closest('.team-policy-dialog')) return;
       e.preventDefault();
       canvasRef.current?.focus({ preventScroll: true });
     }
@@ -829,6 +861,7 @@ export function TeamCanvas({
 
   const handleCanvasKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLElement>) => {
+      if ((e.target as HTMLElement).closest('.team-policy-dialog')) return;
       if (e.key === 'Escape') {
         // Native-DOM Escape handling above already covers every case (including from inside the
         // portaled composer); this branch just avoids a double `.preventDefault()`/no-op re-run
@@ -883,12 +916,46 @@ export function TeamCanvas({
     ],
   );
 
+  // Static parent -> child connectors (Team v2 hierarchy). Deliberately NOT part of the message
+  // cable overlay: these describe STRUCTURE, so they are always drawn, never animated (nothing for
+  // `prefers-reduced-motion` to suppress — they look identical in every motion mode) and never
+  // removed after a message settles. Geometry comes from state rather than measured DOM rects, so
+  // a connector follows its card live while it is being dragged. The parent id is the same one the
+  // layout placed the card under, so a line can never disagree with the arrangement it explains.
+  const hierarchyEdges = useMemo(() => {
+    if (!leaderAgentId) return [];
+    const rectOf = (nodeId: string): Rect | null => {
+      if (nodeId === leaderAgentId) return LEADER_RECT;
+      const placement = hierarchyLayout.get(nodeId);
+      if (!placement) return null;
+      const pos = nodePositions[nodeId] ?? placement;
+      return { x: pos.x, y: pos.y, w: WORKER_SIZE.w, h: WORKER_SIZE.h };
+    };
+    const edges: { childId: string; parentId: string; d: string }[] = [];
+    for (const worker of workers) {
+      const placement = hierarchyLayout.get(worker.id);
+      if (!placement) continue;
+      const from = rectOf(placement.parentAgentId);
+      const to = rectOf(worker.id);
+      if (!from || !to) continue;
+      edges.push({
+        childId: worker.id,
+        parentId: placement.parentAgentId,
+        d: hierarchyEdgePath(from, to),
+      });
+    }
+    return edges;
+  }, [leaderAgentId, hierarchyLayout, nodePositions, workers]);
+
   // Deliberately worded differently from the visible `.team-status-chip` text below: Playwright's
   // getByText() is a substring match, so an aria-live region carrying the *exact same* string
-  // would make `getByText('<state> · Worker N/3')` resolve to two elements (chip + live region).
+  // would make `getByText('<state> · Worker N人')` resolve to two elements (chip + live region).
+  // No denominator on either side (Team v2 B1b): a Team's Worker count is dynamic, so any fixed
+  // "/N" would be wrong — and the Team Policy's execution cap of 8 is a concurrency limit, not a
+  // Worker headcount limit, so it must not stand in as one either.
   const selectionText = selectedNodeId ? `選択: ${describeNode(selectedNodeId)}` : '';
   const liveText = detail
-    ? `Team status: ${detail.team.state}, workers ${workerCount} of ${MAX_WORKERS}${
+    ? `Team status: ${detail.team.state}, workers ${workerCount}${
         selectionText ? `. ${selectionText}` : ''
       }`
     : '';
@@ -909,20 +976,56 @@ export function TeamCanvas({
       ) : (
         <>
           <div className="team-world" ref={worldRef}>
+            {/* Hierarchy connectors, painted under the cards (DOM order: both layers are
+                positioned, so `.team-world-nodes` below still paints on top). Reuses `.team-cables`
+                for its geometry/`pointer-events: none` rather than adding CSS, and styles the lines
+                with plain SVG presentation attributes — `currentColor` at low opacity keeps them
+                readable in either theme and visually distinct from an amber/blue message cable.
+                `aria-hidden` + non-interactive: the same depth/parent facts are text on every
+                Worker card (and in the List), so this steals neither pointer nor focus. */}
+            <svg
+              className="team-cables"
+              viewBox="0 0 7000 6000"
+              data-testid="team-hierarchy-edges"
+              aria-hidden="true"
+              pointerEvents="none"
+            >
+              {hierarchyEdges.map((edge) => (
+                <path
+                  key={edge.childId}
+                  d={edge.d}
+                  data-testid="team-hierarchy-edge"
+                  data-parent-id={edge.parentId}
+                  data-child-id={edge.childId}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.4}
+                  strokeLinecap="round"
+                  opacity={0.32}
+                />
+              ))}
+            </svg>
             <svg className="team-cables" ref={svgRef} viewBox="0 0 7000 6000" />
             <div className="team-world-nodes">
               {/* SurfaceLayer (owned by App) portals the shared ChatSurface instance in here —
                   this anchor only reserves the slot; see App.tsx's morph orchestration. */}
               <div className="leader-anchor" ref={leaderAnchorRef} />
-              {workers.map((worker, index) => {
-                const pos = nodePositions[worker.id] ?? slotFor(index);
+              {workers.map((worker) => {
+                const pos = nodePositions[worker.id] ?? defaultPositionFor(worker.id);
                 return (
                   <WorkerNode
                     key={worker.id}
                     worker={worker}
+                    parent={parentAgentOf(worker, workers)}
+                    // Message lines name their counterpart by its persisted agent id — the Leader
+                    // by `leaderAgentId`, a sibling Worker by its own role. TeamListView resolves
+                    // against the exact same two facts, so both views tag a message identically.
+                    leaderAgentId={detail.team.leaderAgentId}
+                    agents={workers}
                     x={pos.x}
                     y={pos.y}
                     messages={detail.messages}
+                    execution={latestExecutionForWorker(detail.executions, worker.id)}
                     teamBusy={teamBusy}
                     selected={selectedNodeId === worker.id}
                     onStop={() => void stopTeamWorker(task.id, worker.id)}
@@ -954,6 +1057,7 @@ export function TeamCanvas({
             onBack={onRequestExit}
             onStopAll={() => void stopAllTeamWorkers(task.id)}
             onSwitchToListView={onSwitchToListView}
+            onOpenPolicy={() => setPolicyOpen(true)}
           />
 
           <CanvasControlsOverlay
@@ -989,6 +1093,14 @@ export function TeamCanvas({
       <div aria-live="polite" className="visually-hidden" data-testid="team-cable-announcer">
         {cableAnnouncement}
       </div>
+      {detail && policyOpen && (
+        <TeamPolicyDialog
+          open={policyOpen}
+          taskId={task.id}
+          detail={detail}
+          onClose={() => setPolicyOpen(false)}
+        />
+      )}
     </section>
   );
 }
@@ -1001,6 +1113,7 @@ function TeamHeaderOverlay({
   onBack,
   onStopAll,
   onSwitchToListView,
+  onOpenPolicy,
 }: {
   task: TaskSummary;
   detail: TeamDetail;
@@ -1009,6 +1122,7 @@ function TeamHeaderOverlay({
   onBack: () => void;
   onStopAll: () => void;
   onSwitchToListView: () => void;
+  onOpenPolicy: () => void;
 }) {
   return (
     <div className="team-header-overlay">
@@ -1017,7 +1131,7 @@ function TeamHeaderOverlay({
       </button>
       <span className="team-title">{task.title}</span>
       <span className="team-badge">Team · {workerCount} workers</span>
-      <span className="team-status-chip">{`${detail.team.state} · Worker ${workerCount}/${MAX_WORKERS}`}</span>
+      <span className="team-status-chip">{`${detail.team.state} · Worker ${workerCount}人`}</span>
       <button
         type="button"
         className="team-view-toggle-btn"
@@ -1027,6 +1141,7 @@ function TeamHeaderOverlay({
       >
         <List size={14} /> List表示
       </button>
+      <TeamPolicyTrigger onOpen={onOpenPolicy} />
       <button
         type="button"
         className="team-stop-all-btn"

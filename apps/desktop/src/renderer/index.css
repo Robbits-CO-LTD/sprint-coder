@@ -174,9 +174,50 @@ button {
 }
 
 /* ---------- App shell ---------- */
+.app-frame {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-app);
+}
+
+/* macOS keeps its native traffic lights, while the rest of the title bar belongs to the product.
+   The region is intentionally quiet: one app label, the same warm panel material as the working
+   chrome, and a single hairline before the task/navigation layer begins. */
+.app-titlebar {
+  position: relative;
+  z-index: 20;
+  display: flex;
+  flex: none;
+  align-items: center;
+  height: 38px;
+  padding: 0 16px 0 78px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app));
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+.app-titlebar::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: color-mix(in srgb, var(--text-primary) 9%, transparent);
+  content: '';
+  pointer-events: none;
+}
+.app-titlebar-name {
+  opacity: 0.88;
+}
+
 .app-shell {
   display: flex;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   position: relative;
 }
 
@@ -615,16 +656,6 @@ button {
   color: var(--text-primary);
   background: var(--accent-wash);
   border-color: var(--accent-line);
-}
-.goal-input {
-  font: inherit;
-  font-size: 12px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-sm);
-  color: var(--text-primary);
-  padding: 3px 10px;
-  min-width: 160px;
 }
 .team-btn {
   margin-left: auto;
@@ -1393,6 +1424,42 @@ button {
 .ctx-permission-wrap {
   position: relative;
 }
+.composer-permission-wrap {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.composer-permission-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 4px 7px;
+  border: none;
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  transition:
+    color var(--t-quick) var(--ease-ui),
+    background var(--t-quick) var(--ease-ui);
+}
+button.composer-permission-chip:hover,
+button.composer-permission-chip[aria-expanded='true'] {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.composer-permission-chip[data-access-preset='full'] {
+  color: var(--accent);
+}
+.composer-permission-chip .access-unmanaged {
+  padding-left: 6px;
+  border-left: 1px solid currentColor;
+  color: var(--warning);
+  font-size: 10px;
+}
 .permission-menu {
   min-width: 290px;
 }
@@ -1476,7 +1543,7 @@ button {
   color: var(--text-primary);
 }
 
-/* Queue/Steer/Stop & Send (FR-RUN-12/13) */
+/* Queued follow-up messages */
 .queued-list {
   display: flex;
   flex-direction: column;
@@ -1506,29 +1573,6 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.send-mode-group {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--r-sm);
-  background: var(--bg-app);
-  border: 1px solid var(--border-subtle);
-}
-.send-mode-btn {
-  font-size: 11px;
-  color: var(--text-secondary);
-  padding: 4px 9px;
-  border-radius: var(--r-sm);
-  transition: all var(--t-quick) var(--ease-ui);
-}
-.send-mode-btn:hover {
-  color: var(--text-primary);
-}
-.send-mode-btn.active {
-  background: var(--bg-selected);
-  color: var(--text-primary);
 }
 
 .surface-toast {
@@ -1568,14 +1612,18 @@ button {
   right: 0;
   bottom: calc(100% + 8px);
   z-index: 7;
-  max-height: min(330px, 48vh);
-  overflow-y: auto;
+  max-height: min(350px, 52vh);
+  overflow: hidden;
   padding: 5px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-lg);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-2);
   animation: msgIn var(--t-quick) var(--ease-ui);
+}
+.slash-command-viewport {
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .slash-command-heading {
   display: flex;
@@ -1588,7 +1636,7 @@ button {
 }
 .slash-command-item {
   display: grid;
-  grid-template-columns: 104px minmax(0, 1fr);
+  grid-template-columns: 120px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
   width: 100%;
@@ -1622,6 +1670,15 @@ button {
   color: var(--text-secondary);
   font-size: 11px;
 }
+.slash-command-group {
+  justify-self: end;
+  padding: 2px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
 .slash-command-item.unavailable .slash-command-name,
 .slash-command-item.unavailable .slash-command-label {
   color: var(--text-secondary);
@@ -1649,6 +1706,43 @@ button {
   max-height: 140px;
   display: block;
 }
+.composer-skill-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: -1px 0 7px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.composer-skill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: min(280px, 100%);
+  padding: 4px 7px;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  color: var(--text-primary);
+  background: var(--accent-wash);
+  font-size: 11.5px;
+}
+.composer-skill-chip > span {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.composer-skill-chip.team {
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border-subtle));
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+.composer-skill-chip.team > span {
+  color: var(--warning);
+}
+.composer-skill-chip:hover {
+  border-color: var(--accent);
+}
 .composer-input::placeholder {
   color: var(--text-secondary);
   /* 0.7 measured 3.88:1 on --bg-elevated (fails WCAG AA 4.5:1 for real text — see
@@ -1666,6 +1760,23 @@ button {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--border-subtle);
+}
+.composer-run-controls {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  margin-left: auto;
+}
+.composer-run-controls .cmp-chip {
+  padding-inline: 5px;
+}
+.composer-run-controls .model-chip {
+  color: var(--text-primary);
+}
+.composer-run-controls .runtime-menu {
+  right: 0;
+  left: auto;
 }
 .cmp-chip {
   font-size: 11.5px;
@@ -1718,10 +1829,22 @@ button {
   overflow-y: auto;
 }
 .effort-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.effort-chip::after {
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  content: '';
+  flex: none;
+  transform: translateY(-2px) rotate(45deg);
 }
 .effort-menu {
   min-width: 240px;
@@ -1753,6 +1876,190 @@ button {
   cursor: not-allowed;
   opacity: 0.45;
 }
+/* ---------- Multi-provider Model Picker (UI slice U1b) ----------
+   Sits on `.runtime-menu` so it inherits the existing popup's surface, radius, shadow and entry
+   animation — the picker is a bigger menu, not a new visual idiom. Only what windowing actually
+   requires is added: a fixed row height, and a scrollport whose own height is the constant the
+   arithmetic in lib/model-picker-virtualization.ts uses. */
+.model-picker-v2 {
+  /* Wider than the menus it inherits from, by exactly what the provider rail takes: the rail is a
+     column every row pays for, so the model name keeps the width it had before grouping. Still
+     capped against the viewport — `min-width` would otherwise win over `max-width` and let a narrow
+     window push the popup off screen. */
+  min-width: min(380px, calc(100vw - 32px));
+  max-width: min(420px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mpv2-search {
+  width: 100%;
+  padding: 6px 9px;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+}
+.mpv2-search::placeholder {
+  color: var(--text-secondary);
+}
+/* API / サブスク toggle: a two-up track, the on segment carrying the selected wash. */
+.mpv2-access {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+}
+.mpv2-access-btn {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 4px 9px;
+  border-radius: var(--r-sm);
+  transition: all var(--t-quick) var(--ease-ui);
+}
+.mpv2-access-btn:hover {
+  color: var(--text-primary);
+}
+.mpv2-access-btn.active {
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}
+.mpv2-count {
+  padding: 0 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+/* Which provider band the scrollport is on. Indented to the rail's own column so it reads as that
+   column's heading rather than as a second status line, and set in the rail's type so the eye ties
+   the two together. */
+.mpv2-group-cue {
+  padding: 0 10px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mpv2-list {
+  overflow-y: auto;
+  /* `overflow-anchor` off: the browser's scroll anchoring picks a mounted row to hold still, and
+     under windowing that row can be unmounted by the very re-render the scroll caused — which
+     reads as the list jumping while paging. */
+  overflow-anchor: none;
+}
+/* The one hard requirement of the windowing scheme: every row is exactly MODEL_ROW_HEIGHT_PX tall,
+   so a row's offset is its index times a constant and no row has to be measured. `box-sizing`
+   keeps padding inside that height; the meta line is clipped rather than allowed to wrap.
+   Grouping is drawn inside this box — a rail column and a hairline, never a header row — so the
+   constant holds for every row in the list, including the ones that open a provider band. */
+.mpv2-row {
+  box-sizing: border-box;
+  height: 46px;
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 9px;
+  /* No vertical padding: the rail stretches the row's full height, and a padded row would break
+     its line into dashes between neighbours instead of one column down the band. */
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.mpv2-row.active {
+  background: var(--bg-hover);
+}
+.mpv2-row.selected {
+  background: var(--bg-selected);
+}
+/* The boundary between two bands. An inset shadow rather than a border, because a border would
+   have to come out of the row's own 46px and shift its text by a pixel against every other row. */
+.mpv2-row.group-break {
+  box-shadow: inset 0 1px 0 var(--border-subtle);
+}
+/* The provider rail. Its line is the whole grouping affordance for rows in the middle of a band —
+   the label appears only where the band starts, so the column is what says "still the same
+   provider" further down. */
+.mpv2-rail {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding-right: 9px;
+  border-right: 1px solid var(--border-subtle);
+}
+/* Catalog text, only cased by CSS: the label is whatever the connection or the model author is
+   called upstream, so no brand name is written down here. */
+.mpv2-rail-label {
+  min-width: 0;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mpv2-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+/* Model name and connection name share the row's first line. The name gets the leftover width
+   (`min-width: 0` so it may ellipsize inside the flex line) and the connection keeps its own share:
+   which account a row belongs to is not a detail to truncate away first. */
+.mpv2-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.mpv2-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mpv2-conn {
+  flex: 0 1 auto;
+  max-width: 45%;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mpv2-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mpv2-empty,
+.mpv2-more {
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The global squash below already flattens the inherited `msgIn`, but the picker states this for
+     itself: its only motion is the popup entrance, and the popup is fully legible without it. */
+  .model-picker-v2 {
+    animation: none;
+  }
+}
 .runtime-menu-title {
   font-size: 12.5px;
   font-weight: 600;
@@ -1763,7 +2070,7 @@ button {
   color: var(--text-secondary);
 }
 .send-btn {
-  margin-left: auto;
+  margin-left: 6px;
   width: 32px;
   height: 32px;
   border-radius: var(--r-sm);
@@ -1976,63 +2283,270 @@ button {
   border: 0;
 }
 
+/* Turn work summary — one card under the reply saying what the Turn wrote. Chips and paths share
+   the file-change rows' shape so the two readings of "what changed" read as one family. Only hover
+   transitions, so `prefers-reduced-motion` has nothing new to suppress. */
 .turn-diff-card {
   margin: 8px 0 16px 48px;
-  padding: 12px 14px;
+  min-width: 0;
+  padding: 11px 13px 10px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-lg);
   background: var(--bg-elevated);
+  box-shadow: var(--shadow-1);
 }
 
-.turn-diff-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.turn-diff-card ul {
-  display: grid;
-  gap: 7px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.turn-diff-card li {
+.turn-diff-head {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 8px;
-  color: var(--text-secondary);
-  font-size: 12px;
 }
 
-.turn-diff-card code {
+.turn-diff-check {
+  display: inline-flex;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-xs);
+  background: var(--success-wash);
+  color: var(--success);
+}
+
+.turn-diff-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.turn-diff-status,
+.turn-diff-drift-note {
+  flex: none;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+.turn-diff-drift-note {
+  margin: 8px 0 0;
+  color: var(--danger);
+}
+
+.turn-diff-line-stats {
+  display: flex;
+  gap: 5px;
+  margin: 7px 0 0 26px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.turn-diff-added {
+  color: var(--success);
+}
+.turn-diff-deleted {
+  color: var(--danger);
+}
+.turn-diff-partial {
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
+.turn-diff-list {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  margin: 9px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.turn-diff-row {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.turn-diff-path {
+  min-width: 0;
   overflow: hidden;
   color: var(--text-primary);
-  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Truncates from the left, as in the file-change rows: the tail identifies the file. */
+  direction: rtl;
+  text-align: left;
+}
+
+.turn-diff-arrow {
+  flex: none;
+  color: var(--text-secondary);
+}
+.turn-diff-kind,
+.turn-diff-drift {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+/* Colour is never the only signal — each chip also carries its own word. */
+.turn-diff-kind--add {
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
+  color: var(--success);
+}
+
+.turn-diff-kind--delete,
+.turn-diff-drift {
+  border-color: var(--danger-line);
+  color: var(--danger);
+}
+
+.turn-diff-workers {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+}
+.turn-diff-workers-title {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+.turn-diff-workers ul {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.turn-diff-workers li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+.turn-diff-workers li > span:first-child {
+  overflow: hidden;
+  color: var(--text-primary);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.turn-diff-kind,
-.turn-diff-drift {
-  flex: 0 0 auto;
-  padding: 2px 6px;
-  border-radius: var(--r-xs);
+.turn-diff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.turn-diff-action {
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
   background: var(--bg-panel);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  transition:
+    color var(--t-quick) var(--ease-ui),
+    background var(--t-quick) var(--ease-ui),
+    border-color var(--t-quick) var(--ease-ui);
+}
+.turn-diff-action:hover {
+  border-color: var(--accent-line);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.turn-diff-action--primary {
+  border-color: var(--accent-line-soft);
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+.turn-diff-action--primary:hover {
+  border-color: var(--accent);
+  background: var(--accent-wash-strong);
 }
 
-.turn-diff-kind-add {
-  color: var(--success);
+.skill-draft-card {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-panel));
 }
-
-.turn-diff-kind-delete,
-.turn-diff-drift {
-  color: var(--danger);
+.skill-draft-card header,
+.skill-draft-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.skill-draft-card header > div {
+  min-width: 0;
+}
+.skill-draft-card header span {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.skill-draft-card h3,
+.skill-draft-card p {
+  margin: 0;
+}
+.skill-draft-card h3 {
+  margin-top: 2px;
+  font-size: 14px;
+}
+.skill-draft-card p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.skill-draft-card code {
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+.skill-draft-card details {
+  font-size: 12px;
+}
+.skill-draft-card summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.skill-draft-file {
+  margin-top: 9px;
+}
+.skill-draft-file pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 5px 0 0;
+  padding: 9px;
+  border-radius: var(--r-sm);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font: 11px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.skill-draft-card footer {
+  justify-content: flex-end;
+}
+.skill-draft-card footer button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
 }
 
 /* ---------- Team Canvas (demo/index.html §Team mode) ---------- */
@@ -2317,6 +2831,137 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Team Activity Card (Core C1b) — the persisted execution row, rendered identically on the Canvas
+   Worker card and in the List. Purely typographic: every state is legible as words, so nothing
+   here relies on colour to carry meaning, and nothing animates (there is no new motion for
+   `prefers-reduced-motion` to suppress). */
+.team-exec {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+.team-exec-canvas {
+  flex: none;
+  padding: 7px 15px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.team-exec-list {
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--neutral-wash);
+}
+.team-exec-row {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+}
+.team-exec-key {
+  flex: none;
+  width: 5.5em;
+  /* No `opacity` knock-down here: at 11.5px these labels are normal-size text, so WCAG 1.4.3 wants
+     4.5:1. Compositing --text-secondary at 0.75 turned #aaa49a into an effective #8c877e, which is
+     only 3.79:1 on the List variant's --neutral-wash-over---bg-elevated (#302e2a) and failed the
+     packaged axe run. The token at full strength is 5.48:1 there, 4.93:1 over the hovered row and
+     4.82:1 over the selected one, and 7.03:1 on the Canvas variant's --bg-panel. The key still
+     reads as the quieter half of the pair, since --text-secondary against the value's
+     --text-primary is the same rank the rest of the app uses (.w-activity, .team-activity-time). */
+  color: var(--text-secondary);
+}
+.team-exec-value {
+  min-width: 0;
+  color: var(--text-primary);
+}
+.team-exec-wait .team-exec-value {
+  /* Queue facts stay on one wrapped block rather than being clipped — the reason, the wait start
+     and the queue position are the whole point of the waiting states. */
+  white-space: normal;
+}
+.team-exec-instruction {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Team activity history card (Core C2b) — persisted Team activity shown inline in the Chat
+   timeline. Same inset rail as the approval audit row so history reads as annotation rather than
+   as a message. Purely typographic: the type is legible as words (no colour-only meaning) and
+   nothing animates, so `prefers-reduced-motion` has nothing new to suppress. */
+.team-activity-group {
+  width: min(680px, calc(100% - 44px));
+  margin: 2px 0 8px 44px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.team-activity-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 2px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+  list-style: none;
+  cursor: pointer;
+}
+.team-activity-group > summary::-webkit-details-marker {
+  display: none;
+}
+.team-activity-group > summary:hover,
+.team-activity-group[open] > summary {
+  color: var(--text-primary);
+}
+.team-activity-group > summary:focus-visible {
+  border-radius: var(--r-xs);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.team-activity-chevron {
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1;
+}
+.team-activity-list {
+  display: grid;
+  gap: 8px;
+  padding: 4px 0 12px;
+}
+.team-activity-group .team-activity {
+  width: 100%;
+  margin-left: 0;
+}
+.team-activity {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  column-gap: 10px;
+  row-gap: 2px;
+  width: min(680px, calc(100% - 44px));
+  margin: 0 0 0 44px;
+  padding: 7px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--neutral-wash);
+  font-size: 12px;
+}
+.team-activity-time {
+  color: var(--text-secondary);
+  font: 10px/1.6 var(--font-mono);
+}
+.team-activity-headline {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+}
+.team-activity-detail {
+  grid-column: 2;
+  margin: 0;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
 .worker.spawn {
   animation: workerIn var(--t-spatial) var(--ease-spatial) forwards;
 }
@@ -2590,7 +3235,8 @@ button {
   cursor: grab;
 }
 
-.team-view-toggle-btn {
+.team-view-toggle-btn,
+.team-policy-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2601,7 +3247,8 @@ button {
   border-radius: var(--r-sm);
   flex: none;
 }
-.team-view-toggle-btn:hover {
+.team-view-toggle-btn:hover,
+.team-policy-btn:hover {
   color: var(--text-primary);
   border-color: color-mix(in srgb, var(--text-primary) 20%, transparent);
 }
@@ -2631,25 +3278,36 @@ button {
     box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
     overflow-x: clip;
   }
-  .tlv-header {
-    flex-wrap: wrap;
-    height: auto;
-    min-height: 52px;
-    padding: 8px 16px;
-  }
 }
 .tlv-header {
   flex: none;
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 16px;
-  height: 52px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 16px;
+  min-height: 52px;
   border-bottom: 1px solid var(--border-subtle);
+}
+.tlv-header-main,
+.tlv-header-actions {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.tlv-header-main {
+  gap: 12px;
+}
+.tlv-header-actions {
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .tlv-header .team-title {
   flex: 1;
   min-width: 0;
+}
+.tlv-header-actions .team-stop-all-btn {
+  margin-left: auto;
 }
 .tlv-body {
   flex: 1;
@@ -3102,27 +3760,6 @@ button {
   background: none;
 }
 
-.goal-editor {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 2px 2px;
-}
-.goal-editor-label {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-}
-.goal-editor .goal-input {
-  flex: 1;
-  min-width: 0;
-}
-
 /* ---------- Settings dialog (issue #5) ----------
  Native <dialog showModal>, so the focus trap, Escape handling, inert backdrop, and top-layer
  stacking come from the platform rather than from hand-rolled JS. Top-layer matters here: the
@@ -3142,6 +3779,69 @@ button {
 }
 .settings-dialog[open] {
   animation: settingsIn var(--t-standard) var(--ease-ui);
+}
+
+/* Team Policy reuses the settings form controls below, but has its own native top-layer dialog so
+   Canvas and List can mount the same editor without coupling it to the global Runtime settings. */
+.team-policy-dialog {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  padding: 0;
+  width: min(540px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 48px));
+  box-shadow: var(--shadow-3);
+}
+.team-policy-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+.team-policy-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 20px 22px;
+  overflow-y: auto;
+  max-height: inherit;
+}
+.team-policy-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.team-policy-header h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.team-policy-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.team-policy-actions .settings-hint {
+  margin-right: auto;
+}
+.team-policy-error {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-sm);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+@media (max-width: 560px) {
+  .team-policy-actions {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .team-policy-actions .settings-hint {
+    width: 100%;
+  }
 }
 @keyframes settingsIn {
   from {
@@ -3188,6 +3888,167 @@ button {
   color: var(--text-primary);
 }
 
+/* ---------- Settings workspace (UI slice A) ----------
+   The same <dialog>, widened to a desktop two-pane sheet behind `settingsWorkspaceV2`. Fixed
+   height rather than max-height: the nav is a column of its own, and a sheet that changes size as
+   the section list moves the scroll is a sheet that moves under the pointer. */
+.settings-dialog-v2 {
+  width: min(900px, calc(100vw - 32px));
+  height: min(720px, calc(100vh - 48px));
+  max-height: none;
+  overflow: hidden;
+}
+.settings-workspace {
+  display: grid;
+  grid-template:
+    'header header' auto
+    'nav content' minmax(0, 1fr)
+    / 220px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+/* No nav to place — the settings bridge is missing and the sheet is one notice. Without this the
+   empty 220px column stays behind and the notice sits in a gutter. */
+.settings-workspace:not(:has(.settings-nav)) {
+  grid-template:
+    'header' auto
+    'content' minmax(0, 1fr)
+    / minmax(0, 1fr);
+}
+.settings-workspace > .settings-header {
+  grid-area: header;
+  padding: 17px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.settings-workspace > .settings-header > div:first-child {
+  min-width: 0;
+  flex: 1;
+}
+.settings-workspace > .settings-header p {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.settings-nav {
+  grid-area: nav;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  border-right: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-app) 58%, var(--bg-panel));
+}
+.settings-nav button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  text-align: left;
+}
+.settings-nav button:hover {
+  color: var(--text-primary);
+  background: var(--neutral-wash);
+}
+/* The one accented surface in the sheet. Everything else here is neutral on purpose, so "where am
+   I" is the only thing the accent is ever saying. */
+.settings-nav button.active {
+  color: var(--text-primary);
+  border-color: var(--accent-line-soft);
+  background: var(--accent-wash);
+}
+.settings-nav button > span {
+  font-size: 13px;
+  font-weight: 600;
+}
+.settings-nav button > small {
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+/* One scrollport holding every section, rather than a pane the nav swaps. The sections keep their
+   own state and stay reachable by plain scrolling; the nav scrolls this box and reads back from it
+   (see activeSection in SettingsDialog.tsx). `scroll-behavior` is flattened by the global
+   `prefers-reduced-motion` squash further up this file. */
+.settings-content {
+  grid-area: content;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px 26px 32px;
+}
+/* Focused only programmatically, to move a screen reader's cursor with the scroll. The ring would
+   be a surprise on a whole page-sized box, and :focus-visible still rings anything inside it. */
+.settings-page:focus {
+  outline: none;
+}
+.settings-page + .settings-page {
+  border-top: 1px solid var(--border-subtle);
+}
+.settings-page-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.settings-page-heading h3,
+.settings-page-heading p {
+  margin: 0;
+}
+.settings-page-heading h3 {
+  font-size: 18px;
+  line-height: 1.3;
+}
+.settings-page-heading > p:last-child {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.settings-eyebrow {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.team-default-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.team-default-policy {
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+}
+.team-default-policy .settings-field small {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.settings-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.settings-inline-actions .settings-hint {
+  margin: 0;
+}
+
 .settings-note {
   margin: 0;
   font-size: 12.5px;
@@ -3211,6 +4072,58 @@ button {
   text-transform: uppercase;
   color: var(--text-secondary);
   padding: 0;
+}
+
+@media (max-width: 720px) {
+  .settings-dialog-v2 {
+    width: min(620px, calc(100vw - 20px));
+    height: min(760px, calc(100vh - 20px));
+  }
+  .settings-workspace {
+    grid-template:
+      'header' auto
+      'nav' auto
+      'content' minmax(0, 1fr)
+      / minmax(0, 1fr);
+  }
+  .settings-nav {
+    flex-direction: row;
+    gap: 6px;
+    padding: 9px 12px;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .settings-nav button {
+    flex: none;
+    width: auto;
+    padding: 7px 10px;
+  }
+  .settings-nav button > small {
+    display: none;
+  }
+  .settings-page {
+    padding: 20px 18px 28px;
+  }
+}
+@media (max-width: 460px) {
+  .team-default-policy-grid {
+    grid-template-columns: 1fr;
+  }
+  .settings-inline-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-dialog[open] {
+    animation: none;
+  }
+  /* Restated rather than left to the global squash: the section list's whole job is to move this
+     box, and the JS scroll asks for its behaviour explicitly too (see scrollBehavior()). */
+  .settings-content {
+    scroll-behavior: auto;
+  }
 }
 
 .settings-radio {
@@ -3332,6 +4245,10 @@ button {
   background: color-mix(in srgb, var(--warning) 7%, transparent);
 }
 .imagegen-armed {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+.goal-armed {
   color: var(--accent);
   border-color: var(--accent-line);
 }
@@ -3476,6 +4393,13 @@ button {
   line-height: 1.5;
   color: var(--text-secondary);
 }
+.settings-skill-heading-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
 .settings-skill-counts {
   display: grid;
   gap: 5px;
@@ -3510,6 +4434,66 @@ button {
 .settings-builtin-skill small,
 .settings-skill-row small {
   color: var(--text-secondary);
+}
+.settings-skill-drafts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-skill-drafts h4 {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.settings-skill-draft-card {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-md);
+  background: var(--accent-wash);
+}
+.settings-skill-draft-card > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.settings-skill-draft-card small,
+.settings-skill-draft-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.settings-skill-draft-card code {
+  align-self: flex-start;
+  font-size: 10.5px;
+}
+.settings-skill-draft-files {
+  margin-top: 5px;
+  font-size: 11.5px;
+}
+.settings-skill-draft-files summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.settings-skill-draft-files > div {
+  margin-top: 8px;
+}
+.settings-skill-draft-files pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 4px 0 0;
+  padding: 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font: 10.5px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .settings-secondary-button,
 .settings-primary-button {
@@ -3633,6 +4617,222 @@ button {
   padding: 6px 9px;
   color: var(--danger);
   font-size: 12px;
+}
+
+/* ---------- Provider Connections (Team v2 U1c) ----------
+   Same quiet register as the Skills block above it: a divider, a heading row, then rows that read
+   as data rather than as controls. Everything here is a native control, so keyboard order, the
+   global :focus-visible ring, and the disabled affordances all come for free. */
+.settings-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+}
+.settings-connection-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+}
+.settings-connection-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12.5px;
+}
+.settings-connection-card:last-child {
+  border-bottom: none;
+}
+.settings-connection-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.settings-connection-main small {
+  color: var(--text-secondary);
+}
+/* A fact about the Connection, not a call to act on it — so it carries no border, no fill and no
+   radius. The bordered chip it used to be sat in the same visual family as 検証を再実行 right
+   beside it, which made 「確認不要」look like something a user could press. */
+.settings-connection-badge {
+  flex: none;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: default;
+}
+.settings-connection-badge.tone-muted {
+  color: var(--text-secondary);
+}
+.settings-connection-badge.tone-ok {
+  color: var(--success);
+}
+.settings-connection-badge.tone-warn {
+  color: var(--warning);
+}
+.settings-connection-badge.tone-danger {
+  color: var(--danger);
+}
+
+/* ----- Adding a Connection -----
+   Progressive disclosure inside the settings dialog that is already open: one accent button, and
+   the form expands under it in place. A nested modal would fight the dialog's own focus trap. */
+.settings-provider-add {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+.settings-add-connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--accent-line-soft);
+  border-radius: var(--r-sm);
+  color: var(--accent);
+  font-size: 12.5px;
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    border-color var(--t-quick) var(--ease-ui);
+}
+.settings-add-connection:hover {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
+}
+.settings-provider-form {
+  align-self: stretch;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+}
+.settings-provider-form .settings-group {
+  gap: 10px;
+  border: none;
+}
+/* Optional per-Provider extras only. Anything a Provider requires stays above this line, where a
+   user can see the field their submit is waiting on. */
+.settings-provider-advanced {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 9px;
+}
+.settings-provider-advanced > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: color var(--t-quick) var(--ease-ui);
+}
+.settings-provider-advanced > summary:hover,
+.settings-provider-advanced[open] > summary {
+  color: var(--text-primary);
+}
+.settings-provider-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+}
+.settings-text-input {
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  transition: border-color var(--t-quick) var(--ease-ui);
+}
+.settings-text-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.settings-key-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.settings-key-row .settings-secondary-button {
+  flex: none;
+}
+/* The reveal lives inside the field's right edge — where a masked value is actually looked at —
+   rather than as a second control in a row competing with the input. 32px square, so the target
+   clears the 24px minimum with room to spare while still fitting inside the field. */
+.settings-key-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.settings-key-input {
+  padding-right: 42px;
+}
+.settings-key-reveal {
+  position: absolute;
+  right: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+  transition:
+    color var(--t-quick) var(--ease-ui),
+    background var(--t-quick) var(--ease-ui);
+}
+.settings-key-reveal:hover,
+.settings-key-reveal[aria-pressed='true'] {
+  color: var(--text-primary);
+  background: var(--neutral-wash);
+}
+.settings-provider-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* Why the submit is unpressable, on the same line as the submit. */
+.settings-provider-submit-hint {
+  margin-right: auto;
+}
+/* Disabled, but still legibly a button: the shared 0.5 opacity dropped white-on-accent to a smear
+   and took the reason for the disabled state down with it. Scoped to this form on purpose. */
+.settings-provider-form .settings-primary-button:disabled {
+  opacity: 1;
+  background: var(--neutral-wash-strong);
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+.settings-provider-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The only motion in this section is a colour tint on focus/hover; the focus ring already carries
+     that meaning without moving anything. */
+  .settings-text-input,
+  .settings-key-reveal,
+  .settings-add-connection,
+  .settings-provider-advanced > summary {
+    transition: none;
+  }
 }
 
 /* ---------- File changes (issue #37) ----------
