@@ -22,16 +22,49 @@ import { WorkerWorktreeManager } from './worker-worktree';
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 
-afterEach(() => {
-  vi.useRealTimers();
-  for (const directory of cleanup.splice(0)) {
-    rmSync(directory, {
+function removeTemporaryDirectory(
+  directory: string,
+  platform = process.platform,
+  remove: typeof rmSync = rmSync,
+): void {
+  try {
+    remove(directory, {
       recursive: true,
       force: true,
-      maxRetries: process.platform === 'win32' ? 5 : 0,
+      maxRetries: platform === 'win32' ? 5 : 0,
       retryDelay: 100,
     });
+  } catch (error) {
+    // Git can retain Windows file handles beyond Node's retry window. The runner is ephemeral, so
+    // an exhausted cleanup must not replace a successful integration assertion with an EPERM.
+    if (platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') return;
+    throw error;
   }
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+  for (const directory of cleanup.splice(0)) removeTemporaryDirectory(directory);
+});
+
+describe('removeTemporaryDirectory', () => {
+  it('treats an exhausted Windows EPERM as best-effort cleanup', () => {
+    const locked = Object.assign(new Error('locked'), { code: 'EPERM' });
+    expect(() =>
+      removeTemporaryDirectory('locked-directory', 'win32', () => {
+        throw locked;
+      }),
+    ).not.toThrow();
+  });
+
+  it('rethrows cleanup errors other than a Windows EPERM', () => {
+    const unexpected = Object.assign(new Error('unexpected'), { code: 'EIO' });
+    expect(() =>
+      removeTemporaryDirectory('broken-directory', 'win32', () => {
+        throw unexpected;
+      }),
+    ).toThrow(unexpected);
+  });
 });
 
 function createPersistence(): SqlitePersistenceClient {
