@@ -44,6 +44,10 @@ import {
   type TaskSummary,
   type TeamBudgetStatus,
   type TeamBlueprint,
+  type TeamMissionAccess,
+  type TeamMissionCheckpoint,
+  type TeamMissionState,
+  type TeamMissionWorktreeState,
   type TeamModelRestriction,
   type TeamUsageTotals,
   type TurnEvent,
@@ -403,6 +407,20 @@ type WorkerWorktreeRow = {
   created_at: string;
   updated_at: string;
 };
+type TeamMissionWorktreeRow = {
+  execution_id: string;
+  agent_id: string;
+  repo_path: string;
+  path: string;
+  base_head: string;
+  state: TeamMissionWorktreeState;
+  worker_head: string | null;
+  integrated_head: string | null;
+  changed_files_json: string;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
 type TeamMessageRow = {
   id: string;
   team_id: string;
@@ -469,6 +487,8 @@ type TeamAttemptRow = {
   requested_model: string | null;
   provider_call_ordinal: number;
   terminal_reason: string | null;
+  start_reason: TeamAttemptStartReason;
+  last_progress_at: string | null;
   resolved_provider: string | null;
   resolved_model: string | null;
   resolution_json: string | null;
@@ -477,6 +497,28 @@ type TeamAttemptRow = {
   started_at: string | null;
   finished_at: string | null;
   updated_at: string;
+};
+type TeamMissionRow = {
+  id: string;
+  team_id: string;
+  created_by_agent_id: string;
+  state: TeamMissionState;
+  objective: string;
+  done_criteria_json: string;
+  current_step_ordinal: number;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+};
+type TeamMissionStepRow = {
+  mission_id: string;
+  ordinal: number;
+  execution_id: string;
+  access_mode: TeamMissionAccess;
+  checkpoint_json: string | null;
+  checkpoint_digest: string | null;
+  completed_at: string | null;
 };
 export const teamV2ActivityTypes = [
   'worker_hired',
@@ -2327,6 +2369,135 @@ const migrations = [
       ALTER TABLE messages ADD COLUMN work_content TEXT;
     `,
   },
+  {
+    version: 52,
+    checksum: 'team-long-run-v52-attempt-progress',
+    sql: `
+      ALTER TABLE team_attempts
+        ADD COLUMN start_reason TEXT NOT NULL DEFAULT 'initial'
+        CHECK (start_reason IN (
+          'initial', 'automatic_retry', 'manual_resume', 'steer', 'app_restart'
+        ));
+      ALTER TABLE team_attempts ADD COLUMN last_progress_at TEXT;
+    `,
+  },
+  {
+    version: 53,
+    checksum: 'team-long-run-v53-missions-and-resume',
+    sql: `
+      CREATE TABLE team_executions_v53 (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        assignee_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        created_by_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        state TEXT NOT NULL CHECK (state IN (
+          'assigned', 'queued', 'waiting_verification', 'waiting_rate_limit',
+          'running', 'waiting_resume', 'completed', 'failed', 'canceled'
+        )),
+        instruction_revision INTEGER NOT NULL DEFAULT 1 CHECK (instruction_revision >= 1),
+        queue_ordinal INTEGER,
+        queue_reason TEXT CHECK (
+          queue_reason IS NULL OR queue_reason IN (
+            'global_concurrency', 'connection_concurrency', 'verification',
+            'rate_limit', 'budget', 'recovery', 'automatic_retry'
+          )
+        ),
+        connection_id TEXT,
+        requested_provider TEXT,
+        requested_model TEXT,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        assigned_at TEXT NOT NULL,
+        queued_at TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        updated_at TEXT NOT NULL,
+        UNIQUE(team_id, queue_ordinal)
+      );
+      INSERT INTO team_executions_v53 (
+        id, team_id, assignee_agent_id, created_by_agent_id, state,
+        instruction_revision, queue_ordinal, queue_reason,
+        connection_id, requested_provider, requested_model,
+        revision, assigned_at, queued_at, started_at, completed_at, updated_at
+      )
+        SELECT id, team_id, assignee_agent_id, created_by_agent_id, state,
+               instruction_revision, queue_ordinal, queue_reason,
+               connection_id, requested_provider, requested_model,
+               revision, assigned_at, queued_at, started_at, completed_at, updated_at
+        FROM team_executions;
+      DROP TABLE team_executions;
+      ALTER TABLE team_executions_v53 RENAME TO team_executions;
+      CREATE INDEX team_executions_queue_idx
+        ON team_executions(state, queue_ordinal, queued_at, id);
+      CREATE INDEX team_executions_assignee_idx
+        ON team_executions(assignee_agent_id, state, assigned_at, id);
+
+      CREATE TABLE team_missions (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        created_by_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        state TEXT NOT NULL CHECK (state IN (
+          'queued', 'running', 'waiting_resume', 'completed', 'failed', 'canceled'
+        )),
+        objective TEXT NOT NULL,
+        done_criteria_json TEXT NOT NULL,
+        current_step_ordinal INTEGER NOT NULL DEFAULT 1 CHECK (
+          current_step_ordinal >= 1 AND current_step_ordinal <= 12
+        ),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE INDEX team_missions_team_idx ON team_missions(team_id, created_at, id);
+
+      CREATE TABLE team_mission_steps (
+        mission_id TEXT NOT NULL REFERENCES team_missions(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 12),
+        execution_id TEXT NOT NULL UNIQUE REFERENCES team_executions(id) ON DELETE CASCADE,
+        access_mode TEXT NOT NULL CHECK (access_mode IN ('read-only', 'workspace-write')),
+        checkpoint_json TEXT,
+        checkpoint_digest TEXT,
+        completed_at TEXT,
+        PRIMARY KEY(mission_id, ordinal)
+      );
+      CREATE INDEX team_mission_steps_execution_idx
+        ON team_mission_steps(execution_id);
+    `,
+    requiresForeignKeysOff: true,
+  },
+  {
+    version: 54,
+    checksum: 'team-mission-v54-worker-worktree-integration',
+    sql: `
+      CREATE TABLE team_mission_step_worktrees (
+        execution_id TEXT PRIMARY KEY
+          REFERENCES team_mission_steps(execution_id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+        repo_path TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        base_head TEXT NOT NULL CHECK (
+          length(base_head) >= 40 AND length(base_head) <= 64
+        ),
+        state TEXT NOT NULL CHECK (state IN (
+          'created', 'active', 'ready', 'integrated', 'cleaned', 'quarantined'
+        )),
+        worker_head TEXT CHECK (
+          worker_head IS NULL OR (length(worker_head) >= 40 AND length(worker_head) <= 64)
+        ),
+        integrated_head TEXT CHECK (
+          integrated_head IS NULL OR (
+            length(integrated_head) >= 40 AND length(integrated_head) <= 64
+          )
+        ),
+        changed_files_json TEXT NOT NULL DEFAULT '[]',
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX team_mission_step_worktrees_agent_idx
+        ON team_mission_step_worktrees(agent_id, state, created_at);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2655,6 +2826,14 @@ export type TeamExecutionRecord = Readonly<{
   completedAt: string | null;
   updatedAt: string;
 }>;
+export const teamAttemptStartReasons = [
+  'initial',
+  'automatic_retry',
+  'manual_resume',
+  'steer',
+  'app_restart',
+] as const;
+export type TeamAttemptStartReason = (typeof teamAttemptStartReasons)[number];
 export type TeamAttemptRecord = Readonly<{
   id: string;
   executionId: string;
@@ -2664,12 +2843,56 @@ export type TeamAttemptRecord = Readonly<{
   modelSelection: ModelSelection;
   providerCallOrdinal: number;
   terminalReason: string | null;
+  startReason: TeamAttemptStartReason;
+  lastProgressAt: string | null;
   resolution: ExecutionResolution;
   providerUsage: NormalizedProviderUsage | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
   updatedAt: string;
+}>;
+export type TeamMissionStepRecord = Readonly<{
+  missionId: string;
+  ordinal: number;
+  executionId: string;
+  access: TeamMissionAccess;
+  checkpoint: TeamMissionCheckpoint | null;
+  checkpointDigest: string | null;
+  completedAt: string | null;
+}>;
+export type TeamMissionWorktreeRecord = Readonly<{
+  executionId: string;
+  agentId: string;
+  repoPath: string;
+  path: string;
+  baseHead: string;
+  state: TeamMissionWorktreeState;
+  workerHead: string | null;
+  integratedHead: string | null;
+  changedFiles: readonly string[];
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}>;
+export type TeamMissionRecord = Readonly<{
+  id: string;
+  teamId: string;
+  createdByAgentId: string;
+  state: TeamMissionState;
+  objective: string;
+  doneCriteria: readonly string[];
+  currentStepOrdinal: number;
+  steps: readonly TeamMissionStepRecord[];
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}>;
+
+export type TeamIntegrityReport = Readonly<{
+  sqlite: 'ok' | 'corrupt';
+  inconsistencies: readonly string[];
 }>;
 export type TeamV2ActivityRecord = Readonly<{
   id: string;
@@ -2780,7 +3003,11 @@ export interface PersistenceClient {
     now: string;
   }): TeamExecutionRecord;
   cancelQueuedTeamExecution(executionId: string, now: string): TeamExecutionRecord;
-  createTeamAttempt(executionId: string, now: string): TeamAttemptRecord;
+  createTeamAttempt(
+    executionId: string,
+    now: string,
+    startReason?: TeamAttemptStartReason,
+  ): TeamAttemptRecord;
   getTeamAttempt(attemptId: string): TeamAttemptRecord;
   listTeamAttempts(executionId: string): readonly TeamAttemptRecord[];
   transitionTeamAttempt(input: {
@@ -2790,6 +3017,62 @@ export interface PersistenceClient {
     terminalReason?: string | null;
   }): TeamAttemptRecord;
   recordTeamAttemptRateLimited(attemptId: string, now: string): TeamAttemptRecord;
+  touchTeamAttemptProgress(attemptId: string, now: string): TeamAttemptRecord;
+  createTeamMission(input: {
+    teamId: string;
+    createdByAgentId: string;
+    objective: string;
+    doneCriteria: readonly string[];
+    steps: readonly {
+      workerId: string;
+      objective: string;
+      doneCriteria: readonly string[];
+      access: TeamMissionAccess;
+    }[];
+    now: string;
+  }): TeamMissionRecord;
+  getTeamMission(missionId: string): TeamMissionRecord;
+  listTeamMissions(teamId: string): readonly TeamMissionRecord[];
+  getTeamMissionForExecution(executionId: string): TeamMissionRecord | null;
+  recordTeamMissionWorktree(input: {
+    executionId: string;
+    agentId: string;
+    repoPath: string;
+    path: string;
+    baseHead: string;
+    now: string;
+  }): TeamMissionWorktreeRecord;
+  updateTeamMissionWorktree(input: {
+    executionId: string;
+    to: TeamMissionWorktreeState;
+    workerHead?: string | null;
+    integratedHead?: string | null;
+    changedFiles?: readonly string[];
+    reason?: string | null;
+    now: string;
+  }): TeamMissionWorktreeRecord;
+  getTeamMissionWorktree(executionId: string): TeamMissionWorktreeRecord | null;
+  transitionTeamMission(missionId: string, to: TeamMissionState, now: string): TeamMissionRecord;
+  prepareTeamMissionResume(input: {
+    missionId: string;
+    executionId: string;
+    now: string;
+  }): TeamExecutionRecord;
+  recordTeamMissionCheckpoint(input: {
+    executionId: string;
+    checkpoint: TeamMissionCheckpoint;
+    now: string;
+  }): { mission: TeamMissionRecord; nextExecutionId: string | null };
+  completeTeamMissionStep(input: {
+    executionId: string;
+    attemptId: string;
+    teamTaskId: string;
+    agentId: string;
+    report: unknown;
+    doneEvidence: readonly { criterion: string; evidence: string }[];
+    checkpoint: TeamMissionCheckpoint;
+    now: string;
+  }): { mission: TeamMissionRecord; nextExecutionId: string | null };
   recordTeamAttemptProviderResult(
     attemptId: string,
     resolution: ExecutionResolution | undefined,
@@ -2898,6 +3181,7 @@ export interface PersistenceClient {
     threads: number;
     deliveries: number;
   };
+  checkTeamIntegrity(): TeamIntegrityReport;
   renameTask(taskId: string, title: string): TaskSummary;
   setPinned(taskId: string, pinned: boolean): TaskSummary;
   setArchived(taskId: string, archived: boolean): TaskSummary;
@@ -4493,7 +4777,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const type =
         input.to === 'queued'
           ? 'execution_queued'
-          : ['waiting_verification', 'waiting_rate_limit'].includes(input.to)
+          : ['waiting_verification', 'waiting_rate_limit', 'waiting_resume'].includes(input.to)
             ? 'execution_waiting'
             : input.to === 'running'
               ? 'execution_started'
@@ -4560,9 +4844,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.db.transaction(() => {
       const current = this.getTeamExecution(executionId);
       if (
-        !['assigned', 'queued', 'waiting_verification', 'waiting_rate_limit'].includes(
-          current.state,
-        )
+        ![
+          'assigned',
+          'queued',
+          'waiting_verification',
+          'waiting_rate_limit',
+          'waiting_resume',
+        ].includes(current.state)
       )
         throw new Error('Only a queued Team execution can be canceled without interruption');
       const canceled = this.transitionTeamExecution({
@@ -4599,7 +4887,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
-  createTeamAttempt(executionId: string, now: string): TeamAttemptRecord {
+  createTeamAttempt(
+    executionId: string,
+    now: string,
+    startReason: TeamAttemptStartReason = 'initial',
+  ): TeamAttemptRecord {
     return this.db.transaction(() => {
       const execution = this.getTeamExecution(executionId);
       if (execution.state !== 'running')
@@ -4618,8 +4910,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
           `INSERT INTO team_attempts(
              id, execution_id, ordinal, state, instruction_revision,
              connection_id, requested_provider, requested_model,
-             provider_call_ordinal, terminal_reason, created_at, started_at, finished_at, updated_at
-           ) VALUES (?, ?, ?, 'created', ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?)`,
+             provider_call_ordinal, terminal_reason, start_reason, last_progress_at,
+             created_at, started_at, finished_at, updated_at
+           ) VALUES (?, ?, ?, 'created', ?, ?, ?, ?, 0, NULL, ?, NULL, ?, NULL, NULL, ?)`,
         )
         .run(
           id,
@@ -4629,6 +4922,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           execution.modelSelection.connectionId,
           execution.modelSelection.requestedProvider,
           execution.modelSelection.requestedModel,
+          startReason,
           now,
           now,
         );
@@ -4740,6 +5034,381 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  touchTeamAttemptProgress(attemptId: string, now: string): TeamAttemptRecord {
+    const result = this.db
+      .prepare(
+        `UPDATE team_attempts
+         SET last_progress_at = ?, updated_at = ?
+         WHERE id = ? AND state = 'running'`,
+      )
+      .run(now, now, attemptId);
+    if (result.changes !== 1) throw new TeamConflictError();
+    return this.getTeamAttempt(attemptId);
+  }
+
+  createTeamMission(input: {
+    teamId: string;
+    createdByAgentId: string;
+    objective: string;
+    doneCriteria: readonly string[];
+    steps: readonly {
+      workerId: string;
+      objective: string;
+      doneCriteria: readonly string[];
+      access: TeamMissionAccess;
+    }[];
+    now: string;
+  }): TeamMissionRecord {
+    return this.db.transaction(() => {
+      if (input.steps.length < 2 || input.steps.length > 12)
+        throw new Error('A Team Mission requires 2 to 12 steps');
+      const team = this.getTeam(input.teamId);
+      const creator = this.getAgent(input.createdByAgentId);
+      if (creator.teamId !== team.id) throw new Error('Mission creator must belong to Team');
+      const missionId = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO team_missions(
+             id, team_id, created_by_agent_id, state, objective, done_criteria_json,
+             current_step_ordinal, revision, created_at, updated_at, completed_at
+           ) VALUES (?, ?, ?, 'queued', ?, ?, 1, 1, ?, ?, NULL)`,
+        )
+        .run(
+          missionId,
+          team.id,
+          creator.id,
+          input.objective,
+          JSON.stringify(input.doneCriteria),
+          input.now,
+          input.now,
+        );
+      for (const [index, step] of input.steps.entries()) {
+        const worker = this.getAgent(step.workerId);
+        if (worker.teamId !== team.id || worker.kind !== 'worker')
+          throw new Error('Mission step Worker must belong to Team');
+        const execution = this.createTeamExecution({
+          teamId: team.id,
+          assigneeAgentId: worker.id,
+          createdByAgentId: creator.id,
+          instruction: step.objective,
+          now: input.now,
+        });
+        const message = this.createTeamMessage({
+          teamId: team.id,
+          sourceAgentId: creator.id,
+          targetAgentId: worker.id,
+          content: step.objective,
+          executionId: execution.id,
+        });
+        this.createTeamTask({
+          teamId: team.id,
+          messageId: message.id,
+          assigneeAgentId: worker.id,
+          createdByAgentId: creator.id,
+          description: step.objective,
+          doneCriteria: step.doneCriteria,
+          now: input.now,
+        });
+        this.createTeamDelivery({ messageId: message.id, now: input.now });
+        this.db
+          .prepare(
+            `INSERT INTO team_mission_steps(
+               mission_id, ordinal, execution_id, access_mode,
+               checkpoint_json, checkpoint_digest, completed_at
+             ) VALUES (?, ?, ?, ?, NULL, NULL, NULL)`,
+          )
+          .run(missionId, index + 1, execution.id, step.access);
+      }
+      return this.getTeamMission(missionId);
+    })();
+  }
+
+  getTeamMission(missionId: string): TeamMissionRecord {
+    const row = this.db.prepare('SELECT * FROM team_missions WHERE id = ?').get(missionId) as
+      TeamMissionRow | undefined;
+    if (row === undefined) throw new NotFoundError('Team Mission not found');
+    const steps = this.db
+      .prepare('SELECT * FROM team_mission_steps WHERE mission_id = ? ORDER BY ordinal')
+      .all(missionId) as TeamMissionStepRow[];
+    return toTeamMission(row, steps);
+  }
+
+  listTeamMissions(teamId: string): readonly TeamMissionRecord[] {
+    this.getTeam(teamId);
+    return (
+      this.db
+        .prepare('SELECT id FROM team_missions WHERE team_id = ? ORDER BY created_at, id')
+        .all(teamId) as { id: string }[]
+    ).map(({ id }) => this.getTeamMission(id));
+  }
+
+  getTeamMissionForExecution(executionId: string): TeamMissionRecord | null {
+    const row = this.db
+      .prepare('SELECT mission_id FROM team_mission_steps WHERE execution_id = ?')
+      .get(executionId) as { mission_id: string } | undefined;
+    return row === undefined ? null : this.getTeamMission(row.mission_id);
+  }
+
+  recordTeamMissionWorktree(input: {
+    executionId: string;
+    agentId: string;
+    repoPath: string;
+    path: string;
+    baseHead: string;
+    now: string;
+  }): TeamMissionWorktreeRecord {
+    return this.db.transaction(() => {
+      const mission = this.getTeamMissionForExecution(input.executionId);
+      if (mission === null) throw new NotFoundError('Team Mission step not found');
+      const execution = this.getTeamExecution(input.executionId);
+      if (execution.assigneeAgentId !== input.agentId)
+        throw new Error('Mission worktree Agent does not match execution assignee');
+      this.db
+        .prepare(
+          `INSERT INTO team_mission_step_worktrees(
+             execution_id, agent_id, repo_path, path, base_head, state,
+             worker_head, integrated_head, changed_files_json, reason, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, 'created', NULL, NULL, '[]', NULL, ?, ?)`,
+        )
+        .run(
+          input.executionId,
+          input.agentId,
+          input.repoPath,
+          input.path,
+          input.baseHead,
+          input.now,
+          input.now,
+        );
+      return this.requireTeamMissionWorktree(input.executionId);
+    })();
+  }
+
+  updateTeamMissionWorktree(input: {
+    executionId: string;
+    to: TeamMissionWorktreeState;
+    workerHead?: string | null;
+    integratedHead?: string | null;
+    changedFiles?: readonly string[];
+    reason?: string | null;
+    now: string;
+  }): TeamMissionWorktreeRecord {
+    const transitions: Readonly<
+      Record<TeamMissionWorktreeState, readonly TeamMissionWorktreeState[]>
+    > = {
+      created: ['active', 'quarantined'],
+      active: ['ready', 'quarantined'],
+      ready: ['active', 'integrated', 'quarantined'],
+      integrated: ['active', 'cleaned', 'quarantined'],
+      cleaned: [],
+      quarantined: ['active', 'ready', 'integrated'],
+    };
+    return this.db.transaction(() => {
+      const current = this.requireTeamMissionWorktree(input.executionId);
+      if (current.state !== input.to && !transitions[current.state].includes(input.to))
+        throw new Error(`Invalid Mission worktree transition: ${current.state} -> ${input.to}`);
+      const workerHead = input.workerHead === undefined ? current.workerHead : input.workerHead;
+      const integratedHead =
+        input.integratedHead === undefined ? current.integratedHead : input.integratedHead;
+      const changedFiles =
+        input.changedFiles === undefined ? current.changedFiles : [...new Set(input.changedFiles)];
+      const reason = input.reason === undefined ? current.reason : input.reason;
+      if (input.to === 'ready' && workerHead === null)
+        throw new Error('A ready Mission worktree requires workerHead');
+      if (input.to === 'integrated' && integratedHead === null)
+        throw new Error('An integrated Mission worktree requires integratedHead');
+      const result = this.db
+        .prepare(
+          `UPDATE team_mission_step_worktrees
+           SET state = ?, worker_head = ?, integrated_head = ?,
+               changed_files_json = ?, reason = ?, updated_at = ?
+           WHERE execution_id = ? AND state = ?`,
+        )
+        .run(
+          input.to,
+          workerHead,
+          integratedHead,
+          JSON.stringify(changedFiles.slice(0, 500)),
+          reason,
+          input.now,
+          current.executionId,
+          current.state,
+        );
+      if (result.changes !== 1) throw new TeamConflictError();
+      return this.requireTeamMissionWorktree(current.executionId);
+    })();
+  }
+
+  getTeamMissionWorktree(executionId: string): TeamMissionWorktreeRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM team_mission_step_worktrees WHERE execution_id = ?')
+      .get(executionId) as TeamMissionWorktreeRow | undefined;
+    return row === undefined ? null : toTeamMissionWorktree(row);
+  }
+
+  transitionTeamMission(missionId: string, to: TeamMissionState, now: string): TeamMissionRecord {
+    const allowed: Readonly<Record<TeamMissionState, readonly TeamMissionState[]>> = {
+      queued: ['running', 'canceled', 'failed'],
+      running: ['waiting_resume', 'completed', 'canceled', 'failed'],
+      waiting_resume: ['running', 'canceled', 'failed'],
+      completed: [],
+      failed: [],
+      canceled: [],
+    };
+    const current = this.getTeamMission(missionId);
+    if (current.state === to) return current;
+    if (!allowed[current.state].includes(to))
+      throw new Error(`Invalid Team Mission transition: ${current.state} -> ${to}`);
+    const terminal = ['completed', 'failed', 'canceled'].includes(to);
+    const result = this.db
+      .prepare(
+        `UPDATE team_missions
+         SET state = ?, revision = revision + 1, updated_at = ?,
+             completed_at = CASE WHEN ? = 1 THEN ? ELSE completed_at END
+         WHERE id = ? AND revision = ?`,
+      )
+      .run(to, now, terminal ? 1 : 0, now, current.id, current.revision);
+    if (result.changes !== 1) throw new TeamConflictError();
+    return this.getTeamMission(current.id);
+  }
+
+  prepareTeamMissionResume(input: {
+    missionId: string;
+    executionId: string;
+    now: string;
+  }): TeamExecutionRecord {
+    return this.db.transaction(() => {
+      const mission = this.getTeamMission(input.missionId);
+      const step = mission.steps.find(({ executionId }) => executionId === input.executionId);
+      if (mission.state !== 'waiting_resume' || step?.ordinal !== mission.currentStepOrdinal)
+        throw new Error('Mission is not waiting on this execution');
+      const execution = this.getTeamExecution(input.executionId);
+      if (execution.state !== 'waiting_resume')
+        throw new Error('Mission execution is not waiting to resume');
+      const previousDispatch = this.getTeamExecutionDispatch(execution.id);
+      this.transitionTeamMission(mission.id, 'running', input.now);
+      const queued = this.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'queued',
+        now: input.now,
+        queueReason: 'recovery',
+      });
+      const message = this.createTeamMessage({
+        teamId: execution.teamId,
+        sourceAgentId: execution.createdByAgentId,
+        targetAgentId: execution.assigneeAgentId,
+        content: execution.instruction.content,
+        executionId: execution.id,
+      });
+      this.createTeamTask({
+        teamId: execution.teamId,
+        messageId: message.id,
+        assigneeAgentId: execution.assigneeAgentId,
+        createdByAgentId: execution.createdByAgentId,
+        description: execution.instruction.content,
+        doneCriteria: previousDispatch.doneCriteria,
+        now: input.now,
+      });
+      this.createTeamDelivery({ messageId: message.id, now: input.now });
+      return queued;
+    })();
+  }
+
+  recordTeamMissionCheckpoint(input: {
+    executionId: string;
+    checkpoint: TeamMissionCheckpoint;
+    now: string;
+  }): { mission: TeamMissionRecord; nextExecutionId: string | null } {
+    return this.db.transaction(() => {
+      const step = this.db
+        .prepare('SELECT * FROM team_mission_steps WHERE execution_id = ?')
+        .get(input.executionId) as TeamMissionStepRow | undefined;
+      if (step === undefined) throw new NotFoundError('Team Mission step not found');
+      if (step.checkpoint_json !== null) {
+        const mission = this.getTeamMission(step.mission_id);
+        const next = mission.steps.find(({ ordinal }) => ordinal === step.ordinal + 1);
+        return { mission, nextExecutionId: next?.executionId ?? null };
+      }
+      if (this.getTeamExecution(input.executionId).state !== 'completed')
+        throw new Error('Only a completed Mission step can be checkpointed');
+      const serialized = JSON.stringify(input.checkpoint);
+      const digest = createHash('sha256').update(serialized).digest('hex');
+      const updated = this.db
+        .prepare(
+          `UPDATE team_mission_steps
+           SET checkpoint_json = ?, checkpoint_digest = ?, completed_at = ?
+           WHERE execution_id = ? AND checkpoint_json IS NULL`,
+        )
+        .run(serialized, digest, input.now, input.executionId);
+      if (updated.changes !== 1) throw new TeamConflictError();
+      const mission = this.getTeamMission(step.mission_id);
+      const next = mission.steps.find(({ ordinal }) => ordinal === step.ordinal + 1) ?? null;
+      if (next === null) {
+        return {
+          mission: this.transitionTeamMission(mission.id, 'completed', input.now),
+          nextExecutionId: null,
+        };
+      }
+      this.db
+        .prepare(
+          `UPDATE team_missions
+           SET state = 'running', current_step_ordinal = ?,
+               revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(next.ordinal, input.now, mission.id, mission.revision);
+      this.transitionTeamExecution({
+        executionId: next.executionId,
+        to: 'queued',
+        now: input.now,
+        queueReason: 'global_concurrency',
+      });
+      return { mission: this.getTeamMission(mission.id), nextExecutionId: next.executionId };
+    })();
+  }
+
+  completeTeamMissionStep(input: {
+    executionId: string;
+    attemptId: string;
+    teamTaskId: string;
+    agentId: string;
+    report: unknown;
+    doneEvidence: readonly { criterion: string; evidence: string }[];
+    checkpoint: TeamMissionCheckpoint;
+    now: string;
+  }): { mission: TeamMissionRecord; nextExecutionId: string | null } {
+    return this.db.transaction(() => {
+      const attempt = this.getTeamAttempt(input.attemptId);
+      if (attempt.executionId !== input.executionId)
+        throw new Error('Mission Attempt does not belong to execution');
+      const task = this.getTeamTask(input.teamTaskId);
+      const dispatch = this.getTeamExecutionDispatch(input.executionId);
+      if (dispatch.teamTaskId !== task.id)
+        throw new Error('Mission task is not the current execution dispatch');
+      this.completeTeamTaskWithReport({
+        teamTaskId: task.id,
+        agentId: input.agentId,
+        report: input.report,
+        doneEvidence: input.doneEvidence,
+        now: input.now,
+      });
+      this.transitionTeamAttempt({
+        attemptId: attempt.id,
+        to: 'completed',
+        now: input.now,
+      });
+      this.transitionTeamExecution({
+        executionId: input.executionId,
+        to: 'completed',
+        now: input.now,
+      });
+      return this.recordTeamMissionCheckpoint({
+        executionId: input.executionId,
+        checkpoint: input.checkpoint,
+        now: input.now,
+      });
+    })();
+  }
+
   recordTeamAttemptProviderResult(
     attemptId: string,
     resolution: ExecutionResolution | undefined,
@@ -4774,8 +5443,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   recoverInterruptedTeamExecutions(now: string): number {
     return this.db.transaction(() => {
       const running = this.db
-        .prepare("SELECT id, execution_id FROM team_attempts WHERE state = 'running'")
-        .all() as { id: string; execution_id: string }[];
+        .prepare("SELECT id, execution_id, start_reason FROM team_attempts WHERE state = 'running'")
+        .all() as {
+        id: string;
+        execution_id: string;
+        start_reason: TeamAttemptStartReason;
+      }[];
       for (const attempt of running) {
         this.transitionTeamAttempt({
           attemptId: attempt.id,
@@ -4784,7 +5457,29 @@ export class SqlitePersistenceClient implements PersistenceClient {
           terminalReason: 'app_restart',
         });
         const execution = this.getTeamExecution(attempt.execution_id);
-        if (execution.state === 'running')
+        if (execution.state !== 'running') continue;
+        const mission = this.getTeamMissionForExecution(execution.id);
+        const missionStep = mission?.steps.find(({ executionId }) => executionId === execution.id);
+        const worker = this.getAgent(execution.assigneeAgentId);
+        const writable =
+          missionStep?.access === 'workspace-write' ||
+          (missionStep === undefined && worker.writeCapable);
+        const automaticRestartExhausted = attempt.start_reason === 'app_restart';
+        if (writable || (automaticRestartExhausted && mission !== null)) {
+          this.transitionTeamExecution({
+            executionId: execution.id,
+            to: 'waiting_resume',
+            now,
+          });
+          if (mission !== null && mission !== undefined && mission.state === 'running')
+            this.transitionTeamMission(mission.id, 'waiting_resume', now);
+        } else if (automaticRestartExhausted)
+          this.transitionTeamExecution({
+            executionId: execution.id,
+            to: 'failed',
+            now,
+          });
+        else
           this.transitionTeamExecution({
             executionId: execution.id,
             to: 'queued',
@@ -5454,7 +6149,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
           this.db
             .prepare(
               `SELECT DISTINCT team_id FROM team_executions
-               WHERE state IN ('assigned', 'queued', 'waiting_verification', 'waiting_rate_limit')`,
+               WHERE state IN (
+                 'assigned', 'queued', 'waiting_verification', 'waiting_rate_limit',
+                 'waiting_resume'
+               )`,
             )
             .all() as { team_id: string }[]
         ).map(({ team_id }) => team_id),
@@ -5464,7 +6162,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
           this.db
             .prepare(
               `SELECT DISTINCT assignee_agent_id FROM team_executions
-               WHERE state IN ('assigned', 'queued', 'waiting_verification', 'waiting_rate_limit')`,
+               WHERE state IN (
+                 'assigned', 'queued', 'waiting_verification', 'waiting_rate_limit',
+                 'waiting_resume'
+               )`,
             )
             .all() as { assignee_agent_id: string }[]
         ).map(({ assignee_agent_id }) => assignee_agent_id),
@@ -5531,7 +6232,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
                JOIN team_executions e ON e.id = m.execution_id
                WHERE m.id = team_tasks.message_id
                  AND e.state IN (
-                   'assigned', 'queued', 'waiting_verification', 'waiting_rate_limit'
+                   'assigned', 'queued', 'waiting_verification', 'waiting_rate_limit',
+                   'waiting_resume'
                  )
              )`,
         )
@@ -5582,6 +6284,98 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .run(now);
       return { teams, workers, threads, deliveries };
     })();
+  }
+
+  checkTeamIntegrity(): TeamIntegrityReport {
+    const integrityRows = this.db.pragma('integrity_check') as {
+      integrity_check: string;
+    }[];
+    const inconsistencies: string[] = [];
+    if (integrityRows.length !== 1 || integrityRows[0]?.integrity_check.toLowerCase() !== 'ok')
+      inconsistencies.push(
+        `sqlite_integrity:${integrityRows.map(({ integrity_check }) => integrity_check).join(',')}`,
+      );
+    const foreignKeys = this.db.pragma('foreign_key_check') as unknown[];
+    if (foreignKeys.length > 0) inconsistencies.push(`foreign_keys:${foreignKeys.length}`);
+    const checks = [
+      {
+        name: 'checkpoint_without_completed_execution',
+        sql: `SELECT COUNT(*) AS count
+              FROM team_mission_steps s
+              JOIN team_executions e ON e.id = s.execution_id
+              WHERE s.checkpoint_json IS NOT NULL AND e.state <> 'completed'`,
+      },
+      {
+        name: 'completed_execution_without_checkpoint',
+        sql: `SELECT COUNT(*) AS count
+              FROM team_mission_steps s
+              JOIN team_executions e ON e.id = s.execution_id
+              WHERE e.state = 'completed' AND s.checkpoint_json IS NULL`,
+      },
+      {
+        name: 'completed_mission_with_incomplete_step',
+        sql: `SELECT COUNT(*) AS count
+              FROM team_missions m
+              WHERE m.state = 'completed'
+                AND EXISTS (
+                  SELECT 1 FROM team_mission_steps s
+                  WHERE s.mission_id = m.id AND s.checkpoint_json IS NULL
+                )`,
+      },
+      {
+        name: 'waiting_mission_without_waiting_execution',
+        sql: `SELECT COUNT(*) AS count
+              FROM team_missions m
+              WHERE m.state = 'waiting_resume'
+                AND NOT EXISTS (
+                  SELECT 1 FROM team_mission_steps s
+                  JOIN team_executions e ON e.id = s.execution_id
+                  WHERE s.mission_id = m.id
+                    AND s.ordinal = m.current_step_ordinal
+                    AND e.state = 'waiting_resume'
+                )`,
+      },
+      {
+        name: 'mission_missing_current_step',
+        sql: `SELECT COUNT(*) AS count
+              FROM team_missions m
+              WHERE NOT EXISTS (
+                SELECT 1 FROM team_mission_steps s
+                WHERE s.mission_id = m.id AND s.ordinal = m.current_step_ordinal
+              )`,
+      },
+      {
+        name: 'mission_previous_step_without_checkpoint',
+        sql: `SELECT COUNT(*) AS count
+              FROM team_missions m
+              JOIN team_mission_steps s ON s.mission_id = m.id
+              WHERE s.ordinal < m.current_step_ordinal AND s.checkpoint_json IS NULL`,
+      },
+      {
+        name: 'completed_write_without_integrated_head',
+        sql: `SELECT COUNT(*) AS count
+              FROM team_mission_step_worktrees w
+              JOIN team_executions e ON e.id = w.execution_id
+              WHERE e.state = 'completed' AND w.integrated_head IS NULL`,
+      },
+      {
+        name: 'cleaned_worktree_without_completed_execution',
+        sql: `SELECT COUNT(*) AS count
+              FROM team_mission_step_worktrees w
+              JOIN team_executions e ON e.id = w.execution_id
+              WHERE w.state = 'cleaned' AND e.state <> 'completed'`,
+      },
+    ] as const;
+    for (const check of checks) {
+      const row = this.db.prepare(check.sql).get() as { count: number };
+      if (row.count > 0) inconsistencies.push(`${check.name}:${row.count}`);
+    }
+    return {
+      sqlite: inconsistencies.some((issue) => issue.startsWith('sqlite_integrity:'))
+        ? 'corrupt'
+        : 'ok',
+      inconsistencies,
+    };
   }
 
   renameTask(taskId: string, title: string): TaskSummary {
@@ -10072,6 +10866,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return worktree;
   }
 
+  private requireTeamMissionWorktree(executionId: string): TeamMissionWorktreeRecord {
+    const worktree = this.getTeamMissionWorktree(executionId);
+    if (worktree === null) throw new NotFoundError('Team Mission worktree not found');
+    return worktree;
+  }
+
   private getGlobalLimits(): Partial<Record<BudgetKind, number>> {
     const row = this.db.prepare('SELECT limits_json FROM team_global_limits WHERE id = 1').get() as
       { limits_json: string } | undefined;
@@ -10431,6 +11231,23 @@ function toWorkerWorktree(row: WorkerWorktreeRow): WorkerWorktreeRecord {
   };
 }
 
+function toTeamMissionWorktree(row: TeamMissionWorktreeRow): TeamMissionWorktreeRecord {
+  return {
+    executionId: row.execution_id,
+    agentId: row.agent_id,
+    repoPath: row.repo_path,
+    path: row.path,
+    baseHead: row.base_head,
+    state: row.state,
+    workerHead: row.worker_head,
+    integratedHead: row.integrated_head,
+    changedFiles: JSON.parse(row.changed_files_json) as string[],
+    reason: row.reason,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function toTeamMessage(row: TeamMessageRow): TeamMessageRecord {
   return {
     id: row.id,
@@ -10482,6 +11299,8 @@ function toTeamAttempt(row: TeamAttemptRow): TeamAttemptRecord {
     },
     providerCallOrdinal: row.provider_call_ordinal,
     terminalReason: row.terminal_reason,
+    startReason: row.start_reason,
+    lastProgressAt: row.last_progress_at,
     resolution:
       row.resolution_json === null
         ? {
@@ -10497,6 +11316,37 @@ function toTeamAttempt(row: TeamAttemptRow): TeamAttemptRecord {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toTeamMission(
+  row: TeamMissionRow,
+  steps: readonly TeamMissionStepRow[],
+): TeamMissionRecord {
+  return {
+    id: row.id,
+    teamId: row.team_id,
+    createdByAgentId: row.created_by_agent_id,
+    state: row.state,
+    objective: row.objective,
+    doneCriteria: JSON.parse(row.done_criteria_json) as string[],
+    currentStepOrdinal: row.current_step_ordinal,
+    steps: steps.map((step) => ({
+      missionId: step.mission_id,
+      ordinal: step.ordinal,
+      executionId: step.execution_id,
+      access: step.access_mode,
+      checkpoint:
+        step.checkpoint_json === null
+          ? null
+          : (JSON.parse(step.checkpoint_json) as TeamMissionCheckpoint),
+      checkpointDigest: step.checkpoint_digest,
+      completedAt: step.completed_at,
+    })),
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at,
   };
 }
 

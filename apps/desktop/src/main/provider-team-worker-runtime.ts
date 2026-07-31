@@ -75,8 +75,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
+    signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult> {
     if (
       input.worker.modelSelection.connectionId === null ||
@@ -107,6 +109,9 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       throw new Error('Provider Worker egress was denied');
 
     const controller = new AbortController();
+    const abortFromCaller = (): void => controller.abort(input.signal?.reason);
+    if (input.signal?.aborted === true) abortFromCaller();
+    else input.signal?.addEventListener('abort', abortFromCaller, { once: true });
     this.active.set(input.worker.id, { executionId, connection, controller });
     const startedAt = Date.now();
     const output: string[] = [];
@@ -118,6 +123,11 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     let finished = false;
     let reportCursorValue = 0;
     let modelCatalogQueried = false;
+    const heartbeat = setInterval(
+      () => input.onEvent?.({ type: 'heartbeat', at: new Date().toISOString() }),
+      15_000,
+    );
+    heartbeat.unref();
     const availableTools = input.worker.canDelegate
       ? this.deps.managerTools
       : this.deps.workerTools;
@@ -239,6 +249,12 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             reportCursor,
             modelCatalogAudit,
           });
+          input.onEvent?.({
+            type: 'activity',
+            phase: 'executing',
+            label: `${toolCall.name}の実行完了`,
+            at: new Date().toISOString(),
+          });
           messages.push({
             role: 'tool',
             content: JSON.stringify(result ?? null),
@@ -281,6 +297,8 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         ...(providerUsage === undefined ? {} : { providerUsage }),
       };
     } finally {
+      clearInterval(heartbeat);
+      input.signal?.removeEventListener('abort', abortFromCaller);
       if (reasoningActive) input.onEvent?.({ type: 'reasoningPresence', active: false });
       if (this.active.get(input.worker.id)?.controller === controller)
         this.active.delete(input.worker.id);

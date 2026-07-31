@@ -4820,6 +4820,9 @@ if (runsWithElectronAbi)
         { version: 49 },
         { version: 50 },
         { version: 51 },
+        { version: 52 },
+        { version: 53 },
+        { version: 54 },
       ]);
       for (const [table, columns] of [
         [
@@ -4872,6 +4875,7 @@ if (runsWithElectronAbi)
         'team_message_deliveries',
         'team_delivery_events',
         'worker_worktrees',
+        'team_mission_step_worktrees',
         'canvas_views',
         'team_executions',
         'team_execution_instructions',

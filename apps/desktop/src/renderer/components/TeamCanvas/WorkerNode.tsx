@@ -52,6 +52,7 @@ export function WorkerNode({
   teamBusy,
   selected = false,
   onStop,
+  onResumeMission,
   ref,
 }: {
   worker: WorkerSummary;
@@ -75,6 +76,7 @@ export function WorkerNode({
    * prop; the selection index itself lives in TeamCanvas. */
   selected?: boolean;
   onStop: () => void;
+  onResumeMission: (() => void) | undefined;
   ref?: Ref<HTMLDivElement>;
 }) {
   const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
@@ -159,7 +161,7 @@ export function WorkerNode({
           <span className="team-exec-value team-exec-instruction">{model.connectionLabel}</span>
         </p>
       </div>
-      <TeamExecutionStatus execution={execution} variant="canvas" />
+      <TeamExecutionStatus execution={execution} variant="canvas" onResume={onResumeMission} />
       <div
         className="w-body"
         ref={historyRef}

@@ -38,7 +38,7 @@ export type SkepticRuntimeClient = Readonly<{
     effort: undefined,
     writeScope: 'read-only',
   ) => void;
-  cancel: (taskId: string, turnId: string) => void;
+  cancel: (taskId: string, turnId: string) => void | Promise<unknown>;
 }>;
 
 /** Streaming callbacks, shaped like the runtime host's own constructor arguments. */
@@ -115,7 +115,7 @@ export function createSkepticRunner(deps: SkepticRuntimeDeps): SkepticRunner {
       const onAbort = () => {
         // Tell the provider to stop. The panel has already stopped waiting, so a turn left running
         // would be spent with no reader.
-        client.cancel(runtimeTaskId, turnId);
+        void Promise.resolve(client.cancel(runtimeTaskId, turnId)).catch(() => undefined);
         resolve({ error: new Error('Verification exceeded its deadline') });
       };
       signal.addEventListener('abort', onAbort, { once: true });

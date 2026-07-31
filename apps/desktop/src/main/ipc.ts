@@ -95,6 +95,8 @@ import {
   teamDetailSchema,
   teamEventSchema,
   teamHireWorkerInputSchema,
+  teamMissionSummarySchema,
+  teamResumeMissionInputSchema,
   teamMessageSummarySchema,
   teamPolicyUpdateInputSchema,
   teamPolicySchema,
@@ -179,6 +181,7 @@ import { createStreamingSecretRedactor } from './secret-redactor';
 import { secureLogger } from './secure-logger';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
+import { WorkerWorktreeManager } from './worker-worktree';
 import {
   RuntimeHostTeamWorkerRuntime,
   buildInheritedWorkerContext,
@@ -207,7 +210,11 @@ import { installBuiltinSkillCreator } from './skill-creator-builtin';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { ModelCatalogService, teamModelIdentityKey } from './model-catalog-service';
-import { builtinRuntimeForModelSelection, modelSelectionForRuntime } from './connection-identity';
+import {
+  BUILTIN_CODEX_CONNECTION_ID,
+  builtinRuntimeForModelSelection,
+  modelSelectionForRuntime,
+} from './connection-identity';
 import { multiProviderModelPickerV2Enabled, settingsWorkspaceV2Enabled } from './feature-flags';
 import {
   ProviderSecretStorage,
@@ -407,12 +414,20 @@ export class IpcRouter {
     const cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
       // Real worker execution is opt-in when the selected chat runtime is mock. Runtime probe or
       // policy failures remain explicit and are never replaced with simulated Team output.
-      selectRuntime: () =>
-        chooseWorkerRuntime(
-          this.persistence.getRuntime(),
-          this.persistence.getModel(),
-          process.env['SPRINT_CODER_REAL_WORKERS'] === '1',
-        ),
+      selectRuntime: (worker) => {
+        const selected = builtinRuntimeForModelSelection(worker.modelSelection);
+        const choice =
+          selected === null
+            ? chooseWorkerRuntime(
+                this.persistence.getRuntime(),
+                this.persistence.getModel(),
+                process.env['SPRINT_CODER_REAL_WORKERS'] === '1',
+              )
+            : { kind: selected.runtimeKind, model: selected.model };
+        return process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] === '1' && choice?.kind !== 'codex'
+          ? null
+          : choice;
+      },
       workspaceFor: (taskId) => this.persistence.getWorkspace(taskId),
       catalogFor: (kind, workspacePath) =>
         createEmptyToolCatalogSnapshot(
@@ -498,9 +513,9 @@ export class IpcRouter {
         }
       },
       undefined,
-      // Real worker turns run a full provider CLI invocation; the deterministic 10s default is
-      // far too tight for that.
-      180_000,
+      // Long Team work is split into bounded Mission steps. A step may run for up to 30 minutes;
+      // heartbeat and progress leases inside TeamCoordinator detect dead/stalled runtimes sooner.
+      30 * 60_000,
       undefined,
       (selection, taskId) => this.validateTeamModelSelection(selection, taskId),
       (taskId) => {
@@ -521,6 +536,9 @@ export class IpcRouter {
           blueprint,
         };
       },
+      new WorkerWorktreeManager({
+        worktreesRoot: join(app.getPath('userData'), 'team-worker-worktrees'),
+      }),
     );
     // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than
@@ -1432,6 +1450,12 @@ export class IpcRouter {
       teamHireWorkerInputSchema,
       workerSummarySchema,
       (input) => this.teamCoordinator.hireWorker(input),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsResumeMission,
+      teamResumeMissionInputSchema,
+      teamMissionSummarySchema,
+      (input) => this.teamCoordinator.resumeMission(input.taskId, input.missionId),
     );
     this.handleMutation(
       IPC_CHANNELS.teamsSend,
@@ -2352,7 +2376,7 @@ export class IpcRouter {
     input: Parameters<NonNullable<ExecuteTeamToolOptions['listModelCandidates']>>[0],
   ): Promise<unknown> {
     await this.refreshModelCatalog();
-    return this.modelCatalog.query(
+    const result = this.modelCatalog.query(
       {
         taskId: input.taskId,
         text: input.text,
@@ -2366,6 +2390,15 @@ export class IpcRouter {
       },
       this.teamModelAllowedKeys(),
     );
+    return process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] === '1'
+      ? {
+          ...result,
+          items: result.items.filter(
+            ({ connectionId, providerId }) =>
+              connectionId === BUILTIN_CODEX_CONNECTION_ID && providerId === 'openai',
+          ),
+        }
+      : result;
   }
 
   private async validateTeamModelSelection(
@@ -2378,6 +2411,12 @@ export class IpcRouter {
       selection.requestedModel === null
     )
       throw new Error('Team Worker model selection must identify a Connection and model');
+    if (
+      process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] === '1' &&
+      (selection.connectionId !== BUILTIN_CODEX_CONNECTION_ID ||
+        selection.requestedProvider !== 'openai')
+    )
+      throw new Error('This Team durability run permits only Codex CLI OpenAI models');
     await this.refreshModelCatalog();
     if (!this.isTeamModelAllowed(selection))
       throw new Error('Selected Team Worker model is not permitted by Team model settings');
@@ -2487,7 +2526,7 @@ export class IpcRouter {
     this.teamRequiredTurns.delete(turnId);
     this.teamSkillExpectedTurns.delete(turnId);
     this.teamSkillResolutionByTurn.delete(turnId);
-    if (kind === 'codex' || kind === 'claude') this.runtimeFor(kind).cancel(taskId, turnId);
+    if (kind === 'codex' || kind === 'claude') await this.runtimeFor(kind).cancel(taskId, turnId);
     else if (kind === 'provider') {
       this.providerAbortByTurn.get(turnId)?.abort();
       this.providerAbortByTurn.delete(turnId);
@@ -2715,6 +2754,7 @@ export class IpcRouter {
     void this.mailbox
       .run(taskId, () => {
         if (this.turnRuntimes.get(turnId) !== kind) return;
+        if (runtimeEvent.type === 'heartbeat') return;
         if (runtimeEvent.type === 'stage')
           this.publish(this.persistence.changeStage(taskId, turnId, runtimeEvent.stage));
         else if (runtimeEvent.type === 'reasoning')
@@ -2737,6 +2777,7 @@ export class IpcRouter {
             complete: runtimeEvent.complete,
             source: 'stream',
           });
+        else if (runtimeEvent.type === 'operation') return;
         else {
           if (
             shouldFailRequiredTeamTurn(

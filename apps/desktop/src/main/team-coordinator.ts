@@ -10,6 +10,9 @@ import {
   type TeamMessageSummary,
   type TeamActivitySummary,
   type TeamPolicyUpdateInput,
+  type TeamAssignMissionInput,
+  type TeamMissionCheckpoint,
+  type TeamMissionSummary,
   type TeamSendMessageInput,
   type ExecutionResolution,
   type ModelSelection,
@@ -17,11 +20,12 @@ import {
   type WorkerCompletion,
   type WorkerSummary,
 } from '@sprint-coder/contracts';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   assertEnvelopeMatchesClaims,
   assertTeamMessageRate,
   buildTeamEnvelope,
-  TEAM_DELIVERY_MAX_ATTEMPTS,
   TEAM_MESSAGE_RATE_LIMIT,
   TeamDelegationError,
   type ManagerPolicy,
@@ -46,9 +50,13 @@ import type {
   TeamBudgetReservationRecord,
   TeamBlueprintBindingRecord,
   TeamExecutionRecord,
+  TeamAttemptStartReason,
+  TeamMissionRecord,
+  TeamMissionWorktreeRecord,
   TeamSnapshot,
   TeamV2ActivityRecord,
 } from './persistence';
+import type { WorkerWorktreeManager } from './worker-worktree';
 
 export type WorkerRuntimeResult = Readonly<{
   claims?: Readonly<{
@@ -86,6 +94,7 @@ type ExecutionInterruptionControl = Readonly<{
 }>;
 export type WorkerActivityEvent =
   | { type: 'accepted'; at: string }
+  | { type: 'heartbeat'; at: string }
   | { type: 'activity'; phase: string; label: string; at: string }
   | { type: 'outputDelta'; text: string }
   | { type: 'reasoningPresence'; active: boolean }
@@ -100,14 +109,35 @@ export type TeamRuntimeConversationItem = Readonly<{
   content: string;
 }>;
 
+export type WorkerRuntimeControlErrorCode =
+  | 'heartbeat_timeout'
+  | 'idle_timeout'
+  | 'hard_timeout'
+  | 'runtime_failure'
+  | 'user_canceled'
+  | 'stop_unconfirmed';
+
+export class WorkerRuntimeControlError extends Error {
+  constructor(
+    readonly code: WorkerRuntimeControlErrorCode,
+    message: string,
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    super(message, options);
+    this.name = 'WorkerRuntimeControlError';
+  }
+}
+
 export interface TeamWorkerRuntime {
   start(worker: AgentRecord): Promise<{ pid?: number | null }>;
   execute(input: {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
+    signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult>;
   stop(agentId: string): Promise<void>;
 }
@@ -123,6 +153,7 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult> {
@@ -178,7 +209,9 @@ const leafWorkerCeiling = Object.freeze({
 });
 // Local Claude/Codex workers can spend well over ten seconds reasoning before they finish.
 // Keep the delivery boundary finite, but do not turn a healthy streaming run into a retry.
-const DEFAULT_WORKER_DELIVERY_TIMEOUT_MS = 120_000;
+const DEFAULT_WORKER_DELIVERY_TIMEOUT_MS = 30 * 60_000;
+const WORKER_HEARTBEAT_TIMEOUT_MS = 60_000;
+const WORKER_IDLE_TIMEOUT_MS = 15 * 60_000;
 const executionEstimate = Object.freeze({
   costCents: 100,
   tokens: 20_000,
@@ -209,6 +242,7 @@ export class TeamCoordinator {
     private readonly resolveTeamBlueprint?: (
       taskId: string,
     ) => Omit<TeamBlueprintBindingRecord, 'teamId' | 'boundAt'> | null,
+    private readonly worktreeManager?: WorkerWorktreeManager,
   ) {
     if (executionScheduler !== undefined) {
       this.executionScheduler = executionScheduler;
@@ -295,6 +329,7 @@ export class TeamCoordinator {
     const terminal =
       event.type === 'completed' || event.type === 'failed' || event.type === 'canceled';
     const now = this.isoNow();
+    if (event.type === 'heartbeat') return;
     const transient = this.transientWorkerActivity.get(workerId) ?? {
       liveOutput: '',
       reasoningActive: false,
@@ -681,6 +716,96 @@ export class TeamCoordinator {
     return this.assignTaskWithAuthority(input, requesterAgentId);
   }
 
+  async assignMission(
+    input: TeamAssignMissionInput,
+    requesterAgentId: string | null = null,
+  ): Promise<TeamMissionSummary> {
+    return this.enqueue(input.taskId, async () => {
+      const team = this.persistence.getTeamByTask(input.taskId);
+      if (team === null || team.state !== 'active') throw new Error('Team must be active');
+      const snapshot = this.persistence.getTeamSnapshot(team.id);
+      const creator = snapshot.agents.find(
+        ({ id }) => id === (requesterAgentId ?? team.leaderAgentId),
+      );
+      if (creator === undefined) throw new Error('Mission creator not found');
+      if (requesterAgentId !== null && (!creator.canDelegate || creator.managerPolicy === null))
+        throw new Error('Only a Manager may assign a Mission');
+      const workerIds = new Set(input.steps.map(({ workerId }) => workerId));
+      for (const workerId of workerIds) {
+        const worker = snapshot.agents.find(({ id, kind }) => id === workerId && kind === 'worker');
+        if (worker === undefined) throw new Error('Mission Worker not found');
+        if (requesterAgentId !== null && worker.parentAgentId !== creator.id)
+          throw new Error('Manager may only assign Mission steps to direct child Agents');
+        if (!['ready', 'waiting'].includes(worker.state))
+          throw new Error('Mission Worker is not ready');
+        if (
+          this.persistence
+            .listTeamExecutions(team.id)
+            .some(
+              (execution) =>
+                execution.assigneeAgentId === worker.id &&
+                !['completed', 'failed', 'canceled'].includes(execution.state),
+            )
+        )
+          throw new Error('Mission Worker already has a pending execution');
+      }
+      for (const step of input.steps) {
+        const worker = snapshot.agents.find(({ id }) => id === step.workerId);
+        if (step.access === 'workspace-write' && worker?.writeCapable !== true)
+          throw new Error('workspace-write Mission step requires a write-capable Worker');
+      }
+      const mission = this.persistence.createTeamMission({
+        teamId: team.id,
+        createdByAgentId: creator.id,
+        objective: input.objective,
+        doneCriteria: input.doneCriteria,
+        steps: input.steps,
+        now: this.isoNow(),
+      });
+      this.persistence.transitionTeamMission(mission.id, 'running', this.isoNow());
+      const first = mission.steps[0];
+      if (first === undefined) throw new Error('Mission has no first step');
+      this.persistence.transitionTeamExecution({
+        executionId: first.executionId,
+        to: 'queued',
+        now: this.isoNow(),
+        queueReason: 'global_concurrency',
+      });
+      this.schedulePersistedExecution(input.taskId, first.executionId, 'initial');
+      this.emit(input.taskId, team.id);
+      return this.missionSummary(this.persistence.getTeamMission(mission.id));
+    });
+  }
+
+  async resumeMission(
+    taskId: string,
+    missionId: string,
+    requesterAgentId: string | null = null,
+  ): Promise<TeamMissionSummary> {
+    return this.enqueue(taskId, async () => {
+      const team = this.persistence.getTeamByTask(taskId);
+      if (team === null) throw new Error('Team not found');
+      const mission = this.persistence.getTeamMission(missionId);
+      if (mission.teamId !== team.id) throw new Error('Mission does not belong to Task Team');
+      if (mission.state !== 'waiting_resume') throw new Error('Mission is not waiting to resume');
+      if (requesterAgentId !== null && mission.createdByAgentId !== requesterAgentId)
+        throw new Error('Manager may only resume a Mission it created');
+      const step = mission.steps.find(({ ordinal }) => ordinal === mission.currentStepOrdinal);
+      if (step === undefined) throw new Error('Current Mission step not found');
+      const execution = this.persistence.getTeamExecution(step.executionId);
+      if (execution.state !== 'waiting_resume')
+        throw new Error('Current Mission execution is not waiting to resume');
+      this.persistence.prepareTeamMissionResume({
+        missionId: mission.id,
+        executionId: execution.id,
+        now: this.isoNow(),
+      });
+      this.schedulePersistedExecution(taskId, execution.id, 'manual_resume');
+      this.emit(taskId, team.id);
+      return this.missionSummary(this.persistence.getTeamMission(mission.id));
+    });
+  }
+
   private async assignTaskWithAuthority(
     input: TeamSendMessageInput & { doneCriteria: readonly string[] },
     requesterAgentId: string | null,
@@ -807,9 +932,16 @@ export class TeamCoordinator {
         throw new Error('Manager may only cancel executions it assigned');
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'cancel', null);
+      if (execution.state === 'waiting_resume') {
+        const canceled = this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+        this.cancelMissionRemainder(execution.id);
+        this.emit(taskId, team.id);
+        return { executionId: canceled.id, state: canceled.state };
+      }
       if (!this.executionScheduler.cancelQueued(execution.id))
         throw new Error('Execution is not queued or running');
       const canceled = this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+      this.cancelMissionRemainder(execution.id);
       this.emit(taskId, team.id);
       return { executionId: canceled.id, state: canceled.state };
     });
@@ -978,16 +1110,51 @@ export class TeamCoordinator {
     executionId: string;
     doneCriteria: readonly string[];
     resumeAttemptId?: string;
+    attemptStartReason?: TeamAttemptStartReason;
   }): Promise<void> {
     const execution = this.persistence.getTeamExecution(input.executionId);
-    const content = execution.instruction.content;
+    const mission = this.persistence.getTeamMissionForExecution(input.executionId);
+    const missionStep =
+      mission?.steps.find(({ executionId }) => executionId === input.executionId) ?? null;
+    const completedMissionContext =
+      mission === null
+        ? ''
+        : mission.steps
+            .filter(({ checkpoint }) => checkpoint !== null)
+            .map(
+              ({ ordinal, checkpoint }) =>
+                `工程${ordinal}チェックポイント: ${checkpoint?.summary ?? ''}`,
+            )
+            .join('\n');
+    const content = [
+      completedMissionContext,
+      input.attemptStartReason === 'manual_resume'
+        ? '前回の部分変更を最初に検査し、完了済み操作を重複させずに再開してください。'
+        : '',
+      execution.instruction.content,
+    ]
+      .filter((part) => part !== '')
+      .join('\n\n');
     const snapshot = this.persistence.getTeamSnapshot(input.teamId);
     const leader = snapshot.agents.find(({ id }) => id === input.leaderId);
-    const worker = snapshot.agents.find(({ id }) => id === input.workerId);
+    const storedWorker = snapshot.agents.find(({ id }) => id === input.workerId);
+    const worker =
+      storedWorker === undefined
+        ? undefined
+        : missionStep === null
+          ? storedWorker
+          : { ...storedWorker, writeCapable: missionStep.access === 'workspace-write' };
     if (leader === undefined || worker === undefined) throw new Error('Execution Agent not found');
     let attemptId: string | null = null;
     let reservations: readonly TeamBudgetReservationRecord[] = [];
+    let missionWorktree: TeamMissionWorktreeRecord | null = null;
     try {
+      if (missionStep?.access === 'workspace-write')
+        missionWorktree = await this.prepareMissionWorktree(
+          input.taskId,
+          input.executionId,
+          worker.id,
+        );
       this.persistence.transitionTeamExecution({
         executionId: input.executionId,
         to: 'running',
@@ -995,7 +1162,11 @@ export class TeamCoordinator {
       });
       let attempt =
         input.resumeAttemptId === undefined
-          ? this.persistence.createTeamAttempt(input.executionId, this.isoNow())
+          ? this.persistence.createTeamAttempt(
+              input.executionId,
+              this.isoNow(),
+              input.attemptStartReason ?? 'initial',
+            )
           : this.persistence.getTeamAttempt(input.resumeAttemptId);
       if (attempt.executionId !== input.executionId)
         throw new Error('A resumed attempt must belong to the same execution');
@@ -1036,6 +1207,8 @@ export class TeamCoordinator {
         content,
         input.teamTaskId,
         input.executionId,
+        attempt.id,
+        missionWorktree?.path,
       );
       if (this.executionInterruptions.has(input.executionId)) {
         this.releaseReservations(reservations);
@@ -1062,11 +1235,58 @@ export class TeamCoordinator {
           completion.resolution,
           completion.providerUsage,
         );
+      let changedFiles = [...completion.changedFiles];
+      const failedWorkspaceWrite =
+        missionWorktree !== null && completion.value.status !== 'succeeded';
+      if (missionWorktree !== null) {
+        if (this.worktreeManager === undefined)
+          throw new Error('Mission worktree manager is unavailable');
+        const finalized = await this.worktreeManager.finalizeChanges({
+          agentId: worker.id,
+          worktreeId: input.executionId,
+          repoPath: missionWorktree.repoPath,
+          baseHead: missionWorktree.baseHead,
+          commitMessage: `Sprint Coder Mission ${mission?.id ?? ''} step ${missionStep?.ordinal ?? ''}`,
+        });
+        changedFiles = [...finalized.changedFiles];
+        missionWorktree = this.persistence.updateTeamMissionWorktree({
+          executionId: input.executionId,
+          to: 'ready',
+          workerHead: finalized.workerHead,
+          changedFiles,
+          reason: null,
+          now: this.isoNow(),
+        });
+        if (failedWorkspaceWrite)
+          missionWorktree = this.persistence.updateTeamMissionWorktree({
+            executionId: input.executionId,
+            to: 'quarantined',
+            reason: `Worker reported failure before integration: ${completion.value.summary}`.slice(
+              0,
+              2_000,
+            ),
+            now: this.isoNow(),
+          });
+        else {
+          const integrated = await this.worktreeManager.integrate({
+            repoPath: missionWorktree.repoPath,
+            baseHead: missionWorktree.baseHead,
+            workerHead: finalized.workerHead,
+          });
+          missionWorktree = this.persistence.updateTeamMissionWorktree({
+            executionId: input.executionId,
+            to: 'integrated',
+            integratedHead: integrated.integratedHead,
+            reason: null,
+            now: this.isoNow(),
+          });
+        }
+      }
       const report = workerReportSchema.parse({
         status: completion.value.status === 'succeeded' ? 'completed' : 'failed',
         summary: completion.value.summary,
         findings: [],
-        changedFiles: completion.value.artifacts.map((artifact) => artifact.reference),
+        changedFiles,
         artifacts: completion.value.artifacts,
         verification: completion.value.verification,
         risks: completion.value.risks,
@@ -1076,26 +1296,60 @@ export class TeamCoordinator {
           evidence: completion.value.summary,
         })),
       });
-      this.persistence.completeTeamTaskWithReport({
-        teamTaskId: input.teamTaskId,
-        agentId: worker.id,
-        report,
-        doneEvidence: input.doneCriteria.map((criterion) => ({
-          criterion,
-          evidence: completion.value.summary,
-        })),
-        now: this.isoNow(),
-      });
-      this.persistence.transitionTeamAttempt({
-        attemptId: attempt.id,
-        to: 'completed',
-        now: this.isoNow(),
-      });
-      this.persistence.transitionTeamExecution({
-        executionId: input.executionId,
-        to: completion.value.status === 'succeeded' ? 'completed' : 'failed',
-        now: this.isoNow(),
-      });
+      const doneEvidence = input.doneCriteria.map((criterion) => ({
+        criterion,
+        evidence: completion.value.summary,
+      }));
+      let nextMissionExecutionId: string | null = null;
+      let completedMission = false;
+      if (mission !== null && completion.value.status === 'succeeded') {
+        const checkpointResult = this.persistence.completeTeamMissionStep({
+          executionId: input.executionId,
+          attemptId: attempt.id,
+          teamTaskId: input.teamTaskId,
+          agentId: worker.id,
+          report,
+          doneEvidence,
+          checkpoint: this.captureMissionCheckpoint(
+            input.taskId,
+            completion.value.summary,
+            changedFiles,
+          ),
+          now: this.isoNow(),
+        });
+        nextMissionExecutionId = checkpointResult.nextExecutionId;
+        completedMission = checkpointResult.mission.state === 'completed';
+        if (missionWorktree !== null)
+          await this.cleanupIntegratedMissionWorktree(missionWorktree, worker.id);
+      } else {
+        this.persistence.completeTeamTaskWithReport({
+          teamTaskId: input.teamTaskId,
+          agentId: worker.id,
+          report,
+          doneEvidence,
+          now: this.isoNow(),
+        });
+        this.persistence.transitionTeamAttempt({
+          attemptId: attempt.id,
+          to: failedWorkspaceWrite ? 'failed' : 'completed',
+          now: this.isoNow(),
+          terminalReason: failedWorkspaceWrite ? 'worker_reported_failure' : null,
+        });
+        this.persistence.transitionTeamExecution({
+          executionId: input.executionId,
+          to: failedWorkspaceWrite
+            ? 'waiting_resume'
+            : completion.value.status === 'succeeded'
+              ? 'completed'
+              : 'failed',
+          now: this.isoNow(),
+        });
+        if (mission !== null && mission.state === 'running') {
+          if (failedWorkspaceWrite)
+            this.persistence.transitionTeamMission(mission.id, 'waiting_resume', this.isoNow());
+          else this.cancelMissionRemainder(input.executionId, 'failed');
+        }
+      }
       this.persistWorkerResult(
         input.teamId,
         worker,
@@ -1106,13 +1360,34 @@ export class TeamCoordinator {
       );
       this.persistence.transitionWorkerState(
         worker.id,
-        completion.value.status === 'succeeded' ? 'done' : 'failed',
+        completion.value.status === 'succeeded'
+          ? mission !== null && !completedMission
+            ? 'waiting'
+            : 'done'
+          : failedWorkspaceWrite
+            ? 'waiting'
+            : 'failed',
       );
+      if (completedMission && mission !== null) {
+        const missionWorkerIds = new Set(
+          mission.steps.map(
+            ({ executionId }) => this.persistence.getTeamExecution(executionId).assigneeAgentId,
+          ),
+        );
+        for (const candidate of this.persistence.getTeamSnapshot(input.teamId).agents) {
+          if (missionWorkerIds.has(candidate.id) && ['ready', 'waiting'].includes(candidate.state))
+            this.persistence.transitionWorkerState(candidate.id, 'done');
+        }
+      }
+      if (nextMissionExecutionId !== null)
+        this.schedulePersistedExecution(input.taskId, nextMissionExecutionId, 'initial');
       this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
       this.finalizeTeamIfWorkersTerminal(input.teamId);
       this.emit(input.taskId, input.teamId);
     } catch (error) {
       this.releaseReservations(reservations);
+      if (missionWorktree !== null)
+        this.quarantineMissionWorktree(missionWorktree.executionId, error);
       if (
         attemptId !== null &&
         this.handleRequestedInterruption({
@@ -1126,6 +1401,8 @@ export class TeamCoordinator {
         error instanceof ProviderRateLimitedError &&
         this.requeueRateLimitedExecution(input, attemptId, worker, error)
       )
+        return;
+      if (attemptId !== null && this.requeueSafeRuntimeFailure(input, attemptId, worker, error))
         return;
       const failureSummary = (
         error instanceof Error ? error.message : 'Worker runtime failed'
@@ -1150,14 +1427,23 @@ export class TeamCoordinator {
         nextActions: [],
         doneEvidence: [],
       });
-      if (this.persistence.getTeamTask(input.teamTaskId).status === 'running')
-        this.persistence.completeTeamTaskWithReport({
-          teamTaskId: input.teamTaskId,
-          agentId: worker.id,
-          report: failureReport,
-          doneEvidence: [],
-          now: this.isoNow(),
-        });
+      if (this.persistence.getTeamTask(input.teamTaskId).status === 'running') {
+        if (mission === null)
+          this.persistence.completeTeamTaskWithReport({
+            teamTaskId: input.teamTaskId,
+            agentId: worker.id,
+            report: failureReport,
+            doneEvidence: [],
+            now: this.isoNow(),
+          });
+        else this.persistence.transitionTeamTask(input.teamTaskId, 'blocked', this.isoNow());
+      }
+      const terminalReason =
+        error instanceof WorkerRuntimeControlError
+          ? error.code
+          : error instanceof ProviderRateLimitedError
+            ? 'rate_limited'
+            : 'runtime_failure';
       if (attemptId !== null) {
         const attempt = this.persistence.getTeamAttempt(attemptId);
         if (!['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state))
@@ -1165,12 +1451,19 @@ export class TeamCoordinator {
             attemptId,
             to: 'failed',
             now: this.isoNow(),
-            terminalReason:
-              error instanceof ProviderRateLimitedError ? 'rate_limited' : 'runtime_failure',
+            terminalReason,
           });
       }
       const execution = this.persistence.getTeamExecution(input.executionId);
-      if (!['completed', 'failed', 'canceled'].includes(execution.state))
+      if (mission !== null && !['completed', 'failed', 'canceled'].includes(execution.state)) {
+        this.persistence.transitionTeamExecution({
+          executionId: execution.id,
+          to: 'waiting_resume',
+          now: this.isoNow(),
+        });
+        if (mission.state === 'running')
+          this.persistence.transitionTeamMission(mission.id, 'waiting_resume', this.isoNow());
+      } else if (!['completed', 'failed', 'canceled'].includes(execution.state))
         this.persistence.transitionTeamExecution({
           executionId: execution.id,
           to: 'failed',
@@ -1188,7 +1481,8 @@ export class TeamCoordinator {
       const current = this.persistence
         .getTeamSnapshot(input.teamId)
         .agents.find(({ id }) => id === worker.id);
-      if (current?.state === 'busy') this.persistence.transitionWorkerState(worker.id, 'failed');
+      if (current?.state === 'busy')
+        this.persistence.transitionWorkerState(worker.id, mission === null ? 'failed' : 'waiting');
       this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
       const delivery = this.persistence.getTeamDelivery(input.messageId);
       if (delivery !== null && !['failed', 'acked'].includes(delivery.state))
@@ -1252,6 +1546,71 @@ export class TeamCoordinator {
     return true;
   }
 
+  private requeueSafeRuntimeFailure(
+    input: {
+      taskId: string;
+      teamId: string;
+      leaderId: string;
+      workerId: string;
+      messageId: string;
+      messageSeq: number;
+      teamTaskId: string;
+      executionId: string;
+      doneCriteria: readonly string[];
+    },
+    attemptId: string,
+    worker: AgentRecord,
+    error: unknown,
+  ): boolean {
+    if (
+      worker.writeCapable ||
+      error instanceof ProviderRateLimitedError ||
+      (error instanceof WorkerRuntimeControlError && error.code === 'stop_unconfirmed') ||
+      this.persistence.listTeamAttempts(input.executionId).length >= 2
+    )
+      return false;
+    const reason = error instanceof WorkerRuntimeControlError ? error.code : 'runtime_failure';
+    this.persistence.transitionTeamAttempt({
+      attemptId,
+      to: 'failed',
+      now: this.isoNow(),
+      terminalReason: reason,
+    });
+    const queued = this.persistence.transitionTeamExecution({
+      executionId: input.executionId,
+      to: 'queued',
+      now: this.isoNow(),
+      queueReason: 'automatic_retry',
+    });
+    const task = this.persistence.getTeamTask(input.teamTaskId);
+    if (task.status === 'running')
+      this.persistence.transitionTeamTask(input.teamTaskId, 'waiting', this.isoNow());
+    const currentWorker = this.persistence
+      .getTeamSnapshot(input.teamId)
+      .agents.find(({ id }) => id === worker.id);
+    if (currentWorker?.state === 'busy')
+      this.persistence.transitionWorkerState(worker.id, 'waiting');
+    this.persistence.setWorkerCurrentActivity(
+      worker.id,
+      '安全な読み取り工程を自動再試行',
+      this.isoNow(),
+    );
+    const requeued = this.executionScheduler.requeueActive(input.executionId, {
+      executionId: input.executionId,
+      teamId: input.teamId,
+      teamLimit: this.persistence.getTeam(input.teamId).policy.maxConcurrentExecutions,
+      ...this.connectionSchedulingFields(queued, input.taskId, input.teamId),
+      run: () =>
+        this.runScheduledExecution({
+          ...input,
+          attemptStartReason: 'automatic_retry',
+        }),
+    });
+    if (!requeued) throw new Error('Runtime retry left the Scheduler before requeue');
+    this.emit(input.taskId, input.teamId);
+    return true;
+  }
+
   private handleRequestedInterruption(input: {
     taskId: string;
     teamId: string;
@@ -1306,6 +1665,7 @@ export class TeamCoordinator {
           to: 'canceled',
           now: this.isoNow(),
         });
+        this.cancelMissionRemainder(input.executionId);
         this.executionInterruptions.delete(input.executionId);
         control.resolve({ executionId: canceled.id, state: canceled.state });
         this.emit(input.taskId, input.teamId);
@@ -1357,6 +1717,7 @@ export class TeamCoordinator {
             teamTaskId: teamTask.id,
             executionId: input.executionId,
             doneCriteria: input.doneCriteria,
+            attemptStartReason: 'steer',
           }),
       });
       if (!requeued) throw new Error('Running execution left the Scheduler before resume');
@@ -1369,6 +1730,22 @@ export class TeamCoordinator {
       control.reject(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
+  }
+
+  private cancelMissionRemainder(
+    currentExecutionId: string,
+    terminalState: 'canceled' | 'failed' = 'canceled',
+  ): void {
+    const mission = this.persistence.getTeamMissionForExecution(currentExecutionId);
+    if (mission === null || ['completed', 'failed', 'canceled'].includes(mission.state)) return;
+    for (const step of mission.steps) {
+      if (step.executionId === currentExecutionId) continue;
+      const execution = this.persistence.getTeamExecution(step.executionId);
+      if (['completed', 'failed', 'canceled'].includes(execution.state)) continue;
+      this.executionScheduler.cancelQueued(execution.id);
+      this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+    }
+    this.persistence.transitionTeamMission(mission.id, terminalState, this.isoNow());
   }
 
   async stopWorker(taskId: string, agentId: string): Promise<WorkerSummary> {
@@ -1423,15 +1800,21 @@ export class TeamCoordinator {
           !['completed', 'failed', 'canceled'].includes(execution.state),
       );
     let stoppedRunningRuntime = false;
-    for (const execution of pending) {
+    for (const pendingExecution of pending) {
+      const execution = this.persistence.getTeamExecution(pendingExecution.id);
+      if (['completed', 'failed', 'canceled'].includes(execution.state)) continue;
       if (execution.state === 'running') {
         await this.interruptRunningExecution(execution, 'cancel', null);
         stoppedRunningRuntime = true;
         continue;
       }
-      if (!this.executionScheduler.cancelQueued(execution.id))
+      if (
+        !['assigned', 'waiting_resume'].includes(execution.state) &&
+        !this.executionScheduler.cancelQueued(execution.id)
+      )
         throw new Error('Worker execution is not present in the Scheduler');
       this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+      this.cancelMissionRemainder(execution.id);
     }
     if (!stoppedRunningRuntime) await this.runtime.stop(workerId);
   }
@@ -1442,6 +1825,34 @@ export class TeamCoordinator {
       const team = this.persistence.getTeamByTask(task.id);
       if (team === null) continue;
       for (const queued of this.persistence.listQueuedTeamExecutions(team.id)) {
+        const mission = this.persistence.getTeamMissionForExecution(queued.id);
+        const missionStep = mission?.steps.find(({ executionId }) => executionId === queued.id);
+        const previousCheckpoint =
+          missionStep === undefined
+            ? null
+            : (mission?.steps.find(({ ordinal }) => ordinal === missionStep.ordinal - 1)
+                ?.checkpoint ?? null);
+        if (
+          mission !== null &&
+          previousCheckpoint !== null &&
+          previousCheckpoint.gitHead !== null &&
+          !this.workspaceFingerprintMatches(task.id, previousCheckpoint)
+        ) {
+          this.persistence.transitionTeamExecution({
+            executionId: queued.id,
+            to: 'waiting_resume',
+            now: this.isoNow(),
+          });
+          if (mission.state === 'running')
+            this.persistence.transitionTeamMission(mission.id, 'waiting_resume', this.isoNow());
+          this.persistence.setWorkerCurrentActivity(
+            queued.assigneeAgentId,
+            'チェックポイント後にWorkspaceが変更されたため再開待ち',
+            this.isoNow(),
+          );
+          this.emit(task.id, team.id);
+          continue;
+        }
         const execution =
           queued.state === 'queued'
             ? queued
@@ -1463,6 +1874,7 @@ export class TeamCoordinator {
           teamTaskId: dispatch.teamTaskId,
           executionId: execution.id,
           doneCriteria: dispatch.doneCriteria,
+          attemptStartReason: 'app_restart',
         });
       }
     }
@@ -1480,6 +1892,7 @@ export class TeamCoordinator {
     teamTaskId: string;
     executionId: string;
     doneCriteria: readonly string[];
+    attemptStartReason?: TeamAttemptStartReason;
   }): void {
     const execution = this.persistence.getTeamExecution(input.executionId);
     this.executionScheduler.submit({
@@ -1498,7 +1911,33 @@ export class TeamCoordinator {
           teamTaskId: input.teamTaskId,
           executionId: input.executionId,
           doneCriteria: input.doneCriteria,
+          ...(input.attemptStartReason === undefined
+            ? {}
+            : { attemptStartReason: input.attemptStartReason }),
         }),
+    });
+  }
+
+  private schedulePersistedExecution(
+    taskId: string,
+    executionId: string,
+    attemptStartReason: TeamAttemptStartReason,
+  ): void {
+    const execution = this.persistence.getTeamExecution(executionId);
+    const team = this.persistence.getTeam(execution.teamId);
+    const dispatch = this.persistence.getTeamExecutionDispatch(execution.id);
+    this.scheduleExecution({
+      taskId,
+      teamId: team.id,
+      teamLimit: team.policy.maxConcurrentExecutions,
+      leaderId: execution.createdByAgentId,
+      workerId: execution.assigneeAgentId,
+      messageId: dispatch.messageId,
+      messageSeq: dispatch.messageSeq,
+      teamTaskId: dispatch.teamTaskId,
+      executionId: execution.id,
+      doneCriteria: dispatch.doneCriteria,
+      attemptStartReason,
     });
   }
 
@@ -1587,14 +2026,17 @@ export class TeamCoordinator {
     content: string,
     teamTaskId: string,
     executionId?: string,
+    attemptId?: string,
+    workspacePath?: string,
   ): Promise<{
     value: WorkerCompletion;
     usage: WorkerRuntimeResult['usage'];
     resolution: WorkerRuntimeResult['resolution'];
     providerUsage: WorkerRuntimeResult['providerUsage'];
+    changedFiles: readonly string[];
   }> {
     let lastError: unknown;
-    for (let attempt = 1; attempt <= TEAM_DELIVERY_MAX_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= 1; attempt += 1) {
       if (attempt === 1) {
         const message = this.persistence
           .getTeamSnapshot(teamId)
@@ -1627,27 +2069,49 @@ export class TeamCoordinator {
         seq,
       );
       try {
+        const changedFiles = new Set<string>();
         // Enter running before invoking the runtime so adapters that do not emit the optional
         // accepted event still follow the durable task lifecycle. An accepted event is then an
         // idempotent acknowledgement, not the only source of truth for execution start.
         this.persistence.transitionTeamTask(teamTaskId, 'running', this.isoNow());
-        const result = await withTimeout(
-          this.runtime.execute({
-            worker,
-            envelope,
-            content,
-            priorConversation,
-            onEvent: (event) =>
-              this.handleWorkerActivity(leader.taskId, teamId, worker.id, teamTaskId, event),
-          }),
-          this.deliveryTimeoutMs,
-        );
+        let lastProgressWriteMs = 0;
+        const result = await executeWithWatchdog({
+          execute: (observe, signal) =>
+            this.runtime.execute({
+              worker,
+              envelope,
+              content,
+              ...(workspacePath === undefined ? {} : { workspacePath }),
+              priorConversation,
+              signal,
+              onEvent: (event) => {
+                observe(event);
+                if (event.type === 'fileChange')
+                  for (const change of event.changes) changedFiles.add(change.path);
+                if (event.type !== 'heartbeat' && attemptId !== undefined) {
+                  const nowMs = this.now().getTime();
+                  if (
+                    lastProgressWriteMs === 0 ||
+                    nowMs - lastProgressWriteMs >= 5_000 ||
+                    event.type === 'completed'
+                  ) {
+                    this.persistence.touchTeamAttemptProgress(attemptId, this.isoNow());
+                    lastProgressWriteMs = nowMs;
+                  }
+                }
+                this.handleWorkerActivity(leader.taskId, teamId, worker.id, teamTaskId, event);
+              },
+            }),
+          hardTimeoutMs: this.deliveryTimeoutMs,
+          stop: () => this.runtime.stop(worker.id),
+        });
         assertEnvelopeMatchesClaims(envelope, result.claims ?? {});
         return {
           value: workerCompletionSchema.parse(result.completion),
           usage: result.usage,
           resolution: result.resolution,
           providerUsage: result.providerUsage,
+          changedFiles: [...changedFiles],
         };
       } catch (error) {
         lastError = error;
@@ -1661,7 +2125,12 @@ export class TeamCoordinator {
           now: this.isoNow(),
           error: error instanceof Error ? error.message : 'worker timeout',
         });
-        if (attempt === TEAM_DELIVERY_MAX_ATTEMPTS) break;
+        if (
+          worker.writeCapable ||
+          (error instanceof WorkerRuntimeControlError && error.code === 'stop_unconfirmed')
+        )
+          break;
+        break;
       }
     }
     throw lastError instanceof Error ? lastError : new Error('Worker delivery failed');
@@ -1769,6 +2238,21 @@ export class TeamCoordinator {
         this.messageSummaryFromSnapshot(snapshot, message.id),
       ),
       executions: this.persistence.listTeamExecutions(teamId).map((execution) => ({
+        ...(() => {
+          const latestAttempt = this.persistence.listTeamAttempts(execution.id).at(-1) ?? null;
+          const mission = this.persistence.getTeamMissionForExecution(execution.id);
+          const missionStep =
+            mission?.steps.find(({ executionId }) => executionId === execution.id) ?? null;
+          return {
+            attemptStartReason: latestAttempt?.startReason ?? null,
+            lastProgressAt: latestAttempt?.lastProgressAt ?? null,
+            terminalReason: latestAttempt?.terminalReason ?? null,
+            missionId: mission?.id ?? null,
+            missionStepOrdinal: missionStep?.ordinal ?? null,
+            missionStepCount: mission?.steps.length ?? null,
+            worktree: this.missionWorktreeSummary(execution.id),
+          };
+        })(),
         id: execution.id,
         teamId: execution.teamId,
         assigneeAgentId: execution.assigneeAgentId,
@@ -1789,11 +2273,180 @@ export class TeamCoordinator {
         completedAt: execution.completedAt,
         updatedAt: execution.updatedAt,
       })),
+      missions: this.persistence
+        .listTeamMissions(teamId)
+        .map((mission) => this.missionSummary(mission)),
       activities: this.persistence
         .listLatestTeamV2Activity(teamId, 200)
         .map((activity) => this.activitySummary(snapshot, activity)),
       budgets: this.persistence.getTeamBudgetStatus(teamId),
     });
+  }
+
+  private missionSummary(mission: TeamMissionRecord): TeamMissionSummary {
+    return {
+      id: mission.id,
+      teamId: mission.teamId,
+      createdByAgentId: mission.createdByAgentId,
+      state: mission.state,
+      objective: mission.objective,
+      doneCriteria: [...mission.doneCriteria],
+      currentStepOrdinal: mission.currentStepOrdinal,
+      steps: mission.steps.map((step) => {
+        const execution = this.persistence.getTeamExecution(step.executionId);
+        const dispatch = this.persistence.getTeamExecutionDispatch(step.executionId);
+        return {
+          ordinal: step.ordinal,
+          executionId: step.executionId,
+          workerId: execution.assigneeAgentId,
+          objective: execution.instruction.content,
+          doneCriteria: [...dispatch.doneCriteria],
+          access: step.access,
+          state: execution.state,
+          checkpoint: step.checkpoint,
+          worktree: this.missionWorktreeSummary(step.executionId),
+        };
+      }),
+      createdAt: mission.createdAt,
+      updatedAt: mission.updatedAt,
+      completedAt: mission.completedAt,
+    };
+  }
+
+  private async prepareMissionWorktree(
+    taskId: string,
+    executionId: string,
+    agentId: string,
+  ): Promise<TeamMissionWorktreeRecord> {
+    if (this.worktreeManager === undefined)
+      throw new Error('workspace-write Mission requires Worker worktree support');
+    const repoPath = this.persistence.getWorkspace(taskId);
+    if (repoPath === null) throw new Error('workspace-write Mission requires a Git workspace');
+    const existing = this.persistence.getTeamMissionWorktree(executionId);
+    if (existing !== null) {
+      if (existing.agentId !== agentId || existing.repoPath !== repoPath)
+        throw new Error('Persisted Mission worktree identity does not match execution');
+      if (existing.state === 'cleaned')
+        throw new Error('A cleaned Mission worktree cannot be executed again');
+      return existing.state === 'active'
+        ? existing
+        : this.persistence.updateTeamMissionWorktree({
+            executionId,
+            to: 'active',
+            reason: null,
+            now: this.isoNow(),
+          });
+    }
+    const { head } = await this.worktreeManager.requireCleanBase(repoPath);
+    const created = await this.worktreeManager.create({
+      agentId,
+      worktreeId: executionId,
+      repoPath,
+      baseRef: head,
+    });
+    let recorded: TeamMissionWorktreeRecord;
+    try {
+      recorded = this.persistence.recordTeamMissionWorktree({
+        executionId,
+        agentId,
+        repoPath,
+        path: created.path,
+        baseHead: created.baseHead,
+        now: this.isoNow(),
+      });
+    } catch (error) {
+      await this.worktreeManager.cleanup({ agentId, worktreeId: executionId, repoPath });
+      throw error;
+    }
+    return this.persistence.updateTeamMissionWorktree({
+      executionId: recorded.executionId,
+      to: 'active',
+      now: this.isoNow(),
+    });
+  }
+
+  private async cleanupIntegratedMissionWorktree(
+    worktree: TeamMissionWorktreeRecord,
+    agentId: string,
+  ): Promise<void> {
+    if (this.worktreeManager === undefined) return;
+    try {
+      const result = await this.worktreeManager.cleanup({
+        agentId,
+        worktreeId: worktree.executionId,
+        repoPath: worktree.repoPath,
+      });
+      this.persistence.updateTeamMissionWorktree({
+        executionId: worktree.executionId,
+        to: result.outcome === 'removed' ? 'cleaned' : 'quarantined',
+        reason:
+          result.outcome === 'removed' ? null : 'Integrated worktree remained dirty during cleanup',
+        now: this.isoNow(),
+      });
+    } catch (error) {
+      this.quarantineMissionWorktree(worktree.executionId, error);
+    }
+  }
+
+  private quarantineMissionWorktree(executionId: string, error: unknown): void {
+    const current = this.persistence.getTeamMissionWorktree(executionId);
+    if (current === null || current.state === 'cleaned') return;
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+    this.persistence.updateTeamMissionWorktree({
+      executionId,
+      to: 'quarantined',
+      reason: reason === '' ? 'Mission worktree requires inspection' : reason,
+      now: this.isoNow(),
+    });
+  }
+
+  private missionWorktreeSummary(executionId: string) {
+    const worktree = this.persistence.getTeamMissionWorktree(executionId);
+    if (worktree === null) return null;
+    return {
+      path: worktree.path,
+      baseHead: worktree.baseHead,
+      state: worktree.state,
+      workerHead: worktree.workerHead,
+      integratedHead: worktree.integratedHead,
+      changedFiles: [...worktree.changedFiles],
+      reason: worktree.reason,
+    };
+  }
+
+  private captureMissionCheckpoint(
+    taskId: string,
+    summary: string,
+    changedFiles: readonly string[],
+  ): TeamMissionCheckpoint {
+    const fingerprint = this.captureWorkspaceFingerprint(taskId);
+    let workspaceDigest = fingerprint.workspaceDigest;
+    if (workspaceDigest === null)
+      workspaceDigest = createHash('sha256')
+        .update(JSON.stringify({ changedFiles: [...changedFiles].sort(), summary }))
+        .digest('hex');
+    return {
+      summary: summary.slice(0, 4_000),
+      changedFiles: [...new Set(changedFiles)].slice(0, 500),
+      gitHead: fingerprint.gitHead,
+      workspaceDigest,
+      recordedAt: this.isoNow(),
+    };
+  }
+
+  private workspaceFingerprintMatches(taskId: string, checkpoint: TeamMissionCheckpoint): boolean {
+    const current = this.captureWorkspaceFingerprint(taskId);
+    return (
+      current.gitHead === checkpoint.gitHead &&
+      current.workspaceDigest === checkpoint.workspaceDigest
+    );
+  }
+
+  private captureWorkspaceFingerprint(taskId: string): {
+    gitHead: string | null;
+    workspaceDigest: string | null;
+  } {
+    return captureGitWorkspaceFingerprint(this.persistence.getWorkspace(taskId));
   }
 
   private activitySummary(
@@ -1819,6 +2472,7 @@ export class TeamCoordinator {
       'rate_limit',
       'budget',
       'recovery',
+      'automatic_retry',
     ]);
     const actor = snapshot.agents.find(({ id }) => id === activity.actorAgentId);
     const subject = snapshot.agents.find(({ id }) => id === activity.subjectAgentId);
@@ -1986,18 +2640,128 @@ export function priorConversationForAgent(
   return selected.reverse();
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+export function executeWithWatchdog<T>(input: {
+  execute(observe: (event: WorkerActivityEvent) => void, signal: AbortSignal): Promise<T>;
+  hardTimeoutMs: number;
+  stop(): Promise<void>;
+}): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Worker delivery timed out')), timeoutMs);
+    const controller = new AbortController();
+    let expired = false;
+    let heartbeatTimer: NodeJS.Timeout | undefined;
+    let idleTimer: NodeJS.Timeout | undefined;
+    const heartbeatTimeoutMs = Math.min(WORKER_HEARTBEAT_TIMEOUT_MS, input.hardTimeoutMs);
+    const idleTimeoutMs = Math.min(WORKER_IDLE_TIMEOUT_MS, input.hardTimeoutMs);
+    const clearTimers = (): void => {
+      clearTimeout(hardTimer);
+      if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+    };
+    const expire = (
+      code: 'heartbeat_timeout' | 'idle_timeout' | 'hard_timeout',
+      message: string,
+    ): void => {
+      if (expired) return;
+      expired = true;
+      clearTimers();
+      controller.abort(new WorkerRuntimeControlError(code, message));
+      void input.stop().then(
+        () => reject(new WorkerRuntimeControlError(code, `${message} after the runtime stopped`)),
+        (error: unknown) =>
+          reject(
+            new WorkerRuntimeControlError(
+              'stop_unconfirmed',
+              `${message} and runtime stop was not confirmed`,
+              { cause: error },
+            ),
+          ),
+      );
+    };
+    const resetHeartbeat = (): void => {
+      if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
+      heartbeatTimer = setTimeout(
+        () => expire('heartbeat_timeout', 'Worker heartbeat timed out'),
+        heartbeatTimeoutMs,
+      );
+    };
+    const resetProgress = (): void => {
+      resetHeartbeat();
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => expire('idle_timeout', 'Worker made no meaningful progress'),
+        idleTimeoutMs,
+      );
+    };
+    resetProgress();
+    const hardTimer = setTimeout(
+      () => expire('hard_timeout', 'Worker step reached its hard deadline'),
+      input.hardTimeoutMs,
+    );
+    const promise = input.execute((event) => {
+      if (event.type === 'heartbeat') resetHeartbeat();
+      else resetProgress();
+    }, controller.signal);
     void promise.then(
       (value) => {
-        clearTimeout(timer);
+        if (expired) return;
+        clearTimers();
         resolve(value);
       },
       (error: unknown) => {
-        clearTimeout(timer);
+        if (expired) return;
+        clearTimers();
         reject(error);
       },
     );
   });
+}
+
+export function captureGitWorkspaceFingerprint(workspacePath: string | null): {
+  gitHead: string | null;
+  workspaceDigest: string | null;
+} {
+  if (workspacePath === null) return { gitHead: null, workspaceDigest: null };
+  const options = {
+    encoding: 'utf8' as const,
+    timeout: 5_000,
+    maxBuffer: 16 * 1024 * 1024,
+  };
+  const git = (...args: string[]) =>
+    spawnSync('git', ['-c', 'core.hooksPath=', '-C', workspacePath, ...args], options);
+  const head = git('rev-parse', 'HEAD');
+  const status = git('status', '--porcelain=v1', '-z');
+  const unstaged = git('diff', '--binary', '--no-ext-diff');
+  const staged = git('diff', '--cached', '--binary', '--no-ext-diff');
+  const untracked = git('ls-files', '--others', '--exclude-standard', '-z');
+  if (
+    head.status !== 0 ||
+    head.stdout.trim() === '' ||
+    status.status !== 0 ||
+    unstaged.status !== 0 ||
+    staged.status !== 0 ||
+    untracked.status !== 0
+  )
+    return { gitHead: null, workspaceDigest: null };
+  const untrackedPaths = untracked.stdout
+    .split('\0')
+    .filter((path) => path !== '')
+    .slice(0, 500);
+  const untrackedHashes =
+    untrackedPaths.length === 0 ? null : git('hash-object', '--', ...untrackedPaths);
+  if (untrackedHashes !== null && untrackedHashes.status !== 0)
+    return { gitHead: null, workspaceDigest: null };
+  return {
+    gitHead: head.stdout.trim(),
+    workspaceDigest: createHash('sha256')
+      .update(status.stdout)
+      .update('\0')
+      .update(unstaged.stdout)
+      .update('\0')
+      .update(staged.stdout)
+      .update('\0')
+      .update(untracked.stdout)
+      .update('\0')
+      .update(untrackedHashes?.stdout ?? '')
+      .digest('hex'),
+  };
 }

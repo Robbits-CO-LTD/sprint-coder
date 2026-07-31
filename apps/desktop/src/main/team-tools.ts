@@ -155,6 +155,39 @@ export const TEAM_ASSIGN_TASK_TOOL = teamToolDefinition(
   ['workerId', 'objective', 'doneCriteria'],
 );
 
+export const TEAM_ASSIGN_MISSION_TOOL = teamToolDefinition(
+  'team_assign_mission',
+  'assign-mission',
+  {
+    objective: { type: 'string' },
+    doneCriteria: { type: 'array', items: { type: 'string' } },
+    steps: {
+      type: 'array',
+      minItems: 2,
+      maxItems: 12,
+      items: {
+        type: 'object',
+        properties: {
+          workerId: { type: 'string' },
+          objective: { type: 'string' },
+          doneCriteria: { type: 'array', items: { type: 'string' } },
+          access: { type: 'string', enum: ['read-only', 'workspace-write'] },
+        },
+        required: ['workerId', 'objective', 'doneCriteria', 'access'],
+        additionalProperties: false,
+      },
+    },
+  },
+  ['objective', 'doneCriteria', 'steps'],
+);
+
+export const TEAM_RESUME_MISSION_TOOL = teamToolDefinition(
+  'team_resume_mission',
+  'resume-mission',
+  { missionId: { type: 'string' } },
+  ['missionId'],
+);
+
 export const TEAM_STEER_EXECUTION_TOOL = teamToolDefinition(
   'team_steer_execution',
   'steer-execution',
@@ -199,6 +232,8 @@ export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
   TEAM_LIST_MODELS_TOOL,
   TEAM_HIRE_WORKER_TOOL,
   TEAM_ASSIGN_TASK_TOOL,
+  TEAM_ASSIGN_MISSION_TOOL,
+  TEAM_RESUME_MISSION_TOOL,
   TEAM_STEER_EXECUTION_TOOL,
   TEAM_CANCEL_EXECUTION_TOOL,
   TEAM_GET_STATUS_TOOL,
@@ -216,6 +251,10 @@ const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
   team_hire_worker:
     '自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。',
   team_assign_task: '自分の直下Workerへtaskを割り当て、execution IDを返します。',
+  team_assign_mission:
+    '10〜30分単位の2〜12工程を順番に実行する永続Missionを作成します。長時間のコーディングに使います。',
+  team_resume_mission:
+    '再開待ちのMissionを、既存の部分変更を検査する新しいAttemptとして再開します。',
   team_steer_execution: '自分の配下で実行中または待機中のexecutionへ修正指示を送ります。',
   team_cancel_execution: '自分の配下のexecutionを取り消します。',
   team_get_status:
@@ -304,6 +343,8 @@ export type TeamToolName =
   | 'team_record_model_research'
   | 'team_hire_worker'
   | 'team_assign_task'
+  | 'team_assign_mission'
+  | 'team_resume_mission'
   | 'team_steer_execution'
   | 'team_cancel_execution'
   | 'team_get_status'
@@ -320,6 +361,8 @@ export function isTeamToolName(value: unknown): value is TeamToolName {
     value === 'team_record_model_research' ||
     value === 'team_hire_worker' ||
     value === 'team_assign_task' ||
+    value === 'team_assign_mission' ||
+    value === 'team_resume_mission' ||
     value === 'team_steer_execution' ||
     value === 'team_cancel_execution' ||
     value === 'team_get_status' ||
@@ -436,6 +479,26 @@ const assignArgsSchema = z
     doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(20),
   })
   .strict();
+const assignMissionArgsSchema = z
+  .object({
+    objective: z.string().min(1).max(20_000),
+    doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(64),
+    steps: z
+      .array(
+        z
+          .object({
+            workerId: z.string().min(1).max(128),
+            objective: z.string().min(1).max(10_000),
+            doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(20),
+            access: z.enum(['read-only', 'workspace-write']),
+          })
+          .strict(),
+      )
+      .min(2)
+      .max(12),
+  })
+  .strict();
+const resumeMissionArgsSchema = z.object({ missionId: z.string().min(1).max(128) }).strict();
 const steerExecutionArgsSchema = z
   .object({
     executionId: z.string().min(1).max(128),
@@ -763,6 +826,50 @@ export async function executeTeamTool(
         return teamToolError(error);
       }
     }
+    case 'team_assign_mission': {
+      const request = assignMissionArgsSchema.parse(args);
+      try {
+        const mission = await coordinator.assignMission(
+          {
+            taskId,
+            objective: request.objective,
+            doneCriteria: request.doneCriteria,
+            steps: request.steps,
+          },
+          options.requesterAgentId ?? null,
+        );
+        return {
+          ok: true,
+          missionId: mission.id,
+          state: mission.state,
+          currentStepOrdinal: mission.currentStepOrdinal,
+          executions: mission.steps.map(({ ordinal, executionId }) => ({
+            ordinal,
+            executionId,
+          })),
+        };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
+    case 'team_resume_mission': {
+      const request = resumeMissionArgsSchema.parse(args);
+      try {
+        const mission = await coordinator.resumeMission(
+          taskId,
+          request.missionId,
+          options.requesterAgentId ?? null,
+        );
+        return {
+          ok: true,
+          missionId: mission.id,
+          state: mission.state,
+          currentStepOrdinal: mission.currentStepOrdinal,
+        };
+      } catch (error) {
+        return teamToolError(error);
+      }
+    }
     case 'team_steer_execution': {
       const request = steerExecutionArgsSchema.parse(args);
       try {
@@ -845,6 +952,18 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
     implementationKind: 'built-in',
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_assign_task', input),
+  });
+  broker.registerImplementation({
+    toolId: TEAM_ASSIGN_MISSION_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_assign_mission', input),
+  });
+  broker.registerImplementation({
+    toolId: TEAM_RESUME_MISSION_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_resume_mission', input),
   });
   broker.registerImplementation({
     toolId: TEAM_STEER_EXECUTION_TOOL.toolId,

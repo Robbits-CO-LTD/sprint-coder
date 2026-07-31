@@ -9,7 +9,13 @@ import { join } from 'node:path';
 // command-runner.ts; it re-implements its own sandboxed git invocation.
 
 export type WorktreeErrorCode =
-  'git_unavailable' | 'create_failed' | 'dirty' | 'remove_failed' | 'invalid_input';
+  | 'git_unavailable'
+  | 'create_failed'
+  | 'dirty'
+  | 'base_changed'
+  | 'integration_failed'
+  | 'remove_failed'
+  | 'invalid_input';
 
 export class WorktreeError extends Error {
   constructor(
@@ -44,6 +50,7 @@ export type CreateWorktreeInput = Readonly<{
   agentId: string;
   repoPath: string;
   baseRef?: string;
+  worktreeId?: string;
 }>;
 
 export type CreateWorktreeResult = Readonly<{
@@ -54,14 +61,47 @@ export type CreateWorktreeResult = Readonly<{
 export type CleanupWorktreeInput = Readonly<{
   agentId: string;
   repoPath: string;
+  worktreeId?: string;
 }>;
 
 export type CleanupWorktreeResult = Readonly<{
   outcome: 'removed' | 'quarantined';
 }>;
 
-const AGENT_ID_PATTERN = /^[0-9a-zA-Z-]+$/;
+export type FinalizeWorktreeInput = Readonly<{
+  agentId: string;
+  repoPath: string;
+  baseHead: string;
+  worktreeId?: string;
+  commitMessage: string;
+}>;
+
+export type FinalizeWorktreeResult = Readonly<{
+  workerHead: string;
+  changedFiles: readonly string[];
+}>;
+
+export type IntegrateWorktreeInput = Readonly<{
+  repoPath: string;
+  baseHead: string;
+  workerHead: string;
+}>;
+
+export type IntegrateWorktreeResult = Readonly<{
+  integratedHead: string;
+  outcome: 'integrated' | 'already_integrated' | 'no_changes';
+}>;
+
+export type CleanRepositoryBase = Readonly<{ head: string }>;
+
+const WORKTREE_ID_PATTERN = /^[0-9a-zA-Z-]+$/;
 const GIT_TIMEOUT_MS = 30_000;
+const WORKER_GIT_IDENTITY = [
+  '-c',
+  'user.name=Sprint Coder Worker',
+  '-c',
+  'user.email=worker@sprint-coder.local',
+] as const;
 
 export class WorkerWorktreeManager {
   private readonly worktreesRoot: string;
@@ -72,18 +112,33 @@ export class WorkerWorktreeManager {
     this.execFileImpl = options.execFileImpl ?? defaultExecFile;
   }
 
-  /** Deterministic worktree directory for an agent. Throws invalid_input for a bad id. */
-  worktreePathFor(agentId: string): string {
-    validateAgentId(agentId);
-    return join(this.worktreesRoot, `worktree-${agentId}`);
+  async requireCleanBase(repoPath: string): Promise<CleanRepositoryBase> {
+    const { stdout } = await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'create_failed');
+    const head = stdout.trim();
+    validateGitHead(head);
+    const status = await this.runGit(repoPath, ['status', '--porcelain'], 'create_failed');
+    if (status.stdout.trim() !== '')
+      throw new WorktreeError(
+        'base_changed',
+        'Workspace must be clean before a workspace-write Mission step starts',
+      );
+    return { head };
+  }
+
+  /** Deterministic worktree directory for an execution or agent. */
+  worktreePathFor(worktreeId: string): string {
+    validateWorktreeId(worktreeId);
+    return join(this.worktreesRoot, `worktree-${worktreeId}`);
   }
 
   async create({
     agentId,
     repoPath,
     baseRef = 'HEAD',
+    worktreeId = agentId,
   }: CreateWorktreeInput): Promise<CreateWorktreeResult> {
-    const worktreePath = this.worktreePathFor(agentId);
+    validateWorktreeId(agentId);
+    const worktreePath = this.worktreePathFor(worktreeId);
     if (await pathExists(worktreePath))
       throw new WorktreeError('create_failed', `worktree already exists: ${worktreePath}`);
     await mkdir(this.worktreesRoot, { recursive: true });
@@ -96,8 +151,13 @@ export class WorkerWorktreeManager {
     return { path: worktreePath, baseHead: stdout.trim() };
   }
 
-  async cleanup({ agentId, repoPath }: CleanupWorktreeInput): Promise<CleanupWorktreeResult> {
-    const worktreePath = this.worktreePathFor(agentId);
+  async cleanup({
+    agentId,
+    repoPath,
+    worktreeId = agentId,
+  }: CleanupWorktreeInput): Promise<CleanupWorktreeResult> {
+    validateWorktreeId(agentId);
+    const worktreePath = this.worktreePathFor(worktreeId);
     if (!(await pathExists(worktreePath))) {
       await this.runGit(repoPath, ['worktree', 'prune'], 'remove_failed');
       return { outcome: 'removed' };
@@ -122,6 +182,121 @@ export class WorkerWorktreeManager {
     return { outcome: 'removed' };
   }
 
+  /**
+   * Collapse everything a Worker did (including its own commits) into one detached commit.
+   * The primary checkout is not touched by this operation.
+   */
+  async finalizeChanges({
+    agentId,
+    repoPath,
+    baseHead,
+    worktreeId = agentId,
+    commitMessage,
+  }: FinalizeWorktreeInput): Promise<FinalizeWorktreeResult> {
+    validateWorktreeId(agentId);
+    validateGitHead(baseHead);
+    if (commitMessage.trim() === '')
+      throw new WorktreeError('invalid_input', 'commitMessage must not be empty');
+    const worktreePath = this.worktreePathFor(worktreeId);
+    if (!(await pathExists(worktreePath)))
+      throw new WorktreeError('create_failed', `worktree does not exist: ${worktreePath}`);
+    await this.runGit(worktreePath, ['reset', '--soft', baseHead], 'integration_failed');
+    await this.runGit(worktreePath, ['add', '--all'], 'integration_failed');
+    const { stdout: changedOutput } = await this.runGit(
+      worktreePath,
+      ['diff', '--cached', '--name-only', '-z', baseHead],
+      'integration_failed',
+    );
+    const changedFiles = changedOutput.split('\0').filter((path) => path !== '');
+    if (changedFiles.length === 0) return { workerHead: baseHead, changedFiles: [] };
+    await this.runGit(
+      worktreePath,
+      [
+        ...WORKER_GIT_IDENTITY,
+        'commit',
+        '--no-verify',
+        '--no-gpg-sign',
+        '-m',
+        commitMessage.slice(0, 500),
+      ],
+      'integration_failed',
+    );
+    const { stdout } = await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'integration_failed');
+    const workerHead = stdout.trim();
+    validateGitHead(workerHead);
+    // Make sure callers cannot accidentally integrate a commit from another repository.
+    const common = await this.runGit(
+      repoPath,
+      ['merge-base', baseHead, workerHead],
+      'integration_failed',
+    );
+    if (common.stdout.trim() !== baseHead)
+      throw new WorktreeError('integration_failed', 'Worker commit is not based on expected HEAD');
+    return { workerHead, changedFiles };
+  }
+
+  /**
+   * Integrate the isolated commit only when the primary checkout still matches baseHead.
+   * A failed cherry-pick is aborted before the error is surfaced.
+   */
+  async integrate({
+    repoPath,
+    baseHead,
+    workerHead,
+  }: IntegrateWorktreeInput): Promise<IntegrateWorktreeResult> {
+    validateGitHead(baseHead);
+    validateGitHead(workerHead);
+    if (workerHead === baseHead) return { integratedHead: baseHead, outcome: 'no_changes' };
+    const workerTree = (
+      await this.runGit(repoPath, ['rev-parse', `${workerHead}^{tree}`], 'integration_failed')
+    ).stdout.trim();
+    const currentHead = (
+      await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
+    ).stdout.trim();
+    if (currentHead !== baseHead) {
+      const currentTree = (
+        await this.runGit(repoPath, ['rev-parse', 'HEAD^{tree}'], 'integration_failed')
+      ).stdout.trim();
+      const currentParent = await this.tryRunGit(repoPath, ['rev-parse', 'HEAD^']);
+      if (currentTree === workerTree && currentParent?.stdout.trim() === baseHead)
+        return { integratedHead: currentHead, outcome: 'already_integrated' };
+      throw new WorktreeError(
+        'base_changed',
+        `Workspace HEAD changed before integration: expected ${baseHead}, got ${currentHead}`,
+      );
+    }
+    const status = await this.runGit(repoPath, ['status', '--porcelain'], 'integration_failed');
+    if (status.stdout.trim() !== '')
+      throw new WorktreeError(
+        'base_changed',
+        'Workspace has changes outside the isolated Worker worktree',
+      );
+    try {
+      await this.runGit(
+        repoPath,
+        [...WORKER_GIT_IDENTITY, 'cherry-pick', '--no-gpg-sign', workerHead],
+        'integration_failed',
+      );
+    } catch (error) {
+      await this.tryRunGit(repoPath, ['cherry-pick', '--abort']);
+      if (error instanceof WorktreeError)
+        throw new WorktreeError('integration_failed', error.message, { cause: error });
+      throw error;
+    }
+    const integratedHead = (
+      await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
+    ).stdout.trim();
+    const integratedTree = (
+      await this.runGit(repoPath, ['rev-parse', 'HEAD^{tree}'], 'integration_failed')
+    ).stdout.trim();
+    if (integratedTree !== workerTree)
+      throw new WorktreeError(
+        'integration_failed',
+        'Integrated tree does not match the isolated Worker result',
+      );
+    return { integratedHead, outcome: 'integrated' };
+  }
+
   private async runGit(
     dirArg: string,
     subArgs: readonly string[],
@@ -141,11 +316,27 @@ export class WorkerWorktreeManager {
       throw new WorktreeError(failureCode, errorMessage(error), { cause: error });
     }
   }
+
+  private async tryRunGit(
+    dirArg: string,
+    subArgs: readonly string[],
+  ): Promise<ExecFileResult | null> {
+    try {
+      return await this.runGit(dirArg, subArgs, 'integration_failed');
+    } catch {
+      return null;
+    }
+  }
 }
 
-function validateAgentId(agentId: string): void {
-  if (!AGENT_ID_PATTERN.test(agentId))
-    throw new WorktreeError('invalid_input', `invalid agentId: ${JSON.stringify(agentId)}`);
+function validateWorktreeId(worktreeId: string): void {
+  if (!WORKTREE_ID_PATTERN.test(worktreeId))
+    throw new WorktreeError('invalid_input', `invalid worktree id: ${JSON.stringify(worktreeId)}`);
+}
+
+function validateGitHead(head: string): void {
+  if (!/^[0-9a-f]{40,64}$/i.test(head))
+    throw new WorktreeError('invalid_input', `invalid Git object id: ${JSON.stringify(head)}`);
 }
 
 function sanitizedGitEnv(): NodeJS.ProcessEnv {

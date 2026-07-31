@@ -19,6 +19,7 @@ import type {
 } from './protocol';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
+import { terminateRuntimeProcessTree } from './process-tree';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -283,15 +284,15 @@ export class ClaudeRuntimeAdapter {
     });
   }
 
-  cancel(turnId: string): void {
+  async cancel(turnId: string): Promise<boolean> {
     const control = this.active.get(turnId);
-    if (control === undefined) return;
+    if (control === undefined) return false;
     control.canceled = true;
-    void terminateProcessTree(control.child);
+    return !(await terminateProcessTree(control.child));
   }
 
   dispose(): void {
-    for (const [turnId] of this.active) this.cancel(turnId);
+    for (const [turnId] of this.active) void this.cancel(turnId);
   }
 }
 
@@ -518,33 +519,8 @@ function minimalEnvironment(): NodeJS.ProcessEnv {
   );
 }
 
-async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
-  const pid = child.pid;
-  if (pid === undefined || child.exitCode !== null) return;
-  signalTree(pid, 'SIGTERM');
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, 2_000);
-    child.once('exit', () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-  if (child.exitCode === null) signalTree(pid, 'SIGKILL');
-}
-
-function signalTree(pid: number, signal: NodeJS.Signals): void {
-  try {
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(pid), '/t', ...(signal === 'SIGKILL' ? ['/f'] : [])], {
-        env: minimalEnvironment(),
-        stdio: 'ignore',
-      });
-    } else {
-      process.kill(-pid, signal);
-    }
-  } catch {
-    // The process may already have exited between the state check and the signal.
-  }
+async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Promise<boolean> {
+  return terminateRuntimeProcessTree(child, minimalEnvironment());
 }
 
 function publicError(

@@ -27,6 +27,7 @@ import type {
 } from './protocol';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
+import { terminateRuntimeProcessTree } from './process-tree';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -203,7 +204,7 @@ export class CodexRuntimeAdapter {
         failed = true;
         fail(publicError('RUNTIME_TIMEOUT', 'Codex runtimeがタイムアウトしました。', true));
       }
-      void terminateProcessTree(child);
+      void terminateCodexProcessTree(child);
     }, effectiveTimeoutMs);
 
     createInterface({ input: child.stdout }).on('line', (line) => {
@@ -249,7 +250,7 @@ export class CodexRuntimeAdapter {
             false,
           ),
         );
-        void terminateProcessTree(child);
+        void terminateCodexProcessTree(child);
       }
     });
     void (async () => {
@@ -292,7 +293,7 @@ export class CodexRuntimeAdapter {
         if (failed || control.canceled) return;
         failed = true;
         fail(publicError('RUNTIME_FAILED', 'Codex app-serverを開始できませんでした。', true));
-        void terminateProcessTree(child);
+        void terminateCodexProcessTree(child);
       }
     })();
     // Drain diagnostics so the child cannot block, but never forward or retain provider output.
@@ -325,15 +326,15 @@ export class CodexRuntimeAdapter {
     });
   }
 
-  cancel(turnId: string): void {
+  async cancel(turnId: string): Promise<boolean> {
     const control = this.active.get(turnId);
-    if (control === undefined) return;
+    if (control === undefined) return false;
     control.canceled = true;
-    void terminateProcessTree(control.child);
+    return !(await terminateCodexProcessTree(control.child));
   }
 
   dispose(): void {
-    for (const [turnId] of this.active) this.cancel(turnId);
+    for (const [turnId] of this.active) void this.cancel(turnId);
   }
 }
 
@@ -367,10 +368,22 @@ function handleCodexNotification(
     emit({ type: 'reasoning', text: requiredString(params['delta'], 'reasoning delta') });
     return;
   }
+  if (method === 'item/started') {
+    const item = asRecord(params['item']);
+    const operation = codexOperationForItem(item, 'started');
+    if (operation !== null) {
+      advanceStage('executing');
+      emit(operation);
+    }
+    return;
+  }
   if (method === 'item/completed') {
     const item = asRecord(params['item']);
-    if (item['type'] === 'mcpToolCall' || item['type'] === 'commandExecution')
+    const operation = codexOperationForItem(item, 'completed');
+    if (operation !== null) {
       advanceStage('executing');
+      emit(operation);
+    }
     if (item['type'] === 'fileChange' && Array.isArray(item['changes'])) {
       advanceStage('executing');
       const changes = item['changes']
@@ -399,6 +412,36 @@ function handleCodexNotification(
     emit(finalText === null ? { type: 'completed' } : { type: 'completed', finalText });
     completed();
   }
+}
+
+const CODEX_TOOL_ITEM_TYPES = new Set([
+  'mcpToolCall',
+  'dynamicToolCall',
+  'collabAgentToolCall',
+  'webSearch',
+  'imageGeneration',
+]);
+
+export function codexOperationForItem(
+  item: Record<string, unknown>,
+  timing: 'started' | 'completed',
+): Extract<RuntimeCanonicalEvent, { type: 'operation' }> | null {
+  if (item['type'] === 'commandExecution')
+    return {
+      type: 'operation',
+      phase: timing === 'started' ? 'command_start' : 'command_end',
+      label: timing === 'started' ? 'Codex command started' : 'Codex command finished',
+    };
+  if (typeof item['type'] !== 'string' || !CODEX_TOOL_ITEM_TYPES.has(item['type'])) return null;
+  const toolName = typeof item['tool'] === 'string' ? ` (${item['tool']})` : '';
+  return {
+    type: 'operation',
+    phase: timing === 'started' ? 'tool_call_start' : 'tool_call_end',
+    label:
+      timing === 'started'
+        ? `Codex tool call started${toolName}`
+        : `Codex tool call finished${toolName}`,
+  };
 }
 
 /**
@@ -786,33 +829,10 @@ function minimalEnvironment(): NodeJS.ProcessEnv {
   );
 }
 
-async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
-  const pid = child.pid;
-  if (pid === undefined || child.exitCode !== null) return;
-  signalTree(pid, 'SIGTERM');
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, 2_000);
-    child.once('exit', () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-  if (child.exitCode === null) signalTree(pid, 'SIGKILL');
-}
-
-function signalTree(pid: number, signal: NodeJS.Signals): void {
-  try {
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(pid), '/t', ...(signal === 'SIGKILL' ? ['/f'] : [])], {
-        env: minimalEnvironment(),
-        stdio: 'ignore',
-      });
-    } else {
-      process.kill(-pid, signal);
-    }
-  } catch {
-    // The process may already have exited between the state check and the signal.
-  }
+export async function terminateCodexProcessTree(
+  child: ChildProcessWithoutNullStreams,
+): Promise<boolean> {
+  return terminateRuntimeProcessTree(child, minimalEnvironment());
 }
 
 function publicError(

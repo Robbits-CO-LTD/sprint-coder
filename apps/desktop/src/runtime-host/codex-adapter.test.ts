@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,9 +8,11 @@ import {
   advanceCodexAppServerStage,
   buildCodexArgs,
   buildCodexPrompt,
+  codexOperationForItem,
   parseCodexModels,
   probeCodex,
   resolveCodexCommand,
+  terminateCodexProcessTree,
 } from './codex-adapter';
 import { TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 
@@ -22,6 +25,36 @@ afterEach(async () => {
 });
 
 describe('Codex runtime probe', () => {
+  it('terminates the Codex child and its descendant process tree', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-tree-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'tree.cjs');
+    const marker = join(root, 'pids.json');
+    await writeFile(
+      script,
+      [
+        "const { spawn } = require('node:child_process');",
+        "const { writeFileSync } = require('node:fs');",
+        "if (process.argv[2] === 'child') {",
+        "  const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });",
+        '  writeFileSync(process.argv[3], JSON.stringify({ child: process.pid, grandchild: grandchild.pid }));',
+        '  setInterval(() => {}, 1000);',
+        '} else {',
+        "  spawn(process.execPath, [__filename, 'child', process.argv[2]], { detached: true, stdio: 'ignore' });",
+        '  setInterval(() => {}, 1000);',
+        '}',
+      ].join('\n'),
+    );
+    const parent = spawn(process.execPath, [script, marker], {
+      detached: process.platform !== 'win32',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const descendants = await waitForPidMarker(marker);
+
+    await expect(terminateCodexProcessTree(parent)).resolves.toBe(true);
+    await waitForProcessesToExit([parent.pid!, descendants.child, descendants.grandchild]);
+  });
+
   it('resolves the native Codex executable behind the Windows npm shim', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-command-'));
     temporaryRoots.push(root);
@@ -106,6 +139,29 @@ describe('Codex runtime probe', () => {
       { type: 'stage', stage: 'executing' },
       { type: 'stage', stage: 'synthesizing' },
     ]);
+  });
+
+  it('counts Codex dynamic tools such as exec_command and write_stdin as progress', () => {
+    expect(
+      codexOperationForItem(
+        { type: 'dynamicToolCall', tool: 'exec_command', status: 'inProgress' },
+        'started',
+      ),
+    ).toEqual({
+      type: 'operation',
+      phase: 'tool_call_start',
+      label: 'Codex tool call started (exec_command)',
+    });
+    expect(
+      codexOperationForItem(
+        { type: 'dynamicToolCall', tool: 'write_stdin', status: 'completed' },
+        'completed',
+      ),
+    ).toEqual({
+      type: 'operation',
+      phase: 'tool_call_end',
+      label: 'Codex tool call finished (write_stdin)',
+    });
   });
 
   it('degrades to unavailable when the CLI cannot be spawned', async () => {
@@ -363,3 +419,36 @@ describe('Codex runtime probe', () => {
     expect(prompt).toContain('Current user request:\n\ncontinue');
   });
 });
+
+async function waitForPidMarker(path: string): Promise<{ child: number; grandchild: number }> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try {
+      return JSON.parse(await readFile(path, 'utf8')) as {
+        child: number;
+        grandchild: number;
+      };
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error('Timed out waiting for descendant process ids');
+}
+
+async function waitForProcessesToExit(pids: readonly number[]): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    if (pids.every((pid) => !processExists(pid))) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Processes survived cancellation: ${pids.filter(processExists).join(', ')}`);
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}

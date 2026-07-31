@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile, spawnSync } from 'node:child_process';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -71,6 +71,106 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     const result = await manager.cleanup({ agentId: 'agent-5', repoPath });
 
     expect(result).toEqual({ outcome: 'removed' });
+  });
+
+  it('collapses Worker changes into one commit and integrates them into a clean workspace', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const worktreeId = 'execution-1';
+    const { path: worktreePath } = await manager.create({
+      agentId: 'agent-6',
+      worktreeId,
+      repoPath,
+    });
+    await writeFile(join(worktreePath, 'README.md'), 'changed by worker\n');
+    await writeFile(join(worktreePath, 'new.txt'), 'new artifact\n');
+
+    const finalized = await manager.finalizeChanges({
+      agentId: 'agent-6',
+      worktreeId,
+      repoPath,
+      baseHead: head,
+      commitMessage: 'Sprint Coder Mission step',
+    });
+    const integrated = await manager.integrate({
+      repoPath,
+      baseHead: head,
+      workerHead: finalized.workerHead,
+    });
+
+    expect(finalized.changedFiles).toEqual(['README.md', 'new.txt']);
+    expect(integrated.outcome).toBe('integrated');
+    expect(integrated.integratedHead).not.toBe(head);
+    expect(await readFile(join(repoPath, 'README.md'), 'utf8')).toBe('changed by worker\n');
+    expect(await readFile(join(repoPath, 'new.txt'), 'utf8')).toBe('new artifact\n');
+    expect((await git(['-C', repoPath, 'status', '--porcelain'])).trim()).toBe('');
+    await expect(manager.cleanup({ agentId: 'agent-6', worktreeId, repoPath })).resolves.toEqual({
+      outcome: 'removed',
+    });
+  });
+
+  it('recognizes an integration that completed before its durable state was recorded', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const worktreeId = 'execution-2';
+    const { path: worktreePath } = await manager.create({
+      agentId: 'agent-7',
+      worktreeId,
+      repoPath,
+    });
+    await writeFile(join(worktreePath, 'README.md'), 'recoverable\n');
+    const finalized = await manager.finalizeChanges({
+      agentId: 'agent-7',
+      worktreeId,
+      repoPath,
+      baseHead: head,
+      commitMessage: 'recoverable integration',
+    });
+    const first = await manager.integrate({
+      repoPath,
+      baseHead: head,
+      workerHead: finalized.workerHead,
+    });
+
+    const recovered = await manager.integrate({
+      repoPath,
+      baseHead: head,
+      workerHead: finalized.workerHead,
+    });
+
+    expect(first.outcome).toBe('integrated');
+    expect(recovered).toEqual({
+      integratedHead: first.integratedHead,
+      outcome: 'already_integrated',
+    });
+  });
+
+  it('refuses integration when the primary workspace changed and preserves both sides', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const worktreeId = 'execution-3';
+    const { path: worktreePath } = await manager.create({
+      agentId: 'agent-8',
+      worktreeId,
+      repoPath,
+    });
+    await writeFile(join(worktreePath, 'README.md'), 'worker version\n');
+    const finalized = await manager.finalizeChanges({
+      agentId: 'agent-8',
+      worktreeId,
+      repoPath,
+      baseHead: head,
+      commitMessage: 'isolated worker result',
+    });
+    await writeFile(join(repoPath, 'README.md'), 'outside change\n');
+
+    await expect(
+      manager.integrate({
+        repoPath,
+        baseHead: head,
+        workerHead: finalized.workerHead,
+      }),
+    ).rejects.toMatchObject({ code: 'base_changed' });
+
+    expect(await readFile(join(repoPath, 'README.md'), 'utf8')).toBe('outside change\n');
+    expect(await readFile(join(worktreePath, 'README.md'), 'utf8')).toBe('worker version\n');
   });
 
   async function fixture(): Promise<{

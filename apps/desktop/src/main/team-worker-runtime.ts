@@ -24,7 +24,7 @@ type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex'; model: string }>;
 
 export type TeamWorkerRuntimeDeps = Readonly<{
   /** Which real runtime (if any) worker executions should use right now. */
-  selectRuntime: () => RealRuntimeChoice | null;
+  selectRuntime: (worker: AgentRecord) => RealRuntimeChoice | null;
   workspaceFor: (taskId: string) => string | null;
   catalogFor: (kind: 'claude' | 'codex', workspacePath: string | null) => unknown;
   /** Provider egress gate; returns false when policy denies the dispatch. */
@@ -70,11 +70,22 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       (_taskId, turnId, event) => {
         const run = this.pending.get(turnId);
         if (run === undefined) return;
+        if (event.type === 'heartbeat') {
+          run.onEvent?.({ type: 'heartbeat', at: event.at });
+          return;
+        }
         if (event.type === 'stage')
           run.onEvent?.({
             type: 'activity',
             phase: event.stage,
             label: stageLabel(event.stage),
+            at: new Date().toISOString(),
+          });
+        if (event.type === 'operation')
+          run.onEvent?.({
+            type: 'activity',
+            phase: event.phase,
+            label: event.label,
             at: new Date().toISOString(),
           });
         if (event.type === 'delta') {
@@ -122,10 +133,12 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
+    signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult> {
-    const choice = this.deps.selectRuntime();
+    const choice = this.deps.selectRuntime(input.worker);
     if (choice === null) {
       if (this.deps.allowSimulation === true) return this.simulator.execute(input);
       throw new Error('Real Team Worker runtime is unavailable');
@@ -142,6 +155,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       input.worker.objective === null ? '' : `目的: ${input.worker.objective}`,
       `Context継承: ${input.worker.contextInheritancePolicy}`,
       `Workspace書き込み: ${input.worker.writeCapable ? '許可範囲内で可' : '禁止（読み取り専用）'}`,
+      input.workspacePath === undefined
+        ? ''
+        : `隔離worktree: ${input.workspacePath ?? '利用不可'}（このディレクトリ内だけを変更してください）`,
       '以下のLeaderからの依頼に対応し、結果を日本語で簡潔に報告してください。',
       formatPriorTeamConversation(input.priorConversation),
       '',
@@ -155,13 +171,19 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     if (input.worker.canDelegate === true && teamMcp === undefined)
       throw new Error('Manager Team MCP is unavailable');
 
-    const workspacePath = this.deps.workspaceFor(taskId);
+    const workspacePath =
+      input.workspacePath === undefined ? this.deps.workspaceFor(taskId) : input.workspacePath;
     const context = this.deps.contextFor?.(input.worker);
     const writeScope =
       input.worker.writeCapable === true
         ? (this.deps.writeScopeFor?.(input.worker, workspacePath) ?? 'read-only')
         : 'read-only';
     const startedAt = Date.now();
+    if (input.signal?.aborted) throw new Error('Worker execution was canceled before start');
+    const abort = (): void => {
+      void this.stop(input.worker.id).catch(() => undefined);
+    };
+    input.signal?.addEventListener('abort', abort, { once: true });
     const finalText = await new Promise<string>((resolve, reject) => {
       this.pending.set(turnId, {
         resolve,
@@ -187,8 +209,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         writeScope,
       );
     }).finally(() => {
+      input.signal?.removeEventListener('abort', abort);
       this.pending.delete(turnId);
-      this.activeByAgent.delete(input.worker.id);
+      if (this.activeByAgent.get(input.worker.id)?.turnId === turnId)
+        this.activeByAgent.delete(input.worker.id);
       if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
     });
 
@@ -212,21 +236,29 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         timeMs: Date.now() - startedAt,
         toolCalls: 0,
       },
+      resolution: {
+        resolvedProvider: choice.kind === 'codex' ? 'openai' : 'anthropic',
+        resolvedModel: choice.model,
+      },
     };
   }
 
   async stop(agentId: string): Promise<void> {
     const active = this.activeByAgent.get(agentId);
     if (active === undefined) return;
-    this.client(active.kind).cancel(active.taskId, active.turnId);
-    const run = this.pending.get(active.turnId);
-    if (run !== undefined) {
-      flushDelta(run);
-      run.onEvent?.({ type: 'canceled', reason: 'Worker execution stopped' });
-      this.pending.delete(active.turnId);
-      run.reject(new Error('Worker execution stopped'));
+    try {
+      await this.client(active.kind).cancel(active.taskId, active.turnId);
+    } finally {
+      const run = this.pending.get(active.turnId);
+      if (run !== undefined) {
+        flushDelta(run);
+        run.onEvent?.({ type: 'canceled', reason: 'Worker execution stopped' });
+        this.pending.delete(active.turnId);
+        run.reject(new Error('Worker execution stopped'));
+      }
+      if (this.activeByAgent.get(agentId)?.turnId === active.turnId)
+        this.activeByAgent.delete(agentId);
     }
-    this.activeByAgent.delete(agentId);
   }
 
   dispose(): void {

@@ -14,11 +14,25 @@ const runtimeKind = readRuntimeKind();
 const runtimeInstanceId = readRuntimeInstanceId();
 const adapter = runtimeKind === 'claude' ? new ClaudeRuntimeAdapter() : new CodexRuntimeAdapter();
 const sequences = new Map<string, number>();
+const activeTurns = new Map<string, { taskId: string; operationId: string }>();
 const parentPort = requireParentPort(process);
+const heartbeat = setInterval(() => {
+  const at = new Date().toISOString();
+  for (const [turnId, active] of activeTurns)
+    send(active.taskId, turnId, active.operationId, {
+      type: 'event',
+      event: { type: 'heartbeat', at },
+    });
+}, 15_000);
+heartbeat.unref();
 
 parentPort.on('message', ({ data }: Electron.MessageEvent) => {
   if (!isMainToRuntimeEnvelope(data) || data.runtimeInstanceId !== runtimeInstanceId) return;
   if (data.type === 'start') {
+    activeTurns.set(data.turnId, {
+      taskId: data.taskId,
+      operationId: data.operationId,
+    });
     adapter.start(
       data.turnId,
       data.input,
@@ -32,15 +46,20 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
       data.model,
       (event) => send(data.taskId, data.turnId, data.operationId, { type: 'event', event }),
       (error) => send(data.taskId, data.turnId, data.operationId, { type: 'error', error }),
-      (code, canceled) =>
-        send(data.taskId, data.turnId, data.operationId, { type: 'exit', code, canceled }),
+      (code, canceled) => {
+        send(data.taskId, data.turnId, data.operationId, { type: 'exit', code, canceled });
+        activeTurns.delete(data.turnId);
+      },
       data.teamMcp,
       data.effort,
       data.writeScope,
       data.skills ?? [],
     );
   } else if (data.type === 'cancel') {
-    adapter.cancel(data.turnId);
+    void adapter.cancel(data.turnId).then((forced) => {
+      send(data.taskId, data.turnId, data.operationId, { type: 'stopped', forced });
+      activeTurns.delete(data.turnId);
+    });
   }
 });
 
@@ -65,7 +84,10 @@ void (runtimeKind === 'claude' ? probeClaude() : probeCodex()).then((probe) =>
   }),
 );
 
-process.once('exit', () => adapter.dispose());
+process.once('exit', () => {
+  clearInterval(heartbeat);
+  adapter.dispose();
+});
 
 function send(
   taskId: string,
@@ -83,6 +105,7 @@ function send(
         | 'claudeModels'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'event' }>, 'type' | 'event'>
+    | Pick<Extract<RuntimeToMainEnvelope, { type: 'stopped' }>, 'type' | 'forced'>
     | Pick<
         Extract<RuntimeToMainEnvelope, { type: 'started' }>,
         'type' | 'acceptedContextFragmentIds'

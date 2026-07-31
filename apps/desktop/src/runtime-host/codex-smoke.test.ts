@@ -79,8 +79,40 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
 
     expect(started).toBe(true);
     expect(failures).toEqual([]);
-    expect(events.at(-1)).toEqual({ type: 'completed' });
+    expect(events.at(-1)).toMatchObject({ type: 'completed' });
     expect(exitInfo).toMatchObject({ code: 0, canceled: false });
+  }, 60_000);
+
+  it('emits progress for a real Codex dynamic shell tool', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-operation-'));
+    cleanupDirs.push(workspace);
+    const adapter = new CodexRuntimeAdapter();
+    const events: RuntimeCanonicalEvent[] = [];
+    const failures: PublicError[] = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'codex-smoke-dynamic-operation',
+        'Run pwd with a shell command, wait for it to finish, and report the output.',
+        [],
+        () => undefined,
+        workspace,
+        'gpt-5.6-sol',
+        (event) => events.push(event),
+        (error) => failures.push(error),
+        () => resolve(),
+      );
+    });
+
+    expect(failures).toEqual([]);
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'operation' &&
+          (event.phase === 'command_start' || event.phase === 'tool_call_start'),
+      ),
+    ).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: 'completed' });
   }, 60_000);
 
   // issue #11: proves the whole image path against the real CLI — that `$imagegen` runs, that the

@@ -45,6 +45,7 @@ export function TeamListView({
   const detail = useAppStore((state) => state.teamByTask[task.id]);
   const teamBusy = useAppStore((state) => state.teamBusy);
   const stopTeamWorker = useAppStore((state) => state.stopTeamWorker);
+  const resumeTeamMission = useAppStore((state) => state.resumeTeamMission);
   const stopAllTeamWorkers = useAppStore((state) => state.stopAllTeamWorkers);
   const sectionRef = useRef<HTMLElement>(null);
   // Open state is local to the view, not the store: the dialog is a modal task (open, adjust,
@@ -209,6 +210,12 @@ export function TeamListView({
                 <TeamExecutionStatus
                   execution={latestExecutionForWorker(detail.executions, worker.id)}
                   variant="list"
+                  onResume={(() => {
+                    const execution = latestExecutionForWorker(detail.executions, worker.id);
+                    return execution?.missionId == null
+                      ? undefined
+                      : () => void resumeTeamMission(task.id, execution.missionId!);
+                  })()}
                 />
                 <dl className="tlv-usage">
                   <div>

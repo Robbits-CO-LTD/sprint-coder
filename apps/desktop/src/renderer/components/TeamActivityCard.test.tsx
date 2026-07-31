@@ -153,12 +153,12 @@ describe('activity headlines', () => {
 });
 
 describe('activity supplements', () => {
-  it('uses the C1b wording for all six queue reasons', () => {
+  it('uses the C1b wording for every queue reason', () => {
     for (const reason of Object.keys(QUEUE_REASON_LABELS) as (keyof typeof QUEUE_REASON_LABELS)[]) {
       const display = describeActivity(activity({ type: 'execution_queued', queueReason: reason }));
       expect(display.details).toContain(`待機理由 ${QUEUE_REASON_LABELS[reason]}`);
     }
-    expect(Object.keys(QUEUE_REASON_LABELS)).toHaveLength(6);
+    expect(Object.keys(QUEUE_REASON_LABELS)).toHaveLength(7);
   });
 
   it('adds status, terminal reason and attempt ordinal only when recorded', () => {

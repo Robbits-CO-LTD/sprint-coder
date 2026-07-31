@@ -1,13 +1,15 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import type { AgentRecord, TeamSnapshot } from './persistence';
 import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import {
   TeamCoordinator,
+  captureGitWorkspaceFingerprint,
+  executeWithWatchdog,
   priorConversationForAgent,
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
@@ -15,11 +17,13 @@ import {
 } from './team-coordinator';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
+import { WorkerWorktreeManager } from './worker-worktree';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -27,6 +31,56 @@ function createPersistence(): SqlitePersistenceClient {
   const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-coordinator-'));
   cleanup.push(directory);
   return new SqlitePersistenceClient(join(directory, 'test.sqlite3'));
+}
+
+function configureGitWorkspace(
+  persistence: SqlitePersistenceClient,
+  taskId: string,
+): { workspace: string; worktreesRoot: string; manager: WorkerWorktreeManager } {
+  const workspace = mkdtempSync(join(tmpdir(), 'sprint-coder-team-workspace-'));
+  const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-worktrees-'));
+  cleanup.push(workspace, worktreesRoot);
+  expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+  writeFileSync(join(workspace, 'README.md'), 'base\n');
+  expect(spawnSync('git', ['-C', workspace, 'add', 'README.md']).status).toBe(0);
+  expect(
+    spawnSync('git', [
+      '-C',
+      workspace,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'base',
+    ]).status,
+  ).toBe(0);
+  persistence.setWorkspace(taskId, workspace);
+  return {
+    workspace,
+    worktreesRoot,
+    manager: new WorkerWorktreeManager({ worktreesRoot }),
+  };
+}
+
+function coordinatorWithWorktrees(
+  persistence: SqlitePersistenceClient,
+  runtime: TeamWorkerRuntime,
+  manager: WorkerWorktreeManager,
+): TeamCoordinator {
+  return new TeamCoordinator(
+    persistence,
+    runtime,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    manager,
+  );
 }
 
 class TestWorkerRuntime implements TeamWorkerRuntime {
@@ -68,6 +122,57 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
 
   async stop(agentId: string): Promise<void> {
     this.stopped.push(agentId);
+  }
+}
+
+class WorktreeWritingRuntime extends TestWorkerRuntime {
+  readonly workspacePaths: Array<string | null | undefined> = [];
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+    workspacePath?: string | null;
+  }): Promise<WorkerRuntimeResult> {
+    this.workspacePaths.push(input.workspacePath);
+    if (input.worker.writeCapable) {
+      if (input.workspacePath === undefined || input.workspacePath === null)
+        throw new Error('write step did not receive an isolated worktree');
+      writeFileSync(join(input.workspacePath, 'worker-output.txt'), 'isolated\n');
+    }
+    return super.execute(input);
+  }
+}
+
+class ConflictingWorktreeRuntime extends TestWorkerRuntime {
+  constructor(private readonly primaryWorkspace: string) {
+    super();
+  }
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+    workspacePath?: string | null;
+  }): Promise<WorkerRuntimeResult> {
+    if (input.workspacePath === undefined || input.workspacePath === null)
+      throw new Error('write step did not receive an isolated worktree');
+    writeFileSync(join(input.workspacePath, 'worker-only.txt'), 'preserve worker result\n');
+    writeFileSync(join(this.primaryWorkspace, 'outside.txt'), 'external change\n');
+    return super.execute(input);
+  }
+}
+
+class CrashAfterIntegrationManager extends WorkerWorktreeManager {
+  private failAfterIntegration = true;
+
+  override async integrate(input: Parameters<WorkerWorktreeManager['integrate']>[0]) {
+    const result = await super.integrate(input);
+    if (this.failAfterIntegration) {
+      this.failAfterIntegration = false;
+      throw new Error('simulated app crash after Git integration');
+    }
+    return result;
   }
 }
 
@@ -157,6 +262,68 @@ class InterruptibleWorkerRuntime extends TestWorkerRuntime {
   }
 }
 
+class ConfirmedStopWorkerRuntime extends TestWorkerRuntime {
+  activeExecutions = 0;
+  maxActiveExecutions = 0;
+  executeCount = 0;
+  stopCount = 0;
+  private readonly pending = new Map<string, { reject(error: Error): void }>();
+  private readonly stopAcks: Array<() => void> = [];
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+  }): Promise<WorkerRuntimeResult> {
+    this.executeCount += 1;
+    this.activeExecutions += 1;
+    this.maxActiveExecutions = Math.max(this.maxActiveExecutions, this.activeExecutions);
+    await new Promise<void>((_resolve, reject) => {
+      this.pending.set(input.worker.id, { reject });
+    }).finally(() => {
+      this.pending.delete(input.worker.id);
+      this.activeExecutions -= 1;
+    });
+    throw new Error('unreachable');
+  }
+
+  override async stop(agentId: string): Promise<void> {
+    this.stopCount += 1;
+    await new Promise<void>((resolve) => {
+      this.stopAcks.push(() => {
+        this.pending.get(agentId)?.reject(new Error('confirmed stop'));
+        resolve();
+      });
+    });
+  }
+
+  acknowledgeNextStop(): void {
+    const acknowledge = this.stopAcks.shift();
+    if (acknowledge === undefined) throw new Error('No pending stop confirmation');
+    acknowledge();
+  }
+
+  pendingStopCount(): number {
+    return this.stopAcks.length;
+  }
+}
+
+class FailOnceWorkerRuntime extends TestWorkerRuntime {
+  readonly contents: string[] = [];
+  executeCount = 0;
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+  }): Promise<WorkerRuntimeResult> {
+    this.executeCount += 1;
+    this.contents.push(input.content);
+    if (this.executeCount === 1) throw new Error('deliberate first-attempt failure');
+    return super.execute(input);
+  }
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -208,8 +375,694 @@ describe('priorConversationForAgent', () => {
   });
 });
 
+describe('executeWithWatchdog', () => {
+  it('distinguishes missing heartbeat from semantic progress timeout', async () => {
+    vi.useFakeTimers();
+    let stops = 0;
+    let executionSignal: AbortSignal | undefined;
+    const pending = executeWithWatchdog({
+      execute: async (_observe, signal) => {
+        executionSignal = signal;
+        return new Promise<never>(() => undefined);
+      },
+      hardTimeoutMs: 30 * 60_000,
+      stop: async () => {
+        stops += 1;
+      },
+    });
+    expect(executionSignal?.aborted).toBe(false);
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'heartbeat_timeout' });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await rejected;
+    expect(executionSignal?.aborted).toBe(true);
+    expect(stops).toBe(1);
+  });
+
+  it('expires after 15 minutes without meaningful progress even while heartbeats continue', async () => {
+    vi.useFakeTimers();
+    let stops = 0;
+    const pending = executeWithWatchdog({
+      execute: async (observe) => {
+        setInterval(() => observe({ type: 'heartbeat', at: new Date().toISOString() }), 15_000);
+        return new Promise<never>(() => undefined);
+      },
+      hardTimeoutMs: 30 * 60_000,
+      stop: async () => {
+        stops += 1;
+      },
+    });
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'idle_timeout' });
+
+    await vi.advanceTimersByTimeAsync(15 * 60_000);
+    await rejected;
+    expect(stops).toBe(1);
+  });
+
+  it('enforces the 30 minute hard limit despite continuous meaningful progress', async () => {
+    vi.useFakeTimers();
+    let stops = 0;
+    const pending = executeWithWatchdog({
+      execute: async (observe) => {
+        setInterval(
+          () =>
+            observe({
+              type: 'activity',
+              phase: 'working',
+              label: 'still working',
+              at: new Date().toISOString(),
+            }),
+          30_000,
+        );
+        return new Promise<never>(() => undefined);
+      },
+      hardTimeoutMs: 30 * 60_000,
+      stop: async () => {
+        stops += 1;
+      },
+    });
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'hard_timeout' });
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    await rejected;
+    expect(stops).toBe(1);
+  });
+});
+
+describe('Mission workspace fingerprint', () => {
+  it('detects tracked and untracked content changes after a checkpoint', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'sprint-coder-mission-fingerprint-'));
+    cleanup.push(workspace);
+    writeFileSync(join(workspace, 'tracked.txt'), 'initial\n');
+    expect(spawnSync('git', ['-C', workspace, 'init']).status).toBe(0);
+    expect(spawnSync('git', ['-C', workspace, 'add', '.']).status).toBe(0);
+    expect(
+      spawnSync('git', [
+        '-C',
+        workspace,
+        '-c',
+        'user.name=Sprint Coder Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '-m',
+        'fixture',
+      ]).status,
+    ).toBe(0);
+    const checkpoint = captureGitWorkspaceFingerprint(workspace);
+
+    writeFileSync(join(workspace, 'tracked.txt'), 'changed\n');
+    expect(captureGitWorkspaceFingerprint(workspace)).not.toEqual(checkpoint);
+    writeFileSync(join(workspace, 'tracked.txt'), 'initial\n');
+    writeFileSync(join(workspace, 'untracked.txt'), 'one\n');
+    const firstUntracked = captureGitWorkspaceFingerprint(workspace);
+    writeFileSync(join(workspace, 'untracked.txt'), 'two\n');
+    expect(captureGitWorkspaceFingerprint(workspace)).not.toEqual(firstUntracked);
+  });
+});
+
 if (runsWithElectronAbi)
   describe('TeamCoordinator', () => {
+    it('never redelivers a timed-out Worker before its previous runtime stop is confirmed', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Confirmed timeout stop');
+      const runtime = new ConfirmedStopWorkerRuntime();
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        () => undefined,
+        () => new Date(),
+        20,
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'timeout worker',
+        objective: 'prove serial retry',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'wait forever',
+        doneCriteria: ['must time out'],
+      });
+
+      await waitFor(() => runtime.pendingStopCount() === 1);
+      expect(runtime.executeCount).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(runtime.executeCount).toBe(1);
+
+      runtime.acknowledgeNextStop();
+      await waitFor(() => runtime.executeCount === 2);
+      await waitFor(() => runtime.pendingStopCount() === 1);
+      runtime.acknowledgeNextStop();
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+
+      expect(runtime.maxActiveExecutions).toBe(1);
+      expect(runtime.stopCount).toBe(2);
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { ordinal: 1, state: 'failed', startReason: 'initial' },
+        { ordinal: 2, state: 'failed', startReason: 'automatic_retry' },
+      ]);
+      persistence.close();
+    });
+
+    it('runs Mission steps sequentially and checkpoints before starting the next step', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Sequential Mission');
+      const runtime = new BlockingWorkerRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const firstWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reader',
+        objective: 'inspect',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const secondWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'implement',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+
+      const assigned = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'inspect then implement',
+        doneCriteria: ['both steps complete'],
+        steps: [
+          {
+            workerId: firstWorker.id,
+            objective: 'inspect the workspace',
+            doneCriteria: ['inspection reported'],
+            access: 'read-only',
+          },
+          {
+            workerId: secondWorker.id,
+            objective: 'implement the change',
+            doneCriteria: ['change verified'],
+            access: 'workspace-write',
+          },
+        ],
+      });
+
+      await waitFor(() => runtime.contents.length === 1);
+      let mission = persistence.getTeamMission(assigned.id);
+      expect(
+        mission.steps.map(({ executionId }) => persistence.getTeamExecution(executionId).state),
+      ).toEqual(['running', 'assigned']);
+
+      runtime.releases.shift()?.();
+      await waitFor(() => runtime.contents.length === 2);
+      mission = persistence.getTeamMission(assigned.id);
+      expect(mission.steps[0]?.checkpoint).toMatchObject({
+        summary: expect.stringContaining('inspect the workspace'),
+      });
+      expect(persistence.getTeamExecution(mission.steps[0]!.executionId).state).toBe('completed');
+      expect(persistence.getTeamExecution(mission.steps[1]!.executionId).state).toBe('running');
+
+      runtime.releases.shift()?.();
+      await waitFor(() => persistence.getTeamMission(assigned.id).state === 'completed', 5_000);
+      mission = persistence.getTeamMission(assigned.id);
+      expect(mission.steps.every(({ checkpoint }) => checkpoint !== null)).toBe(true);
+      expect(
+        mission.steps.map(({ executionId }) => persistence.listTeamAttempts(executionId)),
+      ).toMatchObject([
+        [{ ordinal: 1, state: 'completed', startReason: 'initial' }],
+        [{ ordinal: 1, state: 'completed', startReason: 'initial' }],
+      ]);
+      expect(persistence.checkTeamIntegrity()).toEqual({
+        sqlite: 'ok',
+        inconsistencies: [],
+      });
+      persistence.close();
+    });
+
+    it('runs a write step in an isolated worktree and integrates one clean commit', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Isolated writable Mission');
+      const runtime = new WorktreeWritingRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write in isolation',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const reader = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reviewer',
+        objective: 'verify integrated output',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+
+      const assigned = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'write then verify',
+        doneCriteria: ['integrated output is available'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'perform isolated write',
+            doneCriteria: ['worker-output.txt exists'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: reader.id,
+            objective: 'verify integrated output',
+            doneCriteria: ['integrated output inspected'],
+            access: 'read-only',
+          },
+        ],
+      });
+
+      await waitFor(
+        () =>
+          ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
+            persistence.getTeamMission(assigned.id).state,
+          ),
+        5_000,
+      );
+
+      const mission = persistence.getTeamMission(assigned.id);
+      const writeWorktree = persistence.getTeamMissionWorktree(mission.steps[0]!.executionId);
+      const isolatedState = {
+        missionState: mission.state,
+        executionStates: mission.steps.map(
+          ({ executionId }) => persistence.getTeamExecution(executionId).state,
+        ),
+        worktree: writeWorktree,
+        checkpoint: mission.steps[0]?.checkpoint,
+        currentFingerprint: captureGitWorkspaceFingerprint(workspace),
+        runtimeWorkspacePaths: runtime.workspacePaths,
+        secondAttempts: persistence.listTeamAttempts(mission.steps[1]!.executionId),
+        secondTask: persistence.getTeamTask(
+          persistence.getTeamExecutionDispatch(mission.steps[1]!.executionId).teamTaskId,
+        ),
+      };
+      expect(mission.state, JSON.stringify(isolatedState, null, 2)).toBe('completed');
+      expect(isolatedState.executionStates).toEqual(['completed', 'completed']);
+      expect(runtime.workspacePaths[0]).not.toBe(workspace);
+      expect(runtime.workspacePaths[1]).toBeUndefined();
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      expect(
+        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
+      ).toBe('');
+      expect(
+        spawnSync('git', ['-C', workspace, 'log', '-1', '--pretty=%s'], {
+          encoding: 'utf8',
+        }).stdout,
+      ).toContain(`Sprint Coder Mission ${assigned.id} step 1`);
+      expect(writeWorktree).toMatchObject({
+        state: 'cleaned',
+        changedFiles: ['worker-output.txt'],
+      });
+      expect(existsSync(writeWorktree!.path)).toBe(false);
+      expect(coordinator.get(task.id)?.missions[0]?.steps[0]?.worktree).toMatchObject({
+        state: 'cleaned',
+        changedFiles: ['worker-output.txt'],
+      });
+      persistence.close();
+    });
+
+    it('quarantines a failed write result and integrates it only after manual resume', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Failed writable Mission');
+      const runtime = new WorktreeWritingRuntime();
+      runtime.completionStatus = 'failed';
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'preserve failed partial work',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'write safely',
+        doneCriteria: ['output integrated after successful resume'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'perform isolated write',
+            doneCriteria: ['worker-output.txt exists'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: writer.id,
+            objective: 'verify integrated write',
+            doneCriteria: ['worker-output.txt is integrated'],
+            access: 'read-only',
+          },
+        ],
+      });
+
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+
+      const executionId = mission.steps[0]!.executionId;
+      const quarantined = persistence.getTeamMissionWorktree(executionId);
+      expect(persistence.getTeamExecution(executionId).state).toBe('waiting_resume');
+      expect(persistence.listTeamAttempts(executionId)).toMatchObject([
+        {
+          ordinal: 1,
+          state: 'failed',
+          terminalReason: 'worker_reported_failure',
+        },
+      ]);
+      expect(quarantined).toMatchObject({
+        state: 'quarantined',
+        changedFiles: ['worker-output.txt'],
+        reason: expect.stringContaining('Worker reported failure before integration'),
+      });
+      expect(readFileSync(join(quarantined!.path, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      expect(existsSync(join(workspace, 'worker-output.txt'))).toBe(false);
+      expect(
+        spawnSync('git', ['-C', workspace, 'log', '-1', '--pretty=%s'], {
+          encoding: 'utf8',
+        }).stdout,
+      ).toBe('base\n');
+
+      runtime.completionStatus = 'succeeded';
+      await coordinator.resumeMission(task.id, mission.id);
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 5_000);
+
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      expect(persistence.listTeamAttempts(executionId)).toMatchObject([
+        { ordinal: 1, state: 'failed', terminalReason: 'worker_reported_failure' },
+        { ordinal: 2, state: 'completed', startReason: 'manual_resume' },
+      ]);
+      expect(persistence.getTeamMissionWorktree(executionId)).toMatchObject({
+        state: 'cleaned',
+        changedFiles: ['worker-output.txt'],
+      });
+      expect(
+        spawnSync('git', ['-C', workspace, 'rev-list', '--count', 'HEAD'], {
+          encoding: 'utf8',
+        }).stdout.trim(),
+      ).toBe('2');
+      persistence.close();
+    });
+
+    it('preserves both sides and waits for resume when the primary workspace changes', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Conflicting writable Mission');
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const runtime = new ConflictingWorktreeRuntime(workspace);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write in isolation',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'conflict safely',
+        doneCriteria: ['no changes are lost'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'write while outside changes',
+            doneCriteria: ['worker result preserved'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: writer.id,
+            objective: 'verify after resume',
+            doneCriteria: ['conflict resolved'],
+            access: 'read-only',
+          },
+        ],
+      });
+
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+
+      const worktree = persistence.getTeamMissionWorktree(mission.steps[0]!.executionId);
+      expect(readFileSync(join(workspace, 'outside.txt'), 'utf8')).toBe('external change\n');
+      expect(worktree).toMatchObject({
+        state: 'quarantined',
+        changedFiles: ['worker-only.txt'],
+        reason: expect.stringContaining('Workspace has changes'),
+      });
+      expect(readFileSync(join(worktree!.path, 'worker-only.txt'), 'utf8')).toBe(
+        'preserve worker result\n',
+      );
+      expect(
+        spawnSync('git', ['-C', workspace, 'log', '-1', '--pretty=%s'], {
+          encoding: 'utf8',
+        }).stdout,
+      ).toBe('base\n');
+      persistence.close();
+    });
+
+    it('resumes idempotently when the app stops after Git integration but before checkpointing', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Crash-safe writable Mission');
+      const { workspace, worktreesRoot, manager } = configureGitWorkspace(persistence, task.id);
+      const firstRuntime = new WorktreeWritingRuntime();
+      const crashingManager = new CrashAfterIntegrationManager({ worktreesRoot });
+      const firstCoordinator = coordinatorWithWorktrees(persistence, firstRuntime, crashingManager);
+      const writer = await firstCoordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write in isolation',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const reader = await firstCoordinator.hireWorker({
+        taskId: task.id,
+        role: 'reviewer',
+        objective: 'verify integrated output',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const mission = await firstCoordinator.assignMission({
+        taskId: task.id,
+        objective: 'survive integration crash',
+        doneCriteria: ['exactly one integrated change'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'perform isolated write',
+            doneCriteria: ['worker-output.txt exists'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: reader.id,
+            objective: 'verify integrated output',
+            doneCriteria: ['integrated output inspected'],
+            access: 'read-only',
+          },
+        ],
+      });
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      expect(persistence.getTeamMissionWorktree(mission.steps[0]!.executionId)).toMatchObject({
+        state: 'quarantined',
+        integratedHead: null,
+        reason: 'simulated app crash after Git integration',
+      });
+
+      const resumedRuntime = new WorktreeWritingRuntime();
+      const resumedCoordinator = coordinatorWithWorktrees(persistence, resumedRuntime, manager);
+      resumedCoordinator.recoverOnStartup();
+      await resumedCoordinator.resumeMission(task.id, mission.id);
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 5_000);
+
+      expect(
+        spawnSync('git', ['-C', workspace, 'rev-list', '--count', 'HEAD'], {
+          encoding: 'utf8',
+        }).stdout.trim(),
+      ).toBe('2');
+      expect(
+        persistence
+          .listTeamAttempts(mission.steps[0]!.executionId)
+          .map(({ startReason, state }) => ({
+            startReason,
+            state,
+          })),
+      ).toEqual([
+        { startReason: 'initial', state: 'failed' },
+        { startReason: 'manual_resume', state: 'completed' },
+      ]);
+      expect(persistence.checkTeamIntegrity()).toEqual({ sqlite: 'ok', inconsistencies: [] });
+      persistence.close();
+    });
+
+    it('keeps a failed write step for manual resume and creates a fresh manual Attempt', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Writable Mission resume');
+      const runtime = new FailOnceWorkerRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'implement safely',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'write then verify',
+        doneCriteria: ['mission complete'],
+        steps: [
+          {
+            workerId: worker.id,
+            objective: 'make one bounded write',
+            doneCriteria: ['write verified'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: worker.id,
+            objective: 'verify without writing',
+            doneCriteria: ['verification reported'],
+            access: 'read-only',
+          },
+        ],
+      });
+
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+      const firstExecutionId = mission.steps[0]!.executionId;
+      expect(runtime.executeCount).toBe(1);
+      expect(persistence.getTeamExecution(firstExecutionId).state).toBe('waiting_resume');
+      expect(persistence.listTeamAttempts(firstExecutionId)).toMatchObject([
+        { ordinal: 1, state: 'failed', startReason: 'initial' },
+      ]);
+
+      await coordinator.resumeMission(task.id, mission.id);
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed');
+      expect(runtime.executeCount).toBe(3);
+      expect(runtime.contents[1]).toContain('前回の部分変更を最初に検査');
+      expect(persistence.listTeamAttempts(firstExecutionId)).toMatchObject([
+        { ordinal: 1, state: 'failed', startReason: 'initial' },
+        { ordinal: 2, state: 'completed', startReason: 'manual_resume' },
+      ]);
+      expect(persistence.checkTeamIntegrity()).toEqual({
+        sqlite: 'ok',
+        inconsistencies: [],
+      });
+      persistence.close();
+    });
+
+    it('pauses the next Mission step when the workspace changed after its checkpoint', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Mission fingerprint recovery');
+      const workspace = mkdtempSync(join(tmpdir(), 'sprint-coder-mission-recovery-'));
+      cleanup.push(workspace);
+      writeFileSync(join(workspace, 'tracked.txt'), 'checkpoint\n');
+      expect(spawnSync('git', ['-C', workspace, 'init']).status).toBe(0);
+      expect(spawnSync('git', ['-C', workspace, 'add', '.']).status).toBe(0);
+      expect(
+        spawnSync('git', [
+          '-C',
+          workspace,
+          '-c',
+          'user.name=Sprint Coder Test',
+          '-c',
+          'user.email=test@example.invalid',
+          'commit',
+          '-m',
+          'checkpoint',
+        ]).status,
+      ).toBe(0);
+      persistence.setWorkspace(task.id, workspace);
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'recovery worker',
+        objective: 'resume safely',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const team = persistence.getTeamByTask(task.id)!;
+      const leader = persistence.getTaskLeader(task.id);
+      const mission = persistence.createTeamMission({
+        teamId: team.id,
+        createdByAgentId: leader.id,
+        objective: 'checkpoint recovery',
+        doneCriteria: ['both steps complete'],
+        steps: [
+          {
+            workerId: worker.id,
+            objective: 'first',
+            doneCriteria: ['first done'],
+            access: 'read-only',
+          },
+          {
+            workerId: worker.id,
+            objective: 'second',
+            doneCriteria: ['second done'],
+            access: 'read-only',
+          },
+        ],
+        now: new Date().toISOString(),
+      });
+      persistence.transitionTeamMission(mission.id, 'running', new Date().toISOString());
+      const first = mission.steps[0]!;
+      persistence.transitionTeamExecution({
+        executionId: first.executionId,
+        to: 'queued',
+        now: new Date().toISOString(),
+        queueReason: 'global_concurrency',
+      });
+      persistence.transitionTeamExecution({
+        executionId: first.executionId,
+        to: 'running',
+        now: new Date().toISOString(),
+      });
+      const dispatch = persistence.getTeamExecutionDispatch(first.executionId);
+      persistence.transitionTeamTask(dispatch.teamTaskId, 'running', new Date().toISOString());
+      const attempt = persistence.createTeamAttempt(first.executionId, new Date().toISOString());
+      persistence.transitionTeamAttempt({
+        attemptId: attempt.id,
+        to: 'running',
+        now: new Date().toISOString(),
+      });
+      const fingerprint = captureGitWorkspaceFingerprint(workspace);
+      persistence.completeTeamMissionStep({
+        executionId: first.executionId,
+        attemptId: attempt.id,
+        teamTaskId: dispatch.teamTaskId,
+        agentId: worker.id,
+        report: {
+          status: 'completed',
+          summary: 'first complete',
+          findings: [],
+          changedFiles: [],
+          artifacts: [],
+          verification: [{ name: 'test', outcome: 'pass' }],
+          risks: [],
+          nextActions: [],
+          doneEvidence: [{ criterion: 'first done', evidence: 'verified' }],
+        },
+        doneEvidence: [{ criterion: 'first done', evidence: 'verified' }],
+        checkpoint: {
+          summary: 'first complete',
+          changedFiles: [],
+          ...fingerprint,
+          recordedAt: new Date().toISOString(),
+        },
+        now: new Date().toISOString(),
+      });
+
+      writeFileSync(join(workspace, 'tracked.txt'), 'externally changed\n');
+      new TeamCoordinator(persistence, new TestWorkerRuntime()).recoverOnStartup();
+      const secondExecutionId = mission.steps[1]!.executionId;
+      expect(persistence.getTeamExecution(secondExecutionId).state).toBe('waiting_resume');
+      expect(persistence.getTeamMission(mission.id).state).toBe('waiting_resume');
+      expect(persistence.listTeamAttempts(secondExecutionId)).toHaveLength(0);
+      persistence.close();
+    });
     it('updates Team Policy with optimistic revision and publishes canonical detail', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Team Policy');
@@ -1107,8 +1960,10 @@ if (runsWithElectronAbi)
       });
 
       await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
-      const attempt = persistence.listTeamAttempts(submission.executionId)[0];
+      const attempts = persistence.listTeamAttempts(submission.executionId);
+      const attempt = attempts.at(-1);
       const reports = coordinator.listWorkerReports(task.id, 0);
+      expect(attempts).toHaveLength(2);
       expect(attempt).toMatchObject({ state: 'failed', terminalReason: 'runtime_failure' });
       expect(reports).toHaveLength(1);
       expect(reports[0]).toMatchObject({

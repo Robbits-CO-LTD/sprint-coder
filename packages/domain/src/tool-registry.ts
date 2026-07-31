@@ -250,7 +250,9 @@ export function toolValueMatchesSchema(schema: JsonValue, value: unknown): boole
     if (!Array.isArray(value)) return false;
     const items = record['items'];
     const minItems = record['minItems'];
+    const maxItems = record['maxItems'];
     if (typeof minItems === 'number' && value.length < minItems) return false;
+    if (typeof maxItems === 'number' && value.length > maxItems) return false;
     return items === undefined || value.every((item) => toolValueMatchesSchema(items, item));
   }
   if (
@@ -540,6 +542,7 @@ function validateSupportedSchema(schema: JsonValue, label: string): void {
     'additionalProperties',
     'items',
     'minItems',
+    'maxItems',
     'enum',
     'const',
     'minimum',
@@ -598,16 +601,21 @@ function validateSupportedSchema(schema: JsonValue, label: string): void {
   }
   if (record['type'] === 'array') {
     const minItems = record['minItems'];
+    const maxItems = record['maxItems'];
     if (record['items'] === undefined)
       throw new Error(`Invalid ${label}: array items are required`);
     if (
-      minItems !== undefined &&
-      (typeof minItems !== 'number' || !Number.isSafeInteger(minItems) || minItems < 0)
+      [minItems, maxItems].some(
+        (bound) =>
+          bound !== undefined &&
+          (typeof bound !== 'number' || !Number.isSafeInteger(bound) || bound < 0),
+      ) ||
+      (typeof minItems === 'number' && typeof maxItems === 'number' && minItems > maxItems)
     )
       throw new Error(`Invalid ${label}: malformed array schema`);
     validateSupportedSchema(record['items'], label);
-  } else if (record['minItems'] !== undefined) {
-    throw new Error(`Invalid ${label}: minItems requires an array schema`);
+  } else if (record['minItems'] !== undefined || record['maxItems'] !== undefined) {
+    throw new Error(`Invalid ${label}: item bounds require an array schema`);
   }
   if (record['allOf'] !== undefined) {
     if (!Array.isArray(record['allOf']) || record['allOf'].length < 1)

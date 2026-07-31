@@ -1,4 +1,4 @@
-import type { TeamExecutionSummary } from '../types/sprint-coder';
+import type { TeamExecutionSummary, TeamMissionWorktreeSummary } from '../types/sprint-coder';
 import { describeExecution } from '../lib/team-execution-display';
 
 /**
@@ -17,9 +17,11 @@ import { describeExecution } from '../lib/team-execution-display';
 export function TeamExecutionStatus({
   execution,
   variant,
+  onResume,
 }: {
   execution: TeamExecutionSummary | null;
   variant: 'canvas' | 'list';
+  onResume?: (() => void) | undefined;
 }) {
   if (execution === null) return null;
   const display = describeExecution(execution);
@@ -40,6 +42,47 @@ export function TeamExecutionStatus({
         <span className="team-exec-key">実行状態</span>
         <span className="team-exec-value">{display.stateLabel}</span>
       </p>
+      {display.attemptReasonLabel !== null && (
+        <p className="team-exec-row" data-testid="team-execution-attempt-reason">
+          <span className="team-exec-key">開始理由</span>
+          <span className="team-exec-value">{display.attemptReasonLabel}</span>
+        </p>
+      )}
+      {display.progressLabel !== null && (
+        <p className="team-exec-row" data-testid="team-execution-progress">
+          <span className="team-exec-key">最終進捗</span>
+          <span className="team-exec-value">{display.progressLabel}</span>
+        </p>
+      )}
+      {display.terminalReasonLabel !== null && (
+        <p className="team-exec-row" data-testid="team-execution-terminal-reason">
+          <span className="team-exec-key">終了理由</span>
+          <span className="team-exec-value">{display.terminalReasonLabel}</span>
+        </p>
+      )}
+      {execution.state === 'waiting_resume' &&
+        execution.missionId !== null &&
+        onResume !== undefined && (
+          <button
+            type="button"
+            className="w-stop-btn"
+            data-testid="team-mission-resume"
+            onClick={onResume}
+          >
+            Missionを再開
+          </button>
+        )}
+      {execution.worktree !== null && (
+        <p className="team-exec-row" data-testid="team-execution-worktree">
+          <span className="team-exec-key">Worktree</span>
+          <span className="team-exec-value">
+            {worktreeStateLabel(execution.worktree.state)}
+            {execution.worktree.changedFiles.length > 0 &&
+              ` · 変更${execution.worktree.changedFiles.length}件`}
+            {execution.worktree.reason !== null && ` · ${execution.worktree.reason}`}
+          </span>
+        </p>
+      )}
       {display.isWaiting && (
         <p className="team-exec-row team-exec-wait" data-testid="team-execution-wait">
           <span className="team-exec-key">待機理由</span>
@@ -67,4 +110,21 @@ export function TeamExecutionStatus({
       </p>
     </div>
   );
+}
+
+function worktreeStateLabel(state: TeamMissionWorktreeSummary['state']): string {
+  switch (state) {
+    case 'created':
+      return '分離環境を準備済み';
+    case 'active':
+      return '分離環境で実行中';
+    case 'ready':
+      return '統合待ち';
+    case 'integrated':
+      return 'Workspaceへ統合済み';
+    case 'cleaned':
+      return '統合・片付け済み';
+    case 'quarantined':
+      return '変更を保持して再開待ち';
+  }
 }
