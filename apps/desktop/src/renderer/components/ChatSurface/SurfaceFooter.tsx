@@ -1,15 +1,14 @@
 import { useAppStore } from '../../store/appStore';
-import { Check, Circle, TriangleAlert, X } from './../icons';
+import { TriangleAlert, X } from './../icons';
 import { RUNTIME_LABEL } from '../../lib/runtime-labels';
 import type { DatabaseRecovery, RuntimeStatus } from '../../types/sprint-coder';
 
 // SurfaceFooter (issue #9): the fifth ChatSurface element from docs §4.2, the only one that was
 // never built — recovery, connection, background activity.
 //
-// Answering the issue's own open question ("常設1行に収めるか、異常時のみ出現させるか"): one always-
-// present slim row for connection, and additional rows only when there is something abnormal to
-// say. A permanently-visible "0 件" or "正常" for every slot would spend a line of the conversation
-// column on nothing, which is the opposite of "常時うるさく主張せず、異常時・復元時にだけ存在感が出る".
+// Answering the issue's own open question ("常設1行に収めるか、異常時のみ出現させるか"):
+// show the footer only when there is something abnormal to say. Idle and running state are already
+// evident from the Composer and Timeline, so repeating them below the Composer adds noise.
 //
 // Shown in both variants (main Chat and the Canvas Leader node), like SurfaceHeader — a Runtime that
 // died is exactly as relevant inside the Canvas, where the Run Card is out of view. The node variant
@@ -29,25 +28,23 @@ export function describeRecovery(recovery: DatabaseRecovery | null): string | nu
   return parts.length === 0 ? null : parts.join(' / ');
 }
 
-/** The connection line. Always present, so it has to read sanely in the ordinary case too. */
+/** A connection failure worth surfacing, or null for ordinary idle/running states. */
 export function describeConnection(
   status: RuntimeStatus | null,
   fallbackKind: RuntimeStatus['kind'],
-): { tone: 'idle' | 'running' | 'failed'; text: string } {
+): { tone: 'failed'; text: string } | null {
+  if (status?.state !== 'failed') return null;
   const kind = status?.kind ?? fallbackKind;
   const label = RUNTIME_LABEL[kind];
-  if (status?.state === 'failed')
-    return {
-      tone: 'failed',
-      // The reason was previously discarded in main, so this line could only ever have said
-      // "something failed" — now it can say which thing.
-      text:
-        status.userMessage === null
-          ? `${label}: 接続が失われました`
-          : `${label}: ${status.userMessage}`,
-    };
-  if (status?.state === 'running') return { tone: 'running', text: `${label}: 実行中` };
-  return { tone: 'idle', text: `${label}: 待機中` };
+  return {
+    tone: 'failed',
+    // The reason was previously discarded in main, so this line could only ever have said
+    // "something failed" — now it can say which thing.
+    text:
+      status.userMessage === null
+        ? `${label}: 接続が失われました`
+        : `${label}: ${status.userMessage}`,
+  };
 }
 
 export function SurfaceFooter({ variant = 'main' }: { variant?: 'main' | 'node' }) {
@@ -59,6 +56,8 @@ export function SurfaceFooter({ variant = 'main' }: { variant?: 'main' | 'node' 
 
   const recoveryText = recoveryAcknowledged ? null : describeRecovery(recovery);
   const connection = describeConnection(runtimeStatus, runtimeKind);
+
+  if (recoveryText === null && connection === null) return null;
 
   return (
     <div
@@ -80,23 +79,14 @@ export function SurfaceFooter({ variant = 'main' }: { variant?: 'main' | 'node' 
           </button>
         </div>
       )}
-      <div className="sf-row" data-testid="surface-footer-connection" data-tone={connection.tone}>
-        <span className={`sf-dot sf-dot--${connection.tone}`} aria-hidden="true">
-          {connection.tone === 'failed' ? (
+      {connection !== null && (
+        <div className="sf-row" data-testid="surface-footer-connection" data-tone={connection.tone}>
+          <span className="sf-dot sf-dot--failed" aria-hidden="true">
             <X size={11} />
-          ) : connection.tone === 'running' ? (
-            <Circle size={9} />
-          ) : (
-            <Check size={11} />
-          )}
-        </span>
-        <span className="sf-text">{connection.text}</span>
-        {/* Background activity would sit here. Deliberately not rendered: `background_activities`
-            has a domain model and persistence, but nothing in the running app ever creates one
-            (verified — the only callers of createBackgroundActivity are persistence.ts itself and
-            its tests), so a slot for it could only ever display a hardcoded zero. It gets a row
-            once a producer exists, not before. */}
-      </div>
+          </span>
+          <span className="sf-text">{connection.text}</span>
+        </div>
+      )}
     </div>
   );
 }

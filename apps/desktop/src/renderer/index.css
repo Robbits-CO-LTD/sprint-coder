@@ -191,7 +191,7 @@ button {
 }
 
 /* macOS keeps its native traffic lights, while the rest of the title bar belongs to the product.
-   The region is intentionally quiet: a compact product mark, graphite chrome and one hairline
+   The region is intentionally quiet: the product name, graphite chrome and one hairline
    before the task/navigation layer begins. */
 .app-titlebar {
   position: relative;
@@ -220,19 +220,7 @@ button {
   pointer-events: none;
 }
 .app-titlebar-name {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
   opacity: 0.94;
-}
-.app-titlebar-name::before {
-  width: 9px;
-  height: 9px;
-  border: 1px solid var(--accent-line);
-  border-radius: 3px;
-  background: var(--accent-wash-strong);
-  box-shadow: inset 0 0 0 2px var(--bg-sidebar);
-  content: '';
 }
 
 .app-shell {
@@ -1775,10 +1763,19 @@ button {
   margin: 0 auto;
 }
 .context-bar {
+  position: relative;
+  z-index: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 5px 8px;
+  min-height: 40px;
+  margin: 0 16px -7px;
+  padding: 7px 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-bottom: 0;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-elevated));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
   font-size: 11.5px;
   color: var(--text-secondary);
   flex-wrap: wrap;
@@ -1792,10 +1789,18 @@ button {
   border: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
 }
+.context-bar .ctx-chip {
+  padding-inline: 7px;
+  border-color: transparent;
+  background: transparent;
+}
 /* A pressable context chip keeps the same surface as a static one — the difference between them is
    the hover, not a permanently brighter fill. */
 .ctx-chip.chip-btn {
   background: var(--bg-panel);
+}
+.context-bar .ctx-chip.chip-btn {
+  background: transparent;
 }
 .ctx-chip.chip-btn:hover {
   background: var(--bg-hover);
@@ -1985,9 +1990,10 @@ button.composer-permission-chip[aria-expanded='true'] {
    whole box instead of just recolouring one hairline. */
 .composer {
   position: relative;
+  z-index: 1;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
-  border-radius: 10px;
+  border-radius: var(--r-lg);
   padding: 12px 13px 10px;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.025),
@@ -3957,9 +3963,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   min-width: 0;
 }
 /* ---------- SurfaceFooter (issue #9) ----------
-   The fifth §4.2 element. Quiet by default: one slim row stating the connection, plus extra rows
-   only when something abnormal happened. Sized so the ordinary case costs the conversation column
-   as little vertical space as a chip row. */
+   The fifth §4.2 element. Only appears for recovery notices and connection failures. */
 .surface-footer {
   flex: none;
   display: flex;
