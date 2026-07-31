@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectSummary, TaskSummary } from '../types/sprint-coder';
-import { projectSidebarProjection } from './project-sidebar';
+import { projectSidebarProjection, taskFallbackProjection } from './project-sidebar';
 
 const project = (overrides: Partial<ProjectSummary> = {}): ProjectSummary => ({
   id: 'project-a',
@@ -94,5 +94,25 @@ describe('projectSidebarProjection', () => {
       forceExpanded: true,
       forceArchivedExpanded: true,
     });
+  });
+});
+
+describe('taskFallbackProjection', () => {
+  it('keeps Project-owned Tasks navigable without calling them unassigned', () => {
+    const projectTask = task({
+      id: 'project-task',
+      projectId: 'project-a',
+      hasConversation: false,
+    });
+    const emptyUnassigned = task({ id: 'empty-unassigned', hasConversation: false });
+    const result = taskFallbackProjection([projectTask, emptyUnassigned], '', null);
+    expect(result.tasks.map(({ id }) => id)).toEqual(['project-task']);
+  });
+
+  it('preserves task search and selected archived disclosure', () => {
+    const archived = task({ id: 'archived', archived: true, title: 'Needle' });
+    const result = taskFallbackProjection([archived], 'needle', 'archived');
+    expect(result.archivedTasks).toEqual([archived]);
+    expect(result.forceArchivedExpanded).toBe(true);
   });
 });

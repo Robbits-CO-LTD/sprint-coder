@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { projectSidebarProjection, type ProjectSidebarGroup } from '../lib/project-sidebar';
+import {
+  projectSidebarProjection,
+  taskFallbackProjection,
+  type ProjectSidebarGroup,
+} from '../lib/project-sidebar';
 import {
   Archive,
   ArchiveRestore,
@@ -78,6 +82,10 @@ export function Sidebar({
   const projection = useMemo(
     () => projectSidebarProjection(projects, tasks, query, selectedTaskId),
     [projects, tasks, query, selectedTaskId],
+  );
+  const fallbackProjection = useMemo(
+    () => taskFallbackProjection(tasks, query, selectedTaskId),
+    [tasks, query, selectedTaskId],
   );
 
   useEffect(() => {
@@ -198,6 +206,7 @@ export function Sidebar({
   };
 
   const initialProjectFailure = projectLoadState === 'loading' || projectLoadState === 'error';
+  const showFallbackTasks = initialProjectFailure || projectLoadState === 'unavailable';
   const canManageProjects = projectLoadState !== 'unavailable' && !initialProjectFailure;
   const hasAnything =
     projection.activeProjects.length > 0 ||
@@ -208,6 +217,7 @@ export function Sidebar({
     selectedTaskId,
     onSelect: (taskId: string) => void selectTask(taskId),
     canManage: typeof window.sprintCoder?.tasks?.setPinned === 'function',
+    canMove: canManageProjects,
     activeProjects: projects.filter((project) => !project.archived),
     onMove: (task: TaskSummary) => openDialog({ kind: 'move-task', task }),
     onTogglePin: (task: TaskSummary) => void setPinned(task.id, !task.pinned),
@@ -268,20 +278,50 @@ export function Sidebar({
             </button>
           </div>
         )}
-        {initialProjectFailure ? (
-          <div className="sb-status" role={projectLoadState === 'error' ? 'alert' : 'status'}>
-            {projectLoadState === 'loading' ? (
-              'Projectを読み込み中…'
-            ) : (
-              <>
-                Projectを読み込めませんでした。
-                {projectLoadError && <span className="sr-only">{projectLoadError}</span>}
-                <button type="button" onClick={() => void refreshProjects()}>
-                  再試行
-                </button>
-              </>
+        {showFallbackTasks ? (
+          <>
+            {initialProjectFailure && (
+              <div className="sb-status" role={projectLoadState === 'error' ? 'alert' : 'status'}>
+                {projectLoadState === 'loading' ? (
+                  'Projectを読み込み中…'
+                ) : (
+                  <>
+                    Projectを読み込めませんでした。
+                    {projectLoadError && <span className="sr-only">{projectLoadError}</span>}
+                    <button type="button" onClick={() => void refreshProjects()}>
+                      再試行
+                    </button>
+                  </>
+                )}
+              </div>
             )}
-          </div>
+            {(fallbackProjection.tasks.length > 0 ||
+              fallbackProjection.archivedTasks.length > 0) && (
+              <section aria-labelledby="fallback-tasks-heading">
+                <div className="sb-section" id="fallback-tasks-heading">
+                  Tasks
+                </div>
+                {fallbackProjection.tasks.map((task) => (
+                  <TaskRow key={task.id} task={task} {...rowProps} />
+                ))}
+                <ArchivedTasks
+                  tasks={fallbackProjection.archivedTasks}
+                  expanded={
+                    archivedTaskGroups.has('fallback') || fallbackProjection.forceArchivedExpanded
+                  }
+                  onToggle={() =>
+                    setArchivedTaskGroups((current) => {
+                      const next = new Set(current);
+                      if (next.has('fallback')) next.delete('fallback');
+                      else next.add('fallback');
+                      return next;
+                    })
+                  }
+                  {...rowProps}
+                />
+              </section>
+            )}
+          </>
         ) : !hasAnything ? (
           <div className="sb-empty">Taskはまだありません</div>
         ) : (
@@ -465,6 +505,7 @@ type RowProps = {
   selectedTaskId: string | null;
   onSelect: (taskId: string) => void;
   canManage: boolean;
+  canMove: boolean;
   activeProjects: ProjectSummary[];
   onMove: (task: TaskSummary) => void;
   onTogglePin: (task: TaskSummary) => void;
@@ -563,6 +604,7 @@ function TaskRow({
   selectedTaskId,
   onSelect,
   canManage,
+  canMove,
   activeProjects,
   onMove,
   onTogglePin,
@@ -596,7 +638,7 @@ function TaskRow({
               {task.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
               {task.archived ? '復元' : 'アーカイブ'}
             </button>
-            {(task.projectId !== null || activeProjects.length > 0) && (
+            {canMove && (task.projectId !== null || activeProjects.length > 0) && (
               <button onClick={() => onMove(task)}>Projectを移動</button>
             )}
           </div>

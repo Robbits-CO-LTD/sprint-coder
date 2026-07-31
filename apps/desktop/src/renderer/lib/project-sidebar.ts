@@ -17,6 +17,12 @@ export type ProjectSidebarProjection = {
   forceArchivedProjectsExpanded: boolean;
 };
 
+export type TaskFallbackProjection = {
+  tasks: TaskSummary[];
+  archivedTasks: TaskSummary[];
+  forceArchivedExpanded: boolean;
+};
+
 function byTaskOrder(a: TaskSummary, b: TaskSummary): number {
   if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
   if (a.updatedAt !== b.updatedAt) return a.updatedAt > b.updatedAt ? -1 : 1;
@@ -30,6 +36,32 @@ function byProjectOrder(a: ProjectSummary, b: ProjectSummary): number {
 
 function normalized(value: string): string {
   return value.trim().toLocaleLowerCase();
+}
+
+/** Task navigation used while Project metadata is unavailable. It deliberately has no
+ * "Projectなし" label: membership is not being inferred from a failed Project request. */
+export function taskFallbackProjection(
+  tasks: readonly TaskSummary[],
+  query: string,
+  selectedTaskId: string | null,
+): TaskFallbackProjection {
+  const q = normalized(query);
+  const visible = tasks.filter(
+    (task) =>
+      // Project-owned empty Tasks are intentional and remain navigable even before their Project
+      // name loads. Only the legacy unassigned scaffolding rule still hides an empty Task.
+      ((task.projectId !== null && task.projectId !== undefined) ||
+        task.hasConversation !== false ||
+        task.id === selectedTaskId) &&
+      (q === '' || normalized(task.title).includes(q) || task.id === selectedTaskId),
+  );
+  const active = visible.filter((task) => !task.archived).sort(byTaskOrder);
+  const archived = visible.filter((task) => task.archived).sort(byTaskOrder);
+  return {
+    tasks: active,
+    archivedTasks: archived,
+    forceArchivedExpanded: archived.some((task) => task.id === selectedTaskId || q !== ''),
+  };
 }
 
 /** Pure sidebar projection. Expansion preferences stay outside this function: search and the
