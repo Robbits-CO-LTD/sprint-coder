@@ -30,7 +30,7 @@ napi_value ThrowWindowsError(napi_env env, const char* operation) {
 bool ReadString(napi_env env, napi_value value, std::string* output) {
   size_t length = 0;
   if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok) return false;
-  std::string buffer(length, '\0');
+  std::string buffer(length + 1, '\0');
   if (napi_get_value_string_utf8(env, value, buffer.data(), length + 1, &length) != napi_ok)
     return false;
   buffer.resize(length);
