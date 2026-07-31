@@ -137,6 +137,8 @@ import {
   type PersistedFragment,
   type PreparedContext,
 } from './context-ledger';
+import { BUILTIN_TEAM_SKILL_CONTENT, BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
+import { isTeamScenarioInput } from './team-tools';
 import type { LiveState } from './context-reminder';
 import { deriveLiveState } from './live-state';
 import { redactSecrets } from './secret-redactor';
@@ -319,6 +321,8 @@ type ProjectRow = {
   name: string;
   archived: number;
   revision: number;
+  instruction: string;
+  context_epoch: number;
   task_count: number;
   last_activity_at: string;
   created_at: string;
@@ -627,7 +631,49 @@ type TurnRow = {
   provider_usage_json: string | null;
   created_at: string;
 };
-type QueueRow = { ordinal: number; payload_json: string };
+type QueueRow = {
+  ordinal: number;
+  operation_id: string;
+  payload_json: string;
+  payload_digest: string;
+};
+type ContextSealRow = {
+  id: string;
+  owner_type: ContextSealOwnerType;
+  owner_id: string;
+  task_id: string;
+  project_id: string | null;
+  project_revision: number | null;
+  project_context_epoch: number | null;
+  candidate_snapshot_digest: string;
+  sealed_digest: string;
+  compacted: number;
+  created_at: string;
+};
+type ContextSealFragmentRow = {
+  fragment_id: string;
+  source: ContextFragment['source'];
+  trust: ContextFragment['trust'];
+  token_estimate: number;
+  content: string;
+  created_at: string;
+  message_id: string | null;
+};
+type ProjectContextManifestItemRow = {
+  item_id: string;
+  kind: ProjectContextManifestItem['kind'];
+  source_task_id: string | null;
+  source_turn_id: string | null;
+  source_reference_id: string | null;
+  candidate_digest: string;
+  sealed_digest: string | null;
+  included: number;
+  exclusion_reason: string | null;
+  authority: ProjectContextManifestItem['authority'];
+  local_only: number;
+  content: string | null;
+  captured_at: string;
+};
 type SkillBindingIdentityRow = {
   source: TurnSkillSelection['ref']['source'];
   skill_id: string;
@@ -2528,6 +2574,81 @@ const migrations = [
         ON tasks(project_id, pinned DESC, updated_at DESC, id);
     `,
   },
+  {
+    version: 56,
+    checksum: 'project-context-hub-v56-context-seals',
+    sql: `
+      ALTER TABLE projects ADD COLUMN instruction TEXT NOT NULL DEFAULT '';
+      ALTER TABLE projects ADD COLUMN context_epoch INTEGER NOT NULL DEFAULT 0
+        CHECK (context_epoch >= 0);
+
+      CREATE TABLE context_seals (
+        id TEXT PRIMARY KEY,
+        owner_type TEXT NOT NULL CHECK (owner_type IN ('turn', 'team_execution')),
+        owner_id TEXT NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+        project_revision INTEGER CHECK (project_revision IS NULL OR project_revision >= 1),
+        project_context_epoch INTEGER CHECK (
+          project_context_epoch IS NULL OR project_context_epoch >= 0
+        ),
+        candidate_snapshot_digest TEXT NOT NULL CHECK (length(candidate_snapshot_digest) = 64),
+        sealed_digest TEXT NOT NULL CHECK (length(sealed_digest) = 64),
+        compacted INTEGER NOT NULL CHECK (compacted IN (0, 1)),
+        created_at TEXT NOT NULL,
+        UNIQUE(owner_type, owner_id)
+      );
+      CREATE INDEX context_seals_task_created_idx
+        ON context_seals(task_id, created_at, id);
+      CREATE INDEX context_seals_project_epoch_idx
+        ON context_seals(project_id, project_context_epoch, created_at);
+
+      CREATE TABLE context_seal_fragments (
+        seal_id TEXT NOT NULL REFERENCES context_seals(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+        fragment_id TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (
+          source IN ('system', 'history', 'goal', 'compaction', 'background', 'skill')
+        ),
+        trust TEXT NOT NULL CHECK (trust IN ('system', 'user', 'assistant')),
+        token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        message_id TEXT,
+        PRIMARY KEY(seal_id, ordinal),
+        UNIQUE(seal_id, fragment_id)
+      );
+
+      CREATE TABLE project_context_manifest_items (
+        seal_id TEXT NOT NULL REFERENCES context_seals(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+        item_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('instruction', 'memory', 'reference')),
+        source_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        source_turn_id TEXT,
+        source_reference_id TEXT,
+        candidate_digest TEXT NOT NULL CHECK (length(candidate_digest) = 64),
+        sealed_digest TEXT CHECK (sealed_digest IS NULL OR length(sealed_digest) = 64),
+        included INTEGER NOT NULL CHECK (included IN (0, 1)),
+        exclusion_reason TEXT,
+        authority TEXT NOT NULL CHECK (authority IN ('user', 'none')),
+        local_only INTEGER NOT NULL CHECK (local_only IN (0, 1)),
+        content TEXT,
+        captured_at TEXT NOT NULL,
+        PRIMARY KEY(seal_id, ordinal),
+        UNIQUE(seal_id, item_id),
+        CHECK (
+          (included = 1 AND sealed_digest IS NOT NULL AND content IS NOT NULL
+            AND exclusion_reason IS NULL)
+          OR
+          (included = 0 AND sealed_digest IS NULL AND content IS NULL
+            AND exclusion_reason IS NOT NULL)
+        )
+      );
+
+      ALTER TABLE input_queue ADD COLUMN payload_digest TEXT NOT NULL DEFAULT '';
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2665,11 +2786,48 @@ export type StartedTurn = {
   modelSelection: ModelSelection;
   skills: PersistedTurnSkill[];
   event: TurnEvent;
+  sealId: string;
+  contextUsageEvents: TurnEvent[];
   /** Present only when this Turn's message triggered automatic naming (issue #4), so the caller
    * can push the new title to the renderer without a dedicated event. */
   renamedTask?: TaskSummary;
 };
 export type QueueTransition = { started: StartedTurn; queueEvent: TurnEvent } | null;
+export type StopAndSendTransition = {
+  canceledEvent: TurnEvent | null;
+  started: StartedTurn;
+};
+
+export type ContextSealOwnerType = 'turn' | 'team_execution';
+export type ProjectContextManifestItem = Readonly<{
+  itemId: string;
+  kind: 'instruction' | 'memory' | 'reference';
+  sourceTaskId: string | null;
+  sourceTurnId: string | null;
+  sourceReferenceId: string | null;
+  candidateDigest: string;
+  sealedDigest: string | null;
+  included: boolean;
+  exclusionReason: string | null;
+  authority: 'user' | 'none';
+  localOnly: boolean;
+  content: string | null;
+  capturedAt: string;
+}>;
+export type ContextSealManifest = Readonly<{
+  sealId: string;
+  ownerType: ContextSealOwnerType;
+  ownerId: string;
+  taskId: string;
+  projectId: string | null;
+  projectRevision: number | null;
+  projectContextEpoch: number | null;
+  candidateSnapshotDigest: string;
+  sealedDigest: string;
+  compacted: boolean;
+  createdAt: string;
+  items: readonly ProjectContextManifestItem[];
+}>;
 export type PersistedTurnSkill = Readonly<{
   selection: TurnSkillSelection;
   name: string;
@@ -2983,6 +3141,16 @@ export interface PersistenceClient {
     name?: string | undefined;
     archived?: boolean | undefined;
   }): ProjectSummary;
+  getProjectInstruction(projectId: string): {
+    instruction: string;
+    revision: number;
+    contextEpoch: number;
+  };
+  setProjectInstruction(input: {
+    projectId: string;
+    expectedRevision: number;
+    instruction: string;
+  }): { instruction: string; revision: number; contextEpoch: number };
   assignTaskToProject(input: {
     projectId: string;
     taskId: string;
@@ -3496,7 +3664,19 @@ export interface PersistenceClient {
   ): NativeMutationIntentSnapshot;
   listRecoverableNativeMutationIntents(): readonly NativeMutationIntentSnapshot[];
   listMessages(taskId: string): ChatMessage[];
-  startTurn(taskId: string, text: string, skills?: readonly PersistedTurnSkill[]): StartedTurn;
+  startTurn(
+    taskId: string,
+    text: string,
+    skills?: readonly PersistedTurnSkill[],
+    includeBuiltinTeamSkill?: boolean,
+  ): StartedTurn;
+  replaceActiveTurn(
+    taskId: string,
+    expectedActiveTurnId: string | null,
+    text: string,
+    skills?: readonly PersistedTurnSkill[],
+    includeBuiltinTeamSkill?: boolean,
+  ): StopAndSendTransition;
   getTurnSkills(taskId: string, turnId: string): PersistedTurnSkill[];
   recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent;
   getTurnModelIdentity(taskId: string, turnId: string): TurnModelIdentity;
@@ -3516,6 +3696,7 @@ export interface PersistenceClient {
     text: string,
     operationId: string,
     skills?: readonly PersistedTurnSkill[],
+    includeBuiltinTeamSkill?: boolean,
   ): { ordinal: number; event: TurnEvent };
   steerTurn(taskId: string, text: string, expectedTurnId: string): void;
   startNextQueued(taskId: string): QueueTransition;
@@ -3531,6 +3712,7 @@ export interface PersistenceClient {
   cancelTurn(taskId: string, turnId: string): TurnEvent | null;
   snapshot(taskId: string): TurnSnapshot;
   prepareContext(taskId: string, turnId: string): PreparedContext;
+  getContextSealManifest(ownerType: ContextSealOwnerType, ownerId: string): ContextSealManifest;
   createIntelligenceStep(input: {
     taskId: string;
     turnId: string;
@@ -4263,6 +4445,57 @@ export class SqlitePersistenceClient implements PersistenceClient {
         );
       if (result.changes !== 1) throw new ProjectConflictError('Stale Project revision');
       return this.getProject(input.projectId);
+    })();
+  }
+
+  getProjectInstruction(projectId: string): {
+    instruction: string;
+    revision: number;
+    contextEpoch: number;
+  } {
+    const project = this.getProjectRow(projectId);
+    return {
+      instruction: project.instruction,
+      revision: project.revision,
+      contextEpoch: project.context_epoch,
+    };
+  }
+
+  setProjectInstruction(input: {
+    projectId: string;
+    expectedRevision: number;
+    instruction: string;
+  }): { instruction: string; revision: number; contextEpoch: number } {
+    if (
+      typeof input.instruction !== 'string' ||
+      Buffer.byteLength(input.instruction, 'utf8') > 16_384
+    )
+      throw new InvalidProjectError('Project instruction must not exceed 16 KiB');
+    const now = new Date().toISOString();
+    return this.db.transaction(() => {
+      const current = this.getProjectRow(input.projectId);
+      if (current.revision !== input.expectedRevision) throw new ProjectConflictError();
+      if (current.instruction === input.instruction)
+        return {
+          instruction: current.instruction,
+          revision: current.revision,
+          contextEpoch: current.context_epoch,
+        };
+      const changes = this.db
+        .prepare(
+          `UPDATE projects
+           SET instruction = ?, revision = revision + 1,
+               context_epoch = context_epoch + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(input.instruction, now, input.projectId, input.expectedRevision).changes;
+      if (changes !== 1) throw new ProjectConflictError();
+      const updated = this.getProjectRow(input.projectId);
+      return {
+        instruction: updated.instruction,
+        revision: updated.revision,
+        contextEpoch: updated.context_epoch,
+      };
     })();
   }
 
@@ -9616,12 +9849,36 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ).map(toMessage);
   }
 
-  startTurn(taskId: string, text: string, skills: readonly PersistedTurnSkill[] = []): StartedTurn {
+  startTurn(
+    taskId: string,
+    text: string,
+    skills: readonly PersistedTurnSkill[] = [],
+    includeBuiltinTeamSkill = false,
+  ): StartedTurn {
     return this.db.transaction(() => {
       this.assertTask(taskId);
       this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
-      return this.startTurnInTransaction(taskId, text, skills);
+      return this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
+    })();
+  }
+
+  replaceActiveTurn(
+    taskId: string,
+    expectedActiveTurnId: string | null,
+    text: string,
+    skills: readonly PersistedTurnSkill[] = [],
+    includeBuiltinTeamSkill = false,
+  ): StopAndSendTransition {
+    return this.db.transaction(() => {
+      this.assertTask(taskId);
+      this.assertTaskNotMutationQuarantined(taskId);
+      const activeTurnId = this.getActiveTurnId(taskId);
+      if (activeTurnId !== expectedActiveTurnId)
+        throw new Error('Active Turn changed before stop-and-send commit');
+      const canceledEvent = activeTurnId === null ? null : this.cancelTurn(taskId, activeTurnId);
+      const started = this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
+      return { canceledEvent, started };
     })();
   }
 
@@ -9705,12 +9962,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
     text: string,
     operationId: string,
     skills: readonly PersistedTurnSkill[] = [],
+    includeBuiltinTeamSkill = false,
   ): { ordinal: number; event: TurnEvent } {
     return this.db.transaction(() => {
       this.assertTask(taskId);
       if (typeof text !== 'string' || text.trim() === '' || text.length > 100_000)
         throw new Error('Queued input text is invalid');
       const parsedSkills = validatePersistedTurnSkills(skills);
+      const payloadJson = JSON.stringify({ text, skills: parsedSkills, includeBuiltinTeamSkill });
+      const payloadDigest = sha256(payloadJson);
       const row = this.db
         .prepare(
           'SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM input_queue WHERE task_id = ?',
@@ -9718,15 +9978,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .get(taskId) as { ordinal: number };
       this.db
         .prepare(
-          `INSERT INTO input_queue(task_id, ordinal, operation_id, mode, payload_json, state, created_at)
-        VALUES (?, ?, ?, 'queue', ?, 'queued', ?)`,
+          `INSERT INTO input_queue(
+            task_id, ordinal, operation_id, mode, payload_json, state, created_at, payload_digest
+          ) VALUES (?, ?, ?, 'queue', ?, 'queued', ?, ?)`,
         )
         .run(
           taskId,
           row.ordinal,
           operationId,
-          JSON.stringify({ text, skills: parsedSkills }),
+          payloadJson,
           new Date().toISOString(),
+          payloadDigest,
         );
       const event = this.queueChangedEvent(taskId);
       return { ordinal: row.ordinal, event };
@@ -9755,16 +10017,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (this.getActiveTurnId(taskId) !== null) return null;
       const row = this.db
         .prepare(
-          `SELECT ordinal, payload_json FROM input_queue
+          `SELECT ordinal, operation_id, payload_json, payload_digest FROM input_queue
         WHERE task_id = ? AND state = 'queued' ORDER BY ordinal LIMIT 1`,
         )
         .get(taskId) as QueueRow | undefined;
       if (row === undefined) return null;
+      const payloadDigest = sha256(row.payload_json);
+      if (row.payload_digest !== '' && !timingSafeDigestEqual(row.payload_digest, payloadDigest))
+        throw new Error('Queued input payload integrity check failed');
       const parsed = parseQueuedPayload(row.payload_json);
-      this.db
-        .prepare("UPDATE input_queue SET state = 'dequeued' WHERE task_id = ? AND ordinal = ?")
-        .run(taskId, row.ordinal);
-      const started = this.startTurnInTransaction(taskId, parsed.text, parsed.skills);
+      const started = this.startTurnInTransaction(
+        taskId,
+        parsed.text,
+        parsed.skills,
+        parsed.includeBuiltinTeamSkill,
+      );
+      const dequeued = this.db
+        .prepare(
+          `UPDATE input_queue SET state = 'dequeued', payload_digest = ?
+           WHERE task_id = ? AND ordinal = ? AND operation_id = ? AND state = 'queued'
+             AND (payload_digest = ? OR payload_digest = '')`,
+        )
+        .run(payloadDigest, taskId, row.ordinal, row.operation_id, row.payload_digest);
+      if (dequeued.changes !== 1)
+        throw new Error('Queued input changed before conditional dequeue');
       return { started, queueEvent: this.queueChangedEvent(taskId) };
     })();
   }
@@ -9901,36 +10177,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   prepareContext(taskId: string, turnId: string): PreparedContext {
     return this.db.transaction(() => {
-      const prepared = this.contextLedger.prepare(taskId, turnId);
-      const skillFragments: ContextFragment[] = this.getTurnSkills(taskId, turnId).map((skill) => {
-        const trust = skill.selection.ref.source === 'builtin' ? 'system' : 'user';
-        const id = `skill:${createHash('sha256')
-          .update(
-            `${skill.selection.ref.source}:${skill.selection.ref.skillId}:${skill.selection.ref.digest}`,
-          )
-          .digest('hex')}`;
-        return {
-          id,
-          taskId,
-          source: 'skill',
-          trust,
-          tokenEstimate: estimateTokens(skill.content),
-          content: skill.content,
-          createdAt: new Date().toISOString(),
-          messageId: null,
-        };
-      });
-      if (skillFragments.length === 0) return prepared;
-      const fragments = [...prepared.fragments, ...skillFragments];
-      return {
-        ...prepared,
-        fragments,
-        usageEvents: [
-          ...prepared.usageEvents,
-          this.recordContextUsage(taskId, turnId, aggregateContextUsage(fragments)),
-        ],
-      };
+      this.getTurn(taskId, turnId);
+      const existing = this.contextSealRow('turn', turnId);
+      if (existing !== undefined) return this.preparedContextFromSeal(existing);
+      // Compatibility for a Turn that was already active while a v55 database upgraded. New Turns
+      // are sealed inside startTurnInTransaction; this one-time path cannot recreate that past
+      // transaction boundary, but it still freezes the first post-upgrade observation permanently.
+      const prepared = this.assembleContextInTransaction(taskId, turnId);
+      this.createContextSealInTransaction('turn', turnId, taskId, prepared);
+      return { ...prepared, usageEvents: [] };
     })();
+  }
+
+  getContextSealManifest(ownerType: ContextSealOwnerType, ownerId: string): ContextSealManifest {
+    const row = this.contextSealRow(ownerType, ownerId);
+    if (row === undefined) throw new NotFoundError('Context seal not found');
+    return this.contextSealManifestFromRow(row);
   }
 
   createIntelligenceStep(input: {
@@ -10260,14 +10522,259 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.close();
   }
 
+  private assembleContextInTransaction(
+    taskId: string,
+    turnId: string,
+    includeBuiltinTeamSkill = false,
+  ): PreparedContext {
+    const prepared = this.contextLedger.prepare(taskId, turnId);
+    const skillFragments: ContextFragment[] = this.getTurnSkills(taskId, turnId).map((skill) => {
+      const trust = skill.selection.ref.source === 'builtin' ? 'system' : 'user';
+      const id = `skill:${sha256(
+        `${skill.selection.ref.source}:${skill.selection.ref.skillId}:${skill.selection.ref.digest}`,
+      )}`;
+      return {
+        id,
+        taskId,
+        source: 'skill',
+        trust,
+        tokenEstimate: estimateTokens(skill.content),
+        content: skill.content,
+        createdAt: new Date().toISOString(),
+        messageId: null,
+      };
+    });
+    if (includeBuiltinTeamSkill) {
+      skillFragments.push({
+        id: BUILTIN_TEAM_SKILL_FRAGMENT_ID,
+        taskId,
+        source: 'system',
+        trust: 'system',
+        tokenEstimate: estimateTokens(BUILTIN_TEAM_SKILL_CONTENT),
+        content: BUILTIN_TEAM_SKILL_CONTENT,
+        createdAt: new Date().toISOString(),
+        messageId: null,
+      });
+    }
+    if (skillFragments.length === 0) return prepared;
+    const fragments = [...prepared.fragments, ...skillFragments];
+    return {
+      ...prepared,
+      fragments,
+      usageEvents: [
+        ...prepared.usageEvents,
+        this.recordContextUsage(taskId, turnId, aggregateContextUsage(fragments)),
+      ],
+    };
+  }
+
+  private createContextSealInTransaction(
+    ownerType: ContextSealOwnerType,
+    ownerId: string,
+    taskId: string,
+    prepared: PreparedContext,
+  ): ContextSealManifest {
+    const existing = this.contextSealRow(ownerType, ownerId);
+    if (existing !== undefined) return this.contextSealManifestFromRow(existing);
+
+    const task = this.getTaskRow(taskId);
+    const project = task.project_id === null ? null : this.getProjectRow(task.project_id);
+    const createdAt = new Date().toISOString();
+    const items: ProjectContextManifestItem[] = [];
+    if (project !== null && project.instruction !== '') {
+      const digest = sha256(project.instruction);
+      items.push({
+        itemId: `project:${project.id}:instruction`,
+        kind: 'instruction',
+        sourceTaskId: null,
+        sourceTurnId: null,
+        sourceReferenceId: null,
+        candidateDigest: digest,
+        sealedDigest: digest,
+        included: true,
+        exclusionReason: null,
+        authority: 'user',
+        localOnly: false,
+        content: project.instruction,
+        capturedAt: createdAt,
+      });
+    }
+    const candidateSnapshotDigest = sha256(
+      JSON.stringify({
+        projectId: project?.id ?? null,
+        projectRevision: project?.revision ?? null,
+        projectContextEpoch: project?.context_epoch ?? null,
+        candidates: items.map((item) => ({
+          itemId: item.itemId,
+          kind: item.kind,
+          sourceTaskId: item.sourceTaskId,
+          sourceTurnId: item.sourceTurnId,
+          sourceReferenceId: item.sourceReferenceId,
+          candidateDigest: item.candidateDigest,
+          authority: item.authority,
+          localOnly: item.localOnly,
+        })),
+      }),
+    );
+    const sealedDigest = sha256(
+      JSON.stringify({
+        fragments: prepared.fragments.map((fragment) => ({
+          id: fragment.id,
+          source: fragment.source,
+          trust: fragment.trust,
+          tokenEstimate: fragment.tokenEstimate,
+          contentDigest: sha256(fragment.content),
+        })),
+        projectItems: items.map((item) => ({
+          itemId: item.itemId,
+          sealedDigest: item.sealedDigest,
+        })),
+      }),
+    );
+    const sealId = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO context_seals(
+          id, owner_type, owner_id, task_id, project_id, project_revision,
+          project_context_epoch, candidate_snapshot_digest, sealed_digest, compacted, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        sealId,
+        ownerType,
+        ownerId,
+        taskId,
+        project?.id ?? null,
+        project?.revision ?? null,
+        project?.context_epoch ?? null,
+        candidateSnapshotDigest,
+        sealedDigest,
+        prepared.compacted ? 1 : 0,
+        createdAt,
+      );
+    const insertFragment = this.db.prepare(
+      `INSERT INTO context_seal_fragments(
+        seal_id, ordinal, fragment_id, source, trust, token_estimate, content, created_at, message_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    prepared.fragments.forEach((fragment, index) =>
+      insertFragment.run(
+        sealId,
+        index + 1,
+        fragment.id,
+        fragment.source,
+        fragment.trust,
+        fragment.tokenEstimate,
+        fragment.content,
+        fragment.createdAt,
+        fragment.messageId,
+      ),
+    );
+    const insertItem = this.db.prepare(
+      `INSERT INTO project_context_manifest_items(
+        seal_id, ordinal, item_id, kind, source_task_id, source_turn_id,
+        source_reference_id, candidate_digest, sealed_digest, included, exclusion_reason,
+        authority, local_only, content, captured_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    items.forEach((item, index) =>
+      insertItem.run(
+        sealId,
+        index + 1,
+        item.itemId,
+        item.kind,
+        item.sourceTaskId,
+        item.sourceTurnId,
+        item.sourceReferenceId,
+        item.candidateDigest,
+        item.sealedDigest,
+        item.included ? 1 : 0,
+        item.exclusionReason,
+        item.authority,
+        item.localOnly ? 1 : 0,
+        item.content,
+        item.capturedAt,
+      ),
+    );
+    return this.contextSealManifestFromRow(this.contextSealRow(ownerType, ownerId)!);
+  }
+
+  private contextSealRow(
+    ownerType: ContextSealOwnerType,
+    ownerId: string,
+  ): ContextSealRow | undefined {
+    return this.db
+      .prepare('SELECT * FROM context_seals WHERE owner_type = ? AND owner_id = ?')
+      .get(ownerType, ownerId) as ContextSealRow | undefined;
+  }
+
+  private preparedContextFromSeal(seal: ContextSealRow): PreparedContext {
+    const rows = this.db
+      .prepare('SELECT * FROM context_seal_fragments WHERE seal_id = ? ORDER BY ordinal')
+      .all(seal.id) as ContextSealFragmentRow[];
+    return {
+      fragments: rows.map((row) => ({
+        id: row.fragment_id,
+        taskId: seal.task_id,
+        source: row.source,
+        trust: row.trust,
+        tokenEstimate: row.token_estimate,
+        content: row.content,
+        createdAt: row.created_at,
+        messageId: row.message_id,
+      })),
+      usageEvents: [],
+      compacted: seal.compacted === 1,
+    };
+  }
+
+  private contextSealManifestFromRow(seal: ContextSealRow): ContextSealManifest {
+    const rows = this.db
+      .prepare('SELECT * FROM project_context_manifest_items WHERE seal_id = ? ORDER BY ordinal')
+      .all(seal.id) as ProjectContextManifestItemRow[];
+    return {
+      sealId: seal.id,
+      ownerType: seal.owner_type,
+      ownerId: seal.owner_id,
+      taskId: seal.task_id,
+      projectId: seal.project_id,
+      projectRevision: seal.project_revision,
+      projectContextEpoch: seal.project_context_epoch,
+      candidateSnapshotDigest: seal.candidate_snapshot_digest,
+      sealedDigest: seal.sealed_digest,
+      compacted: seal.compacted === 1,
+      createdAt: seal.created_at,
+      items: rows.map((row) => ({
+        itemId: row.item_id,
+        kind: row.kind,
+        sourceTaskId: row.source_task_id,
+        sourceTurnId: row.source_turn_id,
+        sourceReferenceId: row.source_reference_id,
+        candidateDigest: row.candidate_digest,
+        sealedDigest: row.sealed_digest,
+        included: row.included === 1,
+        exclusionReason: row.exclusion_reason,
+        authority: row.authority,
+        localOnly: row.local_only === 1,
+        content: row.content,
+        capturedAt: row.captured_at,
+      })),
+    };
+  }
+
   private startTurnInTransaction(
     taskId: string,
     text: string,
     skills: readonly PersistedTurnSkill[] = [],
+    includeBuiltinTeamSkill = false,
   ): StartedTurn {
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
+    const shouldSealBuiltinTeamSkill =
+      includeBuiltinTeamSkill ||
+      isTeamScenarioInput(text) ||
+      parsedSkills.some(({ selection }) => selection.kind === 'team');
     const taskSelection = this.getTaskModelSelection(taskId);
     const explicitRuntime =
       taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
@@ -10339,6 +10846,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const event = this.appendEvent({ type: 'turn.accepted', taskId, turnId, userMessage });
     this.db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(now, taskId);
     const renamedTask = this.autoNameTaskInTransaction(taskId, text, now);
+    const prepared = this.assembleContextInTransaction(taskId, turnId, shouldSealBuiltinTeamSkill);
+    const seal = this.createContextSealInTransaction('turn', turnId, taskId, prepared);
     return {
       turnId,
       text,
@@ -10347,6 +10856,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       modelSelection,
       skills: parsedSkills,
       event,
+      sealId: seal.sealId,
+      contextUsageEvents: prepared.usageEvents,
       ...(renamedTask === null ? {} : { renamedTask }),
     };
   }
@@ -11248,17 +11759,29 @@ function validatePersistedTurnSkills(skills: readonly PersistedTurnSkill[]): Per
 function parseQueuedPayload(payloadJson: string): {
   text: string;
   skills: PersistedTurnSkill[];
+  includeBuiltinTeamSkill: boolean;
 } {
   const parsed: unknown = JSON.parse(payloadJson);
   if (typeof parsed !== 'object' || parsed === null) throw new Error('Queued input is invalid');
-  const value = parsed as { text?: unknown; skills?: unknown };
+  const value = parsed as {
+    text?: unknown;
+    skills?: unknown;
+    includeBuiltinTeamSkill?: unknown;
+  };
   if (typeof value.text !== 'string' || value.text.trim() === '' || value.text.length > 100_000)
     throw new Error('Queued input text is invalid');
-  if (value.skills === undefined) return { text: value.text, skills: [] };
+  if (
+    value.includeBuiltinTeamSkill !== undefined &&
+    typeof value.includeBuiltinTeamSkill !== 'boolean'
+  )
+    throw new Error('Queued Team Skill payload is invalid');
+  const includeBuiltinTeamSkill = value.includeBuiltinTeamSkill ?? false;
+  if (value.skills === undefined) return { text: value.text, skills: [], includeBuiltinTeamSkill };
   if (!Array.isArray(value.skills)) throw new Error('Queued Skill payload is invalid');
   return {
     text: value.text,
     skills: validatePersistedTurnSkills(value.skills as PersistedTurnSkill[]),
+    includeBuiltinTeamSkill,
   };
 }
 
