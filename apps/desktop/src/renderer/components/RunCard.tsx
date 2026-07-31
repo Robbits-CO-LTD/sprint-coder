@@ -1,19 +1,19 @@
 import { useEffect, useId, useState } from 'react';
-import { STAGE_LABEL, STAGE_ORDER, useAppStore, type TurnRuntimeState } from '../store/appStore';
+import { STAGE_LABEL, useAppStore, type TurnRuntimeState } from '../store/appStore';
 import { formatElapsed } from '../lib/format';
 import { teamRunProgress } from '../lib/team-progress';
+import { turnProgress } from '../lib/turn-progress';
+import { GenerationIndicator } from './GenerationIndicator';
 import { ReasoningPanel } from './ReasoningPanel';
 
-// Run Card, collapsed to a single "思考中" pill with the reasoning behind a disclosure (issue #17).
-//
-// The five stages used to be listed permanently, ~140px per turn, of which only the current row said
-// anything the user did not already know. FR-RUN-04 requires elapsed time, current stage, and stop to
-// stay visible at all times — all three are on the pill, so the requirement is met at a fraction of
-// the height, and §4.3's stage visibility survives as the five-segment bar inside the panel.
+// Active turns use a Generation Canvas: the indicator communicates motion and the text communicates
+// state, while the five-segment rail reports only stages the Runtime has actually reached. Terminal
+// turns keep the same DOM and settle into one compact history row, so streaming content can begin
+// below without replacing the status surface.
 //
 // `data-testid="run-card"`, `data-run-status` (same six values) and
 // `data-testid="run-card-stop-button"` are preserved exactly: eight existing E2E specs key off them,
-// and this is a density change, not a contract change.
+// and this remains a presentation change rather than a Runtime contract change.
 
 const TITLE_BY_STATUS: Record<TurnRuntimeState['status'], string> = {
   running: '思考中',
@@ -36,6 +36,7 @@ export function RunCard({
   variant?: 'main' | 'node';
 }) {
   const isActive = turn.status === 'running' || turn.status === 'canceling';
+  const isWorking = turn.status === 'running' && turn.stage !== 'waiting_approval';
   const [now, setNow] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(false);
   const panelId = useId();
@@ -55,7 +56,11 @@ export function RunCard({
       : turn.status === 'failed'
         ? 'blocked'
         : 'done';
-  const currentIndex = STAGE_ORDER.indexOf(turn.stage);
+  const progress = turnProgress({
+    reachedIndex: turn.reachedStageIndex,
+    stage: turn.stage,
+    status: turn.status,
+  });
 
   // Degraded path as a first-class case: plenty of turns produce no reasoning at all (verified —
   // Claude emits thinking blocks at `--effort max` on a demanding prompt, and not at `--effort high`
@@ -72,74 +77,79 @@ export function RunCard({
 
   return (
     <div
-      className={`run-card ${cardStateClass}${isActive ? '' : ' compact'}`}
+      className={`run-card ${cardStateClass}${isActive ? '' : ' compact'}${
+        variant === 'node' ? ' run-card--node' : ''
+      }`}
       data-testid="run-card"
       data-run-status={turn.status}
       data-has-reasoning={hasReasoning ? 'true' : 'false'}
+      data-expanded={expanded ? 'true' : 'false'}
     >
       <div className="run-head">
-        {hasReasoning ? (
-          <button
-            type="button"
-            className="think-toggle"
-            data-testid="run-card-reasoning-toggle"
-            aria-expanded={expanded}
-            aria-controls={panelId}
-            onClick={() => setExpanded((value) => !value)}
-          >
-            <span className="run-dot" aria-hidden="true" />
-            <span className={`run-title${isActive ? ' sheen' : ''}`}>{label}</span>
-            <span className="run-stage-inline">· {stageLabel}</span>
-            <span className="think-chevron" aria-hidden="true">
-              {expanded ? '⌃' : '⌄'}
+        <GenerationIndicator stage={turn.stage} status={turn.status} />
+        <div className="run-copy">
+          {hasReasoning ? (
+            <button
+              type="button"
+              className="think-toggle"
+              data-testid="run-card-reasoning-toggle"
+              aria-expanded={expanded}
+              aria-controls={panelId}
+              onClick={() => setExpanded((value) => !value)}
+            >
+              <span className={`run-title${isWorking ? ' sheen' : ''}`}>{label}</span>
+              <span className="think-chevron" aria-hidden="true">
+                {expanded ? '⌃' : '⌄'}
+              </span>
+            </button>
+          ) : (
+            // Non-interactive span, not a disabled button: there is nothing to disclose, and a
+            // disabled control invites the user to wonder what they did wrong.
+            <span className="think-toggle think-toggle--static">
+              <span className={`run-title${isWorking ? ' sheen' : ''}`}>{label}</span>
             </span>
-          </button>
-        ) : (
-          // Non-interactive span, not a disabled button: there is nothing to disclose, and a disabled
-          // control invites the user to wonder what they did wrong.
-          <span className="think-toggle think-toggle--static">
-            <span className="run-dot" aria-hidden="true" />
-            <span className={`run-title${isActive ? ' sheen' : ''}`}>{label}</span>
-            <span className="run-stage-inline">· {stageLabel}</span>
+          )}
+          <span className="run-stage-inline">{stageLabel}</span>
+        </div>
+        <div className="run-meta">
+          {/* aria-hidden: this ticks every 500ms and would otherwise be announced each time
+              (NFR-A11Y-03). Stage changes are announced by ChatSurface's own live region. */}
+          <span className="run-elapsed" aria-hidden="true">
+            {formatElapsed((turn.finishedAt ?? now) - turn.startedAt)}
           </span>
-        )}
-        {/* aria-hidden: this ticks every 500ms and would otherwise be announced each time
-            (NFR-A11Y-03). Stage changes are announced by ChatSurface's own live region. */}
-        <span className="run-elapsed" aria-hidden="true">
-          {formatElapsed((turn.finishedAt ?? now) - turn.startedAt)}
-        </span>
-        {isActive && (
-          // Sibling of the disclosure, never nested inside it: a button inside a button is invalid
-          // and would make every stop click ambiguous.
-          <button
-            type="button"
-            className="run-stop"
-            data-testid="run-card-stop-button"
-            onClick={onStop}
-            disabled={turn.status === 'canceling'}
-          >
-            停止
-          </button>
-        )}
+          {isActive && (
+            // Sibling of the disclosure, never nested inside it: a button inside a button is invalid
+            // and would make every stop click ambiguous.
+            <button
+              type="button"
+              className="run-stop"
+              data-testid="run-card-stop-button"
+              onClick={onStop}
+              disabled={turn.status === 'canceling'}
+            >
+              停止
+            </button>
+          )}
+        </div>
       </div>
-      {expanded && hasReasoning && (
-        <>
-          {/* §4.3's five stages, preserved as a 3px bar rather than five text rows. */}
-          <div className="think-progress" role="presentation" data-testid="reasoning-progress">
-            {STAGE_ORDER.map((stage, i) => (
-              <span
-                key={stage}
-                className={`think-seg${i < currentIndex ? ' done' : i === currentIndex ? ' current' : ''}`}
-              />
+      <div className="run-canvas-shell" aria-hidden={!isActive}>
+        <div className="run-canvas-clip">
+          <div className="run-stage-progress" role="presentation" data-testid="run-stage-progress">
+            {progress.segments.map((segment, index) => (
+              <span key={index} className={`run-stage-seg ${segment}`} />
             ))}
           </div>
+        </div>
+      </div>
+      {expanded && hasReasoning && (
+        <div className="run-reasoning">
           <ReasoningPanel
             turnId={turn.turnId}
             truncated={reasoning?.truncated === true}
             panelId={panelId}
             variant={variant}
           />
-        </>
+        </div>
       )}
     </div>
   );

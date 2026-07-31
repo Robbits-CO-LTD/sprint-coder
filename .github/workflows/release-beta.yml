@@ -1,7 +1,6 @@
 name: Beta Release
 
 on:
-  workflow_dispatch:
   push:
     tags:
       - 'v*.*.*-beta.*'
@@ -37,13 +36,8 @@ jobs:
             exit 1
           fi
 
-          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_NAME}" != "${tag}" ]]; then
+          if [[ "${GITHUB_REF_NAME}" != "${tag}" ]]; then
             echo "::error::Tag '${GITHUB_REF_NAME}' does not match package version '${tag}'."
-            exit 1
-          fi
-
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${GITHUB_REF}" != "refs/heads/main" ]]; then
-            echo "::error::Manual beta releases must run from the main branch."
             exit 1
           fi
 
@@ -141,7 +135,7 @@ jobs:
       - name: Build NativeSafeFs for Electron ABI
         run: npm run build:native-safe-fs
 
-      - name: Make release ZIP
+      - name: Make release installer
         working-directory: apps/desktop
         run: npx electron-forge make
         env:
@@ -155,7 +149,7 @@ jobs:
         with:
           name: sprint-coder-${{ matrix.artifact }}-${{ runner.arch }}
           path: |
-            apps/desktop/out/make/zip/**/*.zip
+            apps/desktop/out/make/**/*.dmg
             apps/desktop/out/make/squirrel.windows/**/*.exe
           if-no-files-found: error
           retention-days: 7
@@ -183,21 +177,21 @@ jobs:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           assets=()
-          zip_count=0
+          dmg_count=0
           exe_count=0
           while IFS= read -r -d '' asset; do
             assets+=("${asset}")
             case "${asset}" in
-              *.zip) ((zip_count += 1)) ;;
+              *.dmg) ((dmg_count += 1)) ;;
               *.exe) ((exe_count += 1)) ;;
             esac
           done < <(
-            find release-assets -type f \( -name '*.zip' -o -name '*.exe' \) -print0
+            find release-assets -type f \( -name '*.dmg' -o -name '*.exe' \) -print0
           )
 
           printf 'Release asset: %s\n' "${assets[@]}"
-          if (( ${#assets[@]} != 3 || zip_count != 2 || exe_count != 1 )); then
-            echo "::error::Expected two ZIPs and one Windows installer; found ${zip_count} ZIP(s) and ${exe_count} installer(s)."
+          if (( ${#assets[@]} != 2 || dmg_count != 1 || exe_count != 1 )); then
+            echo "::error::Expected one macOS DMG and one Windows installer; found ${dmg_count} DMG(s) and ${exe_count} installer(s)."
             find release-assets -type f -print
             exit 1
           fi
@@ -215,11 +209,7 @@ jobs:
               --generate-notes
               --prerelease
             )
-            if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-              create_args+=(--target "${GITHUB_SHA}")
-            else
-              create_args+=(--verify-tag)
-            fi
+            create_args+=(--verify-tag)
             gh release create "${create_args[@]}"
           fi
 

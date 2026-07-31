@@ -921,8 +921,8 @@ button {
   }
 }
 
-/* The first screen of an empty Task. It carries the product's whole first impression, so it gets
-   tighter type sizing and real spacing rhythm rather than one uniform 14px gap. */
+/* Shared no-content treatment. The active Task's first screen adds its own branded, cardless
+   workbench layout below; the shell-level "select a Task" state keeps this compact centered form. */
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -982,6 +982,145 @@ button {
   color: var(--text-primary);
   border-color: var(--accent-line);
   background: var(--accent-wash);
+}
+
+/* Empty conversation: an editorial, left-aligned start surface instead of a floating card stack.
+   The real product icon is the one visual anchor; everything else is typography, spacing and two
+   lightweight prompt rows that point directly at the composer. */
+.timeline-welcome {
+  width: min(100%, 620px);
+  margin: clamp(50px, 10vh, 96px) auto 0;
+  padding: 0 0 38px;
+  align-items: flex-start;
+  gap: 0;
+  text-align: left;
+}
+.timeline-welcome-mark {
+  position: relative;
+  width: 68px;
+  height: 68px;
+  margin-bottom: 24px;
+  animation: welcomeIn var(--t-cinematic) var(--ease-spatial) both;
+}
+.timeline-welcome-mark::after {
+  position: absolute;
+  inset: 14px -18px -14px 18px;
+  z-index: -1;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  filter: blur(24px);
+  content: '';
+  pointer-events: none;
+}
+.timeline-welcome-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 17px;
+  object-fit: cover;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.12) inset,
+    0 12px 32px rgba(0, 0, 0, 0.28);
+  user-select: none;
+}
+.timeline-welcome-copy {
+  animation: welcomeIn var(--t-cinematic) 70ms var(--ease-spatial) both;
+}
+.timeline-welcome h2 {
+  margin: 0;
+  font-size: clamp(25px, 3.4vw, 31px);
+  font-weight: 680;
+  line-height: 1.28;
+  letter-spacing: -0.035em;
+  font-feature-settings: 'palt', 'kern';
+}
+.timeline-welcome p {
+  max-width: 520px;
+  margin: 11px 0 0;
+  color: var(--text-secondary);
+  font-size: 14.5px;
+  line-height: 1.78;
+  letter-spacing: 0.005em;
+  line-break: strict;
+}
+.timeline-welcome-actions {
+  width: 100%;
+  margin-top: 34px;
+  animation: welcomeIn var(--t-cinematic) 140ms var(--ease-spatial) both;
+}
+.timeline-welcome-actions-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+.timeline-welcome-suggestions {
+  border-top: 1px solid var(--border-subtle);
+}
+.timeline-welcome-suggestion {
+  display: flex;
+  width: 100%;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 0 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  line-height: 1.5;
+  text-align: left;
+  transition:
+    color var(--t-quick) var(--ease-ui),
+    padding var(--t-quick) var(--ease-ui),
+    background var(--t-quick) var(--ease-ui);
+}
+.timeline-welcome-suggestion:hover {
+  padding-inline: 10px;
+  color: var(--text-primary);
+  background: linear-gradient(90deg, var(--accent-wash), transparent 76%);
+}
+.timeline-welcome-suggestion-arrow {
+  color: var(--text-disabled);
+  transform: rotate(45deg);
+  transition:
+    color var(--t-quick) var(--ease-ui),
+    transform var(--t-quick) var(--ease-ui);
+}
+.timeline-welcome-suggestion:hover .timeline-welcome-suggestion-arrow {
+  color: var(--accent);
+  transform: translate(2px, -2px) rotate(45deg);
+}
+@keyframes welcomeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (max-width: 620px) {
+  .timeline-welcome {
+    margin-top: 38px;
+  }
+  .timeline-welcome-mark {
+    width: 60px;
+    height: 60px;
+    margin-bottom: 20px;
+  }
+  .timeline-welcome-mark img {
+    border-radius: 15px;
+  }
+  .timeline-welcome h2 {
+    font-size: 24px;
+  }
+  .timeline-welcome p {
+    font-size: 14px;
+  }
 }
 
 .msg {
@@ -1058,46 +1197,177 @@ button {
   overflow: hidden;
   box-shadow: var(--shadow-1);
   animation: msgIn var(--t-standard) var(--ease-ui);
+  transition: opacity 160ms var(--ease-ui);
 }
 .run-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  padding: 11px 16px;
+  gap: 14px;
+  min-height: 76px;
+  padding: 13px 16px 9px;
 }
-.run-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  background: var(--accent);
+.generation-indicator {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  color: var(--accent);
   flex: none;
 }
-.run-card.running .run-dot {
-  animation: none;
+.generation-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 6px);
+  grid-template-rows: repeat(3, 6px);
+  gap: 2px;
 }
-@keyframes runPulse {
+.generation-pixel {
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.15;
+}
+.generation-indicator--drive .generation-pixel,
+.generation-indicator--dots .generation-pixel {
+  animation: generationPixelOn 650ms ease-in-out infinite;
+}
+.generation-indicator--dots .generation-pixel {
+  border-radius: 50%;
+}
+.generation-indicator--drive .generation-pixel:nth-child(1),
+.generation-indicator--dots .generation-pixel:nth-child(1) {
+  animation-delay: 90ms;
+}
+.generation-indicator--drive .generation-pixel:nth-child(2),
+.generation-indicator--dots .generation-pixel:nth-child(2) {
+  animation-delay: 180ms;
+}
+.generation-indicator--drive .generation-pixel:nth-child(3),
+.generation-indicator--dots .generation-pixel:nth-child(3) {
+  animation-delay: 270ms;
+}
+.generation-indicator--drive .generation-pixel:nth-child(4),
+.generation-indicator--dots .generation-pixel:nth-child(4) {
+  animation-delay: 0ms;
+}
+.generation-indicator--drive .generation-pixel:nth-child(5),
+.generation-indicator--dots .generation-pixel:nth-child(5) {
+  animation-delay: 90ms;
+}
+.generation-indicator--drive .generation-pixel:nth-child(6),
+.generation-indicator--dots .generation-pixel:nth-child(6) {
+  animation-delay: 180ms;
+}
+.generation-indicator--drive .generation-pixel:nth-child(7),
+.generation-indicator--dots .generation-pixel:nth-child(7) {
+  animation-delay: 90ms;
+}
+.generation-indicator--drive .generation-pixel:nth-child(8),
+.generation-indicator--dots .generation-pixel:nth-child(8) {
+  animation-delay: 180ms;
+}
+.generation-indicator--drive .generation-pixel:nth-child(9),
+.generation-indicator--dots .generation-pixel:nth-child(9) {
+  animation-delay: 270ms;
+}
+.generation-indicator--orbit .generation-pixel {
+  animation: generationPixelOn 950ms ease-in-out infinite;
+}
+.generation-indicator--orbit .generation-pixel:nth-child(1) {
+  animation-delay: 0ms;
+}
+.generation-indicator--orbit .generation-pixel:nth-child(2) {
+  animation-delay: 110ms;
+}
+.generation-indicator--orbit .generation-pixel:nth-child(3) {
+  animation-delay: 220ms;
+}
+.generation-indicator--orbit .generation-pixel:nth-child(4) {
+  animation-delay: 770ms;
+}
+.generation-indicator--orbit .generation-pixel:nth-child(5) {
+  animation: none;
+  opacity: 0.07;
+}
+.generation-indicator--orbit .generation-pixel:nth-child(6) {
+  animation-delay: 330ms;
+}
+.generation-indicator--orbit .generation-pixel:nth-child(7) {
+  animation-delay: 660ms;
+}
+.generation-indicator--orbit .generation-pixel:nth-child(8) {
+  animation-delay: 550ms;
+}
+.generation-indicator--orbit .generation-pixel:nth-child(9) {
+  animation-delay: 440ms;
+}
+.generation-indicator--paused {
+  color: var(--warning);
+}
+.generation-indicator--paused .generation-pixel {
+  opacity: 0.24;
+}
+.generation-indicator--paused .generation-pixel:nth-child(1),
+.generation-indicator--paused .generation-pixel:nth-child(5),
+.generation-indicator--paused .generation-pixel:nth-child(9) {
+  opacity: 0.9;
+}
+.generation-indicator--settled .generation-pixel {
+  opacity: 0.24;
+}
+.generation-indicator--settled .generation-pixel:nth-child(1),
+.generation-indicator--settled .generation-pixel:nth-child(3),
+.generation-indicator--settled .generation-pixel:nth-child(5),
+.generation-indicator--settled .generation-pixel:nth-child(7),
+.generation-indicator--settled .generation-pixel:nth-child(9) {
+  opacity: 0.9;
+}
+.run-card[data-run-status='completed'] .generation-indicator--settled {
+  color: var(--success);
+}
+.run-card[data-run-status='failed'] .generation-indicator--settled,
+.run-card[data-run-status='interrupted'] .generation-indicator--settled {
+  color: var(--danger);
+}
+.run-card[data-run-status='canceled'] .generation-indicator--settled {
+  color: var(--text-secondary);
+}
+@keyframes generationPixelOn {
   0%,
   100% {
+    opacity: 0.15;
+  }
+  18%,
+  42% {
     opacity: 1;
   }
-  50% {
-    opacity: 0.35;
+  62% {
+    opacity: 0.15;
   }
 }
-.run-card.done .run-dot {
-  background: var(--success);
-  animation: none;
+.run-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
 }
-.run-card.blocked .run-dot {
-  background: var(--danger);
-  animation: none;
+.run-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: max-content;
 }
 .run-title {
   font-size: 13px;
   font-weight: 600;
 }
 .run-elapsed {
-  margin-left: auto;
   font-size: 12px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
@@ -1117,45 +1387,117 @@ button {
   opacity: 0.55;
   cursor: default;
 }
-.run-stages {
-  padding: 2px 16px 12px;
+.run-canvas-shell {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition:
+    grid-template-rows 320ms var(--ease-spatial),
+    opacity 240ms var(--ease-ui);
+}
+.run-canvas-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+.run-stage-progress {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  gap: 4px;
+  padding: 2px 16px 14px 78px;
 }
-.stage-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  padding: 3px 0;
-  min-height: 26px;
-  transition: color var(--t-quick);
+.run-stage-seg {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--neutral-wash);
+  transition: background-color var(--t-quick) var(--ease-ui);
 }
-.stage-row .s-icon {
-  width: 15px;
-  flex: none;
-  text-align: center;
-  font-size: 12px;
+.run-stage-seg.done {
+  background: var(--text-secondary);
 }
-.stage-row.current {
-  color: var(--text-primary);
+.run-stage-seg.current,
+.run-stage-seg.complete {
+  background: var(--accent);
 }
-.stage-row.current .s-icon {
-  color: var(--accent);
+.run-stage-seg.waiting {
+  background: var(--warning);
 }
-.stage-row.done .s-icon {
-  color: var(--success);
-}
-.run-card.compact .run-stages {
-  display: none;
+.run-stage-seg.failed {
+  background: var(--danger);
 }
 .run-card.compact {
   opacity: 0.85;
 }
 .run-card.compact .run-head {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 9px;
+  min-height: 0;
   padding: 9px 16px;
+}
+.run-card.compact .generation-indicator {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.run-card.compact .generation-grid {
+  grid-template-columns: repeat(3, 3px);
+  grid-template-rows: repeat(3, 3px);
+  gap: 1px;
+}
+.run-card.compact .generation-pixel {
+  width: 3px;
+  height: 3px;
+}
+.run-card.compact .run-copy {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.run-card.compact .run-stage-inline::before {
+  content: '· ';
+}
+.run-card.compact .run-canvas-shell {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+.run-card--node .run-head {
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: 78px;
+  padding: 10px 12px 7px;
+}
+.run-card--node .generation-indicator {
+  width: 40px;
+  height: 40px;
+}
+.run-card--node .generation-grid {
+  grid-template-columns: repeat(3, 5px);
+  grid-template-rows: repeat(3, 5px);
+}
+.run-card--node .generation-pixel {
+  width: 5px;
+  height: 5px;
+}
+.run-card--node .run-stage-progress {
+  padding: 4px 12px 16px 62px;
+}
+.run-card--node.compact .run-head {
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  min-height: 0;
+  padding: 7px 12px;
+}
+.run-card--node.compact .generation-indicator {
+  width: 16px;
+  height: 16px;
+}
+.run-card--node.compact .generation-grid {
+  grid-template-columns: repeat(3, 3px);
+  grid-template-rows: repeat(3, 3px);
+}
+.run-card--node.compact .generation-pixel {
+  width: 3px;
+  height: 3px;
 }
 
 /* Command Card */
@@ -3566,13 +3908,14 @@ button.composer-permission-chip[aria-expanded='true'] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* ---------- Thinking pill (issue #17) ----------
-   Replaces the always-expanded five-stage list. Everything FR-RUN-04 requires (elapsed, current
-   stage, stop) is on one row; §4.3's stage visibility survives as the 3px bar inside the panel. */
+/* ---------- Generation Canvas reasoning disclosure ----------
+   Reasoning stays opt-in even while it streams. The status and stage remain outside the disclosure,
+   so the Canvas never depends on opening provider-authored text to explain what is happening. */
 .think-toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
+  max-width: 100%;
   min-width: 0;
   padding: 0;
   font: inherit;
@@ -3585,6 +3928,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .run-stage-inline {
   font-size: 12.5px;
   color: var(--text-secondary);
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3664,41 +4008,31 @@ button.composer-permission-chip[aria-expanded='true'] {
     var(--ai-accent) 60%,
     var(--text-primary) 80%
   );
-  background-size: 240% 100%;
+  background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: thinkSheen 3200ms linear infinite;
+  animation: thinkSheen 1400ms linear infinite;
 }
 @keyframes thinkSheen {
   from {
-    background-position: 100% 0;
+    background-position: 150% 0;
   }
   to {
-    background-position: -140% 0;
+    background-position: -50% 0;
   }
 }
 
-.think-progress {
-  display: flex;
-  gap: 3px;
-  margin-top: 8px;
+.run-reasoning {
+  padding: 0 16px 14px;
+  animation: thinkParaIn 160ms var(--ease-ui);
 }
-.think-seg {
-  flex: 1;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--neutral-wash);
-}
-.think-seg.done {
-  background: var(--text-secondary);
-}
-.think-seg.current {
-  background: var(--accent);
+.run-card--node .run-reasoning {
+  padding: 0 12px 10px;
 }
 
 .think-panel {
-  margin-top: 8px;
+  margin-top: 0;
   max-height: 208px;
   overflow-y: auto;
   background: var(--bg-elevated);
@@ -3750,6 +4084,12 @@ button.composer-permission-chip[aria-expanded='true'] {
    `background-clip: text` and a transparent text fill, stopping the animation alone can leave the
    label invisible. The colour is reset to a solid one here so the text is always painted. */
 @media (prefers-reduced-motion: reduce) {
+  .generation-pixel {
+    animation: none !important;
+  }
+  .run-canvas-shell {
+    transition: none;
+  }
   .run-title.sheen {
     animation: none;
     background: none;
@@ -3759,11 +4099,18 @@ button.composer-permission-chip[aria-expanded='true'] {
   .think-para.latest {
     animation: none;
   }
+  .run-reasoning {
+    animation: none;
+  }
 }
 
 /* Forced colours strip the gradient but keep `-webkit-text-fill-color: transparent`, which would
    erase the label entirely. */
 @media (forced-colors: active) {
+  .generation-indicator {
+    border-color: CanvasText;
+    color: CanvasText;
+  }
   .run-title.sheen {
     background: none;
     -webkit-text-fill-color: CanvasText;
