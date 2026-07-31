@@ -20,6 +20,7 @@ import {
   type SlashCommandId,
 } from './slash-commands';
 import { buildSkillSearchIndex, filterSkillSearchIndex } from './skill-picker';
+import { useTaskBoundary } from '../TaskBoundary';
 // Shared with the settings dialog (issue #5) so the same option can never be named two ways.
 import {
   EFFORT_DESC,
@@ -40,7 +41,7 @@ export function Composer({ taskId }: { taskId: string }) {
   const setGoal = useAppStore((s) => s.setGoal);
   const startTurn = useAppStore((s) => s.startTurn);
   const queueMessage = useAppStore((s) => s.queueMessage);
-  const createTask = useAppStore((s) => s.createTask);
+  const { createTask } = useTaskBoundary();
   const selectWorkspace = useAppStore((s) => s.selectWorkspace);
   const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const sending = useAppStore((s) => s.sendingByTask[taskId]) ?? false;

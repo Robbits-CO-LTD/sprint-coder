@@ -23,6 +23,7 @@ import type {
   DatabaseRecovery,
   RuntimeKind,
   RuntimeStatus,
+  ProjectSummary,
   TaskSummary,
   TeamDetail,
   TurnDiff,
@@ -128,6 +129,20 @@ export type TeamPolicyValues = {
   budgetMode: 'bounded' | 'unlimited';
 };
 
+export type ProjectLoadState =
+  'loading' | 'ready' | 'refreshing' | 'stale' | 'error' | 'unavailable';
+
+export function projectRefreshState(
+  previous: ProjectLoadState,
+  outcome: 'start' | 'success' | 'failure',
+): ProjectLoadState {
+  if (outcome === 'success') return 'ready';
+  const hasSuccessfulResult =
+    previous === 'ready' || previous === 'refreshing' || previous === 'stale';
+  if (outcome === 'start') return hasSuccessfulResult ? 'refreshing' : 'loading';
+  return hasSuccessfulResult ? 'stale' : 'error';
+}
+
 type AppState = {
   sprintCoderAvailable: boolean;
   initialized: boolean;
@@ -136,6 +151,9 @@ type AppState = {
   error: string | null;
 
   tasks: TaskSummary[];
+  projects: ProjectSummary[];
+  projectLoadState: ProjectLoadState;
+  projectLoadError: string | null;
   selectedTaskId: string | null;
   messagesByTask: Record<string, ChatMessage[]>;
   turnByTask: Record<string, TurnRuntimeState | undefined>;
@@ -218,7 +236,16 @@ type AppState = {
   setAccessPreset(taskId: string, preset: AccessPreset): Promise<void>;
   resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision): Promise<void>;
   selectTask(taskId: string): Promise<void>;
-  createTask(): Promise<void>;
+  createTask(projectId?: string): Promise<TaskSummary | null>;
+  refreshProjects(): Promise<void>;
+  createProject(name: string): Promise<ProjectSummary | null>;
+  updateProject(
+    projectId: string,
+    expectedRevision: number,
+    patch: { name?: string; archived?: boolean },
+  ): Promise<ProjectSummary | null>;
+  assignTaskToProject(taskId: string, projectId: string): Promise<TaskSummary | null>;
+  unassignTaskFromProject(taskId: string): Promise<TaskSummary | null>;
   renameTask(taskId: string, title: string): Promise<void>;
   setPinned(taskId: string, pinned: boolean): Promise<void>;
   setArchived(taskId: string, archived: boolean): Promise<void>;
@@ -266,6 +293,7 @@ let reasoningUnsubscribe: (() => void) | null = null;
 let fileEditUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
+let projectRefreshToken = 0;
 let currentSubscribedTaskId: string | null = null;
 const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -750,6 +778,12 @@ export const useAppStore = create<AppState>((set, get) => {
     error: null,
 
     tasks: [],
+    projects: [],
+    projectLoadState:
+      typeof window !== 'undefined' && typeof window.sprintCoder?.projects?.list === 'function'
+        ? 'loading'
+        : 'unavailable',
+    projectLoadError: null,
     selectedTaskId: null,
     messagesByTask: {},
     turnByTask: {},
@@ -802,6 +836,7 @@ export const useAppStore = create<AppState>((set, get) => {
         return;
       }
       set({ sprintCoderAvailable: true, loadingTasks: true, error: null });
+      void get().refreshProjects();
       void get().loadRuntime();
       // Reasoning is a transient push stream, subscribed once for the window's lifetime (issue #17).
       // The batch carries its own turnId, so there is nothing per-task to re-subscribe.
@@ -1365,17 +1400,127 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async createTask() {
-      if (!window.sprintCoder) return;
+    async createTask(projectId?: string) {
+      if (!window.sprintCoder) return null;
       set({ error: null });
       try {
-        const task = await window.sprintCoder.tasks.create();
+        const task = await window.sprintCoder.tasks.create(
+          projectId === undefined ? {} : { projectId },
+        );
         set((state) => ({ tasks: [task, ...state.tasks] }));
         await get().selectTask(task.id);
         const preset = accessPresetForNewTask();
         if (preset !== 'ask') await get().setAccessPreset(task.id, preset);
+        if (projectId !== undefined) void get().refreshProjects();
+        return task;
       } catch (err) {
         set({ error: describeError(err) });
+        return null;
+      }
+    },
+
+    async refreshProjects() {
+      if (!window.sprintCoder || typeof window.sprintCoder.projects?.list !== 'function') {
+        projectRefreshToken += 1;
+        set({ projectLoadState: 'unavailable', projectLoadError: null });
+        return;
+      }
+      const requestToken = ++projectRefreshToken;
+      const previous = get().projectLoadState;
+      set({
+        projectLoadState: projectRefreshState(previous, 'start'),
+        projectLoadError: null,
+      });
+      try {
+        const projects = await window.sprintCoder.projects.list();
+        if (requestToken !== projectRefreshToken) return;
+        set({
+          projects,
+          projectLoadState: projectRefreshState(previous, 'success'),
+          projectLoadError: null,
+        });
+      } catch (err) {
+        if (requestToken !== projectRefreshToken) return;
+        set({
+          projectLoadState: projectRefreshState(previous, 'failure'),
+          projectLoadError: describeError(err),
+        });
+      }
+    },
+
+    async createProject(name: string) {
+      if (!window.sprintCoder || typeof window.sprintCoder.projects?.create !== 'function')
+        return null;
+      try {
+        const created = await window.sprintCoder.projects.create({ name });
+        set((state) => ({ projects: [created, ...state.projects], projectLoadState: 'ready' }));
+        return created;
+      } catch (err) {
+        set({ error: describeError(err) });
+        return null;
+      }
+    },
+
+    async updateProject(projectId, expectedRevision, patch) {
+      if (!window.sprintCoder || typeof window.sprintCoder.projects?.update !== 'function')
+        return null;
+      try {
+        const updated = await window.sprintCoder.projects.update({
+          projectId,
+          expectedRevision,
+          ...patch,
+        });
+        set((state) => ({
+          projects: state.projects.map((project) => (project.id === projectId ? updated : project)),
+        }));
+        return updated;
+      } catch (err) {
+        set({ error: describeError(err) });
+        void get().refreshProjects();
+        return null;
+      }
+    },
+
+    async assignTaskToProject(taskId, projectId) {
+      if (!window.sprintCoder || typeof window.sprintCoder.projects?.assignTask !== 'function')
+        return null;
+      const task = get().tasks.find(({ id }) => id === taskId);
+      if (task === undefined) return null;
+      try {
+        const updated = await window.sprintCoder.projects.assignTask({
+          projectId,
+          taskId,
+          expectedProjectId: task.projectId,
+        });
+        set((state) => ({
+          tasks: state.tasks.map((candidate) => (candidate.id === taskId ? updated : candidate)),
+        }));
+        void get().refreshProjects();
+        return updated;
+      } catch (err) {
+        set({ error: describeError(err) });
+        return null;
+      }
+    },
+
+    async unassignTaskFromProject(taskId) {
+      if (!window.sprintCoder || typeof window.sprintCoder.projects?.unassignTask !== 'function')
+        return null;
+      const task = get().tasks.find(({ id }) => id === taskId);
+      if (task === undefined) return null;
+      try {
+        const updated = await window.sprintCoder.projects.unassignTask({
+          taskId,
+          expectedProjectId: task.projectId,
+        });
+        set((state) => ({
+          tasks: state.tasks.map((candidate) => (candidate.id === taskId ? updated : candidate)),
+        }));
+        void get().refreshProjects();
+        return updated;
+      } catch (err) {
+        set({ error: describeError(err) });
+        return null;
       }
     },
 
@@ -1386,6 +1531,7 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const updated = await window.sprintCoder.tasks.rename(taskId, trimmed);
         set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
+        if (updated.projectId !== null) void get().refreshProjects();
       } catch (err) {
         set({ error: describeError(err) });
       }
@@ -1396,6 +1542,7 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const updated = await window.sprintCoder.tasks.setPinned(taskId, pinned);
         set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
+        if (updated.projectId !== null) void get().refreshProjects();
       } catch (err) {
         set({ error: describeError(err) });
       }
@@ -1406,6 +1553,7 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const updated = await window.sprintCoder.tasks.setArchived(taskId, archived);
         set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
+        if (updated.projectId !== null) void get().refreshProjects();
       } catch (err) {
         set({ error: describeError(err) });
       }

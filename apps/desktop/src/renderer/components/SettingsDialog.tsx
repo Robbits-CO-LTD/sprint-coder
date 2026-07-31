@@ -12,6 +12,7 @@ import {
 import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/sprint-coder';
 import { ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
+import { useTaskBoundary } from './TaskBoundary';
 import type {
   ProviderModel,
   TeamModelIdentity,
@@ -70,7 +71,7 @@ export const SETTINGS_SECTIONS: readonly {
 
 export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const workspace = useAppStore((s) => s.settingsWorkspaceV2);
-  const createTask = useAppStore((s) => s.createTask);
+  const { createTask } = useTaskBoundary();
   const dialogRef = useRef<HTMLDialogElement>(null);
   // The element that had focus when the dialog opened. Chromium's <dialog> restores focus itself,
   // but capturing it makes the guarantee explicit and independently testable.
@@ -99,7 +100,8 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
     typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.getRuntime === 'function';
 
   async function beginSkillCreation(): Promise<void> {
-    await createTask();
+    const created = await createTask();
+    if (created === null) return;
     const state = useAppStore.getState();
     const taskId = state.selectedTaskId;
     if (taskId === null || typeof window.sprintCoder?.skills?.list !== 'function') return;

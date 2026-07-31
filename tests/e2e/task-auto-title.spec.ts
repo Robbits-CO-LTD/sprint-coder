@@ -29,8 +29,12 @@ test.describe('automatic Task naming', () => {
     await expect(textarea).toBeVisible();
 
     const sidebar = page.locator('.sidebar .sb-scroll');
-    // A blank Task is a composer workspace, not conversation history.
-    await expect(sidebar.getByText(PLACEHOLDER, { exact: true })).toHaveCount(0);
+    // Project Hub A2 keeps the selected empty Task visible so keyboard focus and location are not
+    // lost, while marking it explicitly as not started. An unselected unassigned empty Task is
+    // still hidden by the sidebar projection.
+    const emptySelectedTask = sidebar.locator('[data-task-id]').filter({ hasText: PLACEHOLDER });
+    await expect(emptySelectedTask).toBeVisible();
+    await expect(emptySelectedTask).toContainText('未開始');
 
     // First message names it. Sent as a multi-line message so the assertion also covers "only the
     // first line becomes the title", which is what makes a realistic paste usable as a label.
