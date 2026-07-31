@@ -166,12 +166,51 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('inherits the root Turn seal for ToolBroker formal assignments', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Team assignment context');
+      const root = persistence.startTurn(task.id, 'Use this immutable root context.');
+      const coordinator = new TeamCoordinator(persistence);
+      const broker = brokerFor(coordinator);
+      const toolContext = {
+        taskId: task.id,
+        turnId: root.turnId,
+        workspaceId: null,
+        policyEpoch: 0,
+      };
+      startMockTurnCatalog(broker, toolContext);
+      const hired = (await dispatch(broker, toolContext, 'team_hire_worker', {
+        agentKind: 'worker',
+        role: '実装',
+        objective: 'root contextを継承する',
+      })) as { workerId: string };
+
+      const assigned = (await dispatch(broker, toolContext, 'team_assign_task', {
+        workerId: hired.workerId,
+        objective: '実装する',
+        doneCriteria: ['完了'],
+      })) as { ok: true; executionId: string };
+
+      expect(
+        persistence.getContextSealManifest('team_execution', assigned.executionId).sealedDigest,
+      ).toBe(persistence.getContextSealManifest('turn', root.turnId).sealedDigest);
+      await waitFor(() => persistence.getTeamExecution(assigned.executionId).state === 'completed');
+      await broker.dispose();
+      persistence.close();
+    });
+
     it('assigns a durable 2-step Mission and rejects an undersized Mission at the tool schema', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Team Mission tool');
+      const root = persistence.startTurn(task.id, 'Missionのroot context');
       const coordinator = new TeamCoordinator(persistence);
       const broker = brokerFor(coordinator);
-      const toolContext = { taskId: task.id, turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+      const toolContext = {
+        taskId: task.id,
+        turnId: root.turnId,
+        workspaceId: null,
+        policyEpoch: 0,
+      };
       startMockTurnCatalog(broker, toolContext);
       const hired = (await dispatch(broker, toolContext, 'team_hire_worker', {
         agentKind: 'worker',
@@ -199,7 +238,15 @@ if (runsWithElectronAbi)
       })) as { ok: true; missionId: string; executions: readonly unknown[] };
       expect(result.ok).toBe(true);
       expect(result.executions).toHaveLength(2);
-      expect(persistence.getTeamMission(result.missionId).steps).toHaveLength(2);
+      const mission = persistence.getTeamMission(result.missionId);
+      expect(mission.steps).toHaveLength(2);
+      const rootManifest = persistence.getContextSealManifest('turn', root.turnId);
+      expect(
+        mission.steps.map(
+          ({ executionId }) =>
+            persistence.getContextSealManifest('team_execution', executionId).sealedDigest,
+        ),
+      ).toEqual([rootManifest.sealedDigest, rootManifest.sealedDigest]);
       await waitFor(() => persistence.getTeamMission(result.missionId).state === 'completed');
       await broker.dispose();
       persistence.close();

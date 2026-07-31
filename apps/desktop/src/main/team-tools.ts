@@ -966,13 +966,17 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
     toolId: TEAM_ASSIGN_TASK_TOOL.toolId,
     implementationKind: 'built-in',
     execute: (input, context) =>
-      executeTeamTool(coordinator, context.taskId, 'team_assign_task', input),
+      executeTeamTool(coordinator, context.taskId, 'team_assign_task', input, {
+        contextOwner: { type: 'turn', id: context.turnId },
+      }),
   });
   broker.registerImplementation({
     toolId: TEAM_ASSIGN_MISSION_TOOL.toolId,
     implementationKind: 'built-in',
     execute: (input, context) =>
-      executeTeamTool(coordinator, context.taskId, 'team_assign_mission', input),
+      executeTeamTool(coordinator, context.taskId, 'team_assign_mission', input, {
+        contextOwner: { type: 'turn', id: context.turnId },
+      }),
   });
   broker.registerImplementation({
     toolId: TEAM_RESUME_MISSION_TOOL.toolId,
