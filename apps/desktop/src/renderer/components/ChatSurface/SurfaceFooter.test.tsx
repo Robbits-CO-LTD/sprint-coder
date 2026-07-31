@@ -56,20 +56,17 @@ describe('describeRecovery', () => {
 });
 
 describe('describeConnection', () => {
-  it('reads sanely before any status has arrived, using the selected Runtime', () => {
-    expect(describeConnection(null, 'claude')).toEqual({
-      tone: 'idle',
-      text: 'Claude Code: 待機中',
-    });
+  it('stays hidden before any status has arrived', () => {
+    expect(describeConnection(null, 'claude')).toBeNull();
   });
 
-  it('reports a running turn', () => {
+  it('stays hidden while a turn is running', () => {
     expect(
       describeConnection(
         { kind: 'codex', state: 'running', taskId: 't1', errorCode: null, userMessage: null },
         'mock',
       ),
-    ).toEqual({ tone: 'running', text: 'Codex: 実行中' });
+    ).toBeNull();
   });
 
   it('names the actual failure reason', () => {
@@ -101,11 +98,11 @@ describe('describeConnection', () => {
   it('prefers the status kind over the selected kind', () => {
     // A failure that arrives just after the user switched Runtime must still name the Runtime that
     // actually failed.
-    expect(
-      describeConnection(
-        { kind: 'claude', state: 'failed', taskId: null, errorCode: null, userMessage: null },
-        'mock',
-      ).text,
-    ).toContain('Claude Code');
+    const description = describeConnection(
+      { kind: 'claude', state: 'failed', taskId: null, errorCode: null, userMessage: null },
+      'mock',
+    );
+    expect(description).not.toBeNull();
+    expect(description?.text).toContain('Claude Code');
   });
 });

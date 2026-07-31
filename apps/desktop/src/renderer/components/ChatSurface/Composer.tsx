@@ -322,8 +322,8 @@ export function Composer({ taskId }: { taskId: string }) {
   return (
     <div className="composer-zone">
       <div className="composer-inner">
-        <ContextBar taskId={taskId} />
         <QueuedList items={queued} />
+        <ContextBar taskId={taskId} />
         <div className="composer">
           {slashOpen && (
             <SlashCommandMenu
