@@ -145,9 +145,47 @@ export type CommandOutputPage = {
 export type ContextUsage = {
   usedTokens: number;
   hardCapTokens: number;
+  projectTokens: number;
   fragments: {
-    source: 'system' | 'history' | 'goal' | 'compaction' | 'background';
+    source: 'system' | 'history' | 'goal' | 'compaction' | 'background' | 'skill';
     tokens: number;
+  }[];
+};
+
+export type ProjectInstruction = {
+  instruction: string;
+  revision: number;
+  contextEpoch: number;
+};
+
+export type ProjectContextManifestSummary = {
+  turnId: string;
+  projectId: string | null;
+  projectContextEpoch: number | null;
+  candidateSnapshotDigest: string;
+  sealedDigest: string;
+  createdAt: string;
+};
+
+export type ProjectContextManifest = ProjectContextManifestSummary & {
+  sealId: string;
+  taskId: string;
+  projectRevision: number | null;
+  compacted: boolean;
+  items: {
+    itemId: string;
+    kind: 'instruction' | 'memory' | 'reference';
+    sourceTaskId: string | null;
+    sourceTurnId: string | null;
+    sourceReferenceId: string | null;
+    candidateDigest: string;
+    sealedDigest: string | null;
+    included: boolean;
+    exclusionReason: string | null;
+    authority: 'user' | 'none';
+    localOnly: boolean;
+    content: string | null;
+    capturedAt: string;
   }[];
 };
 
@@ -645,6 +683,14 @@ export interface SprintCoderApi {
   };
   projects: {
     list(): Promise<ProjectSummary[]>;
+    get(input: { projectId: string }): Promise<ProjectInstruction>;
+    setInstruction(input: {
+      projectId: string;
+      expectedRevision: number;
+      instruction: string;
+    }): Promise<ProjectInstruction>;
+    listContextManifests(input: { taskId: string }): Promise<ProjectContextManifestSummary[]>;
+    getContextManifest(input: { taskId: string; turnId: string }): Promise<ProjectContextManifest>;
     create(input: { name: string }): Promise<ProjectSummary>;
     update(input: {
       projectId: string;

@@ -33,6 +33,8 @@ import {
   type ModelSelection,
   type NormalizedProviderUsage,
   type ProviderConnection,
+  type ProjectContextManifest as PublicProjectContextManifest,
+  type ProjectContextManifestSummary,
   type ProjectSummary,
   type ProviderRuntimeKind,
   type QueuedInput,
@@ -3154,6 +3156,8 @@ export interface PersistenceClient {
     expectedRevision: number;
     instruction: string;
   }): { instruction: string; revision: number; contextEpoch: number };
+  listProjectContextManifests(taskId: string): ProjectContextManifestSummary[];
+  getProjectContextManifest(taskId: string, turnId: string): PublicProjectContextManifest;
   assignTaskToProject(input: {
     projectId: string;
     taskId: string;
@@ -10217,6 +10221,46 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.contextSealManifestFromRow(row);
   }
 
+  listProjectContextManifests(taskId: string): ProjectContextManifestSummary[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM context_seals
+         WHERE owner_type = 'turn' AND task_id = ?
+         ORDER BY created_at DESC, rowid DESC`,
+      )
+      .all(taskId) as ContextSealRow[];
+    return rows.map((row) => ({
+      turnId: row.owner_id,
+      projectId: row.project_id,
+      projectContextEpoch: row.project_context_epoch,
+      candidateSnapshotDigest: row.candidate_snapshot_digest,
+      sealedDigest: row.sealed_digest,
+      createdAt: row.created_at,
+    }));
+  }
+
+  getProjectContextManifest(taskId: string, turnId: string): PublicProjectContextManifest {
+    this.getTurn(taskId, turnId);
+    const row = this.contextSealRow('turn', turnId);
+    if (row === undefined || row.task_id !== taskId)
+      throw new NotFoundError('Context seal not found');
+    const manifest = this.contextSealManifestFromRow(row);
+    return {
+      sealId: manifest.sealId,
+      turnId,
+      taskId,
+      projectId: manifest.projectId,
+      projectRevision: manifest.projectRevision,
+      projectContextEpoch: manifest.projectContextEpoch,
+      candidateSnapshotDigest: manifest.candidateSnapshotDigest,
+      sealedDigest: manifest.sealedDigest,
+      compacted: manifest.compacted,
+      createdAt: manifest.createdAt,
+      items: [...manifest.items],
+    };
+  }
+
   sealTeamExecutionContext(input: {
     taskId: string;
     executionId: string;
@@ -10729,6 +10773,29 @@ export class SqlitePersistenceClient implements PersistenceClient {
         content: included ? project.instruction : null,
         capturedAt: createdAt,
       });
+    }
+    if (ownerType === 'turn') {
+      const projectTokens = items.reduce(
+        (total, item) =>
+          total + (item.included && item.content !== null ? estimateTokens(item.content) : 0),
+        0,
+      );
+      const usageIndex = prepared.usageEvents.length - 1;
+      const currentUsageEvent = prepared.usageEvents[usageIndex];
+      if (currentUsageEvent?.type !== 'context.usage')
+        throw new Error('Turn context assembly did not publish final usage');
+      const finalUsageEvent = turnEventSchema.parse({
+        ...currentUsageEvent,
+        usage: aggregateContextUsage(prepared.fragments, projectTokens),
+      });
+      const updated = this.db
+        .prepare(
+          `UPDATE turn_events SET payload_json = ?
+           WHERE task_id = ? AND seq = ? AND type = 'context.usage'`,
+        )
+        .run(JSON.stringify(finalUsageEvent), taskId, currentUsageEvent.seq);
+      if (updated.changes !== 1) throw new Error('Final context usage event changed before seal');
+      prepared.usageEvents[usageIndex] = finalUsageEvent;
     }
     const candidateSnapshotDigest = projectCandidateSnapshotDigest(project, items);
     const sealedDigest = sha256(

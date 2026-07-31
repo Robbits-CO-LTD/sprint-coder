@@ -31,7 +31,14 @@ import {
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   projectAssignTaskInputSchema,
+  projectContextManifestGetInputSchema,
+  projectContextManifestSchema,
+  projectContextManifestsListInputSchema,
+  projectContextManifestSummarySchema,
   projectCreateInputSchema,
+  projectGetInputSchema,
+  projectInstructionResultSchema,
+  projectInstructionSetInputSchema,
   projectSummarySchema,
   projectUnassignTaskInputSchema,
   projectUpdateInputSchema,
@@ -196,6 +203,34 @@ const api: SprintCoderApi = {
   projects: {
     list: () =>
       invoke(IPC_CHANNELS.projectsList, emptyPayloadSchema, z.array(projectSummarySchema), {}),
+    get: (input) =>
+      invoke(
+        IPC_CHANNELS.projectsGet,
+        projectGetInputSchema,
+        projectInstructionResultSchema,
+        input,
+      ),
+    setInstruction: (input) =>
+      invoke(
+        IPC_CHANNELS.projectsSetInstruction,
+        projectInstructionSetInputSchema,
+        projectInstructionResultSchema,
+        input,
+      ),
+    listContextManifests: (input) =>
+      invoke(
+        IPC_CHANNELS.projectsListContextManifests,
+        projectContextManifestsListInputSchema,
+        z.array(projectContextManifestSummarySchema),
+        input,
+      ),
+    getContextManifest: (input) =>
+      invoke(
+        IPC_CHANNELS.projectsGetContextManifest,
+        projectContextManifestGetInputSchema,
+        projectContextManifestSchema,
+        input,
+      ),
     create: (input) =>
       invoke(IPC_CHANNELS.projectsCreate, projectCreateInputSchema, projectSummarySchema, input),
     update: (input) =>

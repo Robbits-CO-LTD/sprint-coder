@@ -48,6 +48,7 @@ describe('ContextLedger calculations', () => {
     ).toEqual({
       usedTokens: 20,
       hardCapTokens: 32_000,
+      projectTokens: 0,
       fragments: [
         { source: 'system', tokens: 2 },
         { source: 'history', tokens: 9 },
@@ -55,6 +56,14 @@ describe('ContextLedger calculations', () => {
         { source: 'compaction', tokens: 6 },
       ],
     });
+  });
+
+  it('reports Project tokens separately while keeping the total consistent', () => {
+    const usage = aggregateContextUsage([fragment('history', 7)], 3);
+    expect(usage).toMatchObject({ usedTokens: 10, projectTokens: 3 });
+    expect(usage.fragments.reduce((total, item) => total + item.tokens, usage.projectTokens)).toBe(
+      usage.usedTokens,
+    );
   });
 });
 
