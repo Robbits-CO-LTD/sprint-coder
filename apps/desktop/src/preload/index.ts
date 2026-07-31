@@ -76,6 +76,8 @@ import {
   teamDetailSchema,
   teamEventSchema,
   teamHireWorkerInputSchema,
+  teamMissionSummarySchema,
+  teamResumeMissionInputSchema,
   teamMessageSummarySchema,
   teamPolicyUpdateInputSchema,
   teamPolicySchema,
@@ -195,6 +197,13 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.teamsUpdatePolicy, teamPolicyUpdateInputSchema, teamDetailSchema, input),
     hireWorker: (input) =>
       invoke(IPC_CHANNELS.teamsHireWorker, teamHireWorkerInputSchema, workerSummarySchema, input),
+    resumeMission: (input) =>
+      invoke(
+        IPC_CHANNELS.teamsResumeMission,
+        teamResumeMissionInputSchema,
+        teamMissionSummarySchema,
+        input,
+      ),
     sendToWorker: (input) =>
       invoke(IPC_CHANNELS.teamsSend, teamSendMessageInputSchema, teamMessageSummarySchema, input),
     stopWorker: (input) =>

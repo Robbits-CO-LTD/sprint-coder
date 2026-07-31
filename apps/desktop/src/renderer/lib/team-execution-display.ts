@@ -16,6 +16,7 @@ export const EXECUTION_STATE_LABELS: Readonly<Record<TeamExecutionState, string>
   waiting_verification: '接続確認待ち',
   waiting_rate_limit: 'レート制限待ち',
   running: '実行中',
+  waiting_resume: '再開待ち',
   completed: '完了',
   failed: '失敗',
   canceled: 'キャンセル済み',
@@ -28,6 +29,7 @@ export const QUEUE_REASON_LABELS: Readonly<Record<TeamQueueReason, string>> = {
   rate_limit: 'Provider rate limit',
   budget: '予算上限',
   recovery: '再起動から復元',
+  automatic_retry: '安全な自動再試行',
 };
 
 /** `queueReason: null` is a real backend state (waiting without a recorded cause), not missing
@@ -42,6 +44,13 @@ export const BUILTIN_CONNECTION_LABELS: Readonly<Record<string, string>> = {
 export const UNKNOWN_CONNECTION_LABEL = 'Connection不明';
 export const EMPTY_INSTRUCTION_LABEL = '指示プレビューなし';
 export const UNKNOWN_STATE_LABEL = '状態不明';
+export const ATTEMPT_START_REASON_LABELS = {
+  initial: '通常開始',
+  automatic_retry: '自動再試行',
+  manual_resume: '手動再開',
+  steer: '修正指示から再開',
+  app_restart: 'アプリ再起動から復元',
+} as const;
 
 /** States in which the execution is holding a queue slot rather than running. Waiting-specific
  * facts (reason / waiting-since / queue position) are only meaningful for these. */
@@ -49,6 +58,7 @@ const WAITING_STATES: ReadonlySet<string> = new Set<TeamExecutionState>([
   'queued',
   'waiting_verification',
   'waiting_rate_limit',
+  'waiting_resume',
 ]);
 
 const TERMINAL_STATES: ReadonlySet<string> = new Set<TeamExecutionState>([
@@ -138,6 +148,9 @@ export type TeamExecutionDisplay = {
   queueOrdinalLabel: string | null;
   connectionLabel: string;
   instructionLabel: string;
+  progressLabel: string | null;
+  attemptReasonLabel: string | null;
+  terminalReasonLabel: string | null;
   /** Single-sentence announcement for the polite live region. */
   ariaSummary: string;
 };
@@ -150,7 +163,11 @@ export function describeExecution(execution: TeamExecutionSummary): TeamExecutio
 
   const waitingSinceIso = isWaiting ? (execution.queuedAt ?? execution.assignedAt) : null;
   const waitingSinceLabel = waitingSinceIso === null ? null : formatClockTime(waitingSinceIso);
-  const waitReasonLabel = isWaiting ? queueReasonLabel(execution.queueReason) : null;
+  const waitReasonLabel = isWaiting
+    ? execution.state === 'waiting_resume'
+      ? '既存変更を確認してから再開'
+      : queueReasonLabel(execution.queueReason)
+    : null;
   const queueOrdinalLabel =
     isWaiting && typeof execution.queueOrdinal === 'number'
       ? `待機順 ${execution.queueOrdinal}`
@@ -161,6 +178,18 @@ export function describeExecution(execution: TeamExecutionSummary): TeamExecutio
   if (waitingSinceLabel !== null) parts.push(`待機開始 ${waitingSinceLabel}`);
   if (queueOrdinalLabel !== null) parts.push(queueOrdinalLabel);
   parts.push(`Connection ${connection}`);
+  const progressLabel =
+    execution.lastProgressAt === null ? null : formatClockTime(execution.lastProgressAt);
+  const attemptReasonLabel =
+    execution.attemptStartReason === null
+      ? null
+      : (ATTEMPT_START_REASON_LABELS[execution.attemptStartReason] ?? execution.attemptStartReason);
+  const terminalReasonLabel =
+    execution.terminalReason === null
+      ? null
+      : execution.terminalReason === 'stop_unconfirmed'
+        ? '強制停止'
+        : execution.terminalReason;
 
   return {
     state: execution.state,
@@ -173,6 +202,9 @@ export function describeExecution(execution: TeamExecutionSummary): TeamExecutio
     queueOrdinalLabel,
     connectionLabel: connection,
     instructionLabel: instruction,
+    progressLabel,
+    attemptReasonLabel,
+    terminalReasonLabel,
     ariaSummary: parts.join('、'),
   };
 }

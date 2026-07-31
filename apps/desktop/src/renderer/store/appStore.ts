@@ -232,6 +232,7 @@ type AppState = {
   // the renderer anymore. `stopTeamWorker`/`stopAllTeamWorkers` stay: FR-TEAM-13 keeps stop as a
   // user override.
   stopTeamWorker(taskId: string, agentId: string): Promise<void>;
+  resumeTeamMission(taskId: string, missionId: string): Promise<void>;
   stopAllTeamWorkers(taskId: string): Promise<void>;
   /** Writes the whole policy under an optimistic-concurrency check (Team v2 Core C4b).
    *
@@ -1465,6 +1466,19 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ error: describeError(err) });
       } finally {
         set({ teamBusy: false });
+      }
+    },
+    async resumeTeamMission(taskId: string, missionId: string) {
+      set({ teamBusy: true, error: null });
+      try {
+        await window.sprintCoder!.teams.resumeMission({ taskId, missionId });
+        const detail = await window.sprintCoder!.teams.get(taskId);
+        set((state) => ({
+          teamByTask: { ...state.teamByTask, [taskId]: detail },
+          teamBusy: false,
+        }));
+      } catch (error) {
+        set({ teamBusy: false, error: describeError(error) });
       }
     },
 

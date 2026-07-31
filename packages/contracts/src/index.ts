@@ -369,6 +369,34 @@ export const teamMessageSummarySchema = z
   .strict();
 export type TeamMessageSummary = z.infer<typeof teamMessageSummarySchema>;
 
+export const teamMissionWorktreeStateSchema = z.enum([
+  'created',
+  'active',
+  'ready',
+  'integrated',
+  'cleaned',
+  'quarantined',
+]);
+export type TeamMissionWorktreeState = z.infer<typeof teamMissionWorktreeStateSchema>;
+export const teamMissionWorktreeSummarySchema = z
+  .object({
+    path: z.string().min(1).max(4_096),
+    baseHead: z.string().regex(/^[0-9a-f]{40,64}$/i),
+    state: teamMissionWorktreeStateSchema,
+    workerHead: z
+      .string()
+      .regex(/^[0-9a-f]{40,64}$/i)
+      .nullable(),
+    integratedHead: z
+      .string()
+      .regex(/^[0-9a-f]{40,64}$/i)
+      .nullable(),
+    changedFiles: z.array(z.string().min(1).max(4_096)).max(500),
+    reason: z.string().min(1).max(2_000).nullable(),
+  })
+  .strict();
+export type TeamMissionWorktreeSummary = z.infer<typeof teamMissionWorktreeSummarySchema>;
+
 export const teamExecutionSummarySchema = z
   .object({
     id: idSchema,
@@ -381,6 +409,7 @@ export const teamExecutionSummarySchema = z
       'waiting_verification',
       'waiting_rate_limit',
       'running',
+      'waiting_resume',
       'completed',
       'failed',
       'canceled',
@@ -396,10 +425,20 @@ export const teamExecutionSummarySchema = z
         'rate_limit',
         'budget',
         'recovery',
+        'automatic_retry',
       ])
       .nullable(),
     connectionId: z.string().min(1).max(128).nullable(),
     requestedModel: z.string().min(1).max(128).nullable(),
+    attemptStartReason: z
+      .enum(['initial', 'automatic_retry', 'manual_resume', 'steer', 'app_restart'])
+      .nullable(),
+    lastProgressAt: timestampSchema.nullable(),
+    terminalReason: z.string().min(1).max(128).nullable(),
+    missionId: idSchema.nullable(),
+    missionStepOrdinal: z.number().int().min(1).max(12).nullable(),
+    missionStepCount: z.number().int().min(2).max(12).nullable(),
+    worktree: teamMissionWorktreeSummarySchema.nullable().default(null),
     assignedAt: timestampSchema,
     queuedAt: timestampSchema.nullable(),
     startedAt: timestampSchema.nullable(),
@@ -408,6 +447,90 @@ export const teamExecutionSummarySchema = z
   })
   .strict();
 export type TeamExecutionSummary = z.infer<typeof teamExecutionSummarySchema>;
+
+export const teamMissionAccessSchema = z.enum(['read-only', 'workspace-write']);
+export type TeamMissionAccess = z.infer<typeof teamMissionAccessSchema>;
+export const teamMissionStateSchema = z.enum([
+  'queued',
+  'running',
+  'waiting_resume',
+  'completed',
+  'failed',
+  'canceled',
+]);
+export type TeamMissionState = z.infer<typeof teamMissionStateSchema>;
+export const teamMissionStepInputSchema = z
+  .object({
+    workerId: idSchema,
+    objective: z.string().min(1).max(10_000),
+    doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(20),
+    access: teamMissionAccessSchema,
+  })
+  .strict();
+export type TeamMissionStepInput = z.infer<typeof teamMissionStepInputSchema>;
+export const teamAssignMissionInputSchema = z
+  .object({
+    taskId: idSchema,
+    objective: z.string().min(1).max(20_000),
+    doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(64),
+    steps: z.array(teamMissionStepInputSchema).min(2).max(12),
+  })
+  .strict();
+export type TeamAssignMissionInput = z.infer<typeof teamAssignMissionInputSchema>;
+export const teamResumeMissionInputSchema = z
+  .object({ taskId: idSchema, missionId: idSchema })
+  .strict();
+export type TeamResumeMissionInput = z.infer<typeof teamResumeMissionInputSchema>;
+export const teamMissionCheckpointSchema = z
+  .object({
+    summary: z.string().min(1).max(4_000),
+    changedFiles: z.array(z.string().min(1).max(4_096)).max(500),
+    gitHead: z.string().min(1).max(128).nullable(),
+    workspaceDigest: z.string().length(64).nullable(),
+    recordedAt: timestampSchema,
+  })
+  .strict();
+export type TeamMissionCheckpoint = z.infer<typeof teamMissionCheckpointSchema>;
+export const teamMissionStepSummarySchema = z
+  .object({
+    ordinal: z.number().int().min(1).max(12),
+    executionId: idSchema,
+    workerId: idSchema,
+    objective: z.string().min(1).max(10_000),
+    doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(20),
+    access: teamMissionAccessSchema,
+    state: z.enum([
+      'assigned',
+      'queued',
+      'waiting_verification',
+      'waiting_rate_limit',
+      'running',
+      'waiting_resume',
+      'completed',
+      'failed',
+      'canceled',
+    ]),
+    checkpoint: teamMissionCheckpointSchema.nullable(),
+    worktree: teamMissionWorktreeSummarySchema.nullable().default(null),
+  })
+  .strict();
+export type TeamMissionStepSummary = z.infer<typeof teamMissionStepSummarySchema>;
+export const teamMissionSummarySchema = z
+  .object({
+    id: idSchema,
+    teamId: idSchema,
+    createdByAgentId: idSchema,
+    state: teamMissionStateSchema,
+    objective: z.string().min(1).max(20_000),
+    doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(64),
+    currentStepOrdinal: z.number().int().min(1).max(12),
+    steps: z.array(teamMissionStepSummarySchema).min(2).max(12),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+    completedAt: timestampSchema.nullable(),
+  })
+  .strict();
+export type TeamMissionSummary = z.infer<typeof teamMissionSummarySchema>;
 
 export const teamActivitySummarySchema = z
   .object({
@@ -442,6 +565,7 @@ export const teamActivitySummarySchema = z
         'rate_limit',
         'budget',
         'recovery',
+        'automatic_retry',
       ])
       .nullable(),
     attemptOrdinal: z.number().int().min(1).nullable(),
@@ -461,6 +585,7 @@ export const teamDetailSchema = z
     workers: z.array(workerSummarySchema),
     messages: z.array(teamMessageSummarySchema),
     executions: z.array(teamExecutionSummarySchema),
+    missions: z.array(teamMissionSummarySchema),
     activities: z.array(teamActivitySummarySchema),
     budgets: z.array(teamBudgetStatusSchema),
   })
@@ -2304,6 +2429,7 @@ export interface SprintCoderApi {
     get(taskId: string): Promise<TeamDetail | null>;
     updatePolicy(input: TeamPolicyUpdateInput): Promise<TeamDetail>;
     hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary>;
+    resumeMission(input: TeamResumeMissionInput): Promise<TeamMissionSummary>;
     sendToWorker(input: TeamSendMessageInput): Promise<TeamMessageSummary>;
     stopWorker(input: TeamWorkerRef): Promise<WorkerSummary>;
     stopAll(taskId: string): Promise<TeamDetail>;
@@ -2465,6 +2591,7 @@ export const IPC_CHANNELS = {
   teamsSend: 'sprint-coder:teams:send',
   teamsStopWorker: 'sprint-coder:teams:stop-worker',
   teamsStopAll: 'sprint-coder:teams:stop-all',
+  teamsResumeMission: 'sprint-coder:teams:resume-mission',
   teamsSubscribe: 'sprint-coder:teams:subscribe',
   teamsUnsubscribe: 'sprint-coder:teams:unsubscribe',
   teamsEvent: 'sprint-coder:teams:event',

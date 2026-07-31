@@ -114,6 +114,7 @@ export function TeamCanvas({
   const detail = useAppStore((s) => s.teamByTask[task.id]);
   const teamBusy = useAppStore((s) => s.teamBusy);
   const stopTeamWorker = useAppStore((s) => s.stopTeamWorker);
+  const resumeTeamMission = useAppStore((s) => s.resumeTeamMission);
   const stopAllTeamWorkers = useAppStore((s) => s.stopAllTeamWorkers);
   const [policyOpen, setPolicyOpen] = useState(false);
 
@@ -1029,6 +1030,15 @@ export function TeamCanvas({
                     teamBusy={teamBusy}
                     selected={selectedNodeId === worker.id}
                     onStop={() => void stopTeamWorker(task.id, worker.id)}
+                    onResumeMission={
+                      latestExecutionForWorker(detail.executions, worker.id)?.missionId == null
+                        ? undefined
+                        : () =>
+                            void resumeTeamMission(
+                              task.id,
+                              latestExecutionForWorker(detail.executions, worker.id)!.missionId!,
+                            )
+                    }
                     ref={(el) => handleWorkerRef(worker.id, el)}
                   />
                 );

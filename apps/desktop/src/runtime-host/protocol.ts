@@ -49,6 +49,12 @@ type EnvelopeBase = {
 };
 
 export type RuntimeCanonicalEvent =
+  | { type: 'heartbeat'; at: string }
+  | {
+      type: 'operation';
+      phase: 'command_start' | 'command_end' | 'tool_call_start' | 'tool_call_end';
+      label: string;
+    }
   | { type: 'stage'; stage: TurnStage }
   | { type: 'delta'; messageId: string; delta: string }
   // `resolvedModel` is additive/optional: only the Claude adapter's normalizer ever populates it
@@ -130,6 +136,7 @@ export type RuntimeToMainEnvelope =
       claudeModels: CodexModelOption[];
     })
   | (EnvelopeBase & { type: 'started'; acceptedContextFragmentIds: string[] })
+  | (EnvelopeBase & { type: 'stopped'; forced: boolean })
   | (EnvelopeBase & { type: 'event'; event: RuntimeCanonicalEvent })
   | (EnvelopeBase & { type: 'exit'; code: number; canceled: boolean })
   | (EnvelopeBase & { type: 'error'; error: PublicError });
@@ -299,6 +306,7 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       )
     );
   if (value.type === 'event') return 'event' in value && isRuntimeCanonicalEvent(value.event);
+  if (value.type === 'stopped') return 'forced' in value && typeof value.forced === 'boolean';
   if (value.type === 'exit')
     return (
       'code' in value &&
@@ -314,6 +322,8 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
 
 function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent {
   if (typeof value !== 'object' || value === null || !('type' in value)) return false;
+  if (value.type === 'heartbeat')
+    return 'at' in value && typeof value.at === 'string' && Number.isFinite(Date.parse(value.at));
   if (value.type === 'completed') {
     const resolvedModelValid =
       !('resolvedModel' in value) ||
@@ -331,6 +341,17 @@ function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent
   }
   if (value.type === 'stage')
     return 'stage' in value && turnStageSchema.safeParse(value.stage).success;
+  if (value.type === 'operation')
+    return (
+      'phase' in value &&
+      ['command_start', 'command_end', 'tool_call_start', 'tool_call_end'].includes(
+        String(value.phase),
+      ) &&
+      'label' in value &&
+      typeof value.label === 'string' &&
+      value.label.length > 0 &&
+      value.label.length <= 1_000
+    );
   if (value.type === 'reasoning')
     return (
       'text' in value &&

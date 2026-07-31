@@ -27,6 +27,13 @@ function execution(overrides: Partial<TeamExecutionSummary> = {}): TeamExecution
     queueReason: null,
     connectionId: 'builtin:claude-cli',
     requestedModel: null,
+    attemptStartReason: 'initial',
+    lastProgressAt: '2026-07-28T01:00:05.000Z',
+    terminalReason: null,
+    missionId: null,
+    missionStepOrdinal: null,
+    missionStepCount: null,
+    worktree: null,
     assignedAt: '2026-07-28T01:00:00.000Z',
     queuedAt: null,
     startedAt: '2026-07-28T01:00:05.000Z',
@@ -124,6 +131,27 @@ describe('TeamExecutionStatus', () => {
     expect(renderToStaticMarkup(<TeamExecutionStatus execution={null} variant="list" />)).toBe('');
   });
 
+  it('shows isolated worktree integration and quarantine state in both views', () => {
+    const row = execution({
+      state: 'waiting_resume',
+      worktree: {
+        path: '/tmp/worktree-exec-1',
+        baseHead: 'a'.repeat(40),
+        state: 'quarantined',
+        workerHead: 'b'.repeat(40),
+        integratedHead: null,
+        changedFiles: ['src/change.ts'],
+        reason: 'Workspace changed before integration',
+      },
+    });
+    for (const variant of ['canvas', 'list'] as const) {
+      const html = renderToStaticMarkup(<TeamExecutionStatus execution={row} variant={variant} />);
+      expect(html).toContain('変更を保持して再開待ち');
+      expect(html).toContain('変更1件');
+      expect(html).toContain('Workspace changed before integration');
+    }
+  });
+
   it.each(Object.entries(EXECUTION_STATE_LABELS))(
     'states %s in Japanese as "%s"',
     (state, label) => {
@@ -168,6 +196,23 @@ describe('TeamExecutionStatus', () => {
       />,
     );
     expect(html).toContain(UNKNOWN_QUEUE_REASON_LABEL);
+  });
+
+  it('shows the same resume control for a waiting Mission in either view', () => {
+    const row = execution({
+      state: 'waiting_resume',
+      missionId: 'mission-1',
+      missionStepOrdinal: 1,
+      missionStepCount: 2,
+    });
+    for (const variant of ['canvas', 'list'] as const) {
+      const html = renderToStaticMarkup(
+        <TeamExecutionStatus execution={row} variant={variant} onResume={() => undefined} />,
+      );
+      expect(html).toContain('data-testid="team-mission-resume"');
+      expect(html).toContain('Missionを再開');
+      expect(html).toContain('再開待ち');
+    }
   });
 
   it.each(['queued', 'waiting_verification', 'waiting_rate_limit'] as const)(

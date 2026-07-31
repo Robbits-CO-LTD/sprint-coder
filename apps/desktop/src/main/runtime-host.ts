@@ -20,6 +20,16 @@ type ActiveTurn = {
   lastSeq: number;
   contextFragmentIds: string[];
 };
+export type RuntimeStopReceipt = Readonly<{
+  turnId: string;
+  forced: boolean;
+  stoppedAt: string;
+}>;
+type CancelWaiter = {
+  resolve(receipt: RuntimeStopReceipt): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+};
 type EventHandler = (taskId: string, turnId: string, event: RuntimeCanonicalEvent) => void;
 type FailureHandler = (taskId: string, turnId: string, error: PublicError) => void;
 type PrepareContext = (taskId: string, turnId: string) => PreparedContext;
@@ -39,6 +49,7 @@ export class RuntimeHostClient {
     models: [],
   });
   private readonly active = new Map<string, ActiveTurn>();
+  private readonly cancelWaiters = new Map<string, CancelWaiter>();
   private disposed = false;
 
   constructor(
@@ -108,19 +119,52 @@ export class RuntimeHostClient {
     });
   }
 
-  cancel(taskId: string, turnId: string): void {
+  cancel(taskId: string, turnId: string): Promise<RuntimeStopReceipt> {
     const active = this.active.get(turnId);
-    if (active === undefined) return;
+    if (active === undefined)
+      return Promise.resolve({
+        turnId,
+        forced: false,
+        stoppedAt: new Date().toISOString(),
+      });
+    const existing = this.cancelWaiters.get(turnId);
+    if (existing !== undefined)
+      return new Promise<RuntimeStopReceipt>((resolve, reject) => {
+        const originalResolve = existing.resolve;
+        const originalReject = existing.reject;
+        existing.resolve = (receipt) => {
+          originalResolve(receipt);
+          resolve(receipt);
+        };
+        existing.reject = (error) => {
+          originalReject(error);
+          reject(error);
+        };
+      });
     this.post({
       ...this.base(taskId, turnId, active.operationId, active.lastSeq + 1),
       type: 'cancel',
     });
-    this.active.delete(turnId);
+    return new Promise<RuntimeStopReceipt>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const current = this.cancelWaiters.get(turnId);
+        if (current === undefined) return;
+        this.restartHostAfterUnconfirmedStop(
+          new Error('Runtime stop was not confirmed within 5 seconds'),
+        );
+      }, 5_000);
+      this.cancelWaiters.set(turnId, { resolve, reject, timer });
+    });
   }
 
   dispose(): void {
     this.disposed = true;
     this.active.clear();
+    for (const [turnId, waiter] of this.cancelWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve({ turnId, forced: true, stoppedAt: new Date().toISOString() });
+    }
+    this.cancelWaiters.clear();
     this.process?.kill();
     this.process = null;
   }
@@ -197,7 +241,7 @@ export class RuntimeHostClient {
       if (raw.event.type === 'completed') this.active.delete(raw.turnId);
     } else if (raw.type === 'started') {
       if (!sameIds(active.contextFragmentIds, raw.acceptedContextFragmentIds)) {
-        this.cancel(raw.taskId, raw.turnId);
+        void this.cancel(raw.taskId, raw.turnId).catch(() => undefined);
         this.onFailure(raw.taskId, raw.turnId, {
           code: 'RUNTIME_PROTOCOL_ERROR',
           userMessage: 'Runtime Hostのcontext受理応答が一致しません。',
@@ -208,27 +252,48 @@ export class RuntimeHostClient {
       try {
         this.onContextAccepted?.(raw.taskId, raw.turnId, raw.acceptedContextFragmentIds);
       } catch {
-        this.cancel(raw.taskId, raw.turnId);
+        void this.cancel(raw.taskId, raw.turnId).catch(() => undefined);
         this.onFailure(raw.taskId, raw.turnId, {
           code: 'RUNTIME_FAILED',
           userMessage: 'Runtime contextの受理記録に失敗しました。',
           retryable: true,
         });
       }
+    } else if (raw.type === 'stopped') {
+      this.finishCancel(raw.turnId, raw.forced);
     } else if (raw.type === 'error') {
       this.active.delete(raw.turnId);
       this.onFailure(raw.taskId, raw.turnId, raw.error);
-    } else if (raw.type === 'exit' && !raw.canceled && raw.code !== 0) {
-      this.active.delete(raw.turnId);
-      this.onFailure(raw.taskId, raw.turnId, {
-        code: 'RUNTIME_FAILED',
-        userMessage:
-          this.kind === 'claude'
-            ? 'Claude runtimeが異常終了しました。'
-            : 'Codex runtimeが異常終了しました。',
-        retryable: true,
-      });
+    } else if (raw.type === 'exit') {
+      if (raw.canceled) this.finishCancel(raw.turnId, false);
+      else {
+        this.active.delete(raw.turnId);
+        if (raw.code !== 0)
+          this.onFailure(raw.taskId, raw.turnId, {
+            code: 'RUNTIME_FAILED',
+            userMessage:
+              this.kind === 'claude'
+                ? 'Claude runtimeが異常終了しました。'
+                : 'Codex runtimeが異常終了しました。',
+            retryable: true,
+          });
+      }
     }
+  }
+
+  private finishCancel(turnId: string, forced: boolean): void {
+    this.active.delete(turnId);
+    const waiter = this.cancelWaiters.get(turnId);
+    if (waiter === undefined) return;
+    clearTimeout(waiter.timer);
+    this.cancelWaiters.delete(turnId);
+    if (forced) {
+      this.restartHostAfterUnconfirmedStop(
+        new Error('Runtime process tree stop could not be confirmed'),
+      );
+      return;
+    }
+    waiter.resolve({ turnId, forced: false, stoppedAt: new Date().toISOString() });
   }
 
   private handleExit(instanceId: string): void {
@@ -238,12 +303,37 @@ export class RuntimeHostClient {
     this.process = null;
     const failures = [...this.active.entries()];
     this.active.clear();
+    for (const [turnId, waiter] of this.cancelWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error('Runtime Host exited before stop confirmation'));
+      this.cancelWaiters.delete(turnId);
+    }
     for (const [turnId, active] of failures)
       this.onFailure(active.taskId, turnId, {
         code: 'RUNTIME_FAILED',
         userMessage: 'Runtime Hostが終了しました。',
         retryable: true,
       });
+  }
+
+  private restartHostAfterUnconfirmedStop(error: Error): void {
+    const child = this.process;
+    this.process = null;
+    const failures = [...this.active.entries()];
+    this.active.clear();
+    for (const [turnId, waiter] of this.cancelWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+      this.cancelWaiters.delete(turnId);
+    }
+    child?.kill();
+    for (const [turnId, active] of failures)
+      this.onFailure(active.taskId, turnId, {
+        code: 'RUNTIME_FAILED',
+        userMessage: '停止を確認できなかったためRuntime Hostを再起動しました。',
+        retryable: true,
+      });
+    if (!this.disposed) this.launch();
   }
 
   private post(message: MainToRuntimeEnvelope): void {

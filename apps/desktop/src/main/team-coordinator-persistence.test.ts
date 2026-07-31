@@ -424,6 +424,85 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('persists a worktree lifecycle for each writable Mission execution', () => {
+      const { persistence } = createPersistence();
+      const { teamId, leaderId, workerId } = buildActiveTeam(persistence, {
+        writeCapable: true,
+      });
+      const mission = persistence.createTeamMission({
+        teamId,
+        createdByAgentId: leaderId,
+        objective: 'isolated write',
+        doneCriteria: ['integrated'],
+        steps: [
+          {
+            workerId,
+            objective: 'write',
+            doneCriteria: ['written'],
+            access: 'workspace-write',
+          },
+          {
+            workerId,
+            objective: 'verify',
+            doneCriteria: ['verified'],
+            access: 'read-only',
+          },
+        ],
+        now: '2026-07-31T00:00:00.000Z',
+      });
+      const executionId = mission.steps[0]!.executionId;
+      const baseHead = 'a'.repeat(40);
+      const workerHead = 'b'.repeat(40);
+      const integratedHead = 'c'.repeat(40);
+
+      expect(
+        persistence.recordTeamMissionWorktree({
+          executionId,
+          agentId: workerId,
+          repoPath: '/tmp/repo',
+          path: '/tmp/worktrees/execution-1',
+          baseHead,
+          now: '2026-07-31T00:00:01.000Z',
+        }),
+      ).toMatchObject({ executionId, state: 'created', baseHead });
+      persistence.updateTeamMissionWorktree({
+        executionId,
+        to: 'active',
+        now: '2026-07-31T00:00:02.000Z',
+      });
+      expect(() =>
+        persistence.updateTeamMissionWorktree({
+          executionId,
+          to: 'ready',
+          now: '2026-07-31T00:00:03.000Z',
+        }),
+      ).toThrow('requires workerHead');
+      expect(
+        persistence.updateTeamMissionWorktree({
+          executionId,
+          to: 'ready',
+          workerHead,
+          changedFiles: ['src/change.ts'],
+          now: '2026-07-31T00:00:04.000Z',
+        }),
+      ).toMatchObject({ state: 'ready', workerHead, changedFiles: ['src/change.ts'] });
+      persistence.updateTeamMissionWorktree({
+        executionId,
+        to: 'integrated',
+        integratedHead,
+        now: '2026-07-31T00:00:05.000Z',
+      });
+      expect(
+        persistence.updateTeamMissionWorktree({
+          executionId,
+          to: 'cleaned',
+          reason: null,
+          now: '2026-07-31T00:00:06.000Z',
+        }),
+      ).toMatchObject({ state: 'cleaned', integratedHead, reason: null });
+      persistence.close();
+    });
+
     it('sets a worker current activity and persists write capability', () => {
       const { persistence } = createPersistence();
       const { workerId } = buildActiveTeam(persistence, { writeCapable: true });

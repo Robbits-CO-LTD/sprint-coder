@@ -458,6 +458,7 @@ export type TeamExecutionSummary = {
     | 'waiting_verification'
     | 'waiting_rate_limit'
     | 'running'
+    | 'waiting_resume'
     | 'completed'
     | 'failed'
     | 'canceled';
@@ -471,9 +472,18 @@ export type TeamExecutionSummary = {
     | 'rate_limit'
     | 'budget'
     | 'recovery'
+    | 'automatic_retry'
     | null;
   connectionId: string | null;
   requestedModel: string | null;
+  attemptStartReason:
+    'initial' | 'automatic_retry' | 'manual_resume' | 'steer' | 'app_restart' | null;
+  lastProgressAt: string | null;
+  terminalReason: string | null;
+  missionId: string | null;
+  missionStepOrdinal: number | null;
+  missionStepCount: number | null;
+  worktree: TeamMissionWorktreeSummary | null;
   assignedAt: string;
   queuedAt: string | null;
   startedAt: string | null;
@@ -510,6 +520,7 @@ export type TeamActivitySummary = {
     | 'rate_limit'
     | 'budget'
     | 'recovery'
+    | 'automatic_retry'
     | null;
   attemptOrdinal: number | null;
   terminalReason: string | null;
@@ -521,11 +532,51 @@ export type TeamActivitySummary = {
   modelSelectionReason: string | null;
   recordedAt: string;
 };
+export type TeamMissionCheckpoint = {
+  summary: string;
+  changedFiles: string[];
+  gitHead: string | null;
+  workspaceDigest: string | null;
+  recordedAt: string;
+};
+export type TeamMissionWorktreeSummary = {
+  path: string;
+  baseHead: string;
+  state: 'created' | 'active' | 'ready' | 'integrated' | 'cleaned' | 'quarantined';
+  workerHead: string | null;
+  integratedHead: string | null;
+  changedFiles: string[];
+  reason: string | null;
+};
+export type TeamMissionSummary = {
+  id: string;
+  teamId: string;
+  createdByAgentId: string;
+  state: 'queued' | 'running' | 'waiting_resume' | 'completed' | 'failed' | 'canceled';
+  objective: string;
+  doneCriteria: string[];
+  currentStepOrdinal: number;
+  steps: {
+    ordinal: number;
+    executionId: string;
+    workerId: string;
+    objective: string;
+    doneCriteria: string[];
+    access: 'read-only' | 'workspace-write';
+    state: TeamExecutionSummary['state'];
+    checkpoint: TeamMissionCheckpoint | null;
+    worktree: TeamMissionWorktreeSummary | null;
+  }[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
 export type TeamDetail = {
   team: TeamSummary;
   workers: WorkerSummary[];
   messages: TeamMessageSummary[];
   executions: TeamExecutionSummary[];
+  missions: TeamMissionSummary[];
   activities: TeamActivitySummary[];
   budgets: {
     scope: 'global' | 'team' | 'worker';
@@ -591,6 +642,7 @@ export interface SprintCoderApi {
       contextInheritancePolicy: 'none' | 'summary' | 'selected_items' | 'full_fork';
       writeCapable: boolean;
     }): Promise<WorkerSummary>;
+    resumeMission(input: { taskId: string; missionId: string }): Promise<TeamMissionSummary>;
     sendToWorker(input: {
       taskId: string;
       targetAgentId: string;

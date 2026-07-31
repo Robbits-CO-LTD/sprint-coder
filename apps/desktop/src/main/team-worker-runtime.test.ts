@@ -24,7 +24,9 @@ vi.mock('./runtime-host', () => ({
       this.onEvent(taskId, turnId, { type: 'completed' });
     }
 
-    cancel(): void {}
+    async cancel(): Promise<{ turnId: string; forced: false; stoppedAt: string }> {
+      return { turnId: 'turn', forced: false, stoppedAt: new Date().toISOString() };
+    }
     dispose(): void {}
   },
 }));
@@ -127,11 +129,14 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       worker: writableWorker,
       envelope: { ...envelope, targetAgentId: writableWorker.id },
       content: '実装する',
+      workspacePath: '/isolated/worktree',
     });
 
+    expect(runtimeHostMock.starts[0]?.[3]).toBe('/isolated/worktree');
     expect(runtimeHostMock.starts[0]?.[6]).toEqual(inherited);
     expect(runtimeHostMock.starts[0]?.[9]).toBe('workspace-write');
     expect(runtimeHostMock.starts[0]?.[2]).toContain('Workspace書き込み: 許可範囲内で可');
+    expect(runtimeHostMock.starts[0]?.[2]).toContain('隔離worktree: /isolated/worktree');
   });
 
   it('places the Agent own prior Team conversation before a tool-prohibited final instruction', async () => {

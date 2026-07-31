@@ -24,6 +24,8 @@ import {
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
+  teamAssignMissionInputSchema,
+  teamMissionSummarySchema,
   teamPolicyUpdateInputSchema,
   teamSendMessageInputSchema,
   teamSummarySchema,
@@ -400,6 +402,12 @@ describe('public contracts', () => {
     queueReason: 'global_concurrency',
     connectionId: 'builtin:claude-cli',
     requestedModel: 'claude-opus-5',
+    attemptStartReason: null,
+    lastProgressAt: null,
+    terminalReason: null,
+    missionId: null,
+    missionStepOrdinal: null,
+    missionStepCount: null,
     assignedAt: '2026-07-23T00:00:00.000Z',
     queuedAt: '2026-07-23T00:00:00.000Z',
     startedAt: null,
@@ -464,6 +472,69 @@ describe('public contracts', () => {
     ).toThrow();
   });
 
+  it('bounds durable Missions to 2 through 12 ordered steps', () => {
+    const step = {
+      workerId: 'worker-1',
+      objective: 'Inspect the workspace.',
+      doneCriteria: ['Report findings.'],
+      access: 'read-only',
+    } as const;
+    const input = {
+      taskId: 'task-1',
+      objective: 'Complete a durable change.',
+      doneCriteria: ['All steps complete.'],
+      steps: [step, { ...step, objective: 'Verify the change.' }],
+    };
+    expect(teamAssignMissionInputSchema.parse(input).steps).toHaveLength(2);
+    expect(() => teamAssignMissionInputSchema.parse({ ...input, steps: [step] })).toThrow();
+    expect(() =>
+      teamAssignMissionInputSchema.parse({
+        ...input,
+        steps: Array.from({ length: 13 }, () => step),
+      }),
+    ).toThrow();
+    expect(
+      teamMissionSummarySchema.parse({
+        id: 'mission-1',
+        teamId: 'team-1',
+        createdByAgentId: 'leader-1',
+        state: 'waiting_resume',
+        objective: input.objective,
+        doneCriteria: input.doneCriteria,
+        currentStepOrdinal: 1,
+        steps: input.steps.map((missionStep, index) => ({
+          ordinal: index + 1,
+          executionId: `execution-${index + 1}`,
+          workerId: missionStep.workerId,
+          objective: missionStep.objective,
+          doneCriteria: missionStep.doneCriteria,
+          access: missionStep.access,
+          state: index === 0 ? 'waiting_resume' : 'assigned',
+          checkpoint: null,
+          worktree:
+            index === 0
+              ? {
+                  path: '/tmp/team-worktrees/execution-1',
+                  baseHead: 'a'.repeat(40),
+                  state: 'quarantined',
+                  workerHead: 'b'.repeat(40),
+                  integratedHead: null,
+                  changedFiles: ['src/change.ts'],
+                  reason: 'Workspace changed before integration',
+                }
+              : null,
+        })),
+        createdAt: '2026-07-28T01:00:00.000Z',
+        updatedAt: '2026-07-28T01:01:00.000Z',
+        completedAt: null,
+      }),
+    ).toMatchObject({
+      state: 'waiting_resume',
+      currentStepOrdinal: 1,
+      steps: [{ worktree: { state: 'quarantined' } }, { worktree: null }],
+    });
+  });
+
   it('validates normalized durable Team activity summaries', () => {
     expect(teamActivitySummarySchema.parse(teamActivity)).toMatchObject({
       type: 'worker_hired',
@@ -480,6 +551,7 @@ describe('public contracts', () => {
       workers: [worker],
       messages: [teamMessage],
       executions: [execution],
+      missions: [],
       activities: [teamActivity],
       budgets: [budget],
     };
@@ -566,6 +638,7 @@ describe('public contracts', () => {
       workers: [worker],
       messages: [teamMessage],
       executions: [execution],
+      missions: [],
       activities: [teamActivity],
       budgets: [budget],
     };

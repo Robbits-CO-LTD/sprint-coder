@@ -229,6 +229,36 @@ describe('Runtime Host protocol', () => {
     ).toBe(false);
   });
 
+  it('strictly validates command and tool operation progress events', () => {
+    const event = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: 'operation-1',
+      type: 'event',
+      event: {
+        type: 'operation',
+        phase: 'command_start',
+        label: 'Codex command started',
+      },
+    };
+    expect(isRuntimeToMainEnvelope(event)).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...event,
+        event: { ...event.event, phase: 'command_output' },
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...event,
+        event: { ...event.event, label: '' },
+      }),
+    ).toBe(false);
+  });
+
   it('accepts only bounded unique context acknowledgements', () => {
     const base = startEnvelope();
     const started = {

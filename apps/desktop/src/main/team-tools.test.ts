@@ -42,6 +42,14 @@ function dispatch(
   });
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 if (runsWithElectronAbi)
   describe('Leader team tools', () => {
     it('auto-promotes the Task to a Team on the first team_hire_worker call', async () => {
@@ -154,6 +162,45 @@ if (runsWithElectronAbi)
         reports: readonly unknown[];
       };
       expect(second.reports).toHaveLength(0);
+      await broker.dispose();
+      persistence.close();
+    });
+
+    it('assigns a durable 2-step Mission and rejects an undersized Mission at the tool schema', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Team Mission tool');
+      const coordinator = new TeamCoordinator(persistence);
+      const broker = brokerFor(coordinator);
+      const toolContext = { taskId: task.id, turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+      startMockTurnCatalog(broker, toolContext);
+      const hired = (await dispatch(broker, toolContext, 'team_hire_worker', {
+        agentKind: 'worker',
+        role: '調査',
+        objective: 'Missionを実行する',
+      })) as { workerId: string };
+      const step = {
+        workerId: hired.workerId,
+        objective: '読み取り工程',
+        doneCriteria: ['結果を報告'],
+        access: 'read-only',
+      };
+
+      await expect(
+        dispatch(broker, toolContext, 'team_assign_mission', {
+          objective: '小さすぎるMission',
+          doneCriteria: ['完了'],
+          steps: [step],
+        }),
+      ).rejects.toThrow('does not match the pinned schema');
+      const result = (await dispatch(broker, toolContext, 'team_assign_mission', {
+        objective: '2工程Mission',
+        doneCriteria: ['完了'],
+        steps: [step, { ...step, objective: '検証工程' }],
+      })) as { ok: true; missionId: string; executions: readonly unknown[] };
+      expect(result.ok).toBe(true);
+      expect(result.executions).toHaveLength(2);
+      expect(persistence.getTeamMission(result.missionId).steps).toHaveLength(2);
+      await waitFor(() => persistence.getTeamMission(result.missionId).state === 'completed');
       await broker.dispose();
       persistence.close();
     });

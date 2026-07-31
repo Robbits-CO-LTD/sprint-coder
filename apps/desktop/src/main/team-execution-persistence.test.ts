@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient } from './persistence';
+import { TeamCoordinator } from './team-coordinator';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -47,6 +48,14 @@ function createExecutionFixture(persistence: SqlitePersistenceClient) {
     now: '2026-07-28T11:00:00.000Z',
   });
   return { team, leader, worker, execution };
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 if (runsWithElectronAbi)
@@ -232,6 +241,216 @@ if (runsWithElectronAbi)
         queueReason: 'recovery',
       });
       expect(reopened.recoverInterruptedTeamExecutions('2026-07-28T11:06:00.000Z')).toBe(0);
+      reopened.close();
+    });
+
+    it('does not automatically restart the same read-only execution twice', () => {
+      const { persistence, path } = createPersistence();
+      const { execution } = createExecutionFixture(persistence);
+      persistence.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'queued',
+        now: '2026-07-28T11:01:00.000Z',
+        queueReason: 'recovery',
+      });
+      persistence.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'running',
+        now: '2026-07-28T11:02:00.000Z',
+      });
+      const attempt = persistence.createTeamAttempt(
+        execution.id,
+        '2026-07-28T11:02:00.000Z',
+        'app_restart',
+      );
+      persistence.transitionTeamAttempt({
+        attemptId: attempt.id,
+        to: 'running',
+        now: '2026-07-28T11:02:01.000Z',
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('second-restart', '2026-07-28T11:05:00.000Z');
+      expect(reopened.getTeamAttempt(attempt.id)).toMatchObject({
+        state: 'interrupted',
+        terminalReason: 'app_restart',
+      });
+      expect(reopened.getTeamExecution(execution.id).state).toBe('failed');
+      reopened.close();
+    });
+
+    it('atomically checkpoints a Mission step and skips it after restart', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Mission checkpoint recovery');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      persistence.transitionTeamState(team.id, 'active');
+      const leader = persistence.getTaskLeader(task.id);
+      const worker = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'mission worker',
+        objective: 'complete two steps',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'none',
+      });
+      persistence.transitionWorkerState(worker.id, 'spawning');
+      persistence.transitionWorkerState(worker.id, 'ready');
+      const mission = persistence.createTeamMission({
+        teamId: team.id,
+        createdByAgentId: leader.id,
+        objective: 'two durable steps',
+        doneCriteria: ['both complete'],
+        steps: [
+          {
+            workerId: worker.id,
+            objective: 'first',
+            doneCriteria: ['first done'],
+            access: 'read-only',
+          },
+          {
+            workerId: worker.id,
+            objective: 'second',
+            doneCriteria: ['second done'],
+            access: 'read-only',
+          },
+        ],
+        now: '2026-07-28T12:00:00.000Z',
+      });
+      persistence.transitionTeamMission(mission.id, 'running', '2026-07-28T12:00:01.000Z');
+      const first = mission.steps[0]!;
+      persistence.transitionTeamExecution({
+        executionId: first.executionId,
+        to: 'queued',
+        now: '2026-07-28T12:00:02.000Z',
+        queueReason: 'global_concurrency',
+      });
+      persistence.transitionTeamExecution({
+        executionId: first.executionId,
+        to: 'running',
+        now: '2026-07-28T12:00:03.000Z',
+      });
+      const dispatch = persistence.getTeamExecutionDispatch(first.executionId);
+      persistence.transitionTeamTask(dispatch.teamTaskId, 'running', '2026-07-28T12:00:03.000Z');
+      const attempt = persistence.createTeamAttempt(first.executionId, '2026-07-28T12:00:03.000Z');
+      persistence.transitionTeamAttempt({
+        attemptId: attempt.id,
+        to: 'running',
+        now: '2026-07-28T12:00:04.000Z',
+      });
+      persistence.completeTeamMissionStep({
+        executionId: first.executionId,
+        attemptId: attempt.id,
+        teamTaskId: dispatch.teamTaskId,
+        agentId: worker.id,
+        report: {
+          status: 'completed',
+          summary: 'first completed',
+          findings: [],
+          changedFiles: [],
+          artifacts: [],
+          verification: [{ name: 'unit', outcome: 'pass' }],
+          risks: [],
+          nextActions: [],
+          doneEvidence: [{ criterion: 'first done', evidence: 'verified' }],
+        },
+        doneEvidence: [{ criterion: 'first done', evidence: 'verified' }],
+        checkpoint: {
+          summary: 'first completed',
+          changedFiles: [],
+          gitHead: null,
+          workspaceDigest: 'a'.repeat(64),
+          recordedAt: '2026-07-28T12:00:05.000Z',
+        },
+        now: '2026-07-28T12:00:05.000Z',
+      });
+      const secondExecutionId = mission.steps[1]!.executionId;
+      expect(persistence.getTeamExecution(first.executionId).state).toBe('completed');
+      expect(persistence.getTeamExecution(secondExecutionId).state).toBe('queued');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('mission-restart', '2026-07-28T12:01:00.000Z');
+      const coordinator = new TeamCoordinator(reopened);
+      coordinator.recoverOnStartup();
+      await waitFor(() => reopened.getTeamMission(mission.id).state === 'completed');
+      expect(reopened.listTeamAttempts(first.executionId)).toHaveLength(1);
+      expect(reopened.listTeamAttempts(secondExecutionId)).toMatchObject([
+        { ordinal: 1, state: 'completed', startReason: 'app_restart' },
+      ]);
+      reopened.close();
+    });
+
+    it('moves an interrupted writable Mission step to waiting_resume on restart', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Writable Mission recovery');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      persistence.transitionTeamState(team.id, 'active');
+      const leader = persistence.getTaskLeader(task.id);
+      const worker = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'writer',
+        objective: 'write safely',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      persistence.transitionWorkerState(worker.id, 'spawning');
+      persistence.transitionWorkerState(worker.id, 'ready');
+      const mission = persistence.createTeamMission({
+        teamId: team.id,
+        createdByAgentId: leader.id,
+        objective: 'writable recovery',
+        doneCriteria: ['complete'],
+        steps: [
+          {
+            workerId: worker.id,
+            objective: 'write',
+            doneCriteria: ['written'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: worker.id,
+            objective: 'verify',
+            doneCriteria: ['verified'],
+            access: 'read-only',
+          },
+        ],
+        now: '2026-07-28T13:00:00.000Z',
+      });
+      persistence.transitionTeamMission(mission.id, 'running', '2026-07-28T13:00:01.000Z');
+      const firstExecutionId = mission.steps[0]!.executionId;
+      persistence.transitionTeamExecution({
+        executionId: firstExecutionId,
+        to: 'queued',
+        now: '2026-07-28T13:00:02.000Z',
+        queueReason: 'global_concurrency',
+      });
+      persistence.transitionTeamExecution({
+        executionId: firstExecutionId,
+        to: 'running',
+        now: '2026-07-28T13:00:03.000Z',
+      });
+      const attempt = persistence.createTeamAttempt(firstExecutionId, '2026-07-28T13:00:03.000Z');
+      persistence.transitionTeamAttempt({
+        attemptId: attempt.id,
+        to: 'running',
+        now: '2026-07-28T13:00:04.000Z',
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('write-restart', '2026-07-28T13:01:00.000Z');
+      const coordinator = new TeamCoordinator(reopened);
+      coordinator.recoverOnStartup();
+      expect(reopened.getTeamAttempt(attempt.id)).toMatchObject({
+        state: 'interrupted',
+        terminalReason: 'app_restart',
+      });
+      expect(reopened.getTeamExecution(firstExecutionId).state).toBe('waiting_resume');
+      expect(reopened.getTeamMission(mission.id).state).toBe('waiting_resume');
+      expect(reopened.listTeamAttempts(firstExecutionId)).toHaveLength(1);
       reopened.close();
     });
   });

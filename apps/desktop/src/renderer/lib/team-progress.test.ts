@@ -77,6 +77,7 @@ function detail(
       updatedAt: '',
     })),
     executions: [],
+    missions: [],
     activities: [],
     budgets: [],
   };
