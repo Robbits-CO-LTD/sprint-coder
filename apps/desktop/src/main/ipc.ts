@@ -51,6 +51,11 @@ import {
   providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
+  projectAssignTaskInputSchema,
+  projectCreateInputSchema,
+  projectSummarySchema,
+  projectUnassignTaskInputSchema,
+  projectUpdateInputSchema,
   connectionIdSchema,
   createdSkillMutationInputSchema,
   createdSkillEnabledInputSchema,
@@ -141,7 +146,11 @@ import {
   NotFoundError,
   OperationConflictError,
   OperationInProgressError,
+  InvalidProjectError,
+  ProjectArchivedError,
+  ProjectConflictError,
   SteerStaleError,
+  TaskAssignmentBlockedError,
   TurnActiveError,
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
@@ -1363,8 +1372,12 @@ export class IpcRouter {
       taskCreateInputSchema,
       taskSummarySchema,
       (_input, _event, envelope) =>
-        this.runMutation(_event, envelope, '', IPC_CHANNELS.tasksCreate, () =>
-          this.persistence.createTask(_input.title, _input.localOnly),
+        this.runMutation(
+          _event,
+          envelope,
+          _input.projectId === undefined ? 'tasks' : `project:${_input.projectId}`,
+          IPC_CHANNELS.tasksCreate,
+          () => this.persistence.createTask(_input.title, _input.localOnly, _input.projectId),
         ).value,
     );
     this.handle(
@@ -1419,6 +1432,50 @@ export class IpcRouter {
       (input, event, envelope) =>
         this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.tasksSetDraft, () =>
           this.persistence.setDraft(input.taskId, input.draft),
+        ).value,
+    );
+
+    this.handle(IPC_CHANNELS.projectsList, emptyPayloadSchema, z.array(projectSummarySchema), () =>
+      this.persistence.listProjects(),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsCreate,
+      projectCreateInputSchema,
+      projectSummarySchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, 'projects', IPC_CHANNELS.projectsCreate, () =>
+          this.persistence.createProject(input.name),
+        ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsUpdate,
+      projectUpdateInputSchema,
+      projectSummarySchema,
+      (input, event, envelope) =>
+        this.runMutation(
+          event,
+          envelope,
+          `project:${input.projectId}`,
+          IPC_CHANNELS.projectsUpdate,
+          () => this.persistence.updateProject(input),
+        ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsAssignTask,
+      projectAssignTaskInputSchema,
+      taskSummarySchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.projectsAssignTask, () =>
+          this.persistence.assignTaskToProject(input),
+        ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsUnassignTask,
+      projectUnassignTaskInputSchema,
+      taskSummarySchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.projectsUnassignTask, () =>
+          this.persistence.unassignTaskFromProject(input),
         ).value,
     );
 
@@ -3338,6 +3395,30 @@ function toPublicError(error: unknown): PublicError {
     return {
       code: 'TURN_ACTIVE',
       userMessage: 'このタスクでは別のTurnが実行中です。',
+      retryable: false,
+    };
+  if (error instanceof ProjectConflictError)
+    return {
+      code: 'OPERATION_CONFLICT',
+      userMessage: 'Projectが別の操作で更新されました。最新状態を読み直してください。',
+      retryable: true,
+    };
+  if (error instanceof ProjectArchivedError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: 'アーカイブ済みProjectにはTaskを追加できません。',
+      retryable: false,
+    };
+  if (error instanceof TaskAssignmentBlockedError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: 'Teamの実行またはMissionが進行中のため、Taskを移動できません。',
+      retryable: false,
+    };
+  if (error instanceof InvalidProjectError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: 'Projectの入力内容を確認してください。',
       retryable: false,
     };
   if (error instanceof MutationQuarantinedError)

@@ -9,6 +9,7 @@
 
 export type TaskSummary = {
   id: string;
+  projectId: string | null;
   title: string;
   pinned: boolean;
   archived: boolean;
@@ -16,6 +17,17 @@ export type TaskSummary = {
   workspacePath: string | null;
   localOnly: boolean;
   hasConversation?: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  archived: boolean;
+  revision: number;
+  taskCount: number;
+  lastActivityAt: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -618,7 +630,11 @@ export interface SprintCoderApi {
   };
   tasks: {
     list(): Promise<TaskSummary[]>;
-    create(input?: { title?: string; localOnly?: boolean }): Promise<TaskSummary>;
+    create(input?: {
+      title?: string;
+      localOnly?: boolean;
+      projectId?: string;
+    }): Promise<TaskSummary>;
     messages(taskId: string): Promise<ChatMessage[]>;
     rename(taskId: string, title: string): Promise<TaskSummary>;
     setPinned(taskId: string, pinned: boolean): Promise<TaskSummary>;
@@ -626,6 +642,22 @@ export interface SprintCoderApi {
     setGoal(taskId: string, goal: string): Promise<TaskSummary>;
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
+  };
+  projects: {
+    list(): Promise<ProjectSummary[]>;
+    create(input: { name: string }): Promise<ProjectSummary>;
+    update(input: {
+      projectId: string;
+      expectedRevision: number;
+      name?: string;
+      archived?: boolean;
+    }): Promise<ProjectSummary>;
+    assignTask(input: {
+      projectId: string;
+      taskId: string;
+      expectedProjectId: string | null;
+    }): Promise<TaskSummary>;
+    unassignTask(input: { taskId: string; expectedProjectId: string | null }): Promise<TaskSummary>;
   };
   teams: {
     promote(taskId: string): Promise<TeamSummary>;

@@ -11,6 +11,10 @@ import {
   permissionSetInputSchema,
   providerConnectionRateLimitLowerInputSchema,
   providerConnectionSchema,
+  projectAssignTaskInputSchema,
+  projectCreateInputSchema,
+  projectSummarySchema,
+  projectUpdateInputSchema,
   publicErrorSchema,
   runtimeSettingsSchema,
   teamModelResearchSettingsSchema,
@@ -73,6 +77,42 @@ describe('public contracts', () => {
     allowWorkerDirectMessages: true,
     budgetMode: 'bounded',
   } as const;
+
+  it('validates Project summaries and mutation CAS inputs', () => {
+    expect(projectCreateInputSchema.parse({ name: '  Project A  ' })).toEqual({
+      name: 'Project A',
+    });
+    expect(
+      projectUpdateInputSchema.parse({
+        projectId: 'project-1',
+        expectedRevision: 2,
+        archived: true,
+      }),
+    ).toEqual({ projectId: 'project-1', expectedRevision: 2, archived: true });
+    expect(
+      projectAssignTaskInputSchema.parse({
+        projectId: 'project-1',
+        taskId: 'task-1',
+        expectedProjectId: null,
+      }),
+    ).toEqual({ projectId: 'project-1', taskId: 'task-1', expectedProjectId: null });
+    expect(() =>
+      projectUpdateInputSchema.parse({ projectId: 'project-1', expectedRevision: 2 }),
+    ).toThrow();
+    expect(() => projectCreateInputSchema.parse({ name: ' '.repeat(121) })).toThrow();
+    expect(
+      projectSummarySchema.parse({
+        id: 'project-1',
+        name: 'Project A',
+        archived: false,
+        revision: 1,
+        taskCount: 0,
+        lastActivityAt: '2026-07-31T00:00:00.000Z',
+        createdAt: '2026-07-31T00:00:00.000Z',
+        updatedAt: '2026-07-31T00:00:00.000Z',
+      }),
+    ).toMatchObject({ id: 'project-1', revision: 1 });
+  });
 
   it('rejects cyclic Team Blueprint parent relationships', () => {
     const role = {

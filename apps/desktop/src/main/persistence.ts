@@ -10,6 +10,7 @@ import {
   modelSelectionSchema,
   normalizedProviderUsageSchema,
   providerConnectionSchema,
+  projectSummarySchema,
   taskSummarySchema,
   teamModelRestrictionSchema,
   teamBlueprintSchema,
@@ -32,6 +33,7 @@ import {
   type ModelSelection,
   type NormalizedProviderUsage,
   type ProviderConnection,
+  type ProjectSummary,
   type ProviderRuntimeKind,
   type QueuedInput,
   type RuntimeKind,
@@ -292,6 +294,7 @@ function isPngBuffer(bytes: Buffer): boolean {
 
 type TaskRow = {
   id: string;
+  project_id: string | null;
   primary_thread_id: string;
   title: string;
   pinned: number;
@@ -308,6 +311,16 @@ type TaskRow = {
   connection_id: string | null;
   requested_provider: string | null;
   requested_model: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type ProjectRow = {
+  id: string;
+  name: string;
+  archived: number;
+  revision: number;
+  task_count: number;
+  last_activity_at: string;
   created_at: string;
   updated_at: string;
 };
@@ -2498,6 +2511,23 @@ const migrations = [
         ON team_mission_step_worktrees(agent_id, state, created_at);
     `,
   },
+  {
+    version: 55,
+    checksum: 'project-context-hub-v55-project-core',
+    sql: `
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL CHECK (length(name) >= 1 AND length(name) <= 120),
+        archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      ALTER TABLE tasks ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
+      CREATE INDEX tasks_project_activity_idx
+        ON tasks(project_id, pinned DESC, updated_at DESC, id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2944,7 +2974,21 @@ export interface PersistenceClient {
   ): ProviderConnection;
   listTasks(): TaskSummary[];
   getTask(taskId: string): TaskSummary;
-  createTask(title?: string, localOnly?: boolean): TaskSummary;
+  createTask(title?: string, localOnly?: boolean, projectId?: string): TaskSummary;
+  listProjects(): ProjectSummary[];
+  createProject(name: string): ProjectSummary;
+  updateProject(input: {
+    projectId: string;
+    expectedRevision: number;
+    name?: string | undefined;
+    archived?: boolean | undefined;
+  }): ProjectSummary;
+  assignTaskToProject(input: {
+    projectId: string;
+    taskId: string;
+    expectedProjectId: string | null;
+  }): TaskSummary;
+  unassignTaskFromProject(input: { taskId: string; expectedProjectId: string | null }): TaskSummary;
   getTaskModelSelection(taskId: string): ModelSelection | null;
   setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null;
   getTaskLeader(taskId: string): AgentRecord;
@@ -4069,8 +4113,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
                WHERE messages.task_id = tasks.id AND messages.author = 'user'
              ) AS has_conversation
            FROM tasks
-           WHERE archived = 0
-           ORDER BY pinned DESC, updated_at DESC`,
+           ORDER BY pinned DESC, updated_at DESC, id`,
         )
         .all() as (TaskRow & { has_conversation: number })[]
     ).map((row) => toTask(row, row.has_conversation === 1));
@@ -4080,7 +4123,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
   }
 
-  createTask(title?: string, localOnly = false): TaskSummary {
+  createTask(title?: string, localOnly = false, projectId?: string): TaskSummary {
     const now = new Date().toISOString();
     const primaryThreadId = randomUUID();
     const leaderAgentId = randomUUID();
@@ -4091,6 +4134,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const titleSource = title === undefined ? 'default' : 'manual';
     const task = taskSummarySchema.parse({
       id: randomUUID(),
+      projectId: projectId ?? null,
       title: title ?? DEFAULT_TASK_TITLE,
       pinned: false,
       archived: false,
@@ -4102,14 +4146,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
       updatedAt: now,
     });
     this.db.transaction(() => {
+      if (projectId !== undefined) this.assertProjectAcceptsTask(projectId);
       this.db
         .prepare(
           `INSERT INTO tasks(
              id, title, pinned, archived, goal, workspace_path, local_only, draft,
-             primary_thread_id, title_source, created_at, updated_at
-           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?, ?)`,
+             primary_thread_id, title_source, created_at, updated_at, project_id
+           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?, ?, ?)`,
         )
-        .run(task.id, task.title, localOnly ? 1 : 0, titleSource, now, now);
+        .run(task.id, task.title, localOnly ? 1 : 0, titleSource, now, now, projectId ?? null);
       this.db
         .prepare(
           `INSERT INTO agent_threads(
@@ -4155,6 +4200,159 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .run(primaryThreadId, task.id);
     })();
     return task;
+  }
+
+  listProjects(): ProjectSummary[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT p.*,
+             SUM(CASE WHEN t.archived = 0 THEN 1 ELSE 0 END) AS task_count,
+             MAX(p.updated_at, COALESCE(MAX(t.updated_at), p.updated_at)) AS last_activity_at
+           FROM projects p
+           LEFT JOIN tasks t ON t.project_id = p.id
+           GROUP BY p.id
+           ORDER BY last_activity_at DESC, p.id`,
+        )
+        .all() as ProjectRow[]
+    ).map(toProject);
+  }
+
+  createProject(name: string): ProjectSummary {
+    const parsedName = parseProjectName(name);
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO projects(id, name, archived, revision, created_at, updated_at)
+         VALUES (?, ?, 0, 1, ?, ?)`,
+      )
+      .run(id, parsedName, now, now);
+    return this.getProject(id);
+  }
+
+  updateProject(input: {
+    projectId: string;
+    expectedRevision: number;
+    name?: string | undefined;
+    archived?: boolean | undefined;
+  }): ProjectSummary {
+    if (input.name === undefined && input.archived === undefined)
+      throw new InvalidProjectError('No Project fields were supplied');
+    const name = input.name === undefined ? undefined : parseProjectName(input.name);
+    return this.db.transaction(() => {
+      const current = this.getProjectRow(input.projectId);
+      if (current.revision !== input.expectedRevision)
+        throw new ProjectConflictError('Stale Project revision');
+      const nextName = name ?? current.name;
+      const nextArchived = input.archived === undefined ? current.archived : input.archived ? 1 : 0;
+      if (nextName === current.name && nextArchived === current.archived)
+        return this.getProject(input.projectId);
+      const result = this.db
+        .prepare(
+          `UPDATE projects
+           SET name = ?, archived = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(
+          nextName,
+          nextArchived,
+          new Date().toISOString(),
+          input.projectId,
+          input.expectedRevision,
+        );
+      if (result.changes !== 1) throw new ProjectConflictError('Stale Project revision');
+      return this.getProject(input.projectId);
+    })();
+  }
+
+  assignTaskToProject(input: {
+    projectId: string;
+    taskId: string;
+    expectedProjectId: string | null;
+  }): TaskSummary {
+    return this.changeTaskProject(input.taskId, input.expectedProjectId, input.projectId);
+  }
+
+  unassignTaskFromProject(input: {
+    taskId: string;
+    expectedProjectId: string | null;
+  }): TaskSummary {
+    return this.changeTaskProject(input.taskId, input.expectedProjectId, null);
+  }
+
+  private changeTaskProject(
+    taskId: string,
+    expectedProjectId: string | null,
+    nextProjectId: string | null,
+  ): TaskSummary {
+    return this.db.transaction(() => {
+      const task = this.getTaskRow(taskId);
+      if (task.project_id !== expectedProjectId)
+        throw new ProjectConflictError('Task Project membership changed');
+      if (task.project_id === nextProjectId) return this.getTask(taskId);
+      if (nextProjectId !== null) this.assertProjectAcceptsTask(nextProjectId);
+      if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
+      if (this.hasNonTerminalTeamWork(taskId)) throw new TaskAssignmentBlockedError();
+      const result = this.db
+        .prepare(
+          `UPDATE tasks SET project_id = ?, updated_at = ?
+           WHERE id = ? AND project_id IS ?`,
+        )
+        .run(nextProjectId, new Date().toISOString(), taskId, expectedProjectId);
+      if (result.changes !== 1) throw new ProjectConflictError('Task Project membership changed');
+      return this.getTask(taskId);
+    })();
+  }
+
+  private hasNonTerminalTeamWork(taskId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM teams t
+         WHERE t.task_id = ? AND (
+           EXISTS (
+             SELECT 1 FROM team_executions e
+             WHERE e.team_id = t.id
+               AND e.state NOT IN ('completed', 'failed', 'canceled')
+           ) OR EXISTS (
+             SELECT 1 FROM team_missions m
+             WHERE m.team_id = t.id
+               AND m.state NOT IN ('completed', 'failed', 'canceled')
+           )
+         )
+         LIMIT 1`,
+      )
+      .get(taskId);
+    return row !== undefined;
+  }
+
+  private assertProjectAcceptsTask(projectId: string): void {
+    const project = this.getProjectRow(projectId);
+    if (project.archived === 1) throw new ProjectArchivedError();
+  }
+
+  private getProject(projectId: string): ProjectSummary {
+    const row = this.db
+      .prepare(
+        `SELECT p.*,
+           SUM(CASE WHEN t.archived = 0 THEN 1 ELSE 0 END) AS task_count,
+           MAX(p.updated_at, COALESCE(MAX(t.updated_at), p.updated_at)) AS last_activity_at
+         FROM projects p
+         LEFT JOIN tasks t ON t.project_id = p.id
+         WHERE p.id = ?
+         GROUP BY p.id`,
+      )
+      .get(projectId) as ProjectRow | undefined;
+    if (row === undefined) throw new NotFoundError('Project not found');
+    return toProject(row);
+  }
+
+  private getProjectRow(projectId: string): Omit<ProjectRow, 'task_count' | 'last_activity_at'> {
+    const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as
+      Omit<ProjectRow, 'task_count' | 'last_activity_at'> | undefined;
+    if (row === undefined) throw new NotFoundError('Project not found');
+    return row;
   }
 
   getTaskModelSelection(taskId: string): ModelSelection | null {
@@ -10996,6 +11194,10 @@ export class SteerStaleError extends Error {}
 export class OperationConflictError extends Error {}
 export class OperationInProgressError extends Error {}
 export class TeamConflictError extends Error {}
+export class ProjectConflictError extends Error {}
+export class ProjectArchivedError extends Error {}
+export class TaskAssignmentBlockedError extends Error {}
+export class InvalidProjectError extends Error {}
 export class InvalidCanvasViewError extends Error {}
 export class CanvasViewConflictError extends Error {}
 export class AcceptanceEvidenceMissingError extends Error {
@@ -11063,6 +11265,7 @@ function parseQueuedPayload(payloadJson: string): {
 function toTask(row: TaskRow, hasConversation: boolean): TaskSummary {
   return taskSummarySchema.parse({
     id: row.id,
+    projectId: row.project_id,
     title: row.title,
     pinned: row.pinned === 1,
     archived: row.archived === 1,
@@ -11073,6 +11276,25 @@ function toTask(row: TaskRow, hasConversation: boolean): TaskSummary {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
+}
+
+function toProject(row: ProjectRow): ProjectSummary {
+  return projectSummarySchema.parse({
+    id: row.id,
+    name: row.name,
+    archived: row.archived === 1,
+    revision: row.revision,
+    taskCount: row.task_count,
+    lastActivityAt: row.last_activity_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+function parseProjectName(name: string): string {
+  const parsed = name.trim();
+  if (parsed.length < 1 || parsed.length > 120) throw new InvalidProjectError();
+  return parsed;
 }
 
 function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {

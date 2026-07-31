@@ -126,6 +126,7 @@ export type ToolCatalogSnapshot = z.infer<typeof toolCatalogSnapshotSchema>;
 export const taskSummarySchema = z
   .object({
     id: idSchema,
+    projectId: idSchema.nullable(),
     title: z.string().min(1).max(200),
     pinned: z.boolean(),
     archived: z.boolean(),
@@ -140,6 +141,20 @@ export const taskSummarySchema = z
   })
   .strict();
 export type TaskSummary = z.infer<typeof taskSummarySchema>;
+
+export const projectSummarySchema = z
+  .object({
+    id: idSchema,
+    name: z.string().min(1).max(120),
+    archived: z.boolean(),
+    revision: z.number().int().positive(),
+    taskCount: z.number().int().nonnegative(),
+    lastActivityAt: timestampSchema,
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type ProjectSummary = z.infer<typeof projectSummarySchema>;
 
 export const teamStateSchema = z.enum([
   'draft',
@@ -2274,7 +2289,32 @@ export const taskCreateInputSchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
     localOnly: z.boolean().optional(),
+    projectId: idSchema.optional(),
   })
+  .strict();
+export const projectCreateInputSchema = z
+  .object({ name: z.string().trim().min(1).max(120) })
+  .strict();
+export const projectUpdateInputSchema = z
+  .object({
+    projectId: idSchema,
+    expectedRevision: z.number().int().positive(),
+    name: z.string().trim().min(1).max(120).optional(),
+    archived: z.boolean().optional(),
+  })
+  .strict()
+  .refine((input) => input.name !== undefined || input.archived !== undefined, {
+    message: 'At least one Project field must be updated',
+  });
+export const projectAssignTaskInputSchema = z
+  .object({
+    projectId: idSchema,
+    taskId: idSchema,
+    expectedProjectId: idSchema.nullable(),
+  })
+  .strict();
+export const projectUnassignTaskInputSchema = z
+  .object({ taskId: idSchema, expectedProjectId: idSchema.nullable() })
   .strict();
 export const taskIdPayloadSchema = z.object({ taskId: idSchema }).strict();
 /** A Workspace-relative path within a Task. Validated as a bounded string here; whether it is
@@ -2415,7 +2455,11 @@ export interface SprintCoderApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
   tasks: {
     list(): Promise<TaskSummary[]>;
-    create(input?: { title?: string; localOnly?: boolean }): Promise<TaskSummary>;
+    create(input?: {
+      title?: string;
+      localOnly?: boolean;
+      projectId?: string;
+    }): Promise<TaskSummary>;
     messages(taskId: string): Promise<ChatMessage[]>;
     rename(taskId: string, title: string): Promise<TaskSummary>;
     setPinned(taskId: string, pinned: boolean): Promise<TaskSummary>;
@@ -2423,6 +2467,22 @@ export interface SprintCoderApi {
     setGoal(taskId: string, goal: string): Promise<TaskSummary>;
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
+  };
+  projects: {
+    list(): Promise<ProjectSummary[]>;
+    create(input: { name: string }): Promise<ProjectSummary>;
+    update(input: {
+      projectId: string;
+      expectedRevision: number;
+      name?: string;
+      archived?: boolean;
+    }): Promise<ProjectSummary>;
+    assignTask(input: {
+      projectId: string;
+      taskId: string;
+      expectedProjectId: string | null;
+    }): Promise<TaskSummary>;
+    unassignTask(input: { taskId: string; expectedProjectId: string | null }): Promise<TaskSummary>;
   };
   teams: {
     promote(taskId: string): Promise<TeamSummary>;
@@ -2584,6 +2644,11 @@ export const IPC_CHANNELS = {
   tasksSetGoal: 'sprint-coder:tasks:set-goal',
   tasksGetDraft: 'sprint-coder:tasks:get-draft',
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
+  projectsList: 'sprint-coder:projects:list',
+  projectsCreate: 'sprint-coder:projects:create',
+  projectsUpdate: 'sprint-coder:projects:update',
+  projectsAssignTask: 'sprint-coder:projects:assign-task',
+  projectsUnassignTask: 'sprint-coder:projects:unassign-task',
   teamsPromote: 'sprint-coder:teams:promote',
   teamsGet: 'sprint-coder:teams:get',
   teamsUpdatePolicy: 'sprint-coder:teams:update-policy',
