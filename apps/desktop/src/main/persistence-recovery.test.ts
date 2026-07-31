@@ -1,8 +1,9 @@
 import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient } from './persistence';
@@ -19,6 +20,7 @@ const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 // budget below remains 1.5s; this timeout only keeps fixture setup from masking that assertion.
 const projectionFixtureTimeoutMs = process.platform === 'win32' ? 120_000 : 60_000;
 const recoveryBridgeTimeoutMs = process.platform === 'win32' ? 150_000 : 90_000;
+const execFileAsync = promisify(execFile);
 
 const tempDirs: string[] = [];
 
@@ -118,9 +120,9 @@ if (runsWithElectronAbi)
 describe('recovery suite Electron ABI bridge', () => {
   it(
     'runs the corruption-recovery and projection-perf suites with the Electron Node ABI',
-    () => {
+    async () => {
       if (runsWithElectronAbi) return; // already inside the bridge run
-      const result = spawnSync(
+      const result = await execFileAsync(
         electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
@@ -132,9 +134,9 @@ describe('recovery suite Electron ABI bridge', () => {
           encoding: 'utf8',
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
           timeout: recoveryBridgeTimeoutMs,
+          maxBuffer: 10 * 1024 * 1024,
         },
       );
-      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       const perfLine = /\[perf\] 10k-event reopen\+projection: \d+ms/.exec(result.stdout ?? '');
       // Surface the measured projection time in the outer run's output for the gate record.
       if (perfLine) console.info(perfLine[0]);
