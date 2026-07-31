@@ -341,7 +341,10 @@ describe('executeTeamTool routing', () => {
 
   it('routes Manager tools with only the caller identity bound to the MCP registration', async () => {
     const coordinator = fakeCoordinator();
-    const options = { requesterAgentId: 'manager-1' };
+    const options = {
+      requesterAgentId: 'manager-1',
+      contextOwner: { type: 'team_execution' as const, id: 'parent-execution-1' },
+    };
     const managerPolicy = {
       maxDirectChildren: 2,
       maxDelegationLevels: 1,
@@ -382,6 +385,7 @@ describe('executeTeamTool routing', () => {
         doneCriteria: ['完了'],
       },
       'manager-1',
+      { type: 'team_execution', id: 'parent-execution-1' },
     );
 
     await executeTeamTool(

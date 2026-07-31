@@ -519,6 +519,8 @@ export type TeamWaitReportsCursor = Readonly<{
 export type ExecuteTeamToolOptions = Readonly<{
   /** Trusted caller identity supplied by the token registration, never by model arguments. */
   requesterAgentId?: string;
+  /** Immutable root Turn or parent Team execution context to inherit for newly-created work. */
+  contextOwner?: { type: 'turn' | 'team_execution'; id: string };
   /** Long-poll team_wait_reports instead of returning immediately (real Leader over MCP). The
    * mock ToolBroker path always omits this (or passes false) to keep its synchronous,
    * replay-since-cursor semantics exactly as tested. */
@@ -814,8 +816,16 @@ export async function executeTeamTool(
         };
         const execution =
           options.requesterAgentId === undefined
-            ? await coordinator.assignTask(assignInput)
-            : await coordinator.assignTaskAs(assignInput, options.requesterAgentId);
+            ? options.contextOwner === undefined
+              ? await coordinator.assignTask(assignInput)
+              : await coordinator.assignTask(assignInput, options.contextOwner)
+            : options.contextOwner === undefined
+              ? await coordinator.assignTaskAs(assignInput, options.requesterAgentId)
+              : await coordinator.assignTaskAs(
+                  assignInput,
+                  options.requesterAgentId,
+                  options.contextOwner,
+                );
         return {
           ok: true,
           workerId: request.workerId,
@@ -829,15 +839,20 @@ export async function executeTeamTool(
     case 'team_assign_mission': {
       const request = assignMissionArgsSchema.parse(args);
       try {
-        const mission = await coordinator.assignMission(
-          {
-            taskId,
-            objective: request.objective,
-            doneCriteria: request.doneCriteria,
-            steps: request.steps,
-          },
-          options.requesterAgentId ?? null,
-        );
+        const missionInput = {
+          taskId,
+          objective: request.objective,
+          doneCriteria: request.doneCriteria,
+          steps: request.steps,
+        };
+        const mission =
+          options.contextOwner === undefined
+            ? await coordinator.assignMission(missionInput, options.requesterAgentId ?? null)
+            : await coordinator.assignMission(
+                missionInput,
+                options.requesterAgentId ?? null,
+                options.contextOwner,
+              );
         return {
           ok: true,
           missionId: mission.id,
@@ -951,13 +966,17 @@ export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinat
     toolId: TEAM_ASSIGN_TASK_TOOL.toolId,
     implementationKind: 'built-in',
     execute: (input, context) =>
-      executeTeamTool(coordinator, context.taskId, 'team_assign_task', input),
+      executeTeamTool(coordinator, context.taskId, 'team_assign_task', input, {
+        contextOwner: { type: 'turn', id: context.turnId },
+      }),
   });
   broker.registerImplementation({
     toolId: TEAM_ASSIGN_MISSION_TOOL.toolId,
     implementationKind: 'built-in',
     execute: (input, context) =>
-      executeTeamTool(coordinator, context.taskId, 'team_assign_mission', input),
+      executeTeamTool(coordinator, context.taskId, 'team_assign_mission', input, {
+        contextOwner: { type: 'turn', id: context.turnId },
+      }),
   });
   broker.registerImplementation({
     toolId: TEAM_RESUME_MISSION_TOOL.toolId,

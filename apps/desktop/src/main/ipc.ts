@@ -461,7 +461,7 @@ export class IpcRouter {
           kind,
           workspacePath === null ? null : digestCanonical({ workspacePath }),
         ),
-      authorizeEgress: (kind, taskId, turnId, prompt) => {
+      authorizeEgress: (kind, taskId, turnId, prompt, context) => {
         const authorize =
           kind === 'claude' ? authorizeClaudeProviderEgress : authorizeCodexProviderEgress;
         return authorize({
@@ -469,18 +469,14 @@ export class IpcRouter {
           task: this.persistence.getTask(taskId),
           turnId,
           prompt,
-          context: {
-            fragments: [],
-            projectItems: [],
-            projectSnapshotDigest: null,
-            usageEvents: [],
-            compacted: false,
-          },
+          context,
           now: new Date().toISOString(),
         }).allowed;
       },
-      contextFor: (worker) =>
-        buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId)),
+      contextFor: (worker, executionId) =>
+        executionId === undefined
+          ? buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId))
+          : this.persistence.prepareTeamExecutionContext(worker.taskId, executionId),
       writeScopeFor: (worker, workspacePath) =>
         worker.writeCapable
           ? resolveWriteScope(
@@ -488,10 +484,10 @@ export class IpcRouter {
               workspacePath,
             )
           : 'read-only',
-      teamMcpFor: (worker, turnId) =>
+      teamMcpFor: (worker, turnId, executionId) =>
         worker.canDelegate
-          ? this.registerManagerMcp(turnId, worker.taskId, worker.id)
-          : this.registerWorkerMcp(turnId, worker.taskId, worker.id),
+          ? this.registerManagerMcp(turnId, worker.taskId, worker.id, executionId)
+          : this.registerWorkerMcp(turnId, worker.taskId, worker.id, executionId),
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
     });
@@ -500,34 +496,33 @@ export class IpcRouter {
       verification: this.providerVerification,
       registry: this.providerRegistry,
       getConnection: (connectionId) => this.persistence.getProviderConnection(connectionId),
-      authorizeEgress: ({ worker, executionId, connection, prompt }) =>
+      authorizeEgress: ({ worker, executionId, connection, prompt, context }) =>
         authorizeOfficialApiProviderEgress(
           {
             broker: this.permissionBroker,
             task: this.persistence.getTask(worker.taskId),
             turnId: executionId,
             prompt,
-            context: {
-              fragments: [],
-              projectItems: [],
-              projectSnapshotDigest: null,
-              usageEvents: [],
-              compacted: false,
-            },
+            context,
             now: new Date().toISOString(),
           },
           connection.providerId,
           this.providerEgressTrustForConnection(connection),
         ).allowed,
-      contextFor: (worker) =>
-        buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId)),
+      contextFor: (worker, executionId) =>
+        executionId === undefined
+          ? buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId))
+          : this.persistence.prepareTeamExecutionContext(worker.taskId, executionId),
       managerGuidance: MANAGER_MCP_SYSTEM_PROMPT,
       managerTools: MANAGER_PROVIDER_TOOLS,
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
       workerTools: WORKER_PROVIDER_TOOLS,
-      executeManagerTool: ({ worker, name, input, reportCursor, modelCatalogAudit }) =>
+      executeManagerTool: ({ worker, name, input, reportCursor, modelCatalogAudit, executionId }) =>
         executeTeamTool(this.teamCoordinator, worker.taskId, name, input, {
           requesterAgentId: worker.id,
+          ...(executionId === undefined
+            ? {}
+            : { contextOwner: { type: 'team_execution' as const, id: executionId } }),
           longPoll: name === 'team_wait_reports',
           waitReportsCursor: reportCursor,
           listModelCandidates: (query) => this.listTeamModelCandidates(query),
@@ -2398,6 +2393,7 @@ export class IpcRouter {
     this.teamMcpBridge.register(turnId, {
       taskId,
       token,
+      contextOwner: { type: 'turn', id: turnId },
       requireModelResearch,
       ...(options.skillCreatorTurn ? { allowSkillDrafts: true } : {}),
       allowTeamTools: options.teamTurn,
@@ -2416,6 +2412,7 @@ export class IpcRouter {
     turnId: string,
     taskId: string,
     requesterAgentId: string,
+    executionId?: string,
   ): RuntimeTeamMcpOption | undefined {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
@@ -2425,6 +2422,9 @@ export class IpcRouter {
       taskId,
       token,
       requesterAgentId,
+      ...(executionId === undefined
+        ? {}
+        : { contextOwner: { type: 'team_execution' as const, id: executionId } }),
       requireModelResearch,
     });
     return {
@@ -2439,11 +2439,19 @@ export class IpcRouter {
     turnId: string,
     taskId: string,
     requesterAgentId: string,
+    executionId?: string,
   ): RuntimeTeamMcpOption | undefined {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
     const token = TeamMcpBridge.generateToken();
-    this.teamMcpBridge.register(turnId, { taskId, token, requesterAgentId });
+    this.teamMcpBridge.register(turnId, {
+      taskId,
+      token,
+      requesterAgentId,
+      ...(executionId === undefined
+        ? {}
+        : { contextOwner: { type: 'team_execution' as const, id: executionId } }),
+    });
     return { socketPath, token, guidance: WORKER_MCP_SYSTEM_PROMPT };
   }
 
@@ -2887,6 +2895,7 @@ export class IpcRouter {
             toolCall.name,
             toolCall.input,
             {
+              contextOwner: { type: 'turn', id: started.turnId },
               longPoll:
                 toolCall.name === 'team_wait_reports' || toolCall.name === 'team_wait_events',
               waitReportsCursor: reportCursor,

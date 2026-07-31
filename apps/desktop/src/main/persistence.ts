@@ -130,6 +130,7 @@ import {
 import {
   ContextLedger,
   CONTEXT_HARD_CAP_TOKENS,
+  CONTEXT_SYSTEM_PROMPT,
   aggregateContextUsage,
   defaultContextUsage,
   estimateTokens,
@@ -3199,6 +3200,7 @@ export interface PersistenceClient {
     createdByAgentId: string;
     instruction: string;
     now: string;
+    contextOwner?: { type: ContextSealOwnerType; id: string };
   }): TeamExecutionRecord;
   getTeamExecution(executionId: string): TeamExecutionRecord;
   listTeamExecutions(teamId: string): readonly TeamExecutionRecord[];
@@ -3244,6 +3246,7 @@ export interface PersistenceClient {
       access: TeamMissionAccess;
     }[];
     now: string;
+    contextOwner?: { type: ContextSealOwnerType; id: string };
   }): TeamMissionRecord;
   getTeamMission(missionId: string): TeamMissionRecord;
   listTeamMissions(teamId: string): readonly TeamMissionRecord[];
@@ -3715,6 +3718,12 @@ export interface PersistenceClient {
   snapshot(taskId: string): TurnSnapshot;
   prepareContext(taskId: string, turnId: string): PreparedContext;
   getContextSealManifest(ownerType: ContextSealOwnerType, ownerId: string): ContextSealManifest;
+  sealTeamExecutionContext(input: {
+    taskId: string;
+    executionId: string;
+    parentOwner?: { type: ContextSealOwnerType; id: string };
+  }): ContextSealManifest;
+  prepareTeamExecutionContext(taskId: string, executionId: string): PreparedContext;
   createIntelligenceStep(input: {
     taskId: string;
     turnId: string;
@@ -4492,6 +4501,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(input.instruction, now, input.projectId, input.expectedRevision).changes;
       if (changes !== 1) throw new ProjectConflictError();
+      this.quarantineBackgroundForProjectContextInTransaction(input.projectId, now);
       const updated = this.getProjectRow(input.projectId);
       return {
         instruction: updated.instruction,
@@ -5023,6 +5033,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     createdByAgentId: string;
     instruction: string;
     now: string;
+    contextOwner?: { type: ContextSealOwnerType; id: string };
   }): TeamExecutionRecord {
     const instruction = createExecutionInstruction(input.instruction, input.now);
     return this.db.transaction(() => {
@@ -5065,6 +5076,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
            ) VALUES (?, 1, ?, ?, 'initial', ?)`,
         )
         .run(id, instruction.content, creator.id, input.now);
+      if (input.contextOwner !== undefined) {
+        const parent = this.contextSealRow(input.contextOwner.type, input.contextOwner.id);
+        if (parent === undefined) throw new NotFoundError('Parent context seal not found');
+        if (parent.task_id !== team.taskId)
+          throw new Error('Parent context seal belongs to another Task');
+        this.cloneContextSealInTransaction(parent, id);
+      }
       this.recordTeamV2Activity({
         teamId: team.id,
         type: 'task_assigned',
@@ -5491,6 +5509,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       access: TeamMissionAccess;
     }[];
     now: string;
+    contextOwner?: { type: ContextSealOwnerType; id: string };
   }): TeamMissionRecord {
     return this.db.transaction(() => {
       if (input.steps.length < 2 || input.steps.length > 12)
@@ -5525,6 +5544,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           createdByAgentId: creator.id,
           instruction: step.objective,
           now: input.now,
+          ...(input.contextOwner === undefined ? {} : { contextOwner: input.contextOwner }),
         });
         const message = this.createTeamMessage({
           teamId: team.id,
@@ -10197,6 +10217,47 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.contextSealManifestFromRow(row);
   }
 
+  sealTeamExecutionContext(input: {
+    taskId: string;
+    executionId: string;
+    parentOwner?: { type: ContextSealOwnerType; id: string };
+  }): ContextSealManifest {
+    return this.db.transaction(() => {
+      const existing = this.contextSealRow('team_execution', input.executionId);
+      if (existing !== undefined) return this.contextSealManifestFromRow(existing);
+      const executionTask = this.db
+        .prepare(
+          `SELECT t.task_id FROM team_executions e
+           JOIN teams t ON t.id = e.team_id
+           WHERE e.id = ?`,
+        )
+        .get(input.executionId) as { task_id: string } | undefined;
+      if (executionTask === undefined) throw new NotFoundError('Team execution not found');
+      if (executionTask.task_id !== input.taskId)
+        throw new Error('Team execution does not belong to Task');
+      if (input.parentOwner !== undefined) {
+        const parent = this.contextSealRow(input.parentOwner.type, input.parentOwner.id);
+        if (parent === undefined) throw new NotFoundError('Parent context seal not found');
+        if (parent.task_id !== input.taskId)
+          throw new Error('Parent context seal belongs to another Task');
+        return this.cloneContextSealInTransaction(parent, input.executionId);
+      }
+      return this.createContextSealInTransaction(
+        'team_execution',
+        input.executionId,
+        input.taskId,
+        this.assembleManualTeamContextSnapshot(input.taskId, input.executionId),
+      );
+    })();
+  }
+
+  prepareTeamExecutionContext(taskId: string, executionId: string): PreparedContext {
+    const manifest = this.sealTeamExecutionContext({ taskId, executionId });
+    const seal = this.contextSealRow('team_execution', manifest.ownerId);
+    if (seal === undefined) throw new NotFoundError('Team execution context seal not found');
+    return this.preparedContextFromSeal(seal);
+  }
+
   createIntelligenceStep(input: {
     taskId: string;
     turnId: string;
@@ -10570,6 +10631,63 @@ export class SqlitePersistenceClient implements PersistenceClient {
     };
   }
 
+  private assembleManualTeamContextSnapshot(taskId: string, executionId: string): PreparedContext {
+    const task = this.getTaskRow(taskId);
+    const createdAt = new Date().toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT id, author, content, created_at
+         FROM messages
+         WHERE task_id = ? AND author IN ('user', 'assistant')
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT 128`,
+      )
+      .all(taskId) as Pick<MessageRow, 'id' | 'author' | 'content' | 'created_at'>[];
+    const fragments: ContextFragment[] = [
+      {
+        id: `team-execution:${executionId}:system`,
+        taskId,
+        source: 'system',
+        trust: 'system',
+        tokenEstimate: estimateTokens(CONTEXT_SYSTEM_PROMPT),
+        content: CONTEXT_SYSTEM_PROMPT,
+        createdAt,
+        messageId: null,
+      },
+      ...(task.goal === null || task.goal === ''
+        ? []
+        : [
+            {
+              id: `team-execution:${executionId}:goal`,
+              taskId,
+              source: 'goal' as const,
+              trust: 'user' as const,
+              tokenEstimate: estimateTokens(task.goal),
+              content: task.goal,
+              createdAt,
+              messageId: null,
+            },
+          ]),
+      ...rows.reverse().map((message) => ({
+        id: `team-execution:${executionId}:message:${message.id}`,
+        taskId,
+        source: 'history' as const,
+        trust: message.author,
+        tokenEstimate: estimateTokens(message.content),
+        content: message.content,
+        createdAt: message.created_at,
+        messageId: message.id,
+      })),
+    ];
+    return {
+      fragments,
+      projectItems: [],
+      projectSnapshotDigest: null,
+      usageEvents: [],
+      compacted: false,
+    };
+  }
+
   private createContextSealInTransaction(
     ownerType: ContextSealOwnerType,
     ownerId: string,
@@ -10612,23 +10730,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         capturedAt: createdAt,
       });
     }
-    const candidateSnapshotDigest = sha256(
-      JSON.stringify({
-        projectId: project?.id ?? null,
-        projectRevision: project?.revision ?? null,
-        projectContextEpoch: project?.context_epoch ?? null,
-        candidates: items.map((item) => ({
-          itemId: item.itemId,
-          kind: item.kind,
-          sourceTaskId: item.sourceTaskId,
-          sourceTurnId: item.sourceTurnId,
-          sourceReferenceId: item.sourceReferenceId,
-          candidateDigest: item.candidateDigest,
-          authority: item.authority,
-          localOnly: item.localOnly,
-        })),
-      }),
-    );
+    const candidateSnapshotDigest = projectCandidateSnapshotDigest(project, items);
     const sealedDigest = sha256(
       JSON.stringify({
         fragments: prepared.fragments.map((fragment) => ({
@@ -10721,6 +10823,58 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.db
       .prepare('SELECT * FROM context_seals WHERE owner_type = ? AND owner_id = ?')
       .get(ownerType, ownerId) as ContextSealRow | undefined;
+  }
+
+  private cloneContextSealInTransaction(
+    parent: ContextSealRow,
+    executionId: string,
+  ): ContextSealManifest {
+    const sealId = randomUUID();
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO context_seals(
+          id, owner_type, owner_id, task_id, project_id, project_revision,
+          project_context_epoch, candidate_snapshot_digest, sealed_digest, compacted, created_at
+        ) VALUES (?, 'team_execution', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        sealId,
+        executionId,
+        parent.task_id,
+        parent.project_id,
+        parent.project_revision,
+        parent.project_context_epoch,
+        parent.candidate_snapshot_digest,
+        parent.sealed_digest,
+        parent.compacted,
+        createdAt,
+      );
+    this.db
+      .prepare(
+        `INSERT INTO context_seal_fragments(
+          seal_id, ordinal, fragment_id, source, trust, token_estimate, content, created_at,
+          message_id
+        )
+        SELECT ?, ordinal, fragment_id, source, trust, token_estimate, content, created_at,
+               message_id
+        FROM context_seal_fragments WHERE seal_id = ? ORDER BY ordinal`,
+      )
+      .run(sealId, parent.id);
+    this.db
+      .prepare(
+        `INSERT INTO project_context_manifest_items(
+          seal_id, ordinal, item_id, kind, source_task_id, source_turn_id, source_reference_id,
+          candidate_digest, sealed_digest, included, exclusion_reason, authority, local_only,
+          content, captured_at
+        )
+        SELECT ?, ordinal, item_id, kind, source_task_id, source_turn_id, source_reference_id,
+               candidate_digest, sealed_digest, included, exclusion_reason, authority, local_only,
+               content, captured_at
+        FROM project_context_manifest_items WHERE seal_id = ? ORDER BY ordinal`,
+      )
+      .run(sealId, parent.id);
+    return this.contextSealManifestFromRow(this.contextSealRow('team_execution', executionId)!);
   }
 
   private preparedContextFromSeal(seal: ContextSealRow): PreparedContext {
@@ -10942,6 +11096,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
     let attachedBytes = 0;
     const maxBackgroundContextBytes = 24_000;
     for (const row of rows) {
+      const projectMismatch = this.backgroundProjectSnapshotMismatch(taskId, row.owner_turn_id);
+      if (projectMismatch !== null) {
+        this.db
+          .prepare(
+            `UPDATE background_completions SET state = 'quarantined', quarantine_reason = ?
+             WHERE completion_id = ? AND state IN ('persisted', 'attached')`,
+          )
+          .run(projectMismatch, row.completion_id);
+        continue;
+      }
       const mismatch = backgroundEpochMismatch(
         {
           branchEpoch: row.branch_epoch,
@@ -11013,6 +11177,41 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .run(reason, row.completion_id);
     }
     return rows.length;
+  }
+
+  private backgroundProjectSnapshotMismatch(
+    taskId: string,
+    ownerTurnId: string,
+  ): 'project_changed' | 'project_context_epoch_changed' | 'project_snapshot_changed' | null {
+    const ownerSeal = this.contextSealRow('turn', ownerTurnId);
+    if (ownerSeal === undefined || ownerSeal.task_id !== taskId) return 'project_changed';
+    const task = this.getTaskRow(taskId);
+    const project = task.project_id === null ? null : this.getProjectRow(task.project_id);
+    if (ownerSeal.project_id !== (project?.id ?? null)) return 'project_changed';
+    if (ownerSeal.project_context_epoch !== (project?.context_epoch ?? null))
+      return 'project_context_epoch_changed';
+    const candidates = projectContextCandidates(project);
+    if (ownerSeal.candidate_snapshot_digest !== projectCandidateSnapshotDigest(project, candidates))
+      return 'project_snapshot_changed';
+    return null;
+  }
+
+  private quarantineBackgroundForProjectContextInTransaction(projectId: string, now: string): void {
+    this.db
+      .prepare(
+        `UPDATE background_activities SET state = 'canceled', finished_at = ?
+         WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
+           AND state IN ('registered', 'running')`,
+      )
+      .run(now, projectId);
+    this.db
+      .prepare(
+        `UPDATE background_completions
+         SET state = 'quarantined', quarantine_reason = 'project_context_epoch_changed'
+         WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
+           AND state IN ('persisted', 'attached')`,
+      )
+      .run(projectId);
   }
 
   private getApprovalRow(approvalId: string): ApprovalRow {
@@ -12395,6 +12594,61 @@ function approvalRowRequestDigest(row: ApprovalRow): string {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+type ProjectCandidateIdentity = Pick<
+  ProjectContextManifestItem,
+  | 'itemId'
+  | 'kind'
+  | 'sourceTaskId'
+  | 'sourceTurnId'
+  | 'sourceReferenceId'
+  | 'candidateDigest'
+  | 'authority'
+  | 'localOnly'
+>;
+
+type ProjectContextRow = Pick<ProjectRow, 'id' | 'revision' | 'instruction' | 'context_epoch'>;
+
+function projectContextCandidates(
+  project: ProjectContextRow | null,
+): readonly ProjectCandidateIdentity[] {
+  if (project === null || project.instruction === '') return [];
+  return [
+    {
+      itemId: `project:${project.id}:instruction`,
+      kind: 'instruction',
+      sourceTaskId: null,
+      sourceTurnId: null,
+      sourceReferenceId: null,
+      candidateDigest: sha256(project.instruction),
+      authority: 'user',
+      localOnly: false,
+    },
+  ];
+}
+
+function projectCandidateSnapshotDigest(
+  project: ProjectContextRow | null,
+  candidates: readonly ProjectCandidateIdentity[],
+): string {
+  return sha256(
+    JSON.stringify({
+      projectId: project?.id ?? null,
+      projectRevision: project?.revision ?? null,
+      projectContextEpoch: project?.context_epoch ?? null,
+      candidates: candidates.map((item) => ({
+        itemId: item.itemId,
+        kind: item.kind,
+        sourceTaskId: item.sourceTaskId,
+        sourceTurnId: item.sourceTurnId,
+        sourceReferenceId: item.sourceReferenceId,
+        candidateDigest: item.candidateDigest,
+        authority: item.authority,
+        localOnly: item.localOnly,
+      })),
+    }),
+  );
 }
 
 function toVerifiedCommandOutput(row: {

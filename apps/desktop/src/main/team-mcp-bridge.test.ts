@@ -316,6 +316,7 @@ describe('TeamMcpBridge', () => {
       taskId: 'task-1',
       token,
       requesterAgentId: 'manager-1',
+      contextOwner: { type: 'team_execution', id: 'parent-execution-1' },
     });
 
     const { lines } = await roundTrip(socketPath as string, {
@@ -335,6 +336,7 @@ describe('TeamMcpBridge', () => {
         doneCriteria: ['完了'],
       },
       'manager-1',
+      { type: 'team_execution', id: 'parent-execution-1' },
     );
   });
 

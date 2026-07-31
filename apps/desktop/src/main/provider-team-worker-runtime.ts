@@ -19,6 +19,8 @@ import type {
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
 import type { PreparedContext } from './context-ledger';
+import { projectContextProviderMessages } from './project-context-delivery';
+import { applyWorkerContextInheritance, reserveTeamWorkerContext } from './team-worker-runtime';
 
 export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   fallback: TeamWorkerRuntime;
@@ -30,8 +32,9 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     executionId: string;
     connection: ProviderConnection;
     prompt: string;
+    context: PreparedContext;
   }): boolean;
-  contextFor?: (worker: AgentRecord) => PreparedContext;
+  contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   managerGuidance: string;
   managerTools: readonly ProviderTool[];
   workerGuidance: string;
@@ -48,6 +51,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
       wasQueried(): boolean;
       markQueried(): void;
     };
+    executionId?: string;
   }): Promise<unknown>;
 }>;
 
@@ -58,6 +62,16 @@ type ActiveProviderWorker = {
 };
 
 const MAX_PROVIDER_MANAGER_ROUNDS = 32;
+
+function emptyPreparedContext(): PreparedContext {
+  return {
+    fragments: [],
+    projectItems: [],
+    projectSnapshotDigest: null,
+    usageEvents: [],
+    compacted: false,
+  };
+}
 
 export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
   private readonly active = new Map<string, ActiveProviderWorker>();
@@ -75,6 +89,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    executionId?: string;
     workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
@@ -92,21 +107,18 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     const connection = await this.deps.verification.requireVerifiedForExecution(connectionId);
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)
       throw new Error('Provider Worker Connection does not match its requested Provider');
-    const executionId = input.envelope.deliveryId;
+    const executionId = input.executionId ?? input.envelope.deliveryId;
     if (input.worker.writeCapable)
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
       );
     const prompt = workerPrompt(input.worker, input.content, input.priorConversation);
-    if (
-      !this.deps.authorizeEgress({
-        worker: input.worker,
-        executionId,
-        connection,
-        prompt,
-      })
-    )
-      throw new Error('Provider Worker egress was denied');
+    const inheritedContext = reserveTeamWorkerContext(
+      applyWorkerContextInheritance(
+        input.worker,
+        this.deps.contextFor?.(input.worker, input.executionId) ?? emptyPreparedContext(),
+      ),
+    );
 
     const controller = new AbortController();
     const abortFromCaller = (): void => controller.abort(input.signal?.reason);
@@ -146,10 +158,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         modelCatalogQueried = true;
       },
     };
-    const inheritedContext = this.deps.contextFor?.(input.worker).fragments ?? [];
     const messages: ProviderExecutionRequest['messages'] = [
       ...(availableTools.length > 0 ? [{ role: 'system' as const, content: toolGuidance }] : []),
-      ...inheritedContext.map((fragment) => ({
+      ...projectContextProviderMessages(inheritedContext.projectItems),
+      ...inheritedContext.fragments.map((fragment) => ({
         role:
           fragment.source === 'system'
             ? ('system' as const)
@@ -171,6 +183,16 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       const runtime = this.deps.registry.resolve(connection);
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
         providerCallCount += 1;
+        if (
+          !this.deps.authorizeEgress({
+            worker: input.worker,
+            executionId,
+            connection,
+            prompt: JSON.stringify(messages),
+            context: inheritedContext,
+          })
+        )
+          throw new Error('Provider Worker egress was denied');
         const providerExecutionId = providerCallExecutionId(executionId, providerCallCount);
         this.active.set(input.worker.id, {
           executionId: providerExecutionId,
@@ -248,6 +270,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             input: toolCall.input,
             reportCursor,
             modelCatalogAudit,
+            ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
           });
           input.onEvent?.({
             type: 'activity',

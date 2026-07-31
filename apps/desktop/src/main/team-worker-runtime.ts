@@ -33,10 +33,15 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     taskId: string,
     turnId: string,
     prompt: string,
+    context: PreparedContext,
   ) => boolean;
-  contextFor?: (worker: AgentRecord) => PreparedContext;
+  contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   writeScopeFor?: (worker: AgentRecord, workspacePath: string | null) => RuntimeWriteScope;
-  teamMcpFor?: (worker: AgentRecord, turnId: string) => RuntimeTeamMcpOption | undefined;
+  teamMcpFor?: (
+    worker: AgentRecord,
+    turnId: string,
+    executionId?: string,
+  ) => RuntimeTeamMcpOption | undefined;
   releaseTeamMcp?: (turnId: string) => void;
   /** Explicit development/test opt-in. Production callers leave this false. */
   allowSimulation?: boolean;
@@ -133,6 +138,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    executionId?: string;
     workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
@@ -165,15 +171,20 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     ]
       .filter((line) => line !== '')
       .join('\n');
-    if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, prompt))
+    const context = reserveTeamWorkerContext(
+      applyWorkerContextInheritance(
+        input.worker,
+        this.deps.contextFor?.(input.worker, input.executionId) ?? emptyPreparedContext(),
+      ),
+    );
+    if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, prompt, context))
       throw new Error(`${choice.kind} Team Worker egress was denied`);
-    const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId);
+    const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId);
     if (input.worker.canDelegate === true && teamMcp === undefined)
       throw new Error('Manager Team MCP is unavailable');
 
     const workspacePath =
       input.workspacePath === undefined ? this.deps.workspaceFor(taskId) : input.workspacePath;
-    const context = this.deps.contextFor?.(input.worker);
     const writeScope =
       input.worker.writeCapable === true
         ? (this.deps.writeScopeFor?.(input.worker, workspacePath) ?? 'read-only')
@@ -265,6 +276,85 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
   }
+}
+
+function emptyPreparedContext(): PreparedContext {
+  return {
+    fragments: [],
+    projectItems: [],
+    projectSnapshotDigest: null,
+    usageEvents: [],
+    compacted: false,
+  };
+}
+
+export function reserveTeamWorkerContext(context: PreparedContext): PreparedContext {
+  const projectBytes = context.projectItems.reduce(
+    (total, item) => total + Buffer.byteLength(item.content, 'utf8'),
+    0,
+  );
+  if (
+    context.projectItems.length > 256 ||
+    projectBytes > 128 * 1024 ||
+    context.projectItems.some((item) => Buffer.byteLength(item.content, 'utf8') > 64 * 1024)
+  )
+    throw new Error('Inherited Project context cannot fit the Worker protocol budget');
+  let remainingBytes = 128 * 1024 - projectBytes;
+  let remainingCount = 256 - context.projectItems.length;
+  const fragments = [] as PreparedContext['fragments'];
+  // Preserve the most recent conversation while shrinking inherited fragments first. Project
+  // items are never subsetted: either every sealed item is delivered or execution fails above.
+  for (const fragment of [...context.fragments].reverse()) {
+    const bytes = Buffer.byteLength(fragment.content, 'utf8');
+    if (remainingCount === 0 || bytes > 64 * 1024 || bytes > remainingBytes) continue;
+    fragments.unshift(fragment);
+    remainingBytes -= bytes;
+    remainingCount -= 1;
+  }
+  return { ...context, fragments };
+}
+
+export function applyWorkerContextInheritance(
+  worker: AgentRecord,
+  sealed: PreparedContext,
+): PreparedContext {
+  if (
+    worker.contextInheritancePolicy === 'none' ||
+    worker.contextInheritancePolicy === 'selected_items'
+  )
+    return { ...sealed, fragments: [], compacted: false };
+  if (worker.contextInheritancePolicy === 'full_fork') return sealed;
+  const relevant = sealed.fragments.filter(
+    ({ source, trust }) =>
+      (source === 'history' || source === 'compaction') &&
+      (trust === 'user' || trust === 'assistant'),
+  );
+  const content = relevant
+    .slice(-6)
+    .map(
+      ({ trust, content: fragment }) => `${trust === 'user' ? 'User' : 'Assistant'}: ${fragment}`,
+    )
+    .join('\n')
+    .slice(-8_000);
+  return {
+    ...sealed,
+    fragments:
+      content === ''
+        ? []
+        : [
+            {
+              id: `team-context-summary:${worker.id}`,
+              taskId: worker.taskId,
+              source: 'compaction',
+              trust: 'assistant',
+              tokenEstimate: Math.max(1, Math.ceil(content.length / 4)),
+              content: `親Taskの直近要約コンテキスト:\n${content}`,
+              createdAt: relevant.at(-1)?.createdAt ?? worker.createdAt,
+              messageId: null,
+            },
+          ],
+    compacted: content !== '',
+  };
 }
 
 export function formatPriorTeamConversation(

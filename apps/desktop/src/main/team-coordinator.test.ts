@@ -2214,6 +2214,70 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('seals a manual Team execution at dispatch and passes its durable execution ID', async () => {
+      const persistence = createPersistence();
+      const project = persistence.createProject('Manual dispatch context');
+      persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: project.revision,
+        instruction: 'Seal this at Team dispatch.',
+      });
+      const task = persistence.createTask('manual Team dispatch', false, project.id);
+      let dispatchedExecutionId: string | undefined;
+      let dispatchedInstruction: string | undefined;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          dispatchedExecutionId = input.executionId;
+          dispatchedInstruction =
+            input.executionId === undefined
+              ? undefined
+              : persistence.prepareTeamExecutionContext(task.id, input.executionId).projectItems[0]
+                  ?.content;
+          return {
+            claims: {
+              deliveryId: input.envelope.deliveryId,
+              sourceAgentId: input.envelope.sourceAgentId,
+              targetAgentId: input.envelope.targetAgentId,
+            },
+            completion: {
+              status: 'succeeded',
+              summary: 'done',
+              artifacts: [],
+              verification: [],
+              risks: [],
+            },
+          };
+        },
+        async stop() {},
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'worker',
+        objective: 'work',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'dispatch now',
+        doneCriteria: ['done'],
+      });
+      await waitFor(() => dispatchedExecutionId !== undefined);
+
+      expect(dispatchedExecutionId).toBe(submission.executionId);
+      expect(dispatchedInstruction).toBe('Seal this at Team dispatch.');
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+      );
+      persistence.close();
+    });
+
     it('pushes accepted, stage, reasoning, and batched output into the live Worker snapshot', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask();
