@@ -21,25 +21,38 @@ async function withApp(label: string, body: (page: Page) => Promise<void>): Prom
   }
 }
 
-test.describe('thinking pill', () => {
-  test('collapses the Run Card to one row and drops the permanent five-stage list', async () => {
+test.describe('Generation Canvas reasoning', () => {
+  test('uses a large Canvas while active and settles into one compact history row', async () => {
     await withApp('reasoning-height', async (page) => {
       await page.getByTestId('composer-textarea').fill('思考ピルの高さを確認したい');
       await page.getByTestId('composer-textarea').press('Enter');
 
       const runCard = page.getByTestId('run-card');
       await expect(runCard).toBeVisible();
-      // The old card listed all five stages permanently at ~140px. FR-RUN-04's three required
-      // elements (elapsed, current stage, stop) are all still on the collapsed row.
-      const collapsedHeight = await runCard.evaluate((el) => el.getBoundingClientRect().height);
-      expect(collapsedHeight).toBeLessThan(56);
+      const activeHeight = await runCard.evaluate((el) => el.getBoundingClientRect().height);
+      expect(activeHeight).toBeGreaterThan(88);
       await expect(runCard).toContainText('思考中');
-      await expect(runCard).toContainText('中'); // a stage label is inline
+      await expect(runCard).toContainText('中'); // the current stage is always text
       await expect(page.getByTestId('run-card-stop-button')).toBeVisible();
-      // The five text rows are gone.
+      await expect(page.getByTestId('run-stage-progress')).toBeVisible();
+      await expect(page.getByTestId('generation-indicator')).toHaveAttribute('aria-hidden', 'true');
+      await expect(page.locator('.generation-pixel')).toHaveCount(9);
       await expect(page.locator('.stage-row')).toHaveCount(0);
 
+      // Answer tokens stream below the Canvas without replacing it.
+      await expect(page.getByTestId('streaming-assistant-message')).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(runCard).toHaveAttribute('data-run-status', 'running');
+
       await expect(runCard).toHaveAttribute('data-run-status', 'completed', { timeout: 30_000 });
+      await expect(page.getByTestId('generation-indicator')).toHaveAttribute(
+        'data-pattern',
+        'settled',
+      );
+      await expect
+        .poll(() => runCard.evaluate((el) => el.getBoundingClientRect().height))
+        .toBeLessThan(56);
     });
   });
 
@@ -61,7 +74,7 @@ test.describe('thinking pill', () => {
       await expect(toggle).toHaveAttribute('aria-expanded', 'true');
       const panel = page.getByTestId('reasoning-panel');
       await expect(panel).toBeVisible();
-      await expect(page.getByTestId('reasoning-progress')).toBeVisible();
+      await expect(page.getByTestId('run-stage-progress')).toBeVisible();
 
       // Real paragraphs, not the empty-state line.
       await expect(page.locator('.think-para').first()).toBeVisible();
@@ -165,6 +178,67 @@ test.describe('thinking pill', () => {
           ),
         ),
       ).toBe(true);
+    });
+  });
+
+  test('keeps every state legible and stops repeated motion when reduced motion is requested', async () => {
+    await withApp('generation-reduced-motion', async (page) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await page.getByTestId('composer-textarea').fill('動きを減らした生成表示を確認したい');
+      await page.getByTestId('composer-textarea').press('Enter');
+
+      const runCard = page.getByTestId('run-card');
+      await expect(runCard).toBeVisible();
+      await expect(runCard).toContainText('思考中');
+      await expect(runCard.locator('.run-stage-inline')).not.toHaveText('');
+      await expect(page.getByTestId('generation-indicator')).toHaveAttribute('aria-hidden', 'true');
+      expect(
+        await page
+          .locator('.generation-pixel')
+          .first()
+          .evaluate((el) => getComputedStyle(el).animationName),
+      ).toBe('none');
+
+      await expect(runCard).toHaveAttribute('data-run-status', 'completed', { timeout: 30_000 });
+      await expect(runCard).toContainText('完了');
+      expect(await runCard.evaluate((el) => el.getBoundingClientRect().height)).toBeLessThan(56);
+    });
+  });
+
+  test('fits the active Canvas inside the Team Leader node without clipping', async () => {
+    await withApp('generation-team-node', async (page) => {
+      await page.getByTestId('team-toggle').click();
+      const leader = page.locator('.surface--node');
+      await expect(leader).toBeVisible();
+
+      await page
+        .getByTestId('composer-textarea')
+        .fill('Team Leaderの狭い表示でも長い日本語の生成段階を確認したい');
+      await page.getByTestId('composer-textarea').press('Enter');
+
+      const runCard = page.getByTestId('run-card');
+      await expect(runCard).toBeVisible();
+      await expect(runCard).toHaveClass(/run-card--node/);
+      const geometry = await runCard.evaluate((card) => {
+        const cardRect = card.getBoundingClientRect();
+        const leaderRect = card.closest('.surface--node')?.getBoundingClientRect();
+        return {
+          // The Canvas world scales the whole Leader surface. `offsetHeight` is the Run Card's
+          // intrinsic node-layout height; the DOMRect below remains appropriate for containment.
+          intrinsicHeight: card.offsetHeight,
+          left: cardRect.left,
+          right: cardRect.right,
+          leaderLeft: leaderRect?.left ?? 0,
+          leaderRight: leaderRect?.right ?? 0,
+          scrollWidth: card.scrollWidth,
+          clientWidth: card.clientWidth,
+        };
+      });
+      expect(geometry.intrinsicHeight).toBeGreaterThanOrEqual(100);
+      expect(geometry.intrinsicHeight).toBeLessThanOrEqual(110);
+      expect(geometry.left).toBeGreaterThanOrEqual(geometry.leaderLeft);
+      expect(geometry.right).toBeLessThanOrEqual(geometry.leaderRight);
+      expect(geometry.scrollWidth).toBe(geometry.clientWidth);
     });
   });
 });

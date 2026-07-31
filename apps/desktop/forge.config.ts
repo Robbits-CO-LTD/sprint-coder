@@ -1,6 +1,6 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
+import { MakerDMG } from '@electron-forge/maker-dmg';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
-import { MakerZIP } from '@electron-forge/maker-zip';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
@@ -185,7 +185,10 @@ const config: ForgeConfig = {
       noMsi: true,
       ...(windowsSign === undefined ? {} : { windowsSign }),
     }),
-    new MakerZIP({}, ['darwin', 'win32', 'linux']),
+    new MakerDMG({
+      name: 'Sprint Coder',
+      format: 'ULFO',
+    }),
   ],
   plugins: [
     new VitePlugin({

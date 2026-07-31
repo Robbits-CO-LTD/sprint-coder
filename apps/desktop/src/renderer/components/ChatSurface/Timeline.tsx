@@ -10,7 +10,7 @@ import { useAppStore } from '../../store/appStore';
 import { isPinnedToBottom } from '../../lib/scroll-follow';
 import { groupActivitiesByMessage } from '../../lib/team-activity-display';
 import { TeamActivityCard, TeamActivityGroup } from '../TeamActivityCard';
-import { ArrowDown } from '../icons';
+import { ArrowDown, ArrowUp } from '../icons';
 import { MessageBubble } from '../MessageBubble';
 import { RunCard } from '../RunCard';
 import { ApprovalCard } from '../ApprovalCard';
@@ -27,6 +27,7 @@ import {
   summarizeRuntimeChanges,
   type WorkspaceChangeSummary,
 } from '../../lib/workspace-change-summary';
+import sprintCoderIcon from '../../../../assets/sprint-coder-icon-master-v1.png';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
 const NO_MESSAGES: ChatMessage[] = [];
@@ -38,7 +39,13 @@ const NO_FILE_CHANGES: ReturnType<typeof useAppStore.getState>['fileChangesByTas
 const NO_ACTIVITIES: TeamActivitySummary[] = [];
 const NO_SKILL_DRAFTS: ReturnType<typeof useAppStore.getState>['skillDraftsByTask'][string] = [];
 
-export function Timeline({ taskId }: { taskId: string }) {
+export function Timeline({
+  taskId,
+  variant = 'main',
+}: {
+  taskId: string;
+  variant?: 'main' | 'node';
+}) {
   const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? NO_MESSAGES;
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const setDraft = useAppStore((s) => s.setDraft);
@@ -176,20 +183,36 @@ export function Timeline({ taskId }: { taskId: string }) {
     >
       <div className="timeline">
         {isEmpty && (
-          <div className="empty-state">
-            <div className="avatar-lg" aria-hidden="true">
-              V
+          <section
+            className="empty-state timeline-welcome"
+            aria-labelledby="timeline-welcome-title"
+          >
+            <div className="timeline-welcome-mark" aria-hidden="true">
+              <img src={sprintCoderIcon} alt="" draggable={false} />
             </div>
-            <h2>なんでも相談してください</h2>
-            <p>Workspaceを選ばなくても会話できます。実行が必要になったら承認を求めます。</p>
-            <div className="chips">
-              {SUGGESTIONS.map((s) => (
-                <button key={s} type="button" className="chip" onClick={() => setDraft(taskId, s)}>
-                  {s}
-                </button>
-              ))}
+            <div className="timeline-welcome-copy">
+              <h2 id="timeline-welcome-title">なんでも相談してください</h2>
+              <p>
+                相談だけでも大丈夫です。Workspaceでの実行が必要になったときは、事前に確認します。
+              </p>
             </div>
-          </div>
+            <div className="timeline-welcome-actions" aria-label="入力例">
+              <span className="timeline-welcome-actions-label">入力例</span>
+              <div className="timeline-welcome-suggestions">
+                {SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className="timeline-welcome-suggestion"
+                    onClick={() => setDraft(taskId, s)}
+                  >
+                    <span>{s}</span>
+                    <ArrowUp size={15} className="timeline-welcome-suggestion-arrow" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
         )}
 
         {activityGroups.leading.map((activity) => (
@@ -282,7 +305,12 @@ export function Timeline({ taskId }: { taskId: string }) {
             <div key={message.id} style={{ display: 'contents' }}>
               <MessageBubble author={message.author} content={message.content} />
               {showRunCardAfter && (isActive || messageActivities.length === 0) && (
-                <RunCard turn={turn} taskId={taskId} onStop={() => void cancelActiveTurn(taskId)} />
+                <RunCard
+                  turn={turn}
+                  taskId={taskId}
+                  variant={variant}
+                  onStop={() => void cancelActiveTurn(taskId)}
+                />
               )}
               {approvalRows.map((approval) => (
                 <ApprovalAuditRow key={approval.id} approval={approval} />

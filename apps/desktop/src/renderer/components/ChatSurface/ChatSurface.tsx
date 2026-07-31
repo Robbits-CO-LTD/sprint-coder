@@ -62,7 +62,7 @@ export function ChatSurface({
       <div aria-live="polite" className="visually-hidden">
         {stageAnnouncement}
       </div>
-      <Timeline taskId={task.id} />
+      <Timeline taskId={task.id} variant={variant} />
       <Composer taskId={task.id} />
       <SurfaceFooter variant={variant} />
     </div>
