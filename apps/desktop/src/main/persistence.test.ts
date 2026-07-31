@@ -4823,6 +4823,7 @@ if (runsWithElectronAbi)
         { version: 52 },
         { version: 53 },
         { version: 54 },
+        { version: 55 },
       ]);
       for (const [table, columns] of [
         [

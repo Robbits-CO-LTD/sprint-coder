@@ -30,6 +30,11 @@ import {
   providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
+  projectAssignTaskInputSchema,
+  projectCreateInputSchema,
+  projectSummarySchema,
+  projectUnassignTaskInputSchema,
+  projectUpdateInputSchema,
   connectionIdSchema,
   createdSkillMutationInputSchema,
   createdSkillEnabledInputSchema,
@@ -187,6 +192,28 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.tasksGetDraft, taskIdPayloadSchema, z.string(), { taskId }),
     setDraft: (taskId, draft) =>
       invoke(IPC_CHANNELS.tasksSetDraft, taskDraftInputSchema, z.undefined(), { taskId, draft }),
+  },
+  projects: {
+    list: () =>
+      invoke(IPC_CHANNELS.projectsList, emptyPayloadSchema, z.array(projectSummarySchema), {}),
+    create: (input) =>
+      invoke(IPC_CHANNELS.projectsCreate, projectCreateInputSchema, projectSummarySchema, input),
+    update: (input) =>
+      invoke(IPC_CHANNELS.projectsUpdate, projectUpdateInputSchema, projectSummarySchema, input),
+    assignTask: (input) =>
+      invoke(
+        IPC_CHANNELS.projectsAssignTask,
+        projectAssignTaskInputSchema,
+        taskSummarySchema,
+        input,
+      ),
+    unassignTask: (input) =>
+      invoke(
+        IPC_CHANNELS.projectsUnassignTask,
+        projectUnassignTaskInputSchema,
+        taskSummarySchema,
+        input,
+      ),
   },
   teams: {
     promote: (taskId) =>
