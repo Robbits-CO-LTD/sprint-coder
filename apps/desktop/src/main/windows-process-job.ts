@@ -51,7 +51,7 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   let request;
-  try { request = JSON.parse(input); } catch { process.exit(125); return; }
+  try { request = JSON.parse(input); } catch { process.exitCode = 125; return; }
   const { spawn } = require('node:child_process');
   const child = spawn(request.executable, request.argv, {
     cwd: request.cwd,
@@ -60,10 +60,10 @@ process.stdin.on('end', () => {
     stdio: ['ignore', 'inherit', 'inherit'],
     windowsHide: true,
   });
-  child.once('error', () => process.exit(126));
-  child.once('exit', (code, signal) => {
-    if (typeof code === 'number') process.exit(code);
-    process.exit(signal ? 128 : 1);
+  child.once('error', () => { process.exitCode = 126; });
+  child.once('close', (code, signal) => {
+    if (process.exitCode === 126) return;
+    process.exitCode = typeof code === 'number' ? code : signal ? 128 : 1;
   });
 });
 `;
