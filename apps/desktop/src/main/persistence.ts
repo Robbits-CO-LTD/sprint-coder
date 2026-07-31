@@ -33,6 +33,7 @@ import {
   type ModelSelection,
   type NormalizedProviderUsage,
   type ProviderConnection,
+  type ProjectReference,
   type ProjectContextManifest as PublicProjectContextManifest,
   type ProjectContextManifestSummary,
   type ProjectSummary,
@@ -143,6 +144,7 @@ import {
   type ProjectContextItem,
 } from './context-ledger';
 import { BUILTIN_TEAM_SKILL_CONTENT, BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
+import { readProjectReference } from './project-reference-file';
 import { isTeamScenarioInput } from './team-tools';
 import type { LiveState } from './context-reminder';
 import { deriveLiveState } from './live-state';
@@ -330,6 +332,18 @@ type ProjectRow = {
   context_epoch: number;
   task_count: number;
   last_activity_at: string;
+  created_at: string;
+  updated_at: string;
+};
+type ProjectReferenceRow = {
+  id: string;
+  project_id: string;
+  source_task_id: string;
+  relative_path: string;
+  registered_root_identity: string;
+  enabled: number;
+  revision: number;
+  last_sealed_digest: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -2654,6 +2668,29 @@ const migrations = [
       ALTER TABLE input_queue ADD COLUMN payload_digest TEXT NOT NULL DEFAULT '';
     `,
   },
+  {
+    version: 57,
+    checksum: 'project-context-hub-v57-reference-files',
+    sql: `
+      CREATE TABLE project_references (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+        relative_path TEXT NOT NULL CHECK (length(relative_path) >= 1 AND length(relative_path) <= 1024),
+        registered_root_identity TEXT NOT NULL CHECK (length(registered_root_identity) = 64),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        last_sealed_digest TEXT CHECK (last_sealed_digest IS NULL OR length(last_sealed_digest) = 64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(project_id, source_task_id, relative_path)
+      );
+      CREATE INDEX project_references_project_order_idx
+        ON project_references(project_id, created_at, id);
+      CREATE INDEX project_references_source_task_idx
+        ON project_references(source_task_id, id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3156,6 +3193,19 @@ export interface PersistenceClient {
     expectedRevision: number;
     instruction: string;
   }): { instruction: string; revision: number; contextEpoch: number };
+  listProjectReferences(projectId: string): ProjectReference[];
+  addProjectReference(input: {
+    projectId: string;
+    sourceTaskId: string;
+    relativePath: string;
+    registeredRootIdentity: string;
+  }): ProjectReference;
+  updateProjectReference(input: {
+    referenceId: string;
+    expectedRevision: number;
+    enabled: boolean;
+  }): ProjectReference;
+  removeProjectReference(referenceId: string, expectedRevision: number): void;
   listProjectContextManifests(taskId: string): ProjectContextManifestSummary[];
   getProjectContextManifest(taskId: string, turnId: string): PublicProjectContextManifest;
   assignTaskToProject(input: {
@@ -4515,6 +4565,153 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  listProjectReferences(projectId: string): ProjectReference[] {
+    this.getProjectRow(projectId);
+    return (
+      this.db
+        .prepare('SELECT * FROM project_references WHERE project_id = ? ORDER BY created_at, id')
+        .all(projectId) as ProjectReferenceRow[]
+    ).map((row) => this.toProjectReference(row));
+  }
+
+  addProjectReference(input: {
+    projectId: string;
+    sourceTaskId: string;
+    relativePath: string;
+    registeredRootIdentity: string;
+  }): ProjectReference {
+    const relativePath = parseReferenceRelativePath(input.relativePath);
+    return this.db.transaction(() => {
+      const project = this.getProjectRow(input.projectId);
+      if (project.archived === 1) throw new ProjectArchivedError();
+      const task = this.getTaskRow(input.sourceTaskId);
+      if (task.project_id !== input.projectId)
+        throw new InvalidProjectError('Reference source Task must belong to the Project');
+      if (
+        task.workspace_path === null ||
+        task.mutation_root_identity_digest !== input.registeredRootIdentity
+      )
+        throw new InvalidProjectError('Reference source Workspace changed');
+      const readable = readProjectReference({
+        workspacePath: task.workspace_path,
+        registeredRootIdentity: input.registeredRootIdentity,
+        relativePath,
+      });
+      if (readable.status !== 'healthy')
+        throw new InvalidProjectError(`Reference is not readable: ${readable.status}`);
+      const count = this.db
+        .prepare('SELECT COUNT(*) AS count FROM project_references WHERE project_id = ?')
+        .get(input.projectId) as { count: number };
+      if (count.count >= 64) throw new InvalidProjectError('Project reference limit reached');
+      const now = new Date().toISOString();
+      const id = randomUUID();
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO project_references(
+               id, project_id, source_task_id, relative_path, registered_root_identity,
+               enabled, revision, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)`,
+          )
+          .run(
+            id,
+            input.projectId,
+            input.sourceTaskId,
+            relativePath,
+            input.registeredRootIdentity,
+            now,
+            now,
+          );
+      } catch (error) {
+        if ((error as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE')
+          throw new InvalidProjectError('Reference is already registered');
+        throw error;
+      }
+      this.bumpProjectContextInTransaction(input.projectId, now);
+      return this.toProjectReference(this.getProjectReferenceRow(id));
+    })();
+  }
+
+  updateProjectReference(input: {
+    referenceId: string;
+    expectedRevision: number;
+    enabled: boolean;
+  }): ProjectReference {
+    return this.db.transaction(() => {
+      const current = this.getProjectReferenceRow(input.referenceId);
+      if (current.revision !== input.expectedRevision) throw new ProjectConflictError();
+      if ((current.enabled === 1) === input.enabled) return this.toProjectReference(current);
+      const now = new Date().toISOString();
+      const changed = this.db
+        .prepare(
+          `UPDATE project_references SET enabled = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(input.enabled ? 1 : 0, now, input.referenceId, input.expectedRevision).changes;
+      if (changed !== 1) throw new ProjectConflictError();
+      this.bumpProjectContextInTransaction(current.project_id, now);
+      return this.toProjectReference(this.getProjectReferenceRow(input.referenceId));
+    })();
+  }
+
+  removeProjectReference(referenceId: string, expectedRevision: number): void {
+    this.db.transaction(() => {
+      const current = this.getProjectReferenceRow(referenceId);
+      if (current.revision !== expectedRevision) throw new ProjectConflictError();
+      const removed = this.db
+        .prepare('DELETE FROM project_references WHERE id = ? AND revision = ?')
+        .run(referenceId, expectedRevision).changes;
+      if (removed !== 1) throw new ProjectConflictError();
+      this.bumpProjectContextInTransaction(current.project_id, new Date().toISOString());
+    })();
+  }
+
+  private getProjectReferenceRow(referenceId: string): ProjectReferenceRow {
+    const row = this.db
+      .prepare('SELECT * FROM project_references WHERE id = ?')
+      .get(referenceId) as ProjectReferenceRow | undefined;
+    if (row === undefined) throw new NotFoundError('Project reference not found');
+    return row;
+  }
+
+  private toProjectReference(row: ProjectReferenceRow): ProjectReference {
+    const task = this.getTaskRow(row.source_task_id);
+    const read = readProjectReference({
+      workspacePath: task.workspace_path,
+      registeredRootIdentity: row.registered_root_identity,
+      relativePath: row.relative_path,
+    });
+    const status =
+      read.status === 'healthy' &&
+      row.last_sealed_digest !== null &&
+      read.digest !== row.last_sealed_digest
+        ? 'changed'
+        : read.status;
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      sourceTaskId: row.source_task_id,
+      relativePath: row.relative_path,
+      enabled: row.enabled === 1,
+      revision: row.revision,
+      lastSealedDigest: row.last_sealed_digest,
+      status,
+      currentDigest: read.digest,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private bumpProjectContextInTransaction(projectId: string, now: string): void {
+    this.db
+      .prepare(
+        `UPDATE projects SET revision = revision + 1, context_epoch = context_epoch + 1,
+           updated_at = ? WHERE id = ?`,
+      )
+      .run(now, projectId);
+    this.quarantineBackgroundForProjectContextInTransaction(projectId, now);
+  }
+
   assignTaskToProject(input: {
     projectId: string;
     taskId: string;
@@ -4540,6 +4737,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (task.project_id !== expectedProjectId)
         throw new ProjectConflictError('Task Project membership changed');
       if (task.project_id === nextProjectId) return this.getTask(taskId);
+      const reference = this.db
+        .prepare('SELECT 1 FROM project_references WHERE source_task_id = ? LIMIT 1')
+        .get(taskId);
+      if (reference !== undefined) throw new ReferenceInUseError();
       if (nextProjectId !== null) this.assertProjectAcceptsTask(nextProjectId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
       if (this.hasNonTerminalTeamWork(taskId)) throw new TaskAssignmentBlockedError();
@@ -10745,15 +10946,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const project = task.project_id === null ? null : this.getProjectRow(task.project_id);
     const createdAt = new Date().toISOString();
     const items: ProjectContextManifestItem[] = [];
+    let contextTokens = prepared.fragments.reduce(
+      (total, fragment) => total + fragment.tokenEstimate,
+      0,
+    );
     if (project !== null && project.instruction !== '') {
       const digest = sha256(project.instruction);
-      const existingTokens = prepared.fragments.reduce(
-        (total, fragment) => total + fragment.tokenEstimate,
-        0,
-      );
       const included =
-        existingTokens <= CONTEXT_HARD_CAP_TOKENS &&
-        existingTokens + estimateTokens(project.instruction) <= CONTEXT_HARD_CAP_TOKENS;
+        contextTokens <= CONTEXT_HARD_CAP_TOKENS &&
+        contextTokens + estimateTokens(project.instruction) <= CONTEXT_HARD_CAP_TOKENS;
       items.push({
         itemId: `project:${project.id}:instruction`,
         kind: 'instruction',
@@ -10765,7 +10966,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         included,
         exclusionReason: included
           ? null
-          : existingTokens > CONTEXT_HARD_CAP_TOKENS
+          : contextTokens > CONTEXT_HARD_CAP_TOKENS
             ? 'existing_context_over_budget'
             : 'project_context_over_budget',
         authority: 'user',
@@ -10773,6 +10974,60 @@ export class SqlitePersistenceClient implements PersistenceClient {
         content: included ? project.instruction : null,
         capturedAt: createdAt,
       });
+      if (included) contextTokens += estimateTokens(project.instruction);
+    }
+    if (project !== null) {
+      const references = this.db
+        .prepare(
+          'SELECT * FROM project_references WHERE project_id = ? AND enabled = 1 ORDER BY created_at, id',
+        )
+        .all(project.id) as ProjectReferenceRow[];
+      for (const reference of references) {
+        const sourceTask = this.getTaskRow(reference.source_task_id);
+        const read = readProjectReference({
+          workspacePath: sourceTask.workspace_path,
+          registeredRootIdentity: reference.registered_root_identity,
+          relativePath: reference.relative_path,
+        });
+        const candidateDigest =
+          read.digest ??
+          sha256(
+            JSON.stringify([
+              reference.id,
+              reference.relative_path,
+              reference.registered_root_identity,
+              read.status,
+            ]),
+          );
+        const itemTokens = read.content === null ? 0 : estimateTokens(read.content);
+        const readable = read.status === 'healthy' && read.content !== null && read.digest !== null;
+        const included =
+          readable &&
+          contextTokens <= CONTEXT_HARD_CAP_TOKENS &&
+          contextTokens + itemTokens <= CONTEXT_HARD_CAP_TOKENS;
+        items.push({
+          itemId: `project:${project.id}:reference:${reference.id}`,
+          kind: 'reference',
+          sourceTaskId: reference.source_task_id,
+          sourceTurnId: null,
+          sourceReferenceId: reference.id,
+          candidateDigest,
+          sealedDigest: included ? read.digest : null,
+          included,
+          exclusionReason: included
+            ? null
+            : !readable
+              ? `reference_${read.status}`
+              : contextTokens > CONTEXT_HARD_CAP_TOKENS
+                ? 'existing_context_over_budget'
+                : 'project_context_over_budget',
+          authority: 'none',
+          localOnly: sourceTask.local_only === 1,
+          content: included ? read.content : null,
+          capturedAt: createdAt,
+        });
+        if (included) contextTokens += itemTokens;
+      }
     }
     if (ownerType === 'turn') {
       const projectTokens = items.reduce(
@@ -10880,6 +11135,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
         item.capturedAt,
       ),
     );
+    for (const item of items) {
+      if (!item.included || item.kind !== 'reference' || item.sourceReferenceId === null) continue;
+      this.db
+        .prepare('UPDATE project_references SET last_sealed_digest = ? WHERE id = ?')
+        .run(item.sealedDigest, item.sourceReferenceId);
+    }
     return this.contextSealManifestFromRow(this.contextSealRow(ownerType, ownerId)!);
   }
 
@@ -11257,10 +11518,50 @@ export class SqlitePersistenceClient implements PersistenceClient {
     if (ownerSeal.project_id !== (project?.id ?? null)) return 'project_changed';
     if (ownerSeal.project_context_epoch !== (project?.context_epoch ?? null))
       return 'project_context_epoch_changed';
-    const candidates = projectContextCandidates(project);
+    const candidates = this.projectContextCandidatesWithReferences(project);
     if (ownerSeal.candidate_snapshot_digest !== projectCandidateSnapshotDigest(project, candidates))
       return 'project_snapshot_changed';
     return null;
+  }
+
+  private projectContextCandidatesWithReferences(
+    project: ProjectContextRow | null,
+  ): readonly ProjectCandidateIdentity[] {
+    const candidates = [...projectContextCandidates(project)];
+    if (project === null) return candidates;
+    const references = this.db
+      .prepare(
+        'SELECT * FROM project_references WHERE project_id = ? AND enabled = 1 ORDER BY created_at, id',
+      )
+      .all(project.id) as ProjectReferenceRow[];
+    for (const reference of references) {
+      const task = this.getTaskRow(reference.source_task_id);
+      const read = readProjectReference({
+        workspacePath: task.workspace_path,
+        registeredRootIdentity: reference.registered_root_identity,
+        relativePath: reference.relative_path,
+      });
+      candidates.push({
+        itemId: `project:${project.id}:reference:${reference.id}`,
+        kind: 'reference',
+        sourceTaskId: reference.source_task_id,
+        sourceTurnId: null,
+        sourceReferenceId: reference.id,
+        candidateDigest:
+          read.digest ??
+          sha256(
+            JSON.stringify([
+              reference.id,
+              reference.relative_path,
+              reference.registered_root_identity,
+              read.status,
+            ]),
+          ),
+        authority: 'none',
+        localOnly: task.local_only === 1,
+      });
+    }
+    return candidates;
   }
 
   private quarantineBackgroundForProjectContextInTransaction(projectId: string, now: string): void {
@@ -12012,6 +12313,7 @@ export class TeamConflictError extends Error {}
 export class ProjectConflictError extends Error {}
 export class ProjectArchivedError extends Error {}
 export class TaskAssignmentBlockedError extends Error {}
+export class ReferenceInUseError extends Error {}
 export class InvalidProjectError extends Error {}
 export class InvalidCanvasViewError extends Error {}
 export class CanvasViewConflictError extends Error {}
@@ -12122,6 +12424,19 @@ function parseProjectName(name: string): string {
   const parsed = name.trim();
   if (parsed.length < 1 || parsed.length > 120) throw new InvalidProjectError();
   return parsed;
+}
+
+function parseReferenceRelativePath(value: string): string {
+  const normalized = value.replaceAll('\\', '/');
+  if (
+    normalized.length < 1 ||
+    normalized.length > 1024 ||
+    normalized.startsWith('/') ||
+    /^[A-Za-z]:\//.test(normalized) ||
+    normalized.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+  )
+    throw new InvalidProjectError('Reference path must be Workspace-relative');
+  return normalized;
 }
 
 function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {

@@ -33,6 +33,35 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
 
 if (runsWithElectronAbi)
   describe('Project persistence', () => {
+    it('migrates v56 databases to the v57 Project reference schema', () => {
+      const { persistence, path } = createPersistence();
+      persistence.createProject('pre-reference');
+      persistence.close();
+      const legacy = new Database(path);
+      legacy.exec(`
+        DROP INDEX project_references_source_task_idx;
+        DROP INDEX project_references_project_order_idx;
+        DROP TABLE project_references;
+        DELETE FROM schema_migrations WHERE version = 57;
+      `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection.prepare('SELECT checksum FROM schema_migrations WHERE version = 57').get(),
+      ).toEqual({ checksum: 'project-context-hub-v57-reference-files' });
+      expect(
+        inspection
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project_references'",
+          )
+          .get(),
+      ).toEqual({ name: 'project_references' });
+      inspection.close();
+      migrated.close();
+    });
+
     it('migrates a v54 Task to an unassigned v55 Task', () => {
       const { persistence, path } = createPersistence();
       const legacyTask = persistence.createTask('v54 task');

@@ -1,6 +1,14 @@
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -663,6 +671,57 @@ if (runsWithElectronAbi)
         instruction: 'A newer instruction.',
       });
       expect(persistence.getContextSealManifest('turn', started.turnId)).toEqual(originalManifest);
+      persistence.close();
+    });
+
+    it('registers safe references, seals them, and blocks source Task movement until removal', () => {
+      const { persistence } = createPersistence();
+      const project = persistence.createProject('References');
+      const task = persistence.createTask('source', false, project.id);
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-reference-db-')));
+      cleanup.push(root);
+      const rootStat = statSync(root, { bigint: true });
+      const rootIdentity = createHash('sha256')
+        .update(
+          JSON.stringify([
+            'workspace-root-v2',
+            rootStat.dev.toString(),
+            rootStat.ino.toString(),
+            'directory',
+          ]),
+        )
+        .digest('hex');
+      writeFileSync(join(root, 'context.txt'), 'trusted by the user, not as an instruction');
+      bindMutationWorkspace(persistence, task.id, root, rootIdentity);
+
+      const reference = persistence.addProjectReference({
+        projectId: project.id,
+        sourceTaskId: task.id,
+        relativePath: 'context.txt',
+        registeredRootIdentity: rootIdentity,
+      });
+      expect(reference).toMatchObject({ status: 'healthy', enabled: true });
+      expect(() =>
+        persistence.unassignTaskFromProject({ taskId: task.id, expectedProjectId: project.id }),
+      ).toThrow();
+
+      const started = persistence.startTurn(task.id, 'use the reference');
+      expect(persistence.prepareContext(task.id, started.turnId).projectItems).toEqual([
+        expect.objectContaining({
+          kind: 'reference',
+          authority: 'none',
+          content: 'trusted by the user, not as an instruction',
+        }),
+      ]);
+      expect(persistence.listProjectReferences(project.id)[0]?.lastSealedDigest).not.toBeNull();
+      writeFileSync(join(root, 'context.txt'), 'changed externally');
+      expect(persistence.listProjectReferences(project.id)[0]?.status).toBe('changed');
+
+      persistence.removeProjectReference(reference.id, reference.revision);
+      persistence.cancelTurn(task.id, started.turnId);
+      expect(
+        persistence.unassignTaskFromProject({ taskId: task.id, expectedProjectId: project.id }),
+      ).toMatchObject({ projectId: null });
       persistence.close();
     });
 

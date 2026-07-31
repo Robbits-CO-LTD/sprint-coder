@@ -1478,6 +1478,7 @@ export const publicErrorCodeSchema = z.enum([
   'NOT_FOUND',
   'TURN_ACTIVE',
   'TASK_RECOVERY_REQUIRED',
+  'REFERENCE_IN_USE',
   'STEER_STALE',
   'STEER_UNSUPPORTED',
   'OPERATION_CONFLICT',
@@ -2379,6 +2380,52 @@ export const projectContextManifestGetInputSchema = z
 export type ProjectInstruction = z.infer<typeof projectInstructionResultSchema>;
 export type ProjectContextManifestSummary = z.infer<typeof projectContextManifestSummarySchema>;
 export type ProjectContextManifest = z.infer<typeof projectContextManifestSchema>;
+export const projectReferenceStatusSchema = z.enum([
+  'healthy',
+  'changed',
+  'missing',
+  'unreadable',
+  'workspace_changed',
+  'too_large',
+  'non_text',
+]);
+export const projectReferenceSchema = z
+  .object({
+    id: idSchema,
+    projectId: idSchema,
+    sourceTaskId: idSchema,
+    relativePath: z.string().min(1).max(1024),
+    enabled: z.boolean(),
+    revision: z.number().int().positive(),
+    lastSealedDigest: digestSchema.nullable(),
+    status: projectReferenceStatusSchema,
+    currentDigest: digestSchema.nullable(),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export const projectReferencesListInputSchema = z.object({ projectId: idSchema }).strict();
+export const projectReferenceAddInputSchema = z
+  .object({
+    projectId: idSchema,
+    sourceTaskId: idSchema,
+    relativePath: z.string().min(1).max(1024),
+  })
+  .strict();
+export const projectReferencePickInputSchema = z
+  .object({ projectId: idSchema, sourceTaskId: idSchema })
+  .strict();
+export const projectReferenceUpdateInputSchema = z
+  .object({
+    referenceId: idSchema,
+    expectedRevision: z.number().int().positive(),
+    enabled: z.boolean(),
+  })
+  .strict();
+export const projectReferenceRemoveInputSchema = z
+  .object({ referenceId: idSchema, expectedRevision: z.number().int().positive() })
+  .strict();
+export type ProjectReference = z.infer<typeof projectReferenceSchema>;
 export const taskIdPayloadSchema = z.object({ taskId: idSchema }).strict();
 /** A Workspace-relative path within a Task. Validated as a bounded string here; whether it is
  * actually inside the Workspace is Main's decision, not the schema's (issue #43). */
@@ -2541,6 +2588,21 @@ export interface SprintCoderApi {
     }): Promise<ProjectInstruction>;
     listContextManifests(input: { taskId: string }): Promise<ProjectContextManifestSummary[]>;
     getContextManifest(input: { taskId: string; turnId: string }): Promise<ProjectContextManifest>;
+    references: {
+      list(input: { projectId: string }): Promise<ProjectReference[]>;
+      pick(input: { projectId: string; sourceTaskId: string }): Promise<ProjectReference | null>;
+      add(input: {
+        projectId: string;
+        sourceTaskId: string;
+        relativePath: string;
+      }): Promise<ProjectReference>;
+      update(input: {
+        referenceId: string;
+        expectedRevision: number;
+        enabled: boolean;
+      }): Promise<ProjectReference>;
+      remove(input: { referenceId: string; expectedRevision: number }): Promise<void>;
+    };
     create(input: { name: string }): Promise<ProjectSummary>;
     update(input: {
       projectId: string;
@@ -2720,6 +2782,11 @@ export const IPC_CHANNELS = {
   projectsSetInstruction: 'sprint-coder:projects:set-instruction',
   projectsListContextManifests: 'sprint-coder:projects:list-context-manifests',
   projectsGetContextManifest: 'sprint-coder:projects:get-context-manifest',
+  projectsReferencesList: 'sprint-coder:projects:references:list',
+  projectsReferencesPick: 'sprint-coder:projects:references:pick',
+  projectsReferencesAdd: 'sprint-coder:projects:references:add',
+  projectsReferencesUpdate: 'sprint-coder:projects:references:update',
+  projectsReferencesRemove: 'sprint-coder:projects:references:remove',
   projectsCreate: 'sprint-coder:projects:create',
   projectsUpdate: 'sprint-coder:projects:update',
   projectsAssignTask: 'sprint-coder:projects:assign-task',
