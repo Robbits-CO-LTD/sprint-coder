@@ -86,6 +86,34 @@ test.describe('Project Context Inspector (B4)', () => {
     await expect(instruction).toHaveValue('Remote instruction');
   });
 
+  test('saves an explicit user-authored memory from a completed Turn', async () => {
+    await page.getByRole('button', { name: 'Project Memoryに保存' }).last().click();
+    const memoryDialog = page.getByRole('dialog', { name: 'Project Memoryに保存' });
+    await expect(memoryDialog).toBeVisible();
+    await expect(memoryDialog.getByRole('heading', { name: 'Request' })).toBeVisible();
+    await expect(memoryDialog.locator('pre').first()).toHaveText('Context sealを確認します');
+    const memory = memoryDialog.getByLabel('Memory（1〜4000文字）');
+    await expect(memory).toHaveValue('');
+    await memory.fill('公開APIを維持する。');
+    await memoryDialog.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(memoryDialog.getByRole('status')).toHaveText(
+      '保存しました。次のTurnから利用されます。',
+    );
+    await memoryDialog.getByRole('button', { name: '閉じる' }).click();
+
+    const memorySection = page
+      .locator('.project-context-section')
+      .filter({ has: page.getByRole('heading', { name: 'Shared memory' }) });
+    await memorySection.getByRole('button', { name: '更新' }).click();
+    const savedMemory = memorySection.getByLabel('Memory内容');
+    await expect(savedMemory).toHaveValue('公開APIを維持する。');
+
+    await savedMemory.fill('公開APIと互換性を維持する。');
+    await memorySection.getByLabel('次のTurnで使用').uncheck();
+    await expect(memorySection.getByLabel('次のTurnで使用')).not.toBeChecked();
+    await expect(memorySection.getByLabel('Memory内容')).toHaveValue('公開APIと互換性を維持する。');
+  });
+
   test('keeps a manually selected past Turn when a newer Turn arrives', async () => {
     const textarea = page.getByTestId('composer-textarea');
     await textarea.fill('二つ目のTurn');

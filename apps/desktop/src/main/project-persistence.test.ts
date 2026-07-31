@@ -33,6 +33,26 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
 
 if (runsWithElectronAbi)
   describe('Project persistence', () => {
+    it('migrates v57 databases to the v58 explicit memory schema', () => {
+      const { persistence, path } = createPersistence();
+      persistence.createProject('pre-memory');
+      persistence.close();
+      const legacy = new Database(path);
+      legacy.exec(`
+        DROP INDEX project_memories_project_order_idx;
+        DROP TABLE project_memories;
+        DELETE FROM schema_migrations WHERE version = 58;
+      `);
+      legacy.close();
+      const migrated = new SqlitePersistenceClient(path);
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection.prepare('SELECT checksum FROM schema_migrations WHERE version = 58').get(),
+      ).toEqual({ checksum: 'project-context-hub-v58-explicit-memory' });
+      inspection.close();
+      migrated.close();
+    });
+
     it('migrates v56 databases to the v57 Project reference schema', () => {
       const { persistence, path } = createPersistence();
       persistence.createProject('pre-reference');
@@ -153,6 +173,86 @@ if (runsWithElectronAbi)
           archived: false,
         }),
       ).toMatchObject({ archived: false, revision: 4 });
+      persistence.close();
+    });
+
+    it('saves only explicit completed-Turn memory to its sealed Project and seals it next Turn', () => {
+      const { persistence } = createPersistence();
+      const projectA = persistence.createProject('A');
+      const projectB = persistence.createProject('B');
+      const task = persistence.createTask('source', true, projectA.id);
+      const source = persistence.startTurn(task.id, 'request text');
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, source.turnId, stage);
+      persistence.appendDelta(task.id, source.turnId, randomUUID(), 'answer text');
+      persistence.completeTurn(task.id, source.turnId, 'completed');
+
+      persistence.assignTaskToProject({
+        projectId: projectB.id,
+        taskId: task.id,
+        expectedProjectId: projectA.id,
+      });
+      const memory = persistence.createProjectMemoryFromTurn({
+        projectId: projectA.id,
+        sourceTurnId: source.turnId,
+        content: '  Preserve the verified API decision.  ',
+      });
+      expect(memory).toMatchObject({
+        projectId: projectA.id,
+        sourceTaskId: task.id,
+        sourceTurnId: source.turnId,
+        content: 'Preserve the verified API decision.',
+        status: 'active',
+        localOnly: true,
+      });
+      expect(() =>
+        persistence.createProjectMemoryFromTurn({
+          projectId: projectB.id,
+          sourceTurnId: source.turnId,
+          content: 'wrong project',
+        }),
+      ).toThrow();
+
+      persistence.assignTaskToProject({
+        projectId: projectA.id,
+        taskId: task.id,
+        expectedProjectId: projectB.id,
+      });
+      const next = persistence.startTurn(task.id, 'next turn');
+      expect(persistence.prepareContext(task.id, next.turnId).projectItems).toEqual([
+        expect.objectContaining({
+          kind: 'memory',
+          authority: 'user',
+          localOnly: true,
+          content: 'Preserve the verified API decision.',
+        }),
+      ]);
+      persistence.cancelTurn(task.id, next.turnId);
+
+      expect(
+        persistence.updateProjectMemory({
+          memoryId: memory.id,
+          expectedRevision: memory.revision,
+          status: 'disabled',
+        }),
+      ).toMatchObject({ status: 'disabled', revision: 2 });
+      const afterDisable = persistence.startTurn(task.id, 'after disable');
+      expect(persistence.prepareContext(task.id, afterDisable.turnId).projectItems).toEqual([]);
+      persistence.close();
+    });
+
+    it('rejects memory from unfinished or answer-less Turns', () => {
+      const { persistence } = createPersistence();
+      const project = persistence.createProject('A');
+      const task = persistence.createTask('source', false, project.id);
+      const turn = persistence.startTurn(task.id, 'unfinished');
+      expect(() =>
+        persistence.createProjectMemoryFromTurn({
+          projectId: project.id,
+          sourceTurnId: turn.turnId,
+          content: 'must not save',
+        }),
+      ).toThrow();
       persistence.close();
     });
 
