@@ -421,56 +421,12 @@ export function ProjectContextInspector({
           ) : (
             <ul className="project-memory-list">
               {memories.map((memory) => (
-                <li key={`${memory.id}:${memory.revision}`}>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={memory.status === 'active'}
-                      onChange={(event) => {
-                        if (projectsApi === undefined) return;
-                        void projectsApi.memories
-                          .update({
-                            memoryId: memory.id,
-                            expectedRevision: memory.revision,
-                            status: event.target.checked ? 'active' : 'disabled',
-                          })
-                          .then(() => refreshAfterMemoryMutation())
-                          .catch((error: unknown) =>
-                            setMemoryError(
-                              error instanceof Error ? error.message : '更新できませんでした。',
-                            ),
-                          );
-                      }}
-                    />
-                    次のTurnで使用
-                  </label>
-                  <textarea
-                    aria-label="Memory内容"
-                    defaultValue={memory.content}
-                    maxLength={4000}
-                    rows={4}
-                    onBlur={(event) => {
-                      const content = event.currentTarget.value.trim();
-                      if (projectsApi === undefined || content === memory.content || content === '')
-                        return;
-                      void projectsApi.memories
-                        .update({
-                          memoryId: memory.id,
-                          expectedRevision: memory.revision,
-                          content,
-                        })
-                        .then(() => refreshAfterMemoryMutation())
-                        .catch((error: unknown) =>
-                          setMemoryError(
-                            error instanceof Error ? error.message : '更新できませんでした。',
-                          ),
-                        );
-                    }}
-                  />
-                  <small>
-                    source Turn: {memory.sourceTurnId} · localOnly: {String(memory.localOnly)}
-                  </small>
-                </li>
+                <MemoryEditor
+                  key={`${memory.id}:${memory.revision}`}
+                  memory={memory}
+                  onSaved={refreshAfterMemoryMutation}
+                  onError={setMemoryError}
+                />
               ))}
             </ul>
           )}
@@ -511,6 +467,74 @@ export function ProjectContextInspector({
         )}
       </section>
     </div>
+  );
+}
+
+function MemoryEditor({
+  memory,
+  onSaved,
+  onError,
+}: {
+  memory: ProjectMemory;
+  onSaved: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [content, setContent] = useState(memory.content);
+  const [saving, setSaving] = useState(false);
+  const dirty = content.trim() !== memory.content;
+
+  async function save(status: ProjectMemory['status'] = memory.status): Promise<void> {
+    const api = window.sprintCoder?.projects.memories;
+    const nextContent = content.trim();
+    if (api === undefined || nextContent === '') return;
+    setSaving(true);
+    try {
+      await api.update({
+        memoryId: memory.id,
+        expectedRevision: memory.revision,
+        content: nextContent,
+        status,
+      });
+      await onSaved();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : '更新できませんでした。');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <li>
+      <label>
+        <input
+          type="checkbox"
+          checked={memory.status === 'active'}
+          disabled={saving || content.trim() === ''}
+          onChange={(event) => void save(event.target.checked ? 'active' : 'disabled')}
+        />
+        次のTurnで使用
+      </label>
+      <textarea
+        aria-label="Memory内容"
+        value={content}
+        maxLength={4000}
+        rows={4}
+        disabled={saving}
+        onChange={(event) => setContent(event.target.value)}
+      />
+      <div className="project-instruction-actions">
+        <small>
+          source Turn: {memory.sourceTurnId} · localOnly: {String(memory.localOnly)}
+        </small>
+        <button
+          type="button"
+          disabled={!dirty || saving || content.trim() === ''}
+          onClick={() => void save()}
+        >
+          {saving ? '保存中…' : 'Memoryを保存'}
+        </button>
+      </div>
+    </li>
   );
 }
 

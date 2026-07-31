@@ -105,7 +105,13 @@ test.describe('Project Context Inspector (B4)', () => {
       .locator('.project-context-section')
       .filter({ has: page.getByRole('heading', { name: 'Shared memory' }) });
     await memorySection.getByRole('button', { name: '更新' }).click();
-    await expect(memorySection.getByLabel('Memory内容')).toHaveValue('公開APIを維持する。');
+    const savedMemory = memorySection.getByLabel('Memory内容');
+    await expect(savedMemory).toHaveValue('公開APIを維持する。');
+
+    await savedMemory.fill('公開APIと互換性を維持する。');
+    await memorySection.getByLabel('次のTurnで使用').uncheck();
+    await expect(memorySection.getByLabel('次のTurnで使用')).not.toBeChecked();
+    await expect(memorySection.getByLabel('Memory内容')).toHaveValue('公開APIと互換性を維持する。');
   });
 
   test('keeps a manually selected past Turn when a newer Turn arrives', async () => {
