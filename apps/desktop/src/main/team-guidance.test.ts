@@ -71,7 +71,13 @@ describe('builtin Team skill', () => {
   });
 
   it('injects the authority-bearing fragment only for a Team turn', () => {
-    const prepared = { fragments: [], usageEvents: [], compacted: false };
+    const prepared = {
+      fragments: [],
+      projectItems: [],
+      projectSnapshotDigest: null,
+      usageEvents: [],
+      compacted: false,
+    };
     expect(attachBuiltinTeamSkill(prepared, 'task-1', false)).toBe(prepared);
     const attached = attachBuiltinTeamSkill(prepared, 'task-1', true);
     expect(attached.fragments).toHaveLength(1);

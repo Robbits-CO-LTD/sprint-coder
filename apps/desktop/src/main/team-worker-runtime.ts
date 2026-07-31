@@ -291,7 +291,13 @@ export function buildInheritedWorkerContext(
     worker.contextInheritancePolicy === 'none' ||
     worker.contextInheritancePolicy === 'selected_items'
   )
-    return { fragments: [], usageEvents: [], compacted: false };
+    return {
+      fragments: [],
+      projectItems: [],
+      projectSnapshotDigest: null,
+      usageEvents: [],
+      compacted: false,
+    };
   if (worker.contextInheritancePolicy === 'summary') {
     const content = relevant
       .slice(-6)
@@ -300,8 +306,17 @@ export function buildInheritedWorkerContext(
       )
       .join('\n')
       .slice(-8_000);
-    if (content.length === 0) return { fragments: [], usageEvents: [], compacted: false };
+    if (content.length === 0)
+      return {
+        fragments: [],
+        projectItems: [],
+        projectSnapshotDigest: null,
+        usageEvents: [],
+        compacted: false,
+      };
     return {
+      projectItems: [],
+      projectSnapshotDigest: null,
       fragments: [
         {
           id: `team-context-summary:${worker.id}`,
@@ -319,6 +334,8 @@ export function buildInheritedWorkerContext(
     };
   }
   return {
+    projectItems: [],
+    projectSnapshotDigest: null,
     fragments: relevant.slice(-128).map((message) => ({
       id: `team-context:${message.id}`,
       taskId: worker.taskId,

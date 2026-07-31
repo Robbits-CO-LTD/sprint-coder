@@ -623,6 +623,16 @@ if (runsWithElectronAbi)
       });
       expect(firstRead).toEqual(secondRead);
       expect(firstRead.usageEvents).toEqual([]);
+      expect(firstRead.projectItems).toEqual([
+        expect.objectContaining({
+          id: `project:${project.id}:instruction`,
+          kind: 'instruction',
+          authority: 'user',
+          localOnly: false,
+          content: 'Always preserve the public API.',
+        }),
+      ]);
+      expect(firstRead.projectSnapshotDigest).toBe(originalManifest.candidateSnapshotDigest);
 
       persistence.setProjectInstruction({
         projectId: project.id,

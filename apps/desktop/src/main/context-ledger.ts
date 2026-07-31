@@ -38,6 +38,19 @@ export type ContextLedgerState = {
 
 export type PersistedFragment = Omit<ContextFragment, 'content'>;
 
+export type ProjectContextItem = Readonly<{
+  id: string;
+  kind: 'instruction' | 'memory' | 'reference';
+  authority: 'user' | 'none';
+  localOnly: boolean;
+  content: string;
+  sealedDigest: string;
+  sourceTaskId: string | null;
+  sourceTurnId: string | null;
+  sourceReferenceId: string | null;
+  capturedAt: string;
+}>;
+
 export interface ContextLedgerStorage {
   loadContextLedgerState(taskId: string, turnId: string): ContextLedgerState;
   recordContextFragments(fragments: PersistedFragment[]): void;
@@ -52,6 +65,8 @@ export interface ContextLedgerStorage {
 
 export type PreparedContext = {
   fragments: ContextFragment[];
+  projectItems: ProjectContextItem[];
+  projectSnapshotDigest: string | null;
   usageEvents: TurnEvent[];
   compacted: boolean;
 };
@@ -115,7 +130,14 @@ export class ContextLedger {
       this.storage.recordContextUsage(taskId, turnId, aggregateContextUsage(before)),
     ];
     const superseded = selectHistoryForCompaction(activeHistory);
-    if (superseded.length === 0) return { fragments: before, usageEvents, compacted: false };
+    if (superseded.length === 0)
+      return {
+        fragments: before,
+        projectItems: [],
+        projectSnapshotDigest: null,
+        usageEvents,
+        compacted: false,
+      };
 
     const summaryContent = createCompactionStub(superseded);
     const compaction = makeFragment(
@@ -152,7 +174,13 @@ export class ContextLedger {
       ...(reminder === null ? [] : [reminder]),
     ];
     usageEvents.push(this.storage.recordContextUsage(taskId, turnId, aggregateContextUsage(after)));
-    return { fragments: after, usageEvents, compacted: true };
+    return {
+      fragments: after,
+      projectItems: [],
+      projectSnapshotDigest: null,
+      usageEvents,
+      compacted: true,
+    };
   }
 }
 

@@ -179,6 +179,8 @@ describe('MockRuntimeAdapter', () => {
       undefined,
       undefined,
       () => ({
+        projectItems: [],
+        projectSnapshotDigest: null,
         fragments: [
           {
             id: 'completion-1',

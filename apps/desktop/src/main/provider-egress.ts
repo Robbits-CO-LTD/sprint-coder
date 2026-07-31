@@ -18,6 +18,13 @@ export type ProviderEgressInput = {
   prompt: string;
   context: PreparedContext;
   now: string;
+  payloadDigest?: string;
+  adapterVersion?: string;
+  connectionId?: string;
+  modelId?: string;
+  endpointTrust?: 'trusted-local' | 'trusted-remote' | 'untrusted';
+  round?: number;
+  toolCatalogDigest?: string;
 };
 
 export function dispatchAfterCodexProviderEgress(
@@ -85,17 +92,22 @@ function authorizeProviderEgress(
   const content = [
     input.prompt,
     ...input.context.fragments.map((fragment) => fragment.content),
+    ...input.context.projectItems.map((item) => item.content),
   ].join('\n');
   const secretScan = redactSecrets(content) === content ? ('clean' as const) : ('blocked' as const);
   const byteCount = Buffer.byteLength(content, 'utf8');
-  const provenanceTrust = input.context.fragments.some((fragment) => fragment.trust === 'assistant')
-    ? ('untrusted' as const)
-    : input.context.fragments.every((fragment) => fragment.source === 'system')
-      ? ('system' as const)
-      : ('user' as const);
+  const provenanceTrust =
+    input.context.fragments.some((fragment) => fragment.trust === 'assistant') ||
+    input.context.projectItems.some((item) => item.authority === 'none')
+      ? ('untrusted' as const)
+      : input.context.fragments.every((fragment) => fragment.source === 'system') &&
+          input.context.projectItems.length === 0
+        ? ('system' as const)
+        : ('user' as const);
   const fragmentKind = [
     'prompt',
     ...new Set(input.context.fragments.map((fragment) => fragment.source)),
+    ...new Set(input.context.projectItems.map((item) => `project:${item.kind}`)),
   ]
     .sort()
     .join('+');
@@ -108,7 +120,8 @@ function authorizeProviderEgress(
     dataResidency: providerTrust === 'trusted-local' ? 'local-device' : 'unspecified',
     provenanceTrust,
     secretScan,
-    localOnlyTask: input.task.localOnly,
+    localOnlyTask:
+      input.task.localOnly || input.context.projectItems.some((item) => item.localOnly),
   };
   const executionSpecDigest = digestCanonical({
     providerId,
@@ -118,6 +131,23 @@ function authorizeProviderEgress(
       id: fragment.id,
       contentDigest: digestCanonical(fragment.content),
     })),
+    projectItems: input.context.projectItems.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      authority: item.authority,
+      localOnly: item.localOnly,
+      sealedDigest: item.sealedDigest,
+    })),
+    egressAudit: {
+      payloadDigest: input.payloadDigest ?? digestCanonical(input.prompt),
+      adapterVersion: input.adapterVersion ?? 'unknown',
+      providerId,
+      connectionId: input.connectionId ?? null,
+      modelId: input.modelId ?? null,
+      endpointTrust: input.endpointTrust ?? providerTrust,
+      round: input.round ?? 1,
+      toolCatalogDigest: input.toolCatalogDigest ?? digestCanonical([]),
+    },
   });
   const requestBase = {
     taskId: input.task.id,

@@ -129,6 +129,7 @@ import {
 } from '@sprint-coder/domain';
 import {
   ContextLedger,
+  CONTEXT_HARD_CAP_TOKENS,
   aggregateContextUsage,
   defaultContextUsage,
   estimateTokens,
@@ -136,6 +137,7 @@ import {
   type ContextLedgerState,
   type PersistedFragment,
   type PreparedContext,
+  type ProjectContextItem,
 } from './context-ledger';
 import { BUILTIN_TEAM_SKILL_CONTENT, BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
 import { isTeamScenarioInput } from './team-tools';
@@ -10583,6 +10585,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const items: ProjectContextManifestItem[] = [];
     if (project !== null && project.instruction !== '') {
       const digest = sha256(project.instruction);
+      const existingTokens = prepared.fragments.reduce(
+        (total, fragment) => total + fragment.tokenEstimate,
+        0,
+      );
+      const included =
+        existingTokens <= CONTEXT_HARD_CAP_TOKENS &&
+        existingTokens + estimateTokens(project.instruction) <= CONTEXT_HARD_CAP_TOKENS;
       items.push({
         itemId: `project:${project.id}:instruction`,
         kind: 'instruction',
@@ -10590,12 +10599,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
         sourceTurnId: null,
         sourceReferenceId: null,
         candidateDigest: digest,
-        sealedDigest: digest,
-        included: true,
-        exclusionReason: null,
+        sealedDigest: included ? digest : null,
+        included,
+        exclusionReason: included
+          ? null
+          : existingTokens > CONTEXT_HARD_CAP_TOKENS
+            ? 'existing_context_over_budget'
+            : 'project_context_over_budget',
         authority: 'user',
         localOnly: false,
-        content: project.instruction,
+        content: included ? project.instruction : null,
         capturedAt: createdAt,
       });
     }
@@ -10625,10 +10638,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
           tokenEstimate: fragment.tokenEstimate,
           contentDigest: sha256(fragment.content),
         })),
-        projectItems: items.map((item) => ({
-          itemId: item.itemId,
-          sealedDigest: item.sealedDigest,
-        })),
+        projectItems: items
+          .filter((item) => item.included)
+          .map((item) => ({
+            itemId: item.itemId,
+            sealedDigest: item.sealedDigest,
+          })),
       }),
     );
     const sealId = randomUUID();
@@ -10712,6 +10727,27 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const rows = this.db
       .prepare('SELECT * FROM context_seal_fragments WHERE seal_id = ? ORDER BY ordinal')
       .all(seal.id) as ContextSealFragmentRow[];
+    const itemRows = this.db
+      .prepare(
+        'SELECT * FROM project_context_manifest_items WHERE seal_id = ? AND included = 1 ORDER BY ordinal',
+      )
+      .all(seal.id) as ProjectContextManifestItemRow[];
+    const projectItems: ProjectContextItem[] = itemRows.map((row) => {
+      if (row.sealed_digest === null || row.content === null)
+        throw new Error('Included Project context item is incomplete');
+      return {
+        id: row.item_id,
+        kind: row.kind,
+        authority: row.authority,
+        localOnly: row.local_only === 1,
+        content: row.content,
+        sealedDigest: row.sealed_digest,
+        sourceTaskId: row.source_task_id,
+        sourceTurnId: row.source_turn_id,
+        sourceReferenceId: row.source_reference_id,
+        capturedAt: row.captured_at,
+      };
+    });
     return {
       fragments: rows.map((row) => ({
         id: row.fragment_id,
@@ -10723,6 +10759,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
         createdAt: row.created_at,
         messageId: row.message_id,
       })),
+      projectItems,
+      projectSnapshotDigest: seal.candidate_snapshot_digest,
       usageEvents: [],
       compacted: seal.compacted === 1,
     };

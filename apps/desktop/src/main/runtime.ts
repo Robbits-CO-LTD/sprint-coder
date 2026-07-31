@@ -17,7 +17,13 @@ type Publish = (event: TurnEvent) => void;
 type Serialize = <T>(taskId: string, action: () => T) => Promise<T>;
 type Terminal = (taskId: string, turnId: string, state: 'completed' | 'failed') => void;
 type PrepareContext = (taskId: string, turnId: string) => PreparedContext | void;
-type ContextAccepted = (taskId: string, turnId: string, fragmentIds: readonly string[]) => void;
+type ContextAccepted = (
+  taskId: string,
+  turnId: string,
+  fragmentIds: readonly string[],
+  projectItemIds: readonly string[],
+  projectSnapshotDigest: string | null,
+) => void;
 type ActiveTurn = {
   canceled: boolean;
   steering: string[];
@@ -109,6 +115,8 @@ export class MockRuntimeAdapter {
         taskId,
         turnId,
         context.fragments.map((fragment) => fragment.id),
+        context.projectItems.map((item) => item.id),
+        context.projectSnapshotDigest,
       );
     let resolveSettled = (): void => undefined;
     const settled = new Promise<void>((resolve) => {
@@ -216,6 +224,7 @@ export class MockRuntimeAdapter {
         taskId,
         turnId,
         fragments: control.context?.fragments ?? [],
+        projectItems: control.context?.projectItems ?? [],
         model: 'mock-v1',
         effort: 'low',
         policyEpoch,

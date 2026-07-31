@@ -11,14 +11,24 @@ import {
 } from '@sprint-coder/contracts';
 import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
 import { isAbsolute, normalize, sep } from 'node:path';
+import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 
-export const RUNTIME_PROTOCOL_VERSION = 5;
+export const RUNTIME_PROTOCOL_VERSION = 6;
 
 export type RuntimeContextFragment = Readonly<{
   id: string;
   source: 'system' | 'history' | 'goal' | 'compaction' | 'background' | 'skill';
   trust: 'system' | 'user' | 'assistant';
   authority: 'system' | 'user' | 'none';
+  content: string;
+}>;
+export type RuntimeProjectContextItem = Readonly<{
+  id: string;
+  kind: 'instruction' | 'memory' | 'reference';
+  authority: 'user' | 'none';
+  localOnly: boolean;
+  sealedDigest: string;
   content: string;
 }>;
 export type RuntimeSkillInput = Readonly<{
@@ -114,6 +124,10 @@ export type MainToRuntimeEnvelope =
       // 'read-only', which is the pre-#37 behaviour.
       writeScope?: 'read-only' | 'workspace-write' | 'full';
       contextFragments: RuntimeContextFragment[];
+      projectItems: RuntimeProjectContextItem[];
+      projectSnapshotDigest: string | null;
+      payload: string;
+      payloadDigest: string;
       skills?: RuntimeSkillInput[];
       toolCatalogSnapshot: ToolCatalogSnapshot;
       teamMcp?: RuntimeTeamMcpOption;
@@ -135,7 +149,13 @@ export type RuntimeToMainEnvelope =
       claudeVersion?: string;
       claudeModels: CodexModelOption[];
     })
-  | (EnvelopeBase & { type: 'started'; acceptedContextFragmentIds: string[] })
+  | (EnvelopeBase & {
+      type: 'started';
+      acceptedContextFragmentIds: string[];
+      acceptedProjectItemIds: string[];
+      acceptedProjectSnapshotDigest: string | null;
+      acceptedPayloadDigest: string;
+    })
   | (EnvelopeBase & { type: 'stopped'; forced: boolean })
   | (EnvelopeBase & { type: 'event'; event: RuntimeCanonicalEvent })
   | (EnvelopeBase & { type: 'exit'; code: number; canceled: boolean })
@@ -164,6 +184,17 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
       value.writeScope === 'full') &&
     'contextFragments' in value &&
     isRuntimeContextFragments(value.contextFragments) &&
+    'projectItems' in value &&
+    isRuntimeProjectContextItems(value.projectItems, value.contextFragments) &&
+    'projectSnapshotDigest' in value &&
+    (value.projectSnapshotDigest === null || isSha256(value.projectSnapshotDigest)) &&
+    'payload' in value &&
+    typeof value.payload === 'string' &&
+    Buffer.byteLength(value.payload, 'utf8') <= 512 * 1024 &&
+    'payloadDigest' in value &&
+    isSha256(value.payloadDigest) &&
+    createHash('sha256').update(Buffer.from(value.payload, 'utf8')).digest('hex') ===
+      value.payloadDigest &&
     (!('skills' in value) || value.skills === undefined || isRuntimeSkillInputs(value.skills)) &&
     'toolCatalogSnapshot' in value &&
     isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot) &&
@@ -227,7 +258,7 @@ function isRuntimeTeamMcpOption(value: unknown): value is RuntimeTeamMcpOption {
 
 function isRuntimeContextFragments(value: unknown): value is RuntimeContextFragment[] {
   if (!Array.isArray(value) || value.length > 256) return false;
-  let totalCharacters = 0;
+  let totalBytes = 0;
   const ids = new Set<string>();
   for (const fragment of value) {
     if (typeof fragment !== 'object' || fragment === null) return false;
@@ -247,14 +278,56 @@ function isRuntimeContextFragments(value: unknown): value is RuntimeContextFragm
       !['system', 'user', 'none'].includes(record['authority'] as string) ||
       !hasValidFragmentAuthority(record) ||
       typeof record['content'] !== 'string' ||
-      record['content'].length > 40_000
+      Buffer.byteLength(record['content'], 'utf8') > 64 * 1024
     )
       return false;
     ids.add(record['id']);
-    totalCharacters += record['content'].length;
-    if (totalCharacters > 128_000) return false;
+    totalBytes += Buffer.byteLength(record['content'], 'utf8');
+    if (totalBytes > 128 * 1024) return false;
   }
   return true;
+}
+
+function isRuntimeProjectContextItems(
+  value: unknown,
+  fragments: readonly RuntimeContextFragment[],
+): value is RuntimeProjectContextItem[] {
+  if (!Array.isArray(value) || fragments.length + value.length > 256) return false;
+  let totalBytes = fragments.reduce(
+    (total, fragment) => total + Buffer.byteLength(fragment.content, 'utf8'),
+    0,
+  );
+  const ids = new Set(fragments.map((fragment) => fragment.id));
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) return false;
+    const record = item as Record<string, unknown>;
+    if (
+      Object.keys(record).some(
+        (key) => !['id', 'kind', 'authority', 'localOnly', 'sealedDigest', 'content'].includes(key),
+      ) ||
+      typeof record['id'] !== 'string' ||
+      record['id'].length < 1 ||
+      record['id'].length > 128 ||
+      ids.has(record['id']) ||
+      !['instruction', 'memory', 'reference'].includes(record['kind'] as string) ||
+      !['user', 'none'].includes(record['authority'] as string) ||
+      record['authority'] !== (record['kind'] === 'reference' ? 'none' : 'user') ||
+      typeof record['localOnly'] !== 'boolean' ||
+      !isSha256(record['sealedDigest']) ||
+      typeof record['content'] !== 'string'
+    )
+      return false;
+    const bytes = Buffer.byteLength(record['content'], 'utf8');
+    if (bytes > 64 * 1024) return false;
+    totalBytes += bytes;
+    if (totalBytes > 128 * 1024) return false;
+    ids.add(record['id']);
+  }
+  return true;
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 }
 
 function hasValidFragmentAuthority(fragment: Record<string, unknown>): boolean {
@@ -303,7 +376,19 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       new Set(value.acceptedContextFragmentIds).size === value.acceptedContextFragmentIds.length &&
       value.acceptedContextFragmentIds.every(
         (id) => typeof id === 'string' && id.length > 0 && id.length <= 128,
-      )
+      ) &&
+      'acceptedProjectItemIds' in value &&
+      Array.isArray(value.acceptedProjectItemIds) &&
+      value.acceptedContextFragmentIds.length + value.acceptedProjectItemIds.length <= 256 &&
+      new Set(value.acceptedProjectItemIds).size === value.acceptedProjectItemIds.length &&
+      value.acceptedProjectItemIds.every(
+        (id) => typeof id === 'string' && id.length > 0 && id.length <= 128,
+      ) &&
+      'acceptedProjectSnapshotDigest' in value &&
+      (value.acceptedProjectSnapshotDigest === null ||
+        isSha256(value.acceptedProjectSnapshotDigest)) &&
+      'acceptedPayloadDigest' in value &&
+      isSha256(value.acceptedPayloadDigest)
     );
   if (value.type === 'event') return 'event' in value && isRuntimeCanonicalEvent(value.event);
   if (value.type === 'stopped') return 'forced' in value && typeof value.forced === 'boolean';
