@@ -222,6 +222,14 @@ export function ProjectContextInspector({
     }
   }
 
+  async function refreshAfterReferenceMutation(): Promise<void> {
+    await Promise.all([
+      loadReferences(),
+      loadInstruction(false),
+      useAppStore.getState().refreshProjects(),
+    ]);
+  }
+
   return (
     <div className="project-context-inspector" data-testid="project-context-inspector">
       {projectId !== null && (
@@ -287,7 +295,7 @@ export function ProjectContextInspector({
                   setReferencesBusy(true);
                   void projectsApi.references
                     .pick({ projectId, sourceTaskId: taskId })
-                    .then(() => loadReferences())
+                    .then(() => refreshAfterReferenceMutation())
                     .catch((error: unknown) =>
                       setReferenceError(
                         error instanceof Error ? error.message : '追加できませんでした。',
@@ -318,7 +326,7 @@ export function ProjectContextInspector({
                             expectedRevision: reference.revision,
                             enabled: event.target.checked,
                           })
-                          .then(() => loadReferences());
+                          .then(() => refreshAfterReferenceMutation());
                       }}
                     />
                     <span>{reference.relativePath}</span>
@@ -333,7 +341,7 @@ export function ProjectContextInspector({
                           referenceId: reference.id,
                           expectedRevision: reference.revision,
                         })
-                        .then(() => loadReferences());
+                        .then(() => refreshAfterReferenceMutation());
                     }}
                   >
                     削除
