@@ -1236,6 +1236,8 @@ export class TeamCoordinator {
           completion.providerUsage,
         );
       let changedFiles = [...completion.changedFiles];
+      const failedWorkspaceWrite =
+        missionWorktree !== null && completion.value.status !== 'succeeded';
       if (missionWorktree !== null) {
         if (this.worktreeManager === undefined)
           throw new Error('Mission worktree manager is unavailable');
@@ -1255,18 +1257,30 @@ export class TeamCoordinator {
           reason: null,
           now: this.isoNow(),
         });
-        const integrated = await this.worktreeManager.integrate({
-          repoPath: missionWorktree.repoPath,
-          baseHead: missionWorktree.baseHead,
-          workerHead: finalized.workerHead,
-        });
-        missionWorktree = this.persistence.updateTeamMissionWorktree({
-          executionId: input.executionId,
-          to: 'integrated',
-          integratedHead: integrated.integratedHead,
-          reason: null,
-          now: this.isoNow(),
-        });
+        if (failedWorkspaceWrite)
+          missionWorktree = this.persistence.updateTeamMissionWorktree({
+            executionId: input.executionId,
+            to: 'quarantined',
+            reason: `Worker reported failure before integration: ${completion.value.summary}`.slice(
+              0,
+              2_000,
+            ),
+            now: this.isoNow(),
+          });
+        else {
+          const integrated = await this.worktreeManager.integrate({
+            repoPath: missionWorktree.repoPath,
+            baseHead: missionWorktree.baseHead,
+            workerHead: finalized.workerHead,
+          });
+          missionWorktree = this.persistence.updateTeamMissionWorktree({
+            executionId: input.executionId,
+            to: 'integrated',
+            integratedHead: integrated.integratedHead,
+            reason: null,
+            now: this.isoNow(),
+          });
+        }
       }
       const report = workerReportSchema.parse({
         status: completion.value.status === 'succeeded' ? 'completed' : 'failed',
@@ -1317,16 +1331,24 @@ export class TeamCoordinator {
         });
         this.persistence.transitionTeamAttempt({
           attemptId: attempt.id,
-          to: 'completed',
+          to: failedWorkspaceWrite ? 'failed' : 'completed',
           now: this.isoNow(),
+          terminalReason: failedWorkspaceWrite ? 'worker_reported_failure' : null,
         });
         this.persistence.transitionTeamExecution({
           executionId: input.executionId,
-          to: completion.value.status === 'succeeded' ? 'completed' : 'failed',
+          to: failedWorkspaceWrite
+            ? 'waiting_resume'
+            : completion.value.status === 'succeeded'
+              ? 'completed'
+              : 'failed',
           now: this.isoNow(),
         });
-        if (mission !== null && mission.state === 'running')
-          this.cancelMissionRemainder(input.executionId, 'failed');
+        if (mission !== null && mission.state === 'running') {
+          if (failedWorkspaceWrite)
+            this.persistence.transitionTeamMission(mission.id, 'waiting_resume', this.isoNow());
+          else this.cancelMissionRemainder(input.executionId, 'failed');
+        }
       }
       this.persistWorkerResult(
         input.teamId,
@@ -1342,7 +1364,9 @@ export class TeamCoordinator {
           ? mission !== null && !completedMission
             ? 'waiting'
             : 'done'
-          : 'failed',
+          : failedWorkspaceWrite
+            ? 'waiting'
+            : 'failed',
       );
       if (completedMission && mission !== null) {
         const missionWorkerIds = new Set(

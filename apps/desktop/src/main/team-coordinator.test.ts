@@ -691,6 +691,86 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('quarantines a failed write result and integrates it only after manual resume', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Failed writable Mission');
+      const runtime = new WorktreeWritingRuntime();
+      runtime.completionStatus = 'failed';
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'preserve failed partial work',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'write safely',
+        doneCriteria: ['output integrated after successful resume'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'perform isolated write',
+            doneCriteria: ['worker-output.txt exists'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: writer.id,
+            objective: 'verify integrated write',
+            doneCriteria: ['worker-output.txt is integrated'],
+            access: 'read-only',
+          },
+        ],
+      });
+
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+
+      const executionId = mission.steps[0]!.executionId;
+      const quarantined = persistence.getTeamMissionWorktree(executionId);
+      expect(persistence.getTeamExecution(executionId).state).toBe('waiting_resume');
+      expect(persistence.listTeamAttempts(executionId)).toMatchObject([
+        {
+          ordinal: 1,
+          state: 'failed',
+          terminalReason: 'worker_reported_failure',
+        },
+      ]);
+      expect(quarantined).toMatchObject({
+        state: 'quarantined',
+        changedFiles: ['worker-output.txt'],
+        reason: expect.stringContaining('Worker reported failure before integration'),
+      });
+      expect(readFileSync(join(quarantined!.path, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      expect(existsSync(join(workspace, 'worker-output.txt'))).toBe(false);
+      expect(
+        spawnSync('git', ['-C', workspace, 'log', '-1', '--pretty=%s'], {
+          encoding: 'utf8',
+        }).stdout,
+      ).toBe('base\n');
+
+      runtime.completionStatus = 'succeeded';
+      await coordinator.resumeMission(task.id, mission.id);
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 5_000);
+
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      expect(persistence.listTeamAttempts(executionId)).toMatchObject([
+        { ordinal: 1, state: 'failed', terminalReason: 'worker_reported_failure' },
+        { ordinal: 2, state: 'completed', startReason: 'manual_resume' },
+      ]);
+      expect(persistence.getTeamMissionWorktree(executionId)).toMatchObject({
+        state: 'cleaned',
+        changedFiles: ['worker-output.txt'],
+      });
+      expect(
+        spawnSync('git', ['-C', workspace, 'rev-list', '--count', 'HEAD'], {
+          encoding: 'utf8',
+        }).stdout.trim(),
+      ).toBe('2');
+      persistence.close();
+    });
+
     it('preserves both sides and waits for resume when the primary workspace changes', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Conflicting writable Mission');
