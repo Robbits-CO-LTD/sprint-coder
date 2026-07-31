@@ -159,6 +159,8 @@ if (runsWithElectronAbi)
         instruction: 'Before dispatch.',
       });
       const task = persistence.createTask('manual', false, project.id);
+      const prior = persistence.startTurn(task.id, 'Conversation before manual Team dispatch.');
+      persistence.cancelTurn(task.id, prior.turnId);
       const team = persistence.promoteTaskToTeam(task.id);
       const leader = persistence.getTaskLeader(task.id);
       persistence.transitionTeamState(team.id, 'forming');
@@ -184,6 +186,14 @@ if (runsWithElectronAbi)
 
       const prepared = persistence.prepareTeamExecutionContext(task.id, execution.id);
       expect(prepared.projectItems[0]?.content).toBe('At dispatch.');
+      expect(prepared.fragments).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            source: 'history',
+            content: 'Conversation before manual Team dispatch.',
+          }),
+        ]),
+      );
       persistence.setProjectInstruction({
         projectId: project.id,
         expectedRevision: second.revision,

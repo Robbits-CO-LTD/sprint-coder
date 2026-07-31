@@ -130,6 +130,7 @@ import {
 import {
   ContextLedger,
   CONTEXT_HARD_CAP_TOKENS,
+  CONTEXT_SYSTEM_PROMPT,
   aggregateContextUsage,
   defaultContextUsage,
   estimateTokens,
@@ -10245,13 +10246,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         'team_execution',
         input.executionId,
         input.taskId,
-        {
-          fragments: [],
-          projectItems: [],
-          projectSnapshotDigest: null,
-          usageEvents: [],
-          compacted: false,
-        },
+        this.assembleManualTeamContextSnapshot(input.taskId, input.executionId),
       );
     })();
   }
@@ -10633,6 +10628,63 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ...prepared.usageEvents,
         this.recordContextUsage(taskId, turnId, aggregateContextUsage(fragments)),
       ],
+    };
+  }
+
+  private assembleManualTeamContextSnapshot(taskId: string, executionId: string): PreparedContext {
+    const task = this.getTaskRow(taskId);
+    const createdAt = new Date().toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT id, author, content, created_at
+         FROM messages
+         WHERE task_id = ? AND author IN ('user', 'assistant')
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT 128`,
+      )
+      .all(taskId) as Pick<MessageRow, 'id' | 'author' | 'content' | 'created_at'>[];
+    const fragments: ContextFragment[] = [
+      {
+        id: `team-execution:${executionId}:system`,
+        taskId,
+        source: 'system',
+        trust: 'system',
+        tokenEstimate: estimateTokens(CONTEXT_SYSTEM_PROMPT),
+        content: CONTEXT_SYSTEM_PROMPT,
+        createdAt,
+        messageId: null,
+      },
+      ...(task.goal === null || task.goal === ''
+        ? []
+        : [
+            {
+              id: `team-execution:${executionId}:goal`,
+              taskId,
+              source: 'goal' as const,
+              trust: 'user' as const,
+              tokenEstimate: estimateTokens(task.goal),
+              content: task.goal,
+              createdAt,
+              messageId: null,
+            },
+          ]),
+      ...rows.reverse().map((message) => ({
+        id: `team-execution:${executionId}:message:${message.id}`,
+        taskId,
+        source: 'history' as const,
+        trust: message.author,
+        tokenEstimate: estimateTokens(message.content),
+        content: message.content,
+        createdAt: message.created_at,
+        messageId: message.id,
+      })),
+    ];
+    return {
+      fragments,
+      projectItems: [],
+      projectSnapshotDigest: null,
+      usageEvents: [],
+      compacted: false,
     };
   }
 
