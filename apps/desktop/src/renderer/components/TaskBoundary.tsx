@@ -12,8 +12,8 @@ const unavailableTaskBoundary: TaskBoundaryActions = {
   createTask: async () => null,
 };
 
-// Fail closed when a component is rendered outside App (SSR/component previews): never fall back
-// to the raw store actions, because that would create a second path around the dirty-editor guard.
+// Fail closed when a component is rendered outside App (SSR/component previews): actions are
+// supplied by the shell so navigation remains consistent across Sidebar, Settings, and Composer.
 const TaskBoundaryContext = createContext<TaskBoundaryActions>(unavailableTaskBoundary);
 
 export function TaskBoundaryProvider({

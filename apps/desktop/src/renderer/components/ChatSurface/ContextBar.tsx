@@ -5,7 +5,6 @@ import { useAppStore } from '../../store/appStore';
 import { accessDescription, accessEnforcement } from '../../lib/access-labels';
 import type { ContextUsage } from '../../types/sprint-coder';
 import type { AccessPreset } from '../../types/sprint-coder';
-import { openProjectContext } from '../../lib/project-inspector';
 
 const SOURCE_LABEL: Record<ContextUsage['fragments'][number]['source'], string> = {
   system: 'システム',
@@ -21,24 +20,9 @@ const WARNING_THRESHOLD_PCT = 80;
 // ContextBar: workspace / usage (§4.2). Access mode lives beside the Composer's plus button because
 // it configures the next send; keeping it in this row made that action look like workspace metadata.
 export function ContextBar({ taskId }: { taskId: string }) {
-  const projectId = useAppStore(
-    (state) => state.tasks.find((task) => task.id === taskId)?.projectId,
-  );
-  const project = useAppStore((state) => state.projects.find((item) => item.id === projectId));
   return (
     <div className="context-bar">
       <WorkspaceChip taskId={taskId} variant="context" />
-      {project !== undefined && (
-        <button
-          type="button"
-          className="ctx-chip chip-btn ctx-project-chip"
-          data-testid="project-context-chip"
-          onClick={() => openProjectContext(taskId)}
-          title="ProjectのInstructionとTurn contextを表示"
-        >
-          Project: {project.name}
-        </button>
-      )}
       <span className="ctx-spacer" />
       <ContextUsageChip taskId={taskId} />
     </div>

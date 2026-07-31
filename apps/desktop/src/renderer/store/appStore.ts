@@ -180,17 +180,11 @@ type AppState = {
    * card that displays them, so switching tasks never drags base64 through the store. */
   imagesByTask: Record<string, GeneratedImage[]>;
   /** Files each Turn changed, newest last (issue #37). Keyed by task and kept in arrival order,
-   * which is the order the edits actually happened — the Inspector reads the tail of this and the
-   * timeline renders one entry per tool call. */
+   * which is the order the edits actually happened. */
   fileChangesByTask: Record<string, { seq: number; turnId: string; changes: FileChange[] }[]>;
   /** The Task whose live file bodies are currently buffered (issue #39). The bodies themselves live
    * in lib/file-edit-buffer.ts; this is only the signal that there is something to show. */
   liveEditTaskId: string | null;
-  /** The in-place editor holds unsaved changes (issue #43). Kept in the store rather than local to
-   * the editor because the shell has to know before it discards the view — switching Task or closing
-   * the window would otherwise lose the user's typing without a word. */
-  editorDirty: boolean;
-  setEditorDirty: (dirty: boolean) => void;
   resolvingApprovalIds: Record<string, boolean | undefined>;
   pendingOptimisticIdByTask: Record<string, string | undefined>;
   teamByTask: Record<string, TeamDetail | null | undefined>;
@@ -731,8 +725,8 @@ function handleTurnEvent(
     }
     case 'file.saved': {
       // The user's own save (issue #43). Deliberately NOT merged into fileChangesByTask: that list is
-      // what the Runtime did, and the Inspector reads it as such. Nothing in the store needs the
-      // path today — the case exists so the event is handled rather than silently dropped, and so a
+      // what the Runtime did. Nothing in the store needs the path today — the case exists so the
+      // event is handled rather than silently dropped, and so a
       // future audit view has an obvious place to hook in.
       break;
     }
@@ -806,7 +800,6 @@ export const useAppStore = create<AppState>((set, get) => {
     imagesByTask: {},
     fileChangesByTask: {},
     liveEditTaskId: null,
-    editorDirty: false,
     resolvingApprovalIds: {},
     pendingOptimisticIdByTask: {},
     teamByTask: {},
@@ -1180,18 +1173,12 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    setEditorDirty(dirty: boolean) {
-      set((state) => (state.editorDirty === dirty ? {} : { editorDirty: dirty }));
-    },
-
     async selectTask(taskId: string) {
       // Live bodies belong to the Task that produced them; carrying them across a switch would show
       // one Task's file under another's name (issue #39).
       if (get().selectedTaskId !== taskId) {
         clearFileEdits();
-        // The editor is unmounted by the switch, so whatever it was holding is gone; the guard that
-        // asks the user happens before this is ever called (see Sidebar).
-        set({ liveEditTaskId: null, editorDirty: false });
+        set({ liveEditTaskId: null });
       }
       set({ selectedTaskId: taskId, loadingMessages: true, error: null });
       if (currentUnsubscribe) {
