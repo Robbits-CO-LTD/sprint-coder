@@ -60,6 +60,10 @@ import {
   projectGetInputSchema,
   projectInstructionResultSchema,
   projectInstructionSetInputSchema,
+  projectMemoriesListInputSchema,
+  projectMemoryCreateInputSchema,
+  projectMemorySchema,
+  projectMemoryUpdateInputSchema,
   projectReferenceAddInputSchema,
   projectReferencePickInputSchema,
   projectReferenceRemoveInputSchema,
@@ -1614,6 +1618,38 @@ export class IpcRouter {
           `reference:${input.referenceId}`,
           IPC_CHANNELS.projectsReferencesRemove,
           () => this.persistence.removeProjectReference(input.referenceId, input.expectedRevision),
+        ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.projectsMemoriesList,
+      projectMemoriesListInputSchema,
+      z.array(projectMemorySchema),
+      (input) => this.persistence.listProjectMemories(input.projectId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsMemoriesCreate,
+      projectMemoryCreateInputSchema,
+      projectMemorySchema,
+      (input, event, envelope) =>
+        this.runMutation(
+          event,
+          envelope,
+          `project:${input.projectId}`,
+          IPC_CHANNELS.projectsMemoriesCreate,
+          () => this.persistence.createProjectMemoryFromTurn(input),
+        ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsMemoriesUpdate,
+      projectMemoryUpdateInputSchema,
+      projectMemorySchema,
+      (input, event, envelope) =>
+        this.runMutation(
+          event,
+          envelope,
+          `memory:${input.memoryId}`,
+          IPC_CHANNELS.projectsMemoriesUpdate,
+          () => this.persistence.updateProjectMemory(input),
         ).value,
     );
     this.handleMutation(

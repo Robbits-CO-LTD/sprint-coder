@@ -3,6 +3,7 @@ import type {
   ProjectContextManifest,
   ProjectContextManifestSummary,
   ProjectInstruction,
+  ProjectMemory,
   ProjectReference,
 } from '../types/sprint-coder';
 import { useAppStore } from '../store/appStore';
@@ -54,6 +55,9 @@ export function ProjectContextInspector({
   const [referenceError, setReferenceError] = useState<string | null>(null);
   const [referencesBusy, setReferencesBusy] = useState(false);
   const referenceToken = useRef(0);
+  const [memories, setMemories] = useState<ProjectMemory[]>([]);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+  const memoryToken = useRef(0);
 
   const loadReferences = useCallback(async () => {
     if (projectId === null || projectsApi === undefined) return;
@@ -83,6 +87,33 @@ export function ProjectContextInspector({
       });
     return () => {
       referenceToken.current += 1;
+    };
+  }, [projectId, projectsApi]);
+
+  const loadMemories = useCallback(async () => {
+    if (projectId === null || projectsApi === undefined) return;
+    try {
+      setMemories(await projectsApi.memories.list({ projectId }));
+      setMemoryError(null);
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : 'Memoryを取得できませんでした。');
+    }
+  }, [projectId, projectsApi]);
+
+  useEffect(() => {
+    if (projectId === null || projectsApi === undefined) return;
+    const token = ++memoryToken.current;
+    void projectsApi.memories
+      .list({ projectId })
+      .then((next) => {
+        if (memoryToken.current === token) setMemories(next);
+      })
+      .catch((error: unknown) => {
+        if (memoryToken.current === token)
+          setMemoryError(error instanceof Error ? error.message : 'Memoryを取得できませんでした。');
+      });
+    return () => {
+      memoryToken.current += 1;
     };
   }, [projectId, projectsApi]);
 
@@ -230,6 +261,29 @@ export function ProjectContextInspector({
     ]);
   }
 
+  async function refreshAfterMemoryMutation(): Promise<void> {
+    await Promise.all([
+      loadMemories(),
+      loadInstruction(false),
+      useAppStore.getState().refreshProjects(),
+    ]);
+  }
+
+  useEffect(() => {
+    const refreshSavedMemory = (event: Event) => {
+      const savedProjectId = (event as CustomEvent<{ projectId?: string }>).detail?.projectId;
+      if (savedProjectId !== projectId) return;
+      void Promise.all([
+        loadMemories(),
+        loadInstruction(false),
+        useAppStore.getState().refreshProjects(),
+      ]);
+    };
+    window.addEventListener('sprint-coder:project-memory-saved', refreshSavedMemory);
+    return () =>
+      window.removeEventListener('sprint-coder:project-memory-saved', refreshSavedMemory);
+  }, [loadInstruction, loadMemories, projectId]);
+
   return (
     <div className="project-context-inspector" data-testid="project-context-inspector">
       {projectId !== null && (
@@ -351,6 +405,76 @@ export function ProjectContextInspector({
             </ul>
           )}
           {referenceError !== null && <p className="project-context-error">{referenceError}</p>}
+        </section>
+      )}
+
+      {projectId !== null && (
+        <section className="project-context-section" aria-labelledby="project-memories-title">
+          <div className="project-context-section-head">
+            <h3 id="project-memories-title">Shared memory</h3>
+            <button type="button" onClick={() => void loadMemories()}>
+              更新
+            </button>
+          </div>
+          {memories.length === 0 ? (
+            <p className="insp-disconnected">保存されたMemoryはありません。</p>
+          ) : (
+            <ul className="project-memory-list">
+              {memories.map((memory) => (
+                <li key={`${memory.id}:${memory.revision}`}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={memory.status === 'active'}
+                      onChange={(event) => {
+                        if (projectsApi === undefined) return;
+                        void projectsApi.memories
+                          .update({
+                            memoryId: memory.id,
+                            expectedRevision: memory.revision,
+                            status: event.target.checked ? 'active' : 'disabled',
+                          })
+                          .then(() => refreshAfterMemoryMutation())
+                          .catch((error: unknown) =>
+                            setMemoryError(
+                              error instanceof Error ? error.message : '更新できませんでした。',
+                            ),
+                          );
+                      }}
+                    />
+                    次のTurnで使用
+                  </label>
+                  <textarea
+                    aria-label="Memory内容"
+                    defaultValue={memory.content}
+                    maxLength={4000}
+                    rows={4}
+                    onBlur={(event) => {
+                      const content = event.currentTarget.value.trim();
+                      if (projectsApi === undefined || content === memory.content || content === '')
+                        return;
+                      void projectsApi.memories
+                        .update({
+                          memoryId: memory.id,
+                          expectedRevision: memory.revision,
+                          content,
+                        })
+                        .then(() => refreshAfterMemoryMutation())
+                        .catch((error: unknown) =>
+                          setMemoryError(
+                            error instanceof Error ? error.message : '更新できませんでした。',
+                          ),
+                        );
+                    }}
+                  />
+                  <small>
+                    source Turn: {memory.sourceTurnId} · localOnly: {String(memory.localOnly)}
+                  </small>
+                </li>
+              ))}
+            </ul>
+          )}
+          {memoryError !== null && <p className="project-context-error">{memoryError}</p>}
         </section>
       )}
 

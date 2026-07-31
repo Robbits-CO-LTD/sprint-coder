@@ -39,6 +39,10 @@ import {
   projectGetInputSchema,
   projectInstructionResultSchema,
   projectInstructionSetInputSchema,
+  projectMemoriesListInputSchema,
+  projectMemoryCreateInputSchema,
+  projectMemorySchema,
+  projectMemoryUpdateInputSchema,
   projectReferenceAddInputSchema,
   projectReferencePickInputSchema,
   projectReferenceRemoveInputSchema,
@@ -271,6 +275,29 @@ const api: SprintCoderApi = {
           IPC_CHANNELS.projectsReferencesRemove,
           projectReferenceRemoveInputSchema,
           z.undefined(),
+          input,
+        ),
+    },
+    memories: {
+      list: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsMemoriesList,
+          projectMemoriesListInputSchema,
+          z.array(projectMemorySchema),
+          input,
+        ),
+      createFromTurn: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsMemoriesCreate,
+          projectMemoryCreateInputSchema,
+          projectMemorySchema,
+          input,
+        ),
+      update: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsMemoriesUpdate,
+          projectMemoryUpdateInputSchema,
+          projectMemorySchema,
           input,
         ),
     },

@@ -29,6 +29,7 @@ import {
 } from '../../lib/workspace-change-summary';
 import sprintCoderIcon from '../../../../assets/sprint-coder-icon-master-v1.png';
 import { openProjectContext } from '../../lib/project-inspector';
+import { ProjectMemoryDialog, type ProjectMemoryDialogSource } from '../ProjectMemoryDialog';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
 const NO_MESSAGES: ChatMessage[] = [];
@@ -65,6 +66,34 @@ export function Timeline({
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
   const resolveApproval = useAppStore((s) => s.resolveApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [memoryDialog, setMemoryDialog] = useState<ProjectMemoryDialogSource | null>(null);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+
+  async function openMemoryDialog(message: ChatMessage): Promise<void> {
+    if (message.turnId === null) return;
+    const api = window.sprintCoder?.projects;
+    if (api === undefined) return;
+    try {
+      const manifest = await api.getContextManifest({ taskId, turnId: message.turnId });
+      if (manifest.projectId === null)
+        throw new Error('ProjectなしのTurnはMemoryに保存できません。');
+      const request =
+        messages.find(
+          (candidate) => candidate.turnId === message.turnId && candidate.author === 'user',
+        )?.content ?? '';
+      setMemoryDialog({
+        projectId: manifest.projectId,
+        turnId: message.turnId,
+        request,
+        answer: message.content,
+      });
+      setMemoryError(null);
+    } catch (error) {
+      setMemoryError(
+        error instanceof Error ? error.message : 'Memoryの出典を確認できませんでした。',
+      );
+    }
+  }
 
   // Persisted Team history (Core C2b), slotted into the gaps between messages by `recordedAt` so
   // "誰を雇い、誰に任せたか" reads in the same column as the conversation. Message order and every
@@ -315,6 +344,15 @@ export function Timeline({
                   Contextを表示
                 </button>
               )}
+              {message.author === 'assistant' && message.turnId !== null && (
+                <button
+                  type="button"
+                  className="turn-context-button"
+                  onClick={() => void openMemoryDialog(message)}
+                >
+                  Project Memoryに保存
+                </button>
+              )}
               {showRunCardAfter && (isActive || messageActivities.length === 0) && (
                 <RunCard
                   turn={turn}
@@ -383,7 +421,16 @@ export function Timeline({
             onDecision={(decision) => void resolveApproval(taskId, approval.id, decision)}
           />
         ))}
+        {memoryError !== null && (
+          <p className="project-context-error" role="alert">
+            {memoryError}
+          </p>
+        )}
       </div>
+
+      {memoryDialog !== null && (
+        <ProjectMemoryDialog source={memoryDialog} onClose={() => setMemoryDialog(null)} />
+      )}
 
       {/* Sticky, zero-height rail so the button hovers over the tail of the timeline without
           taking layout space or scrolling away. Rendered only while following is off, which also

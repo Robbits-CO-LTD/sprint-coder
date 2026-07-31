@@ -34,6 +34,7 @@ import {
   type NormalizedProviderUsage,
   type ProviderConnection,
   type ProjectReference,
+  type ProjectMemory,
   type ProjectContextManifest as PublicProjectContextManifest,
   type ProjectContextManifestSummary,
   type ProjectSummary,
@@ -344,6 +345,18 @@ type ProjectReferenceRow = {
   enabled: number;
   revision: number;
   last_sealed_digest: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type ProjectMemoryRow = {
+  id: string;
+  project_id: string;
+  source_task_id: string;
+  source_turn_id: string;
+  content: string;
+  status: 'active' | 'disabled';
+  revision: number;
+  local_only: number;
   created_at: string;
   updated_at: string;
 };
@@ -2691,6 +2704,26 @@ const migrations = [
         ON project_references(source_task_id, id);
     `,
   },
+  {
+    version: 58,
+    checksum: 'project-context-hub-v58-explicit-memory',
+    sql: `
+      CREATE TABLE project_memories (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+        source_turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE RESTRICT,
+        content TEXT NOT NULL CHECK (length(content) >= 1 AND length(content) <= 4000),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        local_only INTEGER NOT NULL CHECK (local_only IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX project_memories_project_order_idx
+        ON project_memories(project_id, status, updated_at DESC, id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3206,6 +3239,18 @@ export interface PersistenceClient {
     enabled: boolean;
   }): ProjectReference;
   removeProjectReference(referenceId: string, expectedRevision: number): void;
+  listProjectMemories(projectId: string): ProjectMemory[];
+  createProjectMemoryFromTurn(input: {
+    projectId: string;
+    sourceTurnId: string;
+    content: string;
+  }): ProjectMemory;
+  updateProjectMemory(input: {
+    memoryId: string;
+    expectedRevision: number;
+    content?: string | undefined;
+    status?: 'active' | 'disabled' | undefined;
+  }): ProjectMemory;
   listProjectContextManifests(taskId: string): ProjectContextManifestSummary[];
   getProjectContextManifest(taskId: string, turnId: string): PublicProjectContextManifest;
   assignTaskToProject(input: {
@@ -4710,6 +4755,122 @@ export class SqlitePersistenceClient implements PersistenceClient {
       )
       .run(now, projectId);
     this.quarantineBackgroundForProjectContextInTransaction(projectId, now);
+  }
+
+  listProjectMemories(projectId: string): ProjectMemory[] {
+    this.getProjectRow(projectId);
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM project_memories WHERE project_id = ?
+           ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC, id`,
+        )
+        .all(projectId) as ProjectMemoryRow[]
+    ).map(toProjectMemory);
+  }
+
+  createProjectMemoryFromTurn(input: {
+    projectId: string;
+    sourceTurnId: string;
+    content: string;
+  }): ProjectMemory {
+    const content = parseProjectMemoryContent(input.content);
+    return this.db.transaction(() => {
+      this.getProjectRow(input.projectId);
+      const source = this.db
+        .prepare(
+          `SELECT t.task_id, t.state, t.assistant_message_id, task.local_only,
+                  seal.project_id AS sealed_project_id
+           FROM turns t
+           JOIN tasks task ON task.id = t.task_id
+           JOIN context_seals seal ON seal.owner_type = 'turn' AND seal.owner_id = t.id
+           WHERE t.id = ?`,
+        )
+        .get(input.sourceTurnId) as
+        | {
+            task_id: string;
+            state: TurnState;
+            assistant_message_id: string | null;
+            local_only: number;
+            sealed_project_id: string | null;
+          }
+        | undefined;
+      if (source === undefined) throw new NotFoundError('Source Turn not found');
+      if (source.state !== 'completed' || source.assistant_message_id === null)
+        throw new InvalidProjectError('Memory source must be a completed assistant Turn');
+      if (source.sealed_project_id !== input.projectId)
+        throw new InvalidProjectError('Memory Project must match the source Turn seal');
+      const active = this.db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM project_memories WHERE project_id = ? AND status = 'active'",
+        )
+        .get(input.projectId) as { count: number };
+      if (active.count >= 128) throw new InvalidProjectError('Active Project memory limit reached');
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO project_memories(
+             id, project_id, source_task_id, source_turn_id, content, status,
+             revision, local_only, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.projectId,
+          source.task_id,
+          input.sourceTurnId,
+          content,
+          source.local_only,
+          now,
+          now,
+        );
+      this.bumpProjectContextInTransaction(input.projectId, now);
+      return toProjectMemory(this.getProjectMemoryRow(id));
+    })();
+  }
+
+  updateProjectMemory(input: {
+    memoryId: string;
+    expectedRevision: number;
+    content?: string | undefined;
+    status?: 'active' | 'disabled' | undefined;
+  }): ProjectMemory {
+    return this.db.transaction(() => {
+      const current = this.getProjectMemoryRow(input.memoryId);
+      if (current.revision !== input.expectedRevision) throw new ProjectConflictError();
+      const content =
+        input.content === undefined ? current.content : parseProjectMemoryContent(input.content);
+      const status = input.status ?? current.status;
+      if (content === current.content && status === current.status) return toProjectMemory(current);
+      if (current.status === 'disabled' && status === 'active') {
+        const active = this.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM project_memories WHERE project_id = ? AND status = 'active'",
+          )
+          .get(current.project_id) as { count: number };
+        if (active.count >= 128)
+          throw new InvalidProjectError('Active Project memory limit reached');
+      }
+      const now = new Date().toISOString();
+      const changed = this.db
+        .prepare(
+          `UPDATE project_memories
+           SET content = ?, status = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(content, status, now, input.memoryId, input.expectedRevision).changes;
+      if (changed !== 1) throw new ProjectConflictError();
+      this.bumpProjectContextInTransaction(current.project_id, now);
+      return toProjectMemory(this.getProjectMemoryRow(input.memoryId));
+    })();
+  }
+
+  private getProjectMemoryRow(memoryId: string): ProjectMemoryRow {
+    const row = this.db.prepare('SELECT * FROM project_memories WHERE id = ?').get(memoryId) as
+      ProjectMemoryRow | undefined;
+    if (row === undefined) throw new NotFoundError('Project memory not found');
+    return row;
   }
 
   assignTaskToProject(input: {
@@ -10977,6 +11138,40 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (included) contextTokens += estimateTokens(project.instruction);
     }
     if (project !== null) {
+      const memories = this.db
+        .prepare(
+          "SELECT * FROM project_memories WHERE project_id = ? AND status = 'active' ORDER BY updated_at DESC, id",
+        )
+        .all(project.id) as ProjectMemoryRow[];
+      for (const memory of memories) {
+        const digest = sha256(memory.content);
+        const memoryTokens = estimateTokens(memory.content);
+        const included =
+          contextTokens <= CONTEXT_HARD_CAP_TOKENS &&
+          contextTokens + memoryTokens <= CONTEXT_HARD_CAP_TOKENS;
+        items.push({
+          itemId: `project:${project.id}:memory:${memory.id}`,
+          kind: 'memory',
+          sourceTaskId: memory.source_task_id,
+          sourceTurnId: memory.source_turn_id,
+          sourceReferenceId: null,
+          candidateDigest: digest,
+          sealedDigest: included ? digest : null,
+          included,
+          exclusionReason: included
+            ? null
+            : contextTokens > CONTEXT_HARD_CAP_TOKENS
+              ? 'existing_context_over_budget'
+              : 'project_context_over_budget',
+          authority: 'user',
+          localOnly: memory.local_only === 1,
+          content: included ? memory.content : null,
+          capturedAt: createdAt,
+        });
+        if (included) contextTokens += memoryTokens;
+      }
+    }
+    if (project !== null) {
       const references = this.db
         .prepare(
           'SELECT * FROM project_references WHERE project_id = ? AND enabled = 1 ORDER BY created_at, id',
@@ -11529,6 +11724,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
   ): readonly ProjectCandidateIdentity[] {
     const candidates = [...projectContextCandidates(project)];
     if (project === null) return candidates;
+    const memories = this.db
+      .prepare(
+        "SELECT * FROM project_memories WHERE project_id = ? AND status = 'active' ORDER BY updated_at DESC, id",
+      )
+      .all(project.id) as ProjectMemoryRow[];
+    for (const memory of memories) {
+      candidates.push({
+        itemId: `project:${project.id}:memory:${memory.id}`,
+        kind: 'memory',
+        sourceTaskId: memory.source_task_id,
+        sourceTurnId: memory.source_turn_id,
+        sourceReferenceId: null,
+        candidateDigest: sha256(memory.content),
+        authority: 'user',
+        localOnly: memory.local_only === 1,
+      });
+    }
     const references = this.db
       .prepare(
         'SELECT * FROM project_references WHERE project_id = ? AND enabled = 1 ORDER BY created_at, id',
@@ -12437,6 +12649,28 @@ function parseReferenceRelativePath(value: string): string {
   )
     throw new InvalidProjectError('Reference path must be Workspace-relative');
   return normalized;
+}
+
+function parseProjectMemoryContent(value: string): string {
+  const content = value.trim();
+  if (content.length < 1 || content.length > 4000)
+    throw new InvalidProjectError('Project memory must be 1 to 4000 characters');
+  return content;
+}
+
+function toProjectMemory(row: ProjectMemoryRow): ProjectMemory {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sourceTaskId: row.source_task_id,
+    sourceTurnId: row.source_turn_id,
+    content: row.content,
+    status: row.status,
+    revision: row.revision,
+    localOnly: row.local_only === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {

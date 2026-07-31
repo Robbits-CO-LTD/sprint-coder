@@ -53,6 +53,19 @@ export type ProjectReference = {
   updatedAt: string;
 };
 
+export type ProjectMemory = {
+  id: string;
+  projectId: string;
+  sourceTaskId: string;
+  sourceTurnId: string;
+  content: string;
+  status: 'active' | 'disabled';
+  revision: number;
+  localOnly: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ChatMessage = {
   id: string;
   taskId: string;
@@ -726,6 +739,20 @@ export interface SprintCoderApi {
         enabled: boolean;
       }): Promise<ProjectReference>;
       remove(input: { referenceId: string; expectedRevision: number }): Promise<void>;
+    };
+    memories: {
+      list(input: { projectId: string }): Promise<ProjectMemory[]>;
+      createFromTurn(input: {
+        projectId: string;
+        sourceTurnId: string;
+        content: string;
+      }): Promise<ProjectMemory>;
+      update(input: {
+        memoryId: string;
+        expectedRevision: number;
+        content?: string;
+        status?: 'active' | 'disabled';
+      }): Promise<ProjectMemory>;
     };
     create(input: { name: string }): Promise<ProjectSummary>;
     update(input: {

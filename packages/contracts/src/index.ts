@@ -2426,6 +2426,40 @@ export const projectReferenceRemoveInputSchema = z
   .object({ referenceId: idSchema, expectedRevision: z.number().int().positive() })
   .strict();
 export type ProjectReference = z.infer<typeof projectReferenceSchema>;
+export const projectMemorySchema = z
+  .object({
+    id: idSchema,
+    projectId: idSchema,
+    sourceTaskId: idSchema,
+    sourceTurnId: idSchema,
+    content: z.string().min(1).max(4000),
+    status: z.enum(['active', 'disabled']),
+    revision: z.number().int().positive(),
+    localOnly: z.boolean(),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export const projectMemoriesListInputSchema = z.object({ projectId: idSchema }).strict();
+export const projectMemoryCreateInputSchema = z
+  .object({
+    projectId: idSchema,
+    sourceTurnId: idSchema,
+    content: z.string().trim().min(1).max(4000),
+  })
+  .strict();
+export const projectMemoryUpdateInputSchema = z
+  .object({
+    memoryId: idSchema,
+    expectedRevision: z.number().int().positive(),
+    content: z.string().trim().min(1).max(4000).optional(),
+    status: z.enum(['active', 'disabled']).optional(),
+  })
+  .strict()
+  .refine((input) => input.content !== undefined || input.status !== undefined, {
+    message: 'Memory update must change content or status',
+  });
+export type ProjectMemory = z.infer<typeof projectMemorySchema>;
 export const taskIdPayloadSchema = z.object({ taskId: idSchema }).strict();
 /** A Workspace-relative path within a Task. Validated as a bounded string here; whether it is
  * actually inside the Workspace is Main's decision, not the schema's (issue #43). */
@@ -2602,6 +2636,20 @@ export interface SprintCoderApi {
         enabled: boolean;
       }): Promise<ProjectReference>;
       remove(input: { referenceId: string; expectedRevision: number }): Promise<void>;
+    };
+    memories: {
+      list(input: { projectId: string }): Promise<ProjectMemory[]>;
+      createFromTurn(input: {
+        projectId: string;
+        sourceTurnId: string;
+        content: string;
+      }): Promise<ProjectMemory>;
+      update(input: {
+        memoryId: string;
+        expectedRevision: number;
+        content?: string;
+        status?: 'active' | 'disabled';
+      }): Promise<ProjectMemory>;
     };
     create(input: { name: string }): Promise<ProjectSummary>;
     update(input: {
@@ -2787,6 +2835,9 @@ export const IPC_CHANNELS = {
   projectsReferencesAdd: 'sprint-coder:projects:references:add',
   projectsReferencesUpdate: 'sprint-coder:projects:references:update',
   projectsReferencesRemove: 'sprint-coder:projects:references:remove',
+  projectsMemoriesList: 'sprint-coder:projects:memories:list',
+  projectsMemoriesCreate: 'sprint-coder:projects:memories:create',
+  projectsMemoriesUpdate: 'sprint-coder:projects:memories:update',
   projectsCreate: 'sprint-coder:projects:create',
   projectsUpdate: 'sprint-coder:projects:update',
   projectsAssignTask: 'sprint-coder:projects:assign-task',
