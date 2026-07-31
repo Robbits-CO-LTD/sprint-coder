@@ -636,7 +636,7 @@ if (runsWithElectronAbi)
     it('stores an empty Project manifest for an unassigned Turn and seals Team guidance once', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('unassigned');
-      const started = persistence.startTurn(task.id, 'use a team', [], true);
+      const started = persistence.startTurn(task.id, 'チームで進めて');
 
       expect(persistence.getContextSealManifest('turn', started.turnId)).toMatchObject({
         projectId: null,
@@ -649,6 +649,28 @@ if (runsWithElectronAbi)
         prepared.fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
       ).toHaveLength(1);
       expect(persistence.prepareContext(task.id, started.turnId)).toEqual(prepared);
+      persistence.close();
+    });
+
+    it('derives Team guidance at dequeue time for a legacy v55 queued payload', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('legacy queue');
+      persistence.queueInput(task.id, 'placeholder', 'legacy-team-queue');
+      const legacy = new Database(path);
+      legacy
+        .prepare(
+          "UPDATE input_queue SET payload_json = ?, payload_digest = '' WHERE task_id = ? AND state = 'queued'",
+        )
+        .run(JSON.stringify({ text: 'チームで進めて', skills: [] }), task.id);
+      legacy.close();
+
+      const started = persistence.startNextQueued(task.id)?.started;
+      expect(started).toBeDefined();
+      expect(
+        persistence
+          .prepareContext(task.id, started!.turnId)
+          .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
       persistence.close();
     });
 

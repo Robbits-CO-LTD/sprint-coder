@@ -138,6 +138,7 @@ import {
   type PreparedContext,
 } from './context-ledger';
 import { BUILTIN_TEAM_SKILL_CONTENT, BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
+import { isTeamScenarioInput } from './team-tools';
 import type { LiveState } from './context-reminder';
 import { deriveLiveState } from './live-state';
 import { redactSecrets } from './secret-redactor';
@@ -10770,6 +10771,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
+    const shouldSealBuiltinTeamSkill =
+      includeBuiltinTeamSkill ||
+      isTeamScenarioInput(text) ||
+      parsedSkills.some(({ selection }) => selection.kind === 'team');
     const taskSelection = this.getTaskModelSelection(taskId);
     const explicitRuntime =
       taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
@@ -10841,7 +10846,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const event = this.appendEvent({ type: 'turn.accepted', taskId, turnId, userMessage });
     this.db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(now, taskId);
     const renamedTask = this.autoNameTaskInTransaction(taskId, text, now);
-    const prepared = this.assembleContextInTransaction(taskId, turnId, includeBuiltinTeamSkill);
+    const prepared = this.assembleContextInTransaction(taskId, turnId, shouldSealBuiltinTeamSkill);
     const seal = this.createContextSealInTransaction('turn', turnId, taskId, prepared);
     return {
       turnId,
