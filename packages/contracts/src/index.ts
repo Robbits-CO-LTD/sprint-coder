@@ -126,7 +126,7 @@ export type ToolCatalogSnapshot = z.infer<typeof toolCatalogSnapshotSchema>;
 export const taskSummarySchema = z
   .object({
     id: idSchema,
-    projectId: idSchema.nullable(),
+    projectId: idSchema.nullable().default(null),
     title: z.string().min(1).max(200),
     pinned: z.boolean(),
     archived: z.boolean(),

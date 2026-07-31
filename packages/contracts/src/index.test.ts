@@ -114,6 +114,22 @@ describe('public contracts', () => {
     ).toMatchObject({ id: 'project-1', revision: 1 });
   });
 
+  it('defaults a pre-v55 persisted TaskSummary projectId to null during operation replay', () => {
+    expect(
+      contracts.taskSummarySchema.parse({
+        id: 'task-1',
+        title: 'Legacy replay',
+        pinned: false,
+        archived: false,
+        goal: null,
+        workspacePath: null,
+        localOnly: false,
+        createdAt: '2026-07-31T00:00:00.000Z',
+        updatedAt: '2026-07-31T00:00:00.000Z',
+      }).projectId,
+    ).toBeNull();
+  });
+
   it('rejects cyclic Team Blueprint parent relationships', () => {
     const role = {
       title: 'Role',
