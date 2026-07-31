@@ -12,9 +12,16 @@ import { TEAM_SCENARIO_TRIGGER } from './team-tools';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
+const scenarioWaitTimeoutMs = process.platform === 'win32' ? 15_000 : 5_000;
 
 afterEach(() => {
-  for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
+  for (const directory of cleanup.splice(0))
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === 'win32' ? 5 : 0,
+      retryDelay: 100,
+    });
 });
 
 function createPersistence(): SqlitePersistenceClient {
@@ -24,7 +31,7 @@ function createPersistence(): SqlitePersistenceClient {
 }
 
 async function waitFor(check: () => boolean): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + scenarioWaitTimeoutMs;
   while (!check()) {
     if (Date.now() > deadline) throw new Error('waitFor timed out');
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -98,7 +105,7 @@ if (runsWithElectronAbi)
       expect(finalText).toContain('実装');
       expect(finalText).toContain('レビュー');
       persistence.close();
-    }, 10_000);
+    }, 20_000);
 
     it('does not start the team scenario for ordinary input', async () => {
       const persistence = createPersistence();
@@ -121,7 +128,7 @@ if (runsWithElectronAbi)
       await waitFor(() => published.some((event) => event.type === 'turn.completed'));
       expect(persistence.getTeamByTask(task.id)).toBeNull();
       persistence.close();
-    }, 10_000);
+    }, 20_000);
   });
 else
   describe('Deterministic mock team scenario Electron ABI bridge', () => {
