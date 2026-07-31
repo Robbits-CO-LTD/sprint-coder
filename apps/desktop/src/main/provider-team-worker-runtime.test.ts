@@ -131,8 +131,21 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       getConnection: () => connection,
       authorizeEgress,
       contextFor: () => ({
-        projectItems: [],
-        projectSnapshotDigest: null,
+        projectItems: [
+          {
+            id: 'project:one:instruction',
+            kind: 'instruction',
+            authority: 'user',
+            localOnly: false,
+            content: 'Keep the sealed Project instruction.',
+            sealedDigest: 'a'.repeat(64),
+            sourceTaskId: null,
+            sourceTurnId: null,
+            sourceReferenceId: null,
+            capturedAt: '2026-07-31T00:00:00.000Z',
+          },
+        ],
+        projectSnapshotDigest: 'b'.repeat(64),
         fragments: [
           {
             id: 'team-context-summary:worker-1',
@@ -163,7 +176,15 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     });
 
     expect(fallbackExecute).not.toHaveBeenCalled();
-    expect(authorizeEgress).toHaveBeenCalledWith(expect.objectContaining({ connection }));
+    expect(authorizeEgress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connection,
+        executionId: 'delivery-1',
+        context: expect.objectContaining({
+          projectItems: [expect.objectContaining({ id: 'project:one:instruction' })],
+        }),
+      }),
+    );
     expect(result.completion).toMatchObject({ status: 'succeeded', summary: '調査完了' });
     expect(result.resolution).toEqual({
       resolvedProvider: 'openai',
@@ -173,7 +194,11 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     expect(result.usage).toMatchObject({ costCents: 1, tokens: 14, toolCalls: 0 });
     expect(requests[0]).toMatchObject({
       messages: [
-        { role: 'assistant', content: '[継承コンテキスト:compaction]\n親Taskの要約' },
+        expect.objectContaining({ content: expect.stringContaining('sealed Project instruction') }),
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.stringContaining('親Taskの要約'),
+        }),
         expect.objectContaining({
           role: 'user',
           content: expect.stringContaining('前回まとめた調査論点'),
@@ -240,6 +265,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       ok: true,
       workerId: 'worker-child',
     }));
+    const authorizeEgress = vi.fn(() => true);
     const adapter = new ProviderAwareTeamWorkerRuntime({
       fallback: {
         start: async () => ({ pid: null }),
@@ -251,7 +277,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       } as unknown as ProviderVerificationService,
       registry,
       getConnection: () => connection,
-      authorizeEgress: () => true,
+      authorizeEgress,
       managerGuidance: 'Use Team tools.',
       managerTools: [
         {
@@ -268,6 +294,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     const result = await adapter.execute({
       worker: providerWorker(true),
       envelope,
+      executionId: 'execution-durable-1',
       content: '実装を委譲してください',
     });
 
@@ -276,8 +303,10 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
         worker: expect.objectContaining({ id: 'worker-1', canDelegate: true }),
         name: 'team_hire_worker',
         input: { agentKind: 'worker', role: '実装', objective: '機能を実装する' },
+        executionId: 'execution-durable-1',
       }),
     );
+    expect(authorizeEgress).toHaveBeenCalledTimes(2);
     expect(requests).toHaveLength(2);
     expect(requests[1]).toMatchObject({
       messages: [

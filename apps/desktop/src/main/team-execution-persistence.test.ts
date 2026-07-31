@@ -60,6 +60,265 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 
 if (runsWithElectronAbi)
   describe('Team execution persistence', () => {
+    it('inherits the immutable root Turn seal across Team execution retry reads', () => {
+      const { persistence } = createPersistence();
+      const project = persistence.createProject('Inherited context');
+      const instruction = persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: project.revision,
+        instruction: 'Keep the sealed root instruction.',
+      });
+      const task = persistence.createTask('root', false, project.id);
+      const root = persistence.startTurn(task.id, 'チームで実装して');
+      const team = persistence.promoteTaskToTeam(task.id);
+      const leader = persistence.getTaskLeader(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      persistence.transitionTeamState(team.id, 'active');
+      const worker = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'implementer',
+        objective: 'inherit root context',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+      });
+      const execution = persistence.createTeamExecution({
+        teamId: team.id,
+        assigneeAgentId: worker.id,
+        createdByAgentId: leader.id,
+        instruction: 'implement',
+        now: '2026-07-31T00:00:00.000Z',
+        contextOwner: { type: 'turn', id: root.turnId },
+      });
+
+      const rootManifest = persistence.getContextSealManifest('turn', root.turnId);
+      const inherited = persistence.getContextSealManifest('team_execution', execution.id);
+      expect(inherited).toMatchObject({
+        projectId: project.id,
+        projectRevision: instruction.revision,
+        projectContextEpoch: instruction.contextEpoch,
+        candidateSnapshotDigest: rootManifest.candidateSnapshotDigest,
+        sealedDigest: rootManifest.sealedDigest,
+      });
+      expect(persistence.prepareTeamExecutionContext(task.id, execution.id).projectItems).toEqual(
+        persistence.prepareContext(task.id, root.turnId).projectItems,
+      );
+      const mission = persistence.createTeamMission({
+        teamId: team.id,
+        createdByAgentId: leader.id,
+        objective: 'inherit through every mission step',
+        doneCriteria: ['both steps use the root seal'],
+        steps: [
+          {
+            workerId: worker.id,
+            objective: 'first inherited step',
+            doneCriteria: ['first complete'],
+            access: 'read-only',
+          },
+          {
+            workerId: worker.id,
+            objective: 'second inherited step',
+            doneCriteria: ['second complete'],
+            access: 'read-only',
+          },
+        ],
+        now: '2026-07-31T00:00:01.000Z',
+        contextOwner: { type: 'turn', id: root.turnId },
+      });
+      expect(
+        mission.steps.map(({ executionId }) =>
+          persistence.getContextSealManifest('team_execution', executionId),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          candidateSnapshotDigest: rootManifest.candidateSnapshotDigest,
+          sealedDigest: rootManifest.sealedDigest,
+        }),
+        expect.objectContaining({
+          candidateSnapshotDigest: rootManifest.candidateSnapshotDigest,
+          sealedDigest: rootManifest.sealedDigest,
+        }),
+      ]);
+
+      persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: instruction.revision,
+        instruction: 'Changed after assignment.',
+      });
+      expect(
+        persistence.prepareTeamExecutionContext(task.id, execution.id).projectItems[0]?.content,
+      ).toBe('Keep the sealed root instruction.');
+      persistence.close();
+    });
+
+    it('seals a parentless manual execution from live Project state only at dispatch', () => {
+      const { persistence } = createPersistence();
+      const project = persistence.createProject('Manual context');
+      const first = persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: project.revision,
+        instruction: 'Before dispatch.',
+      });
+      const task = persistence.createTask('manual', false, project.id);
+      const team = persistence.promoteTaskToTeam(task.id);
+      const leader = persistence.getTaskLeader(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      const worker = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'manual worker',
+        objective: 'seal at dispatch',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'none',
+      });
+      const execution = persistence.createTeamExecution({
+        teamId: team.id,
+        assigneeAgentId: worker.id,
+        createdByAgentId: leader.id,
+        instruction: 'manual work',
+        now: '2026-07-31T00:00:00.000Z',
+      });
+      const second = persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: first.revision,
+        instruction: 'At dispatch.',
+      });
+
+      const prepared = persistence.prepareTeamExecutionContext(task.id, execution.id);
+      expect(prepared.projectItems[0]?.content).toBe('At dispatch.');
+      persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: second.revision,
+        instruction: 'After dispatch.',
+      });
+      expect(persistence.prepareTeamExecutionContext(task.id, execution.id)).toEqual(prepared);
+      persistence.close();
+    });
+
+    it('cancels and quarantines background work atomically when Project context changes', () => {
+      const { persistence } = createPersistence();
+      const project = persistence.createProject('Background context');
+      const instruction = persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: project.revision,
+        instruction: 'Original background context.',
+      });
+      const completedTask = persistence.createTask('completed background', false, project.id);
+      const completedOwner = persistence.startTurn(completedTask.id, 'start background');
+      persistence.createBackgroundActivity({
+        id: 'project-completed-activity',
+        taskId: completedTask.id,
+        ownerThreadId: completedTask.id,
+        ownerTurnId: completedOwner.turnId,
+        kind: 'command',
+        wakePolicy: 'nextSafePoint',
+        requiredCapabilities: [],
+        volumeQuotaBytes: 10_000,
+        createdAt: '2026-07-31T00:00:00.000Z',
+      });
+      persistence.transitionBackgroundActivity(
+        'project-completed-activity',
+        'running',
+        '2026-07-31T00:00:01.000Z',
+      );
+      persistence.cancelTurn(completedTask.id, completedOwner.turnId);
+      persistence.completeBackgroundActivity({
+        activityId: 'project-completed-activity',
+        completionId: 'project-completion',
+        outcome: 'completed',
+        payload: 'result from the old Project snapshot',
+        outputCursor: 1,
+        completedAt: '2026-07-31T00:00:02.000Z',
+      });
+
+      const runningTask = persistence.createTask('running background', false, project.id);
+      const runningOwner = persistence.startTurn(runningTask.id, 'start monitor');
+      persistence.createBackgroundActivity({
+        id: 'project-running-activity',
+        taskId: runningTask.id,
+        ownerThreadId: runningTask.id,
+        ownerTurnId: runningOwner.turnId,
+        kind: 'monitor',
+        wakePolicy: 'manual',
+        requiredCapabilities: [],
+        volumeQuotaBytes: 10_000,
+        createdAt: '2026-07-31T00:00:03.000Z',
+      });
+      persistence.transitionBackgroundActivity(
+        'project-running-activity',
+        'running',
+        '2026-07-31T00:00:04.000Z',
+      );
+
+      persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: instruction.revision,
+        instruction: 'New background context.',
+      });
+
+      expect(persistence.listBackgroundCompletions(completedTask.id)).toEqual([
+        expect.objectContaining({
+          state: 'quarantined',
+          quarantineReason: 'project_context_epoch_changed',
+        }),
+      ]);
+      expect(() =>
+        persistence.transitionBackgroundActivity(
+          'project-running-activity',
+          'canceled',
+          '2026-07-31T00:00:05.000Z',
+        ),
+      ).toThrow('Invalid background activity transition: canceled -> canceled');
+      persistence.close();
+    });
+
+    it('quarantines a completion when its owner seal Project no longer matches the Task', () => {
+      const { persistence } = createPersistence();
+      const sourceProject = persistence.createProject('Source Project');
+      const targetProject = persistence.createProject('Target Project');
+      const task = persistence.createTask('moving background', false, sourceProject.id);
+      const owner = persistence.startTurn(task.id, 'start background before moving');
+      persistence.createBackgroundActivity({
+        id: 'moving-activity',
+        taskId: task.id,
+        ownerThreadId: task.id,
+        ownerTurnId: owner.turnId,
+        kind: 'command',
+        wakePolicy: 'nextSafePoint',
+        requiredCapabilities: [],
+        volumeQuotaBytes: 10_000,
+        createdAt: '2026-07-31T00:00:00.000Z',
+      });
+      persistence.transitionBackgroundActivity(
+        'moving-activity',
+        'running',
+        '2026-07-31T00:00:01.000Z',
+      );
+      persistence.cancelTurn(task.id, owner.turnId);
+      persistence.completeBackgroundActivity({
+        activityId: 'moving-activity',
+        completionId: 'moving-completion',
+        outcome: 'completed',
+        payload: 'must not cross the Project boundary',
+        outputCursor: 1,
+        completedAt: '2026-07-31T00:00:02.000Z',
+      });
+      persistence.assignTaskToProject({
+        taskId: task.id,
+        projectId: targetProject.id,
+        expectedProjectId: sourceProject.id,
+      });
+
+      const target = persistence.startTurn(task.id, 'use only the target Project context');
+      expect(persistence.listBackgroundCompletions(task.id)).toEqual([
+        expect.objectContaining({ state: 'quarantined', quarantineReason: 'project_changed' }),
+      ]);
+      expect(
+        persistence
+          .prepareContext(task.id, target.turnId)
+          .fragments.some(({ id }) => id === 'moving-completion'),
+      ).toBe(false);
+      persistence.close();
+    });
+
     it('persists queue order and queued instruction revisions across restart', () => {
       const { persistence, path } = createPersistence();
       const { team, leader, worker, execution } = createExecutionFixture(persistence);

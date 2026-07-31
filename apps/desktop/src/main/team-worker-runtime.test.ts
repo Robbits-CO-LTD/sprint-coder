@@ -33,6 +33,7 @@ vi.mock('./runtime-host', () => ({
 
 import {
   RuntimeHostTeamWorkerRuntime,
+  applyWorkerContextInheritance,
   buildInheritedWorkerContext,
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
@@ -88,13 +89,14 @@ function runtime(
     releaseTeamMcp?: (turnId: string) => void;
     contextFor?: TeamWorkerRuntimeDeps['contextFor'];
     writeScopeFor?: TeamWorkerRuntimeDeps['writeScopeFor'];
+    authorizeEgress?: TeamWorkerRuntimeDeps['authorizeEgress'];
   } = {},
 ): RuntimeHostTeamWorkerRuntime {
   return new RuntimeHostTeamWorkerRuntime({
     selectRuntime: () => ({ kind: 'claude', model: 'claude-opus-5' }),
     workspaceFor: () => '/workspace',
     catalogFor: () => ({ tools: [] }),
-    authorizeEgress: () => true,
+    authorizeEgress: overrides.authorizeEgress ?? (() => true),
     ...(overrides.teamMcpFor === undefined ? {} : { teamMcpFor: overrides.teamMcpFor }),
     ...(overrides.releaseTeamMcp === undefined ? {} : { releaseTeamMcp: overrides.releaseTeamMcp }),
     ...(overrides.contextFor === undefined ? {} : { contextFor: overrides.contextFor }),
@@ -137,6 +139,110 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(runtimeHostMock.starts[0]?.[9]).toBe('workspace-write');
     expect(runtimeHostMock.starts[0]?.[2]).toContain('Workspace書き込み: 許可範囲内で可');
     expect(runtimeHostMock.starts[0]?.[2]).toContain('隔離worktree: /isolated/worktree');
+  });
+
+  it('reserves every sealed Project item and binds context lookup to the durable execution', async () => {
+    runtimeHostMock.starts.length = 0;
+    const contextFor = vi.fn(() => ({
+      fragments: [],
+      projectItems: [
+        {
+          id: 'project:one:instruction',
+          kind: 'instruction' as const,
+          authority: 'user' as const,
+          localOnly: false,
+          content: 'Keep the public API stable.',
+          sealedDigest: 'a'.repeat(64),
+          sourceTaskId: null,
+          sourceTurnId: null,
+          sourceReferenceId: null,
+          capturedAt: '2026-07-31T00:00:00.000Z',
+        },
+        {
+          id: 'project:one:reference:one',
+          kind: 'reference' as const,
+          authority: 'none' as const,
+          localOnly: false,
+          content: 'Untrusted reference data.',
+          sealedDigest: 'b'.repeat(64),
+          sourceTaskId: 'source-task',
+          sourceTurnId: null,
+          sourceReferenceId: 'reference-one',
+          capturedAt: '2026-07-31T00:00:01.000Z',
+        },
+      ],
+      projectSnapshotDigest: 'c'.repeat(64),
+      usageEvents: [],
+      compacted: false,
+    }));
+    const authorizeEgress = vi.fn(() => true);
+    const subject = runtime({ contextFor, authorizeEgress });
+
+    await subject.execute({
+      worker: worker(false),
+      envelope: { ...envelope, targetAgentId: 'worker-1' },
+      executionId: 'execution-durable-1',
+      content: '実装する',
+    });
+
+    expect(contextFor).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'worker-1' }),
+      'execution-durable-1',
+    );
+    expect(authorizeEgress).toHaveBeenCalledWith(
+      'claude',
+      'task-1',
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({
+        projectItems: [
+          expect.objectContaining({ id: 'project:one:instruction' }),
+          expect.objectContaining({ id: 'project:one:reference:one' }),
+        ],
+      }),
+    );
+    expect(runtimeHostMock.starts[0]?.[6]).toMatchObject({
+      projectItems: [{ id: 'project:one:instruction' }, { id: 'project:one:reference:one' }],
+    });
+  });
+
+  it('fails explicitly before dispatch rather than silently subsetting oversized Project items', async () => {
+    runtimeHostMock.starts.length = 0;
+    const authorizeEgress = vi.fn(() => true);
+    const subject = runtime({
+      authorizeEgress,
+      contextFor: () => ({
+        fragments: [],
+        projectItems: [
+          {
+            id: 'oversized-project-item',
+            kind: 'reference',
+            authority: 'none',
+            localOnly: false,
+            content: 'x'.repeat(64 * 1024 + 1),
+            sealedDigest: 'd'.repeat(64),
+            sourceTaskId: 'source-task',
+            sourceTurnId: null,
+            sourceReferenceId: 'reference-one',
+            capturedAt: '2026-07-31T00:00:00.000Z',
+          },
+        ],
+        projectSnapshotDigest: 'e'.repeat(64),
+        usageEvents: [],
+        compacted: false,
+      }),
+    });
+
+    await expect(
+      subject.execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        executionId: 'execution-over-budget',
+        content: '実装する',
+      }),
+    ).rejects.toThrow('Inherited Project context cannot fit the Worker protocol budget');
+    expect(authorizeEgress).not.toHaveBeenCalled();
+    expect(runtimeHostMock.starts).toHaveLength(0);
   });
 
   it('places the Agent own prior Team conversation before a tool-prohibited final instruction', async () => {
@@ -184,6 +290,48 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     ).toEqual([]);
   });
 
+  it('applies conversation policy without removing sealed Project items', () => {
+    const sealed = {
+      fragments: [
+        {
+          id: 'history-1',
+          taskId: 'task-1',
+          source: 'history' as const,
+          trust: 'user' as const,
+          tokenEstimate: 2,
+          content: 'parent conversation',
+          createdAt: '2026-07-31T00:00:00.000Z',
+          messageId: 'message-1',
+        },
+      ],
+      projectItems: [
+        {
+          id: 'project-item-1',
+          kind: 'instruction' as const,
+          authority: 'user' as const,
+          localOnly: false,
+          content: 'always inherited',
+          sealedDigest: 'f'.repeat(64),
+          sourceTaskId: null,
+          sourceTurnId: null,
+          sourceReferenceId: null,
+          capturedAt: '2026-07-31T00:00:00.000Z',
+        },
+      ],
+      projectSnapshotDigest: 'a'.repeat(64),
+      usageEvents: [],
+      compacted: false,
+    };
+
+    const inherited = applyWorkerContextInheritance(
+      { ...worker(false), contextInheritancePolicy: 'none' },
+      sealed,
+    );
+    expect(inherited.fragments).toEqual([]);
+    expect(inherited.projectItems).toEqual(sealed.projectItems);
+    expect(inherited.projectSnapshotDigest).toBe(sealed.projectSnapshotDigest);
+  });
+
   it('passes a caller-bound MCP only to a Manager and releases it after the turn', async () => {
     runtimeHostMock.starts.length = 0;
     const releaseTeamMcp = vi.fn();
@@ -203,6 +351,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(teamMcpFor).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'manager-1', canDelegate: true }),
       expect.any(String),
+      undefined,
     );
     expect(runtimeHostMock.starts).toHaveLength(1);
     expect(runtimeHostMock.starts[0]?.[7]).toEqual({
@@ -226,6 +375,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(teamMcpFor).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'worker-1', canDelegate: false }),
       expect.any(String),
+      undefined,
     );
     expect(runtimeHostMock.starts[0]?.[7]).toBeUndefined();
 

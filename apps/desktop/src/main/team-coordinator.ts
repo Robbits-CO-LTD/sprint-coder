@@ -79,6 +79,10 @@ export type TeamExecutionSubmission = Readonly<{
   executionId: string;
   state: TeamExecutionState;
 }>;
+export type TeamContextOwner = Readonly<{
+  type: 'turn' | 'team_execution';
+  id: string;
+}>;
 
 export type ManagerHirePolicy = Readonly<{
   maxDirectChildren: number | null;
@@ -134,6 +138,7 @@ export interface TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    executionId?: string;
     workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
@@ -153,6 +158,7 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    executionId?: string;
     workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
@@ -705,20 +711,23 @@ export class TeamCoordinator {
 
   async assignTask(
     input: TeamSendMessageInput & { doneCriteria: readonly string[] },
+    contextOwner?: TeamContextOwner,
   ): Promise<TeamExecutionSubmission> {
-    return this.assignTaskWithAuthority(input, null);
+    return this.assignTaskWithAuthority(input, null, contextOwner);
   }
 
   async assignTaskAs(
     input: TeamSendMessageInput & { doneCriteria: readonly string[] },
     requesterAgentId: string,
+    contextOwner?: TeamContextOwner,
   ): Promise<TeamExecutionSubmission> {
-    return this.assignTaskWithAuthority(input, requesterAgentId);
+    return this.assignTaskWithAuthority(input, requesterAgentId, contextOwner);
   }
 
   async assignMission(
     input: TeamAssignMissionInput,
     requesterAgentId: string | null = null,
+    contextOwner?: TeamContextOwner,
   ): Promise<TeamMissionSummary> {
     return this.enqueue(input.taskId, async () => {
       const team = this.persistence.getTeamByTask(input.taskId);
@@ -761,6 +770,7 @@ export class TeamCoordinator {
         doneCriteria: input.doneCriteria,
         steps: input.steps,
         now: this.isoNow(),
+        ...(contextOwner === undefined ? {} : { contextOwner }),
       });
       this.persistence.transitionTeamMission(mission.id, 'running', this.isoNow());
       const first = mission.steps[0];
@@ -809,6 +819,7 @@ export class TeamCoordinator {
   private async assignTaskWithAuthority(
     input: TeamSendMessageInput & { doneCriteria: readonly string[] },
     requesterAgentId: string | null,
+    contextOwner?: TeamContextOwner,
   ): Promise<TeamExecutionSubmission> {
     return this.enqueue(input.taskId, async () => {
       const team = this.persistence.getTeamByTask(input.taskId);
@@ -851,6 +862,7 @@ export class TeamCoordinator {
         createdByAgentId: requester.id,
         instruction: input.content,
         now,
+        ...(contextOwner === undefined ? {} : { contextOwner }),
       });
       const message = this.persistence.createTeamMessage({
         teamId: team.id,
@@ -1112,6 +1124,13 @@ export class TeamCoordinator {
     resumeAttemptId?: string;
     attemptStartReason?: TeamAttemptStartReason;
   }): Promise<void> {
+    // Root/parent-triggered executions already own an inherited immutable seal. Renderer/manual
+    // executions have no parent and are sealed here, at the actual dispatch boundary. Retries and
+    // resumes hit the same owner id and therefore reuse the existing seal.
+    this.persistence.sealTeamExecutionContext({
+      taskId: input.taskId,
+      executionId: input.executionId,
+    });
     const execution = this.persistence.getTeamExecution(input.executionId);
     const mission = this.persistence.getTeamMissionForExecution(input.executionId);
     const missionStep =
@@ -2081,6 +2100,7 @@ export class TeamCoordinator {
               worker,
               envelope,
               content,
+              ...(executionId === undefined ? {} : { executionId }),
               ...(workspacePath === undefined ? {} : { workspacePath }),
               priorConversation,
               signal,

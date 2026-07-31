@@ -106,6 +106,7 @@ export type TeamMcpRegistration = Readonly<{
   requireModelResearch?: boolean;
   allowSkillDrafts?: boolean;
   allowTeamTools?: boolean;
+  contextOwner?: { type: 'turn' | 'team_execution'; id: string };
 }>;
 
 type Registered = TeamMcpRegistration & {
@@ -353,6 +354,9 @@ export class TeamMcpBridge {
                   ...(registration.requesterAgentId === undefined
                     ? {}
                     : { requesterAgentId: registration.requesterAgentId }),
+                  ...(registration.contextOwner === undefined
+                    ? {}
+                    : { contextOwner: registration.contextOwner }),
                   longPoll:
                     request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
                   waitReportsCursor: {
