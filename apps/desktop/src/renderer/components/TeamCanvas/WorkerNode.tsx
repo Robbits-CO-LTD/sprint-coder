@@ -165,6 +165,7 @@ export function WorkerNode({
       <div
         className="w-body"
         ref={historyRef}
+        tabIndex={0}
         onScroll={(event) => {
           const element = event.currentTarget;
           setFollowingLatest(element.scrollHeight - element.scrollTop - element.clientHeight < 32);

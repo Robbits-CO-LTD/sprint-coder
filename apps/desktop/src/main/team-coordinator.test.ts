@@ -24,7 +24,14 @@ const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 
 afterEach(() => {
   vi.useRealTimers();
-  for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
+  for (const directory of cleanup.splice(0)) {
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === 'win32' ? 5 : 0,
+      retryDelay: 100,
+    });
+  }
 });
 
 function createPersistence(): SqlitePersistenceClient {
