@@ -32,6 +32,27 @@ export type ProjectSummary = {
   updatedAt: string;
 };
 
+export type ProjectReference = {
+  id: string;
+  projectId: string;
+  sourceTaskId: string;
+  relativePath: string;
+  enabled: boolean;
+  revision: number;
+  lastSealedDigest: string | null;
+  status:
+    | 'healthy'
+    | 'changed'
+    | 'missing'
+    | 'unreadable'
+    | 'workspace_changed'
+    | 'too_large'
+    | 'non_text';
+  currentDigest: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ChatMessage = {
   id: string;
   taskId: string;
@@ -691,6 +712,21 @@ export interface SprintCoderApi {
     }): Promise<ProjectInstruction>;
     listContextManifests(input: { taskId: string }): Promise<ProjectContextManifestSummary[]>;
     getContextManifest(input: { taskId: string; turnId: string }): Promise<ProjectContextManifest>;
+    references: {
+      list(input: { projectId: string }): Promise<ProjectReference[]>;
+      pick(input: { projectId: string; sourceTaskId: string }): Promise<ProjectReference | null>;
+      add(input: {
+        projectId: string;
+        sourceTaskId: string;
+        relativePath: string;
+      }): Promise<ProjectReference>;
+      update(input: {
+        referenceId: string;
+        expectedRevision: number;
+        enabled: boolean;
+      }): Promise<ProjectReference>;
+      remove(input: { referenceId: string; expectedRevision: number }): Promise<void>;
+    };
     create(input: { name: string }): Promise<ProjectSummary>;
     update(input: {
       projectId: string;

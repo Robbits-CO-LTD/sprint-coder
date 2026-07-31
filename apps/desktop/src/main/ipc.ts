@@ -60,6 +60,12 @@ import {
   projectGetInputSchema,
   projectInstructionResultSchema,
   projectInstructionSetInputSchema,
+  projectReferenceAddInputSchema,
+  projectReferencePickInputSchema,
+  projectReferenceRemoveInputSchema,
+  projectReferenceSchema,
+  projectReferencesListInputSchema,
+  projectReferenceUpdateInputSchema,
   projectSummarySchema,
   projectUnassignTaskInputSchema,
   projectUpdateInputSchema,
@@ -139,6 +145,7 @@ import {
   type ProviderMessageToolCall,
   type ProviderModel,
   type PublicError,
+  type ProjectReference,
   type RuntimeKind,
   type TurnEvent,
 } from '@sprint-coder/contracts';
@@ -162,6 +169,7 @@ import {
   InvalidProjectError,
   ProjectArchivedError,
   ProjectConflictError,
+  ReferenceInUseError,
   SteerStaleError,
   TaskAssignmentBlockedError,
   TurnActiveError,
@@ -1503,6 +1511,110 @@ export class IpcRouter {
       projectContextManifestGetInputSchema,
       projectContextManifestSchema,
       (input) => this.persistence.getProjectContextManifest(input.taskId, input.turnId),
+    );
+    this.handle(
+      IPC_CHANNELS.projectsReferencesList,
+      projectReferencesListInputSchema,
+      z.array(projectReferenceSchema),
+      (input) => this.persistence.listProjectReferences(input.projectId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsReferencesAdd,
+      projectReferenceAddInputSchema,
+      projectReferenceSchema,
+      async (input, event, envelope) => {
+        const cached = this.persistence.getOperationResult<ProjectReference>(
+          principalFor(event),
+          `project:${input.projectId}`,
+          IPC_CHANNELS.projectsReferencesAdd,
+          envelope.operationId,
+          requestHash(envelope.payload),
+        );
+        if (cached.found && cached.value !== null) return cached.value;
+        const workspace = this.persistence.getWorkspace(input.sourceTaskId);
+        if (workspace === null) throw new InvalidProjectError('Source Task has no Workspace');
+        const binding = await workspaceMutationBinding(workspace);
+        return this.runMutation(
+          event,
+          envelope,
+          `project:${input.projectId}`,
+          IPC_CHANNELS.projectsReferencesAdd,
+          () =>
+            this.persistence.addProjectReference({
+              ...input,
+              registeredRootIdentity: binding.rootIdentityDigest,
+            }),
+        ).value;
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsReferencesPick,
+      projectReferencePickInputSchema,
+      projectReferenceSchema.nullable(),
+      async (input, event, envelope) => {
+        const workspace = this.persistence.getWorkspace(input.sourceTaskId);
+        if (workspace === null) throw new InvalidProjectError('Source Task has no Workspace');
+        const cached = this.persistence.getOperationResult<ProjectReference | null>(
+          principalFor(event),
+          `project:${input.projectId}`,
+          IPC_CHANNELS.projectsReferencesPick,
+          envelope.operationId,
+          requestHash(envelope.payload),
+        );
+        if (cached.found) return cached.value ?? null;
+        const selected = await dialog.showOpenDialog(this.window, {
+          defaultPath: workspace,
+          properties: ['openFile'],
+        });
+        if (selected.canceled || selected.filePaths[0] === undefined)
+          return this.runMutation(
+            event,
+            envelope,
+            `project:${input.projectId}`,
+            IPC_CHANNELS.projectsReferencesPick,
+            () => null,
+          ).value;
+        const relative = relativePath(workspace, selected.filePaths[0]);
+        const binding = await workspaceMutationBinding(workspace);
+        return this.runMutation(
+          event,
+          envelope,
+          `project:${input.projectId}`,
+          IPC_CHANNELS.projectsReferencesPick,
+          () =>
+            this.persistence.addProjectReference({
+              ...input,
+              relativePath: relative,
+              registeredRootIdentity: binding.rootIdentityDigest,
+            }),
+        ).value;
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsReferencesUpdate,
+      projectReferenceUpdateInputSchema,
+      projectReferenceSchema,
+      (input, event, envelope) =>
+        this.runMutation(
+          event,
+          envelope,
+          `reference:${input.referenceId}`,
+          IPC_CHANNELS.projectsReferencesUpdate,
+          () => this.persistence.updateProjectReference(input),
+        ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsReferencesRemove,
+      projectReferenceRemoveInputSchema,
+      z.undefined(),
+      (input, event, envelope) =>
+        this.runMutation(
+          event,
+          envelope,
+          `reference:${input.referenceId}`,
+          IPC_CHANNELS.projectsReferencesRemove,
+          () => this.persistence.removeProjectReference(input.referenceId, input.expectedRevision),
+        ).value,
     );
     this.handleMutation(
       IPC_CHANNELS.projectsCreate,
@@ -3601,6 +3713,12 @@ function toPublicError(error: unknown): PublicError {
     return {
       code: 'INVALID_REQUEST',
       userMessage: 'Teamの実行またはMissionが進行中のため、Taskを移動できません。',
+      retryable: false,
+    };
+  if (error instanceof ReferenceInUseError)
+    return {
+      code: 'REFERENCE_IN_USE',
+      userMessage: 'このTaskの参照ファイルをProjectから削除してから移動してください。',
       retryable: false,
     };
   if (error instanceof InvalidProjectError)

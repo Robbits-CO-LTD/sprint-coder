@@ -3,6 +3,7 @@ import type {
   ProjectContextManifest,
   ProjectContextManifestSummary,
   ProjectInstruction,
+  ProjectReference,
 } from '../types/sprint-coder';
 import { useAppStore } from '../store/appStore';
 
@@ -49,6 +50,41 @@ export function ProjectContextInspector({
   const [conflicted, setConflicted] = useState(false);
   const [saving, setSaving] = useState(false);
   const instructionToken = useRef(0);
+  const [references, setReferences] = useState<ProjectReference[]>([]);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
+  const [referencesBusy, setReferencesBusy] = useState(false);
+  const referenceToken = useRef(0);
+
+  const loadReferences = useCallback(async () => {
+    if (projectId === null || projectsApi === undefined) return;
+    try {
+      setReferences(await projectsApi.references.list({ projectId }));
+      setReferenceError(null);
+    } catch (error) {
+      setReferenceError(
+        error instanceof Error ? error.message : '参照ファイルを取得できませんでした。',
+      );
+    }
+  }, [projectId, projectsApi]);
+
+  useEffect(() => {
+    if (projectId === null || projectsApi === undefined) return;
+    const token = ++referenceToken.current;
+    void projectsApi.references
+      .list({ projectId })
+      .then((next) => {
+        if (referenceToken.current === token) setReferences(next);
+      })
+      .catch((error: unknown) => {
+        if (referenceToken.current === token)
+          setReferenceError(
+            error instanceof Error ? error.message : '参照ファイルを取得できませんでした。',
+          );
+      });
+    return () => {
+      referenceToken.current += 1;
+    };
+  }, [projectId, projectsApi]);
 
   if (selectionRequestKey !== requestKey) {
     setSelectionRequestKey(requestKey);
@@ -235,6 +271,81 @@ export function ProjectContextInspector({
         </section>
       )}
 
+      {projectId !== null && (
+        <section className="project-context-section" aria-labelledby="project-references-title">
+          <div className="project-context-section-head">
+            <h3 id="project-references-title">Reference files</h3>
+            <div>
+              <button type="button" disabled={referencesBusy} onClick={() => void loadReferences()}>
+                更新
+              </button>
+              <button
+                type="button"
+                disabled={referencesBusy || task?.workspacePath == null}
+                onClick={() => {
+                  if (projectsApi === undefined) return;
+                  setReferencesBusy(true);
+                  void projectsApi.references
+                    .pick({ projectId, sourceTaskId: taskId })
+                    .then(() => loadReferences())
+                    .catch((error: unknown) =>
+                      setReferenceError(
+                        error instanceof Error ? error.message : '追加できませんでした。',
+                      ),
+                    )
+                    .finally(() => setReferencesBusy(false));
+                }}
+              >
+                ファイルを追加
+              </button>
+            </div>
+          </div>
+          {references.length === 0 ? (
+            <p className="insp-disconnected">参照ファイルはありません。</p>
+          ) : (
+            <ul className="project-reference-list">
+              {references.map((reference) => (
+                <li key={reference.id}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={reference.enabled}
+                      onChange={(event) => {
+                        if (projectsApi === undefined) return;
+                        void projectsApi.references
+                          .update({
+                            referenceId: reference.id,
+                            expectedRevision: reference.revision,
+                            enabled: event.target.checked,
+                          })
+                          .then(() => loadReferences());
+                      }}
+                    />
+                    <span>{reference.relativePath}</span>
+                  </label>
+                  <span>{referenceStatusLabel(reference.status)}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (projectsApi === undefined) return;
+                      void projectsApi.references
+                        .remove({
+                          referenceId: reference.id,
+                          expectedRevision: reference.revision,
+                        })
+                        .then(() => loadReferences());
+                    }}
+                  >
+                    削除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {referenceError !== null && <p className="project-context-error">{referenceError}</p>}
+        </section>
+      )}
+
       <section className="project-context-section" aria-labelledby="context-manifest-title">
         <div className="project-context-section-head">
           <h3 id="context-manifest-title">Turn Context</h3>
@@ -269,6 +380,18 @@ export function ProjectContextInspector({
       </section>
     </div>
   );
+}
+
+function referenceStatusLabel(status: ProjectReference['status']): string {
+  return {
+    healthy: '✓ 正常',
+    changed: '● 変更あり',
+    missing: '! 見つかりません',
+    unreadable: '! 読み取れません',
+    workspace_changed: '! Workspace変更',
+    too_large: '! 64 KiB超過',
+    non_text: '! テキストではありません',
+  }[status];
 }
 
 function ManifestDetails({

@@ -39,6 +39,12 @@ import {
   projectGetInputSchema,
   projectInstructionResultSchema,
   projectInstructionSetInputSchema,
+  projectReferenceAddInputSchema,
+  projectReferencePickInputSchema,
+  projectReferenceRemoveInputSchema,
+  projectReferenceSchema,
+  projectReferencesListInputSchema,
+  projectReferenceUpdateInputSchema,
   projectSummarySchema,
   projectUnassignTaskInputSchema,
   projectUpdateInputSchema,
@@ -231,6 +237,43 @@ const api: SprintCoderApi = {
         projectContextManifestSchema,
         input,
       ),
+    references: {
+      list: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsReferencesList,
+          projectReferencesListInputSchema,
+          z.array(projectReferenceSchema),
+          input,
+        ),
+      pick: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsReferencesPick,
+          projectReferencePickInputSchema,
+          projectReferenceSchema.nullable(),
+          input,
+        ),
+      add: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsReferencesAdd,
+          projectReferenceAddInputSchema,
+          projectReferenceSchema,
+          input,
+        ),
+      update: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsReferencesUpdate,
+          projectReferenceUpdateInputSchema,
+          projectReferenceSchema,
+          input,
+        ),
+      remove: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsReferencesRemove,
+          projectReferenceRemoveInputSchema,
+          z.undefined(),
+          input,
+        ),
+    },
     create: (input) =>
       invoke(IPC_CHANNELS.projectsCreate, projectCreateInputSchema, projectSummarySchema, input),
     update: (input) =>
