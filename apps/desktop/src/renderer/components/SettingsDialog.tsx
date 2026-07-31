@@ -30,7 +30,7 @@ import {
 // renderer.
 //
 // Modal rather than a right panel, of the two the issue left open: the right edge is claimed by the
-// Team List View today (and by the inspector panel in #16), settings are a modal task (open,
+// Team List View today, settings are a modal task (open,
 // adjust, close) rather than an ambient one, and a modal is what the app's own focus-restoration
 // conventions are already built around.
 //

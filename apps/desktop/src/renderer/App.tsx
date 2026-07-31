@@ -8,13 +8,6 @@ import type { CapturedSurfaceState } from './components/ChatSurface/SurfaceLayer
 import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
-import { InspectorPanel } from './components/InspectorPanel';
-import {
-  nextInspectorState,
-  readStoredInspectorState,
-  writeStoredInspectorState,
-  type InspectorState,
-} from './lib/inspector-preference';
 import { SettingsDialog } from './components/SettingsDialog';
 import { TaskBoundaryProvider } from './components/TaskBoundary';
 import { List, Plus } from './components/icons';
@@ -25,8 +18,6 @@ import {
   readStoredSidebarCollapsed,
   writeStoredSidebarCollapsed,
 } from './lib/sidebar-preference';
-import { allowTaskBoundary } from './lib/task-boundary';
-import { OPEN_PROJECT_CONTEXT_EVENT, isProjectContextRequest } from './lib/project-inspector';
 
 // Team view preference (Slice 6.1 item 4, List fallback): renderer-only, not part of the
 // persisted Task/Team domain — a per-install UI preference, so localStorage is the right home for
@@ -50,7 +41,6 @@ export default function App() {
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const createTask = useAppStore((s) => s.createTask);
   const selectTask = useAppStore((s) => s.selectTask);
-  const editorDirty = useAppStore((s) => s.editorDirty);
   const teamViewOpen = useAppStore((s) => s.teamViewOpen);
   const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const leaderAgentId = useAppStore((s) => s.teamByTask[selectedTaskId ?? '']?.team.leaderAgentId);
@@ -96,26 +86,17 @@ export default function App() {
   const openSettings = useCallback(() => setSettingsOpen(true), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
-  const confirmEditorBoundary = useCallback((): boolean => {
-    return allowTaskBoundary(editorDirty, () =>
-      window.confirm('編集中のファイルに未保存の変更があります。破棄して移動しますか？'),
-    );
-  }, [editorDirty]);
-  const guardedSelectTask = useCallback(
+  const selectTaskFromUi = useCallback(
     async (taskId: string): Promise<boolean> => {
       if (taskId === selectedTaskId) return true;
-      if (!confirmEditorBoundary()) return false;
       await selectTask(taskId);
       return true;
     },
-    [confirmEditorBoundary, selectTask, selectedTaskId],
+    [selectTask, selectedTaskId],
   );
-  const guardedCreateTask = useCallback(
-    async (projectId?: string) => {
-      if (!confirmEditorBoundary()) return null;
-      return createTask(projectId);
-    },
-    [confirmEditorBoundary, createTask],
+  const createTaskFromUi = useCallback(
+    async (projectId?: string) => createTask(projectId),
+    [createTask],
   );
 
   // --- Sidebar collapse (issue #12) ---
@@ -149,57 +130,6 @@ export default function App() {
       return next;
     });
   }, []);
-
-  // --- Inspector panel (issue #16) ---
-  //
-  // Default `hidden`, and that is not timidity: every existing E2E baseline was recorded without this
-  // panel, so one that appeared unbidden would change the measured layout of specs that have nothing
-  // to do with it.
-  const [inspectorState, setInspectorStateRaw] = useState<InspectorState>(readStoredInspectorState);
-  const [inspectorDisplay, setInspectorDisplay] = useState<'execution' | 'project'>('execution');
-  const [contextRequest, setContextRequest] = useState<{
-    taskId: string;
-    turnId: string | null;
-    key: number;
-  } | null>(null);
-  // Same 900px breakpoint the Team List View and the sidebar already use, so the app has one
-  // narrow-viewport rule rather than three that disagree.
-  const inspectorOverlay = useMediaQuery('(max-width: 900px)');
-
-  const setInspectorState = useCallback((next: InspectorState) => {
-    setInspectorStateRaw(next);
-    writeStoredInspectorState(next);
-  }, []);
-  const setEditorDirty = useAppStore((s) => s.setEditorDirty);
-  // Closing the window discards the editor's buffer. `beforeunload` is the only hook that can stop
-  // that, and it needs a listener registered while the edit is outstanding (issue #43).
-  useEffect(() => {
-    if (!editorDirty) return;
-    const warn = (event: BeforeUnloadEvent): void => {
-      event.preventDefault();
-      // Legacy assignment as well: Electron's Chromium honours preventDefault, but returnValue is
-      // what older paths check and setting both costs nothing.
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
-  }, [editorDirty]);
-
-  const cycleInspector = useCallback(
-    () => setInspectorState(nextInspectorState(inspectorState)),
-    [inspectorState, setInspectorState],
-  );
-  const cycleExecutionInspector = useCallback(() => {
-    if (
-      inspectorDisplay === 'project' &&
-      editorDirty &&
-      !window.confirm('Project Instructionに未保存の変更があります。破棄して切り替えますか？')
-    )
-      return;
-    setInspectorDisplay('execution');
-    cycleInspector();
-  }, [cycleInspector, editorDirty, inspectorDisplay]);
-  const hideInspector = useCallback(() => setInspectorState('hidden'), [setInspectorState]);
 
   // Focus restoration on full Team-mode exit (a11y fix, Phase 7 / NFR-A11Y-02): both exit paths
   // ("Chatに戻る" from the Canvas — after its reverse-FLIP tail — and from the List view) end by
@@ -240,12 +170,6 @@ export default function App() {
   // must not make this component and TeamCanvas (still finishing its own exit) render at once.
   const teamListActive =
     teamViewOpen && teamViewPreference === 'list' && !exiting && selectedTask !== null;
-  // The List view is 460px and the panel 380/560, so showing both needs 840px+ of shell. They are
-  // exclusive: while the List is up the panel drops to `rail`, which keeps the gauge visible without
-  // competing for width. The stored preference is untouched, so it returns on leaving List view.
-  const effectiveInspectorState =
-    teamListActive && inspectorState !== 'hidden' ? 'rail' : inspectorState;
-
   // Render-time sync (not an effect — react-hooks/set-state-in-effect convention, see
   // TaskHeader/GoalChip): keep `surfaceMode` following `teamCanvasActive`, except during
   // the tail of `requestExitTeam`, which explicitly forces 'main' one commit *before* the store
@@ -308,37 +232,6 @@ export default function App() {
     void toggleTeamView(selectedTask.id);
   }, [selectedTask, toggleTeamView]);
 
-  useEffect(() => {
-    const openProjectInspector = (event: Event) => {
-      const detail = (event as CustomEvent<unknown>).detail;
-      if (!isProjectContextRequest(detail)) return;
-      if (
-        inspectorDisplay === 'execution' &&
-        editorDirty &&
-        !window.confirm('編集中のファイルに未保存の変更があります。破棄して切り替えますか？')
-      )
-        return;
-      setInspectorDisplay('project');
-      setContextRequest((current) => ({
-        taskId: detail.taskId,
-        turnId: detail.turnId,
-        key: (current?.key ?? 0) + 1,
-      }));
-      if (inspectorState === 'hidden' || inspectorState === 'rail') setInspectorState('panel');
-      if (teamListActive && selectedTask?.id === detail.taskId) void toggleTeamView(detail.taskId);
-    };
-    window.addEventListener(OPEN_PROJECT_CONTEXT_EVENT, openProjectInspector);
-    return () => window.removeEventListener(OPEN_PROJECT_CONTEXT_EVENT, openProjectInspector);
-  }, [
-    editorDirty,
-    inspectorDisplay,
-    inspectorState,
-    selectedTask?.id,
-    setInspectorState,
-    teamListActive,
-    toggleTeamView,
-  ]);
-
   const switchToListView = useCallback(
     () => setTeamViewPreference('list'),
     [setTeamViewPreference],
@@ -374,7 +267,7 @@ export default function App() {
     navigator.userAgent.toLowerCase().includes('macintosh');
 
   return (
-    <TaskBoundaryProvider value={{ selectTask: guardedSelectTask, createTask: guardedCreateTask }}>
+    <TaskBoundaryProvider value={{ selectTask: selectTaskFromUi, createTask: createTaskFromUi }}>
       <div className="app-frame">
         {usesIntegratedMacTitlebar && (
           <header className="app-titlebar" data-testid="app-titlebar">
@@ -415,8 +308,6 @@ export default function App() {
                   task={selectedTask}
                   onToggleTeam={requestEnterTeam}
                   inert={chromeInert}
-                  onToggleInspector={cycleExecutionInspector}
-                  inspectorOpen={inspectorState !== 'hidden'}
                   onToggleSidebar={toggleSidebar}
                   sidebarCollapsed={sidebarCollapsed}
                 />
@@ -447,7 +338,7 @@ export default function App() {
                     type="button"
                     className="chip"
                     data-testid="empty-state-create-task-button"
-                    onClick={() => void guardedCreateTask()}
+                    onClick={() => void createTaskFromUi()}
                   >
                     <Plus size={14} /> 新しいタスクを作成
                   </button>
@@ -466,22 +357,6 @@ export default function App() {
               onSwitchToListView={switchToListView}
             />
           )}
-          {/* Flex sibling of `.main`, deliberately NOT inside `.surface-anchor`/`.leader-anchor`/
-          `.surface-host`: SurfaceLayer re-parents that host between anchors on every Chat<->Team
-          morph (ADR-002), and anything nested inside it would be torn out and re-inserted with it,
-          losing its own state. Asserted mechanically in the E2E. */}
-          <InspectorPanel
-            state={effectiveInspectorState}
-            onCycle={cycleInspector}
-            onHide={hideInspector}
-            overlay={inspectorOverlay}
-            onDirtyChange={setEditorDirty}
-            display={inspectorDisplay}
-            requestedTurnId={
-              contextRequest?.taskId === selectedTaskId ? contextRequest.turnId : null
-            }
-            contextRequestKey={contextRequest?.key ?? 0}
-          />
           {teamListActive && selectedTask && (
             <TeamListView
               task={selectedTask}

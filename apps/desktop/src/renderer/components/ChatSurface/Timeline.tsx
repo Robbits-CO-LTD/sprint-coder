@@ -28,7 +28,6 @@ import {
   type WorkspaceChangeSummary,
 } from '../../lib/workspace-change-summary';
 import sprintCoderIcon from '../../../../assets/sprint-coder-icon-master-v1.png';
-import { openProjectContext } from '../../lib/project-inspector';
 import { ProjectMemoryDialog, type ProjectMemoryDialogSource } from '../ProjectMemoryDialog';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
@@ -334,16 +333,6 @@ export function Timeline({
           return (
             <div key={message.id} style={{ display: 'contents' }}>
               <MessageBubble author={message.author} content={message.content} />
-              {message.author === 'user' && message.turnId !== null && (
-                <button
-                  type="button"
-                  className="turn-context-button"
-                  data-testid={`turn-context-${message.turnId}`}
-                  onClick={() => openProjectContext(taskId, message.turnId)}
-                >
-                  Contextを表示
-                </button>
-              )}
               {message.author === 'assistant' && message.turnId !== null && (
                 <button
                   type="button"

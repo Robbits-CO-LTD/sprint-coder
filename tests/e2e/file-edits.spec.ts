@@ -41,19 +41,14 @@ test.describe('file edits', () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  test('writes nothing at the ask preset, and says which condition is missing', async () => {
+  test('writes nothing at the ask preset', async () => {
     app = await launchApp(userDataDir);
     const page = await firstWindow(app);
     await page.getByTestId('sidebar-new-task-button').click();
-
-    // No Workspace yet: the Inspector must blame the folder, not the preset — they need different
-    // actions from the user, so one generic "not connected" would leave them guessing.
-    await page.getByTestId('inspector-toggle').click();
-    await expect(page.getByTestId('inspector-stream-disconnected')).toContainText('Workspace');
+    await expect(page.getByRole('button', { name: 'Inspector' })).toHaveCount(0);
+    await expect(page.locator('[data-testid="inspector-panel"]')).toHaveCount(0);
 
     await selectWorkspace(app, page, workspaceDir);
-    // Workspace present, preset still `ask` (the default): now the preset is the reason.
-    await expect(page.getByTestId('inspector-stream-disconnected')).toContainText('確認する');
     // The Access control lives in the ContextBar; the header's read-only copy was removed as a
     // duplicate (issue #47), and the sandbox disclosure moved with the control rather than being
     // dropped.
@@ -90,14 +85,6 @@ test.describe('file edits', () => {
     // something through that it should have dropped.
     for (const path of await card.locator('.filechange-path').allInnerTexts())
       expect(path.startsWith('/'), `absolute path leaked into the timeline: ${path}`).toBe(false);
-
-    await page.getByTestId('inspector-toggle').click();
-    // While a Turn is live the panel shows one row per file with its own state; the historical list
-    // is suppressed so the same paths are not printed twice (issue #45).
-    await expect(
-      page.getByTestId('live-edit-file-row').filter({ hasText: 'parser.ts' }),
-    ).toHaveCount(1);
-    await expect(page.getByTestId('inspector-stream-disconnected')).toHaveCount(0);
 
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
       timeout: 30_000,

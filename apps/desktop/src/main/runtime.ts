@@ -183,8 +183,8 @@ export class MockRuntimeAdapter {
       const workspacePath = this.persistence.getWorkspace?.(taskId) ?? null;
       const policyEpoch = this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0;
       // Pseudo file changes (issue #37). Mock is the ONLY runtime under SPRINT_CODER_E2E_MODE=dev,
-      // so without this the edit path — timeline card, Inspector stream, replay after restart — has
-      // no producer in any E2E run. Gated on exactly the two conditions Main uses for a real
+      // so without this the timeline and replay-after-restart edit path has no producer in any E2E
+      // run. Gated on exactly the two conditions Main uses for a real
       // Runtime (see write-scope.ts), so the mock cannot report an edit in a configuration where a
       // real Runtime would have been refused one.
       if (

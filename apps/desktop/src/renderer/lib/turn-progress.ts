@@ -1,13 +1,8 @@
 import { STAGE_ORDER } from './stages';
 import type { TurnStage } from '../types/sprint-coder';
 
-// Progress arithmetic for the inspector's gauge (issue #16).
-//
-// Answering the issue's first open question: the gauge is five discrete segments and NEVER a
-// percentage. The Claude CLI does not settle a step count in advance — there is no denominator to
-// divide by — so a percentage would be a number the app invented. The issue's own wording is
-// "推定 % を演じない", and the honest consequence is that no percentage is ever shown, not that one
-// is shown when convenient.
+// Progress arithmetic shared by running-Turn status surfaces. The Claude CLI does not settle a
+// step count in advance, so this reports discrete stages rather than inventing a percentage.
 //
 // Kept as pure functions on a stage + status pair so the two properties that matter (never going
 // backwards, never reaching complete before the turn does) are unit-testable without a DOM.

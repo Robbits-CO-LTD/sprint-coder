@@ -4,9 +4,8 @@ import { fileEditVersion, readFileEdits, type LiveFileEdit } from './file-edit-b
 /**
  * The live file bodies, polled through one rAF loop (issue #45).
  *
- * Extracted so the panel and the section around it read the same source. Before this, the Inspector
- * decided whether to show "no files have changed yet" without knowing that two files were being
- * written directly above that sentence — and it said so, next to the evidence that it was wrong.
+ * Keeps timeline summaries subscribed to the shared file-edit buffer without copying file bodies
+ * into the application store.
  *
  * rAF rather than a store subscription for the reason the buffer exists at all: these arrive at the
  * model's typing speed, and a store update per frame would re-render every subscriber in the app.
