@@ -4,6 +4,8 @@ import { ArrowRightLeft, X } from './icons';
 import type { InspectorState } from '../lib/inspector-preference';
 import { LiveFileEditView } from './LiveFileEdit';
 import { useLiveFileEdits } from '../lib/useLiveFileEdits';
+import { ProjectContextInspector } from './ProjectContextInspector';
+import { useCallback, useState } from 'react';
 
 const FILE_KIND_LABEL: Record<'add' | 'update' | 'delete', string> = {
   add: '新規',
@@ -28,6 +30,9 @@ export function InspectorPanel({
   onHide,
   overlay,
   onDirtyChange,
+  display,
+  requestedTurnId,
+  contextRequestKey,
 }: {
   state: InspectorState;
   onCycle: () => void;
@@ -35,6 +40,9 @@ export function InspectorPanel({
   overlay: boolean;
   /** Raised when the editor holds unsaved changes, so the shell can warn before losing them. */
   onDirtyChange: (dirty: boolean) => void;
+  display: 'execution' | 'project';
+  requestedTurnId: string | null;
+  contextRequestKey: number;
 }) {
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const turn = useAppStore((s) => s.turnByTask[selectedTaskId ?? '']);
@@ -42,7 +50,24 @@ export function InspectorPanel({
   const live = useLiveFileEdits();
   const permission = useAppStore((s) => s.permissionByTask[selectedTaskId ?? '']);
   const workspacePath = useAppStore((s) => s.workspaceByTask[selectedTaskId ?? '']);
+  const [projectDirty, setProjectDirty] = useState(false);
+  const handleProjectDirty = useCallback(
+    (dirty: boolean) => {
+      setProjectDirty(dirty);
+      onDirtyChange(dirty);
+    },
+    [onDirtyChange],
+  );
   if (state === 'hidden') return null;
+
+  const requestHide = () => {
+    if (
+      projectDirty &&
+      !window.confirm('Project Instructionに未保存の変更があります。破棄して閉じますか？')
+    )
+      return;
+    onHide();
+  };
 
   // Mirrors main/write-scope.ts's resolveWriteScope. Kept as an explicit pair rather than a single
   // boolean so the panel can say WHICH of the two conditions is missing — "grant access" and "pick a
@@ -74,10 +99,14 @@ export function InspectorPanel({
       className={`insp-panel insp-panel--${state}${overlay ? ' insp-panel--overlay' : ''}`}
       data-testid="inspector-panel"
       data-inspector-state={state}
-      aria-label="実行インスペクタ"
+      aria-label={display === 'project' ? 'Project Contextインスペクタ' : '実行インスペクタ'}
     >
       <div className="insp-head">
-        {!rail && <span className="insp-title">実行インスペクタ</span>}
+        {!rail && (
+          <span className="insp-title">
+            {display === 'project' ? 'Project Context' : '実行インスペクタ'}
+          </span>
+        )}
         <button
           type="button"
           className="insp-cycle"
@@ -94,33 +123,35 @@ export function InspectorPanel({
             className="insp-close"
             data-testid="inspector-close"
             aria-label="インスペクタを閉じる"
-            onClick={onHide}
+            onClick={requestHide}
           >
             <X size={14} />
           </button>
         )}
       </div>
 
-      <div className="insp-section" data-testid="inspector-gauge">
-        {/* Five discrete segments, never a percentage: the Claude CLI does not settle a step count in
+      {display === 'execution' && (
+        <div className="insp-section" data-testid="inspector-gauge">
+          {/* Five discrete segments, never a percentage: the Claude CLI does not settle a step count in
             advance, so any number here would be invented (issue #16's "推定 % を演じない"). */}
-        <div className={`insp-gauge${rail ? ' insp-gauge--rail' : ''}`} role="presentation">
-          {STAGE_ORDER.map((stage, index) => (
-            <span
-              key={stage}
-              className={`insp-seg insp-seg--${progress?.segments[index] ?? 'pending'}`}
-              data-segment={progress?.segments[index] ?? 'pending'}
-            />
-          ))}
+          <div className={`insp-gauge${rail ? ' insp-gauge--rail' : ''}`} role="presentation">
+            {STAGE_ORDER.map((stage, index) => (
+              <span
+                key={stage}
+                className={`insp-seg insp-seg--${progress?.segments[index] ?? 'pending'}`}
+                data-segment={progress?.segments[index] ?? 'pending'}
+              />
+            ))}
+          </div>
+          {!rail && (
+            <p className="insp-stage" data-testid="inspector-stage">
+              {turn === undefined ? 'まだ実行がありません' : STAGE_LABEL[turn.stage]}
+            </p>
+          )}
         </div>
-        {!rail && (
-          <p className="insp-stage" data-testid="inspector-stage">
-            {turn === undefined ? 'まだ実行がありません' : STAGE_LABEL[turn.stage]}
-          </p>
-        )}
-      </div>
+      )}
 
-      {!rail && (
+      {!rail && display === 'execution' && (
         <div className="insp-section" data-testid="inspector-stream">
           <span className="insp-label">編集中のファイル</span>
           {/* The live body sits above the list: while a Turn is writing, the contents are what the
@@ -163,6 +194,15 @@ export function InspectorPanel({
             </p>
           )}
         </div>
+      )}
+      {!rail && display === 'project' && selectedTaskId !== null && (
+        <ProjectContextInspector
+          key={selectedTaskId}
+          taskId={selectedTaskId}
+          requestedTurnId={requestedTurnId}
+          requestKey={contextRequestKey}
+          onDirtyChange={handleProjectDirty}
+        />
       )}
     </aside>
   );

@@ -633,6 +633,29 @@ if (runsWithElectronAbi)
         }),
       ]);
       expect(firstRead.projectSnapshotDigest).toBe(originalManifest.candidateSnapshotDigest);
+      expect(persistence.listProjectContextManifests(task.id)).toEqual([
+        expect.objectContaining({
+          turnId: started.turnId,
+          projectId: project.id,
+          sealedDigest: originalManifest.sealedDigest,
+        }),
+      ]);
+      expect(persistence.getProjectContextManifest(task.id, started.turnId)).toMatchObject({
+        turnId: started.turnId,
+        taskId: task.id,
+        projectId: project.id,
+        items: [expect.objectContaining({ content: 'Always preserve the public API.' })],
+      });
+      const otherTask = persistence.createTask('other');
+      expect(() => persistence.getProjectContextManifest(otherTask.id, started.turnId)).toThrow(
+        'Turn not found',
+      );
+
+      const finalUsage = started.contextUsageEvents.at(-1);
+      expect(finalUsage).toMatchObject({
+        type: 'context.usage',
+        usage: expect.objectContaining({ projectTokens: expect.any(Number) }),
+      });
 
       persistence.setProjectInstruction({
         projectId: project.id,

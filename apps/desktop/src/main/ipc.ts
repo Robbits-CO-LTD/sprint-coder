@@ -52,7 +52,14 @@ import {
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   projectAssignTaskInputSchema,
+  projectContextManifestGetInputSchema,
+  projectContextManifestSchema,
+  projectContextManifestsListInputSchema,
+  projectContextManifestSummarySchema,
   projectCreateInputSchema,
+  projectGetInputSchema,
+  projectInstructionResultSchema,
+  projectInstructionSetInputSchema,
   projectSummarySchema,
   projectUnassignTaskInputSchema,
   projectUpdateInputSchema,
@@ -1465,6 +1472,37 @@ export class IpcRouter {
 
     this.handle(IPC_CHANNELS.projectsList, emptyPayloadSchema, z.array(projectSummarySchema), () =>
       this.persistence.listProjects(),
+    );
+    this.handle(
+      IPC_CHANNELS.projectsGet,
+      projectGetInputSchema,
+      projectInstructionResultSchema,
+      (input) => this.persistence.getProjectInstruction(input.projectId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsSetInstruction,
+      projectInstructionSetInputSchema,
+      projectInstructionResultSchema,
+      (input, event, envelope) =>
+        this.runMutation(
+          event,
+          envelope,
+          `project:${input.projectId}`,
+          IPC_CHANNELS.projectsSetInstruction,
+          () => this.persistence.setProjectInstruction(input),
+        ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.projectsListContextManifests,
+      projectContextManifestsListInputSchema,
+      z.array(projectContextManifestSummarySchema),
+      (input) => this.persistence.listProjectContextManifests(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.projectsGetContextManifest,
+      projectContextManifestGetInputSchema,
+      projectContextManifestSchema,
+      (input) => this.persistence.getProjectContextManifest(input.taskId, input.turnId),
     );
     this.handleMutation(
       IPC_CHANNELS.projectsCreate,

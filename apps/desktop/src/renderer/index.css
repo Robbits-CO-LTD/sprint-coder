@@ -2060,6 +2060,22 @@ button {
 .ctx-spacer {
   margin-left: auto;
 }
+.ctx-project-chip {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turn-context-button {
+  align-self: flex-start;
+  margin: -14px 0 0;
+  padding: 2px 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.turn-context-button:hover {
+  color: var(--accent);
+}
 .ctx-permission-wrap {
   position: relative;
 }
@@ -4207,6 +4223,148 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+}
+.project-context-inspector {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 2px;
+}
+.project-context-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+}
+.project-context-section-head,
+.project-instruction-actions,
+.context-manifest-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.project-context-section h3 {
+  margin: 0;
+  font-size: 12px;
+}
+.project-context-section-head > span,
+.project-instruction-actions,
+.context-manifest-item-meta {
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+.project-context-section textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-xs);
+  background: var(--bg-app);
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.project-context-section select {
+  min-width: 0;
+  max-width: 62%;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-xs);
+  background: var(--bg-app);
+  padding: 4px 6px;
+  font-size: 11px;
+}
+.project-instruction-actions button,
+.project-instruction-conflict button {
+  padding: 4px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-xs);
+  background: var(--bg-panel);
+}
+.project-instruction-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.project-instruction-actions .is-over,
+.project-context-error {
+  color: var(--danger);
+}
+.project-context-error {
+  margin: 0;
+  font-size: 11px;
+}
+.project-instruction-conflict {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
+  border-radius: var(--r-xs);
+  color: var(--warning);
+  font-size: 11px;
+}
+.context-manifest dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+.context-manifest dl > div {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 7px;
+  font-size: 10.5px;
+}
+.context-manifest dt {
+  color: var(--text-secondary);
+}
+.context-manifest dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.context-manifest code {
+  font: 10px/1.45 var(--font-mono);
+}
+.context-manifest-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.context-manifest-items li {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-xs);
+  background: var(--bg-app);
+}
+.context-manifest-items li[data-included='false'] {
+  opacity: 0.75;
+}
+.context-manifest-item-head {
+  font-size: 11px;
+}
+.context-manifest-item-head span {
+  color: var(--text-secondary);
+}
+.context-manifest-items pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 7px 0 0;
+  padding: 7px;
+  border-radius: var(--r-xs);
+  background: var(--bg-panel);
+  font: 10.5px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 /* ---------- SurfaceFooter (issue #9) ----------
    The fifth §4.2 element. Only appears for recovery notices and connection failures. */

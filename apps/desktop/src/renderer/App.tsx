@@ -26,6 +26,7 @@ import {
   writeStoredSidebarCollapsed,
 } from './lib/sidebar-preference';
 import { allowTaskBoundary } from './lib/task-boundary';
+import { OPEN_PROJECT_CONTEXT_EVENT, isProjectContextRequest } from './lib/project-inspector';
 
 // Team view preference (Slice 6.1 item 4, List fallback): renderer-only, not part of the
 // persisted Task/Team domain — a per-install UI preference, so localStorage is the right home for
@@ -155,6 +156,12 @@ export default function App() {
   // panel, so one that appeared unbidden would change the measured layout of specs that have nothing
   // to do with it.
   const [inspectorState, setInspectorStateRaw] = useState<InspectorState>(readStoredInspectorState);
+  const [inspectorDisplay, setInspectorDisplay] = useState<'execution' | 'project'>('execution');
+  const [contextRequest, setContextRequest] = useState<{
+    taskId: string;
+    turnId: string | null;
+    key: number;
+  } | null>(null);
   // Same 900px breakpoint the Team List View and the sidebar already use, so the app has one
   // narrow-viewport rule rather than three that disagree.
   const inspectorOverlay = useMediaQuery('(max-width: 900px)');
@@ -182,6 +189,16 @@ export default function App() {
     () => setInspectorState(nextInspectorState(inspectorState)),
     [inspectorState, setInspectorState],
   );
+  const cycleExecutionInspector = useCallback(() => {
+    if (
+      inspectorDisplay === 'project' &&
+      editorDirty &&
+      !window.confirm('Project Instructionに未保存の変更があります。破棄して切り替えますか？')
+    )
+      return;
+    setInspectorDisplay('execution');
+    cycleInspector();
+  }, [cycleInspector, editorDirty, inspectorDisplay]);
   const hideInspector = useCallback(() => setInspectorState('hidden'), [setInspectorState]);
 
   // Focus restoration on full Team-mode exit (a11y fix, Phase 7 / NFR-A11Y-02): both exit paths
@@ -291,6 +308,37 @@ export default function App() {
     void toggleTeamView(selectedTask.id);
   }, [selectedTask, toggleTeamView]);
 
+  useEffect(() => {
+    const openProjectInspector = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (!isProjectContextRequest(detail)) return;
+      if (
+        inspectorDisplay === 'execution' &&
+        editorDirty &&
+        !window.confirm('編集中のファイルに未保存の変更があります。破棄して切り替えますか？')
+      )
+        return;
+      setInspectorDisplay('project');
+      setContextRequest((current) => ({
+        taskId: detail.taskId,
+        turnId: detail.turnId,
+        key: (current?.key ?? 0) + 1,
+      }));
+      if (inspectorState === 'hidden' || inspectorState === 'rail') setInspectorState('panel');
+      if (teamListActive && selectedTask?.id === detail.taskId) void toggleTeamView(detail.taskId);
+    };
+    window.addEventListener(OPEN_PROJECT_CONTEXT_EVENT, openProjectInspector);
+    return () => window.removeEventListener(OPEN_PROJECT_CONTEXT_EVENT, openProjectInspector);
+  }, [
+    editorDirty,
+    inspectorDisplay,
+    inspectorState,
+    selectedTask?.id,
+    setInspectorState,
+    teamListActive,
+    toggleTeamView,
+  ]);
+
   const switchToListView = useCallback(
     () => setTeamViewPreference('list'),
     [setTeamViewPreference],
@@ -367,7 +415,7 @@ export default function App() {
                   task={selectedTask}
                   onToggleTeam={requestEnterTeam}
                   inert={chromeInert}
-                  onToggleInspector={cycleInspector}
+                  onToggleInspector={cycleExecutionInspector}
                   inspectorOpen={inspectorState !== 'hidden'}
                   onToggleSidebar={toggleSidebar}
                   sidebarCollapsed={sidebarCollapsed}
@@ -428,6 +476,11 @@ export default function App() {
             onHide={hideInspector}
             overlay={inspectorOverlay}
             onDirtyChange={setEditorDirty}
+            display={inspectorDisplay}
+            requestedTurnId={
+              contextRequest?.taskId === selectedTaskId ? contextRequest.turnId : null
+            }
+            contextRequestKey={contextRequest?.key ?? 0}
           />
           {teamListActive && selectedTask && (
             <TeamListView

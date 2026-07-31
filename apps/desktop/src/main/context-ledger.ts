@@ -205,6 +205,7 @@ export function selectHistoryForCompaction(
 
 export function aggregateContextUsage(
   fragments: readonly Pick<ContextFragment, 'source' | 'tokenEstimate'>[],
+  projectTokens = 0,
 ): ContextUsage {
   const tokensBySource = new Map<ContextSource, number>();
   for (const fragment of fragments)
@@ -225,8 +226,9 @@ export function aggregateContextUsage(
     return tokens === undefined ? [] : [{ source, tokens }];
   });
   return {
-    usedTokens: aggregated.reduce((total, fragment) => total + fragment.tokens, 0),
+    usedTokens: aggregated.reduce((total, fragment) => total + fragment.tokens, projectTokens),
     hardCapTokens: CONTEXT_HARD_CAP_TOKENS,
+    projectTokens,
     fragments: aggregated,
   };
 }

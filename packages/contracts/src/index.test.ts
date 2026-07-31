@@ -3,6 +3,7 @@ import * as contracts from './index';
 import {
   claudeEffortSchema,
   commandEnvelopeSchema,
+  contextUsageSchema,
   executionResolutionSchema,
   modelSelectionSchema,
   providerProfileConnectionCreateInputSchema,
@@ -13,6 +14,7 @@ import {
   providerConnectionSchema,
   projectAssignTaskInputSchema,
   projectCreateInputSchema,
+  projectInstructionSetInputSchema,
   projectSummarySchema,
   projectUpdateInputSchema,
   publicErrorSchema,
@@ -112,6 +114,26 @@ describe('public contracts', () => {
         updatedAt: '2026-07-31T00:00:00.000Z',
       }),
     ).toMatchObject({ id: 'project-1', revision: 1 });
+  });
+
+  it('bounds Project instruction by UTF-8 bytes and upgrades legacy usage with zero Project tokens', () => {
+    expect(
+      projectInstructionSetInputSchema.parse({
+        projectId: 'project-1',
+        expectedRevision: 1,
+        instruction: 'a'.repeat(16_384),
+      }).instruction,
+    ).toHaveLength(16_384);
+    expect(() =>
+      projectInstructionSetInputSchema.parse({
+        projectId: 'project-1',
+        expectedRevision: 1,
+        instruction: 'あ'.repeat(5_462),
+      }),
+    ).toThrow();
+    expect(
+      contextUsageSchema.parse({ usedTokens: 2, hardCapTokens: 32_000, fragments: [] }),
+    ).toMatchObject({ projectTokens: 0 });
   });
 
   it('defaults a pre-v55 persisted TaskSummary projectId to null during operation replay', () => {
@@ -745,6 +767,7 @@ describe('public contracts', () => {
         usage: {
           usedTokens: 7,
           hardCapTokens: 32_000,
+          projectTokens: 0,
           fragments: [{ source: 'history', tokens: 7 }],
         },
       }),
@@ -774,6 +797,7 @@ describe('public contracts', () => {
         contextUsage: {
           usedTokens: 7,
           hardCapTokens: 32_000,
+          projectTokens: 0,
           fragments: [
             { source: 'history', tokens: 6 },
             { source: 'background', tokens: 1 },
@@ -1062,7 +1086,7 @@ describe('public contracts', () => {
         messageId: null,
       },
       queued: [],
-      contextUsage: { usedTokens: 0, hardCapTokens: 32_000, fragments: [] },
+      contextUsage: { usedTokens: 0, hardCapTokens: 32_000, projectTokens: 0, fragments: [] },
     };
     expect(turnSnapshotSchema.parse(snapshot)).toMatchObject({
       activeTurn: { turnId: 'turn-1', stage: 'waiting_approval' },

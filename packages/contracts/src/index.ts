@@ -910,6 +910,7 @@ export const contextUsageSchema = z
   .object({
     usedTokens: z.number().int().nonnegative(),
     hardCapTokens: z.number().int().positive(),
+    projectTokens: z.number().int().nonnegative().default(0),
     fragments: z.array(
       z
         .object({
@@ -2316,6 +2317,68 @@ export const projectAssignTaskInputSchema = z
 export const projectUnassignTaskInputSchema = z
   .object({ taskId: idSchema, expectedProjectId: idSchema.nullable() })
   .strict();
+export const projectInstructionSchema = z
+  .string()
+  .refine((value) => new TextEncoder().encode(value).byteLength <= 16_384, {
+    message: 'Project instruction must not exceed 16 KiB',
+  });
+export const projectGetInputSchema = z.object({ projectId: idSchema }).strict();
+export const projectInstructionResultSchema = z
+  .object({
+    instruction: projectInstructionSchema,
+    revision: z.number().int().positive(),
+    contextEpoch: z.number().int().nonnegative(),
+  })
+  .strict();
+export const projectInstructionSetInputSchema = projectGetInputSchema
+  .extend({
+    expectedRevision: z.number().int().positive(),
+    instruction: projectInstructionSchema,
+  })
+  .strict();
+export const projectContextManifestItemSchema = z
+  .object({
+    itemId: z.string().min(1),
+    kind: z.enum(['instruction', 'memory', 'reference']),
+    sourceTaskId: idSchema.nullable(),
+    sourceTurnId: idSchema.nullable(),
+    sourceReferenceId: idSchema.nullable(),
+    candidateDigest: digestSchema,
+    sealedDigest: digestSchema.nullable(),
+    included: z.boolean(),
+    exclusionReason: z.string().min(1).nullable(),
+    authority: z.enum(['user', 'none']),
+    localOnly: z.boolean(),
+    content: z.string().nullable(),
+    capturedAt: timestampSchema,
+  })
+  .strict();
+export const projectContextManifestSummarySchema = z
+  .object({
+    turnId: idSchema,
+    projectId: idSchema.nullable(),
+    projectContextEpoch: z.number().int().nonnegative().nullable(),
+    candidateSnapshotDigest: digestSchema,
+    sealedDigest: digestSchema,
+    createdAt: timestampSchema,
+  })
+  .strict();
+export const projectContextManifestSchema = projectContextManifestSummarySchema
+  .extend({
+    sealId: idSchema,
+    taskId: idSchema,
+    projectRevision: z.number().int().positive().nullable(),
+    compacted: z.boolean(),
+    items: z.array(projectContextManifestItemSchema),
+  })
+  .strict();
+export const projectContextManifestsListInputSchema = z.object({ taskId: idSchema }).strict();
+export const projectContextManifestGetInputSchema = z
+  .object({ taskId: idSchema, turnId: idSchema })
+  .strict();
+export type ProjectInstruction = z.infer<typeof projectInstructionResultSchema>;
+export type ProjectContextManifestSummary = z.infer<typeof projectContextManifestSummarySchema>;
+export type ProjectContextManifest = z.infer<typeof projectContextManifestSchema>;
 export const taskIdPayloadSchema = z.object({ taskId: idSchema }).strict();
 /** A Workspace-relative path within a Task. Validated as a bounded string here; whether it is
  * actually inside the Workspace is Main's decision, not the schema's (issue #43). */
@@ -2470,6 +2533,14 @@ export interface SprintCoderApi {
   };
   projects: {
     list(): Promise<ProjectSummary[]>;
+    get(input: { projectId: string }): Promise<ProjectInstruction>;
+    setInstruction(input: {
+      projectId: string;
+      expectedRevision: number;
+      instruction: string;
+    }): Promise<ProjectInstruction>;
+    listContextManifests(input: { taskId: string }): Promise<ProjectContextManifestSummary[]>;
+    getContextManifest(input: { taskId: string; turnId: string }): Promise<ProjectContextManifest>;
     create(input: { name: string }): Promise<ProjectSummary>;
     update(input: {
       projectId: string;
@@ -2645,6 +2716,10 @@ export const IPC_CHANNELS = {
   tasksGetDraft: 'sprint-coder:tasks:get-draft',
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
   projectsList: 'sprint-coder:projects:list',
+  projectsGet: 'sprint-coder:projects:get',
+  projectsSetInstruction: 'sprint-coder:projects:set-instruction',
+  projectsListContextManifests: 'sprint-coder:projects:list-context-manifests',
+  projectsGetContextManifest: 'sprint-coder:projects:get-context-manifest',
   projectsCreate: 'sprint-coder:projects:create',
   projectsUpdate: 'sprint-coder:projects:update',
   projectsAssignTask: 'sprint-coder:projects:assign-task',
