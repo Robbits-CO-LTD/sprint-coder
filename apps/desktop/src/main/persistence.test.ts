@@ -30,6 +30,7 @@ import {
   validateCanvasNodePositions,
 } from './persistence';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
+import { BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
 import {
   EditSagaCrashError,
   EditSagaExecutor,
@@ -443,9 +444,9 @@ if (runsWithElectronAbi)
       const canceled = persistence.cancelTurn(task.id, first.turnId);
       const all = persistence.listEventsAfter(task.id, 0);
 
-      expect([first.event.seq, queued.event.seq, stage.seq, canceled?.seq]).toEqual([1, 2, 3, 4]);
-      expect(all.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
-      expect(persistence.listEventsAfter(task.id, 2).map((event) => event.seq)).toEqual([3, 4]);
+      expect([first.event.seq, queued.event.seq, stage.seq, canceled?.seq]).toEqual([1, 3, 4, 5]);
+      expect(all.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
+      expect(persistence.listEventsAfter(task.id, 2).map((event) => event.seq)).toEqual([3, 4, 5]);
       persistence.close();
     });
 
@@ -588,6 +589,140 @@ if (runsWithElectronAbi)
       expect(queued?.skills).toEqual([resolved]);
       expect(reopened.getTurnSkills(task.id, queued!.turnId)).toEqual([resolved]);
       reopened.close();
+    });
+
+    it('creates one immutable context seal at the actual Turn boundary', () => {
+      const { persistence } = createPersistence();
+      const project = persistence.createProject('Context Project');
+      const instruction = persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: project.revision,
+        instruction: 'Always preserve the public API.',
+      });
+      const task = persistence.createTask('sealed task', false, project.id);
+
+      const started = persistence.startTurn(task.id, 'implement it');
+      const originalManifest = persistence.getContextSealManifest('turn', started.turnId);
+      const firstRead = persistence.prepareContext(task.id, started.turnId);
+      const secondRead = persistence.prepareContext(task.id, started.turnId);
+
+      expect(originalManifest).toMatchObject({
+        sealId: started.sealId,
+        taskId: task.id,
+        projectId: project.id,
+        projectRevision: instruction.revision,
+        projectContextEpoch: instruction.contextEpoch,
+        items: [
+          expect.objectContaining({
+            kind: 'instruction',
+            authority: 'user',
+            included: true,
+            content: 'Always preserve the public API.',
+          }),
+        ],
+      });
+      expect(firstRead).toEqual(secondRead);
+      expect(firstRead.usageEvents).toEqual([]);
+
+      persistence.setProjectInstruction({
+        projectId: project.id,
+        expectedRevision: instruction.revision,
+        instruction: 'A newer instruction.',
+      });
+      expect(persistence.getContextSealManifest('turn', started.turnId)).toEqual(originalManifest);
+      persistence.close();
+    });
+
+    it('stores an empty Project manifest for an unassigned Turn and seals Team guidance once', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('unassigned');
+      const started = persistence.startTurn(task.id, 'use a team', [], true);
+
+      expect(persistence.getContextSealManifest('turn', started.turnId)).toMatchObject({
+        projectId: null,
+        projectRevision: null,
+        projectContextEpoch: null,
+        items: [],
+      });
+      const prepared = persistence.prepareContext(task.id, started.turnId);
+      expect(
+        prepared.fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
+      expect(persistence.prepareContext(task.id, started.turnId)).toEqual(prepared);
+      persistence.close();
+    });
+
+    it('rolls back the whole Turn when context sealing fails', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('rollback');
+      const setup = new Database(path);
+      setup.exec(`
+        CREATE TRIGGER reject_context_seal
+        BEFORE INSERT ON context_seals
+        BEGIN
+          SELECT RAISE(ABORT, 'seal rejected');
+        END;
+      `);
+      setup.close();
+
+      expect(() => persistence.startTurn(task.id, 'must roll back')).toThrow('seal rejected');
+      expect(persistence.listMessages(task.id)).toEqual([]);
+      expect(persistence.listEventsAfter(task.id, 0)).toEqual([]);
+      expect(persistence.getActiveTurnId(task.id)).toBeNull();
+      persistence.close();
+    });
+
+    it('keeps a tampered queued row queued and creates no Turn', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('queue integrity');
+      persistence.queueInput(task.id, 'original queued text', 'queue-integrity');
+      const tamper = new Database(path);
+      tamper
+        .prepare("UPDATE input_queue SET payload_json = ? WHERE task_id = ? AND state = 'queued'")
+        .run(JSON.stringify({ text: 'tampered', skills: [] }), task.id);
+      tamper.close();
+
+      expect(() => persistence.startNextQueued(task.id)).toThrow(
+        'Queued input payload integrity check failed',
+      );
+      expect(persistence.getActiveTurnId(task.id)).toBeNull();
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection
+          .prepare(
+            'SELECT state, count(*) AS count FROM input_queue WHERE task_id = ? GROUP BY state',
+          )
+          .get(task.id),
+      ).toEqual({ state: 'queued', count: 1 });
+      expect(inspection.prepare('SELECT count(*) AS count FROM context_seals').get()).toEqual({
+        count: 0,
+      });
+      inspection.close();
+      persistence.close();
+    });
+
+    it('rolls back stop-and-send cancellation when the replacement seal cannot commit', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('replace atomically');
+      const active = persistence.startTurn(task.id, 'old request');
+      const setup = new Database(path);
+      setup.exec(`
+        CREATE TRIGGER reject_replacement_seal
+        BEFORE INSERT ON context_seals
+        BEGIN
+          SELECT RAISE(ABORT, 'replacement seal rejected');
+        END;
+      `);
+      setup.close();
+
+      expect(() => persistence.replaceActiveTurn(task.id, active.turnId, 'new request')).toThrow(
+        'replacement seal rejected',
+      );
+      expect(persistence.getActiveTurnId(task.id)).toBe(active.turnId);
+      expect(
+        persistence.listEventsAfter(task.id, 0).filter(({ type }) => type === 'turn.completed'),
+      ).toEqual([]);
+      persistence.close();
     });
 
     it('takes custody of a generated image and announces it on the Turn event stream', () => {
@@ -3471,7 +3606,7 @@ if (runsWithElectronAbi)
         taskId: task.id,
         turnId: turn.turnId,
         approvalId: 'approval-1',
-        seq: 5,
+        seq: 6,
       });
       expect(persistence.snapshot(task.id).activeTurn).toMatchObject({
         turnId: turn.turnId,
@@ -3489,7 +3624,7 @@ if (runsWithElectronAbi)
       });
       expect(
         inspection
-          .prepare('SELECT type FROM turn_events WHERE task_id = ? AND seq = 5')
+          .prepare('SELECT type FROM turn_events WHERE task_id = ? AND seq = 6')
           .get(task.id),
       ).toEqual({ type: 'approval.requested' });
       inspection.close();
@@ -3714,7 +3849,7 @@ if (runsWithElectronAbi)
           type: 'approval.resolved',
           approvalId,
           decision,
-          seq: 6,
+          seq: 7,
         });
         expect(persistence.snapshot(task.id).activeTurn).toMatchObject({
           turnId: turn.turnId,
@@ -3898,7 +4033,7 @@ if (runsWithElectronAbi)
 
       const canceled = persistence.cancelTurn(task.id, turn.turnId);
 
-      expect(canceled).toMatchObject({ type: 'turn.completed', state: 'canceled', seq: 7 });
+      expect(canceled).toMatchObject({ type: 'turn.completed', state: 'canceled', seq: 8 });
       expect(persistence.getApproval(task.id, 'approval-1')).toMatchObject({
         state: 'canceled',
         decision: null,
@@ -3906,11 +4041,11 @@ if (runsWithElectronAbi)
       });
       expect(persistence.listPendingApprovals(task.id)).toEqual([]);
       expect(
-        persistence.listEventsAfter(task.id, 4).map((event) => [event.type, event.seq]),
+        persistence.listEventsAfter(task.id, 5).map((event) => [event.type, event.seq]),
       ).toEqual([
-        ['approval.requested', 5],
-        ['approval.canceled', 6],
-        ['turn.completed', 7],
+        ['approval.requested', 6],
+        ['approval.canceled', 7],
+        ['turn.completed', 8],
       ]);
       expect(() =>
         persistence.resolveApproval({
@@ -3946,14 +4081,14 @@ if (runsWithElectronAbi)
 
       const reopened = new SqlitePersistenceClient(path);
       expect(
-        reopened.listEventsAfter(task.id, 4).map((event) => ({
+        reopened.listEventsAfter(task.id, 5).map((event) => ({
           type: event.type,
           seq: event.seq,
           approvalId: 'approvalId' in event ? event.approvalId : undefined,
         })),
       ).toEqual([
-        { type: 'approval.requested', seq: 5, approvalId: 'approval-1' },
-        { type: 'approval.resolved', seq: 6, approvalId: 'approval-1' },
+        { type: 'approval.requested', seq: 6, approvalId: 'approval-1' },
+        { type: 'approval.resolved', seq: 7, approvalId: 'approval-1' },
       ]);
       expect(reopened.getApproval(task.id, 'approval-1')).toMatchObject({
         state: 'resolved',
@@ -4148,7 +4283,7 @@ if (runsWithElectronAbi)
       const prepared = persistence.prepareContext(task.id, started.turnId);
 
       expect(prepared.compacted).toBe(true);
-      expect(prepared.usageEvents.map((event) => [event.type, event.seq])).toEqual([
+      expect(started.contextUsageEvents.map((event) => [event.type, event.seq])).toEqual([
         ['context.usage', 2],
         ['context.usage', 4],
       ]);
@@ -4164,8 +4299,8 @@ if (runsWithElectronAbi)
       expect(persistence.snapshot(task.id)).toMatchObject({
         lastSeq: 4,
         contextUsage:
-          prepared.usageEvents[1]?.type === 'context.usage'
-            ? prepared.usageEvents[1].usage
+          started.contextUsageEvents[1]?.type === 'context.usage'
+            ? started.contextUsageEvents[1].usage
             : undefined,
       });
       persistence.close();
@@ -4283,7 +4418,7 @@ if (runsWithElectronAbi)
       expect(reopened.listBackgroundCompletions(task.id)[0]?.state).toBe('runtimeAcked');
       const repeated = reopened.prepareContext(task.id, target.turnId);
       expect(repeated.fragments.some((fragment) => fragment.id === 'completion-durable')).toBe(
-        false,
+        true,
       );
       expect(
         reopened
@@ -4824,6 +4959,7 @@ if (runsWithElectronAbi)
         { version: 53 },
         { version: 54 },
         { version: 55 },
+        { version: 56 },
       ]);
       for (const [table, columns] of [
         [
@@ -4849,7 +4985,9 @@ if (runsWithElectronAbi)
             'manager_policy_json',
           ],
         ],
-        ['tasks', ['connection_id', 'requested_provider', 'requested_model']],
+        ['tasks', ['connection_id', 'requested_provider', 'requested_model', 'project_id']],
+        ['projects', ['instruction', 'context_epoch']],
+        ['input_queue', ['payload_digest']],
         ['messages', ['work_content']],
         ['teams', ['policy_json']],
         ['team_messages', ['execution_id', 'attempt_id']],
@@ -4883,6 +5021,9 @@ if (runsWithElectronAbi)
         'team_attempts',
         'team_v2_activity_events',
         'provider_connections',
+        'context_seals',
+        'context_seal_fragments',
+        'project_context_manifest_items',
       ])
         expect(migratedTables.has(table)).toBe(true);
       expect(

@@ -138,7 +138,13 @@ import {
 import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
-import type { PersistenceClient, QueueTransition, StartedTurn } from './persistence';
+import type {
+  PersistedTurnSkill,
+  PersistenceClient,
+  QueueTransition,
+  StartedTurn,
+  StopAndSendTransition,
+} from './persistence';
 import { toApprovalAuditSummary, toApprovalSummary } from './persistence';
 import {
   CanvasViewConflictError,
@@ -208,7 +214,6 @@ import {
   type ExecuteTeamToolOptions,
 } from './team-tools';
 import {
-  attachBuiltinTeamSkill,
   BUILTIN_TEAM_SKILL_AUDIT,
   BUILTIN_TEAM_SKILL_FRAGMENT_ID,
   installBuiltinTeamSkill,
@@ -1623,7 +1628,12 @@ export class IpcRouter {
           input.taskId,
           IPC_CHANNELS.turnsStart,
           () => {
-            started = this.persistence.startTurn(input.taskId, input.text, skills);
+            started = this.persistence.startTurn(
+              input.taskId,
+              input.text,
+              skills,
+              shouldSealBuiltinTeamSkill(input.text, skills),
+            );
             return {
               turnId: started.turnId,
               ...(started.renamedTask === undefined ? {} : { renamedTask: started.renamedTask }),
@@ -1654,6 +1664,7 @@ export class IpcRouter {
               input.text,
               envelope.operationId,
               skills,
+              shouldSealBuiltinTeamSkill(input.text, skills),
             );
             queueEvent = queued.event;
             return { ordinal: queued.ordinal };
@@ -1705,27 +1716,29 @@ export class IpcRouter {
         );
         if (cached.found) return cached.value;
         const activeTurnId = this.persistence.getActiveTurnId(input.taskId);
-        if (activeTurnId !== null) {
-          this.approvalCoordinator.turnEnded(input.taskId, activeTurnId, 'canceled');
-          await this.cancelRuntime(input.taskId, activeTurnId);
-        }
-        const canceledTurnId: string | null = activeTurnId;
-        let canceledEvent: TurnEvent | null = null;
-        let started: StartedTurn | undefined;
+        let transition: StopAndSendTransition | undefined;
         const result = this.runMutation(
           event,
           envelope,
           input.taskId,
           IPC_CHANNELS.turnsStopAndSend,
           () => {
-            if (canceledTurnId !== null)
-              canceledEvent = this.persistence.cancelTurn(input.taskId, canceledTurnId);
-            started = this.persistence.startTurn(input.taskId, input.text, skills);
+            transition = this.persistence.replaceActiveTurn(
+              input.taskId,
+              activeTurnId,
+              input.text,
+              skills,
+              shouldSealBuiltinTeamSkill(input.text, skills),
+            );
           },
         );
-        if (result.executed) {
-          if (canceledEvent !== null) this.publish(canceledEvent);
-          if (started !== undefined) this.dispatchStarted(started);
+        if (result.executed && transition !== undefined) {
+          if (activeTurnId !== null) {
+            this.approvalCoordinator.turnEnded(input.taskId, activeTurnId, 'canceled');
+            await this.cancelRuntime(input.taskId, activeTurnId);
+          }
+          if (transition.canceledEvent !== null) this.publish(transition.canceledEvent);
+          this.dispatchStarted(transition.started);
         }
         return result.value;
       },
@@ -2150,12 +2163,14 @@ export class IpcRouter {
 
   private dispatchStarted(started: StartedTurn): void {
     this.publish(started.event);
+    for (const event of started.contextUsageEvents) this.publish(event);
     this.startSelectedRuntime(started);
   }
 
   private dispatchQueueTransition(transition: QueueTransition): void {
     if (transition === null) return;
     this.publish(transition.started.event);
+    for (const event of transition.started.contextUsageEvents) this.publish(event);
     this.publish(transition.queueEvent);
     this.startSelectedRuntime(transition.started);
   }
@@ -2534,7 +2549,7 @@ export class IpcRouter {
       this.teamSkillExpectedTurns.add(turnId);
       this.teamSkillResolutionByTurn.set(turnId, BUILTIN_TEAM_SKILL_AUDIT);
     }
-    return attachBuiltinTeamSkill(prepared, taskId, teamSkill);
+    return prepared;
   }
 
   private acknowledgeRuntimeContext(
@@ -3541,4 +3556,8 @@ function runtimeProtocolError(): PublicError {
     userMessage: 'Runtime Hostから無効なイベントを受信しました。',
     retryable: false,
   };
+}
+
+function shouldSealBuiltinTeamSkill(text: string, skills: readonly PersistedTurnSkill[]): boolean {
+  return isTeamScenarioInput(text) || skills.some(({ selection }) => selection.kind === 'team');
 }
