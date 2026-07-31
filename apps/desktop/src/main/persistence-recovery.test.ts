@@ -82,7 +82,7 @@ if (runsWithElectronAbi)
   describe('10k-event projection restore (NFR-PERF-04)', () => {
     it(
       'reopens and projects a 10,000-delta task within budget',
-      () => {
+      async () => {
         const path = tempDatabasePath();
         const seeded = new SqlitePersistenceClient(path);
         const task = seeded.createTask('projection perf fixture');
@@ -92,6 +92,9 @@ if (runsWithElectronAbi)
         const messageId = randomUUID();
         for (let index = 0; index < 10_000; index += 1) {
           seeded.appendDelta(task.id, started.turnId, messageId, `chunk-${index} `);
+          // Windows can spend over a minute building this fixture. Yield periodically so Vitest's
+          // worker can service its control-plane RPC while keeping setup outside the measurement.
+          if (index % 250 === 249) await new Promise<void>((resolve) => setImmediate(resolve));
         }
         seeded.close();
 
