@@ -1,4 +1,5 @@
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { dirname, join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from '@sprint-coder/domain';
@@ -9,6 +10,7 @@ import {
 } from './protocol';
 
 function startEnvelope() {
+  const payload = 'hello';
   return {
     protocolVersion: RUNTIME_PROTOCOL_VERSION,
     runtimeInstanceId: 'runtime-1',
@@ -21,6 +23,10 @@ function startEnvelope() {
     workspacePath: null,
     model: 'auto',
     contextFragments: [],
+    projectItems: [],
+    projectSnapshotDigest: null,
+    payload,
+    payloadDigest: createHash('sha256').update(payload).digest('hex'),
     toolCatalogSnapshot: new ToolRegistry().createSnapshot({
       providerId: 'codex',
       workspaceId: null,
@@ -270,6 +276,9 @@ describe('Runtime Host protocol', () => {
       operationId: base.operationId,
       type: 'started',
       acceptedContextFragmentIds: ['completion-1'],
+      acceptedProjectItemIds: [],
+      acceptedProjectSnapshotDigest: null,
+      acceptedPayloadDigest: base.payloadDigest,
     };
     expect(isRuntimeToMainEnvelope(started)).toBe(true);
     expect(
@@ -278,5 +287,79 @@ describe('Runtime Host protocol', () => {
         acceptedContextFragmentIds: ['completion-1', 'completion-1'],
       }),
     ).toBe(false);
+  });
+
+  it('rejects payload tampering and forged Project authority', () => {
+    const valid = startEnvelope();
+    expect(isMainToRuntimeEnvelope({ ...valid, payload: 'tampered' })).toBe(false);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        projectItems: [
+          {
+            id: 'reference-1',
+            kind: 'reference',
+            authority: 'user',
+            localOnly: false,
+            sealedDigest: 'a'.repeat(64),
+            content: 'data',
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it('enforces combined Project protocol count and UTF-8 byte budgets', () => {
+    const valid = startEnvelope();
+    const fragments = Array.from({ length: 255 }, (_, index) => ({
+      id: `fragment-${index}`,
+      source: 'history' as const,
+      trust: 'user' as const,
+      authority: 'user' as const,
+      content: '',
+    }));
+    const projectItem = {
+      id: 'project-instruction',
+      kind: 'instruction' as const,
+      authority: 'user' as const,
+      localOnly: false,
+      sealedDigest: 'a'.repeat(64),
+      content: 'あ'.repeat(Math.floor((64 * 1024) / 3)),
+    };
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        contextFragments: fragments,
+        projectItems: [projectItem],
+      }),
+    ).toBe(true);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        contextFragments: [...fragments, { ...fragments[0]!, id: 'fragment-256' }],
+        projectItems: [projectItem],
+      }),
+    ).toBe(false);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        projectItems: [{ ...projectItem, content: 'あ'.repeat(Math.floor((64 * 1024) / 3) + 1) }],
+      }),
+    ).toBe(false);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        contextFragments: [
+          {
+            id: 'large-fragment',
+            source: 'history',
+            trust: 'user',
+            authority: 'user',
+            content: 'x'.repeat(64 * 1024),
+          },
+        ],
+        projectItems: [{ ...projectItem, content: `y${'x'.repeat(64 * 1024 - 1)}` }],
+      }),
+    ).toBe(true);
   });
 });

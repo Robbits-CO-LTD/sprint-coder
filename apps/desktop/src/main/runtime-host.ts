@@ -5,11 +5,16 @@ import type { CodexModelOption, PublicError, RuntimeWriteScope } from '@sprint-c
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { PreparedContext } from './context-ledger';
 import {
+  serializeCliExecutionPayload,
+  type SerializedExecutionPayload,
+} from '../runtime-host/execution-payload';
+import {
   RUNTIME_PROTOCOL_VERSION,
   isRuntimeToMainEnvelope,
   type MainToRuntimeEnvelope,
   type RuntimeCanonicalEvent,
   type RuntimeContextFragment,
+  type RuntimeProjectContextItem,
   type RuntimeSkillInput,
   type RuntimeTeamMcpOption,
 } from '../runtime-host/protocol';
@@ -19,6 +24,9 @@ type ActiveTurn = {
   operationId: string;
   lastSeq: number;
   contextFragmentIds: string[];
+  projectItemIds: string[];
+  projectSnapshotDigest: string | null;
+  payloadDigest: string;
 };
 export type RuntimeStopReceipt = Readonly<{
   turnId: string;
@@ -33,7 +41,14 @@ type CancelWaiter = {
 type EventHandler = (taskId: string, turnId: string, event: RuntimeCanonicalEvent) => void;
 type FailureHandler = (taskId: string, turnId: string, error: PublicError) => void;
 type PrepareContext = (taskId: string, turnId: string) => PreparedContext;
-type ContextAccepted = (taskId: string, turnId: string, fragmentIds: readonly string[]) => void;
+type ContextAccepted = (
+  taskId: string,
+  turnId: string,
+  fragmentIds: readonly string[],
+  projectItemIds: readonly string[],
+  projectSnapshotDigest: string | null,
+  payloadDigest: string,
+) => void;
 export type RuntimeCapabilityReport = {
   available: boolean;
   models: CodexModelOption[];
@@ -82,12 +97,22 @@ export class RuntimeHostClient {
     // and whether a Workspace exists — never defaulted to anything permissive here.
     writeScope?: RuntimeWriteScope,
     skills: readonly RuntimeSkillInput[] = [],
+    serializedPayload?: SerializedExecutionPayload,
   ): void {
-    const contextFragments = (
-      preparedContext?.fragments ??
-      this.prepareContext?.(taskId, turnId).fragments ??
-      []
-    ).map(toRuntimeContextFragment);
+    const prepared = preparedContext ?? this.prepareContext?.(taskId, turnId);
+    const contextFragments = (prepared?.fragments ?? []).map(toRuntimeContextFragment);
+    const projectItems = (prepared?.projectItems ?? []).map(toRuntimeProjectContextItem);
+    const projectSnapshotDigest = prepared?.projectSnapshotDigest ?? null;
+    const payload =
+      serializedPayload ??
+      serializeCliExecutionPayload({
+        kind: this.kind,
+        request: input,
+        contextFragments,
+        projectItems,
+        ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
+        skills,
+      });
     if (this.disposed) {
       this.onFailure(taskId, turnId, this.unavailableError());
       return;
@@ -103,6 +128,9 @@ export class RuntimeHostClient {
       operationId,
       lastSeq: 0,
       contextFragmentIds: contextFragments.map((fragment) => fragment.id),
+      projectItemIds: projectItems.map((item) => item.id),
+      projectSnapshotDigest,
+      payloadDigest: payload.digest,
     });
     this.post({
       ...this.base(taskId, turnId, operationId, 1),
@@ -111,6 +139,10 @@ export class RuntimeHostClient {
       workspacePath,
       model,
       contextFragments,
+      projectItems,
+      projectSnapshotDigest,
+      payload: Buffer.from(payload.bytes).toString('utf8'),
+      payloadDigest: payload.digest,
       skills: [...skills],
       toolCatalogSnapshot,
       ...(teamMcp === undefined ? {} : { teamMcp }),
@@ -240,7 +272,12 @@ export class RuntimeHostClient {
       this.onEvent(raw.taskId, raw.turnId, raw.event);
       if (raw.event.type === 'completed') this.active.delete(raw.turnId);
     } else if (raw.type === 'started') {
-      if (!sameIds(active.contextFragmentIds, raw.acceptedContextFragmentIds)) {
+      if (
+        !sameIds(active.contextFragmentIds, raw.acceptedContextFragmentIds) ||
+        !sameIds(active.projectItemIds, raw.acceptedProjectItemIds) ||
+        active.projectSnapshotDigest !== raw.acceptedProjectSnapshotDigest ||
+        active.payloadDigest !== raw.acceptedPayloadDigest
+      ) {
         void this.cancel(raw.taskId, raw.turnId).catch(() => undefined);
         this.onFailure(raw.taskId, raw.turnId, {
           code: 'RUNTIME_PROTOCOL_ERROR',
@@ -250,7 +287,14 @@ export class RuntimeHostClient {
         return;
       }
       try {
-        this.onContextAccepted?.(raw.taskId, raw.turnId, raw.acceptedContextFragmentIds);
+        this.onContextAccepted?.(
+          raw.taskId,
+          raw.turnId,
+          raw.acceptedContextFragmentIds,
+          raw.acceptedProjectItemIds,
+          raw.acceptedProjectSnapshotDigest,
+          raw.acceptedPayloadDigest,
+        );
       } catch {
         void this.cancel(raw.taskId, raw.turnId).catch(() => undefined);
         this.onFailure(raw.taskId, raw.turnId, {
@@ -371,7 +415,7 @@ export class RuntimeHostClient {
   }
 }
 
-function toRuntimeContextFragment(
+export function toRuntimeContextFragment(
   fragment: PreparedContext['fragments'][number],
 ): RuntimeContextFragment {
   const authority =
@@ -388,6 +432,19 @@ function toRuntimeContextFragment(
     trust: fragment.trust,
     authority,
     content: fragment.content,
+  };
+}
+
+function toRuntimeProjectContextItem(
+  item: PreparedContext['projectItems'][number],
+): RuntimeProjectContextItem {
+  return {
+    id: item.id,
+    kind: item.kind,
+    authority: item.authority,
+    localOnly: item.localOnly,
+    sealedDigest: item.sealedDigest,
+    content: item.content,
   };
 }
 

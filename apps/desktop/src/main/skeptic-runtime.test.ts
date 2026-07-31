@@ -7,7 +7,13 @@ import {
 } from './skeptic-runtime';
 import type { PreparedContext } from './context-ledger';
 
-const context: PreparedContext = { fragments: [], usageEvents: [], compacted: false };
+const context: PreparedContext = {
+  fragments: [],
+  projectItems: [],
+  projectSnapshotDigest: null,
+  usageEvents: [],
+  compacted: false,
+};
 
 type StartCall = {
   taskId: string;
@@ -221,6 +227,8 @@ describe('refusing to verify rather than pretending to', () => {
 
   it('does not copy the source Task context into the independent skeptic turn', async () => {
     const attackerControlledContext: PreparedContext = {
+      projectItems: [],
+      projectSnapshotDigest: null,
       fragments: [
         {
           id: 'injected-fragment',

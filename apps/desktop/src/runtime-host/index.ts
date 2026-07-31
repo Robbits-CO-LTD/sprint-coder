@@ -41,6 +41,9 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
         send(data.taskId, data.turnId, data.operationId, {
           type: 'started',
           acceptedContextFragmentIds: data.contextFragments.map((fragment) => fragment.id),
+          acceptedProjectItemIds: data.projectItems.map((item) => item.id),
+          acceptedProjectSnapshotDigest: data.projectSnapshotDigest,
+          acceptedPayloadDigest: data.payloadDigest,
         }),
       data.workspacePath,
       data.model,
@@ -54,6 +57,8 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
       data.effort,
       data.writeScope,
       data.skills ?? [],
+      data.projectItems,
+      data.payload,
     );
   } else if (data.type === 'cancel') {
     void adapter.cancel(data.turnId).then((forced) => {
@@ -108,7 +113,11 @@ function send(
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'stopped' }>, 'type' | 'forced'>
     | Pick<
         Extract<RuntimeToMainEnvelope, { type: 'started' }>,
-        'type' | 'acceptedContextFragmentIds'
+        | 'type'
+        | 'acceptedContextFragmentIds'
+        | 'acceptedProjectItemIds'
+        | 'acceptedProjectSnapshotDigest'
+        | 'acceptedPayloadDigest'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'exit' }>, 'type' | 'code' | 'canceled'>
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'error' }>, 'type' | 'error'>,

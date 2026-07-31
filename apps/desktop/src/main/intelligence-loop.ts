@@ -10,7 +10,7 @@ import {
   type ToolTranscriptItem,
   type WorldState,
 } from './context-compiler';
-import type { ContextFragment } from './context-ledger';
+import type { ContextFragment, ProjectContextItem } from './context-ledger';
 
 export type ModelToolCall = {
   callId: string;
@@ -58,6 +58,7 @@ export type IntelligenceLoopInput = {
   taskId: string;
   turnId: string;
   fragments: readonly ContextFragment[];
+  projectItems?: readonly ProjectContextItem[];
   model: string;
   effort: ReasoningEffort;
   policyEpoch: number;
@@ -93,6 +94,7 @@ export async function runIntelligenceLoop(
   for (let ordinal = 1; ordinal <= maxSteps; ordinal += 1) {
     const compiled = compiler.compile({
       fragments: input.fragments,
+      ...(input.projectItems === undefined ? {} : { projectItems: input.projectItems }),
       toolTranscript: transcript,
       previousWorldState,
       worldState,

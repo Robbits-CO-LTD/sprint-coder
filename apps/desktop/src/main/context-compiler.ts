@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { ContextFragment, ContextTrust } from './context-ledger';
+import type { ContextFragment, ContextTrust, ProjectContextItem } from './context-ledger';
 
 export type InstructionAuthority = 'system' | 'user' | 'workspace' | 'none';
 
@@ -41,6 +41,7 @@ export type CompiledContextItem =
 
 export type CompileContextInput = {
   fragments: readonly ContextFragment[];
+  projectItems?: readonly ProjectContextItem[];
   workspaceRules?: readonly WorkspaceRule[];
   previousWorldState?: WorldState;
   worldState?: WorldState;
@@ -62,6 +63,17 @@ export class ContextCompiler {
       trust: fragment.trust,
       content: fragment.content,
     }));
+    for (const item of input.projectItems ?? [])
+      items.push({
+        type: 'instruction',
+        sourceId: item.id,
+        authority: item.authority,
+        trust: 'user',
+        content:
+          item.kind === 'reference'
+            ? JSON.stringify({ type: 'untrusted_project_reference', data: item.content })
+            : item.content,
+      });
 
     for (const rule of input.workspaceRules ?? [])
       items.push({

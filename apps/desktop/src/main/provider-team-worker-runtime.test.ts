@@ -131,6 +131,8 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       getConnection: () => connection,
       authorizeEgress,
       contextFor: () => ({
+        projectItems: [],
+        projectSnapshotDigest: null,
         fragments: [
           {
             id: 'team-context-summary:worker-1',

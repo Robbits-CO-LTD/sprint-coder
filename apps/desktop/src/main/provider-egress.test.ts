@@ -15,7 +15,13 @@ import {
 import type { PreparedContext } from './context-ledger';
 
 const cleanup: string[] = [];
-const context: PreparedContext = { fragments: [], usageEvents: [], compacted: false };
+const context: PreparedContext = {
+  fragments: [],
+  projectItems: [],
+  projectSnapshotDigest: null,
+  usageEvents: [],
+  compacted: false,
+};
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_EGRESS_TEST === '1';
 
 afterEach(() => {
@@ -96,6 +102,40 @@ if (runsWithElectronAbi)
       );
       expect(decision.allowed).toBe(false);
       expect(dispatches).toBe(0);
+      fixture.persistence.close();
+    });
+
+    it('rejects remote egress when an included Project source was captured local-only', () => {
+      const fixture = createFixture(false);
+      const decision = authorizeCodexProviderEgress({
+        broker: new PermissionBroker(fixture.persistence),
+        task: fixture.task,
+        turnId: 'turn-project-local-only',
+        prompt: 'clean prompt',
+        context: {
+          ...context,
+          projectItems: [
+            {
+              id: 'memory-1',
+              kind: 'memory',
+              authority: 'user',
+              localOnly: true,
+              content: 'captured locally',
+              sealedDigest: 'a'.repeat(64),
+              sourceTaskId: 'source-task',
+              sourceTurnId: 'source-turn',
+              sourceReferenceId: null,
+              capturedAt: '2026-07-23T00:00:00.000Z',
+            },
+          ],
+        },
+        now: '2026-07-23T00:00:00.000Z',
+      });
+
+      expect(decision).toMatchObject({
+        allowed: false,
+        evaluation: { decision: 'deny', reason: 'parent_ceiling' },
+      });
       fixture.persistence.close();
     });
 

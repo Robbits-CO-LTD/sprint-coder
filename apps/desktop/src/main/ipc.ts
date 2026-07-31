@@ -160,7 +160,7 @@ import {
   TurnActiveError,
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
-import { RuntimeHostClient } from './runtime-host';
+import { RuntimeHostClient, toRuntimeContextFragment } from './runtime-host';
 import { PermissionBroker } from './permission-broker';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
@@ -179,6 +179,7 @@ const MAX_PROVIDER_LEADER_ROUNDS = 32;
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import type { ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
+import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { permissionRequestFingerprint, type Capability } from '@sprint-coder/domain';
 import type { ExecutionSpec } from '@sprint-coder/domain';
 import { executionSpecPathGuard } from './command-runner';
@@ -192,6 +193,7 @@ import {
   dispatchAfterClaudeProviderEgress,
 } from './provider-egress';
 import { ReasoningBatcher } from './reasoning-batcher';
+import { projectContextProviderMessages } from './project-context-delivery';
 import { RetryableActionRegistry } from './retryable-action';
 import { createStreamingSecretRedactor } from './secret-redactor';
 import { secureLogger } from './secure-logger';
@@ -467,7 +469,13 @@ export class IpcRouter {
           task: this.persistence.getTask(taskId),
           turnId,
           prompt,
-          context: { fragments: [], usageEvents: [], compacted: false },
+          context: {
+            fragments: [],
+            projectItems: [],
+            projectSnapshotDigest: null,
+            usageEvents: [],
+            compacted: false,
+          },
           now: new Date().toISOString(),
         }).allowed;
       },
@@ -499,7 +507,13 @@ export class IpcRouter {
             task: this.persistence.getTask(worker.taskId),
             turnId: executionId,
             prompt,
-            context: { fragments: [], usageEvents: [], compacted: false },
+            context: {
+              fragments: [],
+              projectItems: [],
+              projectSnapshotDigest: null,
+              usageEvents: [],
+              compacted: false,
+            },
             now: new Date().toISOString(),
           },
           connection.providerId,
@@ -616,7 +630,8 @@ export class IpcRouter {
       },
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
-      (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
+      (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
+        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       // Wires the Leader team tools (team_hire_worker/team_send_to_worker/team_wait_reports/
       // team_stop_worker) into the mock intelligence loop — see team-tools.ts.
       this.teamCoordinator,
@@ -642,7 +657,8 @@ export class IpcRouter {
         this.handleRuntimeEvent('codex', taskId, turnId, runtimeEvent),
       (taskId, turnId, error) => this.handleRuntimeFailure('codex', taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
-      (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
+      (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
+        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       'codex',
     );
     this.claudeRuntime = new RuntimeHostClient(
@@ -650,7 +666,8 @@ export class IpcRouter {
         this.handleRuntimeEvent('claude', taskId, turnId, runtimeEvent),
       (taskId, turnId, error) => this.handleRuntimeFailure('claude', taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
-      (taskId, turnId, fragmentIds) => this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds),
+      (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
+        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       'claude',
     );
   }
@@ -2299,14 +2316,39 @@ export class IpcRouter {
     );
     const dispatchEgress =
       kind === 'claude' ? dispatchAfterClaudeProviderEgress : dispatchAfterCodexProviderEgress;
+    const runtimeSkills = started.skills.map((skill) => ({
+      name: skill.selection.ref.skillId,
+      path: skill.packagePath,
+    }));
+    const serializedPayload = serializeCliExecutionPayload({
+      kind,
+      request: started.text,
+      contextFragments: context.fragments.map(toRuntimeContextFragment),
+      projectItems: context.projectItems,
+      ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
+      skills: runtimeSkills,
+    });
+    const gatePayload = Buffer.from(serializedPayload.bytes);
+    const dispatchPayload = Object.freeze({
+      text: Buffer.from(serializedPayload.bytes).toString('utf8'),
+      bytes: Buffer.from(serializedPayload.bytes),
+      digest: serializedPayload.digest,
+    });
     const egress = dispatchEgress(
       {
         broker: this.permissionBroker,
         task: this.persistence.getTask(taskId),
         turnId: started.turnId,
-        prompt: started.text,
+        prompt: gatePayload.toString('utf8'),
         context,
         now: new Date().toISOString(),
+        payloadDigest: serializedPayload.digest,
+        adapterVersion: 'runtime-protocol-v6',
+        connectionId: kind === 'claude' ? 'builtin:claude-cli' : 'builtin:codex-cli',
+        modelId: started.model,
+        endpointTrust: 'trusted-remote',
+        round: 1,
+        toolCatalogDigest: createEmptyToolCatalogSnapshot(kind, workspaceId).digest,
       },
       () =>
         this.runtimeFor(kind).start(
@@ -2326,10 +2368,8 @@ export class IpcRouter {
             ? this.persistence.getEffort()
             : this.persistence.getCodexEffort() || undefined,
           writeScope,
-          started.skills.map((skill) => ({
-            name: skill.selection.ref.skillId,
-            path: skill.packagePath,
-          })),
+          runtimeSkills,
+          dispatchPayload,
         ),
     );
     if (!egress.allowed) {
@@ -2574,7 +2614,16 @@ export class IpcRouter {
     taskId: string,
     turnId: string,
     acceptedFragmentIds: readonly string[],
+    acceptedProjectItemIds: readonly string[] = [],
+    acceptedProjectSnapshotDigest: string | null = null,
   ): void {
+    const sealed = this.persistence.prepareContext(taskId, turnId);
+    if (
+      sealed.projectSnapshotDigest !== acceptedProjectSnapshotDigest ||
+      sealed.projectItems.length !== acceptedProjectItemIds.length ||
+      sealed.projectItems.some((item, index) => item.id !== acceptedProjectItemIds[index])
+    )
+      throw new Error('Runtime Project context acknowledgement mismatch');
     const expectedTeamSkill = this.teamSkillExpectedTurns.delete(turnId);
     if (!verifyBuiltinTeamSkillAcceptance(expectedTeamSkill, acceptedFragmentIds)) {
       this.teamSkillResolutionByTurn.delete(turnId);
@@ -2703,20 +2752,9 @@ export class IpcRouter {
           taskId,
           started.turnId,
           context.fragments.map((fragment) => fragment.id),
+          context.projectItems.map((item) => item.id),
+          context.projectSnapshotDigest,
         );
-      const egress = authorizeOfficialApiProviderEgress(
-        {
-          broker: this.permissionBroker,
-          task: this.persistence.getTask(taskId),
-          turnId: started.turnId,
-          prompt: started.text,
-          context,
-          now: new Date().toISOString(),
-        },
-        connection.providerId,
-        this.providerEgressTrustForConnection(connection),
-      );
-      if (!egress.allowed) throw new Error('Provider egress was denied by policy');
       await this.mailbox.run(taskId, () => {
         if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'understanding'));
@@ -2728,9 +2766,40 @@ export class IpcRouter {
         role: fragment.trust,
         content: fragment.content,
       }));
+      messages.unshift(...projectContextProviderMessages(context.projectItems));
       let aggregateUsage: NormalizedProviderUsage | undefined;
       let finished = false;
       for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
+        const roundTools = teamTurn ? [...LEADER_PROVIDER_TOOLS] : [];
+        const roundPayloadBytes = Buffer.from(
+          JSON.stringify({ messages, tools: roundTools }),
+          'utf8',
+        );
+        const roundPayloadDigest = createHash('sha256').update(roundPayloadBytes).digest('hex');
+        const dispatchRound = JSON.parse(Buffer.from(roundPayloadBytes).toString('utf8')) as {
+          messages: ProviderExecutionRequest['messages'];
+          tools: ProviderExecutionRequest['tools'];
+        };
+        const egress = authorizeOfficialApiProviderEgress(
+          {
+            broker: this.permissionBroker,
+            task: this.persistence.getTask(taskId),
+            turnId: started.turnId,
+            prompt: Buffer.from(roundPayloadBytes).toString('utf8'),
+            context,
+            now: new Date().toISOString(),
+            payloadDigest: roundPayloadDigest,
+            adapterVersion: 'provider-registry-v1',
+            connectionId,
+            modelId,
+            endpointTrust: this.providerEgressTrustForConnection(connection),
+            round: ordinal,
+            toolCatalogDigest: digestCanonical(roundTools),
+          },
+          connection.providerId,
+          this.providerEgressTrustForConnection(connection),
+        );
+        if (!egress.allowed) throw new Error('Provider egress was denied by policy');
         const roundToolCalls: ProviderMessageToolCall[] = [];
         const roundOutput: string[] = [];
         let roundCompleted = false;
@@ -2740,8 +2809,10 @@ export class IpcRouter {
             executionId: providerTurnCallId(started.turnId, ordinal),
             connectionId,
             modelId,
-            messages,
-            ...(teamTurn ? { tools: [...LEADER_PROVIDER_TOOLS] } : {}),
+            messages: dispatchRound.messages,
+            ...(dispatchRound.tools === undefined || dispatchRound.tools.length === 0
+              ? {}
+              : { tools: dispatchRound.tools }),
           },
           controller.signal,
         )) {
