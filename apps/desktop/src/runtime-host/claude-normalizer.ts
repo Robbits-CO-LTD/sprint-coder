@@ -7,6 +7,14 @@ const stages: TurnStage[] = ['understanding', 'planning', 'executing', 'synthesi
 
 export class ClaudeOutputError extends Error {}
 export class ClaudeAuthenticationError extends ClaudeOutputError {}
+export class ClaudeRateLimitError extends ClaudeOutputError {
+  constructor(
+    message: string,
+    readonly resetAtEpochSeconds: number | null,
+  ) {
+    super(message);
+  }
+}
 // Defense in depth: the fixed --tools ""/--strict-mcp-config invocation profile (buildClaudeArgs)
 // should make this structurally impossible, but the normalizer independently verifies the CLI's
 // own reported capabilities before trusting anything else in the stream, mirroring how the Codex
@@ -35,6 +43,8 @@ export class ClaudeJsonlNormalizer {
   private stageIndex = -1;
   private readonly messageId = randomUUID();
   private completed = false;
+  private rateLimitRejected = false;
+  private rateLimitResetAtEpochSeconds: number | null = null;
   // Captured from the session-init report's own `model` field (e.g. "claude-sonnet-5") — the
   // concrete model id the CLI actually resolved for this turn's `auto`/alias selection. Surfaced
   // on the terminal `completed` event so Main can show it in the UI (see the ADR amendment).
@@ -75,10 +85,13 @@ export class ClaudeJsonlNormalizer {
     // useless until complete.
     if (type === 'assistant') return this.rememberWriteIntents(value);
     if (type === 'user') return this.confirmWrites(value);
+    if (type === 'rate_limit_event') {
+      this.rememberRateLimit(value);
+      return [];
+    }
     if (type === 'result') return this.pushResult(value);
     // assistant (full message; superseded by the stream_event deltas we already emitted),
-    // rate_limit_event, and other system subtypes (e.g. post_turn_summary) carry nothing the
-    // canonical protocol needs.
+    // Other system subtypes (e.g. post_turn_summary) carry nothing the canonical protocol needs.
     return [];
   }
 
@@ -252,6 +265,12 @@ export class ClaudeJsonlNormalizer {
       const message = readString(value, 'result') ?? 'Claude reported a failed turn';
       if (/not logged in|authentication[_ ]failed/iu.test(message))
         throw new ClaudeAuthenticationError(message);
+      if (
+        this.rateLimitRejected ||
+        readNumber(value, 'api_error_status') === 429 ||
+        /(?:rate|weekly|usage) limit|hit your .* limit/iu.test(message)
+      )
+        throw new ClaudeRateLimitError(message, this.rateLimitResetAtEpochSeconds);
       throw new ClaudeOutputError(message);
     }
     if (this.completed) return [];
@@ -262,6 +281,14 @@ export class ClaudeJsonlNormalizer {
         ? { type: 'completed' }
         : { type: 'completed', resolvedModel: this.resolvedModel },
     ];
+  }
+
+  private rememberRateLimit(value: Record<string, unknown>): void {
+    const info = isRecord(value['rate_limit_info']) ? value['rate_limit_info'] : null;
+    if (info === null || readString(info, 'status') !== 'rejected') return;
+    this.rateLimitRejected = true;
+    const resetsAt = readNumber(info, 'resetsAt');
+    if (resetsAt !== null && resetsAt > 0) this.rateLimitResetAtEpochSeconds = resetsAt;
   }
 
   private advanceTo(target: TurnStage): RuntimeCanonicalEvent[] {

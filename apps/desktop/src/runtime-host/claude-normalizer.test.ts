@@ -6,6 +6,7 @@ import {
   ClaudeCapabilityViolationError,
   ClaudeJsonlNormalizer,
   ClaudeOutputError,
+  ClaudeRateLimitError,
 } from './claude-normalizer';
 
 describe('ClaudeJsonlNormalizer', () => {
@@ -62,6 +63,33 @@ describe('ClaudeJsonlNormalizer', () => {
         }),
       ),
     ).toThrow(ClaudeAuthenticationError);
+  });
+
+  it('classifies a rejected weekly limit and keeps its reset timestamp', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    normalizer.push(
+      JSON.stringify({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'rejected', resetsAt: 1_785_690_000 },
+      }),
+    );
+
+    let caught: unknown;
+    try {
+      normalizer.push(
+        JSON.stringify({
+          type: 'result',
+          is_error: true,
+          api_error_status: 429,
+          result: "You've hit your weekly limit · resets Aug 3 at 2am (Asia/Tokyo)",
+        }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ClaudeRateLimitError);
+    expect((caught as ClaudeRateLimitError).resetAtEpochSeconds).toBe(1_785_690_000);
   });
 
   it('throws on unparsable JSONL instead of silently dropping the line', () => {

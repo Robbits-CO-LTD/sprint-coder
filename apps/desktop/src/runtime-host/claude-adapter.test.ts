@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildClaudeArgs,
   buildClaudePrompt,
+  claudeOutputErrorToPublicError,
   probeClaude,
   resolveClaudeCommand,
 } from './claude-adapter';
+import { ClaudeRateLimitError } from './claude-normalizer';
 
 const temporaryRoots: string[] = [];
 
@@ -243,5 +245,18 @@ describe('Claude runtime probe', () => {
 
   it('passes through the input unchanged when there is no context to attach', () => {
     expect(buildClaudePrompt('plain input', [])).toBe('plain input');
+  });
+});
+
+describe('Claude runtime errors', () => {
+  it('shows a weekly limit and reset schedule instead of a protocol error', () => {
+    const error = claudeOutputErrorToPublicError(
+      new ClaudeRateLimitError('weekly limit', 1_785_690_000),
+    );
+
+    expect(error).toMatchObject({ code: 'RUNTIME_FAILED', retryable: false });
+    expect(error.userMessage).toContain('Claude Codeの利用上限に達しました');
+    expect(error.userMessage).toContain('リセット予定です');
+    expect(error.userMessage).not.toContain('出力を解釈');
   });
 });
