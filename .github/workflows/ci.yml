@@ -71,10 +71,18 @@ jobs:
       - name: Test
         run: npm run test
 
-      # Exercise the Windows-only npm.cmd spawn and taskkill /PID /T teardown path. Packaged E2E
-      # and the full serial UI suite are intentionally not part of the per-change CI gate. This
-      # focused smoke proves that a clean Windows checkout can run development-mode E2E without a
-      # manually started dev server.
+      # Keep one production-package boundary check without running the full serial UI suite.
+      # This catches Forge, fuse, native-module, and packaged-startup regressions on Linux while
+      # avoiding the 15+ minute Windows packaged E2E critical path.
+      - name: Packaged startup smoke (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npx playwright test tests/e2e/keyboard-smoke.spec.ts
+        env:
+          SPRINT_CODER_E2E_MODE: packaged
+
+      # Exercise the Windows-only npm.cmd spawn and taskkill /PID /T teardown path. This proves
+      # that a clean Windows checkout can run development-mode E2E without a manually started
+      # dev server.
       - name: Dev-mode E2E auto-start smoke (Windows)
         if: runner.os == 'Windows'
         run: npx playwright test tests/e2e/keyboard-smoke.spec.ts
