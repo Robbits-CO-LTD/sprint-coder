@@ -2598,6 +2598,14 @@ export const voidResultSchema = z.undefined();
 
 export interface SprintCoderApi {
   app: { getInfo(): Promise<{ version: string; platform: string }> };
+  windowControls: {
+    platform: string;
+    minimize(): void;
+    toggleMaximize(): void;
+    close(): void;
+    isMaximized(): Promise<boolean>;
+    onMaximizedChanged(listener: (maximized: boolean) => void): () => void;
+  };
   tasks: {
     list(): Promise<TaskSummary[]>;
     create(input?: {

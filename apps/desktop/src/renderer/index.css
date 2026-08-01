@@ -190,9 +190,8 @@ button {
   background: var(--bg-app);
 }
 
-/* macOS keeps its native traffic lights, while the rest of the title bar belongs to the product.
-   The region is intentionally quiet: the product name, graphite chrome and one hairline
-   before the task/navigation layer begins. */
+/* macOS keeps its native traffic lights; Windows supplies three product-owned controls. The rest
+   stays intentionally quiet: product name, graphite chrome and one hairline before navigation. */
 .app-titlebar {
   position: relative;
   z-index: 20;
@@ -200,7 +199,7 @@ button {
   flex: none;
   align-items: center;
   height: 40px;
-  padding: 0 16px 0 78px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-sidebar);
   color: var(--text-secondary);
@@ -210,6 +209,7 @@ button {
   line-height: 1;
   user-select: none;
   -webkit-app-region: drag;
+  app-region: drag;
 }
 .app-titlebar::before {
   position: absolute;
@@ -221,6 +221,58 @@ button {
 }
 .app-titlebar-name {
   opacity: 0.94;
+}
+.app-titlebar--macos {
+  padding-left: 78px;
+}
+.app-titlebar--windows {
+  padding-right: 0;
+}
+.window-controls {
+  display: flex;
+  align-self: stretch;
+  margin-left: auto;
+  color: var(--text-primary);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.window-control {
+  display: grid;
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  place-items: center;
+  border-radius: 0;
+  color: inherit;
+  transition:
+    color var(--t-instant) linear,
+    background var(--t-instant) linear;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.window-control:hover {
+  background: var(--neutral-wash-strong);
+}
+.window-control:active {
+  background: color-mix(in srgb, var(--text-primary) 16%, transparent);
+}
+.window-control--close:hover,
+.window-control--close:active {
+  background: #c42b1c;
+  color: #fff;
+}
+.window-control:focus-visible {
+  border-radius: 0;
+  outline-offset: -3px;
+}
+.window-control-icon {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+  stroke-width: 1;
 }
 
 .app-shell {
