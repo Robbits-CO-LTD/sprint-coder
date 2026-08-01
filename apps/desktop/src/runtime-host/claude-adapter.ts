@@ -17,6 +17,7 @@ import {
   ClaudeAuthenticationError,
   ClaudeCapabilityViolationError,
   ClaudeJsonlNormalizer,
+  ClaudeRateLimitError,
   type ClaudeExpectedCapabilities,
 } from './claude-normalizer';
 import type {
@@ -250,19 +251,7 @@ export class ClaudeRuntimeAdapter {
         }
       } catch (error) {
         failed = true;
-        const violation = error instanceof ClaudeCapabilityViolationError;
-        const authenticationRequired = error instanceof ClaudeAuthenticationError;
-        fail(
-          publicError(
-            violation || authenticationRequired ? 'RUNTIME_FAILED' : 'RUNTIME_PROTOCOL_ERROR',
-            authenticationRequired
-              ? 'Claude Codeへのログインが必要です。ターミナルでclaudeを起動し、/loginを実行してください。'
-              : violation
-                ? 'Claude runtimeが読み取り専用プロファイルを逸脱したため停止しました。'
-                : 'Claude runtimeの出力を解釈できませんでした。',
-            false,
-          ),
-        );
+        fail(claudeOutputErrorToPublicError(error));
         void terminateProcessTree(child);
       }
     });
@@ -306,6 +295,48 @@ export class ClaudeRuntimeAdapter {
   dispose(): void {
     for (const [turnId] of this.active) void this.cancel(turnId);
   }
+}
+
+export function claudeOutputErrorToPublicError(error: unknown): PublicError {
+  if (error instanceof ClaudeRateLimitError) {
+    return publicError(
+      'RUNTIME_FAILED',
+      `Claude Codeの利用上限に達しました。${claudeRateLimitResetMessage(error.resetAtEpochSeconds)}`,
+      false,
+    );
+  }
+  if (error instanceof ClaudeAuthenticationError)
+    return publicError(
+      'RUNTIME_FAILED',
+      'Claude Codeへのログインが必要です。ターミナルでclaudeを起動し、/loginを実行してください。',
+      false,
+    );
+  if (error instanceof ClaudeCapabilityViolationError)
+    return publicError(
+      'RUNTIME_FAILED',
+      'Claude runtimeが読み取り専用プロファイルを逸脱したため停止しました。',
+      false,
+    );
+  return publicError(
+    'RUNTIME_PROTOCOL_ERROR',
+    'Claude runtimeの出力を解釈できませんでした。',
+    false,
+  );
+}
+
+function claudeRateLimitResetMessage(resetAtEpochSeconds: number | null): string {
+  if (resetAtEpochSeconds === null) return 'リセット後にもう一度お試しください。';
+  const resetAt = new Date(resetAtEpochSeconds * 1_000);
+  if (!Number.isFinite(resetAt.getTime())) return 'リセット後にもう一度お試しください。';
+  const formatted = new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  }).format(resetAt);
+  return `${formatted}にリセット予定です。`;
 }
 
 // Kept as a small local constant rather than importing team-tools.ts's tool name list: the
