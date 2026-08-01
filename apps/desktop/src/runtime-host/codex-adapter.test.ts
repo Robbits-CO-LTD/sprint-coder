@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -31,6 +31,7 @@ describe('Codex runtime probe', () => {
     const executable = join(home, '.local', 'bin', 'codex');
     await mkdir(join(executable, '..'), { recursive: true });
     await writeFile(executable, '');
+    await chmod(executable, 0o700);
 
     expect(
       resolveCodexCommand(
@@ -44,6 +45,27 @@ describe('Codex runtime probe', () => {
       ),
     ).toBe(executable);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'skips a non-executable Codex candidate before the user-local CLI',
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-permission-'));
+      temporaryRoots.push(home);
+      const blockedRoot = join(home, 'blocked-bin');
+      const blocked = join(blockedRoot, 'codex');
+      const executable = join(home, '.local', 'bin', 'codex');
+      await mkdir(blockedRoot, { recursive: true });
+      await mkdir(join(executable, '..'), { recursive: true });
+      await writeFile(blocked, '');
+      await chmod(blocked, 0o600);
+      await writeFile(executable, '');
+      await chmod(executable, 0o700);
+
+      expect(resolveCodexCommand('codex', 'darwin', blockedRoot, null, home, 'arm64', null)).toBe(
+        executable,
+      );
+    },
+  );
 
   it('terminates the Codex child and its descendant process tree', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-tree-'));

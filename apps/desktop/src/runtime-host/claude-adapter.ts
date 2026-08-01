@@ -1,5 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { lstatSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  lstatSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -481,7 +489,9 @@ export function resolveClaudeCommand(
       const candidate = join(root, command);
       try {
         // Claude's native installer exposes the versioned binary through this user-local symlink.
-        if (statSync(candidate).isFile()) return candidate;
+        if (!statSync(candidate).isFile()) continue;
+        accessSync(candidate, constants.X_OK);
+        return candidate;
       } catch {
         // Continue through the macOS locations a Finder-launched app does not inherit in PATH.
       }

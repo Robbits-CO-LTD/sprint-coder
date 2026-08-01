@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
+  accessSync,
+  constants,
   lstatSync,
   mkdtempSync,
   readFileSync,
@@ -751,7 +753,9 @@ export function resolveCodexCommand(
       const candidate = join(root, command);
       try {
         // Native installers expose the CLI through a symlink in ~/.local/bin, so follow it.
-        if (statSync(candidate).isFile()) return candidate;
+        if (!statSync(candidate).isFile()) continue;
+        accessSync(candidate, constants.X_OK);
+        return candidate;
       } catch {
         // Continue through the macOS locations a Finder-launched app does not inherit in PATH.
       }
