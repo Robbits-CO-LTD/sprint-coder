@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { lstatSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -469,7 +469,26 @@ export function resolveClaudeCommand(
   appData: string | null | undefined = process.env['APPDATA'],
   userHome: string = homedir(),
 ): string {
-  if (platform !== 'win32' || command !== 'claude') return command;
+  if (command !== 'claude') return command;
+  if (platform === 'darwin') {
+    const roots = [
+      ...(searchPath ?? '').split(delimiter).filter((entry) => entry.length > 0),
+      join(userHome, '.local', 'bin'),
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+    ];
+    for (const root of new Set(roots)) {
+      const candidate = join(root, command);
+      try {
+        // Claude's native installer exposes the versioned binary through this user-local symlink.
+        if (statSync(candidate).isFile()) return candidate;
+      } catch {
+        // Continue through the macOS locations a Finder-launched app does not inherit in PATH.
+      }
+    }
+    return command;
+  }
+  if (platform !== 'win32') return command;
   const roots = [
     ...(searchPath ?? '')
       .split(delimiter)

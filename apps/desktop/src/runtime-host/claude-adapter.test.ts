@@ -18,6 +18,18 @@ afterEach(async () => {
 });
 
 describe('Claude runtime probe', () => {
+  it('resolves the user-local Claude CLI when a packaged macOS app has a system-only PATH', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-home-'));
+    temporaryRoots.push(home);
+    const executable = join(home, '.local', 'bin', 'claude');
+    await mkdir(join(executable, '..'), { recursive: true });
+    await writeFile(executable, '');
+
+    expect(
+      resolveClaudeCommand('claude', 'darwin', '/usr/bin:/bin:/usr/sbin:/sbin', null, home),
+    ).toBe(executable);
+  });
+
   it('resolves the native Claude executable behind the Windows npm shim', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-command-'));
     temporaryRoots.push(root);

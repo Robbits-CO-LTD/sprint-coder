@@ -25,6 +25,26 @@ afterEach(async () => {
 });
 
 describe('Codex runtime probe', () => {
+  it('resolves the user-local Codex CLI when a packaged macOS app has a system-only PATH', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-home-'));
+    temporaryRoots.push(home);
+    const executable = join(home, '.local', 'bin', 'codex');
+    await mkdir(join(executable, '..'), { recursive: true });
+    await writeFile(executable, '');
+
+    expect(
+      resolveCodexCommand(
+        'codex',
+        'darwin',
+        '/usr/bin:/bin:/usr/sbin:/sbin',
+        null,
+        home,
+        'arm64',
+        null,
+      ),
+    ).toBe(executable);
+  });
+
   it('terminates the Codex child and its descendant process tree', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-tree-'));
     temporaryRoots.push(root);
