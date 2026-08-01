@@ -105,6 +105,7 @@ export type TeamMcpRegistration = Readonly<{
   requesterAgentId?: string;
   requireModelResearch?: boolean;
   allowSkillDrafts?: boolean;
+  allowProjectMemory?: boolean;
   allowTeamTools?: boolean;
   contextOwner?: { type: 'turn' | 'team_execution'; id: string };
 }>;
@@ -139,6 +140,10 @@ export class TeamMcpBridge {
       ExecuteTeamToolOptions['listModelCandidates']
     >,
     private readonly createSkillDraft?: (
+      input: unknown,
+      context: { taskId: string; turnId: string },
+    ) => Promise<unknown>,
+    private readonly queueProjectMemoryCandidate?: (
       input: unknown,
       context: { taskId: string; turnId: string },
     ) => Promise<unknown>,
@@ -339,66 +344,68 @@ export class TeamMcpBridge {
       if (process.env['SPRINT_CODER_TEAM_MCP_TRACE'] === '1')
         secureLogger.debug('Team MCP tool received', { tool: request.tool });
       const result =
-        request.tool === 'skill_draft_create'
-          ? await this.executeSkillDraftTool(turnId, registration, request.args)
-          : registration.allowTeamTools === false
-            ? (() => {
-                throw new Error('Team tools are not available for this Turn');
-              })()
-            : await executeTeamTool(
-                this.coordinator,
-                registration.taskId,
-                request.tool,
-                request.args,
-                {
-                  ...(registration.requesterAgentId === undefined
-                    ? {}
-                    : { requesterAgentId: registration.requesterAgentId }),
-                  ...(registration.contextOwner === undefined
-                    ? {}
-                    : { contextOwner: registration.contextOwner }),
-                  longPoll:
-                    request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
-                  waitReportsCursor: {
-                    read: () => registration.waitCursor,
-                    advance: (seq) => {
-                      registration.waitCursor = seq;
+        request.tool === 'project_memory_remember'
+          ? await this.executeProjectMemoryTool(turnId, registration, request.args)
+          : request.tool === 'skill_draft_create'
+            ? await this.executeSkillDraftTool(turnId, registration, request.args)
+            : registration.allowTeamTools === false
+              ? (() => {
+                  throw new Error('Team tools are not available for this Turn');
+                })()
+              : await executeTeamTool(
+                  this.coordinator,
+                  registration.taskId,
+                  request.tool,
+                  request.args,
+                  {
+                    ...(registration.requesterAgentId === undefined
+                      ? {}
+                      : { requesterAgentId: registration.requesterAgentId }),
+                    ...(registration.contextOwner === undefined
+                      ? {}
+                      : { contextOwner: registration.contextOwner }),
+                    longPoll:
+                      request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
+                    waitReportsCursor: {
+                      read: () => registration.waitCursor,
+                      advance: (seq) => {
+                        registration.waitCursor = seq;
+                      },
                     },
-                  },
-                  ...(this.listModelCandidates === undefined
-                    ? {}
-                    : { listModelCandidates: this.listModelCandidates }),
-                  modelCatalogAudit: {
-                    wasQueried: () => registration.modelCatalogQueried,
-                    markQueried: () => {
-                      registration.modelCatalogQueried = true;
+                    ...(this.listModelCandidates === undefined
+                      ? {}
+                      : { listModelCandidates: this.listModelCandidates }),
+                    modelCatalogAudit: {
+                      wasQueried: () => registration.modelCatalogQueried,
+                      markQueried: () => {
+                        registration.modelCatalogQueried = true;
+                      },
                     },
-                  },
-                  ...(registration.requireModelResearch === true
-                    ? {
-                        modelResearchAudit: {
-                          required: true,
-                          record: (input: {
-                            modelSelection: {
+                    ...(registration.requireModelResearch === true
+                      ? {
+                          modelResearchAudit: {
+                            required: true,
+                            record: (input: {
+                              modelSelection: {
+                                connectionId: string | null;
+                                requestedProvider: string | null;
+                                requestedModel: string | null;
+                              };
+                            }) => {
+                              registration.researchedModels.add(
+                                modelSelectionKey(input.modelSelection),
+                              );
+                            },
+                            hasEvidence: (selection: {
                               connectionId: string | null;
                               requestedProvider: string | null;
                               requestedModel: string | null;
-                            };
-                          }) => {
-                            registration.researchedModels.add(
-                              modelSelectionKey(input.modelSelection),
-                            );
+                            }) => registration.researchedModels.has(modelSelectionKey(selection)),
                           },
-                          hasEvidence: (selection: {
-                            connectionId: string | null;
-                            requestedProvider: string | null;
-                            requestedModel: string | null;
-                          }) => registration.researchedModels.has(modelSelectionKey(selection)),
-                        },
-                      }
-                    : {}),
-                },
-              );
+                        }
+                      : {}),
+                  },
+                );
       socket.write(`${JSON.stringify({ ok: true, result })}\n`);
     } catch (error) {
       socket.write(
@@ -420,6 +427,23 @@ export class TeamMcpBridge {
     )
       throw new Error('skill_draft_create is not available for this Turn');
     return this.createSkillDraft(input, { taskId: registration.taskId, turnId });
+  }
+
+  private async executeProjectMemoryTool(
+    turnId: string,
+    registration: Registered,
+    input: unknown,
+  ): Promise<unknown> {
+    if (
+      registration.allowProjectMemory !== true ||
+      registration.requesterAgentId !== undefined ||
+      this.queueProjectMemoryCandidate === undefined
+    )
+      throw new Error('project_memory_remember is not available for this Turn');
+    return this.queueProjectMemoryCandidate(input, {
+      taskId: registration.taskId,
+      turnId,
+    });
   }
 
   /** Constant-time token compare: every registered token is compared with `timingSafeEqual`

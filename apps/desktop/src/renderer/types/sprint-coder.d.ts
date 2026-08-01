@@ -59,6 +59,7 @@ export type ProjectMemory = {
   sourceTaskId: string;
   sourceTurnId: string;
   content: string;
+  createdBy: 'user' | 'assistant';
   status: 'active' | 'disabled';
   revision: number;
   localOnly: boolean;

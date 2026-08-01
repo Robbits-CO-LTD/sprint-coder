@@ -1088,8 +1088,18 @@ const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 const TEAM_INTENT =
   /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
 
+// A failed/canceled Team turn is commonly resumed with a short instruction that no longer repeats
+// the word "Team". Keep this deliberately narrow: ordinary follow-up questions must not silently
+// gain team capabilities just because an older turn once used them.
+const TEAM_CONTINUATION =
+  /^(?:continue|resume|retry|続けて|続行|再開|再試行|リトライ)(?:してください|して|お願い)?[。.!！]?$/i;
+
 export function isTeamScenarioInput(input: string): boolean {
   return TEAM_INTENT.test(input);
+}
+
+export function isTeamContinuationInput(input: string): boolean {
+  return TEAM_CONTINUATION.test(input.trim());
 }
 
 type ToolCallResult = { callId: string; arguments: unknown; result: unknown };

@@ -339,7 +339,7 @@ export function Timeline({
                   className="turn-context-button"
                   onClick={() => void openMemoryDialog(message)}
                 >
-                  Project Memoryに保存
+                  Projectメモとして保存
                 </button>
               )}
               {showRunCardAfter && (isActive || messageActivities.length === 0) && (

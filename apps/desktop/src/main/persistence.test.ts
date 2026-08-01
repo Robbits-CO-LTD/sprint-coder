@@ -744,6 +744,29 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('keeps Team guidance on a short continuation after a failed Team turn', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('team retry');
+      const failed = persistence.startTurn(task.id, 'team二人雇ってAIに会話して');
+      expect(failed.teamTurn).toBe(true);
+      persistence.completeTurn(task.id, failed.turnId, 'failed');
+
+      const continued = persistence.startTurn(task.id, 'continue');
+      expect(continued.teamTurn).toBe(true);
+      expect(
+        persistence
+          .prepareContext(task.id, continued.turnId)
+          .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
+      persistence.completeTurn(task.id, continued.turnId, 'failed');
+
+      const ordinary = persistence.startTurn(task.id, '通常の依頼です');
+      expect(ordinary.teamTurn).toBe(false);
+      persistence.completeTurn(task.id, ordinary.turnId, 'failed');
+      expect(persistence.startTurn(task.id, 'continue').teamTurn).toBe(false);
+      persistence.close();
+    });
+
     it('derives Team guidance at dequeue time for a legacy v55 queued payload', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('legacy queue');
@@ -5076,6 +5099,7 @@ if (runsWithElectronAbi)
         { version: 56 },
         { version: 57 },
         { version: 58 },
+        { version: 59 },
       ]);
       for (const [table, columns] of [
         [

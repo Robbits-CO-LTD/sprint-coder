@@ -16,6 +16,7 @@
 //    TeamCoordinator/persistence directly and holds no taskId of its own — the bridge is the only
 //    thing that knows which Task/turn this socket connection belongs to.
 export const TEAM_MCP_TOOL_NAMES = [
+  'project_memory_remember',
   'skill_draft_create',
   'team_list_models',
   'team_record_model_research',
@@ -39,6 +40,19 @@ const SOCKET_PATH = process.env.TEAM_BRIDGE_SOCKET;
 const TOKEN = process.env.TEAM_BRIDGE_TOKEN;
 
 const TOOLS = [
+  {
+    name: 'project_memory_remember',
+    description:
+      'Queue one durable, self-contained Project memory candidate. It is committed only after this Turn completes successfully.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', minLength: 1, maxLength: 4000 },
+      },
+      required: ['content'],
+      additionalProperties: false,
+    },
+  },
   {
     name: 'skill_draft_create',
     description:

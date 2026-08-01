@@ -2433,6 +2433,7 @@ export const projectMemorySchema = z
     sourceTaskId: idSchema,
     sourceTurnId: idSchema,
     content: z.string().min(1).max(4000),
+    createdBy: z.enum(['user', 'assistant']),
     status: z.enum(['active', 'disabled']),
     revision: z.number().int().positive(),
     localOnly: z.boolean(),

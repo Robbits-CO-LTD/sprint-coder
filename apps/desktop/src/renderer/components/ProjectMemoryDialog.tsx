@@ -70,13 +70,13 @@ export function ProjectMemoryDialog({
         }}
       >
         <header className="team-policy-header">
-          <h2 id="project-memory-dialog-title">Project Memoryに保存</h2>
+          <h2 id="project-memory-dialog-title">Projectメモとして保存</h2>
           <button type="button" className="settings-close" onClick={onClose} disabled={saving}>
             閉じる
           </button>
         </header>
         <p className="settings-note">
-          出典を確認し、今後も使う内容を自分の言葉で要約してください。
+          AIの自動記憶とは別に、今後も残したい内容を自分の言葉で要約してください。
         </p>
         <section>
           <h3>Request</h3>

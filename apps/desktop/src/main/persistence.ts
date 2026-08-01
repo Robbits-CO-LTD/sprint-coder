@@ -146,7 +146,7 @@ import {
 } from './context-ledger';
 import { BUILTIN_TEAM_SKILL_CONTENT, BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
 import { readProjectReference } from './project-reference-file';
-import { isTeamScenarioInput } from './team-tools';
+import { isTeamContinuationInput, isTeamScenarioInput } from './team-tools';
 import type { LiveState } from './context-reminder';
 import { deriveLiveState } from './live-state';
 import { redactSecrets } from './secret-redactor';
@@ -354,6 +354,7 @@ type ProjectMemoryRow = {
   source_task_id: string;
   source_turn_id: string;
   content: string;
+  created_by: 'user' | 'assistant';
   status: 'active' | 'disabled';
   revision: number;
   local_only: number;
@@ -2724,6 +2725,14 @@ const migrations = [
         ON project_memories(project_id, status, updated_at DESC, id);
     `,
   },
+  {
+    version: 59,
+    checksum: 'project-context-hub-v59-memory-provenance',
+    sql: `
+      ALTER TABLE project_memories ADD COLUMN created_by TEXT NOT NULL DEFAULT 'user'
+        CHECK (created_by IN ('user', 'assistant'));
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2860,6 +2869,8 @@ export type StartedTurn = {
   model: string;
   modelSelection: ModelSelection;
   skills: PersistedTurnSkill[];
+  /** Computed once with context sealing and reused by dispatch so Team routing cannot diverge. */
+  teamTurn: boolean;
   event: TurnEvent;
   sealId: string;
   contextUsageEvents: TurnEvent[];
@@ -3241,6 +3252,11 @@ export interface PersistenceClient {
   removeProjectReference(referenceId: string, expectedRevision: number): void;
   listProjectMemories(projectId: string): ProjectMemory[];
   createProjectMemoryFromTurn(input: {
+    projectId: string;
+    sourceTurnId: string;
+    content: string;
+  }): ProjectMemory;
+  createAgentProjectMemoryFromTurn(input: {
     projectId: string;
     sourceTurnId: string;
     content: string;
@@ -4774,6 +4790,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     sourceTurnId: string;
     content: string;
   }): ProjectMemory {
+    return this.createProjectMemoryFromTurnWithProvenance(input, 'user');
+  }
+
+  createAgentProjectMemoryFromTurn(input: {
+    projectId: string;
+    sourceTurnId: string;
+    content: string;
+  }): ProjectMemory {
+    return this.createProjectMemoryFromTurnWithProvenance(input, 'assistant');
+  }
+
+  private createProjectMemoryFromTurnWithProvenance(
+    input: { projectId: string; sourceTurnId: string; content: string },
+    createdBy: 'user' | 'assistant',
+  ): ProjectMemory {
     const content = parseProjectMemoryContent(input.content);
     return this.db.transaction(() => {
       this.getProjectRow(input.projectId);
@@ -4811,9 +4842,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare(
           `INSERT INTO project_memories(
-             id, project_id, source_task_id, source_turn_id, content, status,
+             id, project_id, source_task_id, source_turn_id, content, created_by, status,
              revision, local_only, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)`,
         )
         .run(
           id,
@@ -4821,6 +4852,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           source.task_id,
           input.sourceTurnId,
           content,
+          createdBy,
           source.local_only,
           now,
           now,
@@ -11163,7 +11195,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
             : contextTokens > CONTEXT_HARD_CAP_TOKENS
               ? 'existing_context_over_budget'
               : 'project_context_over_budget',
-          authority: 'user',
+          authority: memory.created_by === 'user' ? 'user' : 'none',
           localOnly: memory.local_only === 1,
           content: included ? memory.content : null,
           capturedAt: createdAt,
@@ -11489,7 +11521,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const shouldSealBuiltinTeamSkill =
       includeBuiltinTeamSkill ||
       isTeamScenarioInput(text) ||
-      parsedSkills.some(({ selection }) => selection.kind === 'team');
+      parsedSkills.some(({ selection }) => selection.kind === 'team') ||
+      (isTeamContinuationInput(text) && this.latestTurnIncludedBuiltinTeamSkill(taskId));
     const taskSelection = this.getTaskModelSelection(taskId);
     const explicitRuntime =
       taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
@@ -11570,11 +11603,32 @@ export class SqlitePersistenceClient implements PersistenceClient {
       model,
       modelSelection,
       skills: parsedSkills,
+      teamTurn: shouldSealBuiltinTeamSkill,
       event,
       sealId: seal.sealId,
       contextUsageEvents: prepared.usageEvents,
       ...(renamedTask === null ? {} : { renamedTask }),
     };
+  }
+
+  private latestTurnIncludedBuiltinTeamSkill(taskId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS present
+         FROM context_seals seal
+         JOIN context_seal_fragments fragment ON fragment.seal_id = seal.id
+         WHERE seal.id = (
+           SELECT latest.id
+           FROM context_seals latest
+           WHERE latest.owner_type = 'turn' AND latest.task_id = ?
+           ORDER BY latest.created_at DESC, latest.rowid DESC
+           LIMIT 1
+         )
+           AND fragment.fragment_id = ?
+         LIMIT 1`,
+      )
+      .get(taskId, BUILTIN_TEAM_SKILL_FRAGMENT_ID) as { present: number } | undefined;
+    return row !== undefined;
   }
 
   /**
@@ -12665,6 +12719,7 @@ function toProjectMemory(row: ProjectMemoryRow): ProjectMemory {
     sourceTaskId: row.source_task_id,
     sourceTurnId: row.source_turn_id,
     content: row.content,
+    createdBy: row.created_by,
     status: row.status,
     revision: row.revision,
     localOnly: row.local_only === 1,

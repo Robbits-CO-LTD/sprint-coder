@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  isTeamContinuationInput,
   isTeamScenarioInput,
   LEADER_MCP_SYSTEM_PROMPT,
   LEADER_PROVIDER_TOOLS,
@@ -57,6 +58,13 @@ describe('builtin Team skill', () => {
       expect(isTeamScenarioInput(input), input).toBe(true);
     for (const input of ['簡単に説明して', '一人称を直して', 'teamworkについて説明して'])
       expect(isTeamScenarioInput(input), input).toBe(false);
+  });
+
+  it('recognizes only narrow retry instructions as Team continuation input', () => {
+    for (const input of ['continue', 'Resume', 'retry', '続けて', '再開してください', 'リトライ'])
+      expect(isTeamContinuationInput(input), input).toBe(true);
+    for (const input of ['続きを説明して', 'continue implementing this feature', '通常の依頼です'])
+      expect(isTeamContinuationInput(input), input).toBe(false);
   });
 
   it('keeps the built-in and Provider hire schemas on the same discriminated contract', () => {

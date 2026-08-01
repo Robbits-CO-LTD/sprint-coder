@@ -244,6 +244,12 @@ import {
 } from './team-skill';
 import { installBuiltinSkillCreator } from './skill-creator-builtin';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
+import {
+  PROJECT_MEMORY_MCP_GUIDANCE,
+  PROJECT_MEMORY_PROVIDER_TOOL,
+  appendProjectMemoryCandidate,
+  parseProjectMemoryCandidate,
+} from './project-memory-guidance';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { ModelCatalogService, teamModelIdentityKey } from './model-catalog-service';
 import {
@@ -359,6 +365,10 @@ export class IpcRouter {
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
   private readonly teamRequiredTurns = new Set<string>();
+  private readonly pendingProjectMemoriesByTurn = new Map<
+    string,
+    { projectId: string; content: string }[]
+  >();
 
   constructor(
     private readonly window: BrowserWindow,
@@ -610,6 +620,7 @@ export class IpcRouter {
         this.publish(this.persistence.recordSkillDraft(context.taskId, context.turnId, draft));
         return draft;
       },
+      async (input, context) => this.queueProjectMemoryCandidate(input, context),
     );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
@@ -2214,6 +2225,8 @@ export class IpcRouter {
         resolvedModel,
       });
     const event = this.persistence.completeTurn(taskId, turnId, state, finalText);
+    if (state === 'completed') this.commitProjectMemoryCandidates(turnId);
+    else this.pendingProjectMemoriesByTurn.delete(turnId);
     this.publish(
       event.type === 'turn.completed' && resolvedModel !== undefined
         ? { ...event, resolvedModel }
@@ -2399,7 +2412,7 @@ export class IpcRouter {
         : null;
     if (externalConnectionId !== null) {
       this.turnRuntimes.set(started.turnId, 'provider');
-      void this.startProviderTurn(started, externalConnectionId, isTeamScenarioInput(started.text));
+      void this.startProviderTurn(started, externalConnectionId, started.teamTurn);
       return;
     }
     this.pushRuntimeStatus({
@@ -2416,17 +2429,16 @@ export class IpcRouter {
     // when a request warrants a team (the guidance says to hire only when genuinely beneficial);
     // hiring auto-promotes the task and the renderer auto-opens the canvas, so "the AI decided a
     // team is needed" becomes visible without any keyword or button.
-    const teamTurn =
-      isTeamScenarioInput(started.text) ||
-      started.skills.some(({ selection }) => selection.kind === 'team');
+    const teamTurn = started.teamTurn;
     const skillCreatorTurn = started.skills.some(
       ({ selection }) =>
         selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
     );
+    const memoryTurn = this.persistence.getTask(taskId).projectId !== null;
     const wantsLeaderMcp =
       process.env['SPRINT_CODER_LEADER_MCP'] !== '0' &&
       kind !== 'mock' &&
-      (teamTurn || skillCreatorTurn);
+      (teamTurn || skillCreatorTurn || memoryTurn);
     if (teamTurn && wantsLeaderMcp && !this.teamSkillReady) {
       this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
         code: 'RUNTIME_FAILED',
@@ -2440,8 +2452,9 @@ export class IpcRouter {
       teamMcp = this.registerLeaderMcp(started.turnId, taskId, {
         teamTurn,
         skillCreatorTurn,
+        memoryTurn,
       });
-      if (teamMcp === undefined) {
+      if (teamMcp === undefined && (teamTurn || skillCreatorTurn)) {
         this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
           code: 'RUNTIME_FAILED',
           userMessage: 'Team MCPへ接続できないためTeamを開始できません。',
@@ -2570,7 +2583,7 @@ export class IpcRouter {
   private registerLeaderMcp(
     turnId: string,
     taskId: string,
-    options: { teamTurn: boolean; skillCreatorTurn: boolean },
+    options: { teamTurn: boolean; skillCreatorTurn: boolean; memoryTurn: boolean },
   ): RuntimeTeamMcpOption | undefined {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
@@ -2582,16 +2595,60 @@ export class IpcRouter {
       contextOwner: { type: 'turn', id: turnId },
       requireModelResearch,
       ...(options.skillCreatorTurn ? { allowSkillDrafts: true } : {}),
+      ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
       allowTeamTools: options.teamTurn,
     });
+    const guidance = [
+      options.teamTurn ? teamGuidance(LEADER_MCP_SYSTEM_PROMPT, requireModelResearch) : null,
+      options.skillCreatorTurn
+        ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
+        : null,
+      options.memoryTurn ? PROJECT_MEMORY_MCP_GUIDANCE : null,
+    ]
+      .filter((item): item is string => item !== null)
+      .join('\n\n');
     return {
       socketPath,
       token,
-      guidance: options.teamTurn
-        ? teamGuidance(LEADER_MCP_SYSTEM_PROMPT, requireModelResearch)
-        : 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。',
+      guidance,
       enableWebSearch: options.teamTurn && requireModelResearch,
     };
+  }
+
+  private async queueProjectMemoryCandidate(
+    input: unknown,
+    context: { taskId: string; turnId: string },
+  ): Promise<{ queued: true }> {
+    const content = parseProjectMemoryCandidate(input);
+    const manifest = this.persistence.getContextSealManifest('turn', context.turnId);
+    if (manifest.taskId !== context.taskId || manifest.projectId === null)
+      throw new Error('Projectに所属しないTurnではProject Memoryを利用できません');
+    const pending = appendProjectMemoryCandidate(
+      this.pendingProjectMemoriesByTurn.get(context.turnId) ?? [],
+      { projectId: manifest.projectId, content },
+    );
+    this.pendingProjectMemoriesByTurn.set(context.turnId, pending);
+    return { queued: true };
+  }
+
+  private commitProjectMemoryCandidates(turnId: string): void {
+    const candidates = this.pendingProjectMemoriesByTurn.get(turnId) ?? [];
+    this.pendingProjectMemoriesByTurn.delete(turnId);
+    for (const candidate of candidates) {
+      try {
+        const duplicate = this.persistence
+          .listProjectMemories(candidate.projectId)
+          .some(({ content, status }) => status === 'active' && content === candidate.content);
+        if (duplicate) continue;
+        this.persistence.createAgentProjectMemoryFromTurn({
+          projectId: candidate.projectId,
+          sourceTurnId: turnId,
+          content: candidate.content,
+        });
+      } catch (error) {
+        secureLogger.error('Project Memory candidate commit failed', { turnId, error });
+      }
+    }
   }
 
   private registerManagerMcp(
@@ -2882,6 +2939,7 @@ export class IpcRouter {
       this.teamRequiredTurns.delete(turnId);
       this.teamSkillExpectedTurns.delete(turnId);
       this.teamSkillResolutionByTurn.delete(turnId);
+      this.pendingProjectMemoriesByTurn.delete(turnId);
       this.providerAbortByTurn.delete(turnId);
       return cancelAction;
     });
@@ -2914,6 +2972,7 @@ export class IpcRouter {
     teamTurn = false,
   ): Promise<void> {
     const taskId = started.event.taskId;
+    const memoryTurn = this.persistence.getTask(taskId).projectId !== null;
     const controller = new AbortController();
     this.providerAbortByTurn.set(started.turnId, controller);
     let synthesizing = false;
@@ -2961,10 +3020,14 @@ export class IpcRouter {
         content: fragment.content,
       }));
       messages.unshift(...projectContextProviderMessages(context.projectItems));
+      if (memoryTurn) messages.unshift({ role: 'system', content: PROJECT_MEMORY_MCP_GUIDANCE });
       let aggregateUsage: NormalizedProviderUsage | undefined;
       let finished = false;
       for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
-        const roundTools = teamTurn ? [...LEADER_PROVIDER_TOOLS] : [];
+        const roundTools = [
+          ...(teamTurn ? LEADER_PROVIDER_TOOLS : []),
+          ...(memoryTurn ? [PROJECT_MEMORY_PROVIDER_TOOL] : []),
+        ];
         const roundPayloadBytes = Buffer.from(
           JSON.stringify({ messages, tools: roundTools }),
           'utf8',
@@ -3012,10 +3075,14 @@ export class IpcRouter {
         )) {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
           if (providerEvent.type === 'tool_call') {
-            if (!teamTurn)
+            if (!teamTurn && !memoryTurn)
               throw new Error('Provider requested a tool that is not available for this Turn');
-            if (!LEADER_PROVIDER_TOOLS.some((tool) => tool.name === providerEvent.name))
-              throw new Error(`Provider Leader requested unknown Team tool: ${providerEvent.name}`);
+            const knownTeamTool =
+              teamTurn && LEADER_PROVIDER_TOOLS.some((tool) => tool.name === providerEvent.name);
+            const knownMemoryTool =
+              memoryTurn && providerEvent.name === PROJECT_MEMORY_PROVIDER_TOOL.name;
+            if (!knownTeamTool && !knownMemoryTool)
+              throw new Error(`Provider Leader requested unknown tool: ${providerEvent.name}`);
             if (roundToolCalls.some((toolCall) => toolCall.callId === providerEvent.callId))
               throw new Error(`Provider Leader repeated tool call ID: ${providerEvent.callId}`);
             roundToolCalls.push({
@@ -3075,20 +3142,20 @@ export class IpcRouter {
           toolCalls: roundToolCalls,
         });
         for (const toolCall of roundToolCalls) {
-          const result = await executeTeamTool(
-            this.teamCoordinator,
-            taskId,
-            toolCall.name,
-            toolCall.input,
-            {
-              contextOwner: { type: 'turn', id: started.turnId },
-              longPoll:
-                toolCall.name === 'team_wait_reports' || toolCall.name === 'team_wait_events',
-              waitReportsCursor: reportCursor,
-              listModelCandidates: (query) => this.listTeamModelCandidates(query),
-              modelCatalogAudit,
-            },
-          );
+          const result =
+            toolCall.name === PROJECT_MEMORY_PROVIDER_TOOL.name
+              ? await this.queueProjectMemoryCandidate(toolCall.input, {
+                  taskId,
+                  turnId: started.turnId,
+                })
+              : await executeTeamTool(this.teamCoordinator, taskId, toolCall.name, toolCall.input, {
+                  contextOwner: { type: 'turn', id: started.turnId },
+                  longPoll:
+                    toolCall.name === 'team_wait_reports' || toolCall.name === 'team_wait_events',
+                  waitReportsCursor: reportCursor,
+                  listModelCandidates: (query) => this.listTeamModelCandidates(query),
+                  modelCatalogAudit,
+                });
           messages.push({
             role: 'tool',
             content: JSON.stringify(result ?? null),
