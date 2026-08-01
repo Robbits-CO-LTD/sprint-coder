@@ -31,10 +31,10 @@ test('uses platform-owned traffic lights on macOS and product-owned controls on 
     await expect(titlebar).toHaveAttribute('data-platform', 'win32');
     const minimize = page.getByRole('button', { name: '最小化' });
     const toggleMaximize = page.getByTestId('window-toggle-maximize');
-    const close = page.getByRole('button', { name: '閉じる' });
+    const close = page.getByTestId('window-close');
     await expect(minimize).toBeVisible();
     await expect(toggleMaximize).toHaveAccessibleName('最大化');
-    await expect(close).toBeVisible();
+    await expect(close).toHaveAccessibleName('閉じる');
 
     const regions = await page.evaluate(() => {
       const bar = document.querySelector<HTMLElement>('[data-testid="app-titlebar"]');
