@@ -42,6 +42,7 @@ const runtimeModuleFiles = [
   ['file-uri-to-path', 'package.json'],
   ['file-uri-to-path', 'index.js'],
 ] as const;
+const appIconPath = resolve(__dirname, 'assets', 'sprint-coder-icon');
 const macCodeSignIdentity = process.env['SPRINT_CODER_CODESIGN_IDENTITY'] ?? '-';
 const releasePackage = process.env['SPRINT_CODER_RELEASE'] === '1';
 const ciPackage = process.env['CI'] === '1' || process.env['CI'] === 'true';
@@ -124,6 +125,8 @@ function signAdhocBundle(appPath: string): void {
 
 const config: ForgeConfig = {
   packagerConfig: {
+    // Electron Packager appends the platform-specific extension (.icns/.ico).
+    icon: appIconPath,
     // @electron/asar matches `unpack` against the full source filename with matchBase enabled.
     // Native addons cannot be loaded from inside app.asar, so unpack only `.node` binaries.
     asar: { unpack: '*.node' },
@@ -182,6 +185,7 @@ const config: ForgeConfig = {
     new MakerSquirrel({
       name: 'SprintCoder',
       setupExe: 'Sprint-Coder-Setup.exe',
+      setupIcon: `${appIconPath}.ico`,
       noMsi: true,
       ...(windowsSign === undefined ? {} : { windowsSign }),
     }),

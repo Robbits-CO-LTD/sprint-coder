@@ -34,6 +34,7 @@ const DESKTOP_MANIFEST = JSON.parse(readFileSync(join(DESKTOP_ROOT, 'package.jso
 
 const WATCHED_ROOTS = [
   join(DESKTOP_ROOT, 'src'),
+  join(DESKTOP_ROOT, 'assets'),
   join(DESKTOP_ROOT, 'forge.config.ts'),
   join(DESKTOP_ROOT, 'package.json'),
   join(DESKTOP_ROOT, 'vite.main.config.ts'),
