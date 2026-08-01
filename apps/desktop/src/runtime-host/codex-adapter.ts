@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
+  accessSync,
+  constants,
   lstatSync,
   mkdtempSync,
   readFileSync,
@@ -739,7 +741,28 @@ export function resolveCodexCommand(
   architecture: NodeJS.Architecture = process.arch,
   localAppData: string | null | undefined = process.env['LOCALAPPDATA'],
 ): string {
-  if (platform !== 'win32' || command !== 'codex') return command;
+  if (command !== 'codex') return command;
+  if (platform === 'darwin') {
+    const roots = [
+      ...(searchPath ?? '').split(delimiter).filter((entry) => entry.length > 0),
+      join(userHome, '.local', 'bin'),
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+    ];
+    for (const root of new Set(roots)) {
+      const candidate = join(root, command);
+      try {
+        // Native installers expose the CLI through a symlink in ~/.local/bin, so follow it.
+        if (!statSync(candidate).isFile()) continue;
+        accessSync(candidate, constants.X_OK);
+        return candidate;
+      } catch {
+        // Continue through the macOS locations a Finder-launched app does not inherit in PATH.
+      }
+    }
+    return command;
+  }
+  if (platform !== 'win32') return command;
   const desktopCommand = resolveCodexDesktopCommand(localAppData);
   if (desktopCommand !== null) return desktopCommand;
   const packageArchitecture = architecture === 'arm64' ? 'arm64' : 'x64';

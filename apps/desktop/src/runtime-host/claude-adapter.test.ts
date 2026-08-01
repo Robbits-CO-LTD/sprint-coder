@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -18,6 +18,38 @@ afterEach(async () => {
 });
 
 describe('Claude runtime probe', () => {
+  it('resolves the user-local Claude CLI when a packaged macOS app has a system-only PATH', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-home-'));
+    temporaryRoots.push(home);
+    const executable = join(home, '.local', 'bin', 'claude');
+    await mkdir(join(executable, '..'), { recursive: true });
+    await writeFile(executable, '');
+    await chmod(executable, 0o700);
+
+    expect(
+      resolveClaudeCommand('claude', 'darwin', '/usr/bin:/bin:/usr/sbin:/sbin', null, home),
+    ).toBe(executable);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'skips a non-executable Claude candidate before the user-local CLI',
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-permission-'));
+      temporaryRoots.push(home);
+      const blockedRoot = join(home, 'blocked-bin');
+      const blocked = join(blockedRoot, 'claude');
+      const executable = join(home, '.local', 'bin', 'claude');
+      await mkdir(blockedRoot, { recursive: true });
+      await mkdir(join(executable, '..'), { recursive: true });
+      await writeFile(blocked, '');
+      await chmod(blocked, 0o600);
+      await writeFile(executable, '');
+      await chmod(executable, 0o700);
+
+      expect(resolveClaudeCommand('claude', 'darwin', blockedRoot, null, home)).toBe(executable);
+    },
+  );
+
   it('resolves the native Claude executable behind the Windows npm shim', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-command-'));
     temporaryRoots.push(root);
