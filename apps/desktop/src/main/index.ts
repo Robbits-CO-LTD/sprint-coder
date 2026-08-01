@@ -47,11 +47,10 @@ if (squirrelStartup || !hasLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (mainWindow !== null) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    showMainWindow();
   });
+
+  app.on('activate', () => showMainWindow());
 
   void app
     .whenReady()
@@ -143,8 +142,29 @@ function createWindow(): BrowserWindow {
     callback(false),
   );
   session.defaultSession.setPermissionCheckHandler(() => false);
+  if (process.platform === 'darwin') {
+    // Keep the BrowserWindow (and the window-bound IPC router) alive when the user clicks the
+    // macOS close button. A later Dock activation or second launch can then restore the same
+    // session instead of touching a destroyed BrowserWindow.
+    window.on('close', (event) => {
+      if (shutdownInFlight || shutdownCommitted) return;
+      event.preventDefault();
+      window.hide();
+    });
+  }
+  window.once('closed', () => {
+    if (mainWindow === window) mainWindow = null;
+  });
   window.once('ready-to-show', () => window.show());
   return window;
+}
+
+function showMainWindow(): void {
+  const window = mainWindow;
+  if (window === null || window.isDestroyed()) return;
+  if (window.isMinimized()) window.restore();
+  if (!window.isVisible()) window.show();
+  window.focus();
 }
 
 async function loadRenderer(window: BrowserWindow): Promise<void> {

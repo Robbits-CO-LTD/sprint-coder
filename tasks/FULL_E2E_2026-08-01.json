@@ -1,0 +1,178 @@
+{
+  "$schema": "e2e-test-plan-v2",
+  "mode": "browser",
+  "hosting": "local",
+  "browser_tool": "playwright-mcp",
+  "issue_ref": "#89",
+  "issue_body": "macOSで全ウィンドウを閉じた後、同じprofileで二重起動すると、破棄済みmainWindowをsecond-instance handlerが操作してTypeError: Object has been destroyedになる。閉じる後も安全に再表示でき、Task履歴を保持すること。",
+  "purpose": "最新のorigin/mainから作成した作業ブランチ上で、Sprint Coderの主要ユーザーフローをElectron実アプリで完全走査し、Computer Useでも直接操作して再現可能な不具合を発見・修正する",
+  "pass_criteria": "全Playwright E2EがPASSし、Computer Useの核心操作と入力境界・再起動往復がPASSし、発見した不具合は修正前再現と修正後回帰の証跡を持ち、PRのレビューBOT承認後にsquash mergeされる",
+  "critical_point": "コード検査や画面表示だけでなく、Task作成から送信・完了・永続化、Project/Settings/Team/承認の状態変更を実アプリで直接往復操作する",
+  "smoke_test_passed": true,
+  "smoke_evidence": "2026-08-01: Node v22.23.1でtests/e2e/keyboard-smoke.spec.tsをdev-mode Electron実アプリに対して実行。新規Task作成→Composer入力→送信が4.3秒でPASS（1/1）。",
+  "user_perspective_check": "はい。ユーザーとしてパッケージ版を起動し、Task作成、Chat入力・送信・再起動復元、Settings、Team Canvas/Listを直接操作できた。発見したmacOS閉じる→再起動クラッシュは修正前再現と修正後の履歴保持まで確認し、全E2E・品質ゲートも0 failureで完走しているため、この成果物で目的を達成できる。",
+  "confidence_gate": {
+    "C1": {
+      "answer": "はい",
+      "evidence_ref": "T1・T2・T8のevidence参照 — Computer UseでTask作成、2通送信、macOS閉じる、再起動、Settings、Team Canvas/Listを直接操作"
+    },
+    "C2": {
+      "answer": "はい",
+      "evidence_ref": "T1・T7・T8のevidence参照 — 署名済みパッケージ版で主要フローを直接操作し、全Electron E2Eを0 failureで完走"
+    },
+    "C3": {
+      "answer": "はい",
+      "evidence_ref": "T1〜T8すべてにPASSと具体的な操作・テスト証跡を記入済み"
+    },
+    "C4": {
+      "answer": "はい",
+      "evidence_ref": "T1・T2・T8のevidence参照 — Playwright Electron runnerに加えてComputer Useでネイティブウィンドウ操作と主要画面を補完検証"
+    },
+    "C5": {
+      "answer": "はい",
+      "evidence_ref": "T1のinitial_failureとevidence参照 — 修正前のTypeError: Object has been destroyedを再現し、修正後は同profile二重起動で再表示・履歴保持・エラーなしを確認"
+    },
+    "C6": {
+      "answer": "はい",
+      "evidence_ref": "AC-1→T1、AC-2→T2、AC-3→T3、AC-4→T4、AC-5→T5、AC-6→T6、AC-7→T7、AC-8→T8"
+    }
+  },
+  "execution_note": "browser_toolの列挙値制約に合わせてplaywright-mcpを指定するが、実行はリポジトリ標準Playwright Electron runnerとComputer Useを併用する",
+  "items": [
+    {
+      "id": 1,
+      "screen": "Chat / Task golden path",
+      "changed_files": [
+        "apps/desktop/src/main/index.ts",
+        "tests/e2e/macos-window-lifecycle.spec.ts"
+      ],
+      "depth": "L2",
+      "operation_flow": "起動直後 → Computer Useで新規Taskを作成しMock Runtimeを選ぶ → 日本語メッセージを入力・送信 → ストリーム完了を待つ → Task名・回答・完了状態を確認 → アプリ再起動後も履歴が復元される",
+      "method": "direct",
+      "priority": "high",
+      "acceptance_criteria": "AC-1: 新規Taskの送信・完了・再起動復元が実ユーザー操作で成立する",
+      "expected_errors": "アプリ起動失敗、Runtime未検出、送信無反応、ストリーム停止、再起動後の履歴消失",
+      "result": "PASS",
+      "evidence": "Computer Use: 新規Task→日本語2行送信→Mock完了→2通目送信→macOS閉じる→同profile二重起動→既存ウィンドウ再表示→2往復の履歴保持を確認。修正前はTypeError: Object has been destroyed、修正後は重大ダイアログなし。Playwright: golden-path-1 + macos-window-lifecycle 2/2 PASS。",
+      "skip_reason": null,
+      "defect_class": null,
+      "vercel_log_ref": null,
+      "initial_failure": {
+        "defect_class": "PRE-EXISTING",
+        "evidence": "Computer Use（専用一時profile /private/tmp/sprint-coder-cu.jJtoAF）: 新規Task→日本語2行メッセージ送信→2通目送信成功→macOS閉じるボタン→同profileで再起動。重大エラーダイアログ『TypeError: Object has been destroyed』、apps/desktop/.vite/build/index.jsのsecond-instance handlerで再現。Issue #89。なお完了直後にAX treeだけが古いplaceholderを返す観測は、画面表示と2通目送信成功によりComputer Use側のキャッシュ遅延と判定。"
+      }
+    },
+    {
+      "id": 2,
+      "screen": "Composer input boundaries",
+      "changed_files": ["tests/e2e/composer-input-boundaries.spec.ts"],
+      "depth": "L2",
+      "operation_flow": "空のComposer → Shift+Enterで複数行を作る → 日本語入力と長文を追加する → レイアウト・スクロール・左端揃えを確認 → 送信し、内容が欠落・二重化せず表示される",
+      "method": "direct",
+      "priority": "high",
+      "acceptance_criteria": "AC-2: 複数行・日本語・長文入力が崩れず、送信内容が保持される",
+      "expected_errors": "Enter誤送信、日本語重複または欠落、長文でComposer崩壊、送信後の改行消失",
+      "result": "PASS",
+      "evidence": "Computer Use: set_valueで日本語2行・長文の完全一致とレイアウトを目視し送信成功。Playwright: Shift+Enter実キー→日本語確定相当insertText→長文スクロール→送信後message完全一致を検証、1/1 PASS。",
+      "skip_reason": null,
+      "defect_class": null,
+      "vercel_log_ref": null
+    },
+    {
+      "id": 3,
+      "screen": "Project Context Hub",
+      "changed_files": [],
+      "depth": "L2",
+      "operation_flow": "サイドバー表示 → Projectを作成 → TaskをProjectへ移動 → Projectをアーカイブ・復元 → キーボードでも同じ操作ができ、再読み込み後に状態が保たれる",
+      "method": "scenario",
+      "priority": "high",
+      "acceptance_criteria": "AC-3: Project作成・移動・アーカイブ・復元が永続化される",
+      "expected_errors": "Project重複、Task消失、復元不能、フォーカス喪失、再起動後の状態不一致",
+      "result": "PASS",
+      "evidence": "Playwright project-sidebar.spec.ts: Project作成→Task移動→archive→restore→キーボード操作を実Electronで実行、1/1 PASS。",
+      "skip_reason": null,
+      "defect_class": null,
+      "vercel_log_ref": null
+    },
+    {
+      "id": 4,
+      "screen": "Settings / model / access / skills",
+      "changed_files": [],
+      "depth": "L2",
+      "operation_flow": "設定を開く → Model・Effort・Accessを変更 → Skillを選択またはimport previewする → 設定を閉じて再度開く → 選択値とCLI検出状態が一致する",
+      "method": "scenario",
+      "priority": "high",
+      "acceptance_criteria": "AC-4: 設定変更が正しく制約され、保存・再表示される",
+      "expected_errors": "選択肢不整合、保存漏れ、CLI検出誤表示、ダイアログのフォーカストラップ不良",
+      "result": "PASS",
+      "evidence": "Playwright settings-dialog.spec.ts + model-and-access-settings.spec.ts: ダイアログfocus、CLI検出、Skill import、Model/Effort/Access保存、Team model制約を実Electronで実行、12/12 PASS。",
+      "skip_reason": null,
+      "defect_class": null,
+      "vercel_log_ref": null
+    },
+    {
+      "id": 5,
+      "screen": "Team Canvas / List / activity",
+      "changed_files": [],
+      "depth": "L2",
+      "operation_flow": "Chat Task → Teamへ昇格 → Mock Leaderが複数Workerをhire・dispatch → CanvasとListを往復 → カメラ・Worker位置・activityを確認 → 再起動後の復元またはpaused状態を確認",
+      "method": "scenario",
+      "priority": "high",
+      "acceptance_criteria": "AC-5: Teamの実行・Canvas/List表示・永続化が一貫する",
+      "expected_errors": "Worker重なり、状態不一致、activity欠落、Canvas遷移破綻、再起動後の実行状態誤り",
+      "result": "PASS",
+      "evidence": "Playwright team-flow.spec.ts: 3 Worker hire/dispatch/completion、active Team再起動paused復元、自然文auto-promotionを実Electronで実行、3/3 PASS。",
+      "skip_reason": null,
+      "defect_class": null,
+      "vercel_log_ref": null
+    },
+    {
+      "id": 6,
+      "screen": "File edits / command approvals",
+      "changed_files": [],
+      "depth": "L2",
+      "operation_flow": "一時workspaceを割り当てる → Askでは編集が書き込まれないことを確認 → Autoでは編集が記録・復元されることを確認 → command承認を拒否して無実行を確認 → 承認後に同一commandが一度だけ実行される",
+      "method": "scenario",
+      "priority": "high",
+      "acceptance_criteria": "AC-6: Access presetと承認判断どおりに副作用が制御される",
+      "expected_errors": "無承認書き込み、二重実行、拒否無視、監査履歴欠落、再起動後の編集履歴消失",
+      "result": "PASS",
+      "evidence": "Playwright file-edits.spec.ts + command-runner-flow.spec.ts: Ask無書込、Auto編集と再起動復元、command拒否後の無実行と承認後の一度だけ実行を検証、3/3 PASS。",
+      "skip_reason": null,
+      "defect_class": null,
+      "vercel_log_ref": null
+    },
+    {
+      "id": 7,
+      "screen": "Full Playwright Electron suite",
+      "changed_files": [],
+      "depth": "L2",
+      "operation_flow": "最新ソースをpackage → npm run e2eでtests/e2e全件を単一worker実行 → 各テストの終了状態・stderr・artifactを確認 → FAILは最小specで再現して分類する",
+      "method": "scenario",
+      "priority": "high",
+      "acceptance_criteria": "AC-7: リポジトリ標準の全E2Eテストが0 failureで完走する",
+      "expected_errors": "package失敗、Electron launch timeout、flaky animation、platform差、テスト間状態汚染",
+      "result": "PASS",
+      "evidence": "Node v22.23.1で署名済みmacOS arm64パッケージを生成・検証後、SPRINT_CODER_E2E_MODE=packaged npm run e2eを実行。全87項目中84 PASS、実Codex/CLIを明示的に有効化する隔離テスト3件のみ意図どおりSKIP、0 failure、4.8分。追加回帰2件を含む。続けてtypecheck・ESLint・Prettier checkは0 error、unit/integrationはdesktop 2063 + contracts 39 + domain 290 = 2392 PASS（外部Runtime等の明示ゲート45 SKIP）。",
+      "skip_reason": null,
+      "defect_class": null,
+      "vercel_log_ref": null
+    },
+    {
+      "id": 8,
+      "screen": "Whole-app visual and accessibility overview",
+      "changed_files": [],
+      "depth": "L1",
+      "operation_flow": "全L2完了後 → Computer Useで主要画面を巡回 → 画面欠け・操作不能・不自然なラベルを確認 → Playwrightのaxe・keyboard・zoom・reduced-motion項目とconsole errorを確認する",
+      "method": "direct",
+      "priority": "medium",
+      "acceptance_criteria": "AC-8: 主要画面に明白な視覚破綻や重大アクセシビリティ違反、console errorがない",
+      "expected_errors": "ウィンドウ幅依存の欠け、焦点不可、重大axe違反、console例外、reduced motion無視",
+      "result": "PASS",
+      "evidence": "全L2完了後、Computer Useで隔離profileのパッケージ版を起動し、初期画面→新規Task→Chat→Settings→Team Canvas→Team Listをクリックして各スクリーンショットとAX treeを確認。見切れ・重なり・操作不能なし。一時profileは終了後削除。Playwrightではaxe 4/4、keyboard golden path/list parity、reduced motion 4/4、200% zoom 2/2、最終layout 2/2がPASSし、console例外なし。",
+      "skip_reason": null,
+      "defect_class": null,
+      "vercel_log_ref": null
+    }
+  ]
+}
