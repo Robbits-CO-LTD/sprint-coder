@@ -33,7 +33,7 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
 
 if (runsWithElectronAbi)
   describe('Project persistence', () => {
-    it('migrates v57 databases to the v58 explicit memory schema', () => {
+    it('migrates v57 databases through explicit memory and provenance schemas', () => {
       const { persistence, path } = createPersistence();
       persistence.createProject('pre-memory');
       persistence.close();
@@ -41,7 +41,7 @@ if (runsWithElectronAbi)
       legacy.exec(`
         DROP INDEX project_memories_project_order_idx;
         DROP TABLE project_memories;
-        DELETE FROM schema_migrations WHERE version = 58;
+        DELETE FROM schema_migrations WHERE version IN (58, 59);
       `);
       legacy.close();
       const migrated = new SqlitePersistenceClient(path);
@@ -49,6 +49,12 @@ if (runsWithElectronAbi)
       expect(
         inspection.prepare('SELECT checksum FROM schema_migrations WHERE version = 58').get(),
       ).toEqual({ checksum: 'project-context-hub-v58-explicit-memory' });
+      expect(
+        inspection.prepare('SELECT checksum FROM schema_migrations WHERE version = 59').get(),
+      ).toEqual({ checksum: 'project-context-hub-v59-memory-provenance' });
+      expect(inspection.prepare("PRAGMA table_info('project_memories')").all()).toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: 'created_by' })]),
+      );
       inspection.close();
       migrated.close();
     });
@@ -202,6 +208,7 @@ if (runsWithElectronAbi)
         sourceTaskId: task.id,
         sourceTurnId: source.turnId,
         content: 'Preserve the verified API decision.',
+        createdBy: 'user',
         status: 'active',
         localOnly: true,
       });
@@ -238,6 +245,34 @@ if (runsWithElectronAbi)
       ).toMatchObject({ status: 'disabled', revision: 2 });
       const afterDisable = persistence.startTurn(task.id, 'after disable');
       expect(persistence.prepareContext(task.id, afterDisable.turnId).projectItems).toEqual([]);
+      persistence.close();
+    });
+
+    it('stores agent-selected memory with non-user authority on the next Turn', () => {
+      const { persistence } = createPersistence();
+      const project = persistence.createProject('Agent memory');
+      const task = persistence.createTask('source', false, project.id);
+      const source = persistence.startTurn(task.id, 'verify the stable command');
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, source.turnId, stage);
+      persistence.appendDelta(task.id, source.turnId, randomUUID(), 'npm run check is verified');
+      persistence.completeTurn(task.id, source.turnId, 'completed');
+
+      const memory = persistence.createAgentProjectMemoryFromTurn({
+        projectId: project.id,
+        sourceTurnId: source.turnId,
+        content: 'The verified project check command is npm run check.',
+      });
+      expect(memory.createdBy).toBe('assistant');
+
+      const next = persistence.startTurn(task.id, 'continue');
+      expect(persistence.prepareContext(task.id, next.turnId).projectItems).toEqual([
+        expect.objectContaining({
+          kind: 'memory',
+          authority: 'none',
+          content: 'The verified project check command is npm run check.',
+        }),
+      ]);
       persistence.close();
     });
 

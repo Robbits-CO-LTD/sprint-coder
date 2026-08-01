@@ -247,6 +247,49 @@ describe('TeamMcpBridge', () => {
     expect(createSkillDraft).toHaveBeenCalledOnce();
   });
 
+  it('allows Project memory candidates only for an explicitly eligible Leader turn', async () => {
+    const queueCandidate = vi.fn(async () => ({ queued: true }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      undefined,
+      undefined,
+      queueCandidate,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const deniedToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-denied', { taskId: 'task-1', token: deniedToken });
+    const denied = await roundTrip(socketPath as string, {
+      token: deniedToken,
+      tool: 'project_memory_remember',
+      args: { content: 'stable fact' },
+    });
+    expect(JSON.parse(denied.lines[0] as string)).toMatchObject({ ok: false });
+
+    const allowedToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-allowed', {
+      taskId: 'task-1',
+      token: allowedToken,
+      allowProjectMemory: true,
+      allowTeamTools: false,
+    });
+    const allowed = await roundTrip(socketPath as string, {
+      token: allowedToken,
+      tool: 'project_memory_remember',
+      args: { content: 'stable fact' },
+    });
+    expect(JSON.parse(allowed.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { queued: true },
+    });
+    expect(queueCandidate).toHaveBeenCalledWith(
+      { content: 'stable fact' },
+      { taskId: 'task-1', turnId: 'turn-allowed' },
+    );
+  });
+
   it('does not expose Team tools to a Skill Creator-only turn', async () => {
     const coordinator = fakeCoordinator();
     const bridge = new TeamMcpBridge(coordinator, testSocketPath());
