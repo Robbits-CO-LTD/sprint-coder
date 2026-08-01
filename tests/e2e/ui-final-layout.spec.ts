@@ -131,12 +131,12 @@ test.describe('final UI layout gate', () => {
     });
   });
 
-  test('keeps the macOS titlebar separate from content and Team policy visible', async ({
+  test('keeps the custom titlebar separate from content and Team policy visible', async ({
     browserName,
   }, testInfo) => {
     expect(browserName).toBe('chromium');
     await withFreshApp('titlebar-team-list-layout', testInfo, async (page) => {
-      if (process.platform === 'darwin') {
+      if (process.platform === 'darwin' || process.platform === 'win32') {
         const titlebar = page.getByTestId('app-titlebar');
         await expect(titlebar).toBeVisible();
         await expect(titlebar).toContainText('Sprint Coder');

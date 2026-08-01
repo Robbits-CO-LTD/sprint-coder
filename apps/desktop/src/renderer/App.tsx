@@ -10,6 +10,7 @@ import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
 import { SettingsDialog } from './components/SettingsDialog';
 import { TaskBoundaryProvider } from './components/TaskBoundary';
+import { AppTitlebar } from './components/AppTitlebar';
 import { List, Plus } from './components/icons';
 import { useMediaQuery } from './lib/useMediaQuery';
 import {
@@ -262,18 +263,10 @@ export default function App() {
   // who could otherwise still Tab into chrome that looks gone. List mode never sets this class, so
   // the sidebar/header stay fully interactive there.
   const chromeInert = teamCanvasActive || exiting;
-  const usesIntegratedMacTitlebar =
-    navigator.platform.toLowerCase().includes('mac') ||
-    navigator.userAgent.toLowerCase().includes('macintosh');
-
   return (
     <TaskBoundaryProvider value={{ selectTask: selectTaskFromUi, createTask: createTaskFromUi }}>
       <div className="app-frame">
-        {usesIntegratedMacTitlebar && (
-          <header className="app-titlebar" data-testid="app-titlebar">
-            <span className="app-titlebar-name">Sprint Coder</span>
-          </header>
-        )}
+        <AppTitlebar />
         <div
           className={[
             'app-shell',

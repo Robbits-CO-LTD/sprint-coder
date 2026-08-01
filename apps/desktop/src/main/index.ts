@@ -1,4 +1,14 @@
-import { app, BrowserWindow, dialog, net, protocol, session } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  net,
+  protocol,
+  session,
+  type IpcMainEvent,
+  type IpcMainInvokeEvent,
+} from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
 import { readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +26,12 @@ import {
   type NativeMutationPackagedLoadEvidence,
 } from './native-mutation-platform-gate';
 import { secureLogger } from './secure-logger';
+import {
+  applyWindowControl,
+  isWindowControlAction,
+  WINDOW_CONTROL_CHANNELS,
+  windowChromeOptions,
+} from '../window-controls';
 
 const isDevelopment = !app.isPackaged;
 app.setName('Sprint Coder');
@@ -33,6 +49,16 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 app.enableSandbox();
+
+ipcMain.on(WINDOW_CONTROL_CHANNELS.action, (event, action: unknown) => {
+  const window = trustedWindowControlTarget(event);
+  if (window === null || !isWindowControlAction(action)) return;
+  applyWindowControl(window, action);
+});
+ipcMain.handle(WINDOW_CONTROL_CHANNELS.getMaximized, (event) => {
+  const window = trustedWindowControlTarget(event);
+  return window?.isMaximized() ?? false;
+});
 
 const userDataOverride = process.env['SPRINT_CODER_USER_DATA_DIR'];
 if (userDataOverride !== undefined && userDataOverride.length > 0) {
@@ -122,12 +148,7 @@ function createWindow(): BrowserWindow {
     minHeight: 560,
     show: false,
     backgroundColor: '#12110f',
-    ...(process.platform === 'darwin'
-      ? {
-          titleBarStyle: 'hiddenInset' as const,
-          trafficLightPosition: { x: 14, y: 13 },
-        }
-      : { autoHideMenuBar: true }),
+    ...windowChromeOptions(process.platform),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       sandbox: true,
@@ -152,10 +173,31 @@ function createWindow(): BrowserWindow {
       window.hide();
     });
   }
+  const publishMaximizedState = (): void => {
+    if (!window.webContents.isDestroyed())
+      window.webContents.send(WINDOW_CONTROL_CHANNELS.maximizedChanged, window.isMaximized());
+  };
+  window.on('maximize', publishMaximizedState);
+  window.on('unmaximize', publishMaximizedState);
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
   });
   window.once('ready-to-show', () => window.show());
+  return window;
+}
+
+function trustedWindowControlTarget(
+  event: IpcMainEvent | IpcMainInvokeEvent,
+): BrowserWindow | null {
+  const window = mainWindow;
+  if (
+    process.platform !== 'win32' ||
+    window === null ||
+    window.isDestroyed() ||
+    event.sender !== window.webContents ||
+    event.senderFrame !== window.webContents.mainFrame
+  )
+    return null;
   return window;
 }
 

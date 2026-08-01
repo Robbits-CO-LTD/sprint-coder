@@ -697,6 +697,14 @@ export interface SprintCoderApi {
       settingsWorkspaceV2?: boolean;
     }>;
   };
+  windowControls: {
+    platform: string;
+    minimize(): void;
+    toggleMaximize(): void;
+    close(): void;
+    isMaximized(): Promise<boolean>;
+    onMaximizedChanged(listener: (maximized: boolean) => void): () => void;
+  };
   runtime: {
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
   };
