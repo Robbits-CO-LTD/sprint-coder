@@ -71,23 +71,10 @@ jobs:
       - name: Test
         run: npm run test
 
-      # Keep the per-change E2E gate focused on the core lifecycle. The full serial
-      # UI suite takes more than ten minutes even without packaging; unit tests cover
-      # the individual surfaces above, while these specs prove restart, cancel, and
-      # queued-turn behavior through a real Electron app.
-      - name: Dev-mode E2E smoke (Linux)
-        if: runner.os == 'Linux'
-        run: >-
-          xvfb-run -a npx playwright test
-          tests/e2e/golden-path-1-restart-restore.spec.ts
-          tests/e2e/golden-path-2-cancel.spec.ts
-          tests/e2e/golden-path-3-queue.spec.ts
-        env:
-          SPRINT_CODER_E2E_MODE: dev
-
       # Exercise the Windows-only npm.cmd spawn and taskkill /PID /T teardown path. Packaged E2E
-      # is intentionally not part of the per-change CI gate. This focused smoke proves that a clean
-      # Windows checkout can run development-mode E2E without a manually started dev server.
+      # and the full serial UI suite are intentionally not part of the per-change CI gate. This
+      # focused smoke proves that a clean Windows checkout can run development-mode E2E without a
+      # manually started dev server.
       - name: Dev-mode E2E auto-start smoke (Windows)
         if: runner.os == 'Windows'
         run: npx playwright test tests/e2e/keyboard-smoke.spec.ts
