@@ -24,13 +24,18 @@ test.describe('composer input boundaries', () => {
     await textarea.focus();
 
     const firstLine = '第一行：日本語入力テスト';
-    const secondLine = `第二行：${'長文入力でも欠落や二重化を起こさない。'.repeat(20)}`;
+    const remainingLines = Array.from(
+      { length: 8 },
+      (_, index) => `第${index + 2}行：${'長文入力でも欠落や二重化を起こさない。'.repeat(4)}`,
+    );
     await page.keyboard.insertText(firstLine);
-    await page.keyboard.press('Shift+Enter');
-    // insertText follows the same committed-text path used after an IME confirms Japanese text.
-    await page.keyboard.insertText(secondLine);
+    for (const line of remainingLines) {
+      await page.keyboard.press('Shift+Enter');
+      // insertText follows the same committed-text path used after an IME confirms Japanese text.
+      await page.keyboard.insertText(line);
+    }
 
-    const messageText = `${firstLine}\n${secondLine}`;
+    const messageText = [firstLine, ...remainingLines].join('\n');
     await expect(textarea).toHaveValue(messageText);
     const geometry = await textarea.evaluate((element) => {
       const node = element as HTMLTextAreaElement;
