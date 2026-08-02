@@ -86,7 +86,6 @@ export function Sidebar({
   const [moveTarget, setMoveTarget] = useState('');
   const [pending, setPending] = useState(false);
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const sidebarRef = useRef<HTMLElement>(null);
   const pendingFocusRef = useRef<PendingFocus | null>(null);
 
   const projection = useMemo(
@@ -129,11 +128,7 @@ export function Sidebar({
     const request: PendingFocus = { frame: null, observer: null, timeout: null };
     const stillOwnsFocus = (): boolean => {
       const active = document.activeElement;
-      return (
-        active === origin ||
-        active === document.body ||
-        sidebarRef.current?.contains(active) === true
-      );
+      return active === origin || active === document.body;
     };
     const cancel = (): void => {
       if (pendingFocusRef.current !== request) return;
@@ -281,7 +276,6 @@ export function Sidebar({
 
   return (
     <nav
-      ref={sidebarRef}
       className="sidebar"
       data-testid="sidebar"
       aria-label="Task履歴"
