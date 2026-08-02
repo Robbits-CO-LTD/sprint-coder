@@ -123,7 +123,20 @@ async function drainAclQueue(): Promise<void> {
           );
           for (const request of requests) request.resolve();
         } catch (error) {
-          for (const request of requests) request.reject(error);
+          if (requests.length === 1) {
+            requests[0]?.reject(error);
+            continue;
+          }
+          // A coalesced wave is only an optimization. One vanished/locked path must not reject
+          // unrelated callers, so retry requests separately to identify the actual failures.
+          for (const request of requests) {
+            try {
+              await executeAcl(request.paths, operation);
+              request.resolve();
+            } catch (requestError) {
+              request.reject(requestError);
+            }
+          }
         }
       }
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -172,6 +185,7 @@ async function runAclBatch(
       },
     );
     let settled = false;
+    let timedOut = false;
     const finish = (error?: Error): void => {
       if (settled) return;
       settled = true;
@@ -180,15 +194,19 @@ async function runAclBatch(
       else reject(error);
     };
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill('SIGKILL');
-      finish(new Error(`Windows ACL ${operation} timed out`));
     }, WINDOWS_ACL_TIMEOUT_MS);
     child.once('error', (error) => finish(error));
     // Wait for the PowerShell process itself, not pipe closure. GitHub runner helpers may inherit
     // pipe handles and keep execFile's close callback pending after PowerShell has already exited.
-    child.once('exit', (code) =>
-      finish(code === 0 ? undefined : new Error(`Windows ACL ${operation} exited with ${code}`)),
-    );
+    child.once('exit', (code) => {
+      if (timedOut) {
+        finish(new Error(`Windows ACL ${operation} timed out`));
+        return;
+      }
+      finish(code === 0 ? undefined : new Error(`Windows ACL ${operation} exited with ${code}`));
+    });
   });
 }
 

@@ -28,6 +28,7 @@ const fileSystemFault = vi.hoisted(() => ({
   failRename: false,
   failAtomicReplace: false,
   failDirectorySync: false,
+  failCopyAfterCreate: false,
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -46,6 +47,13 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
+    copyFileSync: (...args: Parameters<typeof actual.copyFileSync>) => {
+      if (fileSystemFault.failCopyAfterCreate) {
+        actual.writeFileSync(args[1], 'partial copy');
+        throw new Error('simulated copy failure after destination creation');
+      }
+      return actual.copyFileSync(...args);
+    },
     writeSync: (...args: Parameters<typeof actual.writeSync>) => {
       if (fileSystemFault.failWrite) throw new Error('simulated disk write failure');
       return actual.writeSync(...args);
@@ -201,6 +209,27 @@ describe('saveWorkspaceFile (issue #43)', () => {
       expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
     } finally {
       fileSystemFault.failWrite = false;
+    }
+    expect(readFileSync(file)).toEqual(original);
+    expect(readdirSync(root)).toEqual(['important.txt']);
+  });
+
+  it('removes a partial staging file when copying fails after creating it', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original 日本語\r\n', 'utf8');
+    writeFileSync(file, original);
+    fileSystemFault.failCopyAfterCreate = true;
+    try {
+      const result = saveWorkspaceFile(
+        root,
+        'important.txt',
+        'replacement\r\n',
+        createHash('sha256').update(original).digest('hex'),
+      );
+      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+    } finally {
+      fileSystemFault.failCopyAfterCreate = false;
     }
     expect(readFileSync(file)).toEqual(original);
     expect(readdirSync(root)).toEqual(['important.txt']);

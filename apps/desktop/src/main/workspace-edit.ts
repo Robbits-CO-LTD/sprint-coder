@@ -166,8 +166,10 @@ export function saveWorkspaceFile(
     const bytes = Buffer.from(text, 'utf8');
     // Start from a copy of the validated target so mode and other copyable metadata are retained.
     // Windows publication below separately uses File.Replace to retain the destination ACL.
-    copyFileSync(absolute, staging, constants.COPYFILE_EXCL);
+    // The nonce makes this name ours even if copyFileSync creates the destination and then throws
+    // part-way through (ENOSPC/EIO). Claim it first so that partial copies are always cleaned up.
     ownsStaging = true;
+    copyFileSync(absolute, staging, constants.COPYFILE_EXCL);
     const originalMode = Number(stat.mode & 0o777n);
     chmodSync(staging, originalMode | 0o200);
     stagingDescriptor = openSync(

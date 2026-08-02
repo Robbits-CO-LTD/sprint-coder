@@ -63,4 +63,23 @@ describe('Windows ACL runner', () => {
       await Promise.all(paths.map((path) => verifyWindowsPathAcl(path, 'file')));
     },
   );
+
+  it.runIf(process.platform === 'win32')(
+    'isolates a failing coalesced request from an unrelated valid request',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-isolation-'));
+      cleanup.push(root);
+      const valid = join(root, 'valid.txt');
+      await writeFile(valid, 'private');
+
+      const [validResult, missingResult] = await Promise.allSettled([
+        secureWindowsPath(valid, 'file'),
+        secureWindowsPath(join(root, 'missing.txt'), 'file'),
+      ]);
+
+      expect(validResult.status).toBe('fulfilled');
+      expect(missingResult.status).toBe('rejected');
+      await verifyWindowsPathAcl(valid, 'file');
+    },
+  );
 });
