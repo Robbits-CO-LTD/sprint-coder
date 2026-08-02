@@ -10,6 +10,7 @@ export type CommandTailLine = Readonly<{
 export type CommandTailProjection = Readonly<{
   lines: readonly CommandTailLine[];
   lastOutputSeq: number;
+  pendingCarriageReturn?: 'stdout' | 'stderr' | null;
 }>;
 
 const COLLAPSED_LINE_LIMIT = 8;
@@ -20,8 +21,21 @@ export function appendCommandOutput(
   output: CommandOutputRecord,
 ): CommandTailProjection {
   if (output.seq <= current.lastOutputSeq) return current;
-  const extracted = trailingSegments(output.text, COLLAPSED_LINE_LIMIT + 1);
+  const carriedCarriageReturn = current.pendingCarriageReturn ?? null;
+  const continuesSplitCrLf =
+    carriedCarriageReturn === output.stream && output.text.startsWith('\n');
+  const displayText = normalizeCommandChunk(output.text).text;
+  const extracted = trailingSegments(displayText, COLLAPSED_LINE_LIMIT + 1);
   const lines = extracted.truncated ? [] : [...current.lines];
+  if (carriedCarriageReturn !== null && !continuesSplitCrLf) {
+    const previousLine = lines.at(-1);
+    if (
+      previousLine !== undefined &&
+      previousLine.stream === carriedCarriageReturn &&
+      !previousLine.complete
+    )
+      lines[lines.length - 1] = { ...previousLine, complete: true };
+  }
   const segments = extracted.segments;
   let segmentIndex = 0;
   const previous = lines.at(-1);
@@ -50,6 +64,7 @@ export function appendCommandOutput(
   return Object.freeze({
     lines: Object.freeze(visualRows.slice(-COLLAPSED_LINE_LIMIT)),
     lastOutputSeq: output.seq,
+    pendingCarriageReturn: output.text.endsWith('\r') ? output.stream : null,
   });
 }
 
@@ -57,6 +72,10 @@ function trailingSegments(text: string, limit: number): { segments: string[]; tr
   const segments: string[] = [];
   let end = text.length;
   while (segments.length < limit) {
+    if (end === 0) {
+      segments.unshift('');
+      return { segments, truncated: false };
+    }
     const newline = text.lastIndexOf('\n', end - 1);
     if (newline < 0) {
       segments.unshift(text.slice(0, end));
@@ -87,10 +106,15 @@ export function projectCommandLines(
 ): readonly CommandTailLine[] {
   const rows: CommandTailLine[] = [];
   let lastSeq = 0;
+  let pendingCarriageReturn: 'stdout' | 'stderr' | null = null;
   for (const output of outputs) {
     if (output.seq <= lastSeq) continue;
     lastSeq = output.seq;
-    const display = output.text.replaceAll('\n', '↵ ');
+    const continuesSplitCrLf =
+      pendingCarriageReturn === output.stream && output.text.startsWith('\n');
+    const normalized = normalizeCommandChunk(output.text);
+    const prefix = pendingCarriageReturn !== null && !continuesSplitCrLf ? '↵ ' : '';
+    const display = prefix + normalized.text.replaceAll('\n', '↵ ');
     for (let offset = 0; offset < display.length; offset += COMMAND_VISUAL_ROW_CHAR_LIMIT)
       rows.push({
         stream: output.stream,
@@ -98,14 +122,26 @@ export function projectCommandLines(
         complete: true,
         outputSeq: output.seq,
       });
+    pendingCarriageReturn = normalized.trailingCarriageReturn ? output.stream : null;
   }
   return Object.freeze(rows);
+}
+
+function normalizeCommandChunk(text: string): { text: string; trailingCarriageReturn: boolean } {
+  // Preserve whether the record ended in CR. The next record decides whether it was the first half
+  // of CRLF or a standalone terminal carriage return; persisted audit bytes remain untouched.
+  const trailingCarriageReturn = text.endsWith('\r');
+  return {
+    text: text.replaceAll('\r\n', '\n').replace(/\r$/, '').replaceAll('\r', '\n'),
+    trailingCarriageReturn,
+  };
 }
 
 export function projectCommandTail(outputs: readonly CommandOutputRecord[]): CommandTailProjection {
   return outputs.reduce<CommandTailProjection>(appendCommandOutput, {
     lines: Object.freeze([]),
     lastOutputSeq: 0,
+    pendingCarriageReturn: null,
   });
 }
 

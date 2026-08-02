@@ -59,6 +59,51 @@ describe('Command Card projection', () => {
     ).toBe(first);
   });
 
+  it('renders Windows CRLF as one logical line break without changing stored output', () => {
+    const output = {
+      seq: 1,
+      stream: 'stdout' as const,
+      text: '一行目\r\n二行目\r\n',
+      byteLength: 20,
+    };
+    const collapsed = appendCommandOutput({ lines: [], lastOutputSeq: 0 }, output);
+    expect(collapsed.lines.map(({ text }) => text)).toEqual(['一行目', '二行目']);
+    expect(projectCommandLines([output])[0]?.text).toBe('一行目↵ 二行目↵ ');
+    expect(output.text).toBe('一行目\r\n二行目\r\n');
+  });
+
+  it('renders a CRLF split across output records as one logical line break', () => {
+    const outputs = [
+      { seq: 1, stream: 'stdout' as const, text: '一行目\r', byteLength: 7 },
+      { seq: 2, stream: 'stdout' as const, text: '\n二行目', byteLength: 7 },
+    ];
+    const collapsed = outputs.reduce<CommandTailProjection>(appendCommandOutput, {
+      lines: [],
+      lastOutputSeq: 0,
+    });
+
+    expect(collapsed.lines.map(({ text }) => text)).toEqual(['一行目', '二行目']);
+    expect(projectCommandLines(outputs).map(({ text }) => text)).toEqual(['一行目', '↵ 二行目']);
+    expect(outputs.map(({ text }) => text)).toEqual(['一行目\r', '\n二行目']);
+  });
+
+  it('keeps standalone carriage-return progress records as separate updates', () => {
+    const outputs = [
+      { seq: 1, stream: 'stdout' as const, text: '10%\r', byteLength: 4 },
+      { seq: 2, stream: 'stdout' as const, text: '20%\r', byteLength: 4 },
+    ];
+    const collapsed = outputs.reduce<CommandTailProjection>(appendCommandOutput, {
+      lines: [],
+      lastOutputSeq: 0,
+    });
+
+    expect(collapsed.lines).toMatchObject([
+      { text: '10%', complete: true },
+      { text: '20%', complete: false },
+    ]);
+    expect(projectCommandLines(outputs).map(({ text }) => text)).toEqual(['10%', '↵ 20%']);
+  });
+
   it('renders exact argv as an unambiguous JSON array and computes bounded duration', () => {
     expect(exactArgvDisplay('/bin/tool', ['', 'a b', '"quoted"', 'line\nbreak'])).toBe(
       '["/bin/tool","","a b","\\"quoted\\"","line\\nbreak"]',

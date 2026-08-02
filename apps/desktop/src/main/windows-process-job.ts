@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 
@@ -74,6 +75,14 @@ process.stdin.on('end', () => {
  */
 export function windowsJobWrapperCommand(): string {
   if (resolvedNodeCommand !== undefined) return resolvedNodeCommand;
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  if (resourcesPath !== undefined) {
+    const bundled = join(resourcesPath, 'node.exe');
+    if (existsSync(bundled)) {
+      resolvedNodeCommand = bundled;
+      return bundled;
+    }
+  }
   const output = execFileSync('C:\\Windows\\System32\\where.exe', ['node.exe'], {
     encoding: 'utf8',
     env: process.env,

@@ -204,7 +204,11 @@ import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinato
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
 import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
-import { openWorkspaceFileForEdit, saveWorkspaceFile } from './workspace-edit';
+import {
+  openWorkspaceFileForEdit,
+  recoverWorkspaceFileForEdit,
+  saveWorkspaceFile,
+} from './workspace-edit';
 import {
   SkillSettingsError,
   SkillSettingsService,
@@ -256,12 +260,19 @@ import {
 } from './team-tools';
 import {
   BUILTIN_TEAM_SKILL_AUDIT,
+  BUILTIN_TEAM_SKILL_CONTENT,
+  BUILTIN_TEAM_SKILL_DIGEST,
   BUILTIN_TEAM_SKILL_FRAGMENT_ID,
-  installBuiltinTeamSkill,
+  BUILTIN_TEAM_SKILL_ID,
   verifyBuiltinTeamSkillAcceptance,
   type TeamSkillResolutionAudit,
 } from './team-skill';
-import { installBuiltinSkillCreator } from './skill-creator-builtin';
+import {
+  BUILTIN_SKILL_CREATOR_CONTENT,
+  BUILTIN_SKILL_CREATOR_DIGEST,
+  BUILTIN_SKILL_CREATOR_ID,
+} from './skill-creator-builtin';
+import { SkillStore } from './skill-store';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import {
   PROJECT_MEMORY_MCP_GUIDANCE,
@@ -767,7 +778,9 @@ export class IpcRouter {
         return {
           kind,
           codexAvailable: codexCapability.available,
+          codexReadiness: codexCapability.readiness,
           claudeAvailable: claudeCapability.available,
+          claudeReadiness: claudeCapability.readiness,
           model,
           models: activeCapability.models,
           effort: this.persistence.getEffort(),
@@ -1148,7 +1161,8 @@ export class IpcRouter {
             throw new InvalidModelError('provider');
         } else {
           const capability = await this.runtimeFor(runtime.runtimeKind).probe();
-          if (!capability.available) throw new RuntimeUnavailableError(runtime.runtimeKind);
+          if (capability.readiness !== 'ready')
+            throw new RuntimeUnavailableError(runtime.runtimeKind);
           if (!capability.models.some(({ id }) => id === runtime.model))
             throw new InvalidModelError(runtime.runtimeKind);
         }
@@ -1177,7 +1191,7 @@ export class IpcRouter {
       async (input, event, envelope) => {
         if (input.kind === 'codex' || input.kind === 'claude') {
           const capability = await this.runtimeFor(input.kind).probe();
-          if (!capability.available) throw new RuntimeUnavailableError(input.kind);
+          if (capability.readiness !== 'ready') throw new RuntimeUnavailableError(input.kind);
         }
         return this.runMutation(
           event,
@@ -1210,7 +1224,7 @@ export class IpcRouter {
         const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
         const runtimeKind = kind === 'claude' ? 'claude' : 'codex';
         const capability = await this.runtimeFor(runtimeKind).probe();
-        if (!capability.available) throw new RuntimeUnavailableError(runtimeKind);
+        if (capability.readiness !== 'ready') throw new RuntimeUnavailableError(runtimeKind);
         if (!capability.models.some(({ id }) => id === input.model))
           throw new InvalidModelError(runtimeKind);
         return this.runMutation(
@@ -1239,6 +1253,36 @@ export class IpcRouter {
         ).value;
       },
     );
+    this.handle(
+      IPC_CHANNELS.filesPick,
+      taskIdPayloadSchema,
+      fileOpenResultSchema.nullable(),
+      async (input) => {
+        const workspace = this.persistence.getEffectiveWorkspaceSet(input.taskId);
+        const workspacePath = primaryWorkspacePath(workspace);
+        if (workspacePath === null) return null;
+        const selected = await dialog.showOpenDialog(this.window, {
+          title: 'Workspaceのファイルを開く',
+          defaultPath: workspacePath,
+          properties: ['openFile', 'dontAddToRecent'],
+        });
+        if (selected.canceled || selected.filePaths.length === 0) return null;
+        const rooted = resolveTurnRootedPath(workspace, selected.filePaths[0]!);
+        if (rooted === null)
+          return {
+            rootId: workspace.primaryRootId ?? 'legacy-primary',
+            path: selected.filePaths[0]!,
+            text: '',
+            digest: EMPTY_FILE_DIGEST,
+            editable: false,
+            reason: 'outside_workspace' as const,
+          };
+        return {
+          ...openWorkspaceFileForEdit(rooted.root.path, rooted.path),
+          rootId: rooted.root.rootId,
+        };
+      },
+    );
     this.handle(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, (input) => {
       const root = resolveEffectiveWorkspaceRoot(
         this.persistence.getEffectiveWorkspaceSet(input.taskId),
@@ -1248,13 +1292,30 @@ export class IpcRouter {
       // than an empty document the user could type into and then fail to save.
       if (root === null)
         return {
+          rootId: input.rootId,
           path: input.path,
           text: '',
           digest: EMPTY_FILE_DIGEST,
           editable: false,
           reason: 'outside_workspace' as const,
         };
-      return openWorkspaceFileForEdit(root.path, input.path);
+      return { ...openWorkspaceFileForEdit(root.path, input.path), rootId: root.rootId };
+    });
+    this.handle(IPC_CHANNELS.filesRecover, filePathPayloadSchema, fileOpenResultSchema, (input) => {
+      const root = resolveEffectiveWorkspaceRoot(
+        this.persistence.getEffectiveWorkspaceSet(input.taskId),
+        input.rootId,
+      );
+      if (root === null)
+        return {
+          rootId: input.rootId,
+          path: input.path,
+          text: '',
+          digest: EMPTY_FILE_DIGEST,
+          editable: false,
+          reason: 'outside_workspace' as const,
+        };
+      return { ...recoverWorkspaceFileForEdit(root.path, input.path), rootId: root.rootId };
     });
     this.handleMutation(
       IPC_CHANNELS.filesSave,
@@ -1271,6 +1332,7 @@ export class IpcRouter {
               outcome: 'refused' as const,
               digest: null,
               reason: 'outside_workspace' as const,
+              conflictPath: null,
             };
           const result = saveWorkspaceFile(root.path, input.path, input.text, input.baseDigest);
           // Audited only on an actual write, and as its own event type: `files.changed` is the record
@@ -1339,7 +1401,7 @@ export class IpcRouter {
         // valid levels is per-model (published in models_cache.json) rather than a fixed enum, and
         // an unsupported level does not fall back — it fails the turn with an API 400.
         const capability = await this.runtimeFor('codex').probe();
-        if (!capability.available) throw new RuntimeUnavailableError('codex');
+        if (capability.readiness !== 'ready') throw new RuntimeUnavailableError('codex');
         const selected = capability.models.find(({ id }) => id === this.persistence.getModel());
         if (!selected?.efforts?.some(({ id }) => id === input.effort))
           throw new InvalidEffortError(selected?.displayName ?? 'このモデル');
@@ -2199,8 +2261,21 @@ export class IpcRouter {
     await this.teamMcpBridge.ensureStarted();
     try {
       const skillHome = process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home');
-      await installBuiltinTeamSkill(skillHome);
-      await installBuiltinSkillCreator(skillHome);
+      const store = await SkillStore.open({
+        rootPath: join(skillHome, '.sprintcoder', 'skills'),
+      });
+      await Promise.all([
+        store.installBuiltin(
+          BUILTIN_TEAM_SKILL_ID,
+          BUILTIN_TEAM_SKILL_CONTENT,
+          BUILTIN_TEAM_SKILL_DIGEST,
+        ),
+        store.installBuiltin(
+          BUILTIN_SKILL_CREATOR_ID,
+          BUILTIN_SKILL_CREATOR_CONTENT,
+          BUILTIN_SKILL_CREATOR_DIGEST,
+        ),
+      ]);
       this.teamSkillReady = true;
     } catch {
       this.teamSkillReady = false;
@@ -2233,11 +2308,8 @@ export class IpcRouter {
       ]);
       // Codex first only because it is the historical default of this app's settings key; neither is
       // "better", and the user changes it in one click either way.
-      const installed: RuntimeKind | null = codex.available
-        ? 'codex'
-        : claude.available
-          ? 'claude'
-          : null;
+      const installed: RuntimeKind | null =
+        codex.readiness === 'ready' ? 'codex' : claude.readiness === 'ready' ? 'claude' : null;
       if (installed === null) return;
       this.persistence.setRuntime(installed);
     } catch {
@@ -2928,7 +3000,7 @@ export class IpcRouter {
           'Codex CLI',
           'openai',
           codexCapability.models,
-          codexCapability.available,
+          codexCapability.readiness === 'ready',
           checkedAt,
         ),
         ...providerModelsForBuiltin(
@@ -2936,7 +3008,7 @@ export class IpcRouter {
           'Claude Code',
           'anthropic',
           claudeCapability.models,
-          claudeCapability.available,
+          claudeCapability.readiness === 'ready',
           checkedAt,
         ),
         ...externalModels,

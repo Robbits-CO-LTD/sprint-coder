@@ -92,6 +92,7 @@ describe('Claude runtime probe', () => {
   it('degrades to unavailable when the CLI cannot be spawned', async () => {
     await expect(probeClaude('__sprint_coder_claude_cli_does_not_exist__')).resolves.toEqual({
       available: false,
+      readiness: 'unavailable',
       models: [],
     });
   });

@@ -47,6 +47,12 @@ type DialogState =
   | { kind: 'move-task'; task: TaskSummary }
   | null;
 
+type PendingFocus = {
+  frame: number | null;
+  observer: MutationObserver | null;
+  timeout: ReturnType<typeof setTimeout> | null;
+};
+
 export function Sidebar({
   inert,
   collapsed = false,
@@ -80,6 +86,7 @@ export function Sidebar({
   const [moveTarget, setMoveTarget] = useState('');
   const [pending, setPending] = useState(false);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const pendingFocusRef = useRef<PendingFocus | null>(null);
 
   const projection = useMemo(
     () => projectSidebarProjection(projects, tasks, query, selectedTaskId),
@@ -96,18 +103,64 @@ export function Sidebar({
     if (dialog === null && element?.open) element.close();
   }, [dialog]);
 
+  useEffect(
+    () => () => {
+      const pendingFocus = pendingFocusRef.current;
+      if (pendingFocus?.frame != null) cancelAnimationFrame(pendingFocus.frame);
+      pendingFocus?.observer?.disconnect();
+      if (pendingFocus?.timeout != null) clearTimeout(pendingFocus.timeout);
+      pendingFocusRef.current = null;
+    },
+    [],
+  );
+
   const focusLater = (selector: string, fallback = '[data-testid="sidebar-new-task-button"]') => {
-    requestAnimationFrame(() => {
-      // A Project move can change both its section and its disclosure in separate React commits.
-      // The second frame waits for both without using a timing guess.
-      requestAnimationFrame(() => {
-        (
-          document.querySelector<HTMLElement>(selector) ??
-          document.querySelector<HTMLElement>(fallback)
-        )?.focus({
-          preventScroll: false,
-        });
+    // Project mutations cross the IPC/store boundary, so the target can appear after more than two
+    // animation frames on a busy Windows machine. Focusing the fallback immediately loses the
+    // keyboard position even though the requested heading appears a moment later. Observe the
+    // sidebar until the exact target is committed, with a bounded fallback for genuine failures.
+    const previous = pendingFocusRef.current;
+    if (previous?.frame != null) cancelAnimationFrame(previous.frame);
+    previous?.observer?.disconnect();
+    if (previous?.timeout != null) clearTimeout(previous.timeout);
+
+    const origin = document.activeElement;
+    const request: PendingFocus = { frame: null, observer: null, timeout: null };
+    const stillOwnsFocus = (): boolean => {
+      const active = document.activeElement;
+      return active === origin || active === document.body;
+    };
+    const cancel = (): void => {
+      if (pendingFocusRef.current !== request) return;
+      if (request.frame !== null) cancelAnimationFrame(request.frame);
+      request.observer?.disconnect();
+      if (request.timeout !== null) clearTimeout(request.timeout);
+      pendingFocusRef.current = null;
+    };
+    const focusTarget = (): boolean => {
+      if (!stillOwnsFocus()) return false;
+      const target = document.querySelector<HTMLElement>(selector);
+      if (target === null) return false;
+      target.focus({ preventScroll: false });
+      return true;
+    };
+    pendingFocusRef.current = request;
+    request.frame = requestAnimationFrame(() => {
+      request.frame = null;
+      if (focusTarget()) {
+        cancel();
+        return;
+      }
+      const observer = new MutationObserver(() => {
+        if (!stillOwnsFocus() || focusTarget()) cancel();
       });
+      request.observer = observer;
+      observer.observe(document.body, { childList: true, subtree: true });
+      request.timeout = setTimeout(() => {
+        if (stillOwnsFocus())
+          document.querySelector<HTMLElement>(fallback)?.focus({ preventScroll: false });
+        cancel();
+      }, 2_000);
     });
   };
 

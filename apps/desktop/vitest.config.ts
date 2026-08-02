@@ -17,5 +17,11 @@ export default defineConfig({
   test: {
     testTimeout: 20_000,
     hookTimeout: 20_000,
+    // The Windows suite launches real Electron, PowerShell, cmd, Git, and SQLite child processes.
+    // Letting Vitest derive a larger worker count from the host causes those processes to contend
+    // until otherwise healthy ACL checks hit their bounded deadline on two-core CI runners. Keep
+    // one worker on Windows so PowerShell-backed ACL tests still run as part of the complete suite
+    // without competing hosts; other platforms retain Vitest's automatic worker count.
+    ...(process.platform === 'win32' ? { maxWorkers: 1 } : {}),
   },
 });

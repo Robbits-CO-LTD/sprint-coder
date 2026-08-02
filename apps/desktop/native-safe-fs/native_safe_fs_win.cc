@@ -39,6 +39,44 @@ bool ReadString(napi_env env, napi_value value, std::string* output) {
   return true;
 }
 
+bool Utf8ToWide(const std::string& input, std::wstring* output) {
+  const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(),
+                                         static_cast<int>(input.size()), nullptr, 0);
+  if (length <= 0) return false;
+  output->resize(static_cast<size_t>(length));
+  return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(),
+                             static_cast<int>(input.size()), output->data(), length) == length;
+}
+
+napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 3) {
+    napi_throw_type_error(env, nullptr,
+                          "replaceFileWithBackup requires replacement, target, and backup paths");
+    return nullptr;
+  }
+  std::string replacement_utf8;
+  std::string target_utf8;
+  std::string backup_utf8;
+  std::wstring replacement;
+  std::wstring target;
+  std::wstring backup;
+  if (!ReadString(env, argv[0], &replacement_utf8) ||
+      !ReadString(env, argv[1], &target_utf8) || !ReadString(env, argv[2], &backup_utf8) ||
+      !Utf8ToWide(replacement_utf8, &replacement) || !Utf8ToWide(target_utf8, &target) ||
+      !Utf8ToWide(backup_utf8, &backup)) {
+    napi_throw_type_error(env, nullptr, "Invalid replaceFileWithBackup path");
+    return nullptr;
+  }
+  if (!ReplaceFileW(target.c_str(), replacement.c_str(), backup.c_str(),
+                    REPLACEFILE_WRITE_THROUGH, nullptr, nullptr))
+    return ThrowWindowsError(env, "ReplaceFileW");
+  napi_value result;
+  napi_get_boolean(env, true, &result);
+  return result;
+}
+
 napi_value AssignProcessToOwnedJob(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2];
@@ -185,6 +223,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"terminateOwnedJob", nullptr, TerminateOwnedJob, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"closeOwnedJob", nullptr, CloseOwnedJob, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"replaceFileWithBackup", nullptr, ReplaceFileWithBackup, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   return exports;

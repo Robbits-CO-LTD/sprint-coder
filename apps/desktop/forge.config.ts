@@ -1,10 +1,12 @@
-import type { ForgeConfig } from '@electron-forge/shared-types';
+import type { ForgeConfig, ForgePlatform } from '@electron-forge/shared-types';
 import { MakerDMG } from '@electron-forge/maker-dmg';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
+import { MakerZIP } from '@electron-forge/maker-zip';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
-import { cpSync, lstatSync, mkdirSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
@@ -58,6 +60,71 @@ const windowsSign =
         description: 'Sprint Coder',
       }
     : undefined;
+const BUNDLED_NODE_VERSION = '22.23.2';
+const BUNDLED_NODE_SHA256 = '0D0F5E39F9F3D9587BC19F73EAB3C2C9C4903FD02D6DBF9C853DD81B3D95FAD4';
+const BUNDLED_NODE_SIGNER_SUBJECT =
+  'CN=OpenJS Foundation, O=OpenJS Foundation, L=San Francisco, S=California, C=US';
+const BUNDLED_NODE_SIGNER_ISSUER =
+  'CN=Microsoft ID Verified CS AOC CA 03, O=Microsoft Corporation, C=US';
+const BUNDLED_NODE_SIGNER_THUMBPRINT = '01A4F6F4AA2524CECF7A926DCD0BAA64B4956CF0';
+
+function bundledNodeResources(): string[] {
+  if (process.platform !== 'win32') return [];
+  const nodeExecutable = process.execPath;
+  return [nodeExecutable, join(resolve(nodeExecutable, '..'), 'LICENSE')];
+}
+
+export function verifyBundledNodeResources(): void {
+  if (process.platform !== 'win32') return;
+  if (process.versions.node !== BUNDLED_NODE_VERSION)
+    throw new Error(
+      `Windows packages must be built with Node ${BUNDLED_NODE_VERSION}, got ${process.version}`,
+    );
+  const nodeExecutable = process.execPath;
+  const nodeLicense = join(resolve(nodeExecutable, '..'), 'LICENSE');
+  const signatureJson = execFileSync(
+    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `Import-Module "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $signature = Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_NODE; [pscustomobject]@{Status=$signature.Status.ToString();Subject=$signature.SignerCertificate.Subject;Issuer=$signature.SignerCertificate.Issuer;Thumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress`,
+    ],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, SPRINT_CODER_NODE: nodeExecutable },
+      windowsHide: true,
+    },
+  ).trim();
+  const signature = JSON.parse(signatureJson) as {
+    Status?: unknown;
+    Subject?: unknown;
+    Issuer?: unknown;
+    Thumbprint?: unknown;
+  };
+  if (
+    signature.Status !== 'Valid' ||
+    signature.Subject !== BUNDLED_NODE_SIGNER_SUBJECT ||
+    signature.Issuer !== BUNDLED_NODE_SIGNER_ISSUER ||
+    signature.Thumbprint !== BUNDLED_NODE_SIGNER_THUMBPRINT
+  )
+    throw new Error('Bundled Node signature does not match the pinned OpenJS signer');
+  const digest = createHash('sha256')
+    .update(readFileSync(nodeExecutable))
+    .digest('hex')
+    .toUpperCase();
+  if (digest !== BUNDLED_NODE_SHA256)
+    throw new Error(`Bundled Node SHA-256 does not match the pinned Node ${BUNDLED_NODE_VERSION}`);
+  if (!lstatSync(nodeLicense).isFile()) throw new Error('Bundled Node LICENSE was not found');
+}
+
+export function assertNativePackagingHost(targetPlatform: ForgePlatform): void {
+  if (targetPlatform === process.platform) return;
+  throw new Error(
+    `Cross-platform packaging is unsupported: target ${targetPlatform} must be built on ${targetPlatform}, not ${process.platform}. The package contains target-native Node and Electron addons.`,
+  );
+}
 
 if (
   process.platform === 'win32' &&
@@ -130,6 +197,7 @@ const config: ForgeConfig = {
     // @electron/asar matches `unpack` against the full source filename with matchBase enabled.
     // Native addons cannot be loaded from inside app.asar, so unpack only `.node` binaries.
     asar: { unpack: '*.node' },
+    extraResource: bundledNodeResources(),
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep
     // their per-process entitlements. Local ad-hoc packages are signed in the postPackage hook,
@@ -154,6 +222,10 @@ const config: ForgeConfig = {
     ],
   },
   hooks: {
+    prePackage: async (_forgeConfig, platform) => {
+      assertNativePackagingHost(platform);
+      if (platform === 'win32') verifyBundledNodeResources();
+    },
     postPackage: async (_forgeConfig, packageResult) => {
       if (packageResult.platform !== 'darwin') return;
       if ((releasePackage || ciPackage) && macCodeSignIdentity === '-' && !allowAdhocCodeSign)
@@ -189,6 +261,7 @@ const config: ForgeConfig = {
       noMsi: true,
       ...(windowsSign === undefined ? {} : { windowsSign }),
     }),
+    new MakerZIP({}, ['win32']),
     new MakerDMG({
       name: 'Sprint Coder',
       format: 'ULFO',

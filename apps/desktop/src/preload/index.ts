@@ -478,8 +478,18 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.filesList, taskIdPayloadSchema, z.array(fileChangeRecordSchema), {
         taskId,
       }),
+    pick: (taskId) =>
+      invoke(IPC_CHANNELS.filesPick, taskIdPayloadSchema, fileOpenResultSchema.nullable(), {
+        taskId,
+      }),
     open: (taskId, rootId, path) =>
       invoke(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, {
+        taskId,
+        rootId,
+        path,
+      }),
+    recover: (taskId, rootId, path) =>
+      invoke(IPC_CHANNELS.filesRecover, filePathPayloadSchema, fileOpenResultSchema, {
         taskId,
         rootId,
         path,

@@ -1,5 +1,5 @@
-import { lstatSync, openSync, readSync, closeSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
+import { resolveSafeWorkspaceFile } from './workspace-safe-path';
 
 /** A file larger than this is not something anyone watches scroll past; the tail is what matters. */
 const MAX_PREVIEW_BYTES = 262_144;
@@ -23,27 +23,30 @@ const MAX_PREVIEW_BYTES = 262_144;
  * never fail because its preview could not be produced.
  */
 export function readWorkspaceTextFile(workspacePath: string, relativePath: string): string | null {
-  const root = resolve(workspacePath);
-  const absolute = resolve(root, relativePath);
-  // Second check, after Main's own path validation: cheap, and the two would have to fail together.
-  const relation = relative(root, absolute);
-  if (
-    relation.length === 0 ||
-    relation === '..' ||
-    relation.startsWith(`..${sep}`) ||
-    isAbsolute(relation)
-  )
-    return null;
+  const safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  if (safe.path === null) return null;
+  const absolute = safe.path;
   let fd: number | null = null;
   try {
-    const stat = lstatSync(absolute);
+    fd = openSync(
+      absolute,
+      constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+    );
+    const stat = fstatSync(fd, { bigint: true });
+    if (
+      stat.dev !== safe.identity.dev ||
+      stat.ino !== safe.identity.ino ||
+      stat.nlink !== 1n ||
+      safe.identity.nlink !== 1n
+    )
+      return null;
     if (!stat.isFile()) return null;
-    const size = stat.size;
+    if (stat.size > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    const size = Number(stat.size);
     const start = size > MAX_PREVIEW_BYTES ? size - MAX_PREVIEW_BYTES : 0;
     const length = Math.min(size, MAX_PREVIEW_BYTES);
     if (length === 0) return '';
     const buffer = Buffer.alloc(length);
-    fd = openSync(absolute, 'r');
     const read = readSync(fd, buffer, 0, length, start);
     const slice = buffer.subarray(0, read);
     if (slice.includes(0)) return null;

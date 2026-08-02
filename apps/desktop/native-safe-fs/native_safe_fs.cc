@@ -1781,6 +1781,29 @@ NativeFailure AtomicMutationFailure(const char* operation) {
   return {"NATIVE_FAILURE", ErrnoMessage(operation)};
 }
 
+napi_value ExchangeFiles(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
+    return ThrowFailure(env, "INVALID_INPUT", "exchangeFiles requires a path pair");
+  }
+  std::string first;
+  std::string second;
+  if (!ReadString(env, argv[0], "first", &first) ||
+      !ReadString(env, argv[0], "second", &second) || first.empty() || second.empty() ||
+      first[0] != '/' || second[0] != '/')
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid exchangeFiles path pair");
+  if (AtomicExchange(AT_FDCWD, first.c_str(), AT_FDCWD, second.c_str()) != 0) {
+    if (errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP || errno == EXDEV)
+      return ThrowFailure(env, "UNSUPPORTED", ErrnoMessage("exchange files"));
+    const NativeFailure failure = AtomicMutationFailure("exchange files");
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  napi_value result;
+  napi_get_boolean(env, true, &result);
+  return result;
+}
+
 bool SameDirectoryIdentity(int first_fd, int second_fd) {
   if (first_fd < 0 || second_fd < 0) return false;
   struct stat first {};
@@ -2330,6 +2353,7 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"cleanupIntentAuxiliary", nullptr, CleanupIntentAuxiliary, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"closeSession", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"exchangeFiles", nullptr, ExchangeFiles, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
 #if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)

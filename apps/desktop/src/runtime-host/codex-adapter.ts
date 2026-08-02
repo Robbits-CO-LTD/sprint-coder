@@ -30,10 +30,12 @@ import type {
   RuntimeWorkspaceSet,
 } from './protocol';
 import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
+import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from './probe-budget';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
 import { serializeCliExecutionPayload } from './execution-payload';
+import { probeCliAuthentication } from './authentication-probe';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -45,6 +47,7 @@ type EmitError = (error: PublicError) => void;
 
 export type CodexProbe = {
   available: boolean;
+  readiness: 'ready' | 'authentication_required' | 'unavailable';
   version?: string;
   models: CodexModelOption[];
 };
@@ -73,9 +76,14 @@ export async function probeCodex(
   // have no Codex installation or credentials, so expose a deterministic catalog only to the
   // isolated E2E process. Adapter execution remains untouched and would still fail closed.
   if (environment['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1') {
-    return { available: true, version: 'e2e-fixture', models: E2E_CODEX_MODELS };
+    return {
+      available: true,
+      readiness: 'ready',
+      version: 'e2e-fixture',
+      models: E2E_CODEX_MODELS,
+    };
   }
-  const availability = await new Promise<Omit<CodexProbe, 'models'>>((resolve) => {
+  const availability = await new Promise<Omit<CodexProbe, 'models' | 'readiness'>>((resolve) => {
     let settled = false;
     const child = spawn(resolveCodexCommand(command), ['--version'], {
       env: minimalEnvironment(),
@@ -83,7 +91,7 @@ export async function probeCodex(
     });
     const chunks: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const finish = (result: Omit<CodexProbe, 'models'>): void => {
+    const finish = (result: Omit<CodexProbe, 'models' | 'readiness'>): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -101,10 +109,24 @@ export async function probeCodex(
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish({ available: false });
-    }, 5_000);
+    }, RUNTIME_VERSION_PROBE_TIMEOUT_MS);
   });
+  const authentication = availability.available
+    ? await probeCliAuthentication(
+        'codex',
+        resolveCodexCommand(command),
+        ['login', 'status'],
+        minimalEnvironment(environment),
+        RUNTIME_AUTH_PROBE_TIMEOUT_MS,
+      )
+    : 'unknown';
   return {
     ...availability,
+    readiness: !availability.available
+      ? 'unavailable'
+      : authentication === 'unauthenticated'
+        ? 'authentication_required'
+        : 'ready',
     models: availability.available ? readCodexModels() : [],
   };
 }
@@ -152,11 +174,26 @@ export class CodexRuntimeAdapter {
     let teamMcpDirectory: string | null = null;
     let teamMcpProfile: CodexTeamMcpProfile | undefined;
     if (teamMcp !== undefined) {
+      let nodeCommand: string;
+      try {
+        nodeCommand = teamMcpNodeCommand();
+      } catch {
+        if (temporaryDirectory !== null)
+          rmSync(temporaryDirectory, { recursive: true, force: true });
+        fail(
+          publicError(
+            'RUNTIME_FAILED',
+            'Team機能に必要な同梱Node.jsを起動できません。アプリを再インストールしてください。',
+            false,
+          ),
+        );
+        return;
+      }
       teamMcpDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-mcp-'));
       const scriptPath = join(teamMcpDirectory, 'team-mcp-server.cjs');
       writeFileSync(scriptPath, TEAM_MCP_SERVER_SOURCE, { mode: 0o600 });
       teamMcpProfile = {
-        command: teamMcpNodeCommand(),
+        command: nodeCommand,
         scriptPath,
         enableWebSearch: teamMcp.enableWebSearch === true,
       };
@@ -854,7 +891,7 @@ function resolveCodexDesktopCommand(localAppData: string | null | undefined): st
   }
 }
 
-function minimalEnvironment(): NodeJS.ProcessEnv {
+function minimalEnvironment(source: Readonly<NodeJS.ProcessEnv> = process.env): NodeJS.ProcessEnv {
   const allowlist = [
     'PATH',
     'HOME',
@@ -869,10 +906,17 @@ function minimalEnvironment(): NodeJS.ProcessEnv {
     'SSL_CERT_FILE',
     'SSL_CERT_DIR',
     'CODEX_HOME',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'SystemRoot',
+    'WINDIR',
+    'ComSpec',
+    'PATHEXT',
   ];
   return Object.fromEntries(
     allowlist.flatMap((key) => {
-      const value = process.env[key];
+      const value = source[key];
       return value === undefined ? [] : [[key, value]];
     }),
   );

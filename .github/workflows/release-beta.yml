@@ -47,7 +47,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: npm
 
       - name: Install dependencies
@@ -114,7 +114,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: npm
 
       - name: Install dependencies
@@ -151,6 +151,7 @@ jobs:
           path: |
             apps/desktop/out/make/**/*.dmg
             apps/desktop/out/make/squirrel.windows/**/*.exe
+            apps/desktop/out/make/**/*.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -179,19 +180,21 @@ jobs:
           assets=()
           dmg_count=0
           exe_count=0
+          zip_count=0
           while IFS= read -r -d '' asset; do
             assets+=("${asset}")
             case "${asset}" in
               *.dmg) ((dmg_count += 1)) ;;
               *.exe) ((exe_count += 1)) ;;
+              *.zip) ((zip_count += 1)) ;;
             esac
           done < <(
-            find release-assets -type f \( -name '*.dmg' -o -name '*.exe' \) -print0
+            find release-assets -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.zip' \) -print0
           )
 
           printf 'Release asset: %s\n' "${assets[@]}"
-          if (( ${#assets[@]} != 2 || dmg_count != 1 || exe_count != 1 )); then
-            echo "::error::Expected one macOS DMG and one Windows installer; found ${dmg_count} DMG(s) and ${exe_count} installer(s)."
+          if (( ${#assets[@]} != 3 || dmg_count != 1 || exe_count != 1 || zip_count != 1 )); then
+            echo "::error::Expected one macOS DMG, one Windows installer, and one Windows ZIP; found ${dmg_count} DMG(s), ${exe_count} installer(s), and ${zip_count} ZIP(s)."
             find release-assets -type f -print
             exit 1
           fi

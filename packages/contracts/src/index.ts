@@ -1278,6 +1278,8 @@ export type FileEditFrame = z.infer<typeof fileEditFrameSchema>;
  */
 export const fileOpenResultSchema = z
   .object({
+    /** Workspace root that owns this path. Legacy single-root callers resolve to the Primary. */
+    rootId: idSchema.default('legacy-primary'),
     path: z.string().min(1).max(1024),
     /** The complete file, present only when `editable` is true. */
     text: z.string().max(2_097_152),
@@ -1285,7 +1287,9 @@ export const fileOpenResultSchema = z
     digest: digestSchema,
     editable: z.boolean(),
     /** Why not, when `editable` is false. Shown to the user rather than a generic failure. */
-    reason: z.enum(['too_large', 'binary', 'not_a_file', 'outside_workspace']).nullable(),
+    reason: z
+      .enum(['too_large', 'binary', 'not_a_file', 'outside_workspace', 'recovery_required'])
+      .nullable(),
   })
   .strict();
 export type FileOpenResult = z.infer<typeof fileOpenResultSchema>;
@@ -1303,9 +1307,11 @@ export const fileSaveInputSchema = z
   .strict();
 
 /**
- * `conflict` is not an error, it is the mechanism: the file changed under the editor, so the write
- * did not happen and the user gets to decide. `refused` covers everything the app will not do at
- * all — outside the Workspace, a symlink, not a regular file, too large.
+ * `conflict` is not an error, it is the mechanism: the file changed under the editor, so the
+ * original on-disk version was restored and the user gets to decide. If another write landed during
+ * that atomic rollback, `conflictPath` retains the displaced version instead of deleting it.
+ * `refused` covers everything the app will not do at all — outside the Workspace, a symlink, not a
+ * regular file, too large.
  */
 export const fileSaveResultSchema = z
   .object({
@@ -1315,6 +1321,8 @@ export const fileSaveResultSchema = z
     reason: z
       .enum(['too_large', 'binary', 'not_a_file', 'outside_workspace', 'io_error'])
       .nullable(),
+    /** A retained sibling containing the version displaced by conflict rollback, when present. */
+    conflictPath: z.string().min(1).max(1200).nullable().default(null),
   })
   .strict();
 export type FileSaveResult = z.infer<typeof fileSaveResultSchema>;
@@ -2229,14 +2237,18 @@ export type CodexModelOption = z.infer<typeof codexModelOptionSchema>;
 // (deliberately provider-agnostic) — this schema is Claude-specific.
 export const claudeEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']);
 export type ClaudeEffort = z.infer<typeof claudeEffortSchema>;
+export const runtimeReadinessSchema = z.enum(['ready', 'authentication_required', 'unavailable']);
+export type RuntimeReadiness = z.infer<typeof runtimeReadinessSchema>;
 export const runtimeSettingsSchema = z
   .object({
     kind: runtimeKindSchema,
     codexAvailable: z.boolean(),
+    codexReadiness: runtimeReadinessSchema,
     // Additive parallel availability field for the Claude CLI runtime (Slice 3.4). Existing
     // `codexAvailable` consumers are unaffected; `models`/`model` reflect the currently selected
     // Runtime kind's own capability list (Codex's or Claude's), per the Main-side probe.
     claudeAvailable: z.boolean(),
+    claudeReadiness: runtimeReadinessSchema,
     model: codexModelIdSchema,
     models: z.array(codexModelOptionSchema).max(32),
     // Additive field for the Claude effort control. Persisted under the single
@@ -2981,8 +2993,12 @@ export interface SprintCoderApi {
     /** Every edit recorded for this Task, oldest first. Read on select rather than replayed through
      * the event port, which only carries events newer than the snapshot's lastSeq. */
     list(taskId: string): Promise<FileChangeRecord[]>;
+    /** Opens the native file picker and returns a safe editable file, or null when cancelled. */
+    pick(taskId: string): Promise<FileOpenResult | null>;
     /** Reads a file in full so it can be edited, or refuses with a reason. */
     open(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
+    /** Restores verified pre-save bytes after the user confirms an ambiguous interrupted save. */
+    recover(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
     /** Writes the user's own edit. Refuses rather than overwriting when the file changed underneath. */
     save(input: {
       taskId: string;
@@ -3172,7 +3188,9 @@ export const IPC_CHANNELS = {
   runtimeStatusEvent: 'sprint-coder:runtime:status',
   imagesList: 'sprint-coder:images:list',
   filesList: 'sprint-coder:files:list',
+  filesPick: 'sprint-coder:files:pick',
   filesOpen: 'sprint-coder:files:open',
+  filesRecover: 'sprint-coder:files:recover',
   filesSave: 'sprint-coder:files:save',
   imagesRead: 'sprint-coder:images:read',
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',

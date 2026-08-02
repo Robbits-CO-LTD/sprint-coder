@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SkillStore, SkillStoreError, type SkillProvider } from './skill-store';
-import { verifyWindowsPathAcl } from './windows-acl';
+import { verifyWindowsPathAcl, verifyWindowsPaths } from './windows-acl';
 
 const roots: string[] = [];
 
@@ -352,10 +352,12 @@ describe.runIf(process.platform === 'win32')('SkillStore Windows ACL', () => {
     let preview = await store.previewImport(candidate!);
     const imported = await store.importSkill(preview);
 
-    await expect(verifyWindowsPathAcl(storeRoot, 'directory')).resolves.toBeUndefined();
-    await expect(verifyWindowsPathAcl(imported.path, 'directory')).resolves.toBeUndefined();
     await expect(
-      verifyWindowsPathAcl(join(imported.path, 'SKILL.md'), 'file'),
+      verifyWindowsPaths([
+        { path: storeRoot, kind: 'directory' },
+        { path: imported.path, kind: 'directory' },
+        { path: join(imported.path, 'SKILL.md'), kind: 'file' },
+      ]),
     ).resolves.toBeUndefined();
 
     await writeFile(
@@ -367,9 +369,11 @@ describe.runIf(process.platform === 'win32')('SkillStore Windows ACL', () => {
     const updated = await store.updateSkill(preview);
 
     expect(await readFile(join(updated.path, 'SKILL.md'), 'utf8')).toContain('Updated on Windows');
-    await expect(verifyWindowsPathAcl(updated.path, 'directory')).resolves.toBeUndefined();
     await expect(
-      verifyWindowsPathAcl(join(updated.path, 'SKILL.md'), 'file'),
+      verifyWindowsPaths([
+        { path: updated.path, kind: 'directory' },
+        { path: join(updated.path, 'SKILL.md'), kind: 'file' },
+      ]),
     ).resolves.toBeUndefined();
   });
 

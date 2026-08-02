@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
@@ -98,5 +98,44 @@ test.describe('file edits', () => {
     await expect(restored.getByTestId('file-change-card')).toContainText('src/parser.ts');
     // And it is not duplicated by the replay — the store de-duplicates on the event's seq.
     await expect(restored.getByTestId('file-change-card')).toHaveCount(1);
+  });
+
+  test('keeps the manual file editor above the composer', async () => {
+    const filePath = join(workspaceDir, '日本語 file #1.txt');
+    writeFileSync(filePath, '初期内容です。\r\n二行目です。\r\n', 'utf8');
+
+    app = await launchApp(userDataDir);
+    const page = await firstWindow(app);
+    await page.getByTestId('sidebar-new-task-button').click();
+    await selectWorkspace(app, page, workspaceDir);
+    await app.evaluate(({ dialog }, selectedFile) => {
+      Object.defineProperty(dialog, 'showOpenDialog', {
+        configurable: true,
+        value: async () => ({ canceled: false, filePaths: [selectedFile] }),
+      });
+    }, filePath);
+
+    await page.getByTestId('open-file-button').click();
+    const editor = page.getByRole('dialog', { name: 'ファイルを編集' });
+    await expect(editor).toBeVisible();
+    await expect(editor.locator('.file-editor-footer')).toBeVisible();
+
+    expect(
+      await editor.evaluate((element) => element.parentElement === document.body),
+      'a fixed dialog inside the ContextBar stacking context can be covered by the composer',
+    ).toBe(true);
+
+    const save = editor.getByRole('button', { name: '保存' });
+    const textbox = editor.getByRole('textbox', { name: /の内容$/ });
+    await textbox.fill('日本語の編集\n複数行');
+    await expect(save).toBeEnabled();
+    await editor.getByRole('button', { name: '再読み込み' }).click();
+    const discard = editor.getByRole('alert');
+    await expect(discard).toContainText('未保存の変更を破棄して再読み込みしますか？');
+    await expect(textbox).toHaveValue('日本語の編集\n複数行');
+    await discard.getByRole('button', { name: '編集に戻る' }).click();
+    await expect(discard).toHaveCount(0);
+    await save.click();
+    await expect(editor.getByRole('status')).toHaveText('保存しました');
   });
 });

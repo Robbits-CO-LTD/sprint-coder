@@ -74,16 +74,20 @@ void (runtimeKind === 'claude' ? probeClaude() : probeCodex()).then((probe) =>
     ...(runtimeKind === 'claude'
       ? {
           codexAvailable: false,
+          codexReadiness: 'unavailable',
           codexModels: [],
           claudeAvailable: probe.available,
+          claudeReadiness: probe.readiness,
           claudeModels: probe.models,
           ...(probe.version === undefined ? {} : { claudeVersion: probe.version }),
         }
       : {
           codexAvailable: probe.available,
+          codexReadiness: probe.readiness,
           codexModels: probe.models,
           ...(probe.version === undefined ? {} : { codexVersion: probe.version }),
           claudeAvailable: false,
+          claudeReadiness: 'unavailable',
           claudeModels: [],
         }),
   }),
@@ -103,9 +107,11 @@ function send(
         Extract<RuntimeToMainEnvelope, { type: 'hello' }>,
         | 'type'
         | 'codexAvailable'
+        | 'codexReadiness'
         | 'codexVersion'
         | 'codexModels'
         | 'claudeAvailable'
+        | 'claudeReadiness'
         | 'claudeVersion'
         | 'claudeModels'
       >

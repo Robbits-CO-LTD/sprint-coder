@@ -1,16 +1,156 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import type * as NodeChildProcess from 'node:child_process';
+import type * as NodeFs from 'node:fs';
+import type * as NativeFilePublication from './native-file-publication';
 import {
+  chmodSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   symlinkSync,
+  statSync,
+  unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_EDITABLE_BYTES, openWorkspaceFileForEdit, saveWorkspaceFile } from './workspace-edit';
+import {
+  MAX_EDITABLE_BYTES,
+  openWorkspaceFileForEdit,
+  recoverWorkspaceFileForEdit,
+  saveWorkspaceFile,
+} from './workspace-edit';
+import { secureWindowsPath, verifyWindowsPathAcl } from './windows-acl';
+
+const fileSystemFault = vi.hoisted(() => ({
+  failWrite: false,
+  failRename: false,
+  unsupportedExchange: false,
+  failAtomicReplace: false,
+  failDirectorySync: false,
+  failStageAfterCreate: false,
+  concurrentWindowsContent: null as string | null,
+  concurrentPosixContent: null as string | null,
+  afterPublicationContent: null as string | null,
+  failBoundaryRead: false,
+  stagingSymlinkTarget: null as string | null,
+}));
+
+vi.mock('./native-file-publication', async (importOriginal) => {
+  const actual = await importOriginal<typeof NativeFilePublication>();
+  return {
+    ...actual,
+    replaceWindowsFileWithBackup: (
+      ...args: Parameters<typeof actual.replaceWindowsFileWithBackup>
+    ) => {
+      if (fileSystemFault.failAtomicReplace)
+        throw new Error('simulated atomic replacement failure');
+      if (fileSystemFault.concurrentWindowsContent !== null) {
+        writeFileSync(args[1], fileSystemFault.concurrentWindowsContent);
+        fileSystemFault.concurrentWindowsContent = null;
+      }
+      const result = actual.replaceWindowsFileWithBackup(...args);
+      if (fileSystemFault.afterPublicationContent !== null) {
+        writeFileSync(args[1], fileSystemFault.afterPublicationContent);
+        fileSystemFault.afterPublicationContent = null;
+      }
+      return result;
+    },
+    exchangePosixFiles: (...args: Parameters<typeof actual.exchangePosixFiles>) => {
+      if (fileSystemFault.unsupportedExchange)
+        throw Object.assign(new Error('exchange unsupported'), { code: 'UNSUPPORTED' });
+      if (fileSystemFault.failRename) throw new Error('simulated atomic exchange failure');
+      if (fileSystemFault.concurrentPosixContent !== null) {
+        writeFileSync(args[1], fileSystemFault.concurrentPosixContent);
+        fileSystemFault.concurrentPosixContent = null;
+      }
+      const result = actual.exchangePosixFiles(...args);
+      if (fileSystemFault.afterPublicationContent !== null) {
+        writeFileSync(args[1], fileSystemFault.afterPublicationContent);
+        fileSystemFault.afterPublicationContent = null;
+      }
+      return result;
+    },
+  };
+});
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeChildProcess>();
+  return {
+    ...actual,
+    execFileSync: (...args: Parameters<typeof actual.execFileSync>) => {
+      if (fileSystemFault.failAtomicReplace)
+        throw new Error('simulated atomic replacement failure');
+      if (fileSystemFault.concurrentWindowsContent !== null) {
+        const options = args[2] as { env?: NodeJS.ProcessEnv } | undefined;
+        const target = options?.env?.['SPRINT_CODER_TARGET'];
+        if (target !== undefined) writeFileSync(target, fileSystemFault.concurrentWindowsContent);
+      }
+      const result = actual.execFileSync(...args);
+      if (
+        fileSystemFault.stagingSymlinkTarget !== null &&
+        args[0] === '/bin/cp' &&
+        Array.isArray(args[1]) &&
+        args[1].at(-1)?.includes('.sprint-coder-stage-') === true
+      ) {
+        const staging = args[1].at(-1);
+        if (staging !== undefined) {
+          unlinkSync(staging);
+          symlinkSync(fileSystemFault.stagingSymlinkTarget, staging);
+        }
+        fileSystemFault.stagingSymlinkTarget = null;
+      }
+      return result;
+    },
+  };
+});
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    readFileSync: (...args: Parameters<typeof actual.readFileSync>) => {
+      if (
+        fileSystemFault.failBoundaryRead &&
+        typeof args[0] !== 'number' &&
+        String(args[0]).includes('.sprint-coder-')
+      ) {
+        fileSystemFault.failBoundaryRead = false;
+        throw new Error('simulated boundary read failure');
+      }
+      return actual.readFileSync(...args);
+    },
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      if (
+        fileSystemFault.failStageAfterCreate &&
+        typeof args[0] === 'string' &&
+        args[0].includes('.sprint-coder-stage-')
+      ) {
+        const descriptor = actual.openSync(...args);
+        actual.closeSync(descriptor);
+        throw new Error('simulated staging failure after destination creation');
+      }
+      return actual.openSync(...args);
+    },
+    writeSync: (...args: Parameters<typeof actual.writeSync>) => {
+      if (fileSystemFault.failWrite) throw new Error('simulated disk write failure');
+      return actual.writeSync(...args);
+    },
+    renameSync: (...args: Parameters<typeof actual.renameSync>) => {
+      if (fileSystemFault.failRename) throw new Error('simulated atomic rename failure');
+      return actual.renameSync(...args);
+    },
+    fsyncSync: (...args: Parameters<typeof actual.fsyncSync>) => {
+      if (fileSystemFault.failDirectorySync && actual.fstatSync(args[0]).isDirectory())
+        throw new Error('simulated directory sync failure');
+      return actual.fsyncSync(...args);
+    },
+  };
+});
 
 function workspace(): string {
   return mkdtempSync(join(tmpdir(), 'sprint-coder-edit-'));
@@ -47,13 +187,63 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
     expect(openWorkspaceFileForEdit(root, 'blob.bin').reason).toBe('binary');
   });
 
-  it('refuses a symlink, a directory, and a missing file', () => {
+  it('refuses malformed UTF-8 instead of replacing bytes and corrupting them on save', () => {
     const root = workspace();
-    const outside = join(workspace(), 'id_rsa');
-    writeFileSync(outside, 'PRIVATE KEY\n');
-    symlinkSync(outside, join(root, 'link.ts'));
+    const bytes = Buffer.from([0x82, 0xa0, 0x82, 0xa2]);
+    writeFileSync(join(root, 'shift-jis.txt'), bytes);
+    expect(openWorkspaceFileForEdit(root, 'shift-jis.txt').reason).toBe('binary');
+    expect(readFileSync(join(root, 'shift-jis.txt'))).toEqual(bytes);
+  });
+
+  it('preserves a UTF-8 BOM when the opened text is saved', () => {
+    const root = workspace();
+    const file = join(root, 'bom.txt');
+    const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('日本語\r\n')]);
+    writeFileSync(file, bytes);
+    const opened = openWorkspaceFileForEdit(root, 'bom.txt');
+    expect(opened.editable).toBe(true);
+    expect(opened.text).toBe('\ufeff日本語\r\n');
+    const result = saveWorkspaceFile(root, 'bom.txt', opened.text, opened.digest);
+    expect(result.outcome).toBe('saved');
+    expect(readFileSync(file)).toEqual(bytes);
+  });
+
+  it('never trusts, deletes, or applies workspace files that resemble old recovery metadata', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const live = Buffer.from('live user content\n');
+    const attackerRecovery = Buffer.from('attacker-chosen replacement\n');
+    writeFileSync(file, live);
+    writeFileSync(`${file}.sprint-coder-recovery.tmp`, attackerRecovery);
+    writeFileSync(`${file}.sprint-coder-stage.tmp`, 'unrelated stage');
+    writeFileSync(
+      `${file}.sprint-coder-save.json`,
+      JSON.stringify({
+        version: 1,
+        originalDigest: createHash('sha256').update(attackerRecovery).digest('hex'),
+        newDigest: createHash('sha256').update('anything').digest('hex'),
+      }),
+    );
+    expect(openWorkspaceFileForEdit(root, 'important.txt')).toMatchObject({
+      editable: true,
+      text: 'live user content\n',
+    });
+    expect(recoverWorkspaceFileForEdit(root, 'important.txt')).toMatchObject({
+      editable: true,
+      text: 'live user content\n',
+    });
+    expect(readFileSync(file)).toEqual(live);
+    expect(readFileSync(`${file}.sprint-coder-recovery.tmp`)).toEqual(attackerRecovery);
+    expect(readdirSync(root)).toHaveLength(4);
+  });
+
+  it('refuses a parent junction that escapes the Workspace, a directory, and a missing file', () => {
+    const root = workspace();
+    const outside = workspace();
+    writeFileSync(join(outside, 'id_rsa'), 'PRIVATE KEY\n');
+    symlinkSync(outside, join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
     mkdirSync(join(root, 'dir'));
-    expect(openWorkspaceFileForEdit(root, 'link.ts').reason).toBe('not_a_file');
+    expect(openWorkspaceFileForEdit(root, 'escape/id_rsa').reason).toBe('outside_workspace');
     expect(openWorkspaceFileForEdit(root, 'dir').reason).toBe('not_a_file');
     expect(openWorkspaceFileForEdit(root, 'missing.ts').reason).toBe('not_a_file');
   });
@@ -85,6 +275,209 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readFileSync(join(root, 'a.ts'), 'utf8')).toBe('the model rewrote this\n');
   });
 
+  it('keeps the original byte-for-byte when staging the replacement fails', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original 日本語\r\n', 'utf8');
+    writeFileSync(file, original);
+    fileSystemFault.failWrite = true;
+    try {
+      const result = saveWorkspaceFile(
+        root,
+        'important.txt',
+        'replacement\r\n',
+        createHash('sha256').update(original).digest('hex'),
+      );
+      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      expect(result.conflictPath).toBeNull();
+    } finally {
+      fileSystemFault.failWrite = false;
+    }
+    expect(readFileSync(file)).toEqual(original);
+    expect(readdirSync(root)).toEqual(['important.txt']);
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'fails closed without moving the target when the filesystem cannot exchange files',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.unsupportedExchange = true;
+      try {
+        expect(
+          saveWorkspaceFile(root, 'important.txt', 'after\n', digestOf('before\n')),
+        ).toMatchObject({ outcome: 'refused', reason: 'io_error', conflictPath: null });
+      } finally {
+        fileSystemFault.unsupportedExchange = false;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('before\n');
+      expect(readdirSync(root)).toEqual(['important.txt']);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'removes a partial staging file when exclusive creation fails after creating it',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      const original = Buffer.from('original 日本語\r\n', 'utf8');
+      writeFileSync(file, original);
+      fileSystemFault.failStageAfterCreate = true;
+      try {
+        const result = saveWorkspaceFile(
+          root,
+          'important.txt',
+          'replacement\r\n',
+          createHash('sha256').update(original).digest('hex'),
+        );
+        expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      } finally {
+        fileSystemFault.failStageAfterCreate = false;
+      }
+      expect(readFileSync(file)).toEqual(original);
+      expect(readdirSync(root)).toEqual(['important.txt']);
+    },
+  );
+
+  it('retains the displaced file when validation fails after publication', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    writeFileSync(file, 'before\n');
+    fileSystemFault.failBoundaryRead = true;
+    try {
+      const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-/);
+      expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
+      expect(readFileSync(file, 'utf8')).toBe('before\n');
+    } finally {
+      fileSystemFault.failBoundaryRead = false;
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'restores a concurrent POSIX edit observed at the atomic exchange boundary',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.concurrentPosixContent = 'concurrent writer\n';
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+        expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-stage-/);
+        expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
+      } finally {
+        fileSystemFault.concurrentPosixContent = null;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('concurrent writer\n');
+      expect(readdirSync(root)).toHaveLength(2);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'retains a POSIX edit displaced by conflict rollback instead of deleting it',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.concurrentPosixContent = 'boundary writer\n';
+      fileSystemFault.afterPublicationContent = 'late writer\n';
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+        expect(readFileSync(file, 'utf8')).toBe('boundary writer\n');
+        expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('late writer\n');
+      } finally {
+        fileSystemFault.concurrentPosixContent = null;
+        fileSystemFault.afterPublicationContent = null;
+      }
+    },
+  );
+
+  it('keeps the original bytes when publishing the staged edit fails', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original 日本語\r\n', 'utf8');
+    writeFileSync(file, original);
+    if (process.platform === 'win32') fileSystemFault.failAtomicReplace = true;
+    else fileSystemFault.failRename = true;
+    try {
+      const result = saveWorkspaceFile(
+        root,
+        'important.txt',
+        'replacement\r\n',
+        createHash('sha256').update(original).digest('hex'),
+      );
+      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      expect(result.conflictPath).toBeNull();
+    } finally {
+      fileSystemFault.failRename = false;
+      fileSystemFault.failAtomicReplace = false;
+    }
+    expect(readFileSync(file)).toEqual(original);
+    expect(readdirSync(root)).toEqual(['important.txt']);
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'restores a concurrent Windows edit observed at the File.Replace boundary',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.concurrentWindowsContent = 'concurrent writer\n';
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+        expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-stage-/);
+        expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
+      } finally {
+        fileSystemFault.concurrentWindowsContent = null;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('concurrent writer\n');
+      expect(readdirSync(root)).toHaveLength(2);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'retains a Windows edit displaced by conflict rollback instead of deleting it',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.concurrentWindowsContent = 'boundary writer\n';
+      fileSystemFault.afterPublicationContent = 'late writer\n';
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+        expect(readFileSync(file, 'utf8')).toBe('boundary writer\n');
+        expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('late writer\n');
+      } finally {
+        fileSystemFault.concurrentWindowsContent = null;
+        fileSystemFault.afterPublicationContent = null;
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reports the committed save when the filesystem rejects parent directory sync',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.failDirectorySync = true;
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'after\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'saved', digest: digestOf('after\n') });
+      } finally {
+        fileSystemFault.failDirectorySync = false;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('after\n');
+      expect(readdirSync(root)).toEqual(['important.txt']);
+    },
+  );
+
   it('refuses to write outside the Workspace, and leaves the target untouched', () => {
     const outsideRoot = workspace();
     const outside = join(outsideRoot, 'secret.txt');
@@ -100,18 +493,118 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readFileSync(outside, 'utf8')).toBe('original\n');
   });
 
-  it('refuses to write through a symlink, and leaves the link target untouched', () => {
+  it('refuses to write through an escaping parent junction, and leaves the target untouched', () => {
     // The link is inside the Workspace, so a path check alone would let this through — which is why
     // the write path lstats rather than stats.
     const root = workspace();
-    const target = join(workspace(), 'id_rsa');
+    const outside = workspace();
+    const target = join(outside, 'id_rsa');
     writeFileSync(target, 'PRIVATE KEY\n');
-    symlinkSync(target, join(root, 'notes.md'));
-    const result = saveWorkspaceFile(root, 'notes.md', 'pwned\n', digestOf('PRIVATE KEY\n'));
+    symlinkSync(outside, join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    const result = saveWorkspaceFile(root, 'escape/id_rsa', 'pwned\n', digestOf('PRIVATE KEY\n'));
     expect(result.outcome).toBe('refused');
-    expect(result.reason).toBe('not_a_file');
+    expect(result.reason).toBe('outside_workspace');
     expect(readFileSync(target, 'utf8')).toBe('PRIVATE KEY\n');
   });
+
+  it('refuses a multiply-linked file that could alias a target outside the Workspace', () => {
+    const outside = workspace();
+    const outsideFile = join(outside, 'secret.txt');
+    writeFileSync(outsideFile, 'secret\n');
+    const root = workspace();
+    linkSync(outsideFile, join(root, 'alias.txt'));
+    const result = saveWorkspaceFile(root, 'alias.txt', 'changed\n', digestOf('secret\n'));
+    expect(result.outcome).toBe('refused');
+    expect(readFileSync(outsideFile, 'utf8')).toBe('secret\n');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not chmod a symlink planted over the staging file',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      const outsideRoot = workspace();
+      const outside = join(outsideRoot, 'outside.txt');
+      writeFileSync(outside, 'outside\n');
+      chmodSync(outside, 0o444);
+      fileSystemFault.stagingSymlinkTarget = outside;
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'after\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      } finally {
+        fileSystemFault.stagingSymlinkTarget = null;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('before\n');
+      expect(readFileSync(outside, 'utf8')).toBe('outside\n');
+      expect(statSync(outside).mode & 0o222).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves POSIX special permission bits and ordinary mode on save',
+    () => {
+      const root = workspace();
+      const file = join(root, 'script.sh');
+      writeFileSync(file, '#!/bin/sh\n');
+      chmodSync(file, 0o2755);
+      const oldTimestamp = new Date('2000-01-01T00:00:00.000Z');
+      utimesSync(file, oldTimestamp, oldTimestamp);
+      const result = saveWorkspaceFile(
+        root,
+        'script.sh',
+        '#!/bin/sh\necho ok\n',
+        digestOf('#!/bin/sh\n'),
+      );
+      expect(result.outcome).toBe('saved');
+      expect(statSync(file).mode & 0o7777).toBe(0o2755);
+      expect(statSync(file).mtimeMs).toBeGreaterThan(oldTimestamp.getTime());
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'atomically saves a readable file while preserving its read-only mode',
+    () => {
+      const root = workspace();
+      const file = join(root, 'generated.txt');
+      writeFileSync(file, 'before\n');
+      chmodSync(file, 0o444);
+
+      const result = saveWorkspaceFile(root, 'generated.txt', 'after\n', digestOf('before\n'));
+
+      expect(result.outcome).toBe('saved');
+      expect(readFileSync(file, 'utf8')).toBe('after\n');
+      expect(statSync(file).mode & 0o222).toBe(0);
+    },
+  );
+
+  it('publishes a replacement inode instead of truncating the live file in place', () => {
+    const root = workspace();
+    const file = join(root, 'protected.txt');
+    writeFileSync(file, 'before\n');
+    const before = statSync(file, { bigint: true });
+
+    const result = saveWorkspaceFile(root, 'protected.txt', 'after\n', digestOf('before\n'));
+    const after = statSync(file, { bigint: true });
+
+    expect(result.outcome).toBe('saved');
+    expect({ dev: after.dev, ino: after.ino }).not.toEqual({ dev: before.dev, ino: before.ino });
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'preserves a private Windows ACL across atomic publication',
+    async () => {
+      const root = workspace();
+      const file = join(root, 'private.txt');
+      writeFileSync(file, 'before\n');
+      await secureWindowsPath(file, 'file');
+
+      const result = saveWorkspaceFile(root, 'private.txt', 'after\n', digestOf('before\n'));
+
+      expect(result.outcome).toBe('saved');
+      await verifyWindowsPathAcl(file, 'file');
+    },
+  );
 
   it('refuses to write more than the cap', () => {
     const root = workspace();

@@ -5,6 +5,7 @@ import {
   SETTINGS_SECTIONS,
   SettingsDialog,
   WorkspaceBody,
+  availabilityOf,
   integerOptions,
   recoveryText,
   runtimeStatusText,
@@ -114,6 +115,20 @@ describe('which body the flag selects', () => {
     stubBridge();
     const headings = workspace().match(/Skills<\/h[1-6]>/g) ?? [];
     expect(headings).toHaveLength(1);
+  });
+});
+
+describe('CLI detection status', () => {
+  it('keeps an installed but unauthenticated CLI detected while explaining that login is needed', () => {
+    expect(
+      availabilityOf('codex', {
+        codexReadiness: 'authentication_required',
+        claudeReadiness: 'unavailable',
+      }),
+    ).toEqual({
+      available: true,
+      reason: 'Codexはインストール済みですが、ログインが必要です',
+    });
   });
 });
 

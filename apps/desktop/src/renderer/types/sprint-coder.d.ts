@@ -294,16 +294,18 @@ export type FileChange = {
 export type FileChangeRecord = { seq: number; turnId: string; changes: FileChange[] };
 /** A file read in full for editing, or a refusal with its reason (issue #43). */
 export type FileOpenResult = {
+  rootId: string;
   path: string;
   text: string;
   digest: string;
   editable: boolean;
-  reason: 'too_large' | 'binary' | 'not_a_file' | 'outside_workspace' | null;
+  reason: 'too_large' | 'binary' | 'not_a_file' | 'outside_workspace' | 'recovery_required' | null;
 };
 export type FileSaveResult = {
   outcome: 'saved' | 'conflict' | 'refused';
   digest: string | null;
   reason: 'too_large' | 'binary' | 'not_a_file' | 'outside_workspace' | 'io_error' | null;
+  conflictPath: string | null;
 };
 /** A file's body as a Runtime writes it (issue #39). Pushed, never persisted — see contracts'
  * fileEditFrameSchema. `text` is the whole body so far, already secret-redacted by Main. */
@@ -946,7 +948,9 @@ export interface SprintCoderApi {
   };
   files: {
     list(taskId: string): Promise<FileChangeRecord[]>;
+    pick(taskId: string): Promise<FileOpenResult | null>;
     open(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
+    recover(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
     save(input: {
       taskId: string;
       rootId: string;
@@ -965,7 +969,9 @@ export interface SprintCoderApi {
     getRuntime(taskId?: string): Promise<{
       kind: RuntimeKind;
       codexAvailable: boolean;
+      codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
       claudeAvailable: boolean;
+      claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
       model: string;
       models: CodexModelOption[];
       effort: ClaudeEffort;

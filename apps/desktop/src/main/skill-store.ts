@@ -14,7 +14,7 @@ import {
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { skillDraftSchema, teamBlueprintSchema, type SkillDraft } from '@sprint-coder/contracts';
-import { secureWindowsPath } from './windows-acl';
+import { secureWindowsPath, secureWindowsPaths } from './windows-acl';
 
 const MAX_FILES = 256;
 const MAX_FILE_BYTES = 1024 * 1024;
@@ -23,6 +23,7 @@ const MAX_DEPTH = 8;
 const SKILL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const BUILTIN_SKILL_IDS = new Set(['sprint-coder-team', 'skill-creator']);
 const RESERVED_NAMES = new Set(['sprint-coder-team', 'skill-creator', 'team', 'team-hub']);
+const WINDOWS_RESERVED_BASENAMES = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 const SECRET_FILE_NAMES = new Set([
   '.env',
   '.env.local',
@@ -124,9 +125,13 @@ export class SkillStore {
   private constructor(private readonly rootPath: string) {}
 
   static async open(input: { rootPath: string }): Promise<SkillStore> {
-    await ensurePrivateDirectory(input.rootPath);
+    await mkdir(input.rootPath, { recursive: true, mode: 0o700 });
+    const rootItem = await lstat(input.rootPath);
+    if (!rootItem.isDirectory() || rootItem.isSymbolicLink())
+      throw new SkillStoreError('UNSAFE_SOURCE', 'Skill store path must be a real directory');
     const rootPath = await realpath(input.rootPath);
-    for (const path of [
+    await ensurePrivateDirectories([
+      rootPath,
       join(rootPath, 'builtin'),
       join(rootPath, 'created'),
       join(rootPath, 'drafts'),
@@ -134,8 +139,7 @@ export class SkillStore {
       join(rootPath, 'imported', 'claude'),
       join(rootPath, 'imported', 'agents'),
       join(rootPath, 'revisions'),
-    ])
-      await ensurePrivateDirectory(path);
+    ]);
     await removeOwnedStagingDirectories(rootPath);
     return new SkillStore(rootPath);
   }
@@ -161,7 +165,8 @@ export class SkillStore {
       for (const skillId of entries) {
         const problems: string[] = [];
         const sourcePath = join(root, skillId);
-        if (!SKILL_ID.test(skillId)) problems.push('Skill folder name is invalid');
+        if (!SKILL_ID.test(skillId) || !isWindowsSafePathSegment(skillId))
+          problems.push('Skill folder name is invalid on Windows');
         try {
           const item = await lstat(sourcePath);
           if (!item.isDirectory() || item.isSymbolicLink())
@@ -209,10 +214,12 @@ export class SkillStore {
     const staging = join(builtinRoot, `.staging-${randomUUID()}`);
     const backup = join(builtinRoot, `.backup-${randomUUID()}`);
     try {
-      await ensurePrivateDirectory(staging);
-      await writeExclusive(join(staging, 'SKILL.md'), Buffer.from(content, 'utf8'));
+      await mkdir(staging, { recursive: true, mode: 0o700 });
+      const skillPath = join(staging, 'SKILL.md');
+      const manifestPath = join(staging, 'manifest.json');
+      await writeExclusive(skillPath, Buffer.from(content, 'utf8'), false);
       await writeExclusive(
-        join(staging, 'manifest.json'),
+        manifestPath,
         Buffer.from(
           `${JSON.stringify(
             {
@@ -228,7 +235,14 @@ export class SkillStore {
           )}\n`,
           'utf8',
         ),
+        false,
       );
+      if (process.platform === 'win32')
+        await secureWindowsPaths([
+          { path: staging, kind: 'directory' },
+          { path: skillPath, kind: 'file' },
+          { path: manifestPath, kind: 'file' },
+        ]);
       await syncDirectoryTree(staging);
       await this.ensureRevisionFromDirectory('builtin', skillId, digest, staging);
       if (currentManifest !== null) await rename(destination, backup);
@@ -314,9 +328,10 @@ export class SkillStore {
     const seen = new Set<string>();
     let totalBytes = 0;
     for (const file of canonical) {
-      if (seen.has(file.path))
+      const comparisonKey = file.path.toLocaleLowerCase('en-US');
+      if (seen.has(comparisonKey))
         throw new SkillStoreError('INVALID_SKILL', `Duplicate Skill file: ${file.path}`);
-      seen.add(file.path);
+      seen.add(comparisonKey);
       if (file.bytes.byteLength > MAX_FILE_BYTES)
         throw new SkillStoreError('INVALID_SKILL', `Skill file is too large: ${file.path}`);
       totalBytes += file.bytes.byteLength;
@@ -778,16 +793,24 @@ async function materializeSkill(
   files: { path: string; bytes: Buffer }[],
   manifest: SkillManifest,
 ): Promise<void> {
-  await ensurePrivateDirectory(staging);
+  const aclPaths: { path: string; kind: 'directory' | 'file' }[] = [];
+  await mkdir(staging, { recursive: true, mode: 0o700 });
+  aclPaths.push({ path: staging, kind: 'directory' });
   for (const file of files) {
     const target = safeChild(staging, file.path);
-    await ensurePrivateDirectory(dirname(target));
-    await writeExclusive(target, file.bytes);
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    aclPaths.push({ path: dirname(target), kind: 'directory' });
+    await writeExclusive(target, file.bytes, false);
+    aclPaths.push({ path: target, kind: 'file' });
   }
+  const manifestPath = join(staging, 'manifest.json');
   await writeExclusive(
-    join(staging, 'manifest.json'),
+    manifestPath,
     Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'),
+    false,
   );
+  aclPaths.push({ path: manifestPath, kind: 'file' });
+  if (process.platform === 'win32') await secureWindowsPaths(aclPaths);
   await syncDirectoryTree(staging);
 }
 
@@ -922,7 +945,12 @@ function normalizeDraftFilePath(path: string): string {
     normalized.startsWith('/') ||
     parts.some((part) => part === '' || part === '.' || part === '..') ||
     parts.length > MAX_DEPTH + 1 ||
-    parts.some((part) => part.startsWith('.') || SECRET_FILE_NAMES.has(part.toLowerCase()))
+    parts.some(
+      (part) =>
+        part.startsWith('.') ||
+        SECRET_FILE_NAMES.has(part.toLowerCase()) ||
+        !isWindowsSafePathSegment(part),
+    )
   )
     throw new SkillStoreError('UNSAFE_SOURCE', 'Skill Draftのファイルパスが安全ではありません');
   return normalized;
@@ -943,17 +971,24 @@ function safeDraftPath(root: string, draftId: string): string {
 }
 
 async function ensurePrivateDirectory(path: string): Promise<void> {
-  await mkdir(path, { recursive: true, mode: 0o700 });
-  const item = await lstat(path);
-  if (!item.isDirectory() || item.isSymbolicLink())
-    throw new SkillStoreError('UNSAFE_SOURCE', 'Skill store path must be a real directory');
+  await ensurePrivateDirectories([path]);
+}
+
+async function ensurePrivateDirectories(paths: readonly string[]): Promise<void> {
+  const unique = [...new Set(paths)];
+  for (const path of unique) {
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    const item = await lstat(path);
+    if (!item.isDirectory() || item.isSymbolicLink())
+      throw new SkillStoreError('UNSAFE_SOURCE', 'Skill store path must be a real directory');
+  }
   if (process.platform === 'win32') {
     try {
-      await secureWindowsPath(path, 'directory');
+      await secureWindowsPaths(unique.map((path) => ({ path, kind: 'directory' as const })));
     } catch {
       throw new SkillStoreError('UNSAFE_SOURCE', 'Skill store directory ACL is unsafe');
     }
-  } else await chmod(path, 0o700);
+  } else for (const path of unique) await chmod(path, 0o700);
 }
 
 async function removeOwnedStagingDirectories(rootPath: string): Promise<void> {
@@ -1091,12 +1126,17 @@ function isManifest(value: unknown): value is SkillManifest {
 }
 
 function assertSkillId(skillId: string): void {
-  if (!SKILL_ID.test(skillId) || RESERVED_NAMES.has(skillId.toLowerCase()))
+  if (
+    !SKILL_ID.test(skillId) ||
+    !isWindowsSafePathSegment(skillId) ||
+    RESERVED_NAMES.has(skillId.toLowerCase())
+  )
     throw new SkillStoreError('INVALID_SKILL', 'Skill id is invalid');
 }
 
 function assertSkillIdForSource(source: SkillSource, skillId: string): void {
-  if (!SKILL_ID.test(skillId)) throw new SkillStoreError('INVALID_SKILL', 'Skill id is invalid');
+  if (!SKILL_ID.test(skillId) || !isWindowsSafePathSegment(skillId))
+    throw new SkillStoreError('INVALID_SKILL', 'Skill id is invalid');
   if (source === 'builtin') {
     if (!BUILTIN_SKILL_IDS.has(skillId))
       throw new SkillStoreError('INVALID_SKILL', 'Builtin Skill id is invalid');
@@ -1104,6 +1144,16 @@ function assertSkillIdForSource(source: SkillSource, skillId: string): void {
   }
   if (RESERVED_NAMES.has(skillId.toLowerCase()))
     throw new SkillStoreError('INVALID_SKILL', 'Skill id is reserved');
+}
+
+export function isWindowsSafePathSegment(segment: string): boolean {
+  return (
+    segment.length > 0 &&
+    !/[<>:"/\\|?*]/u.test(segment) &&
+    ![...segment].some((character) => character.charCodeAt(0) <= 0x1f) &&
+    !/[ .]$/u.test(segment) &&
+    !WINDOWS_RESERVED_BASENAMES.test(segment)
+  );
 }
 
 function safeChild(root: string, child: string): string {
@@ -1158,12 +1208,14 @@ async function copySafeDirectory(
   destinationRoot: string,
   options: { omit: ReadonlySet<string>; secureDestination?: boolean },
 ): Promise<void> {
-  if (options.secureDestination === false)
-    await mkdir(destinationRoot, { recursive: true, mode: 0o700 });
-  else await ensurePrivateDirectory(destinationRoot);
+  const secureDestination = options.secureDestination !== false;
+  const aclPaths: { path: string; kind: 'directory' | 'file' }[] = [];
+  await mkdir(destinationRoot, { recursive: true, mode: 0o700 });
+  if (secureDestination) aclPaths.push({ path: destinationRoot, kind: 'directory' });
   let files = 0;
   let totalBytes = 0;
   await copy(sourceRoot, destinationRoot, '', 0);
+  if (process.platform === 'win32' && secureDestination) await secureWindowsPaths(aclPaths);
 
   async function copy(
     sourceDirectory: string,
@@ -1182,9 +1234,8 @@ async function copySafeDirectory(
       if (before.isSymbolicLink() || (!before.isDirectory() && !before.isFile()))
         throw new SkillStoreError('UNSAFE_SOURCE', `Unsupported file type: ${relativePath}`);
       if (before.isDirectory()) {
-        if (options.secureDestination === false)
-          await mkdir(destinationPath, { recursive: true, mode: 0o700 });
-        else await ensurePrivateDirectory(destinationPath);
+        await mkdir(destinationPath, { recursive: true, mode: 0o700 });
+        if (secureDestination) aclPaths.push({ path: destinationPath, kind: 'directory' });
         await copy(sourcePath, destinationPath, relativePath, depth + 1);
         continue;
       }
@@ -1197,11 +1248,8 @@ async function copySafeDirectory(
         const opened = await handle.stat();
         if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino)
           throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
-        await writeExclusive(
-          destinationPath,
-          await handle.readFile(),
-          options.secureDestination !== false,
-        );
+        await writeExclusive(destinationPath, await handle.readFile(), false);
+        if (secureDestination) aclPaths.push({ path: destinationPath, kind: 'file' });
       } finally {
         await handle.close();
       }

@@ -5,9 +5,9 @@ import {
   EFFORT_DESC,
   EFFORT_LABEL,
   EFFORT_LEVELS,
-  RUNTIME_CLI_MISSING_HINT,
   RUNTIME_LABEL,
   effortUnavailableReason,
+  runtimeReadinessHint,
 } from '../lib/runtime-labels';
 import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/sprint-coder';
 import { ProviderSettingsSection } from './ProviderSettingsSection';
@@ -363,13 +363,16 @@ function CloseButton({ onClose }: { onClose: () => void }) {
 // One definition each. Two copies of a control that writes a persisted setting is exactly the kind
 // of thing that ends up disagreeing with itself.
 
-function availabilityOf(
+export function availabilityOf(
   kind: RuntimeKind,
-  runtime: { codexAvailable: boolean; claudeAvailable: boolean },
+  runtime: {
+    codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
+    claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
+  },
 ): { available: boolean; reason: string | null } {
   if (kind === 'mock') return { available: true, reason: null };
-  const available = kind === 'codex' ? runtime.codexAvailable : runtime.claudeAvailable;
-  return { available, reason: available ? null : RUNTIME_CLI_MISSING_HINT[kind] };
+  const readiness = kind === 'codex' ? runtime.codexReadiness : runtime.claudeReadiness;
+  return { available: readiness !== 'unavailable', reason: runtimeReadinessHint(kind, readiness) };
 }
 
 function ModelGroup() {
@@ -476,7 +479,7 @@ function CliDetectionGroup() {
                 {available ? <Check size={14} /> : <X size={14} />}
               </span>
               <span>{RUNTIME_LABEL[kind]}</span>
-              <span className="settings-hint">{available ? '検出済み' : (reason ?? '未検出')}</span>
+              <span className="settings-hint">{reason ?? (available ? '利用可能' : '未検出')}</span>
             </li>
           );
         })}

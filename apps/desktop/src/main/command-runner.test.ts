@@ -15,7 +15,17 @@ import { workspaceMutationBinding } from './path-guard';
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    roots.splice(0).map((root) =>
+      rm(root, {
+        recursive: true,
+        force: true,
+        // Windows can report EBUSY briefly after a terminated process releases its cwd handle.
+        maxRetries: process.platform === 'win32' ? 5 : 0,
+        retryDelay: 50,
+      }),
+    ),
+  );
 });
 
 async function workspace(): Promise<string> {

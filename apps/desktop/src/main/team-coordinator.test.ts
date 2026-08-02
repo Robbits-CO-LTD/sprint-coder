@@ -3432,6 +3432,9 @@ else
           cwd: process.cwd(),
           encoding: 'utf8',
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
+          // This bridge runs the coordinator integration cases in a second Electron process. A
+          // serialized Windows suite can take about a minute and still needs time for clean
+          // Vitest/Electron shutdown.
           timeout: 120_000,
           maxBuffer: 10 * 1024 * 1024,
         },
