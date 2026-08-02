@@ -10,7 +10,7 @@ export const WINDOWS_ACL_TIMEOUT_MS = 18_000;
 const secureAclScript = String.raw`
 $ErrorActionPreference = 'Stop'
 $items = @((([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
-  [Console]::In.ReadLine()
+  $env:SPRINT_CODER_ACL_ITEMS
 ))) | ConvertFrom-Json))
 $operation = $env:SPRINT_CODER_ACL_OPERATION
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -66,6 +66,7 @@ exit 0
 `;
 
 export type WindowsAclPath = Readonly<{ path: string; kind: 'directory' | 'file' }>;
+const MAX_ENCODED_BATCH_CHARS = 20_000;
 
 export async function secureWindowsPath(path: string, kind: 'directory' | 'file'): Promise<void> {
   await secureWindowsPaths([{ path, kind }]);
@@ -96,10 +97,17 @@ async function runAcl(
       paths.map((item) => [`${item.kind}:${item.path.toLocaleLowerCase('en-US')}`, item]),
     ).values(),
   ];
+  for (const batch of aclBatches(unique)) await runAclBatch(batch, operation);
+}
+
+async function runAclBatch(
+  paths: readonly WindowsAclPath[],
+  operation: 'secure' | 'verify',
+): Promise<void> {
   const encodedScript = Buffer.from(secureAclScript, 'utf16le').toString('base64');
-  const encodedItems = Buffer.from(JSON.stringify(unique), 'utf8').toString('base64');
+  const encodedItems = Buffer.from(JSON.stringify(paths), 'utf8').toString('base64');
   await new Promise<void>((resolve, reject) => {
-    const child = execFile(
+    execFile(
       POWERSHELL,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript],
       {
@@ -111,6 +119,7 @@ async function runAcl(
           TMP: process.env['TMP'] ?? '',
           USERPROFILE: process.env['USERPROFILE'] ?? '',
           SPRINT_CODER_ACL_OPERATION: operation,
+          SPRINT_CODER_ACL_ITEMS: encodedItems,
         },
         encoding: 'utf8',
         timeout: WINDOWS_ACL_TIMEOUT_MS,
@@ -119,10 +128,23 @@ async function runAcl(
       },
       (error) => (error === null ? resolve() : reject(error)),
     );
-    // A Skill can contain 256 files, so its encoded ACL list can exceed Windows' roughly 32K
-    // process-environment limit. Send one newline-terminated Base64 record instead. Reading a
-    // complete line also avoids relying on redirected-stdin EOF propagation, which can remain
-    // pending under the nested PowerShell host used by Windows GitHub runners.
-    child.stdin?.end(`${encodedItems}\n`);
   });
+}
+
+function aclBatches(paths: readonly WindowsAclPath[]): WindowsAclPath[][] {
+  const batches: WindowsAclPath[][] = [];
+  let current: WindowsAclPath[] = [];
+  for (const path of paths) {
+    const candidate = [...current, path];
+    const encodedLength = Buffer.byteLength(JSON.stringify(candidate), 'utf8') * 2;
+    if (encodedLength <= MAX_ENCODED_BATCH_CHARS) {
+      current = candidate;
+      continue;
+    }
+    if (current.length === 0) throw new Error('Windows ACL path exceeds the process input limit');
+    batches.push(current);
+    current = [path];
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
 }
