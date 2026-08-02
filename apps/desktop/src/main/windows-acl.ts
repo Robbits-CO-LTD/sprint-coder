@@ -10,7 +10,7 @@ export const WINDOWS_ACL_TIMEOUT_MS = 18_000;
 const secureAclScript = String.raw`
 $ErrorActionPreference = 'Stop'
 $items = @((([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
-  [Console]::In.ReadToEnd()
+  [Console]::In.ReadLine()
 ))) | ConvertFrom-Json))
 $operation = $env:SPRINT_CODER_ACL_OPERATION
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -120,7 +120,9 @@ async function runAcl(
       (error) => (error === null ? resolve() : reject(error)),
     );
     // A Skill can contain 256 files, so its encoded ACL list can exceed Windows' roughly 32K
-    // process-environment limit. Standard input has no such environment-block ceiling.
-    child.stdin?.end(encodedItems);
+    // process-environment limit. Send one newline-terminated Base64 record instead. Reading a
+    // complete line also avoids relying on redirected-stdin EOF propagation, which can remain
+    // pending under the nested PowerShell host used by Windows GitHub runners.
+    child.stdin?.end(`${encodedItems}\n`);
   });
 }
