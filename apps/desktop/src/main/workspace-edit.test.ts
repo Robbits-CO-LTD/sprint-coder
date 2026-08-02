@@ -27,6 +27,7 @@ const fileSystemFault = vi.hoisted(() => ({
   failWrite: false,
   failRename: false,
   failAtomicReplace: false,
+  failDirectorySync: false,
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -52,6 +53,11 @@ vi.mock('node:fs', async (importOriginal) => {
     renameSync: (...args: Parameters<typeof actual.renameSync>) => {
       if (fileSystemFault.failRename) throw new Error('simulated atomic rename failure');
       return actual.renameSync(...args);
+    },
+    fsyncSync: (...args: Parameters<typeof actual.fsyncSync>) => {
+      if (fileSystemFault.failDirectorySync && actual.fstatSync(args[0]).isDirectory())
+        throw new Error('simulated directory sync failure');
+      return actual.fsyncSync(...args);
     },
   };
 });
@@ -222,6 +228,24 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readFileSync(file)).toEqual(original);
     expect(readdirSync(root)).toEqual(['important.txt']);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'reports the committed save when the filesystem rejects parent directory sync',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.failDirectorySync = true;
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'after\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'saved', digest: digestOf('after\n') });
+      } finally {
+        fileSystemFault.failDirectorySync = false;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('after\n');
+      expect(readdirSync(root)).toEqual(['important.txt']);
+    },
+  );
 
   it('refuses to write outside the Workspace, and leaves the target untouched', () => {
     const outsideRoot = workspace();

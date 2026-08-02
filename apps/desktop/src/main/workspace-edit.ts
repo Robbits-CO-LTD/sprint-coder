@@ -205,7 +205,13 @@ export function saveWorkspaceFile(
     publishStagedFile(staging, absolute, backup);
     ownsStaging = false;
     ownsBackup = process.platform === 'win32';
-    syncParentDirectory(absolute);
+    try {
+      syncParentDirectory(absolute);
+    } catch {
+      // Publication is the commit point: the target already contains the complete replacement.
+      // Some FUSE and network filesystems reject directory fsync even though the atomic rename
+      // succeeded. Reporting a refusal here would leave the editor stale and make a retry conflict.
+    }
     return { outcome: 'saved', digest: digestOf(bytes), reason: null };
   } catch {
     return refuse('io_error');
