@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
-import { windowsPowerShellCommand } from './windows-powershell';
+import { windowsPowerShellStdinCommand } from './windows-powershell';
 
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const ACL_PROCESS_LOCK = `\\\\.\\pipe\\sprint-coder-windows-acl-${createHash('sha256')
@@ -70,7 +70,6 @@ if (($only.FileSystemRights -band [System.Security.AccessControl.FileSystemRight
   throw 'ACL does not grant the current user full control'
 }
 }
-exit 0
 `;
 
 export type WindowsAclPath = Readonly<{ path: string; kind: 'directory' | 'file' }>;
@@ -175,7 +174,7 @@ async function runAclBatch(
   const releaseProcessLock = await acquireWindowsAclProcessLock();
   try {
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(POWERSHELL, windowsPowerShellCommand(secureAclScript), {
+      const child = spawn(POWERSHELL, windowsPowerShellStdinCommand(), {
         env: {
           SystemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
           WINDIR: process.env['WINDIR'] ?? 'C:\\Windows',
@@ -186,11 +185,12 @@ async function runAclBatch(
           SPRINT_CODER_ACL_OPERATION: operation,
           SPRINT_CODER_ACL_ITEMS: encodedItems,
         },
-        stdio: 'ignore',
+        stdio: ['pipe', 'ignore', 'ignore'],
         windowsHide: true,
       });
       let settled = false;
       let timedOut = false;
+      let stdinError: Error | undefined;
       const finish = (error?: Error): void => {
         if (settled) return;
         settled = true;
@@ -208,11 +208,20 @@ async function runAclBatch(
         // process can still be alive, and the queue must remain blocked until its exit event.
         if (!timedOut) finish(error);
       });
+      child.stdin.once('error', (error) => {
+        // Keep the interprocess lock until the child exits even when its input pipe fails.
+        stdinError = error;
+      });
+      child.stdin.end(secureAclScript);
       // Wait for the PowerShell process itself, not pipe closure. GitHub runner helpers may inherit
       // pipe handles and keep execFile's close callback pending after PowerShell has already exited.
       child.once('exit', (code) => {
         if (timedOut) {
           finish(new Error(`Windows ACL ${operation} timed out`));
+          return;
+        }
+        if (stdinError !== undefined) {
+          finish(stdinError);
           return;
         }
         finish(code === 0 ? undefined : new Error(`Windows ACL ${operation} exited with ${code}`));
