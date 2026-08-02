@@ -108,7 +108,7 @@ test.describe('settings dialog', () => {
     await expect(page.getByTestId('settings-dialog')).not.toBeVisible();
   });
 
-  test('never offers full access as an inherited default for a new Task', async () => {
+  test('offers and persists full access as the default for a new Task', async () => {
     const page: Page = await firstWindow(app!);
     await page.getByTestId('sidebar-settings-button').click();
     const accessDefault = page.getByTestId('settings-access-default');
@@ -117,8 +117,12 @@ test.describe('settings dialog', () => {
       '前回選択した設定',
       '毎回確認',
       '安全時は自動',
+      'フルアクセス',
     ]);
-    await expect(accessDefault.locator('option[value="full"]')).toHaveCount(0);
+    await accessDefault.selectOption('full');
+    await page.keyboard.press('Escape');
+    await page.getByTestId('sidebar-settings-button').click();
+    await expect(page.getByTestId('settings-access-default')).toHaveValue('full');
     await page.keyboard.press('Escape');
   });
 

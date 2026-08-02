@@ -833,13 +833,14 @@ describe('public contracts', () => {
     expect(() => claudeEffortSchema.parse('bogus')).toThrow();
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'])
       expect(claudeEffortSchema.parse(effort)).toBe(effort);
-    expect(
-      publicErrorSchema.parse({
-        code: 'STEER_UNSUPPORTED',
-        userMessage: 'unsupported',
-        retryable: false,
-      }).code,
-    ).toBe('STEER_UNSUPPORTED');
+    for (const code of ['STEER_UNSUPPORTED', 'USER_CANCELED'] as const)
+      expect(
+        publicErrorSchema.parse({
+          code,
+          userMessage: 'public error',
+          retryable: false,
+        }).code,
+      ).toBe(code);
   });
 
   it('validates task-scoped permission preset settings', () => {

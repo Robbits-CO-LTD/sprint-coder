@@ -1120,6 +1120,7 @@ export const useAppStore = create<AppState>((set, get) => {
               : state.permissionByTask,
         }));
       } catch (err) {
+        const userCanceled = errorCode(err) === 'USER_CANCELED';
         let restored = previous;
         try {
           restored = await window.sprintCoder.permissions.get(taskId);
@@ -1132,7 +1133,7 @@ export const useAppStore = create<AppState>((set, get) => {
             state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
               ? { ...state.permissionByTask, [taskId]: restored }
               : state.permissionByTask,
-          error: describeError(err),
+          ...(userCanceled ? {} : { error: describeError(err) }),
         }));
       }
     },
@@ -1397,6 +1398,9 @@ export const useAppStore = create<AppState>((set, get) => {
         set((state) => ({ tasks: [task, ...state.tasks] }));
         await get().selectTask(task.id);
         const preset = accessPresetForNewTask();
+        // `setAccessPreset` crosses the permissions IPC boundary. Main always shows its native
+        // confirmation before accepting `full`, including this inherited/default path; declining
+        // leaves the newly created Task at the initial `ask` preset.
         if (preset !== 'ask') await get().setAccessPreset(task.id, preset);
         if (projectId !== undefined) void get().refreshProjects();
         return task;

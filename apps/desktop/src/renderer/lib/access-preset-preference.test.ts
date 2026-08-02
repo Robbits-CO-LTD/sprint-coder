@@ -25,12 +25,12 @@ beforeEach(() => {
 });
 
 describe('access preset preference', () => {
-  it('starts safe and reuses only non-privileged confirmed selections', () => {
+  it('starts safe and reuses the last confirmed selection, including full access', () => {
     expect(accessPresetForNewTask()).toBe('ask');
     rememberAccessPreset('auto');
     expect(accessPresetForNewTask()).toBe('auto');
     rememberAccessPreset('full');
-    expect(accessPresetForNewTask()).toBe('ask');
+    expect(accessPresetForNewTask()).toBe('full');
   });
 
   it('lets an explicit settings default override later task selections', () => {
@@ -48,13 +48,12 @@ describe('access preset preference', () => {
     writeAccessPresetDefault('ask');
     writeAccessPresetDefault('last');
     expect(readAccessPresetDefault()).toBe('last');
-    expect(accessPresetForNewTask()).toBe('ask');
+    expect(accessPresetForNewTask()).toBe('full');
   });
 
-  it('ignores a stale full-access default from older builds or tampered storage', () => {
-    window.localStorage.setItem('sprint-coder:default-access-preset', 'full');
-    window.localStorage.setItem('sprint-coder:last-access-preset', 'full');
-    expect(readAccessPresetDefault()).toBe('last');
-    expect(accessPresetForNewTask()).toBe('ask');
+  it('persists an explicit full-access default', () => {
+    writeAccessPresetDefault('full');
+    expect(readAccessPresetDefault()).toBe('full');
+    expect(accessPresetForNewTask()).toBe('full');
   });
 });

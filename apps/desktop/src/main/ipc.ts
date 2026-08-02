@@ -3890,7 +3890,7 @@ function toPublicError(error: unknown): PublicError {
     };
   if (error instanceof FullAccessConfirmationDeclinedError)
     return {
-      code: 'FORBIDDEN',
+      code: 'USER_CANCELED',
       userMessage: 'フルアクセスへの変更をキャンセルしました。',
       retryable: false,
     };

@@ -451,11 +451,12 @@ function AccessDefaultGroup() {
           <option value="last">前回選択した設定</option>
           <option value="ask">毎回確認</option>
           <option value="auto">安全時は自動</option>
+          <option value="full">フルアクセス</option>
         </select>
       </label>
       <p className="settings-hint">
-        設定しない場合は直近の安全な選択を引き継ぎます。フルアクセスは新しいタスクへ
-        引き継がれず、タスクごとに確認します。
+        「前回選択した設定」は直近の選択を引き継ぎます。フルアクセスを新しいタスクへ
+        適用するときも、Mainプロセスの確認ダイアログを表示します。
       </p>
     </div>
   );
