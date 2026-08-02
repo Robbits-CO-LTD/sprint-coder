@@ -7,6 +7,7 @@ import {
   type TeamWorkerRuntime,
   type WorkerActivityEvent,
   type WorkerRuntimeResult,
+  type TeamExecutionAccess,
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
 import type { PreparedContext } from './context-ledger';
@@ -138,6 +139,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    accessMode?: TeamExecutionAccess;
     executionId?: string;
     workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
@@ -160,7 +162,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       `親Agent ID: ${input.worker.parentAgentId ?? 'Leader'}`,
       input.worker.objective === null ? '' : `目的: ${input.worker.objective}`,
       `Context継承: ${input.worker.contextInheritancePolicy}`,
-      `Workspace書き込み: ${input.worker.writeCapable ? '許可範囲内で可' : '禁止（読み取り専用）'}`,
+      `Workspace書き込み: ${input.accessMode === 'workspace-write' ? '隔離範囲内で可' : '禁止（読み取り専用）'}`,
       input.workspacePath === undefined
         ? ''
         : `隔離worktree: ${input.workspacePath ?? '利用不可'}（このディレクトリ内だけを変更してください）`,
@@ -185,10 +187,11 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
 
     const workspacePath =
       input.workspacePath === undefined ? this.deps.workspaceFor(taskId) : input.workspacePath;
-    const writeScope =
-      input.worker.writeCapable === true
+    const requestedWriteScope =
+      input.accessMode === 'workspace-write' && input.worker.writeCapable === true
         ? (this.deps.writeScopeFor?.(input.worker, workspacePath) ?? 'read-only')
         : 'read-only';
+    const writeScope = requestedWriteScope === 'full' ? 'workspace-write' : requestedWriteScope;
     const startedAt = Date.now();
     if (input.signal?.aborted) throw new Error('Worker execution was canceled before start');
     const abort = (): void => {

@@ -377,10 +377,27 @@ describe('TeamMcpBridge', () => {
         targetAgentId: 'worker-1',
         content: '実装する',
         doneCriteria: ['完了'],
+        accessMode: 'read-only',
       },
       'manager-1',
       { type: 'team_execution', id: 'parent-execution-1' },
     );
+
+    const blockedWrite = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_assign_task',
+      args: {
+        workerId: 'worker-1',
+        objective: '書き込む',
+        doneCriteria: ['完了'],
+        access: 'workspace-write',
+      },
+    });
+    expect(JSON.parse(blockedWrite.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { ok: false, message: expect.stringContaining('read-only') },
+    });
+    expect(coordinator.assignTaskAs).toHaveBeenCalledTimes(1);
   });
 
   it('closes the connection without responding to an unknown token', async () => {

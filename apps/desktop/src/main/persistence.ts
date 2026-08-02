@@ -535,6 +535,7 @@ type TeamExecutionRow = {
   team_id: string;
   assignee_agent_id: string;
   created_by_agent_id: string;
+  access_mode: TeamMissionAccess;
   state: TeamExecutionState;
   instruction_revision: number;
   queue_ordinal: number | null;
@@ -2867,6 +2868,19 @@ const migrations = [
       ALTER TABLE workspace_mutation_state ADD COLUMN root_id TEXT;
     `,
   },
+  {
+    version: 62,
+    checksum: 'team-execution-access-mode-v62',
+    sql: `
+      ALTER TABLE team_executions ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'read-only'
+        CHECK (access_mode IN ('read-only', 'workspace-write'));
+      UPDATE team_executions SET access_mode = COALESCE(
+        (SELECT access_mode FROM team_mission_steps
+         WHERE team_mission_steps.execution_id = team_executions.id),
+        'read-only'
+      );
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3224,6 +3238,7 @@ export type TeamExecutionRecord = Readonly<{
   teamId: string;
   assigneeAgentId: string;
   createdByAgentId: string;
+  accessMode: TeamMissionAccess;
   state: TeamExecutionState;
   instruction: ExecutionInstruction;
   queueOrdinal: number | null;
@@ -3469,6 +3484,7 @@ export interface PersistenceClient {
     assigneeAgentId: string;
     createdByAgentId: string;
     instruction: string;
+    accessMode?: TeamMissionAccess;
     now: string;
     contextOwner?: { type: ContextSealOwnerType; id: string };
   }): TeamExecutionRecord;
@@ -6033,6 +6049,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     assigneeAgentId: string;
     createdByAgentId: string;
     instruction: string;
+    accessMode?: TeamMissionAccess;
     now: string;
     contextOwner?: { type: ContextSealOwnerType; id: string };
   }): TeamExecutionRecord {
@@ -6047,16 +6064,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
         throw new Error('Execution Agents must belong to the same Team');
       if (['done', 'failed', 'stopped'].includes(assignee.state))
         throw new Error('A terminal Agent cannot receive an execution');
+      const accessMode = input.accessMode ?? 'read-only';
+      if (accessMode === 'workspace-write' && assignee.writeCapable !== true)
+        throw new Error('workspace-write execution requires a write-capable Worker');
       const id = randomUUID();
       this.db
         .prepare(
           `INSERT INTO team_executions(
-             id, team_id, assignee_agent_id, created_by_agent_id, state,
+             id, team_id, assignee_agent_id, created_by_agent_id, access_mode, state,
              instruction_revision, queue_ordinal, queue_reason,
              connection_id, requested_provider, requested_model,
              revision, assigned_at, queued_at, started_at, completed_at, updated_at
            ) VALUES (
-             ?, ?, ?, ?, 'assigned', 1, NULL, NULL, ?, ?, ?, 1, ?, NULL, NULL, NULL, ?
+             ?, ?, ?, ?, ?, 'assigned', 1, NULL, NULL, ?, ?, ?, 1, ?, NULL, NULL, NULL, ?
            )`,
         )
         .run(
@@ -6064,6 +6084,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           team.id,
           assignee.id,
           creator.id,
+          accessMode,
           assignee.modelSelection.connectionId,
           assignee.modelSelection.requestedProvider,
           assignee.modelSelection.requestedModel,
@@ -6092,6 +6113,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         executionId: id,
         payload: {
           instructionRevision: instruction.revision,
+          accessMode,
           modelSelection: assignee.modelSelection,
         },
         now: input.now,
@@ -6544,6 +6566,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           assigneeAgentId: worker.id,
           createdByAgentId: creator.id,
           instruction: step.objective,
+          accessMode: step.access,
           now: input.now,
           ...(input.contextOwner === undefined ? {} : { contextOwner: input.contextOwner }),
         });
@@ -6913,11 +6936,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         const execution = this.getTeamExecution(attempt.execution_id);
         if (execution.state !== 'running') continue;
         const mission = this.getTeamMissionForExecution(execution.id);
-        const missionStep = mission?.steps.find(({ executionId }) => executionId === execution.id);
-        const worker = this.getAgent(execution.assigneeAgentId);
-        const writable =
-          missionStep?.access === 'workspace-write' ||
-          (missionStep === undefined && worker.writeCapable);
+        const writable = execution.accessMode === 'workspace-write';
         const automaticRestartExhausted = attempt.start_reason === 'app_restart';
         if (writable || (automaticRestartExhausted && mission !== null)) {
           this.transitionTeamExecution({
@@ -13192,6 +13211,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       teamId: row.team_id,
       assigneeAgentId: row.assignee_agent_id,
       createdByAgentId: row.created_by_agent_id,
+      accessMode: row.access_mode,
       state: row.state,
       instruction: {
         revision: instruction.revision,

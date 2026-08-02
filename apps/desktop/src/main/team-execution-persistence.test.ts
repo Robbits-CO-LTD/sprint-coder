@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient } from './persistence';
 import { TeamCoordinator } from './team-coordinator';
@@ -60,6 +61,90 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 
 if (runsWithElectronAbi)
   describe('Team execution persistence', () => {
+    it('defaults legacy calls to read-only and persists explicit workspace-write access', () => {
+      const { persistence, path } = createPersistence();
+      const { team, leader, worker, execution } = createExecutionFixture(persistence);
+      expect(execution.accessMode).toBe('read-only');
+      expect(() =>
+        persistence.createTeamExecution({
+          teamId: team.id,
+          assigneeAgentId: worker.id,
+          createdByAgentId: leader.id,
+          instruction: 'must not write',
+          accessMode: 'workspace-write',
+          now: '2026-07-28T11:00:00.500Z',
+        }),
+      ).toThrow('write-capable Worker');
+      const writable = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'writer',
+        objective: 'write inside isolation',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+        writeCapable: true,
+      });
+      const writeExecution = persistence.createTeamExecution({
+        teamId: team.id,
+        assigneeAgentId: writable.id,
+        createdByAgentId: leader.id,
+        instruction: 'write safely',
+        accessMode: 'workspace-write',
+        now: '2026-07-28T11:00:01.000Z',
+      });
+      expect(writeExecution.accessMode).toBe('workspace-write');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTeamExecution(execution.id).accessMode).toBe('read-only');
+      expect(reopened.getTeamExecution(writeExecution.id).accessMode).toBe('workspace-write');
+      reopened.close();
+    });
+
+    it('backfills v61 Mission access while leaving standalone executions read-only', () => {
+      const { persistence, path } = createPersistence();
+      const { team, leader, execution } = createExecutionFixture(persistence);
+      const writer = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'migration writer',
+        objective: 'migrate access',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+        writeCapable: true,
+      });
+      persistence.transitionTeamState(team.id, 'active');
+      const mission = persistence.createTeamMission({
+        teamId: team.id,
+        createdByAgentId: leader.id,
+        objective: 'migrate mission access',
+        doneCriteria: ['done'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'write',
+            doneCriteria: ['written'],
+            access: 'workspace-write',
+          },
+          { workerId: writer.id, objective: 'read', doneCriteria: ['read'], access: 'read-only' },
+        ],
+        now: '2026-07-28T11:00:02.000Z',
+      });
+      persistence.close();
+      const legacy = new Database(path);
+      legacy.exec(`
+        ALTER TABLE team_executions DROP COLUMN access_mode;
+        DELETE FROM schema_migrations WHERE version = 62;
+      `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.getTeamExecution(execution.id).accessMode).toBe('read-only');
+      expect(migrated.getTeamExecution(mission.steps[0]!.executionId).accessMode).toBe(
+        'workspace-write',
+      );
+      expect(migrated.getTeamExecution(mission.steps[1]!.executionId).accessMode).toBe('read-only');
+      migrated.close();
+    });
+
     it('inherits the immutable root Turn seal across Team execution retry reads', () => {
       const { persistence } = createPersistence();
       const project = persistence.createProject('Inherited context');

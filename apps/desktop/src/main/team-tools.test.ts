@@ -194,6 +194,7 @@ if (runsWithElectronAbi)
       expect(
         persistence.getContextSealManifest('team_execution', assigned.executionId).sealedDigest,
       ).toBe(persistence.getContextSealManifest('turn', root.turnId).sealedDigest);
+      expect(persistence.getTeamExecution(assigned.executionId).accessMode).toBe('read-only');
       await waitFor(() => persistence.getTeamExecution(assigned.executionId).state === 'completed');
       await broker.dispose();
       persistence.close();

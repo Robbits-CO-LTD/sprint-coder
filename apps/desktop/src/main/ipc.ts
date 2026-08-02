@@ -568,6 +568,10 @@ export class IpcRouter {
       executeManagerTool: ({ worker, name, input, reportCursor, modelCatalogAudit, executionId }) =>
         executeTeamTool(this.teamCoordinator, worker.taskId, name, input, {
           requesterAgentId: worker.id,
+          accessCeiling:
+            executionId === undefined
+              ? 'read-only'
+              : this.persistence.getTeamExecution(executionId).accessMode,
           ...(executionId === undefined
             ? {}
             : { contextOwner: { type: 'team_execution' as const, id: executionId } }),
@@ -2830,6 +2834,10 @@ export class IpcRouter {
       taskId,
       token,
       requesterAgentId,
+      accessCeiling:
+        executionId === undefined
+          ? 'read-only'
+          : this.persistence.getTeamExecution(executionId).accessMode,
       ...(executionId === undefined
         ? {}
         : { contextOwner: { type: 'team_execution' as const, id: executionId } }),

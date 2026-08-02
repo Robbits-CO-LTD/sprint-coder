@@ -39,6 +39,14 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
     ),
     assignTask: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
     assignTaskAs: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
+    assignMission: vi.fn(
+      async () =>
+        ({ id: 'mission-1', state: 'running', currentStepOrdinal: 0, steps: [] }) as never,
+    ),
+    resumeMission: vi.fn(
+      async () =>
+        ({ id: 'mission-1', state: 'running', currentStepOrdinal: 0, steps: [] }) as never,
+    ),
     steerExecution: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
     cancelExecution: vi.fn(
       async () => ({ executionId: 'execution-2', state: 'canceled' }) as never,
@@ -309,6 +317,7 @@ describe('executeTeamTool routing', () => {
       targetAgentId: 'worker-1',
       content: '実装する',
       doneCriteria: ['targeted test passes'],
+      accessMode: 'read-only',
     });
     expect(assigned).toMatchObject({ ok: true, executionId: 'execution-2', state: 'queued' });
 
@@ -323,6 +332,7 @@ describe('executeTeamTool routing', () => {
       'execution-2',
       'add the regression test',
       null,
+      'read-only',
     );
     expect(
       await executeTeamTool(coordinator, 'task-1', 'team_cancel_execution', {
@@ -337,6 +347,89 @@ describe('executeTeamTool routing', () => {
     });
     await executeTeamTool(coordinator, 'task-1', 'team_wait_events', { cursor: 7 });
     expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 7, undefined);
+  });
+
+  it('passes an explicit workspace-write mode to the execution contract', async () => {
+    const coordinator = fakeCoordinator();
+    await executeTeamTool(coordinator, 'task-1', 'team_assign_task', {
+      workerId: 'worker-1',
+      objective: '隔離環境で実装する',
+      doneCriteria: ['tests pass'],
+      access: 'workspace-write',
+    });
+    expect(coordinator.assignTask).toHaveBeenCalledWith(
+      expect.objectContaining({ accessMode: 'workspace-write' }),
+    );
+  });
+
+  it('prevents a read-only Manager execution from delegating workspace writes', async () => {
+    const coordinator = fakeCoordinator();
+    const options = { requesterAgentId: 'manager-1', accessCeiling: 'read-only' as const };
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_task',
+        {
+          workerId: 'worker-1',
+          objective: 'write',
+          doneCriteria: ['done'],
+          access: 'workspace-write',
+        },
+        options,
+      ),
+    ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('read-only') });
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_mission',
+        {
+          objective: 'write mission',
+          doneCriteria: ['done'],
+          steps: [
+            { workerId: 'worker-1', objective: 'one', doneCriteria: ['one'], access: 'read-only' },
+            {
+              workerId: 'worker-2',
+              objective: 'two',
+              doneCriteria: ['two'],
+              access: 'workspace-write',
+            },
+          ],
+        },
+        options,
+      ),
+    ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('read-only') });
+    expect(coordinator.assignTaskAs).not.toHaveBeenCalled();
+    expect(coordinator.assignMission).not.toHaveBeenCalled();
+  });
+
+  it('allows a workspace-write Manager execution to delegate within the same ceiling', async () => {
+    const coordinator = fakeCoordinator();
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_task',
+        {
+          workerId: 'worker-1',
+          objective: 'write',
+          doneCriteria: ['done'],
+          access: 'workspace-write',
+        },
+        { requesterAgentId: 'manager-1', accessCeiling: 'workspace-write' },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    expect(coordinator.assignTaskAs).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        targetAgentId: 'worker-1',
+        content: 'write',
+        doneCriteria: ['done'],
+        accessMode: 'workspace-write',
+      },
+      'manager-1',
+    );
   });
 
   it('routes Manager tools with only the caller identity bound to the MCP registration', async () => {
@@ -383,9 +476,24 @@ describe('executeTeamTool routing', () => {
         targetAgentId: 'worker-1',
         content: '実装する',
         doneCriteria: ['完了'],
+        accessMode: 'read-only',
       },
       'manager-1',
       { type: 'team_execution', id: 'parent-execution-1' },
+    );
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_resume_mission',
+      { missionId: 'mission-1' },
+      options,
+    );
+    expect(coordinator.resumeMission).toHaveBeenCalledWith(
+      'task-1',
+      'mission-1',
+      'manager-1',
+      'read-only',
     );
 
     await executeTeamTool(
@@ -400,6 +508,7 @@ describe('executeTeamTool routing', () => {
       'execution-2',
       '修正する',
       'manager-1',
+      'read-only',
     );
 
     await executeTeamTool(

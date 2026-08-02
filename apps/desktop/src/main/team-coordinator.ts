@@ -79,6 +79,7 @@ export type TeamExecutionSubmission = Readonly<{
   executionId: string;
   state: TeamExecutionState;
 }>;
+export type TeamExecutionAccess = 'read-only' | 'workspace-write';
 export type TeamContextOwner = Readonly<{
   type: 'turn' | 'team_execution';
   id: string;
@@ -138,6 +139,7 @@ export interface TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    accessMode?: TeamExecutionAccess;
     executionId?: string;
     workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
@@ -158,6 +160,7 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    accessMode?: TeamExecutionAccess;
     executionId?: string;
     workspacePath?: string | null;
     priorConversation?: readonly TeamRuntimeConversationItem[];
@@ -710,14 +713,20 @@ export class TeamCoordinator {
   }
 
   async assignTask(
-    input: TeamSendMessageInput & { doneCriteria: readonly string[] },
+    input: TeamSendMessageInput & {
+      doneCriteria: readonly string[];
+      accessMode?: TeamExecutionAccess;
+    },
     contextOwner?: TeamContextOwner,
   ): Promise<TeamExecutionSubmission> {
     return this.assignTaskWithAuthority(input, null, contextOwner);
   }
 
   async assignTaskAs(
-    input: TeamSendMessageInput & { doneCriteria: readonly string[] },
+    input: TeamSendMessageInput & {
+      doneCriteria: readonly string[];
+      accessMode?: TeamExecutionAccess;
+    },
     requesterAgentId: string,
     contextOwner?: TeamContextOwner,
   ): Promise<TeamExecutionSubmission> {
@@ -763,6 +772,14 @@ export class TeamCoordinator {
         if (step.access === 'workspace-write' && worker?.writeCapable !== true)
           throw new Error('workspace-write Mission step requires a write-capable Worker');
       }
+      if (input.steps.some(({ access }) => access === 'workspace-write')) {
+        const repositories = await this.requireWorkspaceWriteEligibility(input.taskId);
+        if (
+          repositories.length !== 1 ||
+          this.persistence.getEffectiveWorkspaceSet(input.taskId).roots.length !== 1
+        )
+          throw new Error('multi-root workspace-write isolation is not available');
+      }
       const mission = this.persistence.createTeamMission({
         teamId: team.id,
         createdByAgentId: creator.id,
@@ -791,6 +808,7 @@ export class TeamCoordinator {
     taskId: string,
     missionId: string,
     requesterAgentId: string | null = null,
+    accessCeiling: TeamExecutionAccess = 'read-only',
   ): Promise<TeamMissionSummary> {
     return this.enqueue(taskId, async () => {
       const team = this.persistence.getTeamByTask(taskId);
@@ -800,6 +818,12 @@ export class TeamCoordinator {
       if (mission.state !== 'waiting_resume') throw new Error('Mission is not waiting to resume');
       if (requesterAgentId !== null && mission.createdByAgentId !== requesterAgentId)
         throw new Error('Manager may only resume a Mission it created');
+      if (
+        requesterAgentId !== null &&
+        accessCeiling === 'read-only' &&
+        mission.steps.some(({ access }) => access === 'workspace-write')
+      )
+        throw new Error('read-only execution cannot resume a workspace-write Mission');
       const step = mission.steps.find(({ ordinal }) => ordinal === mission.currentStepOrdinal);
       if (step === undefined) throw new Error('Current Mission step not found');
       const execution = this.persistence.getTeamExecution(step.executionId);
@@ -817,7 +841,10 @@ export class TeamCoordinator {
   }
 
   private async assignTaskWithAuthority(
-    input: TeamSendMessageInput & { doneCriteria: readonly string[] },
+    input: TeamSendMessageInput & {
+      doneCriteria: readonly string[];
+      accessMode?: TeamExecutionAccess;
+    },
     requesterAgentId: string | null,
     contextOwner?: TeamContextOwner,
   ): Promise<TeamExecutionSubmission> {
@@ -839,6 +866,12 @@ export class TeamCoordinator {
           throw new Error('Manager may only assign executions to direct child Agents');
       }
       if (!['ready', 'waiting'].includes(worker.state)) throw new Error('Worker is not ready');
+      if ((input.accessMode ?? 'read-only') === 'workspace-write') {
+        if (worker.writeCapable !== true)
+          throw new Error('workspace-write execution requires a write-capable Worker');
+        await this.requireWorkspaceWriteEligibility(input.taskId);
+        throw new Error('workspace-write task isolation is not available');
+      }
       if (
         this.persistence
           .listTeamExecutions(team.id)
@@ -861,6 +894,7 @@ export class TeamCoordinator {
         assigneeAgentId: worker.id,
         createdByAgentId: requester.id,
         instruction: input.content,
+        accessMode: input.accessMode ?? 'read-only',
         now,
         ...(contextOwner === undefined ? {} : { contextOwner }),
       });
@@ -909,6 +943,7 @@ export class TeamCoordinator {
     executionId: string,
     instruction: string,
     requesterAgentId: string | null = null,
+    accessCeiling: TeamExecutionAccess = 'read-only',
   ): Promise<TeamExecutionSubmission> {
     return this.enqueue(taskId, async () => {
       const team = this.persistence.getTeamByTask(taskId);
@@ -917,6 +952,12 @@ export class TeamCoordinator {
       if (execution.teamId !== team.id) throw new Error('Execution does not belong to Task Team');
       if (requesterAgentId !== null && execution.createdByAgentId !== requesterAgentId)
         throw new Error('Manager may only steer executions it assigned');
+      if (
+        requesterAgentId !== null &&
+        accessCeiling === 'read-only' &&
+        execution.accessMode === 'workspace-write'
+      )
+        throw new Error('read-only execution cannot steer a workspace-write execution');
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'steer', instruction);
       const revised = this.persistence.reviseQueuedTeamExecution({
@@ -1157,18 +1198,18 @@ export class TeamCoordinator {
     const snapshot = this.persistence.getTeamSnapshot(input.teamId);
     const leader = snapshot.agents.find(({ id }) => id === input.leaderId);
     const storedWorker = snapshot.agents.find(({ id }) => id === input.workerId);
-    const worker =
-      storedWorker === undefined
-        ? undefined
-        : missionStep === null
-          ? storedWorker
-          : { ...storedWorker, writeCapable: missionStep.access === 'workspace-write' };
-    if (leader === undefined || worker === undefined) throw new Error('Execution Agent not found');
+    if (leader === undefined || storedWorker === undefined)
+      throw new Error('Execution Agent not found');
+    if (execution.accessMode === 'workspace-write' && storedWorker.writeCapable !== true)
+      throw new Error('workspace-write execution requires a write-capable Worker');
+    const worker = { ...storedWorker, writeCapable: execution.accessMode === 'workspace-write' };
     let attemptId: string | null = null;
     let reservations: readonly TeamBudgetReservationRecord[] = [];
     let missionWorktree: TeamMissionWorktreeRecord | null = null;
     try {
-      if (missionStep?.access === 'workspace-write')
+      if (execution.accessMode === 'workspace-write' && missionStep === null)
+        throw new Error('workspace-write task isolation is not available');
+      if (execution.accessMode === 'workspace-write')
         missionWorktree = await this.prepareMissionWorktree(
           input.taskId,
           input.executionId,
@@ -1228,6 +1269,7 @@ export class TeamCoordinator {
         input.executionId,
         attempt.id,
         missionWorktree?.path,
+        execution.accessMode,
       );
       if (this.executionInterruptions.has(input.executionId)) {
         this.releaseReservations(reservations);
@@ -2047,6 +2089,7 @@ export class TeamCoordinator {
     executionId?: string,
     attemptId?: string,
     workspacePath?: string,
+    accessMode: TeamExecutionAccess = 'read-only',
   ): Promise<{
     value: WorkerCompletion;
     usage: WorkerRuntimeResult['usage'];
@@ -2100,6 +2143,7 @@ export class TeamCoordinator {
               worker,
               envelope,
               content,
+              accessMode,
               ...(executionId === undefined ? {} : { executionId }),
               ...(workspacePath === undefined ? {} : { workspacePath }),
               priorConversation,
@@ -2383,6 +2427,18 @@ export class TeamCoordinator {
       to: 'active',
       now: this.isoNow(),
     });
+  }
+
+  private async requireWorkspaceWriteEligibility(taskId: string) {
+    if (this.worktreeManager === undefined)
+      throw new Error('workspace-write execution requires Worker worktree support');
+    const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
+    if (workspace.roots.length === 0)
+      throw new Error('workspace-write execution requires a Git workspace');
+    const unhealthy = workspace.roots.find(({ status }) => status !== 'available');
+    if (unhealthy !== undefined)
+      throw new Error(`workspace-write root is not available: ${unhealthy.label}`);
+    return this.worktreeManager.requireCleanRepositorySet(workspace.roots.map(({ path }) => path));
   }
 
   private async cleanupIntegratedMissionWorktree(
