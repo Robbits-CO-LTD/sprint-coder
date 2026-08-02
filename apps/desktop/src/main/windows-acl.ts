@@ -1,7 +1,5 @@
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 
-const execFileAsync = promisify(execFile);
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 // Keep the subprocess deadline below Vitest's 20 second integration-test ceiling while allowing
 // for PowerShell startup contention on two-core Windows runners. The previous 10 second deadline
@@ -12,7 +10,7 @@ export const WINDOWS_ACL_TIMEOUT_MS = 18_000;
 const secureAclScript = String.raw`
 $ErrorActionPreference = 'Stop'
 $items = @((([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
-  $env:SPRINT_CODER_ACL_ITEMS
+  [Console]::In.ReadToEnd()
 ))) | ConvertFrom-Json))
 $operation = $env:SPRINT_CODER_ACL_OPERATION
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -100,24 +98,29 @@ async function runAcl(
   ];
   const encodedScript = Buffer.from(secureAclScript, 'utf16le').toString('base64');
   const encodedItems = Buffer.from(JSON.stringify(unique), 'utf8').toString('base64');
-  await execFileAsync(
-    POWERSHELL,
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript],
-    {
-      env: {
-        SystemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
-        WINDIR: process.env['WINDIR'] ?? 'C:\\Windows',
-        PATH: process.env['PATH'] ?? '',
-        TEMP: process.env['TEMP'] ?? '',
-        TMP: process.env['TMP'] ?? '',
-        USERPROFILE: process.env['USERPROFILE'] ?? '',
-        SPRINT_CODER_ACL_ITEMS: encodedItems,
-        SPRINT_CODER_ACL_OPERATION: operation,
+  await new Promise<void>((resolve, reject) => {
+    const child = execFile(
+      POWERSHELL,
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript],
+      {
+        env: {
+          SystemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
+          WINDIR: process.env['WINDIR'] ?? 'C:\\Windows',
+          PATH: process.env['PATH'] ?? '',
+          TEMP: process.env['TEMP'] ?? '',
+          TMP: process.env['TMP'] ?? '',
+          USERPROFILE: process.env['USERPROFILE'] ?? '',
+          SPRINT_CODER_ACL_OPERATION: operation,
+        },
+        encoding: 'utf8',
+        timeout: WINDOWS_ACL_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: 64 * 1024,
       },
-      encoding: 'utf8',
-      timeout: WINDOWS_ACL_TIMEOUT_MS,
-      windowsHide: true,
-      maxBuffer: 64 * 1024,
-    },
-  );
+      (error) => (error === null ? resolve() : reject(error)),
+    );
+    // A Skill can contain 256 files, so its encoded ACL list can exceed Windows' roughly 32K
+    // process-environment limit. Standard input has no such environment-block ceiling.
+    child.stdin?.end(encodedItems);
+  });
 }
