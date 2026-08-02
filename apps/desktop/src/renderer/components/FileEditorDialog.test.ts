@@ -11,6 +11,15 @@ describe('FileEditorDialog async request generation', () => {
     expect(generation.isCurrent(inFlight)).toBe(false);
     expect(generation.isCurrent(generation.capture())).toBe(true);
   });
+
+  it('invalidates an in-flight reload when the editor content changes', () => {
+    const generation = new EditorRequestGeneration();
+    const reload = generation.capture();
+
+    generation.invalidate();
+
+    expect(generation.isCurrent(reload)).toBe(false);
+  });
 });
 
 describe('FileEditorDialog line endings', () => {

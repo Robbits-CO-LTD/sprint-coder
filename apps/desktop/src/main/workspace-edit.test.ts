@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import type * as NodeChildProcess from 'node:child_process';
 import type * as NodeFs from 'node:fs';
+import type * as NativeFilePublication from './native-file-publication';
 import {
   chmodSync,
   linkSync,
@@ -31,7 +32,32 @@ const fileSystemFault = vi.hoisted(() => ({
   failDirectorySync: false,
   failCopyAfterCreate: false,
   concurrentWindowsContent: null as string | null,
+  concurrentPosixContent: null as string | null,
 }));
+
+vi.mock('./native-file-publication', async (importOriginal) => {
+  const actual = await importOriginal<typeof NativeFilePublication>();
+  return {
+    ...actual,
+    replaceWindowsFileWithBackup: (
+      ...args: Parameters<typeof actual.replaceWindowsFileWithBackup>
+    ) => {
+      if (fileSystemFault.failAtomicReplace)
+        throw new Error('simulated atomic replacement failure');
+      if (fileSystemFault.concurrentWindowsContent !== null)
+        writeFileSync(args[1], fileSystemFault.concurrentWindowsContent);
+      return actual.replaceWindowsFileWithBackup(...args);
+    },
+    exchangePosixFiles: (...args: Parameters<typeof actual.exchangePosixFiles>) => {
+      if (fileSystemFault.failRename) throw new Error('simulated atomic exchange failure');
+      if (fileSystemFault.concurrentPosixContent !== null) {
+        writeFileSync(args[1], fileSystemFault.concurrentPosixContent);
+        fileSystemFault.concurrentPosixContent = null;
+      }
+      return actual.exchangePosixFiles(...args);
+    },
+  };
+});
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeChildProcess>();
@@ -241,6 +267,24 @@ describe('saveWorkspaceFile (issue #43)', () => {
         fileSystemFault.failCopyAfterCreate = false;
       }
       expect(readFileSync(file)).toEqual(original);
+      expect(readdirSync(root)).toEqual(['important.txt']);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'restores a concurrent POSIX edit observed at the atomic exchange boundary',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.concurrentPosixContent = 'concurrent writer\n';
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+      } finally {
+        fileSystemFault.concurrentPosixContent = null;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('concurrent writer\n');
       expect(readdirSync(root)).toEqual(['important.txt']);
     },
   );

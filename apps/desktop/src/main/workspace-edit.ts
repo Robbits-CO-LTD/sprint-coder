@@ -11,14 +11,13 @@ import {
   openSync,
   readFileSync,
   readSync,
-  renameSync,
   unlinkSync,
   utimesSync,
   writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
+import { exchangePosixFiles, replaceWindowsFileWithBackup } from './native-file-publication';
 import { resolveSafeWorkspaceFile } from './workspace-safe-path';
-import { windowsPowerShellCommand } from './windows-powershell';
 
 // Reading a Workspace file in full so the user can edit it, and writing their edit back (issue #43).
 //
@@ -209,7 +208,6 @@ export function saveWorkspaceFile(
     descriptor = null;
     const publication = publishStagedFile(staging, absolute, backup, baseDigest);
     if (publication === 'conflict') return { outcome: 'conflict', digest: null, reason: null };
-    ownsStaging = false;
     ownsBackup = process.platform === 'win32';
     try {
       syncParentDirectory(absolute);
@@ -254,29 +252,6 @@ function syncParentDirectory(absolute: string): void {
   }
 }
 
-const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
-const WINDOWS_ATOMIC_REPLACE_SCRIPT = String.raw`
-$ErrorActionPreference = 'Stop'
-[System.IO.File]::Replace(
-  $env:SPRINT_CODER_REPLACEMENT,
-  $env:SPRINT_CODER_TARGET,
-  $env:SPRINT_CODER_BACKUP,
-  $false
-)
-$boundaryDigest = (Get-FileHash -LiteralPath $env:SPRINT_CODER_BACKUP -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($boundaryDigest -ne $env:SPRINT_CODER_EXPECTED_DIGEST) {
-  [System.IO.File]::Replace(
-    $env:SPRINT_CODER_BACKUP,
-    $env:SPRINT_CODER_TARGET,
-    $env:SPRINT_CODER_REPLACEMENT,
-    $false
-  )
-  [Console]::Out.Write('conflict')
-  exit 0
-}
-[Console]::Out.Write('published')
-`;
-
 /** Atomically publishes complete bytes while retaining the destination's Windows security data. */
 function publishStagedFile(
   staging: string,
@@ -285,33 +260,42 @@ function publishStagedFile(
   baseDigest: string,
 ): 'published' | 'conflict' {
   if (process.platform !== 'win32') {
-    renameSync(staging, absolute);
-    return 'published';
+    exchangePosixFiles(staging, absolute);
+    try {
+      if (digestOf(readFileSync(staging)) === baseDigest) return 'published';
+      exchangePosixFiles(staging, absolute);
+      return 'conflict';
+    } catch (error) {
+      try {
+        exchangePosixFiles(staging, absolute);
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          'POSIX atomic publication and rollback both failed',
+          { cause: rollbackError },
+        );
+      }
+      throw error;
+    }
   }
-  // File.Replace maps to ReplaceFileW. Unlike MoveFileEx/rename, it retains the destination ACL and
-  // other mergeable metadata while swapping the fully-flushed sibling into place atomically.
-  const result = execFileSync(
-    WINDOWS_POWERSHELL,
-    windowsPowerShellCommand(WINDOWS_ATOMIC_REPLACE_SCRIPT),
-    {
-      env: {
-        SystemRoot: process.env['SystemRoot'] ?? '',
-        WINDIR: process.env['WINDIR'] ?? '',
-        TEMP: process.env['TEMP'] ?? '',
-        TMP: process.env['TMP'] ?? '',
-        USERPROFILE: process.env['USERPROFILE'] ?? '',
-        SPRINT_CODER_REPLACEMENT: staging,
-        SPRINT_CODER_TARGET: absolute,
-        SPRINT_CODER_BACKUP: backup,
-        SPRINT_CODER_EXPECTED_DIGEST: baseDigest,
-      },
-      encoding: 'utf8',
-      stdio: 'pipe',
-      timeout: 10_000,
-      windowsHide: true,
-    },
-  );
-  return result.trim() === 'conflict' ? 'conflict' : 'published';
+  // ReplaceFileW retains the destination ACL and atomically places its boundary version in backup.
+  replaceWindowsFileWithBackup(staging, absolute, backup);
+  try {
+    if (digestOf(readFileSync(backup)) === baseDigest) return 'published';
+    replaceWindowsFileWithBackup(backup, absolute, staging);
+    return 'conflict';
+  } catch (error) {
+    try {
+      replaceWindowsFileWithBackup(backup, absolute, staging);
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        'Windows atomic publication and rollback both failed',
+        { cause: rollbackError },
+      );
+    }
+    throw error;
+  }
 }
 
 function stageTargetFile(absolute: string, staging: string): void {

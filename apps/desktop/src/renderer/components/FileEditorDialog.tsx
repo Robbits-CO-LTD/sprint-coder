@@ -250,8 +250,10 @@ export function FileEditorDialog({
                 className="file-editor-textarea"
                 aria-label={`${opened.path}の内容`}
                 spellCheck={false}
+                disabled={busy}
                 value={draft}
                 onChange={(event) => {
+                  editorGenerationRef.current.invalidate();
                   setDraft(event.target.value);
                   setMessage('未保存の変更があります');
                 }}
