@@ -21,6 +21,7 @@ export function FileEditorDialog({
   const [opened, setOpened] = useState<FileOpenResult | null>(null);
   const [draft, setDraft] = useState('');
   const [lineEnding, setLineEnding] = useState<LineEnding>('lf');
+  const [originalLineEndings, setOriginalLineEndings] = useState<LineEnding[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -28,8 +29,9 @@ export function FileEditorDialog({
   const filesApi = typeof window !== 'undefined' ? window.sprintCoder?.files : undefined;
   const supported = typeof filesApi?.pick === 'function';
   const dirty = useMemo(
-    () => opened?.editable === true && diskText(draft, lineEnding) !== opened.text,
-    [draft, lineEnding, opened],
+    () =>
+      opened?.editable === true && diskText(draft, originalLineEndings, lineEnding) !== opened.text,
+    [draft, lineEnding, opened, originalLineEndings],
   );
 
   useEffect(() => {
@@ -56,8 +58,10 @@ export function FileEditorDialog({
   }
 
   function loadResult(result: FileOpenResult): void {
+    const endings = extractLineEndings(result.text);
     setOpened(result);
-    setLineEnding(result.text.includes('\r\n') ? 'crlf' : 'lf');
+    setOriginalLineEndings(endings);
+    setLineEnding(dominantLineEnding(endings));
     setDraft(result.text.replaceAll('\r\n', '\n'));
     setMessage('読み込みました');
     setConfirmDiscard(false);
@@ -81,7 +85,7 @@ export function FileEditorDialog({
     if (!opened?.editable || busy || !filesApi) return;
     setBusy(true);
     try {
-      const text = diskText(draft, lineEnding);
+      const text = diskText(draft, originalLineEndings, lineEnding);
       const result = await filesApi.save({
         taskId,
         rootId: opened.rootId,
@@ -91,6 +95,7 @@ export function FileEditorDialog({
       });
       if (result.outcome === 'saved' && result.digest) {
         setOpened({ ...opened, text, digest: result.digest });
+        setOriginalLineEndings(extractLineEndings(text));
         setMessage('保存しました');
       } else if (result.outcome === 'conflict') {
         setMessage('他の処理で変更されました。上書きせず、再読み込みできます。');
@@ -116,6 +121,7 @@ export function FileEditorDialog({
   function close(): void {
     setOpened(null);
     setDraft('');
+    setOriginalLineEndings([]);
     setConfirmDiscard(false);
     setMessage('');
   }
@@ -215,7 +221,26 @@ export function FileEditorDialog({
   );
 }
 
-export function diskText(editorText: string, lineEnding: LineEnding): string {
+export function diskText(
+  editorText: string,
+  originalLineEndings: LineEnding | readonly LineEnding[],
+  fallback: LineEnding = 'lf',
+): string {
   const normalized = editorText.replaceAll('\r\n', '\n');
-  return lineEnding === 'crlf' ? normalized.replaceAll('\n', '\r\n') : normalized;
+  const endings = typeof originalLineEndings === 'string' ? null : originalLineEndings;
+  const newLineEnding = typeof originalLineEndings === 'string' ? originalLineEndings : fallback;
+  let newlineIndex = 0;
+  return normalized.replaceAll('\n', () => {
+    const ending = endings?.[newlineIndex++] ?? newLineEnding;
+    return ending === 'crlf' ? '\r\n' : '\n';
+  });
+}
+
+export function extractLineEndings(text: string): LineEnding[] {
+  return [...text.matchAll(/\r\n|\n/g)].map(([ending]) => (ending === '\r\n' ? 'crlf' : 'lf'));
+}
+
+function dominantLineEnding(endings: readonly LineEnding[]): LineEnding {
+  const crlf = endings.filter((ending) => ending === 'crlf').length;
+  return crlf > endings.length / 2 ? 'crlf' : 'lf';
 }
