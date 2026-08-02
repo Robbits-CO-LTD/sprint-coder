@@ -96,6 +96,85 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
     expect(readFileSync(file)).toEqual(bytes);
   });
 
+  it('restores the durable recovery copy after a crash leaves a partial in-place write', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original 日本語\r\n', 'utf8');
+    const replacement = Buffer.from('replacement\r\n', 'utf8');
+    writeFileSync(file, replacement.subarray(0, 4));
+    writeFileSync(`${file}.sprint-coder-recovery.tmp`, original);
+    writeFileSync(`${file}.sprint-coder-stage.tmp`, replacement);
+    writeFileSync(
+      `${file}.sprint-coder-save.json`,
+      JSON.stringify({
+        version: 1,
+        originalDigest: createHash('sha256').update(original).digest('hex'),
+        newDigest: createHash('sha256').update(replacement).digest('hex'),
+      }),
+    );
+    const identityBeforeRecovery = statSync(file, { bigint: true });
+
+    const opened = openWorkspaceFileForEdit(root, 'important.txt');
+
+    expect(opened).toMatchObject({ editable: true, text: 'original 日本語\r\n' });
+    expect(readFileSync(file)).toEqual(original);
+    const identityAfterRecovery = statSync(file, { bigint: true });
+    expect({ dev: identityAfterRecovery.dev, ino: identityAfterRecovery.ino }).toEqual({
+      dev: identityBeforeRecovery.dev,
+      ino: identityBeforeRecovery.ino,
+    });
+    expect(readdirSync(root)).toEqual(['important.txt']);
+  });
+
+  it('keeps a fully flushed replacement when a crash only interrupted transaction cleanup', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original\n', 'utf8');
+    const replacement = Buffer.from('replacement\n', 'utf8');
+    writeFileSync(file, replacement);
+    writeFileSync(`${file}.sprint-coder-recovery.tmp`, original);
+    writeFileSync(`${file}.sprint-coder-stage.tmp`, replacement);
+    writeFileSync(
+      `${file}.sprint-coder-save.json`,
+      JSON.stringify({
+        version: 1,
+        originalDigest: createHash('sha256').update(original).digest('hex'),
+        newDigest: createHash('sha256').update(replacement).digest('hex'),
+      }),
+    );
+
+    const opened = openWorkspaceFileForEdit(root, 'important.txt');
+
+    expect(opened).toMatchObject({ editable: true, text: 'replacement\n' });
+    expect(readFileSync(file)).toEqual(replacement);
+    expect(readdirSync(root)).toEqual(['important.txt']);
+  });
+
+  it('does not mistake an unrelated external edit for a partial crashed write', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original\n', 'utf8');
+    const replacement = Buffer.from('replacement\n', 'utf8');
+    const external = Buffer.from('edited by another program\n', 'utf8');
+    writeFileSync(file, external);
+    writeFileSync(`${file}.sprint-coder-recovery.tmp`, original);
+    writeFileSync(`${file}.sprint-coder-stage.tmp`, replacement);
+    writeFileSync(
+      `${file}.sprint-coder-save.json`,
+      JSON.stringify({
+        version: 1,
+        originalDigest: createHash('sha256').update(original).digest('hex'),
+        newDigest: createHash('sha256').update(replacement).digest('hex'),
+      }),
+    );
+
+    const opened = openWorkspaceFileForEdit(root, 'important.txt');
+
+    expect(opened).toMatchObject({ editable: false, reason: 'not_a_file' });
+    expect(readFileSync(file)).toEqual(external);
+    expect(readdirSync(root)).toHaveLength(4);
+  });
+
   it('refuses a parent junction that escapes the Workspace, a directory, and a missing file', () => {
     const root = workspace();
     const outside = workspace();
@@ -184,7 +263,7 @@ describe('saveWorkspaceFile (issue #43)', () => {
     const original = Buffer.from('original 日本語\r\n', 'utf8');
     writeFileSync(file, original);
     fileSystemFault.writeCalls = 0;
-    fileSystemFault.failWriteAtCalls = [2, 3];
+    fileSystemFault.failWriteAtCalls = [3, 4];
     try {
       const result = saveWorkspaceFile(
         root,
@@ -198,10 +277,15 @@ describe('saveWorkspaceFile (issue #43)', () => {
       fileSystemFault.writeCalls = 0;
     }
 
-    const recovery = readdirSync(root).find((name) => name.includes('.sprint-coder-recovery-'));
+    const recovery = readdirSync(root).find((name) => name.endsWith('.sprint-coder-recovery.tmp'));
     expect(recovery).toBeDefined();
     expect(readFileSync(join(root, recovery!))).toEqual(original);
-    expect(readdirSync(root).some((name) => name.includes('.sprint-coder-stage-'))).toBe(false);
+    expect(readdirSync(root).some((name) => name.endsWith('.sprint-coder-stage.tmp'))).toBe(true);
+    expect(readdirSync(root).some((name) => name.endsWith('.sprint-coder-save.json'))).toBe(true);
+
+    const recovered = openWorkspaceFileForEdit(root, 'important.txt');
+    expect(recovered).toMatchObject({ editable: true, text: 'original 日本語\r\n' });
+    expect(readdirSync(root)).toEqual(['important.txt']);
   });
 
   it('refuses to write outside the Workspace, and leaves the target untouched', () => {

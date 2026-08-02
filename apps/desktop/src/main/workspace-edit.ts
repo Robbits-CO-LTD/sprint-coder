@@ -1,8 +1,9 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   constants,
   copyFileSync,
+  existsSync,
   fstatSync,
   fsyncSync,
   ftruncateSync,
@@ -12,6 +13,7 @@ import {
   unlinkSync,
   writeSync,
 } from 'node:fs';
+import { dirname } from 'node:path';
 import { resolveSafeWorkspaceFile } from './workspace-safe-path';
 
 // Reading a Workspace file in full so the user can edit it, and writing their edit back (issue #43).
@@ -52,7 +54,16 @@ export function openWorkspaceFileForEdit(workspacePath: string, relativePath: st
     digest: EMPTY_DIGEST,
     reason,
   });
-  const safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  let safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  if (safe.path === null) return refuse(safe.reason);
+  try {
+    recoverInterruptedSave(safe.path);
+  } catch {
+    return refuse('not_a_file');
+  }
+  // Recovery writes through the existing descriptor, but re-resolve anyway so this boundary never
+  // relies on identity information captured before filesystem repair.
+  safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
   if (safe.path === null) return refuse(safe.reason);
   const absolute = safe.path;
   let descriptor: number | null = null;
@@ -105,10 +116,11 @@ export type SaveOutcome = {
  * silently winning.
  *
  * The target is opened once for validation. Replacement bytes are staged and durably flushed in a
- * random, exclusively-created sibling copied from that target. The target identity and digest are
+ * exclusively-created sibling copied from that target. Before the live inode is touched, a durable
+ * journal records both the original and replacement digests. The target identity and digest are
  * revalidated immediately before publishing. Publication writes through the original descriptor so
- * the inode — including its ACLs and extended attributes — is retained. If publication fails after
- * truncation starts, the original bytes are restored through that same descriptor.
+ * the inode — including its ACLs and extended attributes — is retained. If the process or machine
+ * stops mid-write, the next open/save restores the flushed recovery copy before exposing the file.
  */
 export function saveWorkspaceFile(
   workspacePath: string,
@@ -122,7 +134,15 @@ export function saveWorkspaceFile(
     reason,
   });
   if (Buffer.byteLength(text, 'utf8') > MAX_EDITABLE_BYTES) return refuse('too_large');
-  const safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  if (!SHA256_PATTERN.test(baseDigest)) return refuse('io_error');
+  let safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  if (safe.path === null) return refuse(safe.reason);
+  try {
+    recoverInterruptedSave(safe.path);
+  } catch {
+    return refuse('io_error');
+  }
+  safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
   if (safe.path === null) return refuse(safe.reason);
   const absolute = safe.path;
 
@@ -131,6 +151,8 @@ export function saveWorkspaceFile(
   let recovery: string | null = null;
   let stagingDescriptor: number | null = null;
   let staging: string | null = null;
+  let journalDescriptor: number | null = null;
+  let journal: string | null = null;
   let original: Buffer | null = null;
   let targetMutationStarted = false;
   let preserveRecoveryCopy = false;
@@ -150,7 +172,10 @@ export function saveWorkspaceFile(
       return { outcome: 'conflict', digest: null, reason: null };
 
     const bytes = Buffer.from(text, 'utf8');
-    recovery = `${absolute}.sprint-coder-recovery-${randomUUID()}.tmp`;
+    const transaction = transactionPaths(absolute);
+    recovery = transaction.recovery;
+    staging = transaction.staging;
+    journal = transaction.journal;
     copyFileSync(absolute, recovery, constants.COPYFILE_EXCL);
     recoveryDescriptor = openSync(
       recovery,
@@ -165,7 +190,6 @@ export function saveWorkspaceFile(
     closeSync(recoveryDescriptor);
     recoveryDescriptor = null;
 
-    staging = `${absolute}.sprint-coder-stage-${randomUUID()}.tmp`;
     stagingDescriptor = openSync(
       staging,
       constants.O_CREAT |
@@ -182,6 +206,23 @@ export function saveWorkspaceFile(
       return refuse('io_error');
     closeSync(stagingDescriptor);
     stagingDescriptor = null;
+
+    const journalBytes = Buffer.from(
+      JSON.stringify({ version: 1, originalDigest: baseDigest, newDigest: digestOf(bytes) }),
+      'utf8',
+    );
+    journalDescriptor = openSync(
+      journal,
+      constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_RDWR |
+        (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+      0o600,
+    );
+    replaceDescriptorContents(journalDescriptor, journalBytes);
+    closeSync(journalDescriptor);
+    journalDescriptor = null;
+    syncParentDirectory(absolute);
 
     const finalTarget = resolveSafeWorkspaceFile(workspacePath, relativePath);
     if (
@@ -225,23 +266,183 @@ export function saveWorkspaceFile(
       } catch {
         // The operation already failed; cleanup below is still attempted.
       }
-    if (staging !== null)
+    if (journalDescriptor !== null)
       try {
-        unlinkSync(staging);
+        closeSync(journalDescriptor);
       } catch {
-        // A failed stage must not obscure the original refusal.
+        // The operation already failed; cleanup below is still attempted.
       }
+    // Remove the recovery bytes first and the journal last. If the process stops during cleanup,
+    // the remaining journal can prove that an already-complete target is safe to keep.
+    let transactionPayloadRemoved = true;
     if (recovery !== null && !preserveRecoveryCopy)
       try {
         unlinkSync(recovery);
       } catch {
-        // A failed stage must not obscure the original refusal.
+        transactionPayloadRemoved = false;
+      }
+    if (staging !== null && !preserveRecoveryCopy)
+      try {
+        unlinkSync(staging);
+      } catch {
+        transactionPayloadRemoved = false;
+      }
+    if (journal !== null && !preserveRecoveryCopy && transactionPayloadRemoved)
+      try {
+        unlinkSync(journal);
+      } catch {
+        // A later open can safely repeat cleanup from the durable journal.
       }
     if (descriptor !== null) closeSync(descriptor);
   }
 }
 
+type SaveJournal = Readonly<{
+  version: 1;
+  originalDigest: string;
+  newDigest: string;
+}>;
+
+const RECOVERY_SUFFIX = '.sprint-coder-recovery.tmp';
+const STAGING_SUFFIX = '.sprint-coder-stage.tmp';
+const JOURNAL_SUFFIX = '.sprint-coder-save.json';
+
+function transactionPaths(absolute: string): Readonly<{
+  recovery: string;
+  staging: string;
+  journal: string;
+}> {
+  return {
+    recovery: `${absolute}${RECOVERY_SUFFIX}`,
+    staging: `${absolute}${STAGING_SUFFIX}`,
+    journal: `${absolute}${JOURNAL_SUFFIX}`,
+  };
+}
+
+/** Repairs an interrupted in-place publication before callers can observe or overwrite it. */
+function recoverInterruptedSave(absolute: string): void {
+  const transaction = transactionPaths(absolute);
+  const hasRecovery = existsSync(transaction.recovery);
+  const hasStage = existsSync(transaction.staging);
+  const hasJournal = existsSync(transaction.journal);
+  if (!hasRecovery && !hasStage && !hasJournal) return;
+
+  let targetDescriptor: number | null = null;
+  let recoveryDescriptor: number | null = null;
+  let stagingDescriptor: number | null = null;
+  let journalDescriptor: number | null = null;
+  try {
+    // Publication never begins until both recovery bytes and the journal have been flushed. An
+    // incomplete pre-journal transaction is deliberately left fail-closed instead of deleting a
+    // user-created lookalike file.
+    if (!hasJournal) throw new Error('Incomplete save transaction');
+
+    journalDescriptor = openSync(
+      transaction.journal,
+      constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+    );
+    const journalStat = fstatSync(journalDescriptor, { bigint: true });
+    if (!journalStat.isFile() || journalStat.nlink !== 1n || journalStat.size > 1_024n)
+      throw new Error('Unsafe save journal');
+    const parsed: unknown = JSON.parse(
+      readDescriptor(journalDescriptor, Number(journalStat.size)).toString('utf8'),
+    );
+    if (!isSaveJournal(parsed)) throw new Error('Invalid save journal');
+
+    targetDescriptor = openSync(
+      absolute,
+      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+    );
+    const targetStat = fstatSync(targetDescriptor, { bigint: true });
+    if (
+      !targetStat.isFile() ||
+      targetStat.nlink !== 1n ||
+      targetStat.size > BigInt(MAX_EDITABLE_BYTES)
+    )
+      throw new Error('Unsafe save target');
+    const targetBytes = readDescriptor(targetDescriptor, Number(targetStat.size));
+    const targetDigest = digestOf(targetBytes);
+
+    if (targetDigest !== parsed.originalDigest && targetDigest !== parsed.newDigest) {
+      if (!hasRecovery || !hasStage) throw new Error('Save recovery bytes are missing');
+      recoveryDescriptor = openSync(
+        transaction.recovery,
+        constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+      );
+      const recoveryStat = fstatSync(recoveryDescriptor, { bigint: true });
+      if (
+        !recoveryStat.isFile() ||
+        recoveryStat.nlink !== 1n ||
+        recoveryStat.size > BigInt(MAX_EDITABLE_BYTES)
+      )
+        throw new Error('Unsafe save recovery file');
+      const original = readDescriptor(recoveryDescriptor, Number(recoveryStat.size));
+      if (digestOf(original) !== parsed.originalDigest)
+        throw new Error('Save recovery digest mismatch');
+      stagingDescriptor = openSync(
+        transaction.staging,
+        constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+      );
+      const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
+      if (
+        !stagingStat.isFile() ||
+        stagingStat.nlink !== 1n ||
+        stagingStat.size > BigInt(MAX_EDITABLE_BYTES)
+      )
+        throw new Error('Unsafe save staging file');
+      const replacement = readDescriptor(stagingDescriptor, Number(stagingStat.size));
+      if (digestOf(replacement) !== parsed.newDigest)
+        throw new Error('Save staging digest mismatch');
+      // Our in-place writer truncates and then writes from offset zero. Restore only a prefix it
+      // could have produced (or a prefix left by a failed rollback); never overwrite an unrelated
+      // external edit that happened while Sprint Coder was not running.
+      if (!isPrefixOf(targetBytes, replacement) && !isPrefixOf(targetBytes, original))
+        throw new Error('Save target changed outside the interrupted transaction');
+      replaceDescriptorContents(targetDescriptor, original);
+    }
+  } finally {
+    if (journalDescriptor !== null) closeSync(journalDescriptor);
+    if (stagingDescriptor !== null) closeSync(stagingDescriptor);
+    if (recoveryDescriptor !== null) closeSync(recoveryDescriptor);
+    if (targetDescriptor !== null) closeSync(targetDescriptor);
+  }
+
+  // Journal-last deletion makes an interrupted cleanup distinguishable from an interrupted write.
+  if (hasRecovery) unlinkSync(transaction.recovery);
+  if (hasStage) unlinkSync(transaction.staging);
+  unlinkSync(transaction.journal);
+}
+
+function isPrefixOf(candidate: Buffer, complete: Buffer): boolean {
+  return (
+    candidate.length <= complete.length && complete.subarray(0, candidate.length).equals(candidate)
+  );
+}
+
+function isSaveJournal(value: unknown): value is SaveJournal {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<SaveJournal>;
+  return (
+    candidate.version === 1 &&
+    typeof candidate.originalDigest === 'string' &&
+    SHA256_PATTERN.test(candidate.originalDigest) &&
+    typeof candidate.newDigest === 'string' &&
+    SHA256_PATTERN.test(candidate.newDigest)
+  );
+}
+
+function syncParentDirectory(absolute: string): void {
+  if (process.platform === 'win32') return;
+  const descriptor = openSync(dirname(absolute), constants.O_RDONLY);
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 const EMPTY_DIGEST = createHash('sha256').update('').digest('hex');
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 function digestOf(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
