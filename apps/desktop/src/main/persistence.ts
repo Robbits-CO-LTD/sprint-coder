@@ -14,6 +14,7 @@ import {
   taskSummarySchema,
   teamModelRestrictionSchema,
   teamBlueprintSchema,
+  teamExecutionIsolationSchema,
   turnSkillSelectionsSchema,
   turnSkillSelectionSchema,
   turnEventSchema,
@@ -57,6 +58,7 @@ import {
   type TeamMissionCheckpoint,
   type TeamMissionState,
   type TeamMissionWorktreeState,
+  type TeamExecutionIsolation,
   type TeamModelRestriction,
   type TeamUsageTotals,
   type TurnEvent,
@@ -499,6 +501,17 @@ type TeamMissionWorktreeRow = {
   integrated_head: string | null;
   changed_files_json: string;
   reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type TeamExecutionIsolationRow = {
+  execution_id: string;
+  phase: TeamExecutionIsolation['phase'];
+  resume_kind: TeamExecutionIsolation['resumeKind'];
+  repositories_json: string;
+  roots_json: string;
+  reason: string | null;
+  revision: number;
   created_at: string;
   updated_at: string;
 };
@@ -2881,6 +2894,38 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 63,
+    checksum: 'team-multi-repository-isolation-v63',
+    sql: `
+      CREATE TABLE team_execution_isolations (
+        execution_id TEXT PRIMARY KEY REFERENCES team_executions(id) ON DELETE CASCADE,
+        phase TEXT NOT NULL CHECK (phase IN (
+          'preparing', 'running', 'finalizing', 'integrating',
+          'waiting_resume', 'completed', 'quarantined'
+        )),
+        resume_kind TEXT CHECK (resume_kind IS NULL OR resume_kind IN ('worker', 'integration')),
+        repositories_json TEXT NOT NULL,
+        roots_json TEXT NOT NULL,
+        reason TEXT CHECK (reason IS NULL OR length(reason) <= 2000),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX team_execution_isolations_phase_idx
+        ON team_execution_isolations(phase, updated_at, execution_id);
+
+      CREATE TABLE team_integration_root_leases (
+        mutation_key TEXT PRIMARY KEY CHECK (length(mutation_key) = 64),
+        root_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL REFERENCES team_executions(id) ON DELETE CASCADE,
+        root_identity TEXT NOT NULL CHECK (length(root_identity) = 64),
+        acquired_at TEXT NOT NULL
+      );
+      CREATE INDEX team_integration_root_leases_execution_idx
+        ON team_integration_root_leases(execution_id, root_id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3300,6 +3345,14 @@ export type TeamMissionWorktreeRecord = Readonly<{
   createdAt: string;
   updatedAt: string;
 }>;
+export type TeamExecutionIsolationRecord = Readonly<
+  TeamExecutionIsolation & {
+    executionId: string;
+    revision: number;
+    createdAt: string;
+    updatedAt: string;
+  }
+>;
 export type TeamMissionRecord = Readonly<{
   id: string;
   teamId: string;
@@ -3377,6 +3430,9 @@ export interface PersistenceClient {
   listProjectFolders(projectId: string): ProjectFolder[];
   getProjectFolderRootIdentities(projectId: string): ReadonlyMap<string, string>;
   getEffectiveWorkspaceRootIdentities(taskId: string): ReadonlyMap<string, string>;
+  getEffectiveWorkspaceMutationBindings(
+    taskId: string,
+  ): ReadonlyMap<string, Readonly<{ workspaceKey: string; rootIdentityDigest: string }>>;
   getTurnWorkspaceRootIdentities(turnId: string): ReadonlyMap<string, string>;
   getTurnWorkspaceMutationBindings(
     turnId: string,
@@ -3555,6 +3611,31 @@ export interface PersistenceClient {
     now: string;
   }): TeamMissionWorktreeRecord;
   getTeamMissionWorktree(executionId: string): TeamMissionWorktreeRecord | null;
+  createTeamExecutionIsolation(input: {
+    executionId: string;
+    repositories: TeamExecutionIsolation['repositories'];
+    roots: TeamExecutionIsolation['roots'];
+    now: string;
+  }): TeamExecutionIsolationRecord;
+  updateTeamExecutionIsolation(input: {
+    executionId: string;
+    phase: TeamExecutionIsolation['phase'];
+    repositories?: TeamExecutionIsolation['repositories'];
+    roots?: TeamExecutionIsolation['roots'];
+    resumeKind?: TeamExecutionIsolation['resumeKind'];
+    reason?: string | null;
+    now: string;
+  }): TeamExecutionIsolationRecord;
+  getTeamExecutionIsolation(executionId: string): TeamExecutionIsolationRecord | null;
+  acquireTeamIntegrationRootLeases(input: {
+    executionId: string;
+    roots: readonly Pick<
+      TeamExecutionIsolation['roots'][number],
+      'rootId' | 'mutationKey' | 'identity'
+    >[];
+    now: string;
+  }): void;
+  releaseTeamIntegrationRootLeases(executionId: string): void;
   transitionTeamMission(missionId: string, to: TeamMissionState, now: string): TeamMissionRecord;
   prepareTeamMissionResume(input: {
     missionId: string;
@@ -4820,6 +4901,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
         rootId,
         rootIdentityDigest,
       ]),
+    );
+  }
+
+  getEffectiveWorkspaceMutationBindings(
+    taskId: string,
+  ): ReadonlyMap<string, Readonly<{ workspaceKey: string; rootIdentityDigest: string }>> {
+    const task = this.getTaskRow(taskId);
+    const roots = task.project_id === null ? [] : this.getProjectRootRows(task.project_id);
+    return new Map(
+      effectiveWorkspaceBindings(task, roots).map(
+        ({ rootId, workspaceKey, rootIdentityDigest }) => [
+          rootId,
+          Object.freeze({ workspaceKey, rootIdentityDigest }),
+        ],
+      ),
     );
   }
 
@@ -6720,6 +6816,157 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('SELECT * FROM team_mission_step_worktrees WHERE execution_id = ?')
       .get(executionId) as TeamMissionWorktreeRow | undefined;
     return row === undefined ? null : toTeamMissionWorktree(row);
+  }
+
+  createTeamExecutionIsolation(input: {
+    executionId: string;
+    repositories: TeamExecutionIsolation['repositories'];
+    roots: TeamExecutionIsolation['roots'];
+    now: string;
+  }): TeamExecutionIsolationRecord {
+    const parsed = teamExecutionIsolationSchema.parse({
+      phase: 'preparing',
+      resumeKind: null,
+      repositories: input.repositories,
+      roots: input.roots,
+      reason: null,
+    });
+    if (this.getTeamExecution(input.executionId).accessMode !== 'workspace-write')
+      throw new Error('Team execution isolation requires workspace-write access');
+    this.db
+      .prepare(
+        `INSERT INTO team_execution_isolations(
+           execution_id, phase, resume_kind, repositories_json, roots_json,
+           reason, revision, created_at, updated_at
+         ) VALUES (?, ?, NULL, ?, ?, NULL, 1, ?, ?)`,
+      )
+      .run(
+        input.executionId,
+        parsed.phase,
+        JSON.stringify(parsed.repositories),
+        JSON.stringify(parsed.roots),
+        input.now,
+        input.now,
+      );
+    return this.requireTeamExecutionIsolation(input.executionId);
+  }
+
+  updateTeamExecutionIsolation(input: {
+    executionId: string;
+    phase: TeamExecutionIsolation['phase'];
+    repositories?: TeamExecutionIsolation['repositories'];
+    roots?: TeamExecutionIsolation['roots'];
+    resumeKind?: TeamExecutionIsolation['resumeKind'];
+    reason?: string | null;
+    now: string;
+  }): TeamExecutionIsolationRecord {
+    const allowed: Readonly<
+      Record<TeamExecutionIsolation['phase'], readonly TeamExecutionIsolation['phase'][]>
+    > = {
+      preparing: ['running', 'quarantined'],
+      running: ['finalizing', 'quarantined'],
+      finalizing: ['integrating', 'waiting_resume', 'quarantined'],
+      integrating: ['waiting_resume', 'completed', 'quarantined'],
+      waiting_resume: ['integrating', 'quarantined'],
+      completed: ['quarantined'],
+      quarantined: [],
+    };
+    return this.db.transaction(() => {
+      const current = this.requireTeamExecutionIsolation(input.executionId);
+      if (current.phase !== input.phase && !allowed[current.phase].includes(input.phase))
+        throw new Error(`Invalid Team isolation transition: ${current.phase} -> ${input.phase}`);
+      const parsed = teamExecutionIsolationSchema.parse({
+        phase: input.phase,
+        resumeKind: input.resumeKind === undefined ? current.resumeKind : input.resumeKind,
+        repositories: input.repositories ?? current.repositories,
+        roots: input.roots ?? current.roots,
+        reason: input.reason === undefined ? current.reason : input.reason,
+      });
+      const result = this.db
+        .prepare(
+          `UPDATE team_execution_isolations
+           SET phase = ?, resume_kind = ?, repositories_json = ?, roots_json = ?, reason = ?,
+               revision = revision + 1, updated_at = ?
+           WHERE execution_id = ? AND revision = ?`,
+        )
+        .run(
+          parsed.phase,
+          parsed.resumeKind,
+          JSON.stringify(parsed.repositories),
+          JSON.stringify(parsed.roots),
+          parsed.reason,
+          input.now,
+          current.executionId,
+          current.revision,
+        );
+      if (result.changes !== 1) throw new TeamConflictError();
+      return this.requireTeamExecutionIsolation(input.executionId);
+    })();
+  }
+
+  getTeamExecutionIsolation(executionId: string): TeamExecutionIsolationRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM team_execution_isolations WHERE execution_id = ?')
+      .get(executionId) as TeamExecutionIsolationRow | undefined;
+    return row === undefined ? null : toTeamExecutionIsolation(row);
+  }
+
+  acquireTeamIntegrationRootLeases(input: {
+    executionId: string;
+    roots: readonly Pick<
+      TeamExecutionIsolation['roots'][number],
+      'rootId' | 'mutationKey' | 'identity'
+    >[];
+    now: string;
+  }): void {
+    this.db.transaction(() => {
+      this.getTeamExecution(input.executionId);
+      if (input.roots.length === 0) throw new Error('Team integration requires root leases');
+      const insert = this.db.prepare(
+        `INSERT INTO team_integration_root_leases(
+           mutation_key, root_id, execution_id, root_identity, acquired_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      );
+      for (const root of [...input.roots].sort((a, b) =>
+        a.mutationKey.localeCompare(b.mutationKey),
+      )) {
+        const mutationState = this.db
+          .prepare(
+            `SELECT state, root_identity_digest
+             FROM workspace_mutation_state WHERE workspace_key = ?`,
+          )
+          .get(root.mutationKey) as
+          { state: 'idle' | 'held' | 'quarantined'; root_identity_digest: string } | undefined;
+        if (
+          mutationState !== undefined &&
+          (mutationState.state !== 'idle' || mutationState.root_identity_digest !== root.identity)
+        )
+          throw new TeamConflictError('A workspace root is leased or quarantined');
+        const existing = this.db
+          .prepare(
+            `SELECT execution_id, mutation_key, root_identity
+             FROM team_integration_root_leases WHERE mutation_key = ?`,
+          )
+          .get(root.mutationKey) as
+          { execution_id: string; mutation_key: string; root_identity: string } | undefined;
+        if (existing !== undefined) {
+          if (
+            existing.execution_id === input.executionId &&
+            existing.mutation_key === root.mutationKey &&
+            existing.root_identity === root.identity
+          )
+            continue;
+          throw new TeamConflictError('A workspace root is already leased for integration');
+        }
+        insert.run(root.mutationKey, root.rootId, input.executionId, root.identity, input.now);
+      }
+    })();
+  }
+
+  releaseTeamIntegrationRootLeases(executionId: string): void {
+    this.db
+      .prepare('DELETE FROM team_integration_root_leases WHERE execution_id = ?')
+      .run(executionId);
   }
 
   transitionTeamMission(missionId: string, to: TeamMissionState, now: string): TeamMissionRecord {
@@ -9823,6 +10070,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
         return { error: clockFailure ? 'clock' : 'quarantined' } as const;
       }
       if (row.state === 'held') return { error: 'busy' } as const;
+      if (
+        this.db
+          .prepare('SELECT 1 FROM team_integration_root_leases WHERE mutation_key = ? LIMIT 1')
+          .get(input.workspaceKey) !== undefined
+      )
+        return { error: 'busy' } as const;
       const activeQuarantine = this.db
         .prepare(
           `SELECT 1 FROM task_mutation_quarantines
@@ -13259,6 +13512,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return worktree;
   }
 
+  private requireTeamExecutionIsolation(executionId: string): TeamExecutionIsolationRecord {
+    const isolation = this.getTeamExecutionIsolation(executionId);
+    if (isolation === null) throw new NotFoundError('Team execution isolation not found');
+    return isolation;
+  }
+
   private getGlobalLimits(): Partial<Record<BudgetKind, number>> {
     const row = this.db.prepare('SELECT limits_json FROM team_global_limits WHERE id = 1').get() as
       { limits_json: string } | undefined;
@@ -13898,6 +14157,23 @@ function toTeamMissionWorktree(row: TeamMissionWorktreeRow): TeamMissionWorktree
     integratedHead: row.integrated_head,
     changedFiles: JSON.parse(row.changed_files_json) as string[],
     reason: row.reason,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toTeamExecutionIsolation(row: TeamExecutionIsolationRow): TeamExecutionIsolationRecord {
+  const parsed = teamExecutionIsolationSchema.parse({
+    phase: row.phase,
+    resumeKind: row.resume_kind,
+    repositories: JSON.parse(row.repositories_json),
+    roots: JSON.parse(row.roots_json),
+    reason: row.reason,
+  });
+  return {
+    executionId: row.execution_id,
+    ...parsed,
+    revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

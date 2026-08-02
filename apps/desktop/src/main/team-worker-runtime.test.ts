@@ -142,6 +142,48 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(runtimeHostMock.starts[0]?.[2]).toContain('隔離worktree: /isolated/worktree');
   });
 
+  it('passes the complete isolated root set while deriving policy from its Primary root', async () => {
+    runtimeHostMock.starts.length = 0;
+    const writeScopeFor = vi.fn(() => 'workspace-write' as const);
+    const subject = runtime({ writeScopeFor });
+    const writableWorker = { ...worker(false), writeCapable: true };
+    const workspaceSet = {
+      primaryRootId: 'root-primary',
+      roots: [
+        {
+          rootId: 'root-primary',
+          path: '/isolated/primary',
+          label: 'primary',
+          role: 'primary' as const,
+        },
+        {
+          rootId: 'root-secondary',
+          path: '/isolated/secondary',
+          label: 'secondary',
+          role: 'secondary' as const,
+        },
+      ],
+      digest: 'a'.repeat(64),
+    };
+
+    await subject.execute({
+      worker: writableWorker,
+      envelope: { ...envelope, targetAgentId: writableWorker.id },
+      content: '両方を変更する',
+      accessMode: 'workspace-write',
+      workspaceSet,
+    });
+
+    expect(runtimeHostMock.starts[0]?.[3]).toEqual(workspaceSet);
+    expect(writeScopeFor).toHaveBeenCalledWith(
+      expect.objectContaining({ id: writableWorker.id }),
+      '/isolated/primary',
+    );
+    expect(runtimeHostMock.starts[0]?.[2]).toContain(
+      '隔離root: primary=/isolated/primary, secondary=/isolated/secondary',
+    );
+  });
+
   it('reserves every sealed Project item and binds context lookup to the durable execution', async () => {
     runtimeHostMock.starts.length = 0;
     const contextFor = vi.fn(() => ({

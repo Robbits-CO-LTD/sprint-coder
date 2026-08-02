@@ -13,6 +13,7 @@ describe('Team execution domain', () => {
   it('moves an execution through queue and running to a terminal state', () => {
     expect(transitionTeamExecution('assigned', 'queued')).toBe('queued');
     expect(transitionTeamExecution('queued', 'running')).toBe('running');
+    expect(transitionTeamExecution('queued', 'failed')).toBe('failed');
     expect(transitionTeamExecution('running', 'completed')).toBe('completed');
     expect(() => transitionTeamExecution('completed', 'running')).toThrow(
       'Invalid Team execution transition',

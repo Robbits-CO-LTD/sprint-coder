@@ -13,6 +13,7 @@ import type { AgentRecord } from './persistence';
 import type { PreparedContext } from './context-ledger';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
+import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 // Real Worker execution (Phase 7 follow-up: "Team must work without mocks"). Each dispatched
 // Worker task runs one ephemeral, read-only/no-tools turn on a production runtime (Claude/Codex)
@@ -142,6 +143,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     accessMode?: TeamExecutionAccess;
     executionId?: string;
     workspacePath?: string | null;
+    workspaceSet?: RuntimeWorkspaceSet;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
     signal?: AbortSignal;
@@ -166,6 +168,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       input.workspacePath === undefined
         ? ''
         : `隔離worktree: ${input.workspacePath ?? '利用不可'}（このディレクトリ内だけを変更してください）`,
+      input.workspaceSet === undefined
+        ? ''
+        : `隔離root: ${input.workspaceSet.roots.map(({ label, path }) => `${label}=${path}`).join(', ')}`,
       '以下のLeaderからの依頼に対応し、結果を日本語で簡潔に報告してください。',
       formatPriorTeamConversation(input.priorConversation),
       '',
@@ -186,7 +191,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       throw new Error('Manager Team MCP is unavailable');
 
     const workspacePath =
-      input.workspacePath === undefined ? this.deps.workspaceFor(taskId) : input.workspacePath;
+      input.workspaceSet?.roots.find(({ rootId }) => rootId === input.workspaceSet?.primaryRootId)
+        ?.path ??
+      (input.workspacePath === undefined ? this.deps.workspaceFor(taskId) : input.workspacePath);
+    const runtimeWorkspace = input.workspaceSet ?? workspacePath;
     const requestedWriteScope =
       input.accessMode === 'workspace-write' && input.worker.writeCapable === true
         ? (this.deps.writeScopeFor?.(input.worker, workspacePath) ?? 'read-only')
@@ -214,7 +222,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         taskId,
         turnId,
         prompt,
-        workspacePath,
+        runtimeWorkspace,
         choice.model,
         this.deps.catalogFor(choice.kind, workspacePath) as never,
         context,

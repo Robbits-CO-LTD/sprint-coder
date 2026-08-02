@@ -625,6 +625,13 @@ export class IpcRouter {
       new WorkerWorktreeManager({
         worktreesRoot: join(app.getPath('userData'), 'team-worker-worktrees'),
       }),
+      async (taskId) => {
+        const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
+        await verifyTurnWorkspaceIdentities(
+          workspace,
+          this.persistence.getEffectiveWorkspaceRootIdentities(taskId),
+        );
+      },
     );
     // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than

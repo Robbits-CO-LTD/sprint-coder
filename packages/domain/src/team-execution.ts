@@ -42,7 +42,14 @@ export type ExecutionInstruction = Readonly<{
 
 const executionTransitions: Readonly<Record<TeamExecutionState, readonly TeamExecutionState[]>> = {
   assigned: ['queued', 'waiting_resume', 'canceled'],
-  queued: ['waiting_verification', 'waiting_rate_limit', 'running', 'waiting_resume', 'canceled'],
+  queued: [
+    'waiting_verification',
+    'waiting_rate_limit',
+    'running',
+    'waiting_resume',
+    'failed',
+    'canceled',
+  ],
   waiting_verification: ['queued', 'running', 'waiting_resume', 'failed', 'canceled'],
   waiting_rate_limit: ['queued', 'running', 'waiting_resume', 'failed', 'canceled'],
   running: ['queued', 'waiting_rate_limit', 'waiting_resume', 'completed', 'failed', 'canceled'],

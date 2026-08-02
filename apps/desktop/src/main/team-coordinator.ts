@@ -13,6 +13,7 @@ import {
   type TeamAssignMissionInput,
   type TeamMissionCheckpoint,
   type TeamMissionSummary,
+  type TeamExecutionIsolation,
   type TeamSendMessageInput,
   type ExecutionResolution,
   type ModelSelection,
@@ -22,6 +23,8 @@ import {
 } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { realpath as fsRealpath } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import {
   assertEnvelopeMatchesClaims,
   assertTeamMessageRate,
@@ -53,10 +56,12 @@ import type {
   TeamAttemptStartReason,
   TeamMissionRecord,
   TeamMissionWorktreeRecord,
+  TeamExecutionIsolationRecord,
   TeamSnapshot,
   TeamV2ActivityRecord,
 } from './persistence';
-import type { WorkerWorktreeManager } from './worker-worktree';
+import type { CleanRepository, WorkerWorktreeManager } from './worker-worktree';
+import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 export type WorkerRuntimeResult = Readonly<{
   claims?: Readonly<{
@@ -142,6 +147,7 @@ export interface TeamWorkerRuntime {
     accessMode?: TeamExecutionAccess;
     executionId?: string;
     workspacePath?: string | null;
+    workspaceSet?: RuntimeWorkspaceSet;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
     signal?: AbortSignal;
@@ -163,6 +169,7 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     accessMode?: TeamExecutionAccess;
     executionId?: string;
     workspacePath?: string | null;
+    workspaceSet?: RuntimeWorkspaceSet;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
   }): Promise<WorkerRuntimeResult> {
@@ -252,6 +259,7 @@ export class TeamCoordinator {
       taskId: string,
     ) => Omit<TeamBlueprintBindingRecord, 'teamId' | 'boundAt'> | null,
     private readonly worktreeManager?: WorkerWorktreeManager,
+    private readonly verifyWorkspace?: (taskId: string) => Promise<void>,
   ) {
     if (executionScheduler !== undefined) {
       this.executionScheduler = executionScheduler;
@@ -772,14 +780,8 @@ export class TeamCoordinator {
         if (step.access === 'workspace-write' && worker?.writeCapable !== true)
           throw new Error('workspace-write Mission step requires a write-capable Worker');
       }
-      if (input.steps.some(({ access }) => access === 'workspace-write')) {
-        const repositories = await this.requireWorkspaceWriteEligibility(input.taskId);
-        if (
-          repositories.length !== 1 ||
-          this.persistence.getEffectiveWorkspaceSet(input.taskId).roots.length !== 1
-        )
-          throw new Error('multi-root workspace-write isolation is not available');
-      }
+      if (input.steps.some(({ access }) => access === 'workspace-write'))
+        await this.requireWorkspaceWriteEligibility(input.taskId);
       const mission = this.persistence.createTeamMission({
         teamId: team.id,
         createdByAgentId: creator.id,
@@ -870,7 +872,6 @@ export class TeamCoordinator {
         if (worker.writeCapable !== true)
           throw new Error('workspace-write execution requires a write-capable Worker');
         await this.requireWorkspaceWriteEligibility(input.taskId);
-        throw new Error('workspace-write task isolation is not available');
       }
       if (
         this.persistence
@@ -1168,10 +1169,6 @@ export class TeamCoordinator {
     // Root/parent-triggered executions already own an inherited immutable seal. Renderer/manual
     // executions have no parent and are sealed here, at the actual dispatch boundary. Retries and
     // resumes hit the same owner id and therefore reuse the existing seal.
-    this.persistence.sealTeamExecutionContext({
-      taskId: input.taskId,
-      executionId: input.executionId,
-    });
     const execution = this.persistence.getTeamExecution(input.executionId);
     const mission = this.persistence.getTeamMissionForExecution(input.executionId);
     const missionStep =
@@ -1206,15 +1203,29 @@ export class TeamCoordinator {
     let attemptId: string | null = null;
     let reservations: readonly TeamBudgetReservationRecord[] = [];
     let missionWorktree: TeamMissionWorktreeRecord | null = null;
+    let executionIsolation: TeamExecutionIsolationRecord | null = null;
     try {
-      if (execution.accessMode === 'workspace-write' && missionStep === null)
-        throw new Error('workspace-write task isolation is not available');
-      if (execution.accessMode === 'workspace-write')
-        missionWorktree = await this.prepareMissionWorktree(
-          input.taskId,
-          input.executionId,
-          worker.id,
-        );
+      this.persistence.sealTeamExecutionContext({
+        taskId: input.taskId,
+        executionId: input.executionId,
+      });
+      await this.verifyWorkspace?.(input.taskId);
+      if (execution.accessMode === 'workspace-write') {
+        const legacyWorktree = this.persistence.getTeamMissionWorktree(input.executionId);
+        const workspace = this.persistence.getEffectiveWorkspaceSet(input.taskId);
+        if (legacyWorktree !== null || (workspace.source === 'task' && missionStep !== null))
+          missionWorktree = await this.prepareMissionWorktree(
+            input.taskId,
+            input.executionId,
+            worker.id,
+          );
+        else
+          executionIsolation = await this.prepareExecutionIsolation(
+            input.taskId,
+            input.executionId,
+            worker.id,
+          );
+      }
       this.persistence.transitionTeamExecution({
         executionId: input.executionId,
         to: 'running',
@@ -1268,8 +1279,14 @@ export class TeamCoordinator {
         input.teamTaskId,
         input.executionId,
         attempt.id,
-        missionWorktree?.path,
+        missionWorktree?.path ??
+          executionIsolation?.roots.find(({ role }) => role === 'primary')?.isolatedPath,
         execution.accessMode,
+        executionIsolation !== null
+          ? this.runtimeWorkspaceForIsolation(executionIsolation)
+          : missionWorktree === null
+            ? this.runtimeWorkspaceForTask(input.taskId)
+            : undefined,
       );
       if (this.executionInterruptions.has(input.executionId)) {
         this.releaseReservations(reservations);
@@ -1298,7 +1315,8 @@ export class TeamCoordinator {
         );
       let changedFiles = [...completion.changedFiles];
       const failedWorkspaceWrite =
-        missionWorktree !== null && completion.value.status !== 'succeeded';
+        (missionWorktree !== null || executionIsolation !== null) &&
+        completion.value.status !== 'succeeded';
       if (missionWorktree !== null) {
         if (this.worktreeManager === undefined)
           throw new Error('Mission worktree manager is unavailable');
@@ -1343,6 +1361,23 @@ export class TeamCoordinator {
           });
         }
       }
+      if (executionIsolation !== null) {
+        if (failedWorkspaceWrite)
+          this.quarantineExecutionIsolation(
+            executionIsolation.executionId,
+            `Worker reported failure before integration: ${completion.value.summary}`,
+          );
+        else {
+          const integrated = await this.finalizeAndIntegrateIsolation({
+            isolation: executionIsolation,
+            agentId: worker.id,
+            missionId: mission?.id ?? '',
+            stepOrdinal: missionStep?.ordinal ?? 1,
+          });
+          executionIsolation = integrated.isolation;
+          changedFiles = [...integrated.changedFiles];
+        }
+      }
       const report = workerReportSchema.parse({
         status: completion.value.status === 'succeeded' ? 'completed' : 'failed',
         summary: completion.value.summary,
@@ -1382,6 +1417,8 @@ export class TeamCoordinator {
         completedMission = checkpointResult.mission.state === 'completed';
         if (missionWorktree !== null)
           await this.cleanupIntegratedMissionWorktree(missionWorktree, worker.id);
+        if (executionIsolation !== null)
+          await this.cleanupIntegratedExecutionIsolation(executionIsolation, worker.id);
       } else {
         this.persistence.completeTeamTaskWithReport({
           teamTaskId: input.teamTaskId,
@@ -1410,6 +1447,12 @@ export class TeamCoordinator {
             this.persistence.transitionTeamMission(mission.id, 'waiting_resume', this.isoNow());
           else this.cancelMissionRemainder(input.executionId, 'failed');
         }
+        if (
+          mission === null &&
+          executionIsolation !== null &&
+          completion.value.status === 'succeeded'
+        )
+          await this.cleanupIntegratedExecutionIsolation(executionIsolation, worker.id);
       }
       this.persistWorkerResult(
         input.teamId,
@@ -1449,6 +1492,8 @@ export class TeamCoordinator {
       this.releaseReservations(reservations);
       if (missionWorktree !== null)
         this.quarantineMissionWorktree(missionWorktree.executionId, error);
+      if (executionIsolation !== null)
+        this.quarantineExecutionIsolation(executionIsolation.executionId, error);
       if (
         attemptId !== null &&
         this.handleRequestedInterruption({
@@ -2090,6 +2135,7 @@ export class TeamCoordinator {
     attemptId?: string,
     workspacePath?: string,
     accessMode: TeamExecutionAccess = 'read-only',
+    workspaceSet?: RuntimeWorkspaceSet,
   ): Promise<{
     value: WorkerCompletion;
     usage: WorkerRuntimeResult['usage'];
@@ -2146,6 +2192,7 @@ export class TeamCoordinator {
               accessMode,
               ...(executionId === undefined ? {} : { executionId }),
               ...(workspacePath === undefined ? {} : { workspacePath }),
+              ...(workspaceSet === undefined ? {} : { workspaceSet }),
               priorConversation,
               signal,
               onEvent: (event) => {
@@ -2315,12 +2362,14 @@ export class TeamCoordinator {
             missionStepOrdinal: missionStep?.ordinal ?? null,
             missionStepCount: mission?.steps.length ?? null,
             worktree: this.missionWorktreeSummary(execution.id),
+            isolation: this.executionIsolationSummary(execution.id),
           };
         })(),
         id: execution.id,
         teamId: execution.teamId,
         assigneeAgentId: execution.assigneeAgentId,
         createdByAgentId: execution.createdByAgentId,
+        accessMode: execution.accessMode,
         state: execution.state,
         instructionPreview:
           execution.instruction.content.length <= 500
@@ -2429,9 +2478,160 @@ export class TeamCoordinator {
     });
   }
 
+  private async prepareExecutionIsolation(
+    taskId: string,
+    executionId: string,
+    agentId: string,
+  ): Promise<TeamExecutionIsolationRecord> {
+    if (this.worktreeManager === undefined)
+      throw new Error('workspace-write Mission requires Worker worktree support');
+    const existing = this.persistence.getTeamExecutionIsolation(executionId);
+    if (existing !== null) {
+      if (existing.phase !== 'preparing' && existing.phase !== 'running')
+        throw new Error(`Team execution isolation cannot run from ${existing.phase}`);
+      return existing.phase === 'running'
+        ? existing
+        : this.persistence.updateTeamExecutionIsolation({
+            executionId,
+            phase: 'running',
+            resumeKind: null,
+            reason: null,
+            now: this.isoNow(),
+          });
+    }
+    const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
+    const repositories = await this.requireWorkspaceWriteEligibility(taskId);
+    const bindings = this.persistence.getEffectiveWorkspaceMutationBindings(taskId);
+    const created: { repository: CleanRepository; ordinal: number; path: string }[] = [];
+    try {
+      for (const [index, repository] of repositories.entries()) {
+        const ordinal = index + 1;
+        const worktree = await this.worktreeManager.create({
+          agentId,
+          worktreeId: isolationWorktreeId(executionId, ordinal),
+          repoPath: repository.repoPath,
+          baseRef: repository.head,
+        });
+        created.push({ repository, ordinal, path: worktree.path });
+      }
+      const repositoryRecords: TeamExecutionIsolation['repositories'] = created.map(
+        ({ repository, ordinal, path }) => ({
+          ordinal,
+          repoPath: repository.repoPath,
+          worktreePath: path,
+          baseHead: repository.head,
+          workerHead: null,
+          integratedHead: null,
+          state: 'active',
+          changedFiles: [],
+        }),
+      );
+      const canonicalRootPaths = new Map(
+        await Promise.all(
+          workspace.roots.map(async (root) => [root.rootId, await fsRealpath(root.path)] as const),
+        ),
+      );
+      const rootRecords: TeamExecutionIsolation['roots'] = workspace.roots.map((root) => {
+        const canonicalRootPath = canonicalRootPaths.get(root.rootId);
+        if (canonicalRootPath === undefined)
+          throw new Error(`Workspace root canonical path is unavailable: ${root.label}`);
+        const repository = created.find(({ repository: candidate }) =>
+          isPathInsideOrSame(candidate.repoPath, canonicalRootPath),
+        );
+        if (repository === undefined)
+          throw new Error(`Workspace root is not mapped to a repository: ${root.label}`);
+        const binding = bindings.get(root.rootId);
+        if (binding === undefined)
+          throw new Error(`Workspace root mutation binding is unavailable: ${root.label}`);
+        const repositoryRelative = relative(repository.repository.repoPath, canonicalRootPath);
+        if (isEscapingRelativePath(repositoryRelative))
+          throw new Error(`Workspace root escapes its repository: ${root.label}`);
+        return {
+          rootId: root.rootId,
+          rootLabel: root.label,
+          role: root.role,
+          repositoryOrdinal: repository.ordinal,
+          sourcePath: canonicalRootPath,
+          isolatedPath: resolve(repository.path, repositoryRelative),
+          identity: binding.rootIdentityDigest,
+          mutationKey: binding.workspaceKey,
+        };
+      });
+      const recorded = this.persistence.createTeamExecutionIsolation({
+        executionId,
+        repositories: repositoryRecords,
+        roots: rootRecords,
+        now: this.isoNow(),
+      });
+      return this.persistence.updateTeamExecutionIsolation({
+        executionId: recorded.executionId,
+        phase: 'running',
+        resumeKind: null,
+        reason: null,
+        now: this.isoNow(),
+      });
+    } catch (error) {
+      for (const item of [...created].reverse())
+        await this.worktreeManager
+          .cleanup({
+            agentId,
+            worktreeId: isolationWorktreeId(executionId, item.ordinal),
+            repoPath: item.repository.repoPath,
+          })
+          .catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private runtimeWorkspaceForIsolation(
+    isolation: TeamExecutionIsolationRecord,
+  ): RuntimeWorkspaceSet {
+    const primary = isolation.roots.find(({ role }) => role === 'primary');
+    if (primary === undefined) throw new Error('Team execution isolation has no Primary root');
+    return {
+      primaryRootId: primary.rootId,
+      roots: isolation.roots.map((root) => ({
+        rootId: root.rootId,
+        path: root.isolatedPath,
+        label: root.rootLabel,
+        role: root.role,
+      })),
+      digest: createHash('sha256')
+        .update(
+          JSON.stringify(
+            isolation.roots.map(({ rootId, isolatedPath, identity, role }) => ({
+              rootId,
+              isolatedPath,
+              identity,
+              role,
+            })),
+          ),
+        )
+        .digest('hex'),
+    };
+  }
+
+  private runtimeWorkspaceForTask(taskId: string): RuntimeWorkspaceSet {
+    const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
+    const unhealthy = workspace.roots.find(({ status }) => status !== 'available');
+    if (unhealthy !== undefined)
+      throw new Error(`Team workspace root is not available: ${unhealthy.label}`);
+    return {
+      primaryRootId: workspace.primaryRootId,
+      roots: workspace.roots.map((root) => ({
+        rootId: root.rootId,
+        path: root.path,
+        label: root.label,
+        role: root.role,
+      })),
+      digest: workspace.digest,
+    };
+  }
+
   private async requireWorkspaceWriteEligibility(taskId: string) {
     if (this.worktreeManager === undefined)
       throw new Error('workspace-write execution requires Worker worktree support');
+    await this.verifyWorkspace?.(taskId);
     const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
     if (workspace.roots.length === 0)
       throw new Error('workspace-write execution requires a Git workspace');
@@ -2439,6 +2639,160 @@ export class TeamCoordinator {
     if (unhealthy !== undefined)
       throw new Error(`workspace-write root is not available: ${unhealthy.label}`);
     return this.worktreeManager.requireCleanRepositorySet(workspace.roots.map(({ path }) => path));
+  }
+
+  private async finalizeAndIntegrateIsolation(input: {
+    isolation: TeamExecutionIsolationRecord;
+    agentId: string;
+    missionId: string;
+    stepOrdinal: number;
+  }): Promise<{ isolation: TeamExecutionIsolationRecord; changedFiles: readonly string[] }> {
+    if (this.worktreeManager === undefined)
+      throw new Error('Mission worktree manager is unavailable');
+    let isolation = this.persistence.updateTeamExecutionIsolation({
+      executionId: input.isolation.executionId,
+      phase: 'finalizing',
+      resumeKind: null,
+      reason: null,
+      now: this.isoNow(),
+    });
+    for (const repository of isolation.repositories) {
+      const finalized = await this.worktreeManager.finalizeChanges({
+        agentId: input.agentId,
+        worktreeId: isolationWorktreeId(isolation.executionId, repository.ordinal),
+        repoPath: repository.repoPath,
+        baseHead: repository.baseHead,
+        commitMessage: `Sprint Coder Mission ${input.missionId} step ${input.stepOrdinal} repository ${repository.ordinal}`,
+      });
+      isolation = this.persistence.updateTeamExecutionIsolation({
+        executionId: isolation.executionId,
+        phase: 'finalizing',
+        repositories: replaceIsolationRepository(isolation.repositories, repository.ordinal, {
+          ...repository,
+          workerHead: finalized.workerHead,
+          state: 'ready',
+          changedFiles: [...finalized.changedFiles],
+        }),
+        now: this.isoNow(),
+      });
+    }
+    this.persistence.acquireTeamIntegrationRootLeases({
+      executionId: isolation.executionId,
+      roots: isolation.roots,
+      now: this.isoNow(),
+    });
+    try {
+      isolation = this.persistence.updateTeamExecutionIsolation({
+        executionId: isolation.executionId,
+        phase: 'integrating',
+        now: this.isoNow(),
+      });
+      const primaryRepositoryOrdinal = isolation.roots.find(
+        ({ role }) => role === 'primary',
+      )?.repositoryOrdinal;
+      const integrationOrder = [...isolation.repositories].sort((left, right) => {
+        if (left.ordinal === primaryRepositoryOrdinal) return 1;
+        if (right.ordinal === primaryRepositoryOrdinal) return -1;
+        return left.ordinal - right.ordinal;
+      });
+      for (const repository of integrationOrder) {
+        if (repository.workerHead === null)
+          throw new Error('All repositories must be finalized before integration');
+        const integrated = await this.worktreeManager.integrate({
+          repoPath: repository.repoPath,
+          baseHead: repository.baseHead,
+          workerHead: repository.workerHead,
+        });
+        isolation = this.persistence.updateTeamExecutionIsolation({
+          executionId: isolation.executionId,
+          phase: 'integrating',
+          repositories: replaceIsolationRepository(isolation.repositories, repository.ordinal, {
+            ...repository,
+            integratedHead: integrated.integratedHead,
+            state: 'integrated',
+          }),
+          now: this.isoNow(),
+        });
+      }
+      isolation = this.persistence.updateTeamExecutionIsolation({
+        executionId: isolation.executionId,
+        phase: 'completed',
+        resumeKind: null,
+        reason: null,
+        now: this.isoNow(),
+      });
+    } finally {
+      this.persistence.releaseTeamIntegrationRootLeases(isolation.executionId);
+    }
+    return {
+      isolation,
+      changedFiles: isolation.repositories.flatMap(({ ordinal, repoPath, changedFiles }) => {
+        const roots = isolation.roots.filter(
+          ({ repositoryOrdinal }) => repositoryOrdinal === ordinal,
+        );
+        return changedFiles.map((path) => {
+          const root = roots.find((candidate) => {
+            const prefix = relative(repoPath, candidate.sourcePath).split(sep).join('/');
+            return prefix === '' || path === prefix || path.startsWith(`${prefix}/`);
+          });
+          if (root === undefined) return `repository-${ordinal} › ${path}`;
+          const prefix = relative(repoPath, root.sourcePath).split(sep).join('/');
+          const rootedPath = prefix === '' ? path : path.slice(prefix.length + 1);
+          return `${root.rootLabel} › ${rootedPath}`;
+        });
+      }),
+    };
+  }
+
+  private async cleanupIntegratedExecutionIsolation(
+    isolation: TeamExecutionIsolationRecord,
+    agentId: string,
+  ): Promise<void> {
+    if (this.worktreeManager === undefined) return;
+    let current = isolation;
+    for (const repository of current.repositories) {
+      try {
+        const result = await this.worktreeManager.cleanup({
+          agentId,
+          worktreeId: isolationWorktreeId(current.executionId, repository.ordinal),
+          repoPath: repository.repoPath,
+        });
+        current = this.persistence.updateTeamExecutionIsolation({
+          executionId: current.executionId,
+          phase: current.phase,
+          repositories: replaceIsolationRepository(current.repositories, repository.ordinal, {
+            ...repository,
+            state: result.outcome === 'removed' ? 'cleaned' : 'quarantined',
+          }),
+          reason:
+            result.outcome === 'removed'
+              ? current.reason
+              : 'Integrated repository worktree remained dirty during cleanup',
+          now: this.isoNow(),
+        });
+      } catch (error) {
+        this.quarantineExecutionIsolation(current.executionId, error);
+        return;
+      }
+    }
+  }
+
+  private quarantineExecutionIsolation(executionId: string, error: unknown): void {
+    const current = this.persistence.getTeamExecutionIsolation(executionId);
+    if (current === null || current.phase === 'quarantined') return;
+    this.persistence.releaseTeamIntegrationRootLeases(executionId);
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+    this.persistence.updateTeamExecutionIsolation({
+      executionId,
+      phase: 'quarantined',
+      repositories: current.repositories.map((repository) => ({
+        ...repository,
+        state: repository.state === 'cleaned' ? 'cleaned' : 'quarantined',
+      })),
+      resumeKind: null,
+      reason: reason === '' ? 'Team execution isolation requires inspection' : reason,
+      now: this.isoNow(),
+    });
   }
 
   private async cleanupIntegratedMissionWorktree(
@@ -2487,6 +2841,21 @@ export class TeamCoordinator {
       integratedHead: worktree.integratedHead,
       changedFiles: [...worktree.changedFiles],
       reason: worktree.reason,
+    };
+  }
+
+  private executionIsolationSummary(executionId: string): TeamExecutionIsolation | null {
+    const isolation = this.persistence.getTeamExecutionIsolation(executionId);
+    if (isolation === null) return null;
+    return {
+      phase: isolation.phase,
+      resumeKind: isolation.resumeKind,
+      repositories: isolation.repositories.map((repository) => ({
+        ...repository,
+        changedFiles: [...repository.changedFiles],
+      })),
+      roots: isolation.roots.map((root) => ({ ...root })),
+      reason: isolation.reason,
     };
   }
 
@@ -2840,4 +3209,29 @@ export function captureGitWorkspaceFingerprint(workspacePath: string | null): {
       .update(untrackedHashes?.stdout ?? '')
       .digest('hex'),
   };
+}
+
+function isolationWorktreeId(executionId: string, repositoryOrdinal: number): string {
+  return `${executionId}-${repositoryOrdinal}`;
+}
+
+function replaceIsolationRepository(
+  repositories: TeamExecutionIsolation['repositories'],
+  ordinal: number,
+  replacement: TeamExecutionIsolation['repositories'][number],
+): TeamExecutionIsolation['repositories'] {
+  if (!repositories.some((repository) => repository.ordinal === ordinal))
+    throw new Error(`Team isolation repository not found: ${ordinal}`);
+  return repositories.map((repository) =>
+    repository.ordinal === ordinal ? replacement : repository,
+  );
+}
+
+function isPathInsideOrSame(parent: string, child: string): boolean {
+  const value = relative(parent, child);
+  return value === '' || !isEscapingRelativePath(value);
+}
+
+function isEscapingRelativePath(value: string): boolean {
+  return value === '..' || value.startsWith(`..${sep}`) || isAbsolute(value);
 }

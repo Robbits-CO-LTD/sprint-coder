@@ -33,6 +33,7 @@ import {
   teamBlueprintSchema,
   teamDetailSchema,
   teamExecutionSummarySchema,
+  teamExecutionIsolationSchema,
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
@@ -622,6 +623,58 @@ describe('public contracts', () => {
     expect(() =>
       teamExecutionSummarySchema.parse({ ...execution, queueReason: 'provider_guess' }),
     ).toThrow();
+  });
+
+  it('seals Team isolation root bindings and completion state', () => {
+    const isolation = {
+      phase: 'running',
+      resumeKind: null,
+      repositories: [
+        {
+          ordinal: 1,
+          repoPath: '/repo',
+          worktreePath: '/worktree',
+          baseHead: 'a'.repeat(40),
+          workerHead: null,
+          integratedHead: null,
+          state: 'active',
+          changedFiles: [],
+        },
+      ],
+      roots: [
+        {
+          rootId: 'root-1',
+          rootLabel: 'repo',
+          role: 'primary',
+          repositoryOrdinal: 1,
+          sourcePath: '/repo',
+          isolatedPath: '/worktree',
+          identity: 'b'.repeat(64),
+          mutationKey: 'c'.repeat(64),
+        },
+      ],
+      reason: null,
+    } as const;
+    expect(teamExecutionIsolationSchema.parse(isolation)).toMatchObject({ phase: 'running' });
+    expect(
+      teamExecutionIsolationSchema.safeParse({
+        ...isolation,
+        roots: [isolation.roots[0], { ...isolation.roots[0], role: 'secondary' }],
+      }).success,
+    ).toBe(false);
+    expect(
+      teamExecutionIsolationSchema.safeParse({
+        ...isolation,
+        phase: 'completed',
+        repositories: [
+          {
+            ...isolation.repositories[0],
+            workerHead: 'd'.repeat(40),
+            state: 'ready',
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   it('bounds durable Missions to 2 through 12 ordered steps', () => {

@@ -505,12 +505,118 @@ export const teamMissionWorktreeSummarySchema = z
   .strict();
 export type TeamMissionWorktreeSummary = z.infer<typeof teamMissionWorktreeSummarySchema>;
 
+export const teamExecutionIsolationSchema = z
+  .object({
+    phase: z.enum([
+      'preparing',
+      'running',
+      'finalizing',
+      'integrating',
+      'waiting_resume',
+      'completed',
+      'quarantined',
+    ]),
+    resumeKind: z.enum(['worker', 'integration']).nullable(),
+    repositories: z
+      .array(
+        z
+          .object({
+            ordinal: z.number().int().min(1).max(16),
+            repoPath: z.string().min(1).max(4_096),
+            worktreePath: z.string().min(1).max(4_096),
+            baseHead: z.string().regex(/^[0-9a-f]{40,64}$/i),
+            workerHead: z
+              .string()
+              .regex(/^[0-9a-f]{40,64}$/i)
+              .nullable(),
+            integratedHead: z
+              .string()
+              .regex(/^[0-9a-f]{40,64}$/i)
+              .nullable(),
+            state: z.enum(['active', 'ready', 'integrated', 'cleaned', 'quarantined']),
+            changedFiles: z.array(z.string().min(1).max(4_096)).max(500),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(16),
+    roots: z
+      .array(
+        z
+          .object({
+            rootId: idSchema,
+            rootLabel: z.string().min(1).max(255),
+            role: z.enum(['primary', 'secondary']),
+            repositoryOrdinal: z.number().int().min(1).max(16),
+            sourcePath: z.string().min(1).max(4_096),
+            isolatedPath: z.string().min(1).max(4_096),
+            identity: z.string().length(64),
+            mutationKey: z.string().length(64),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(16),
+    reason: z.string().min(1).max(2_000).nullable(),
+  })
+  .strict()
+  .superRefine((isolation, context) => {
+    const repositoryOrdinals = new Set(isolation.repositories.map(({ ordinal }) => ordinal));
+    if (repositoryOrdinals.size !== isolation.repositories.length)
+      context.addIssue({ code: 'custom', message: 'Isolation repository ordinals must be unique' });
+    const rootIds = new Set(isolation.roots.map(({ rootId }) => rootId));
+    const mutationKeys = new Set(isolation.roots.map(({ mutationKey }) => mutationKey));
+    if (rootIds.size !== isolation.roots.length || mutationKeys.size !== isolation.roots.length)
+      context.addIssue({ code: 'custom', message: 'Isolation root bindings must be unique' });
+    if (isolation.roots.filter(({ role }) => role === 'primary').length !== 1)
+      context.addIssue({ code: 'custom', message: 'Isolation requires exactly one Primary root' });
+    if (isolation.roots.some(({ repositoryOrdinal }) => !repositoryOrdinals.has(repositoryOrdinal)))
+      context.addIssue({
+        code: 'custom',
+        message: 'Isolation root references an unknown repository',
+      });
+    if ((isolation.phase === 'waiting_resume') !== (isolation.resumeKind !== null))
+      context.addIssue({
+        code: 'custom',
+        message: 'Isolation resume kind does not match its phase',
+      });
+    if (
+      ['preparing', 'running'].includes(isolation.phase) &&
+      isolation.repositories.some(({ state }) => state !== 'active')
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Running isolation repositories must be active',
+      });
+    if (
+      ['integrating', 'waiting_resume', 'completed'].includes(isolation.phase) &&
+      isolation.repositories.some(
+        ({ state, workerHead }) =>
+          !['ready', 'integrated', 'cleaned'].includes(state) || workerHead === null,
+      )
+    )
+      context.addIssue({ code: 'custom', message: 'Isolation repositories must finalize first' });
+    if (
+      isolation.phase === 'completed' &&
+      isolation.repositories.some(
+        ({ state, integratedHead }) =>
+          !['integrated', 'cleaned'].includes(state) || integratedHead === null,
+      )
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Completed isolation must integrate every repository',
+      });
+  });
+export type TeamExecutionIsolation = z.infer<typeof teamExecutionIsolationSchema>;
+
 export const teamExecutionSummarySchema = z
   .object({
     id: idSchema,
     teamId: idSchema,
     assigneeAgentId: idSchema,
     createdByAgentId: idSchema,
+    accessMode: z.enum(['read-only', 'workspace-write']).default('read-only'),
     state: z.enum([
       'assigned',
       'queued',
@@ -547,6 +653,7 @@ export const teamExecutionSummarySchema = z
     missionStepOrdinal: z.number().int().min(1).max(12).nullable(),
     missionStepCount: z.number().int().min(2).max(12).nullable(),
     worktree: teamMissionWorktreeSummarySchema.nullable().default(null),
+    isolation: teamExecutionIsolationSchema.nullable().default(null),
     assignedAt: timestampSchema,
     queuedAt: timestampSchema.nullable(),
     startedAt: timestampSchema.nullable(),
