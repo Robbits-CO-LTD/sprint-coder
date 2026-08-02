@@ -5,6 +5,7 @@ export type WorkspaceMutationState = 'idle' | 'held' | 'quarantined';
 
 export type MutationLeaseToken = Readonly<{
   version: 1;
+  rootId: string | null;
   workspaceKey: string;
   rootIdentityDigest: string;
   leaseId: string;

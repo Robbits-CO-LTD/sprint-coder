@@ -62,7 +62,9 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
 
 export type WorkspacePatchDeps = Readonly<{
   turnWorkspaceSetFor: (taskId: string, turnId: string) => EffectiveWorkspaceSet | null;
-  turnRootIdentitiesFor: (turnId: string) => ReadonlyMap<string, string>;
+  turnRootMutationBindingsFor: (
+    turnId: string,
+  ) => ReadonlyMap<string, { workspaceKey: string; rootIdentityDigest: string }>;
   revisions: FileRevisionRegistry;
   apply: (request: EditSagaApplyRequest) => Promise<EditSagaSnapshot>;
   policyEpochFor: (taskId: string) => number;
@@ -98,12 +100,13 @@ export async function executeWorkspacePatch(
   const requestedRootId = request.rootId ?? workspace.primaryRootId;
   const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
   if (root === undefined) throw new Error('apply_patch requires a valid Workspace rootId');
-  const expectedRootIdentityDigest =
+  const mutationBinding =
     workspace.source === 'project'
-      ? deps.turnRootIdentitiesFor(context.turnId).get(root.rootId)
+      ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
       : undefined;
-  if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
+  if (workspace.source === 'project' && mutationBinding === undefined)
     throw new Error('apply_patch Turn Workspace identity is incomplete');
+  const expectedRootIdentityDigest = mutationBinding?.rootIdentityDigest;
 
   const owner = { taskId: context.taskId, turnId: context.turnId };
   const policyEpoch = deps.policyEpochFor(context.taskId);
@@ -152,6 +155,16 @@ export async function executeWorkspacePatch(
     turnId: context.turnId,
     operationId: (deps.newId ?? randomUUID)(),
     plan,
+    ...(mutationBinding === undefined
+      ? {}
+      : {
+          mutationBinding: {
+            rootId: root.rootId,
+            workspacePath: root.path,
+            workspaceKey: mutationBinding.workspaceKey,
+            rootIdentityDigest: mutationBinding.rootIdentityDigest,
+          },
+        }),
     createdAt: (deps.now ?? (() => new Date().toISOString()))(),
   });
   // A Saga that did not commit left the file as it was; reporting the state rather than throwing

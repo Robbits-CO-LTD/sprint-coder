@@ -45,6 +45,7 @@ export type NativeSafeFsProbe = Readonly<{
 
 export type NativeSafeFsSession = Readonly<{
   id: string;
+  rootId: string;
   workspaceKey: string;
   fence: string;
   rootDev: string;
@@ -52,6 +53,7 @@ export type NativeSafeFsSession = Readonly<{
 }>;
 
 export type NativeSafeFsOpenInput = Readonly<{
+  rootId: string;
   workspacePath: string;
   rootDev: string;
   rootIno: string;
@@ -63,7 +65,9 @@ export type NativeSafeFsOpenInput = Readonly<{
 export interface NativeSafeFs {
   probe(): Promise<NativeSafeFsProbe>;
   openSession(input: NativeSafeFsOpenInput): Promise<NativeSafeFsSession>;
-  assertSession(binding: Readonly<{ id: string; workspaceKey: string; fence: string }>): void;
+  assertSession(
+    binding: Readonly<{ id: string; rootId?: string; workspaceKey: string; fence: string }>,
+  ): void;
   invalidateWorkspace(workspaceKey: string, minimumFence: string): void;
   observeIntent(
     session: NativeSafeFsSession,
@@ -214,6 +218,7 @@ export function loadNativeSafeFs(
         const session = parseSession(await addon.openSession(Object.freeze({ ...input })));
         if (
           session.workspaceKey !== input.workspaceKey ||
+          session.rootId !== input.rootId ||
           session.fence !== input.fence ||
           session.rootDev !== input.rootDev ||
           session.rootIno !== input.rootIno
@@ -229,11 +234,14 @@ export function loadNativeSafeFs(
       }
     },
 
-    assertSession(binding: Readonly<{ id: string; workspaceKey: string; fence: string }>): void {
+    assertSession(
+      binding: Readonly<{ id: string; rootId?: string; workspaceKey: string; fence: string }>,
+    ): void {
       const session = issuedSessions.get(binding.id);
       if (
         session === undefined ||
         session.workspaceKey !== binding.workspaceKey ||
+        (binding.rootId !== undefined && session.rootId !== binding.rootId) ||
         session.fence !== binding.fence
       )
         throw new NativeSafeFsError('STALE_SESSION', 'NativeSafeFs session is stale');
@@ -513,6 +521,9 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
 
 function validateOpenInput(input: NativeSafeFsOpenInput): void {
   if (
+    typeof input.rootId !== 'string' ||
+    input.rootId.length === 0 ||
+    input.rootId.length > 200 ||
     typeof input.workspacePath !== 'string' ||
     input.workspacePath.length < 1 ||
     input.workspacePath.includes('\0') ||
@@ -565,6 +576,9 @@ function parseSession(value: unknown): NativeSafeFsSession {
   if (
     typeof record['id'] !== 'string' ||
     !/^[a-f0-9]{32}$/.test(record['id']) ||
+    typeof record['rootId'] !== 'string' ||
+    record['rootId'].length === 0 ||
+    record['rootId'].length > 200 ||
     typeof record['workspaceKey'] !== 'string' ||
     !/^[a-f0-9]{64}$/.test(record['workspaceKey']) ||
     !isPositiveDecimal(record['fence']) ||
@@ -574,6 +588,7 @@ function parseSession(value: unknown): NativeSafeFsSession {
     throw new Error('Invalid native session');
   return Object.freeze({
     id: record['id'],
+    rootId: record['rootId'],
     workspaceKey: record['workspaceKey'],
     fence: record['fence'],
     rootDev: record['rootDev'],

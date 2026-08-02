@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isAbsolute, relative, sep } from 'node:path';
 import type { PreparedPatchOperation, PreparedStructuredPatch } from './structured-patch';
 import { structuredPatchDigest } from './structured-patch';
 import {
@@ -106,6 +107,7 @@ export type EditSagaSnapshot = Readonly<{
   planDigest: string;
   journalDigest: string;
   policyEpoch: number;
+  rootId: string | null;
   workspaceKey: string | null;
   rootIdentityDigest: string | null;
   state: EditSagaState;
@@ -124,7 +126,14 @@ export type EditSagaApplyRequest = Readonly<{
   turnId: string;
   operationId: string;
   plan: PreparedStructuredPatch;
-  mutationBinding?: Readonly<{ workspaceKey: string; rootIdentityDigest: string }>;
+  mutationBinding?: Readonly<{
+    workspaceKey: string;
+    rootIdentityDigest: string;
+  }> &
+    (
+      | Readonly<{ rootId: string; workspacePath: string }>
+      | Readonly<{ rootId?: never; workspacePath?: never }>
+    );
   createdAt: string;
 }>;
 
@@ -136,6 +145,7 @@ export type EditSagaCreateRequest = Readonly<{
   planDigest: string;
   journalDigest: string;
   policyEpoch: number;
+  rootId: string | null;
   workspaceKey: string | null;
   rootIdentityDigest: string | null;
   operations: readonly JournaledPatchOperation[];
@@ -318,6 +328,7 @@ export function createEditSagaSnapshot(request: EditSagaCreateRequest): EditSaga
     planDigest: request.planDigest,
     journalDigest: request.journalDigest,
     policyEpoch: request.policyEpoch,
+    rootId: request.rootId,
     workspaceKey: request.workspaceKey,
     rootIdentityDigest: request.rootIdentityDigest,
     state: 'prepared',
@@ -343,6 +354,8 @@ export async function stageEditSagaRequest(
 ): Promise<EditSagaCreateRequest> {
   if (structuredPatchDigest(request.plan) !== request.plan.digest)
     throw new Error('Prepared Edit plan digest mismatch');
+  if (request.mutationBinding?.rootId !== undefined)
+    assertPlanBoundToOneRoot(request.plan, request.mutationBinding);
   const operations: JournaledPatchOperation[] = [];
   for (let index = 0; index < request.plan.operations.length; index += 1) {
     const operation = request.plan.operations[index];
@@ -379,8 +392,9 @@ export async function stageEditSagaRequest(
     );
   }
   const facts = {
-    version: 2 as const,
+    version: 3 as const,
     policyEpoch: request.plan.policyEpoch,
+    rootId: request.mutationBinding?.rootId ?? null,
     workspaceKey: request.mutationBinding?.workspaceKey ?? null,
     rootIdentityDigest: request.mutationBinding?.rootIdentityDigest ?? null,
     operations: Object.freeze(operations),
@@ -393,6 +407,7 @@ export async function stageEditSagaRequest(
     planDigest: request.plan.digest,
     journalDigest: journaledPatchDigest(facts),
     policyEpoch: request.plan.policyEpoch,
+    rootId: facts.rootId,
     workspaceKey: facts.workspaceKey,
     rootIdentityDigest: facts.rootIdentityDigest,
     operations: facts.operations,
@@ -401,8 +416,9 @@ export async function stageEditSagaRequest(
 }
 
 export function journaledPatchDigest(input: {
-  version?: 2;
+  version?: 2 | 3;
   policyEpoch: number;
+  rootId?: string | null;
   workspaceKey: string | null;
   rootIdentityDigest: string | null;
   operations: readonly JournaledPatchOperation[];
@@ -410,8 +426,9 @@ export function journaledPatchDigest(input: {
   return createHash('sha256')
     .update(
       JSON.stringify({
-        version: 2,
+        version: input.version ?? 3,
         policyEpoch: input.policyEpoch,
+        ...((input.version ?? 3) === 3 ? { rootId: input.rootId ?? null } : {}),
         workspaceKey: input.workspaceKey,
         rootIdentityDigest: input.rootIdentityDigest,
         operations: input.operations,
@@ -441,6 +458,7 @@ export function parseEditSagaSnapshot(value: unknown): EditSagaSnapshot {
     'planDigest',
     'journalDigest',
     'policyEpoch',
+    'rootId',
     'workspaceKey',
     'rootIdentityDigest',
     'state',
@@ -464,9 +482,11 @@ export function parseEditSagaSnapshot(value: unknown): EditSagaSnapshot {
     !isDigest(value['journalDigest']) ||
     !Number.isSafeInteger(value['policyEpoch']) ||
     (value['policyEpoch'] as number) < 0 ||
+    (value['rootId'] !== null && !isString(value['rootId'], 200)) ||
     !isOptionalDigest(value['workspaceKey']) ||
     !isOptionalDigest(value['rootIdentityDigest']) ||
     (value['workspaceKey'] === null) !== (value['rootIdentityDigest'] === null) ||
+    (value['rootId'] !== null && value['workspaceKey'] === null) ||
     !editSagaStates.includes(state as EditSagaState) ||
     !Number.isSafeInteger(value['revision']) ||
     (value['revision'] as number) < 0 ||
@@ -496,8 +516,9 @@ export function parseEditSagaSnapshot(value: unknown): EditSagaSnapshot {
   if (snapshot.recovery !== null) validateRecovery(snapshot.recovery);
   if (
     journaledPatchDigest({
-      version: 2,
+      version: 3,
       policyEpoch: snapshot.policyEpoch,
+      rootId: snapshot.rootId,
       workspaceKey: snapshot.workspaceKey,
       rootIdentityDigest: snapshot.rootIdentityDigest,
       operations: snapshot.steps.map((step) => step.operation),
@@ -522,7 +543,13 @@ export class EditSagaExecutor {
       throw new Error('Prepared Edit plan digest mismatch');
     const existing = this.store.find(request.taskId, request.turnId, request.operationId);
     if (existing !== null) {
-      if (existing.planDigest !== request.plan.digest)
+      if (
+        existing.planDigest !== request.plan.digest ||
+        existing.rootId !== (request.mutationBinding?.rootId ?? null) ||
+        (request.mutationBinding !== undefined &&
+          (existing.workspaceKey !== request.mutationBinding.workspaceKey ||
+            existing.rootIdentityDigest !== request.mutationBinding.rootIdentityDigest))
+      )
         throw new Error('Edit operation id was reused with another patch');
       if (isTerminal(existing.state)) return this.cleanupArtifacts(existing);
       if (existing.state !== 'prepared') return this.recover(existing.id);
@@ -1172,6 +1199,7 @@ function assertStableIdentity(
     candidate.planDigest !== current.planDigest ||
     candidate.journalDigest !== current.journalDigest ||
     candidate.policyEpoch !== current.policyEpoch ||
+    candidate.rootId !== current.rootId ||
     candidate.workspaceKey !== current.workspaceKey ||
     candidate.rootIdentityDigest !== current.rootIdentityDigest ||
     candidate.createdAt !== current.createdAt
@@ -1195,6 +1223,28 @@ function assertStableIdentity(
     })
   )
     throw new Error('Immutable Edit Saga plan changed');
+}
+
+function assertPlanBoundToOneRoot(
+  plan: PreparedStructuredPatch,
+  binding: NonNullable<EditSagaApplyRequest['mutationBinding']> & {
+    rootId: string;
+    workspacePath: string;
+  },
+): void {
+  if (binding.rootId.length === 0 || !isAbsolute(binding.workspacePath))
+    throw new Error('Edit Saga mutation root binding is invalid');
+  for (const operation of plan.operations) {
+    assertCanonicalPathInsideRoot(binding.workspacePath, operation.canonicalPath);
+    if (operation.canonicalDestination !== null)
+      assertCanonicalPathInsideRoot(binding.workspacePath, operation.canonicalDestination);
+  }
+}
+
+function assertCanonicalPathInsideRoot(rootPath: string, candidatePath: string): void {
+  const fromRoot = relative(rootPath, candidatePath);
+  if (fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot))
+    throw new Error('Edit Saga cannot span multiple Workspace roots');
 }
 
 function validateTerminalCleanupTransition(

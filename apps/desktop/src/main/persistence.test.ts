@@ -1314,6 +1314,56 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('seals a Project root into the Edit Saga and its mutation lease', async () => {
+      const { persistence } = createPersistence();
+      const rootId = randomUUID();
+      const workspaceKey = 'b'.repeat(64);
+      const rootIdentityDigest = 'a'.repeat(64);
+      const project = persistence.createProject({
+        name: 'root-bound edits',
+        folders: [
+          {
+            id: rootId,
+            path: '/workspace',
+            canonicalPath: '/workspace',
+            label: 'workspace',
+            role: 'primary',
+            workspaceKey,
+            rootIdentityDigest,
+          },
+        ],
+      });
+      const task = persistence.createTask('project edit', false, project.id);
+      const turn = persistence.startTurn(task.id, 'edit the Project root');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest({
+          id: 'project-root-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'project-root-operation',
+          plan: persistedEditPlan(),
+          mutationBinding: {
+            rootId,
+            workspacePath: '/workspace',
+            workspaceKey,
+            rootIdentityDigest,
+          },
+          createdAt: '2026-07-23T00:00:00.000Z',
+        }),
+      );
+      const token = await new SqliteEditSagaLeaseGuard(
+        persistence,
+        'project-root-executor',
+        () => new Date('2026-07-23T00:00:01.000Z'),
+      ).acquire(saga, 'forward');
+
+      expect(saga).toMatchObject({ rootId, workspaceKey, rootIdentityDigest });
+      expect(token).toMatchObject({ rootId, workspaceKey, rootIdentityDigest });
+      expect(persistence.getMutationWorkspacePath(task.id, turn.turnId, rootId)).toBe('/workspace');
+      persistence.releaseMutationLease(token, '2026-07-23T00:00:02.000Z');
+      persistence.close();
+    });
+
     it('persists the Acceptance Contract and refuses completion before edit evidence exists', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -5164,6 +5214,7 @@ if (runsWithElectronAbi)
         { version: 58 },
         { version: 59 },
         { version: 60 },
+        { version: 61 },
       ]);
       for (const [table, columns] of [
         [
