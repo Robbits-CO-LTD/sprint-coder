@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
@@ -23,6 +24,8 @@ import {
   projectContextManifestGetInputSchema,
   projectContextManifestsListInputSchema,
   projectCreateInputSchema,
+  projectFoldersListInputSchema,
+  projectFoldersReplaceInputSchema,
   projectGetInputSchema,
   projectInstructionSetInputSchema,
   projectMemoriesListInputSchema,
@@ -80,7 +83,22 @@ import {
   isTrustedIpcSender,
   shouldBlockProviderLeaderCompletion,
   shouldFailRequiredTeamTurn,
+  requiresHomeDirectoryConfirmation,
 } from './ipc';
+
+describe('Project home-directory confirmation', () => {
+  const home = join(dirname(process.cwd()), 'home-owner');
+
+  it('requires confirmation for the home directory and any selected ancestor', () => {
+    expect(requiresHomeDirectoryConfirmation(home, home)).toBe(true);
+    expect(requiresHomeDirectoryConfirmation(dirname(home), home)).toBe(true);
+  });
+
+  it('does not warn for a child or path-component sibling of home', () => {
+    expect(requiresHomeDirectoryConfirmation(join(home, 'project'), home)).toBe(false);
+    expect(requiresHomeDirectoryConfirmation(`${home}-other`, home)).toBe(false);
+  });
+});
 
 describe('Provider Team completion and model errors', () => {
   it('does not mislabel an external Provider model error as a Codex CLI error', () => {
@@ -289,6 +307,9 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.tasksGetDraft]: taskIdPayloadSchema,
   [IPC_CHANNELS.tasksSetDraft]: taskDraftInputSchema,
   [IPC_CHANNELS.projectsList]: emptyPayloadSchema,
+  [IPC_CHANNELS.projectsPickFolders]: emptyPayloadSchema,
+  [IPC_CHANNELS.projectsFoldersList]: projectFoldersListInputSchema,
+  [IPC_CHANNELS.projectsFoldersReplace]: projectFoldersReplaceInputSchema,
   [IPC_CHANNELS.projectsGet]: projectGetInputSchema,
   [IPC_CHANNELS.projectsSetInstruction]: projectInstructionSetInputSchema,
   [IPC_CHANNELS.projectsListContextManifests]: projectContextManifestsListInputSchema,
@@ -318,6 +339,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.teamsGetCanvasView]: taskIdPayloadSchema,
   [IPC_CHANNELS.teamsSaveCanvasView]: canvasViewSaveInputSchema,
   [IPC_CHANNELS.workspaceGet]: taskIdPayloadSchema,
+  [IPC_CHANNELS.workspaceGetEffective]: taskIdPayloadSchema,
   [IPC_CHANNELS.workspaceSelect]: taskIdPayloadSchema,
   [IPC_CHANNELS.settingsGetTeamModelResearch]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamModelResearch]: teamModelResearchSettingsSetInputSchema,

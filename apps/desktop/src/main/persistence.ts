@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
-import { dirname, isAbsolute, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, sep } from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   chatMessageSchema,
@@ -34,6 +34,9 @@ import {
   type NormalizedProviderUsage,
   type ProviderConnection,
   type ProjectReference,
+  type ProjectFolder,
+  type ProjectFolderInput,
+  type EffectiveWorkspaceSet,
   type ProjectMemory,
   type ProjectContextManifest as PublicProjectContextManifest,
   type ProjectContextManifestSummary,
@@ -314,6 +317,7 @@ type TaskRow = {
   local_only: number;
   mutation_scope_key: string | null;
   mutation_root_identity_digest: string | null;
+  legacy_project_workspace_fallback: number;
   draft: string;
   branch_epoch: number;
   context_epoch: number;
@@ -331,7 +335,12 @@ type ProjectRow = {
   revision: number;
   instruction: string;
   context_epoch: number;
+  workspace_roots_configured: number;
   task_count: number;
+  folder_count: number;
+  primary_folder_id: string | null;
+  primary_folder_path: string | null;
+  primary_folder_label: string | null;
   last_activity_at: string;
   created_at: string;
   updated_at: string;
@@ -339,7 +348,8 @@ type ProjectRow = {
 type ProjectReferenceRow = {
   id: string;
   project_id: string;
-  source_task_id: string;
+  source_task_id: string | null;
+  project_root_id: string | null;
   relative_path: string;
   registered_root_identity: string;
   enabled: number;
@@ -347,6 +357,26 @@ type ProjectReferenceRow = {
   last_sealed_digest: string | null;
   created_at: string;
   updated_at: string;
+};
+type ProjectWorkspaceRootRow = {
+  id: string;
+  project_id: string;
+  canonical_path: string;
+  label: string;
+  role: 'primary' | 'secondary';
+  ordinal: number;
+  workspace_key: string;
+  root_identity_digest: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProjectFolderBinding = Omit<ProjectFolderInput, 'path' | 'label'> & {
+  path: string;
+  canonicalPath: string;
+  label: string;
+  workspaceKey: string;
+  rootIdentityDigest: string;
 };
 type ProjectMemoryRow = {
   id: string;
@@ -2733,6 +2763,96 @@ const migrations = [
         CHECK (created_by IN ('user', 'assistant'));
     `,
   },
+  {
+    version: 60,
+    checksum: 'project-multi-folder-v60-foundation',
+    sql: `
+      ALTER TABLE tasks ADD COLUMN legacy_project_workspace_fallback INTEGER NOT NULL DEFAULT 0
+        CHECK (legacy_project_workspace_fallback IN (0, 1));
+      UPDATE tasks SET legacy_project_workspace_fallback = 1
+        WHERE project_id IS NOT NULL AND workspace_path IS NOT NULL;
+      ALTER TABLE projects ADD COLUMN workspace_roots_configured INTEGER NOT NULL DEFAULT 0
+        CHECK (workspace_roots_configured IN (0, 1));
+
+      CREATE TABLE project_workspace_roots (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        canonical_path TEXT NOT NULL,
+        label TEXT NOT NULL CHECK (length(label) >= 1 AND length(label) <= 255),
+        role TEXT NOT NULL CHECK (role IN ('primary', 'secondary')),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 16),
+        workspace_key TEXT NOT NULL CHECK (length(workspace_key) = 64),
+        root_identity_digest TEXT NOT NULL CHECK (length(root_identity_digest) = 64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(project_id, root_identity_digest)
+      );
+      CREATE UNIQUE INDEX project_workspace_roots_primary_idx
+        ON project_workspace_roots(project_id) WHERE role = 'primary';
+      CREATE INDEX project_workspace_roots_project_order_idx
+        ON project_workspace_roots(project_id, ordinal, id);
+      CREATE INDEX project_workspace_roots_project_path_idx
+        ON project_workspace_roots(project_id, canonical_path, id);
+
+      ALTER TABLE project_references RENAME TO project_references_v57;
+      CREATE TABLE project_references (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        source_task_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT,
+        project_root_id TEXT REFERENCES project_workspace_roots(id) ON DELETE RESTRICT,
+        relative_path TEXT NOT NULL CHECK (length(relative_path) >= 1 AND length(relative_path) <= 1024),
+        registered_root_identity TEXT NOT NULL CHECK (length(registered_root_identity) = 64),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        last_sealed_digest TEXT CHECK (last_sealed_digest IS NULL OR length(last_sealed_digest) = 64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK ((source_task_id IS NULL) <> (project_root_id IS NULL))
+      );
+      INSERT INTO project_references(
+        id, project_id, source_task_id, project_root_id, relative_path,
+        registered_root_identity, enabled, revision, last_sealed_digest, created_at, updated_at
+      ) SELECT id, project_id, source_task_id, NULL, relative_path,
+          registered_root_identity, enabled, revision, last_sealed_digest, created_at, updated_at
+        FROM project_references_v57;
+      DROP TABLE project_references_v57;
+      CREATE UNIQUE INDEX project_references_task_path_idx
+        ON project_references(project_id, source_task_id, relative_path)
+        WHERE source_task_id IS NOT NULL;
+      CREATE UNIQUE INDEX project_references_root_path_idx
+        ON project_references(project_id, project_root_id, relative_path)
+        WHERE project_root_id IS NOT NULL;
+      CREATE INDEX project_references_project_order_idx
+        ON project_references(project_id, created_at, id);
+      CREATE INDEX project_references_source_task_idx
+        ON project_references(source_task_id, id) WHERE source_task_id IS NOT NULL;
+      CREATE INDEX project_references_project_root_idx
+        ON project_references(project_root_id, id) WHERE project_root_id IS NOT NULL;
+
+      CREATE TABLE turn_workspace_sets (
+        turn_id TEXT PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        source TEXT NOT NULL CHECK (source IN ('project', 'task', 'none')),
+        project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+        primary_root_id TEXT,
+        root_set_digest TEXT NOT NULL CHECK (length(root_set_digest) = 64),
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE turn_workspace_roots (
+        turn_id TEXT NOT NULL REFERENCES turn_workspace_sets(turn_id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 16),
+        root_id TEXT NOT NULL,
+        canonical_path TEXT NOT NULL,
+        label TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('primary', 'secondary')),
+        workspace_key TEXT NOT NULL CHECK (length(workspace_key) = 64),
+        root_identity_digest TEXT NOT NULL CHECK (length(root_identity_digest) = 64),
+        PRIMARY KEY(turn_id, ordinal),
+        UNIQUE(turn_id, root_id)
+      );
+    `,
+    requiresForeignKeysOff: true,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3220,7 +3340,17 @@ export interface PersistenceClient {
   getTask(taskId: string): TaskSummary;
   createTask(title?: string, localOnly?: boolean, projectId?: string): TaskSummary;
   listProjects(): ProjectSummary[];
-  createProject(name: string): ProjectSummary;
+  createProject(
+    input: string | { name: string; folders?: readonly ProjectFolderBinding[] },
+  ): ProjectSummary;
+  listProjectFolders(projectId: string): ProjectFolder[];
+  getProjectFolderRootIdentities(projectId: string): ReadonlyMap<string, string>;
+  getEffectiveWorkspaceRootIdentities(taskId: string): ReadonlyMap<string, string>;
+  replaceProjectFolders(input: {
+    projectId: string;
+    expectedRevision: number;
+    folders: readonly ProjectFolderBinding[];
+  }): ProjectSummary;
   updateProject(input: {
     projectId: string;
     expectedRevision: number;
@@ -3240,7 +3370,8 @@ export interface PersistenceClient {
   listProjectReferences(projectId: string): ProjectReference[];
   addProjectReference(input: {
     projectId: string;
-    sourceTaskId: string;
+    sourceTaskId?: string;
+    projectRootId?: string;
     relativePath: string;
     registeredRootIdentity: string;
   }): ProjectReference;
@@ -3250,6 +3381,9 @@ export interface PersistenceClient {
     enabled: boolean;
   }): ProjectReference;
   removeProjectReference(referenceId: string, expectedRevision: number): void;
+  getEffectiveWorkspaceSet(taskId: string): EffectiveWorkspaceSet;
+  sealTurnWorkspaceSet(taskId: string, turnId: string): EffectiveWorkspaceSet;
+  readTurnWorkspaceSet(turnId: string): EffectiveWorkspaceSet | null;
   listProjectMemories(projectId: string): ProjectMemory[];
   createProjectMemoryFromTurn(input: {
     projectId: string;
@@ -4454,15 +4588,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
       updatedAt: now,
     });
     this.db.transaction(() => {
-      if (projectId !== undefined) this.assertProjectAcceptsTask(projectId);
+      let legacyProjectWorkspaceFallback = 0;
+      if (projectId !== undefined) {
+        this.assertProjectAcceptsTask(projectId);
+        legacyProjectWorkspaceFallback =
+          this.getProjectRow(projectId).workspace_roots_configured === 0 ? 1 : 0;
+      }
       this.db
         .prepare(
           `INSERT INTO tasks(
              id, title, pinned, archived, goal, workspace_path, local_only, draft,
-             primary_thread_id, title_source, created_at, updated_at, project_id
-           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?, ?, ?)`,
+             primary_thread_id, title_source, created_at, updated_at, project_id,
+             legacy_project_workspace_fallback
+           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?, ?, ?, ?)`,
         )
-        .run(task.id, task.title, localOnly ? 1 : 0, titleSource, now, now, projectId ?? null);
+        .run(
+          task.id,
+          task.title,
+          localOnly ? 1 : 0,
+          titleSource,
+          now,
+          now,
+          projectId ?? null,
+          legacyProjectWorkspaceFallback,
+        );
       this.db
         .prepare(
           `INSERT INTO agent_threads(
@@ -4515,28 +4664,297 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare(
           `SELECT p.*,
-             SUM(CASE WHEN t.archived = 0 THEN 1 ELSE 0 END) AS task_count,
-             MAX(p.updated_at, COALESCE(MAX(t.updated_at), p.updated_at)) AS last_activity_at
+             (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.archived = 0) AS task_count,
+             (SELECT COUNT(*) FROM project_workspace_roots r WHERE r.project_id = p.id) AS folder_count,
+             (SELECT id FROM project_workspace_roots r WHERE r.project_id = p.id AND r.role = 'primary') AS primary_folder_id,
+             (SELECT canonical_path FROM project_workspace_roots r WHERE r.project_id = p.id AND r.role = 'primary') AS primary_folder_path,
+             (SELECT label FROM project_workspace_roots r WHERE r.project_id = p.id AND r.role = 'primary') AS primary_folder_label,
+             MAX(p.updated_at, COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.project_id = p.id), p.updated_at)) AS last_activity_at
            FROM projects p
-           LEFT JOIN tasks t ON t.project_id = p.id
-           GROUP BY p.id
            ORDER BY last_activity_at DESC, p.id`,
         )
         .all() as ProjectRow[]
     ).map(toProject);
   }
 
-  createProject(name: string): ProjectSummary {
-    const parsedName = parseProjectName(name);
+  createProject(
+    input: string | { name: string; folders?: readonly ProjectFolderBinding[] },
+  ): ProjectSummary {
+    const parsedName = parseProjectName(typeof input === 'string' ? input : input.name);
+    const folders = typeof input === 'string' ? [] : [...(input.folders ?? [])];
+    const workspaceRootsConfigured = typeof input !== 'string' && input.folders !== undefined;
+    validateProjectFolderBindings(folders);
     const now = new Date().toISOString();
     const id = randomUUID();
-    this.db
-      .prepare(
-        `INSERT INTO projects(id, name, archived, revision, created_at, updated_at)
-         VALUES (?, ?, 0, 1, ?, ?)`,
-      )
-      .run(id, parsedName, now, now);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO projects(
+             id, name, archived, revision, workspace_roots_configured, created_at, updated_at
+           ) VALUES (?, ?, 0, 1, ?, ?, ?)`,
+        )
+        .run(id, parsedName, workspaceRootsConfigured ? 1 : 0, now, now);
+      this.insertProjectFolders(id, folders, now);
+    })();
     return this.getProject(id);
+  }
+
+  listProjectFolders(projectId: string): ProjectFolder[] {
+    this.getProjectRow(projectId);
+    return this.getProjectRootRows(projectId).map(toProjectFolder);
+  }
+
+  getProjectFolderRootIdentities(projectId: string): ReadonlyMap<string, string> {
+    this.getProjectRow(projectId);
+    return new Map(
+      this.getProjectRootRows(projectId).map(({ id, root_identity_digest }) => [
+        id,
+        root_identity_digest,
+      ]),
+    );
+  }
+
+  getEffectiveWorkspaceRootIdentities(taskId: string): ReadonlyMap<string, string> {
+    const task = this.getTaskRow(taskId);
+    const roots = task.project_id === null ? [] : this.getProjectRootRows(task.project_id);
+    return new Map(
+      effectiveWorkspaceBindings(task, roots).map(({ rootId, rootIdentityDigest }) => [
+        rootId,
+        rootIdentityDigest,
+      ]),
+    );
+  }
+
+  replaceProjectFolders(input: {
+    projectId: string;
+    expectedRevision: number;
+    folders: readonly ProjectFolderBinding[];
+  }): ProjectSummary {
+    const folders = [...input.folders];
+    validateProjectFolderBindings(folders);
+    return this.db.transaction(() => {
+      const project = this.getProjectRow(input.projectId);
+      if (project.revision !== input.expectedRevision)
+        throw new ProjectConflictError('Stale Project revision');
+      const current = this.getProjectRootRows(input.projectId);
+      const assignedIds = assignProjectFolderIds(current, folders);
+      const next = folders.map((folder, ordinal) => ({
+        ...folder,
+        id: assignedIds[ordinal]!,
+        ordinal,
+      }));
+      const unchanged =
+        project.workspace_roots_configured === 1 &&
+        current.length === next.length &&
+        current.every((root, ordinal) => {
+          const candidate = next[ordinal]!;
+          return (
+            root.id === candidate.id &&
+            root.canonical_path === candidate.canonicalPath &&
+            root.label === (candidate.label ?? folderLabel(candidate.canonicalPath)) &&
+            root.role === candidate.role &&
+            root.workspace_key === candidate.workspaceKey &&
+            root.root_identity_digest === candidate.rootIdentityDigest
+          );
+        });
+      if (unchanged) return this.getProject(input.projectId);
+      this.assertProjectFolderMutationAllowed(input.projectId, current, folders);
+      const retained = new Set(next.map(({ id }) => id));
+      const removed = current.filter(({ id }) => !retained.has(id));
+      if (
+        removed.some(
+          ({ id }) =>
+            this.db
+              .prepare('SELECT 1 FROM project_references WHERE project_root_id = ? LIMIT 1')
+              .get(id) !== undefined,
+        )
+      )
+        throw new ReferenceInUseError();
+      const now = new Date().toISOString();
+      const currentIds = new Set(current.map(({ id }) => id));
+      const removeRoot = this.db.prepare('DELETE FROM project_workspace_roots WHERE id = ?');
+      for (const root of removed) removeRoot.run(root.id);
+      const updateSecondary = this.db.prepare(
+        `UPDATE project_workspace_roots
+         SET canonical_path = ?, label = ?, role = 'secondary', ordinal = ?,
+             workspace_key = ?, root_identity_digest = ?, updated_at = ?
+         WHERE id = ? AND project_id = ?`,
+      );
+      const insertSecondary = this.db.prepare(
+        `INSERT INTO project_workspace_roots(
+           id, project_id, canonical_path, label, role, ordinal,
+           workspace_key, root_identity_digest, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'secondary', ?, ?, ?, ?, ?)`,
+      );
+      for (const folder of next.filter(({ role }) => role === 'secondary')) {
+        if (currentIds.has(folder.id))
+          updateSecondary.run(
+            folder.canonicalPath,
+            folder.label,
+            folder.ordinal,
+            folder.workspaceKey,
+            folder.rootIdentityDigest,
+            now,
+            folder.id,
+            input.projectId,
+          );
+        else
+          insertSecondary.run(
+            folder.id,
+            input.projectId,
+            folder.canonicalPath,
+            folder.label,
+            folder.ordinal,
+            folder.workspaceKey,
+            folder.rootIdentityDigest,
+            now,
+            now,
+          );
+      }
+      const primary = next.find(({ role }) => role === 'primary');
+      if (primary !== undefined) {
+        if (currentIds.has(primary.id)) {
+          updateSecondary.run(
+            primary.canonicalPath,
+            primary.label,
+            primary.ordinal,
+            primary.workspaceKey,
+            primary.rootIdentityDigest,
+            now,
+            primary.id,
+            input.projectId,
+          );
+          this.db
+            .prepare("UPDATE project_workspace_roots SET role = 'primary' WHERE id = ?")
+            .run(primary.id);
+        } else {
+          insertSecondary.run(
+            primary.id,
+            input.projectId,
+            primary.canonicalPath,
+            primary.label,
+            primary.ordinal,
+            primary.workspaceKey,
+            primary.rootIdentityDigest,
+            now,
+            now,
+          );
+          this.db
+            .prepare("UPDATE project_workspace_roots SET role = 'primary' WHERE id = ?")
+            .run(primary.id);
+        }
+      }
+      const updated = this.db
+        .prepare(
+          `UPDATE projects SET revision = revision + 1, context_epoch = context_epoch + 1,
+             workspace_roots_configured = 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+        )
+        .run(now, input.projectId, input.expectedRevision);
+      if (updated.changes !== 1) throw new ProjectConflictError('Stale Project revision');
+      this.db
+        .prepare(
+          `UPDATE tasks SET context_epoch = context_epoch + 1,
+             legacy_project_workspace_fallback = 0, updated_at = ? WHERE project_id = ?`,
+        )
+        .run(now, input.projectId);
+      this.bumpProjectTaskPolicyEpochs(input.projectId, now);
+      this.quarantineBackgroundForProjectContextInTransaction(input.projectId, now);
+      return this.getProject(input.projectId);
+    })();
+  }
+
+  private insertProjectFolders(
+    projectId: string,
+    folders: readonly ProjectFolderBinding[],
+    now: string,
+  ): void {
+    const insert = this.db.prepare(
+      `INSERT INTO project_workspace_roots(
+         id, project_id, canonical_path, label, role, ordinal,
+         workspace_key, root_identity_digest, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    folders.forEach((folder, ordinal) =>
+      insert.run(
+        folder.id ?? randomUUID(),
+        projectId,
+        folder.canonicalPath,
+        folder.label ?? folderLabel(folder.canonicalPath),
+        folder.role,
+        ordinal,
+        folder.workspaceKey,
+        folder.rootIdentityDigest,
+        now,
+        now,
+      ),
+    );
+  }
+
+  private getProjectRootRows(projectId: string): ProjectWorkspaceRootRow[] {
+    return this.db
+      .prepare('SELECT * FROM project_workspace_roots WHERE project_id = ? ORDER BY ordinal, id')
+      .all(projectId) as ProjectWorkspaceRootRow[];
+  }
+
+  private assertProjectFolderMutationAllowed(
+    projectId: string,
+    current: readonly ProjectWorkspaceRootRow[],
+    next: readonly ProjectFolderBinding[],
+  ): void {
+    const busyTask = this.db
+      .prepare(
+        `SELECT 1 FROM tasks t WHERE t.project_id = ? AND (
+           EXISTS (SELECT 1 FROM turns tr WHERE tr.task_id = t.id AND tr.state NOT IN ('completed', 'failed', 'canceled', 'interrupted'))
+           OR EXISTS (SELECT 1 FROM input_queue q WHERE q.task_id = t.id AND q.state = 'queued')
+           OR EXISTS (
+             SELECT 1 FROM teams tm WHERE tm.task_id = t.id AND (
+               EXISTS (SELECT 1 FROM team_executions e WHERE e.team_id = tm.id AND e.state NOT IN ('completed', 'failed', 'canceled'))
+               OR EXISTS (SELECT 1 FROM team_missions m WHERE m.team_id = tm.id AND m.state NOT IN ('completed', 'failed', 'canceled'))
+             )
+           )
+           OR EXISTS (SELECT 1 FROM edit_sagas s WHERE s.task_id = t.id AND s.state NOT IN ('committed', 'restored'))
+         ) LIMIT 1`,
+      )
+      .get(projectId);
+    if (busyTask !== undefined)
+      throw new ProjectFolderMutationBlockedError('Project has active work');
+    const keys = new Set([
+      ...current.map(({ workspace_key }) => workspace_key),
+      ...next.map(({ workspaceKey }) => workspaceKey),
+    ]);
+    const stateQuery = this.db.prepare(
+      `SELECT state FROM workspace_mutation_state WHERE workspace_key = ? AND state <> 'idle'`,
+    );
+    const quarantineQuery = this.db.prepare(
+      `SELECT 1 FROM task_mutation_quarantines WHERE workspace_key = ? AND cleared_at IS NULL LIMIT 1`,
+    );
+    for (const key of keys)
+      if (stateQuery.get(key) !== undefined || quarantineQuery.get(key) !== undefined)
+        throw new ProjectFolderMutationBlockedError('Project Workspace is leased or recovering');
+  }
+
+  private bumpProjectTaskPolicyEpochs(projectId: string, now: string): void {
+    const rows = this.db
+      .prepare(
+        `SELECT s.task_id, s.policy_epoch FROM permission_policy_state s
+         JOIN tasks t ON t.id = s.task_id WHERE t.project_id = ?`,
+      )
+      .all(projectId) as { task_id: string; policy_epoch: number }[];
+    for (const row of rows) {
+      const nextEpoch = row.policy_epoch + 1;
+      this.db
+        .prepare(
+          'UPDATE permission_policy_state SET policy_epoch = ?, updated_at = ? WHERE task_id = ?',
+        )
+        .run(nextEpoch, now, row.task_id);
+      this.db
+        .prepare(
+          'UPDATE permission_grants SET revoked_at = COALESCE(revoked_at, ?) WHERE task_id = ?',
+        )
+        .run(now, row.task_id);
+      this.enqueuePermissionPolicyEpoch(row.task_id, nextEpoch, now);
+    }
   }
 
   updateProject(input: {
@@ -4637,7 +5055,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   addProjectReference(input: {
     projectId: string;
-    sourceTaskId: string;
+    sourceTaskId?: string;
+    projectRootId?: string;
     relativePath: string;
     registeredRootIdentity: string;
   }): ProjectReference {
@@ -4645,16 +5064,27 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.db.transaction(() => {
       const project = this.getProjectRow(input.projectId);
       if (project.archived === 1) throw new ProjectArchivedError();
-      const task = this.getTaskRow(input.sourceTaskId);
-      if (task.project_id !== input.projectId)
-        throw new InvalidProjectError('Reference source Task must belong to the Project');
-      if (
-        task.workspace_path === null ||
-        task.mutation_root_identity_digest !== input.registeredRootIdentity
-      )
-        throw new InvalidProjectError('Reference source Workspace changed');
+      if ((input.sourceTaskId === undefined) === (input.projectRootId === undefined))
+        throw new InvalidProjectError('Exactly one reference root must be supplied');
+      let workspacePath: string | null;
+      if (input.projectRootId !== undefined) {
+        const root = this.getProjectRootRow(input.projectRootId);
+        if (root.project_id !== input.projectId)
+          throw new InvalidProjectError('Reference root must belong to the Project');
+        workspacePath = root.canonical_path;
+        if (root.root_identity_digest !== input.registeredRootIdentity)
+          throw new InvalidProjectError('Reference root identity changed');
+      } else {
+        const task = this.getTaskRow(input.sourceTaskId!);
+        if (task.project_id !== input.projectId)
+          throw new InvalidProjectError('Reference source Task must belong to the Project');
+        workspacePath = task.workspace_path;
+        if (task.mutation_root_identity_digest !== input.registeredRootIdentity)
+          throw new InvalidProjectError('Reference source Workspace changed');
+      }
+      if (workspacePath === null) throw new InvalidProjectError('Reference root is unavailable');
       const readable = readProjectReference({
-        workspacePath: task.workspace_path,
+        workspacePath,
         registeredRootIdentity: input.registeredRootIdentity,
         relativePath,
       });
@@ -4670,14 +5100,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
         this.db
           .prepare(
             `INSERT INTO project_references(
-               id, project_id, source_task_id, relative_path, registered_root_identity,
+               id, project_id, source_task_id, project_root_id, relative_path, registered_root_identity,
                enabled, revision, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)`,
+             ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?)`,
           )
           .run(
             id,
             input.projectId,
-            input.sourceTaskId,
+            input.sourceTaskId ?? null,
+            input.projectRootId ?? null,
             relativePath,
             input.registeredRootIdentity,
             now,
@@ -4736,9 +5167,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   private toProjectReference(row: ProjectReferenceRow): ProjectReference {
-    const task = this.getTaskRow(row.source_task_id);
+    const workspace = this.projectReferenceWorkspace(row);
     const read = readProjectReference({
-      workspacePath: task.workspace_path,
+      workspacePath: workspace.path,
       registeredRootIdentity: row.registered_root_identity,
       relativePath: row.relative_path,
     });
@@ -4752,6 +5183,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       id: row.id,
       projectId: row.project_id,
       sourceTaskId: row.source_task_id,
+      projectRootId: row.project_root_id,
       relativePath: row.relative_path,
       enabled: row.enabled === 1,
       revision: row.revision,
@@ -4761,6 +5193,25 @@ export class SqlitePersistenceClient implements PersistenceClient {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  private getProjectRootRow(rootId: string): ProjectWorkspaceRootRow {
+    const row = this.db
+      .prepare('SELECT * FROM project_workspace_roots WHERE id = ?')
+      .get(rootId) as ProjectWorkspaceRootRow | undefined;
+    if (row === undefined) throw new NotFoundError('Project folder not found');
+    return row;
+  }
+
+  private projectReferenceWorkspace(row: ProjectReferenceRow): {
+    path: string | null;
+    localOnly: number;
+  } {
+    if (row.project_root_id !== null)
+      return { path: this.getProjectRootRow(row.project_root_id).canonical_path, localOnly: 0 };
+    if (row.source_task_id === null) throw new InvalidProjectError('Reference root is missing');
+    const task = this.getTaskRow(row.source_task_id);
+    return { path: task.workspace_path, localOnly: task.local_only };
   }
 
   private bumpProjectContextInTransaction(projectId: string, now: string): void {
@@ -4939,10 +5390,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (this.hasNonTerminalTeamWork(taskId)) throw new TaskAssignmentBlockedError();
       const result = this.db
         .prepare(
-          `UPDATE tasks SET project_id = ?, updated_at = ?
+          `UPDATE tasks
+           SET project_id = ?, legacy_project_workspace_fallback = ?, updated_at = ?
            WHERE id = ? AND project_id IS ?`,
         )
-        .run(nextProjectId, new Date().toISOString(), taskId, expectedProjectId);
+        .run(
+          nextProjectId,
+          nextProjectId !== null &&
+            this.getProjectRow(nextProjectId).workspace_roots_configured === 0
+            ? 1
+            : 0,
+          new Date().toISOString(),
+          taskId,
+          expectedProjectId,
+        );
       if (result.changes !== 1) throw new ProjectConflictError('Task Project membership changed');
       return this.getTask(taskId);
     })();
@@ -4979,21 +5440,43 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const row = this.db
       .prepare(
         `SELECT p.*,
-           SUM(CASE WHEN t.archived = 0 THEN 1 ELSE 0 END) AS task_count,
-           MAX(p.updated_at, COALESCE(MAX(t.updated_at), p.updated_at)) AS last_activity_at
+           (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.archived = 0) AS task_count,
+           (SELECT COUNT(*) FROM project_workspace_roots r WHERE r.project_id = p.id) AS folder_count,
+           (SELECT id FROM project_workspace_roots r WHERE r.project_id = p.id AND r.role = 'primary') AS primary_folder_id,
+           (SELECT canonical_path FROM project_workspace_roots r WHERE r.project_id = p.id AND r.role = 'primary') AS primary_folder_path,
+           (SELECT label FROM project_workspace_roots r WHERE r.project_id = p.id AND r.role = 'primary') AS primary_folder_label,
+           MAX(p.updated_at, COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.project_id = p.id), p.updated_at)) AS last_activity_at
          FROM projects p
-         LEFT JOIN tasks t ON t.project_id = p.id
          WHERE p.id = ?
-         GROUP BY p.id`,
+        `,
       )
       .get(projectId) as ProjectRow | undefined;
     if (row === undefined) throw new NotFoundError('Project not found');
     return toProject(row);
   }
 
-  private getProjectRow(projectId: string): Omit<ProjectRow, 'task_count' | 'last_activity_at'> {
+  private getProjectRow(
+    projectId: string,
+  ): Omit<
+    ProjectRow,
+    | 'task_count'
+    | 'folder_count'
+    | 'primary_folder_id'
+    | 'primary_folder_path'
+    | 'primary_folder_label'
+    | 'last_activity_at'
+  > {
     const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as
-      Omit<ProjectRow, 'task_count' | 'last_activity_at'> | undefined;
+      | Omit<
+          ProjectRow,
+          | 'task_count'
+          | 'folder_count'
+          | 'primary_folder_id'
+          | 'primary_folder_path'
+          | 'primary_folder_label'
+          | 'last_activity_at'
+        >
+      | undefined;
     if (row === undefined) throw new NotFoundError('Project not found');
     return row;
   }
@@ -7427,7 +7910,123 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   getWorkspace(taskId: string): string | null {
-    return this.getTaskRow(taskId).workspace_path;
+    const task = this.getTaskRow(taskId);
+    if (task.project_id === null) return task.workspace_path;
+    const project = this.getProjectRow(task.project_id);
+    return project.workspace_roots_configured === 0 && task.legacy_project_workspace_fallback === 1
+      ? task.workspace_path
+      : null;
+  }
+
+  getEffectiveWorkspaceSet(taskId: string): EffectiveWorkspaceSet {
+    const task = this.getTaskRow(taskId);
+    if (task.project_id !== null) {
+      const project = this.getProjectRow(task.project_id);
+      const roots = this.getProjectRootRows(task.project_id);
+      if (roots.length > 0) return effectiveWorkspaceSetFromRows('project', task.project_id, roots);
+      if (
+        project.workspace_roots_configured === 0 &&
+        task.legacy_project_workspace_fallback === 1 &&
+        task.workspace_path !== null &&
+        task.mutation_scope_key !== null &&
+        task.mutation_root_identity_digest !== null
+      )
+        return effectiveWorkspaceSetFromLegacyTask(task, task.project_id);
+      return emptyEffectiveWorkspaceSet(task.project_id);
+    }
+    if (
+      task.workspace_path !== null &&
+      task.mutation_scope_key !== null &&
+      task.mutation_root_identity_digest !== null
+    )
+      return effectiveWorkspaceSetFromLegacyTask(task, null);
+    return emptyEffectiveWorkspaceSet(null);
+  }
+
+  sealTurnWorkspaceSet(taskId: string, turnId: string): EffectiveWorkspaceSet {
+    return this.db.transaction(() => {
+      const existing = this.readTurnWorkspaceSet(turnId);
+      if (existing !== null) return existing;
+      const turn = this.db.prepare('SELECT task_id FROM turns WHERE id = ?').get(turnId) as
+        { task_id: string } | undefined;
+      if (turn === undefined || turn.task_id !== taskId) throw new NotFoundError('Turn not found');
+      const effective = this.getEffectiveWorkspaceSet(taskId);
+      const task = this.getTaskRow(taskId);
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO turn_workspace_sets(
+             turn_id, task_id, source, project_id, primary_root_id, root_set_digest, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          turnId,
+          taskId,
+          effective.source,
+          effective.projectId,
+          effective.primaryRootId,
+          effective.digest,
+          now,
+        );
+      const bindings = effectiveWorkspaceBindings(
+        task,
+        this.getProjectRootRows(task.project_id ?? ''),
+      );
+      const insert = this.db.prepare(
+        `INSERT INTO turn_workspace_roots(
+           turn_id, ordinal, root_id, canonical_path, label, role,
+           workspace_key, root_identity_digest
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      bindings.forEach((root, ordinal) =>
+        insert.run(
+          turnId,
+          ordinal,
+          root.rootId,
+          root.path,
+          root.label,
+          root.role,
+          root.workspaceKey,
+          root.rootIdentityDigest,
+        ),
+      );
+      return effective;
+    })();
+  }
+
+  readTurnWorkspaceSet(turnId: string): EffectiveWorkspaceSet | null {
+    const set = this.db
+      .prepare('SELECT * FROM turn_workspace_sets WHERE turn_id = ?')
+      .get(turnId) as
+      | {
+          source: 'project' | 'task' | 'none';
+          project_id: string | null;
+          primary_root_id: string | null;
+          root_set_digest: string;
+        }
+      | undefined;
+    if (set === undefined) return null;
+    const roots = this.db
+      .prepare('SELECT * FROM turn_workspace_roots WHERE turn_id = ? ORDER BY ordinal')
+      .all(turnId) as {
+      root_id: string;
+      canonical_path: string;
+      label: string;
+      role: 'primary' | 'secondary';
+    }[];
+    return {
+      source: set.source,
+      projectId: set.project_id,
+      primaryRootId: set.primary_root_id,
+      roots: roots.map((root) => ({
+        rootId: root.root_id,
+        path: root.canonical_path,
+        label: root.label,
+        role: root.role,
+        status: 'available',
+      })),
+      digest: set.root_set_digest,
+    };
   }
 
   setWorkspace(taskId: string, path: string): void {
@@ -7448,6 +8047,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.transaction(() => {
       this.assertTaskNotMutationQuarantined(taskId);
       const current = this.getTaskRow(taskId);
+      if (current.project_id !== null) {
+        const project = this.getProjectRow(current.project_id);
+        if (
+          project.workspace_roots_configured === 1 ||
+          current.legacy_project_workspace_fallback !== 1
+        )
+          throw new InvalidProjectError('Project Tasks use the Project Workspace');
+      }
       if (current.mutation_scope_key !== null) {
         const active = this.db
           .prepare(
@@ -11210,9 +11817,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .all(project.id) as ProjectReferenceRow[];
       for (const reference of references) {
-        const sourceTask = this.getTaskRow(reference.source_task_id);
+        const referenceWorkspace = this.projectReferenceWorkspace(reference);
         const read = readProjectReference({
-          workspacePath: sourceTask.workspace_path,
+          workspacePath: referenceWorkspace.path,
           registeredRootIdentity: reference.registered_root_identity,
           relativePath: reference.relative_path,
         });
@@ -11249,7 +11856,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
                 ? 'existing_context_over_budget'
                 : 'project_context_over_budget',
           authority: 'none',
-          localOnly: sourceTask.local_only === 1,
+          localOnly: referenceWorkspace.localOnly === 1,
           content: included ? read.content : null,
           capturedAt: createdAt,
         });
@@ -11515,6 +12122,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     skills: readonly PersistedTurnSkill[] = [],
     includeBuiltinTeamSkill = false,
   ): StartedTurn {
+    const effectiveWorkspace = this.getEffectiveWorkspaceSet(taskId);
+    if (effectiveWorkspace.source === 'project' && effectiveWorkspace.roots.length > 0)
+      throw new ProjectWorkspaceRuntimeUnavailableError();
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
@@ -11801,9 +12411,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       )
       .all(project.id) as ProjectReferenceRow[];
     for (const reference of references) {
-      const task = this.getTaskRow(reference.source_task_id);
+      const referenceWorkspace = this.projectReferenceWorkspace(reference);
       const read = readProjectReference({
-        workspacePath: task.workspace_path,
+        workspacePath: referenceWorkspace.path,
         registeredRootIdentity: reference.registered_root_identity,
         relativePath: reference.relative_path,
       });
@@ -11824,7 +12434,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
             ]),
           ),
         authority: 'none',
-        localOnly: task.local_only === 1,
+        localOnly: referenceWorkspace.localOnly === 1,
       });
     }
     return candidates;
@@ -12581,6 +13191,8 @@ export class ProjectArchivedError extends Error {}
 export class TaskAssignmentBlockedError extends Error {}
 export class ReferenceInUseError extends Error {}
 export class InvalidProjectError extends Error {}
+export class ProjectFolderMutationBlockedError extends Error {}
+export class ProjectWorkspaceRuntimeUnavailableError extends Error {}
 export class InvalidCanvasViewError extends Error {}
 export class CanvasViewConflictError extends Error {}
 export class AcceptanceEvidenceMissingError extends Error {
@@ -12680,10 +13292,204 @@ function toProject(row: ProjectRow): ProjectSummary {
     archived: row.archived === 1,
     revision: row.revision,
     taskCount: row.task_count,
+    folderCount: row.folder_count,
+    primaryFolder:
+      row.primary_folder_id === null ||
+      row.primary_folder_path === null ||
+      row.primary_folder_label === null
+        ? null
+        : {
+            id: row.primary_folder_id,
+            path: row.primary_folder_path,
+            label: row.primary_folder_label,
+          },
     lastActivityAt: row.last_activity_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
+}
+
+function toProjectFolder(row: ProjectWorkspaceRootRow): ProjectFolder {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    path: row.canonical_path,
+    label: row.label,
+    role: row.role,
+    ordinal: row.ordinal,
+    status: 'available',
+  };
+}
+
+function folderLabel(path: string): string {
+  return basename(path) || path;
+}
+
+function validateProjectFolderBindings(folders: readonly ProjectFolderBinding[]): void {
+  if (folders.length > 16) throw new InvalidProjectError('Project folder limit reached');
+  const primaryCount = folders.filter(({ role }) => role === 'primary').length;
+  if ((folders.length === 0 && primaryCount !== 0) || (folders.length > 0 && primaryCount !== 1))
+    throw new InvalidProjectError('A non-empty Project must have exactly one Primary folder');
+  const paths = new Set<string>();
+  const identities = new Set<string>();
+  folders.forEach((folder, index) => {
+    if (!isAbsolute(folder.canonicalPath) || dirname(folder.canonicalPath) === folder.canonicalPath)
+      throw new InvalidProjectError('Project folder must be an absolute non-filesystem-root path');
+    validateMutationDigest(folder.workspaceKey, 'workspace mutation key');
+    validateMutationDigest(folder.rootIdentityDigest, 'workspace root identity digest');
+    if (paths.has(folder.canonicalPath) || identities.has(folder.rootIdentityDigest))
+      throw new InvalidProjectError('Project folders must resolve to distinct directories');
+    for (const previous of folders.slice(0, index)) {
+      const fromPrevious = relative(previous.canonicalPath, folder.canonicalPath);
+      const fromFolder = relative(folder.canonicalPath, previous.canonicalPath);
+      if (
+        (fromPrevious !== '' && !fromPrevious.startsWith(`..${sep}`) && fromPrevious !== '..') ||
+        (fromFolder !== '' && !fromFolder.startsWith(`..${sep}`) && fromFolder !== '..')
+      )
+        throw new InvalidProjectError('Nested Project folders are not allowed');
+    }
+    paths.add(folder.canonicalPath);
+    identities.add(folder.rootIdentityDigest);
+  });
+}
+
+function assignProjectFolderIds(
+  current: readonly ProjectWorkspaceRootRow[],
+  folders: readonly ProjectFolderBinding[],
+): string[] {
+  const currentById = new Map(current.map((root) => [root.id, root]));
+  const currentByIdentity = new Map(current.map((root) => [root.root_identity_digest, root]));
+  const used = new Set<string>();
+  return folders.map((folder) => {
+    const requested = folder.id === undefined ? undefined : currentById.get(folder.id);
+    const identityMatch = currentByIdentity.get(folder.rootIdentityDigest);
+    const match =
+      requested?.root_identity_digest === folder.rootIdentityDigest ? requested : identityMatch;
+    const id = match?.id ?? randomUUID();
+    if (used.has(id)) throw new InvalidProjectError('Project folder ID is duplicated');
+    used.add(id);
+    return id;
+  });
+}
+
+type EffectiveWorkspaceBinding = {
+  rootId: string;
+  path: string;
+  label: string;
+  role: 'primary' | 'secondary';
+  workspaceKey: string;
+  rootIdentityDigest: string;
+};
+
+function effectiveWorkspaceBindings(
+  task: TaskRow,
+  projectRoots: readonly ProjectWorkspaceRootRow[],
+): EffectiveWorkspaceBinding[] {
+  if (projectRoots.length > 0)
+    return projectRoots.map((root) => ({
+      rootId: root.id,
+      path: root.canonical_path,
+      label: root.label,
+      role: root.role,
+      workspaceKey: root.workspace_key,
+      rootIdentityDigest: root.root_identity_digest,
+    }));
+  if (
+    task.workspace_path !== null &&
+    task.mutation_scope_key !== null &&
+    task.mutation_root_identity_digest !== null &&
+    (task.project_id === null || task.legacy_project_workspace_fallback === 1)
+  )
+    return [
+      {
+        rootId: task.id,
+        path: task.workspace_path,
+        label: folderLabel(task.workspace_path),
+        role: 'primary',
+        workspaceKey: task.mutation_scope_key,
+        rootIdentityDigest: task.mutation_root_identity_digest,
+      },
+    ];
+  return [];
+}
+
+function effectiveWorkspaceDigest(
+  source: 'project' | 'task' | 'none',
+  projectId: string | null,
+  roots: readonly EffectiveWorkspaceBinding[],
+): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        'effective-workspace-set-v1',
+        source,
+        projectId,
+        roots.map((root) => [
+          root.rootId,
+          root.path,
+          root.role,
+          root.workspaceKey,
+          root.rootIdentityDigest,
+        ]),
+      ]),
+    )
+    .digest('hex');
+}
+
+function effectiveWorkspaceSetFromRows(
+  source: 'project',
+  projectId: string,
+  rows: readonly ProjectWorkspaceRootRow[],
+): EffectiveWorkspaceSet {
+  const bindings = rows.map((root) => ({
+    rootId: root.id,
+    path: root.canonical_path,
+    label: root.label,
+    role: root.role,
+    workspaceKey: root.workspace_key,
+    rootIdentityDigest: root.root_identity_digest,
+  }));
+  return {
+    source,
+    projectId,
+    primaryRootId: bindings.find(({ role }) => role === 'primary')?.rootId ?? null,
+    roots: bindings.map(
+      ({ workspaceKey: _workspaceKey, rootIdentityDigest: _identity, ...root }) => ({
+        ...root,
+        status: 'available',
+      }),
+    ),
+    digest: effectiveWorkspaceDigest(source, projectId, bindings),
+  };
+}
+
+function effectiveWorkspaceSetFromLegacyTask(
+  task: TaskRow,
+  projectId: string | null,
+): EffectiveWorkspaceSet {
+  const bindings = effectiveWorkspaceBindings(task, []);
+  return {
+    source: 'task',
+    projectId,
+    primaryRootId: task.id,
+    roots: bindings.map(
+      ({ workspaceKey: _workspaceKey, rootIdentityDigest: _identity, ...root }) => ({
+        ...root,
+        status: 'available',
+      }),
+    ),
+    digest: effectiveWorkspaceDigest('task', projectId, bindings),
+  };
+}
+
+function emptyEffectiveWorkspaceSet(projectId: string | null): EffectiveWorkspaceSet {
+  return {
+    source: 'none',
+    projectId,
+    primaryRootId: null,
+    roots: [],
+    digest: effectiveWorkspaceDigest('none', projectId, []),
+  };
 }
 
 function parseProjectName(name: string): string {
