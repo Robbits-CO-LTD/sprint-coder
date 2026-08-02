@@ -184,6 +184,7 @@ export function saveWorkspaceFile(
       return refuse('io_error');
     closeSync(stagingDescriptor);
     stagingDescriptor = null;
+    restoreStagedMetadata(absolute, staging);
     chmodSync(staging, originalMode);
 
     const finalTarget = resolveSafeWorkspaceFile(workspacePath, relativePath);
@@ -337,6 +338,18 @@ function stageTargetFile(absolute: string, staging: string): void {
     return;
   }
   throw new Error(`Atomic metadata-preserving saves are unsupported on ${process.platform}`);
+}
+
+function restoreStagedMetadata(absolute: string, staging: string): void {
+  if (process.platform !== 'linux') return;
+  // Linux clears security.capability when file contents change. Reapply attributes after the
+  // write without copying the old bytes back; failure is fatal so capabilities are never lost
+  // silently. The final chmod below restores all ordinary and special permission bits as well.
+  execFileSync(
+    '/bin/cp',
+    ['--attributes-only', '--preserve=all', '--no-target-directory', absolute, staging],
+    { stdio: 'ignore' },
+  );
 }
 
 const EMPTY_DIGEST = createHash('sha256').update('').digest('hex');
