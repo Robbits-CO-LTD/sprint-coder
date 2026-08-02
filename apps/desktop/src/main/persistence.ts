@@ -6910,7 +6910,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       finalizing: ['integrating', 'waiting_resume', 'quarantined'],
       integrating: ['waiting_resume', 'completed', 'quarantined'],
       waiting_resume: ['finalizing', 'integrating', 'quarantined'],
-      completed: ['quarantined'],
+      completed: ['waiting_resume', 'quarantined'],
       quarantined: [],
     };
     return this.db.transaction(() => {

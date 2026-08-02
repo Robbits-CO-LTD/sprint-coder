@@ -93,6 +93,25 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     });
   });
 
+  it('adopts a clean deterministic worktree left by a preparing execution', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const created = await manager.create({
+      agentId: 'agent-prepare',
+      worktreeId: 'execution-prepare-1',
+      repoPath,
+      baseRef: head,
+    });
+
+    await expect(
+      manager.ensureCreated({
+        agentId: 'agent-prepare',
+        worktreeId: 'execution-prepare-1',
+        repoPath,
+        baseRef: head,
+      }),
+    ).resolves.toEqual(created);
+  });
+
   it('rejects an agentId that does not match the allowed character set', async () => {
     const { repoPath, manager } = await fixture();
 

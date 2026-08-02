@@ -211,6 +211,27 @@ export class WorkerWorktreeManager {
     return { path: worktreePath, baseHead: stdout.trim() };
   }
 
+  async ensureCreated(input: CreateWorktreeInput): Promise<CreateWorktreeResult> {
+    const worktreeId = input.worktreeId ?? input.agentId;
+    const worktreePath = this.worktreePathFor(worktreeId);
+    if (!(await pathExists(worktreePath))) return this.create(input);
+    const expectedHead = (
+      await this.runGit(input.repoPath, ['rev-parse', input.baseRef ?? 'HEAD'], 'create_failed')
+    ).stdout.trim();
+    validateGitHead(expectedHead);
+    const { stdout } = await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'create_failed');
+    const head = stdout.trim();
+    if (head !== expectedHead)
+      throw new WorktreeError(
+        'create_failed',
+        `Existing worktree HEAD does not match its preparing record: expected ${expectedHead}, got ${head}`,
+      );
+    const status = await this.runGit(worktreePath, ['status', '--porcelain'], 'create_failed');
+    if (status.stdout.trim() !== '')
+      throw new WorktreeError('dirty', 'Existing preparing worktree contains unsealed changes');
+    return { path: worktreePath, baseHead: head };
+  }
+
   async cleanup({
     agentId,
     repoPath,

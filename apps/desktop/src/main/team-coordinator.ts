@@ -60,7 +60,7 @@ import type {
   TeamSnapshot,
   TeamV2ActivityRecord,
 } from './persistence';
-import type { CleanRepository, WorkerWorktreeManager } from './worker-worktree';
+import type { WorkerWorktreeManager } from './worker-worktree';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 export type WorkerRuntimeResult = Readonly<{
@@ -847,6 +847,11 @@ export class TeamCoordinator {
           (isolation.phase === 'waiting_resume' && isolation.resumeKind === 'integration'))
       ) {
         await this.verifyWorkspace?.(taskId);
+        this.persistence.acquireTeamIntegrationRootLeases({
+          executionId: execution.id,
+          roots: isolationLeaseBindings(isolation),
+          now: this.isoNow(),
+        });
         this.persistence.transitionTeamMission(mission.id, 'running', this.isoNow());
         if (this.persistence.getTeamTask(completion.teamTaskId).status === 'blocked')
           this.persistence.transitionTeamTask(completion.teamTaskId, 'running', this.isoNow());
@@ -872,7 +877,11 @@ export class TeamCoordinator {
             now: this.isoNow(),
           });
           const integrated =
-            finalized.phase === 'completed' ? finalized : await this.integrateIsolation(finalized);
+            finalized.phase === 'completed'
+              ? await this.revalidateIntegratedIsolation(finalized)
+              : await this.integrateIsolation(finalized);
+          if (finalized.phase === 'completed')
+            this.persistence.releaseTeamIntegrationRootLeases(execution.id);
           const checkpointResult = this.persistence.completeTeamMissionStep({
             executionId: execution.id,
             attemptId: completion.attemptId,
@@ -899,6 +908,7 @@ export class TeamCoordinator {
           this.emit(taskId, team.id);
           return this.missionSummary(checkpointResult.mission);
         } catch (error) {
+          this.persistence.releaseTeamIntegrationRootLeases(execution.id);
           if (this.persistence.getTeamTask(completion.teamTaskId).status === 'running')
             this.persistence.transitionTeamTask(completion.teamTaskId, 'blocked', this.isoNow());
           if (this.persistence.getTeamMission(mission.id).state === 'running')
@@ -937,6 +947,11 @@ export class TeamCoordinator {
       )
         throw new Error('Team execution has no resumable integration');
       await this.verifyWorkspace?.(taskId);
+      this.persistence.acquireTeamIntegrationRootLeases({
+        executionId: execution.id,
+        roots: isolationLeaseBindings(isolation),
+        now: this.isoNow(),
+      });
       if (this.persistence.getTeamTask(completion.teamTaskId).status === 'blocked')
         this.persistence.transitionTeamTask(completion.teamTaskId, 'running', this.isoNow());
       try {
@@ -961,7 +976,11 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
         const integrated =
-          finalized.phase === 'completed' ? finalized : await this.integrateIsolation(finalized);
+          finalized.phase === 'completed'
+            ? await this.revalidateIntegratedIsolation(finalized)
+            : await this.integrateIsolation(finalized);
+        if (finalized.phase === 'completed')
+          this.persistence.releaseTeamIntegrationRootLeases(execution.id);
         this.persistence.completeTeamTaskWithReport({
           teamTaskId: completion.teamTaskId,
           agentId: completion.agentId,
@@ -985,6 +1004,7 @@ export class TeamCoordinator {
         this.emit(taskId, team.id);
         return this.detail(team.id);
       } catch (error) {
+        this.persistence.releaseTeamIntegrationRootLeases(execution.id);
         if (this.persistence.getTeamTask(completion.teamTaskId).status === 'running')
           this.persistence.transitionTeamTask(completion.teamTaskId, 'blocked', this.isoNow());
         this.emit(taskId, team.id);
@@ -2699,90 +2719,88 @@ export class TeamCoordinator {
         throw new Error(`Team execution isolation cannot run from ${existing.phase}`);
       this.persistence.acquireTeamIntegrationRootLeases({
         executionId,
-        roots: existing.roots,
+        roots: isolationLeaseBindings(existing),
         now: this.isoNow(),
       });
-      return existing.phase === 'running'
-        ? existing
-        : this.persistence.updateTeamExecutionIsolation({
-            executionId,
-            phase: 'running',
-            resumeKind: null,
-            reason: null,
-            now: this.isoNow(),
+      if (existing.phase === 'running') return existing;
+      try {
+        for (const repository of existing.repositories)
+          await this.worktreeManager.ensureCreated({
+            agentId,
+            worktreeId: isolationWorktreeId(executionId, repository.ordinal),
+            repoPath: repository.repoPath,
+            baseRef: repository.baseHead,
           });
+        return this.persistence.updateTeamExecutionIsolation({
+          executionId,
+          phase: 'running',
+          resumeKind: null,
+          reason: null,
+          now: this.isoNow(),
+        });
+      } catch (error) {
+        this.persistence.releaseTeamIntegrationRootLeases(executionId);
+        throw error;
+      }
     }
     const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
     const repositories = await this.requireWorkspaceWriteEligibility(taskId);
     const bindings = this.persistence.getEffectiveWorkspaceMutationBindings(taskId);
-    const created: { repository: CleanRepository; ordinal: number; path: string }[] = [];
-    try {
-      this.persistence.acquireTeamIntegrationRootLeases({
-        executionId,
-        roots: workspace.roots.map((root) => {
-          const binding = bindings.get(root.rootId);
-          if (binding === undefined)
-            throw new Error(`Workspace root mutation binding is unavailable: ${root.label}`);
-          return {
-            rootId: root.rootId,
-            mutationKey: binding.workspaceKey,
-            identity: binding.rootIdentityDigest,
-          };
-        }),
-        now: this.isoNow(),
-      });
-      for (const [index, repository] of repositories.entries()) {
+    const repositoryRecords: TeamExecutionIsolation['repositories'] = repositories.map(
+      (repository, index) => {
         const ordinal = index + 1;
-        const worktree = await this.worktreeManager.create({
-          agentId,
-          worktreeId: isolationWorktreeId(executionId, ordinal),
-          repoPath: repository.repoPath,
-          baseRef: repository.head,
-        });
-        created.push({ repository, ordinal, path: worktree.path });
-      }
-      const repositoryRecords: TeamExecutionIsolation['repositories'] = created.map(
-        ({ repository, ordinal, path }) => ({
+        return {
           ordinal,
           repoPath: repository.repoPath,
-          worktreePath: path,
+          worktreePath: this.worktreeManager!.worktreePathFor(
+            isolationWorktreeId(executionId, ordinal),
+          ),
           baseHead: repository.head,
           workerHead: null,
           integratedHead: null,
           state: 'active',
           changedFiles: [],
-        }),
-      );
-      const canonicalRootPaths = new Map(
-        await Promise.all(
-          workspace.roots.map(async (root) => [root.rootId, await fsRealpath(root.path)] as const),
-        ),
-      );
-      const rootRecords: TeamExecutionIsolation['roots'] = workspace.roots.map((root) => {
-        const canonicalRootPath = canonicalRootPaths.get(root.rootId);
-        if (canonicalRootPath === undefined)
-          throw new Error(`Workspace root canonical path is unavailable: ${root.label}`);
-        const repository = created.find(({ repository: candidate }) =>
-          isPathInsideOrSame(candidate.repoPath, canonicalRootPath),
-        );
-        if (repository === undefined)
-          throw new Error(`Workspace root is not mapped to a repository: ${root.label}`);
-        const binding = bindings.get(root.rootId);
-        if (binding === undefined)
-          throw new Error(`Workspace root mutation binding is unavailable: ${root.label}`);
-        const repositoryRelative = relative(repository.repository.repoPath, canonicalRootPath);
-        if (isEscapingRelativePath(repositoryRelative))
-          throw new Error(`Workspace root escapes its repository: ${root.label}`);
-        return {
-          rootId: root.rootId,
-          rootLabel: root.label,
-          role: root.role,
-          repositoryOrdinal: repository.ordinal,
-          sourcePath: canonicalRootPath,
-          isolatedPath: resolve(repository.path, repositoryRelative),
-          identity: binding.rootIdentityDigest,
-          mutationKey: binding.workspaceKey,
         };
+      },
+    );
+    const canonicalRootPaths = new Map(
+      await Promise.all(
+        workspace.roots.map(async (root) => [root.rootId, await fsRealpath(root.path)] as const),
+      ),
+    );
+    const rootRecords: TeamExecutionIsolation['roots'] = workspace.roots.map((root) => {
+      const canonicalRootPath = canonicalRootPaths.get(root.rootId);
+      if (canonicalRootPath === undefined)
+        throw new Error(`Workspace root canonical path is unavailable: ${root.label}`);
+      const repositoryIndex = repositories.findIndex((candidate) =>
+        isPathInsideOrSame(candidate.repoPath, canonicalRootPath),
+      );
+      const repository = repositories[repositoryIndex];
+      const repositoryRecord = repositoryRecords[repositoryIndex];
+      if (repository === undefined || repositoryRecord === undefined)
+        throw new Error(`Workspace root is not mapped to a repository: ${root.label}`);
+      const binding = bindings.get(root.rootId);
+      if (binding === undefined)
+        throw new Error(`Workspace root mutation binding is unavailable: ${root.label}`);
+      const repositoryRelative = relative(repository.repoPath, canonicalRootPath);
+      if (isEscapingRelativePath(repositoryRelative))
+        throw new Error(`Workspace root escapes its repository: ${root.label}`);
+      return {
+        rootId: root.rootId,
+        rootLabel: root.label,
+        role: root.role,
+        repositoryOrdinal: repositoryRecord.ordinal,
+        sourcePath: canonicalRootPath,
+        isolatedPath: resolve(repositoryRecord.worktreePath, repositoryRelative),
+        identity: binding.rootIdentityDigest,
+        mutationKey: binding.workspaceKey,
+      };
+    });
+    try {
+      this.persistence.acquireTeamIntegrationRootLeases({
+        executionId,
+        roots: isolationLeaseBindings({ repositories: repositoryRecords, roots: rootRecords }),
+        now: this.isoNow(),
       });
       const recorded = this.persistence.createTeamExecutionIsolation({
         executionId,
@@ -2790,6 +2808,13 @@ export class TeamCoordinator {
         roots: rootRecords,
         now: this.isoNow(),
       });
+      for (const repository of recorded.repositories)
+        await this.worktreeManager.ensureCreated({
+          agentId,
+          worktreeId: isolationWorktreeId(executionId, repository.ordinal),
+          repoPath: repository.repoPath,
+          baseRef: repository.baseHead,
+        });
       return this.persistence.updateTeamExecutionIsolation({
         executionId: recorded.executionId,
         phase: 'running',
@@ -2798,14 +2823,6 @@ export class TeamCoordinator {
         now: this.isoNow(),
       });
     } catch (error) {
-      for (const item of [...created].reverse())
-        await this.worktreeManager
-          .cleanup({
-            agentId,
-            worktreeId: isolationWorktreeId(executionId, item.ordinal),
-            repoPath: item.repository.repoPath,
-          })
-          .catch(() => undefined);
       this.persistence.releaseTeamIntegrationRootLeases(executionId);
       throw error;
     }
@@ -2932,7 +2949,7 @@ export class TeamCoordinator {
     try {
       this.persistence.acquireTeamIntegrationRootLeases({
         executionId: isolation.executionId,
-        roots: isolation.roots,
+        roots: isolationLeaseBindings(isolation),
         now: this.isoNow(),
       });
       isolation = this.persistence.updateTeamExecutionIsolation({
@@ -2950,7 +2967,9 @@ export class TeamCoordinator {
         if (right.ordinal === primaryRepositoryOrdinal) return -1;
         return left.ordinal - right.ordinal;
       });
-      for (const repository of integrationOrder.filter(({ state }) => state === 'ready')) {
+      for (const repository of integrationOrder.filter(({ state }) =>
+        ['ready', 'integrated'].includes(state),
+      )) {
         if (repository.workerHead === null)
           throw new Error('All repositories must be finalized before integration');
         const integrated = await this.worktreeManager.integrate({
@@ -2958,6 +2977,11 @@ export class TeamCoordinator {
           baseHead: repository.baseHead,
           workerHead: repository.workerHead,
         });
+        if (
+          repository.state === 'integrated' &&
+          integrated.integratedHead !== repository.integratedHead
+        )
+          throw new Error(`Integrated repository HEAD changed: ${repository.repoPath}`);
         isolation = this.persistence.updateTeamExecutionIsolation({
           executionId: isolation.executionId,
           phase: 'integrating',
@@ -2990,6 +3014,39 @@ export class TeamCoordinator {
       this.persistence.releaseTeamIntegrationRootLeases(isolation.executionId);
     }
     return isolation;
+  }
+
+  private async revalidateIntegratedIsolation(
+    initial: TeamExecutionIsolationRecord,
+  ): Promise<TeamExecutionIsolationRecord> {
+    if (this.worktreeManager === undefined)
+      throw new Error('Mission worktree manager is unavailable');
+    try {
+      for (const repository of initial.repositories) {
+        if (repository.workerHead === null || repository.integratedHead === null)
+          throw new Error('Completed isolation repository is missing its sealed Git heads');
+        const verified = await this.worktreeManager.integrate({
+          repoPath: repository.repoPath,
+          baseHead: repository.baseHead,
+          workerHead: repository.workerHead,
+        });
+        if (verified.integratedHead !== repository.integratedHead)
+          throw new Error(`Integrated repository HEAD changed: ${repository.repoPath}`);
+      }
+      return initial;
+    } catch (error) {
+      const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+      const waiting = this.persistence.updateTeamExecutionIsolation({
+        executionId: initial.executionId,
+        phase: 'waiting_resume',
+        resumeKind: 'integration',
+        reason: reason === '' ? 'Integrated repository requires revalidation' : reason,
+        now: this.isoNow(),
+      });
+      throw new TeamIntegrationResumeRequiredError(
+        waiting.reason ?? 'Integrated repository changed before resume',
+      );
+    }
   }
 
   private isolationChangedFiles(isolation: TeamExecutionIsolationRecord): readonly string[] {
@@ -3479,6 +3536,29 @@ export function captureGitWorkspaceFingerprint(workspacePath: string | null): {
 
 function isolationWorktreeId(executionId: string, repositoryOrdinal: number): string {
   return `${executionId}-${repositoryOrdinal}`;
+}
+
+function isolationLeaseBindings(
+  isolation: Pick<TeamExecutionIsolationRecord, 'repositories' | 'roots'>,
+): readonly {
+  rootId: string;
+  mutationKey: string;
+  identity: string;
+}[] {
+  const repositories = isolation.repositories.map(({ ordinal, repoPath }) => {
+    const canonicalKey = process.platform === 'win32' ? repoPath.toLowerCase() : repoPath;
+    const mutationKey = createHash('sha256')
+      .update(`team-repository\0${canonicalKey}`)
+      .digest('hex');
+    return {
+      rootId: `repository-${ordinal}`,
+      mutationKey,
+      identity: createHash('sha256')
+        .update(`team-repository-identity\0${canonicalKey}`)
+        .digest('hex'),
+    };
+  });
+  return [...isolation.roots, ...repositories];
 }
 
 function replaceIsolationRepository(

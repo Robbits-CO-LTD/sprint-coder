@@ -266,6 +266,19 @@ class FailRepositoryOnceManager extends WorkerWorktreeManager {
   }
 }
 
+class CrashAfterFirstWorktreeManager extends WorkerWorktreeManager {
+  private crashed = false;
+
+  override async ensureCreated(input: Parameters<WorkerWorktreeManager['ensureCreated']>[0]) {
+    const result = await super.ensureCreated(input);
+    if (!this.crashed) {
+      this.crashed = true;
+      throw new Error('simulated crash after first worktree creation');
+    }
+    return result;
+  }
+}
+
 class BlockingWorkerRuntime extends TestWorkerRuntime {
   activeExecutions = 0;
   maxActiveExecutions = 0;
@@ -862,28 +875,86 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('rejects a concurrent writer before a second Worker runs on the same roots', async () => {
+    it('serializes concurrent writers whose distinct roots share one repository', async () => {
       const persistence = createPersistence();
-      const task = persistence.createTask('Concurrent workspace writers');
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-concurrent-repo-')));
+      const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-concurrent-worktrees-'));
+      cleanup.push(repo, worktreesRoot);
+      const firstRoot = join(repo, 'first');
+      const secondRoot = join(repo, 'second');
+      mkdirSync(firstRoot);
+      mkdirSync(secondRoot);
+      expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+      writeFileSync(join(firstRoot, 'README.md'), 'first\n');
+      writeFileSync(join(secondRoot, 'README.md'), 'second\n');
+      expect(spawnSync('git', ['-C', repo, 'add', '.']).status).toBe(0);
+      expect(
+        spawnSync('git', [
+          '-C',
+          repo,
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.com',
+          'commit',
+          '-q',
+          '-m',
+          'base',
+        ]).status,
+      ).toBe(0);
+      const firstProject = persistence.createProject({
+        name: 'First sibling root',
+        folders: [
+          {
+            id: '50000000-0000-4000-8000-000000000001',
+            path: firstRoot,
+            canonicalPath: firstRoot,
+            label: 'first',
+            role: 'primary',
+            workspaceKey: 'b'.repeat(64),
+            rootIdentityDigest: 'c'.repeat(64),
+          },
+        ],
+      });
+      const secondProject = persistence.createProject({
+        name: 'Second sibling root',
+        folders: [
+          {
+            id: '50000000-0000-4000-8000-000000000002',
+            path: secondRoot,
+            canonicalPath: secondRoot,
+            label: 'second',
+            role: 'primary',
+            workspaceKey: 'd'.repeat(64),
+            rootIdentityDigest: 'e'.repeat(64),
+          },
+        ],
+      });
+      const firstTask = persistence.createTask('First concurrent writer', false, firstProject.id);
+      const secondTask = persistence.createTask(
+        'Second concurrent writer',
+        false,
+        secondProject.id,
+      );
       const runtime = new BlockingWorkerRuntime();
-      const { manager } = configureGitWorkspace(persistence, task.id);
+      const manager = new WorkerWorktreeManager({ worktreesRoot });
       const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
       const firstWorker = await coordinator.hireWorker({
-        taskId: task.id,
+        taskId: firstTask.id,
         role: 'first writer',
         objective: 'hold the root lease',
         contextInheritancePolicy: 'none',
         writeCapable: true,
       });
       const secondWorker = await coordinator.hireWorker({
-        taskId: task.id,
+        taskId: secondTask.id,
         role: 'second writer',
         objective: 'must not overlap the first writer',
         contextInheritancePolicy: 'none',
         writeCapable: true,
       });
       const first = await coordinator.assignTask({
-        taskId: task.id,
+        taskId: firstTask.id,
         targetAgentId: firstWorker.id,
         content: 'first write',
         doneCriteria: ['first completes'],
@@ -891,7 +962,7 @@ if (runsWithElectronAbi)
       });
       await waitFor(() => runtime.releases.length === 1);
       const second = await coordinator.assignTask({
-        taskId: task.id,
+        taskId: secondTask.id,
         targetAgentId: secondWorker.id,
         content: 'second write',
         doneCriteria: ['second must not overlap'],
@@ -903,6 +974,92 @@ if (runsWithElectronAbi)
 
       runtime.releases.shift()?.();
       await waitFor(() => persistence.getTeamExecution(first.executionId).state === 'completed');
+      persistence.close();
+    });
+
+    it('adopts a deterministic worktree after a crash in preparing', async () => {
+      const persistence = createPersistence();
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-prepare-repo-')));
+      const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-prepare-worktrees-'));
+      cleanup.push(repo, worktreesRoot);
+      expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+      writeFileSync(join(repo, 'README.md'), 'base\n');
+      expect(spawnSync('git', ['-C', repo, 'add', 'README.md']).status).toBe(0);
+      expect(
+        spawnSync('git', [
+          '-C',
+          repo,
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.com',
+          'commit',
+          '-q',
+          '-m',
+          'base',
+        ]).status,
+      ).toBe(0);
+      const project = persistence.createProject({
+        name: 'Preparing recovery',
+        folders: [
+          {
+            id: '40000000-0000-4000-8000-000000000001',
+            path: repo,
+            canonicalPath: repo,
+            label: 'repo',
+            role: 'primary',
+            workspaceKey: '9'.repeat(64),
+            rootIdentityDigest: 'a'.repeat(64),
+          },
+        ],
+      });
+      const task = persistence.createTask('Preparing recovery Mission', false, project.id);
+      const runtime = new MultiRootWritingRuntime();
+      const crashing = new CrashAfterFirstWorktreeManager({ worktreesRoot });
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, crashing);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'resume the preparing worktree',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'recover preparation',
+        doneCriteria: ['worktree recovered'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'write after recovery',
+            doneCriteria: ['output exists'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: writer.id,
+            objective: 'verify after recovery',
+            doneCriteria: ['output verified'],
+            access: 'read-only',
+          },
+        ],
+      });
+
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+      const executionId = mission.steps[0]!.executionId;
+      const preparing = persistence.getTeamExecutionIsolation(executionId);
+      expect(preparing).toMatchObject({ phase: 'preparing' });
+      expect(existsSync(preparing!.repositories[0]!.worktreePath)).toBe(true);
+      expect(runtime.workspaceSets).toHaveLength(0);
+
+      const resumed = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new WorkerWorktreeManager({ worktreesRoot }),
+      );
+      await resumed.resumeMission(task.id, mission.id);
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 20_000);
+      expect(runtime.workspaceSets).toHaveLength(1);
+      expect(readFileSync(join(repo, 'worker-output.txt'), 'utf8')).toBe('repo\n');
       persistence.close();
     });
 
@@ -1159,7 +1316,8 @@ if (runsWithElectronAbi)
         20_000,
       );
       const executionId = mission.steps[0]!.executionId;
-      expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
+      const partialIsolation = persistence.getTeamExecutionIsolation(executionId);
+      expect(partialIsolation).toMatchObject({
         phase: 'waiting_resume',
         resumeKind: 'integration',
         repositories: [{ state: 'ready' }, { state: 'integrated' }],
@@ -1189,12 +1347,44 @@ if (runsWithElectronAbi)
       const resumedIntegrate = vi.spyOn(resumedManager, 'integrate');
       const resumedCoordinator = coordinatorWithWorktrees(persistence, runtime, resumedManager);
       resumedCoordinator.recoverOnStartup();
+      writeFileSync(join(secondaryRepo, 'outside.txt'), 'changed after partial integration\n');
+      expect(spawnSync('git', ['-C', secondaryRepo, 'add', 'outside.txt']).status).toBe(0);
+      expect(
+        spawnSync('git', [
+          '-C',
+          secondaryRepo,
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.com',
+          'commit',
+          '-q',
+          '-m',
+          'external change',
+        ]).status,
+      ).toBe(0);
+      await expect(resumedCoordinator.resumeMission(task.id, mission.id)).rejects.toThrow(
+        'Workspace HEAD changed before integration',
+      );
+      expect(persistence.getTeamMission(mission.id).state).toBe('waiting_resume');
+      expect(
+        spawnSync('git', ['-C', primaryRepo, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' })
+          .stdout,
+      ).toBe('1\n');
+      const secondaryIntegratedHead = partialIsolation?.repositories[1]?.integratedHead;
+      if (secondaryIntegratedHead === null || secondaryIntegratedHead === undefined)
+        throw new Error('Secondary integrated HEAD was not sealed');
+      expect(
+        spawnSync('git', ['-C', secondaryRepo, 'reset', '--hard', secondaryIntegratedHead]).status,
+      ).toBe(0);
       await resumedCoordinator.resumeMission(task.id, mission.id);
       await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 20_000);
       expect(runtime.workspaceSets).toHaveLength(1);
       expect(persistence.listTeamAttempts(executionId)).toHaveLength(1);
       expect(persistence.getTeamExecutionIsolationCompletion(executionId)).toBeNull();
       expect(resumedIntegrate.mock.calls.map(([input]) => basename(input.repoPath))).toEqual([
+        basename(secondaryRepo),
+        basename(secondaryRepo),
         basename(primaryRepo),
       ]);
       expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
