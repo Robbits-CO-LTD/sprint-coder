@@ -313,6 +313,7 @@ if (runsWithElectronAbi)
           rootIdentityDigest: 'd'.repeat(64),
         }),
       ).toThrow('Project Tasks use the Project Workspace');
+      expect(persistence.getWorkspace(task.id)).toBeNull();
 
       expect(project).toMatchObject({
         folderCount: 2,
