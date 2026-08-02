@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import { closeSync, constants, openSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 // Keep the subprocess deadline below Vitest's 20 second integration-test ceiling while allowing
@@ -67,6 +70,15 @@ exit 0
 
 export type WindowsAclPath = Readonly<{ path: string; kind: 'directory' | 'file' }>;
 const MAX_ENCODED_BATCH_CHARS = 20_000;
+type AclOperation = 'secure' | 'verify';
+type PendingAclRequest = Readonly<{
+  paths: readonly WindowsAclPath[];
+  operation: AclOperation;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}>;
+const pendingAclRequests: PendingAclRequest[] = [];
+let drainingAclRequests = false;
 
 export async function secureWindowsPath(path: string, kind: 'directory' | 'file'): Promise<void> {
   await secureWindowsPaths([{ path, kind }]);
@@ -87,22 +99,96 @@ export async function verifyWindowsPaths(paths: readonly WindowsAclPath[]): Prom
   await runAcl(paths, 'verify');
 }
 
-async function runAcl(
-  paths: readonly WindowsAclPath[],
-  operation: 'secure' | 'verify',
-): Promise<void> {
+async function runAcl(paths: readonly WindowsAclPath[], operation: AclOperation): Promise<void> {
   if (process.platform !== 'win32' || paths.length === 0) return;
+  await new Promise<void>((resolve, reject) => {
+    pendingAclRequests.push({ paths, operation, resolve, reject });
+    void drainAclQueue();
+  });
+}
+
+async function drainAclQueue(): Promise<void> {
+  if (drainingAclRequests) return;
+  drainingAclRequests = true;
+  try {
+    // Let ACL requests started by parallel Vitest files join one wave. Starting many Windows
+    // PowerShell hosts at once can starve all of them until their deadlines on GitHub runners.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    while (pendingAclRequests.length > 0) {
+      const wave = pendingAclRequests.splice(0);
+      for (const operation of ['secure', 'verify'] as const) {
+        const requests = wave.filter((request) => request.operation === operation);
+        if (requests.length === 0) continue;
+        try {
+          await executeAcl(
+            requests.flatMap((request) => request.paths),
+            operation,
+          );
+          for (const request of requests) request.resolve();
+        } catch (error) {
+          for (const request of requests) request.reject(error);
+        }
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  } finally {
+    drainingAclRequests = false;
+    if (pendingAclRequests.length > 0) void drainAclQueue();
+  }
+}
+
+async function executeAcl(
+  paths: readonly WindowsAclPath[],
+  operation: AclOperation,
+): Promise<void> {
   const unique = [
     ...new Map(
       paths.map((item) => [`${item.kind}:${item.path.toLocaleLowerCase('en-US')}`, item]),
     ).values(),
   ];
-  for (const batch of aclBatches(unique)) await runAclBatch(batch, operation);
+  await withAclProcessLock(async () => {
+    for (const batch of aclBatches(unique)) await runAclBatch(batch, operation);
+  });
+}
+
+async function withAclProcessLock<T>(action: () => Promise<T>): Promise<T> {
+  const id = process.env['SPRINT_CODER_ACL_LOCK_ID'];
+  if (id === undefined || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return action();
+  const lockPath = join(tmpdir(), `sprint-coder-windows-acl-${id}.lock`);
+  const deadline = Date.now() + WINDOWS_ACL_TIMEOUT_MS;
+  let descriptor: number | null = null;
+  while (descriptor === null) {
+    try {
+      descriptor = openSync(
+        lockPath,
+        constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+        0o600,
+      );
+    } catch (error) {
+      if (!isAlreadyExists(error) || Date.now() >= deadline) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  try {
+    return await action();
+  } finally {
+    closeSync(descriptor);
+    unlinkSync(lockPath);
+  }
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'EEXIST'
+  );
 }
 
 async function runAclBatch(
   paths: readonly WindowsAclPath[],
-  operation: 'secure' | 'verify',
+  operation: AclOperation,
 ): Promise<void> {
   const encodedScript = Buffer.from(secureAclScript, 'utf16le').toString('base64');
   const encodedItems = Buffer.from(JSON.stringify(paths), 'utf8').toString('base64');

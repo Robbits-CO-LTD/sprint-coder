@@ -1,5 +1,10 @@
 import { defineConfig } from 'vitest/config';
 
+// Worker processes inherit this run-scoped id. ACL integration tests use it to serialize the real
+// Windows PowerShell host across Vitest workers, rather than merely inside one isolated module.
+if (process.platform === 'win32')
+  process.env['SPRINT_CODER_ACL_LOCK_ID'] ??= process.env['GITHUB_RUN_ID'] ?? String(process.pid);
+
 // Only the timeouts are configured here; everything else stays on Vitest's defaults.
 //
 // Vitest's default 5s per-test timeout is written for pure unit tests. A large part of this

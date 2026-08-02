@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  secureWindowsPath,
   secureWindowsPaths,
+  verifyWindowsPathAcl,
   verifyWindowsPaths,
   WINDOWS_ACL_TIMEOUT_MS,
   type WindowsAclPath,
@@ -41,6 +43,24 @@ describe('Windows ACL runner', () => {
 
       await secureWindowsPaths(items);
       await verifyWindowsPaths(items);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'coalesces parallel ACL callers without starting competing PowerShell hosts',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-parallel-'));
+      cleanup.push(root);
+      const paths = await Promise.all(
+        Array.from({ length: 32 }, async (_, index) => {
+          const path = join(root, `${index}.txt`);
+          await writeFile(path, 'private');
+          return path;
+        }),
+      );
+
+      await Promise.all(paths.map((path) => secureWindowsPath(path, 'file')));
+      await Promise.all(paths.map((path) => verifyWindowsPathAcl(path, 'file')));
     },
   );
 });
