@@ -1332,6 +1332,7 @@ export class IpcRouter {
               outcome: 'refused' as const,
               digest: null,
               reason: 'outside_workspace' as const,
+              conflictPath: null,
             };
           const result = saveWorkspaceFile(root.path, input.path, input.text, input.baseDigest);
           // Audited only on an actual write, and as its own event type: `files.changed` is the record

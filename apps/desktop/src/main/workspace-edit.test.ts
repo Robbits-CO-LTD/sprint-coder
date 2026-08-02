@@ -33,6 +33,7 @@ const fileSystemFault = vi.hoisted(() => ({
   failCopyAfterCreate: false,
   concurrentWindowsContent: null as string | null,
   concurrentPosixContent: null as string | null,
+  afterPublicationContent: null as string | null,
 }));
 
 vi.mock('./native-file-publication', async (importOriginal) => {
@@ -44,9 +45,16 @@ vi.mock('./native-file-publication', async (importOriginal) => {
     ) => {
       if (fileSystemFault.failAtomicReplace)
         throw new Error('simulated atomic replacement failure');
-      if (fileSystemFault.concurrentWindowsContent !== null)
+      if (fileSystemFault.concurrentWindowsContent !== null) {
         writeFileSync(args[1], fileSystemFault.concurrentWindowsContent);
-      return actual.replaceWindowsFileWithBackup(...args);
+        fileSystemFault.concurrentWindowsContent = null;
+      }
+      const result = actual.replaceWindowsFileWithBackup(...args);
+      if (fileSystemFault.afterPublicationContent !== null) {
+        writeFileSync(args[1], fileSystemFault.afterPublicationContent);
+        fileSystemFault.afterPublicationContent = null;
+      }
+      return result;
     },
     exchangePosixFiles: (...args: Parameters<typeof actual.exchangePosixFiles>) => {
       if (fileSystemFault.failRename) throw new Error('simulated atomic exchange failure');
@@ -54,7 +62,12 @@ vi.mock('./native-file-publication', async (importOriginal) => {
         writeFileSync(args[1], fileSystemFault.concurrentPosixContent);
         fileSystemFault.concurrentPosixContent = null;
       }
-      return actual.exchangePosixFiles(...args);
+      const result = actual.exchangePosixFiles(...args);
+      if (fileSystemFault.afterPublicationContent !== null) {
+        writeFileSync(args[1], fileSystemFault.afterPublicationContent);
+        fileSystemFault.afterPublicationContent = null;
+      }
+      return result;
     },
   };
 });
@@ -281,11 +294,33 @@ describe('saveWorkspaceFile (issue #43)', () => {
       try {
         const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
         expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+        expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-stage-/);
+        expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
       } finally {
         fileSystemFault.concurrentPosixContent = null;
       }
       expect(readFileSync(file, 'utf8')).toBe('concurrent writer\n');
-      expect(readdirSync(root)).toEqual(['important.txt']);
+      expect(readdirSync(root)).toHaveLength(2);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'retains a POSIX edit displaced by conflict rollback instead of deleting it',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.concurrentPosixContent = 'boundary writer\n';
+      fileSystemFault.afterPublicationContent = 'late writer\n';
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+        expect(readFileSync(file, 'utf8')).toBe('boundary writer\n');
+        expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('late writer\n');
+      } finally {
+        fileSystemFault.concurrentPosixContent = null;
+        fileSystemFault.afterPublicationContent = null;
+      }
     },
   );
 
@@ -322,11 +357,33 @@ describe('saveWorkspaceFile (issue #43)', () => {
       try {
         const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
         expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+        expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-stage-/);
+        expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
       } finally {
         fileSystemFault.concurrentWindowsContent = null;
       }
       expect(readFileSync(file, 'utf8')).toBe('concurrent writer\n');
-      expect(readdirSync(root)).toEqual(['important.txt']);
+      expect(readdirSync(root)).toHaveLength(2);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'retains a Windows edit displaced by conflict rollback instead of deleting it',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.concurrentWindowsContent = 'boundary writer\n';
+      fileSystemFault.afterPublicationContent = 'late writer\n';
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+        expect(readFileSync(file, 'utf8')).toBe('boundary writer\n');
+        expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('late writer\n');
+      } finally {
+        fileSystemFault.concurrentWindowsContent = null;
+        fileSystemFault.afterPublicationContent = null;
+      }
     },
   );
 

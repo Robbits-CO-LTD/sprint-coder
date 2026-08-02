@@ -1307,9 +1307,11 @@ export const fileSaveInputSchema = z
   .strict();
 
 /**
- * `conflict` is not an error, it is the mechanism: the file changed under the editor, so the write
- * did not happen and the user gets to decide. `refused` covers everything the app will not do at
- * all — outside the Workspace, a symlink, not a regular file, too large.
+ * `conflict` is not an error, it is the mechanism: the file changed under the editor, so the
+ * original on-disk version was restored and the user gets to decide. If another write landed during
+ * that atomic rollback, `conflictPath` retains the displaced version instead of deleting it.
+ * `refused` covers everything the app will not do at all — outside the Workspace, a symlink, not a
+ * regular file, too large.
  */
 export const fileSaveResultSchema = z
   .object({
@@ -1319,6 +1321,8 @@ export const fileSaveResultSchema = z
     reason: z
       .enum(['too_large', 'binary', 'not_a_file', 'outside_workspace', 'io_error'])
       .nullable(),
+    /** A retained sibling containing the version displaced by conflict rollback, when present. */
+    conflictPath: z.string().min(1).max(1200).nullable().default(null),
   })
   .strict();
 export type FileSaveResult = z.infer<typeof fileSaveResultSchema>;

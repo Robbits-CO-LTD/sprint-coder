@@ -109,6 +109,7 @@ export type SaveOutcome = {
   outcome: 'saved' | 'conflict' | 'refused';
   digest: string | null;
   reason: OpenRefusal | 'io_error' | null;
+  conflictPath: string | null;
 };
 
 /**
@@ -136,6 +137,7 @@ export function saveWorkspaceFile(
     outcome: 'refused',
     digest: null,
     reason,
+    conflictPath: null,
   });
   if (Buffer.byteLength(text, 'utf8') > MAX_EDITABLE_BYTES) return refuse('too_large');
   if (!SHA256_PATTERN.test(baseDigest)) return refuse('io_error');
@@ -162,7 +164,7 @@ export function saveWorkspaceFile(
     const current = readDescriptor(descriptor, Number(stat.size));
     // Not an error: the file changed under the editor, so this write is not the one to make.
     if (digestOf(current) !== baseDigest)
-      return { outcome: 'conflict', digest: null, reason: null };
+      return { outcome: 'conflict', digest: null, reason: null, conflictPath: null };
 
     const bytes = Buffer.from(text, 'utf8');
     // Start from a copy of the validated target so mode and other copyable metadata are retained.
@@ -200,14 +202,28 @@ export function saveWorkspaceFile(
     if (!sameIdentity(latestStat, safe.identity)) return refuse('outside_workspace');
     if (latestStat.size > BigInt(MAX_EDITABLE_BYTES)) return refuse('too_large');
     if (digestOf(readDescriptor(descriptor, Number(latestStat.size))) !== baseDigest)
-      return { outcome: 'conflict', digest: null, reason: null };
+      return { outcome: 'conflict', digest: null, reason: null, conflictPath: null };
 
     // Windows will not replace an open destination. Closing only after the final identity/digest
     // check keeps the race window as small as the filesystem API permits; rename itself is atomic.
     closeSync(descriptor);
     descriptor = null;
-    const publication = publishStagedFile(staging, absolute, backup, baseDigest);
-    if (publication === 'conflict') return { outcome: 'conflict', digest: null, reason: null };
+    const publication = publishStagedFile(staging, absolute, backup, baseDigest, digestOf(bytes));
+    if (publication === 'conflict') {
+      // Atomic rollback moves the version displaced at rollback time into staging. Retaining it is
+      // essential: deleting it could destroy a third-party edit made after the first exchange.
+      ownsStaging = false;
+      return {
+        outcome: 'conflict',
+        digest: null,
+        reason: null,
+        conflictPath: `${relativePath}.sprint-coder-stage-${nonce}.tmp`,
+      };
+    }
+    if (publication === 'intervened') {
+      ownsBackup = process.platform === 'win32';
+      return { outcome: 'conflict', digest: null, reason: null, conflictPath: null };
+    }
     ownsBackup = process.platform === 'win32';
     try {
       syncParentDirectory(absolute);
@@ -216,7 +232,7 @@ export function saveWorkspaceFile(
       // Some FUSE and network filesystems reject directory fsync even though the atomic rename
       // succeeded. Reporting a refusal here would leave the editor stale and make a retry conflict.
     }
-    return { outcome: 'saved', digest: digestOf(bytes), reason: null };
+    return { outcome: 'saved', digest: digestOf(bytes), reason: null, conflictPath: null };
   } catch {
     return refuse('io_error');
   } finally {
@@ -258,11 +274,13 @@ function publishStagedFile(
   absolute: string,
   backup: string,
   baseDigest: string,
-): 'published' | 'conflict' {
+  replacementDigest: string,
+): 'published' | 'conflict' | 'intervened' {
   if (process.platform !== 'win32') {
     exchangePosixFiles(staging, absolute);
     try {
-      if (digestOf(readFileSync(staging)) === baseDigest) return 'published';
+      if (digestOf(readFileSync(staging)) === baseDigest)
+        return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
       exchangePosixFiles(staging, absolute);
       return 'conflict';
     } catch (error) {
@@ -281,7 +299,8 @@ function publishStagedFile(
   // ReplaceFileW retains the destination ACL and atomically places its boundary version in backup.
   replaceWindowsFileWithBackup(staging, absolute, backup);
   try {
-    if (digestOf(readFileSync(backup)) === baseDigest) return 'published';
+    if (digestOf(readFileSync(backup)) === baseDigest)
+      return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
     replaceWindowsFileWithBackup(backup, absolute, staging);
     return 'conflict';
   } catch (error) {

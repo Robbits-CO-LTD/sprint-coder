@@ -305,6 +305,7 @@ export type FileSaveResult = {
   outcome: 'saved' | 'conflict' | 'refused';
   digest: string | null;
   reason: 'too_large' | 'binary' | 'not_a_file' | 'outside_workspace' | 'io_error' | null;
+  conflictPath: string | null;
 };
 /** A file's body as a Runtime writes it (issue #39). Pushed, never persisted — see contracts'
  * fileEditFrameSchema. `text` is the whole body so far, already secret-redacted by Main. */

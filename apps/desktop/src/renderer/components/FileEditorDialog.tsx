@@ -161,7 +161,11 @@ export function FileEditorDialog({
         setSavedLineEnding(lineEnding);
         setMessage('保存しました');
       } else if (result.outcome === 'conflict') {
-        setMessage('他の処理で変更されました。上書きせず、再読み込みできます。');
+        setMessage(
+          result.conflictPath
+            ? `他の処理で変更されました。上書きせず、退避した版を保持しました: ${result.conflictPath}`
+            : '他の処理で変更されました。上書きせず、再読み込みできます。',
+        );
       } else {
         setMessage(
           result.reason === 'too_large'
