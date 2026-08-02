@@ -3428,9 +3428,13 @@ else
           cwd: process.cwd(),
           encoding: 'utf8',
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-          timeout: 60_000,
+          // This bridge runs all 45 coordinator integration cases in a second Electron process.
+          // A serialized Windows suite can finish the cases in about 58s and still need time for
+          // Vitest/Electron shutdown, so the old 60s process limit killed a successful run before
+          // spawnSync could report its exit status.
+          timeout: 120_000,
         },
       );
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    }, 65_000);
+    }, 125_000);
   });
