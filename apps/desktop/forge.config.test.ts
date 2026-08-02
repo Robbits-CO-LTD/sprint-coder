@@ -32,3 +32,17 @@ describe('native package target', () => {
     },
   );
 });
+
+describe('beta release artifacts', () => {
+  it('uploads and publishes the portable Windows ZIP alongside the installer', () => {
+    const workflow = readFileSync(
+      resolve(__dirname, '../../.github/workflows/release-beta.yml'),
+      'utf8',
+    );
+
+    expect(workflow).toContain('apps/desktop/out/make/**/*.zip');
+    expect(workflow).toContain("-name '*.exe' -o -name '*.zip'");
+    expect(workflow).toContain('zip_count != 1');
+    expect(workflow).toContain('${#assets[@]} != 3');
+  });
+});
