@@ -128,6 +128,7 @@ import {
   type CommandResult,
   type SprintCoderApi,
 } from '@sprint-coder/contracts';
+import { WINDOW_CONTROL_CHANNELS } from '../window-controls';
 
 async function invoke<TInput, TOutput>(
   channel: string,
@@ -183,6 +184,21 @@ function getTaskId(value: unknown): string | undefined {
 
 const api: SprintCoderApi = {
   app: { getInfo: () => invoke(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, {}) },
+  windowControls: {
+    platform: process.platform,
+    minimize: () => ipcRenderer.send(WINDOW_CONTROL_CHANNELS.action, 'minimize'),
+    toggleMaximize: () => ipcRenderer.send(WINDOW_CONTROL_CHANNELS.action, 'toggle-maximize'),
+    close: () => ipcRenderer.send(WINDOW_CONTROL_CHANNELS.action, 'close'),
+    isMaximized: async () =>
+      (await ipcRenderer.invoke(WINDOW_CONTROL_CHANNELS.getMaximized)) === true,
+    onMaximizedChanged: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => {
+        if (typeof value === 'boolean') listener(value);
+      };
+      ipcRenderer.on(WINDOW_CONTROL_CHANNELS.maximizedChanged, handler);
+      return () => ipcRenderer.removeListener(WINDOW_CONTROL_CHANNELS.maximizedChanged, handler);
+    },
+  },
   tasks: {
     list: () => invoke(IPC_CHANNELS.tasksList, emptyPayloadSchema, z.array(taskSummarySchema), {}),
     create: (input = {}) =>

@@ -265,7 +265,7 @@ export class CodexRuntimeAdapter {
           clientInfo: {
             name: 'sprint-coder',
             title: 'Sprint Coder',
-            version: '0.0.1-beta.1',
+            version: '0.0.1-beta.2',
           },
           capabilities: {},
         });
@@ -717,8 +717,11 @@ export function parseCodexModels(value: unknown): CodexModelOption[] {
   return result;
 }
 
-function readCodexModels(): CodexModelOption[] {
-  const codexRoot = process.env['CODEX_HOME'] ?? join(process.env['HOME'] ?? '', '.codex');
+export function readCodexModels(
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+  userHome: string = homedir(),
+): CodexModelOption[] {
+  const codexRoot = environment['CODEX_HOME'] ?? join(environment['HOME'] ?? userHome, '.codex');
   try {
     const parsed = JSON.parse(
       readFileSync(join(codexRoot, 'models_cache.json'), 'utf8'),
