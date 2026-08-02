@@ -328,6 +328,24 @@ describe('path guard', () => {
     expect(direct.rootIdentityDigest).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it('rejects a different directory inode recreated at an approved root path', async () => {
+    const { workspace } = await fixture();
+    const binding = await workspaceMutationBinding(workspace);
+    await rm(workspace, { recursive: true });
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    await writeFile(join(workspace, 'src', 'safe.txt'), 'replacement');
+
+    await expect(
+      createPathGuard({
+        rootId: 'root-a',
+        workspacePath: workspace,
+        expectedRootIdentityDigest: binding.rootIdentityDigest,
+        targetPath: 'src/safe.txt',
+        operation: 'read',
+      }),
+    ).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
+  });
+
   // Adversarial fixtures (Phase 7 hardening, IMPLEMENTATION_PLAN §10.4): percent-encoded
   // traversal, backslash traversal, NUL bytes, overlong paths, and exact workspace-root
   // boundary cases that a naive prefix check (rather than node:path `relative()`) would get

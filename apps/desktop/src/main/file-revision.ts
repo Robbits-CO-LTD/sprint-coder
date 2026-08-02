@@ -68,6 +68,7 @@ export class FileRevisionRegistry {
     owner: FileRevisionOwner;
     rootId?: string | undefined;
     workspacePath: string;
+    expectedRootIdentityDigest?: string | undefined;
     targetPath: string;
     policyEpoch: number;
     maxBytes?: number;
@@ -93,6 +94,7 @@ export class FileRevisionRegistry {
     reference: FileRevisionReference;
     rootId?: string | undefined;
     workspacePath: string;
+    expectedRootIdentityDigest?: string | undefined;
     targetPath: string;
     policyEpoch: number;
   }): Promise<RevisionBoundFile> {
@@ -109,6 +111,7 @@ export class FileRevisionRegistry {
       token: record.token,
       rootId: input.rootId,
       workspacePath: input.workspacePath,
+      expectedRootIdentityDigest: input.expectedRootIdentityDigest,
       targetPath: input.targetPath,
       policyEpoch: input.policyEpoch,
     });
@@ -130,6 +133,7 @@ export class FileRevisionRegistry {
 export async function readRevisionBoundFile(input: {
   rootId?: string | undefined;
   workspacePath: string;
+  expectedRootIdentityDigest?: string | undefined;
   targetPath: string;
   policyEpoch: number;
   maxBytes?: number;
@@ -139,6 +143,7 @@ export async function readRevisionBoundFile(input: {
   const guard = await createPathGuard({
     rootId: input.rootId,
     workspacePath: input.workspacePath,
+    expectedRootIdentityDigest: input.expectedRootIdentityDigest,
     targetPath: input.targetPath,
     operation: 'read',
   });
@@ -193,6 +198,7 @@ export async function revalidateFileRevisionToken(input: {
   token: FileRevisionToken;
   rootId?: string | undefined;
   workspacePath: string;
+  expectedRootIdentityDigest?: string | undefined;
   targetPath: string;
   policyEpoch: number;
 }): Promise<FileRevisionToken> {
@@ -208,6 +214,7 @@ export async function revalidateFileRevisionToken(input: {
   const guard = await createPathGuard({
     rootId: input.rootId,
     workspacePath: input.workspacePath,
+    expectedRootIdentityDigest: input.expectedRootIdentityDigest,
     targetPath: input.targetPath,
     operation: 'read',
   });
@@ -221,6 +228,7 @@ export async function revalidateFileRevisionToken(input: {
   const current = await readRevisionBoundFile({
     rootId: input.rootId,
     workspacePath: input.workspacePath,
+    expectedRootIdentityDigest: input.expectedRootIdentityDigest,
     targetPath: input.targetPath,
     policyEpoch,
     maxBytes: input.token.maxBytes,

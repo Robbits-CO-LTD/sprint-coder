@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -4942,6 +4943,55 @@ if (runsWithElectronAbi)
         expect(commandEvent).toMatchObject({
           type: 'command.completed',
           command: { state: 'exited' },
+        });
+        persistence.close();
+      },
+    );
+
+    commandExecutionIt(
+      'resolves command cwd from the sealed Turn roots after Workspace changes',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const primaryAtStart = join(dirname(path), 'root-at-start');
+        const primaryAfterChange = join(dirname(path), 'root-after-change');
+        mkdirSync(primaryAtStart);
+        mkdirSync(primaryAfterChange);
+        persistence.setWorkspace(task.id, primaryAtStart);
+        const started = startExecutingTurn(persistence, task.id);
+        persistence.setWorkspace(task.id, primaryAfterChange);
+        let authorizedInput: unknown;
+        const broker = createDefaultToolBroker(
+          () => 0,
+          (request) => {
+            authorizedInput = request.input;
+            return { decision: 'deny', reason: 'snapshot_test' };
+          },
+          { persistence, publish: () => undefined },
+        );
+        startMockTurnCatalog(broker, {
+          taskId: task.id,
+          turnId: started.turnId,
+          workspaceId: 'workspace-1',
+          policyEpoch: 0,
+        });
+
+        await expect(
+          broker.dispatch({
+            taskId: task.id,
+            turnId: started.turnId,
+            callId: 'sealed-root-command',
+            providerName: 'run_command',
+            input: {
+              executable: '/usr/bin/printf',
+              argv: ['unused'],
+              cwd: '.',
+              purpose: 'Turn snapshot test',
+            },
+          }),
+        ).rejects.toMatchObject({ name: 'ToolAuthorizationDeniedError' });
+        expect(authorizedInput).toMatchObject({
+          cwdIdentity: { canonicalPath: realpathSync(primaryAtStart) },
         });
         persistence.close();
       },

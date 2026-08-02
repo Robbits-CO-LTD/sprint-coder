@@ -122,6 +122,7 @@ export async function prepareStructuredPatch(input: {
   owner: FileRevisionOwner;
   rootId?: string | undefined;
   workspacePath: string;
+  expectedRootIdentityDigest?: string | undefined;
   policyEpoch: number;
   registry: FileRevisionRegistry;
   operations: readonly StructuredPatchOperation[];
@@ -135,6 +136,7 @@ export async function prepareStructuredPatch(input: {
     const sourceGuard = await canonicalizeResourcePath({
       rootId: input.rootId,
       workspacePath: input.workspacePath,
+      expectedRootIdentityDigest: input.expectedRootIdentityDigest,
       targetPath: operation.path,
       operation: operation.kind === 'add' ? 'write' : 'read',
     });
@@ -167,6 +169,7 @@ export async function prepareStructuredPatch(input: {
       reference: operation.revision,
       rootId: input.rootId,
       workspacePath: input.workspacePath,
+      expectedRootIdentityDigest: input.expectedRootIdentityDigest,
       targetPath: operation.path,
       policyEpoch: input.policyEpoch,
     });
@@ -219,6 +222,7 @@ export async function prepareStructuredPatch(input: {
     const destinationGuard = await canonicalizeResourcePath({
       rootId: input.rootId,
       workspacePath: input.workspacePath,
+      expectedRootIdentityDigest: input.expectedRootIdentityDigest,
       targetPath: operation.destination,
       operation: 'write',
     });

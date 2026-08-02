@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { access, chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +10,7 @@ import {
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
 } from './command-runner';
+import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
 
@@ -59,6 +60,24 @@ describe('CommandRunner', () => {
         cwd: '..',
       }),
     ).rejects.toThrow();
+  });
+
+  it('rejects a replacement inode at a persisted Project root path', async () => {
+    const root = await workspace();
+    const binding = await workspaceMutationBinding(root);
+    await rm(root, { recursive: true });
+    await mkdir(root);
+
+    await expect(
+      prepareExecutionSpec({
+        rootId: 'root-a',
+        workspacePath: root,
+        expectedRootIdentityDigest: binding.rootIdentityDigest,
+        executable: process.execPath,
+        argv: ['--version'],
+        cwd: '.',
+      }),
+    ).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
   });
 
   executionIt(

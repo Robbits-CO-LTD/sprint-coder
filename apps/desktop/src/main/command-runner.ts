@@ -47,6 +47,7 @@ export type CommandResult = Readonly<{
 export type PrepareExecutionSpecInput = Readonly<{
   rootId?: string | undefined;
   workspacePath: string;
+  expectedRootIdentityDigest?: string | undefined;
   executable: string;
   argv: readonly string[];
   cwd?: string;
@@ -94,6 +95,7 @@ export async function prepareExecutionSpec(
   const pathGuard = await createPathGuard({
     rootId: input.rootId,
     workspacePath: input.workspacePath,
+    expectedRootIdentityDigest: input.expectedRootIdentityDigest,
     targetPath: input.cwd ?? '.',
     operation: 'read',
   });

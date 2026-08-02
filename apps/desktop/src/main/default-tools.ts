@@ -102,7 +102,8 @@ export function createDefaultToolBroker(
   command?: {
     persistence: Pick<
       PersistenceClient,
-      | 'getEffectiveWorkspaceSet'
+      | 'readTurnWorkspaceSet'
+      | 'getTurnWorkspaceRootIdentities'
       | 'prepareCommand'
       | 'beginCommand'
       | 'startCommand'
@@ -182,13 +183,22 @@ export function createDefaultToolBroker(
         cwd?: string;
         purpose: string;
       };
-      const workspace = command.persistence.getEffectiveWorkspaceSet(context.taskId);
+      const workspace = command.persistence.readTurnWorkspaceSet(context.turnId);
+      if (workspace === null)
+        throw new Error('CommandRunner requires a sealed Turn Workspace snapshot');
       const requestedRootId = request.rootId ?? workspace.primaryRootId;
       const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
       if (root === undefined) throw new Error('CommandRunner requires a valid Workspace rootId');
+      const expectedRootIdentityDigest =
+        workspace.source === 'project'
+          ? command.persistence.getTurnWorkspaceRootIdentities(context.turnId).get(root.rootId)
+          : undefined;
+      if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
+        throw new Error('CommandRunner Turn Workspace identity is incomplete');
       const spec = await prepareExecutionSpec({
         rootId: root.rootId,
         workspacePath: root.path,
+        ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
         executable: request.executable,
         argv: request.argv,
         ...(request.cwd === undefined ? {} : { cwd: request.cwd }),

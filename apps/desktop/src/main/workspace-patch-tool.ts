@@ -61,7 +61,8 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
 });
 
 export type WorkspacePatchDeps = Readonly<{
-  workspaceSetFor: (taskId: string) => EffectiveWorkspaceSet;
+  turnWorkspaceSetFor: (taskId: string, turnId: string) => EffectiveWorkspaceSet | null;
+  turnRootIdentitiesFor: (turnId: string) => ReadonlyMap<string, string>;
   revisions: FileRevisionRegistry;
   apply: (request: EditSagaApplyRequest) => Promise<EditSagaSnapshot>;
   policyEpochFor: (taskId: string) => number;
@@ -91,11 +92,18 @@ export async function executeWorkspacePatch(
   deps: WorkspacePatchDeps,
 ): Promise<{ rootId: string; path: string; sagaId: string; state: string; edits: number }> {
   const request = parseInput(input);
-  const workspace = deps.workspaceSetFor(context.taskId);
+  const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  if (workspace === null) throw new Error('apply_patch requires a sealed Turn Workspace snapshot');
   if (workspace.roots.length === 0) throw new Error('apply_patch requires a selected Workspace');
   const requestedRootId = request.rootId ?? workspace.primaryRootId;
   const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
   if (root === undefined) throw new Error('apply_patch requires a valid Workspace rootId');
+  const expectedRootIdentityDigest =
+    workspace.source === 'project'
+      ? deps.turnRootIdentitiesFor(context.turnId).get(root.rootId)
+      : undefined;
+  if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
+    throw new Error('apply_patch Turn Workspace identity is incomplete');
 
   const owner = { taskId: context.taskId, turnId: context.turnId };
   const policyEpoch = deps.policyEpochFor(context.taskId);
@@ -105,6 +113,7 @@ export async function executeWorkspacePatch(
     owner,
     rootId: root.rootId,
     workspacePath: root.path,
+    ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
     targetPath: request.path,
     policyEpoch,
   });
@@ -115,6 +124,7 @@ export async function executeWorkspacePatch(
       owner,
       rootId: root.rootId,
       workspacePath: root.path,
+      ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
       policyEpoch,
       registry: deps.revisions,
       operations: [

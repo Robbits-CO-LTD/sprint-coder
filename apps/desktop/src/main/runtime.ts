@@ -43,6 +43,8 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
       PersistenceClient,
       | 'getWorkspace'
       | 'getEffectiveWorkspaceSet'
+      | 'readTurnWorkspaceSet'
+      | 'getTurnWorkspaceRootIdentities'
       | 'getPermissionPolicy'
       | 'getAcceptanceContract'
       | 'createIntelligenceStep'
@@ -99,7 +101,8 @@ export class MockRuntimeAdapter {
       {
         persistence: this.persistence as Pick<
           PersistenceClient,
-          | 'getEffectiveWorkspaceSet'
+          | 'readTurnWorkspaceSet'
+          | 'getTurnWorkspaceRootIdentities'
           | 'prepareCommand'
           | 'beginCommand'
           | 'startCommand'
