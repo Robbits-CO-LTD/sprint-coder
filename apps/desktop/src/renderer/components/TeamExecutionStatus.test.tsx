@@ -20,6 +20,7 @@ function execution(overrides: Partial<TeamExecutionSummary> = {}): TeamExecution
     teamId: 'team-1',
     assigneeAgentId: 'worker-1',
     createdByAgentId: 'leader-1',
+    accessMode: 'read-only',
     state: 'running',
     instructionPreview: 'テストを追加する',
     instructionRevision: 1,
@@ -34,6 +35,7 @@ function execution(overrides: Partial<TeamExecutionSummary> = {}): TeamExecution
     missionStepOrdinal: null,
     missionStepCount: null,
     worktree: null,
+    isolation: null,
     assignedAt: '2026-07-28T01:00:00.000Z',
     queuedAt: null,
     startedAt: '2026-07-28T01:00:05.000Z',
@@ -152,6 +154,91 @@ describe('TeamExecutionStatus', () => {
     }
   });
 
+  it('shows repository integration progress, reason, and the same resume action in both views', () => {
+    const row = execution({
+      accessMode: 'workspace-write',
+      state: 'waiting_resume',
+      missionId: 'mission-1',
+      isolation: {
+        phase: 'waiting_resume',
+        resumeKind: 'integration',
+        repositories: [
+          {
+            ordinal: 1,
+            repoPath: '/workspace/primary',
+            worktreePath: '/tmp/primary',
+            baseHead: 'a'.repeat(40),
+            workerHead: 'b'.repeat(40),
+            integratedHead: null,
+            state: 'ready',
+            changedFiles: ['primary.txt'],
+          },
+          {
+            ordinal: 2,
+            repoPath: '/workspace/secondary',
+            worktreePath: '/tmp/secondary',
+            baseHead: 'c'.repeat(40),
+            workerHead: 'd'.repeat(40),
+            integratedHead: 'e'.repeat(40),
+            state: 'integrated',
+            changedFiles: ['secondary.txt'],
+          },
+        ],
+        roots: [
+          {
+            rootId: 'root-1',
+            rootLabel: 'primary',
+            role: 'primary',
+            repositoryOrdinal: 1,
+            sourcePath: '/workspace/primary',
+            isolatedPath: '/tmp/primary',
+            identity: '1'.repeat(64),
+            mutationKey: '2'.repeat(64),
+          },
+        ],
+        reason: 'Primary integration failed',
+      },
+    });
+    for (const variant of ['canvas', 'list'] as const) {
+      const html = renderToStaticMarkup(
+        <TeamExecutionStatus execution={row} variant={variant} onResume={() => undefined} />,
+      );
+      expect(html).toContain('1/2 repository統合済み');
+      expect(html).toContain('Primary integration failed');
+      expect(html).toContain('data-testid="team-integration-resume"');
+      expect(html).toContain('統合を再開');
+    }
+  });
+
+  it('routes standalone integration and Worker resumes to distinct labeled actions', () => {
+    const integration = execution({
+      state: 'waiting_resume',
+      isolation: {
+        phase: 'waiting_resume',
+        resumeKind: 'integration',
+        repositories: [],
+        roots: [],
+        reason: 'resume',
+      },
+    });
+    expect(
+      renderToStaticMarkup(
+        <TeamExecutionStatus
+          execution={integration}
+          variant="list"
+          onResumeIntegration={() => undefined}
+        />,
+      ),
+    ).toContain('data-testid="team-integration-resume"');
+
+    const worker = execution({ state: 'waiting_resume', missionId: 'mission-1' });
+    const html = renderToStaticMarkup(
+      <TeamExecutionStatus execution={worker} variant="canvas" onResume={() => undefined} />,
+    );
+    expect(html).toContain('data-testid="team-worker-resume"');
+    expect(html).toContain('Workerを再開');
+  });
+
   it.each(Object.entries(EXECUTION_STATE_LABELS))(
     'states %s in Japanese as "%s"',
     (state, label) => {
@@ -198,7 +285,7 @@ describe('TeamExecutionStatus', () => {
     expect(html).toContain(UNKNOWN_QUEUE_REASON_LABEL);
   });
 
-  it('shows the same resume control for a waiting Mission in either view', () => {
+  it('shows the same Worker resume control for a waiting Mission in either view', () => {
     const row = execution({
       state: 'waiting_resume',
       missionId: 'mission-1',
@@ -209,8 +296,8 @@ describe('TeamExecutionStatus', () => {
       const html = renderToStaticMarkup(
         <TeamExecutionStatus execution={row} variant={variant} onResume={() => undefined} />,
       );
-      expect(html).toContain('data-testid="team-mission-resume"');
-      expect(html).toContain('Missionを再開');
+      expect(html).toContain('data-testid="team-worker-resume"');
+      expect(html).toContain('Workerを再開');
       expect(html).toContain('再開待ち');
     }
   });

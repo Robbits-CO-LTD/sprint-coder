@@ -115,6 +115,7 @@ export function TeamCanvas({
   const teamBusy = useAppStore((s) => s.teamBusy);
   const stopTeamWorker = useAppStore((s) => s.stopTeamWorker);
   const resumeTeamMission = useAppStore((s) => s.resumeTeamMission);
+  const resumeTeamExecutionIntegration = useAppStore((s) => s.resumeTeamExecutionIntegration);
   const stopAllTeamWorkers = useAppStore((s) => s.stopAllTeamWorkers);
   const [policyOpen, setPolicyOpen] = useState(false);
 
@@ -1013,6 +1014,7 @@ export function TeamCanvas({
               <div className="leader-anchor" ref={leaderAnchorRef} />
               {workers.map((worker) => {
                 const pos = nodePositions[worker.id] ?? defaultPositionFor(worker.id);
+                const execution = latestExecutionForWorker(detail.executions, worker.id);
                 return (
                   <WorkerNode
                     key={worker.id}
@@ -1026,18 +1028,19 @@ export function TeamCanvas({
                     x={pos.x}
                     y={pos.y}
                     messages={detail.messages}
-                    execution={latestExecutionForWorker(detail.executions, worker.id)}
+                    execution={execution}
                     teamBusy={teamBusy}
                     selected={selectedNodeId === worker.id}
                     onStop={() => void stopTeamWorker(task.id, worker.id)}
                     onResumeMission={
-                      latestExecutionForWorker(detail.executions, worker.id)?.missionId == null
+                      execution?.missionId == null
                         ? undefined
-                        : () =>
-                            void resumeTeamMission(
-                              task.id,
-                              latestExecutionForWorker(detail.executions, worker.id)!.missionId!,
-                            )
+                        : () => void resumeTeamMission(task.id, execution.missionId!)
+                    }
+                    onResumeIntegration={
+                      execution === null
+                        ? undefined
+                        : () => void resumeTeamExecutionIntegration(task.id, execution.id)
                     }
                     ref={(el) => handleWorkerRef(worker.id, el)}
                   />

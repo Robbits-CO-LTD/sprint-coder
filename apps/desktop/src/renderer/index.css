@@ -3849,6 +3849,29 @@ button.composer-permission-chip[aria-expanded='true'] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.team-exec-isolation {
+  display: grid;
+  gap: 3px;
+  margin-top: 3px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-subtle);
+}
+.team-exec-repositories summary {
+  width: fit-content;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.team-exec-repositories > div {
+  display: grid;
+  max-height: 130px;
+  gap: 3px;
+  padding-top: 4px;
+  overflow: auto;
+}
+.team-exec-isolation-reason .team-exec-value {
+  color: var(--danger);
+  white-space: normal;
+}
 /* Team activity history card (Core C2b) — persisted Team activity shown inline in the Chat
    timeline. Same inset rail as the approval audit row so history reads as annotation rather than
    as a message. Purely typographic: the type is legible as words (no colour-only meaning) and

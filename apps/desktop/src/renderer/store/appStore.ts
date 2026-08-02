@@ -270,6 +270,7 @@ type AppState = {
   // user override.
   stopTeamWorker(taskId: string, agentId: string): Promise<void>;
   resumeTeamMission(taskId: string, missionId: string): Promise<void>;
+  resumeTeamExecutionIntegration(taskId: string, executionId: string): Promise<void>;
   stopAllTeamWorkers(taskId: string): Promise<void>;
   /** Writes the whole policy under an optimistic-concurrency check (Team v2 Core C4b).
    *
@@ -838,7 +839,7 @@ export const useAppStore = create<AppState>((set, get) => {
     recovery: null,
     recoveryAcknowledged: false,
     settingsWorkspaceV2: true,
-    projectMultiFolderUx: false,
+    projectMultiFolderUx: true,
     runtimeStatus: null,
     stageAnnouncement: '',
     toast: null,
@@ -902,7 +903,7 @@ export const useAppStore = create<AppState>((set, get) => {
             set({
               ...(info.recovery === undefined ? {} : { recovery: info.recovery }),
               settingsWorkspaceV2: info.settingsWorkspaceV2 ?? true,
-              projectMultiFolderUx: info.projectMultiFolderUx ?? false,
+              projectMultiFolderUx: info.projectMultiFolderUx ?? true,
             });
           })
           .catch(() => undefined);
@@ -1686,6 +1687,23 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         await window.sprintCoder!.teams.resumeMission({ taskId, missionId });
         const detail = await window.sprintCoder!.teams.get(taskId);
+        set((state) => ({
+          teamByTask: { ...state.teamByTask, [taskId]: detail },
+          teamBusy: false,
+        }));
+      } catch (error) {
+        set({ teamBusy: false, error: describeError(error) });
+      }
+    },
+
+    async resumeTeamExecutionIntegration(taskId: string, executionId: string) {
+      if (!window.sprintCoder?.teams || get().teamBusy) return;
+      set({ teamBusy: true, error: null });
+      try {
+        const detail = await window.sprintCoder.teams.resumeExecutionIntegration({
+          taskId,
+          executionId,
+        });
         set((state) => ({
           teamByTask: { ...state.teamByTask, [taskId]: detail },
           teamBusy: false,

@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import type { AgentRecord, TeamSnapshot } from './persistence';
@@ -30,6 +31,7 @@ import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
+const execFileAsync = promisify(execFile);
 
 function removeTemporaryDirectory(
   directory: string,
@@ -3416,8 +3418,10 @@ if (runsWithElectronAbi)
   });
 else
   describe('TeamCoordinator Electron ABI bridge', () => {
-    it('runs the TeamCoordinator integration suite with Electron', () => {
-      const result = spawnSync(
+    it('runs the TeamCoordinator integration suite with Electron', async () => {
+      // This suite can exceed Vitest's worker-RPC timeout on Windows CI. An asynchronous child
+      // keeps the worker event loop available while Electron runs the SQLite integration cases.
+      const result = await execFileAsync(
         electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
@@ -3428,13 +3432,13 @@ else
           cwd: process.cwd(),
           encoding: 'utf8',
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-          // This bridge runs all 45 coordinator integration cases in a second Electron process.
-          // A serialized Windows suite can finish the cases in about 58s and still need time for
-          // Vitest/Electron shutdown, so the old 60s process limit killed a successful run before
-          // spawnSync could report its exit status.
+          // This bridge runs the coordinator integration cases in a second Electron process. A
+          // serialized Windows suite can take about a minute and still needs time for clean
+          // Vitest/Electron shutdown.
           timeout: 120_000,
+          maxBuffer: 10 * 1024 * 1024,
         },
       );
-      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    }, 125_000);
+      expect(result.stderr, result.stdout).not.toContain('Failed Tests');
+    }, 130_000);
   });
