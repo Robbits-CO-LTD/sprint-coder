@@ -87,6 +87,23 @@ describe('Command Card projection', () => {
     expect(outputs.map(({ text }) => text)).toEqual(['一行目\r', '\n二行目']);
   });
 
+  it('keeps standalone carriage-return progress records as separate updates', () => {
+    const outputs = [
+      { seq: 1, stream: 'stdout' as const, text: '10%\r', byteLength: 4 },
+      { seq: 2, stream: 'stdout' as const, text: '20%\r', byteLength: 4 },
+    ];
+    const collapsed = outputs.reduce<CommandTailProjection>(appendCommandOutput, {
+      lines: [],
+      lastOutputSeq: 0,
+    });
+
+    expect(collapsed.lines).toMatchObject([
+      { text: '10%', complete: true },
+      { text: '20%', complete: false },
+    ]);
+    expect(projectCommandLines(outputs).map(({ text }) => text)).toEqual(['10%', '↵ 20%']);
+  });
+
   it('renders exact argv as an unambiguous JSON array and computes bounded duration', () => {
     expect(exactArgvDisplay('/bin/tool', ['', 'a b', '"quoted"', 'line\nbreak'])).toBe(
       '["/bin/tool","","a b","\\"quoted\\"","line\\nbreak"]',
