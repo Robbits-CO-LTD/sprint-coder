@@ -50,6 +50,12 @@ async function startHarness(): Promise<Harness> {
   const bridgeReceived: { token: unknown; tool: unknown; args: unknown }[] = [];
   const bridgeResponders: ((response: unknown) => void)[] = [];
   const fakeBridge = createServer((socket) => {
+    // Teardown kills the child before closing this fixture server. Linux can report the expected
+    // peer reset asynchronously after the test has completed; consume only that socket-level
+    // teardown event so Vitest does not misclassify a fully passing suite as an unhandled error.
+    socket.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ECONNRESET') throw error;
+    });
     let buffer = '';
     socket.on('data', (chunk: Buffer) => {
       buffer += chunk.toString('utf8');
