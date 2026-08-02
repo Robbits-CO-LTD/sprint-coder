@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   closeSync,
+  chmodSync,
   constants,
   copyFileSync,
   fstatSync,
@@ -151,7 +152,7 @@ export function saveWorkspaceFile(
   try {
     descriptor = openSync(
       absolute,
-      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+      constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
     );
     const stat = fstatSync(descriptor, { bigint: true });
     if (!sameIdentity(stat, safe.identity)) return refuse('outside_workspace');
@@ -167,6 +168,8 @@ export function saveWorkspaceFile(
     // Windows publication below separately uses File.Replace to retain the destination ACL.
     copyFileSync(absolute, staging, constants.COPYFILE_EXCL);
     ownsStaging = true;
+    const originalMode = Number(stat.mode & 0o777n);
+    chmodSync(staging, originalMode | 0o200);
     stagingDescriptor = openSync(
       staging,
       constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
@@ -179,6 +182,7 @@ export function saveWorkspaceFile(
       return refuse('io_error');
     closeSync(stagingDescriptor);
     stagingDescriptor = null;
+    chmodSync(staging, originalMode);
 
     const finalTarget = resolveSafeWorkspaceFile(workspacePath, relativePath);
     if (

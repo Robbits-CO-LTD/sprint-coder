@@ -278,6 +278,22 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(statSync(file).mode & 0o777).toBe(0o755);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'atomically saves a readable file while preserving its read-only mode',
+    () => {
+      const root = workspace();
+      const file = join(root, 'generated.txt');
+      writeFileSync(file, 'before\n');
+      chmodSync(file, 0o444);
+
+      const result = saveWorkspaceFile(root, 'generated.txt', 'after\n', digestOf('before\n'));
+
+      expect(result.outcome).toBe('saved');
+      expect(readFileSync(file, 'utf8')).toBe('after\n');
+      expect(statSync(file).mode & 0o222).toBe(0);
+    },
+  );
+
   it('publishes a replacement inode instead of truncating the live file in place', () => {
     const root = workspace();
     const file = join(root, 'protected.txt');
