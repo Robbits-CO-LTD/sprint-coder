@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 // Keep the subprocess deadline below Vitest's 20 second integration-test ceiling while allowing
@@ -153,7 +153,7 @@ async function runAclBatch(
   const encodedScript = Buffer.from(secureAclScript, 'utf16le').toString('base64');
   const encodedItems = Buffer.from(JSON.stringify(paths), 'utf8').toString('base64');
   await new Promise<void>((resolve, reject) => {
-    execFile(
+    const child = spawn(
       POWERSHELL,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript],
       {
@@ -167,12 +167,27 @@ async function runAclBatch(
           SPRINT_CODER_ACL_OPERATION: operation,
           SPRINT_CODER_ACL_ITEMS: encodedItems,
         },
-        encoding: 'utf8',
-        timeout: WINDOWS_ACL_TIMEOUT_MS,
+        stdio: 'ignore',
         windowsHide: true,
-        maxBuffer: 64 * 1024,
       },
-      (error) => (error === null ? resolve() : reject(error)),
+    );
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(new Error(`Windows ACL ${operation} timed out`));
+    }, WINDOWS_ACL_TIMEOUT_MS);
+    child.once('error', (error) => finish(error));
+    // Wait for the PowerShell process itself, not pipe closure. GitHub runner helpers may inherit
+    // pipe handles and keep execFile's close callback pending after PowerShell has already exited.
+    child.once('exit', (code) =>
+      finish(code === 0 ? undefined : new Error(`Windows ACL ${operation} exited with ${code}`)),
     );
   });
 }
