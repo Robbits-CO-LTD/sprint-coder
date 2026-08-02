@@ -30,6 +30,7 @@ import type {
   RuntimeWorkspaceSet,
 } from './protocol';
 import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
+import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from './probe-budget';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
@@ -107,7 +108,7 @@ export async function probeCodex(
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish({ available: false });
-    }, 5_000);
+    }, RUNTIME_VERSION_PROBE_TIMEOUT_MS);
   });
   const authenticated = availability.available
     ? await probeAuthentication(resolveCodexCommand(command), ['login', 'status'], environment)
@@ -918,7 +919,7 @@ async function probeAuthentication(
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish(false);
-    }, 3_000);
+    }, RUNTIME_AUTH_PROBE_TIMEOUT_MS);
   });
 }
 

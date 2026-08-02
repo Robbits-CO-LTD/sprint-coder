@@ -20,6 +20,7 @@ import {
   type RuntimeWorkspaceSet,
   runtimeWorkspaceSetFromLegacyPath,
 } from '../runtime-host/protocol';
+import { RUNTIME_HOST_HELLO_TIMEOUT_MS } from '../runtime-host/probe-budget';
 
 type ActiveTurn = {
   taskId: string;
@@ -219,7 +220,7 @@ export class RuntimeHostClient {
           this.resolveProbe = null;
           resolve({ available: false, readiness: 'unavailable', models: [] });
         }
-      }, 7_000);
+      }, RUNTIME_HOST_HELLO_TIMEOUT_MS);
     });
     let child: UtilityProcess;
     try {
