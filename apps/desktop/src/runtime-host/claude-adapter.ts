@@ -198,6 +198,21 @@ export class ClaudeRuntimeAdapter {
     let teamMcpDirectory: string | null = null;
     let teamMcpArgs: { configPath: string; guidance: string; enableWebSearch: boolean } | undefined;
     if (teamMcp !== undefined) {
+      let nodeCommand: string;
+      try {
+        nodeCommand = teamMcpNodeCommand();
+      } catch {
+        if (temporaryDirectory !== null)
+          rmSync(temporaryDirectory, { recursive: true, force: true });
+        fail(
+          publicError(
+            'RUNTIME_FAILED',
+            'Team機能に必要な同梱Node.jsを起動できません。アプリを再インストールしてください。',
+            false,
+          ),
+        );
+        return;
+      }
       teamMcpDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-mcp-'));
       const scriptPath = join(teamMcpDirectory, 'team-mcp-server.cjs');
       const configPath = join(teamMcpDirectory, 'mcp-config.json');
@@ -208,7 +223,7 @@ export class ClaudeRuntimeAdapter {
           mcpServers: {
             team: {
               type: 'stdio',
-              command: teamMcpNodeCommand(),
+              command: nodeCommand,
               args: [scriptPath],
               env: {
                 TEAM_BRIDGE_SOCKET: teamMcp.socketPath,

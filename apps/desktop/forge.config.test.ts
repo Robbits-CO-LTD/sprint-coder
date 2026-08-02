@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import config, { assertNativePackagingHost } from './forge.config';
+import config, { assertNativePackagingHost, verifyBundledNodeResources } from './forge.config';
 
 describe('desktop package icon', () => {
   it('points Electron Packager at real macOS and Windows icon files', () => {
@@ -24,4 +24,11 @@ describe('native package target', () => {
       'Cross-platform packaging is unsupported',
     );
   });
+
+  it.runIf(process.platform === 'win32')(
+    'accepts only the pinned signed Node executable used by Windows packages',
+    () => {
+      expect(() => verifyBundledNodeResources()).not.toThrow();
+    },
+  );
 });

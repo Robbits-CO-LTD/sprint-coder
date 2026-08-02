@@ -167,11 +167,26 @@ export class CodexRuntimeAdapter {
     let teamMcpDirectory: string | null = null;
     let teamMcpProfile: CodexTeamMcpProfile | undefined;
     if (teamMcp !== undefined) {
+      let nodeCommand: string;
+      try {
+        nodeCommand = teamMcpNodeCommand();
+      } catch {
+        if (temporaryDirectory !== null)
+          rmSync(temporaryDirectory, { recursive: true, force: true });
+        fail(
+          publicError(
+            'RUNTIME_FAILED',
+            'Team機能に必要な同梱Node.jsを起動できません。アプリを再インストールしてください。',
+            false,
+          ),
+        );
+        return;
+      }
       teamMcpDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-mcp-'));
       const scriptPath = join(teamMcpDirectory, 'team-mcp-server.cjs');
       writeFileSync(scriptPath, TEAM_MCP_SERVER_SOURCE, { mode: 0o600 });
       teamMcpProfile = {
-        command: teamMcpNodeCommand(),
+        command: nodeCommand,
         scriptPath,
         enableWebSearch: teamMcp.enableWebSearch === true,
       };

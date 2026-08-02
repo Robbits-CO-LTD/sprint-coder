@@ -102,6 +102,10 @@ export function TeamPolicyDialog({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (open) closingRef.current = false;
+  }, [open]);
+
+  useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
     if (open && !dialog.open) {
