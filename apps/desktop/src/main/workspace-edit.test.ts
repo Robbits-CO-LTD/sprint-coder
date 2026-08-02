@@ -16,14 +16,23 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_EDITABLE_BYTES, openWorkspaceFileForEdit, saveWorkspaceFile } from './workspace-edit';
 
-const fileSystemFault = vi.hoisted(() => ({ failWrite: false }));
+const fileSystemFault = vi.hoisted(() => ({
+  failWrite: false,
+  failWriteAtCall: null as number | null,
+  writeCalls: 0,
+}));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
     writeSync: (...args: Parameters<typeof actual.writeSync>) => {
-      if (fileSystemFault.failWrite) throw new Error('simulated disk write failure');
+      fileSystemFault.writeCalls += 1;
+      if (
+        fileSystemFault.failWrite ||
+        fileSystemFault.writeCalls === fileSystemFault.failWriteAtCall
+      )
+        throw new Error('simulated disk write failure');
       return actual.writeSync(...args);
     },
   };
@@ -144,6 +153,29 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readdirSync(root)).toEqual(['important.txt']);
   });
 
+  it('restores the original bytes when publishing the staged edit fails', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original 日本語\r\n', 'utf8');
+    writeFileSync(file, original);
+    fileSystemFault.writeCalls = 0;
+    fileSystemFault.failWriteAtCall = 2;
+    try {
+      const result = saveWorkspaceFile(
+        root,
+        'important.txt',
+        'replacement\r\n',
+        createHash('sha256').update(original).digest('hex'),
+      );
+      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+    } finally {
+      fileSystemFault.failWriteAtCall = null;
+      fileSystemFault.writeCalls = 0;
+    }
+    expect(readFileSync(file)).toEqual(original);
+    expect(readdirSync(root)).toEqual(['important.txt']);
+  });
+
   it('refuses to write outside the Workspace, and leaves the target untouched', () => {
     const outsideRoot = workspace();
     const outside = join(outsideRoot, 'secret.txt');
@@ -197,6 +229,19 @@ describe('saveWorkspaceFile (issue #43)', () => {
     );
     expect(result.outcome).toBe('saved');
     expect(statSync(file).mode & 0o777).toBe(0o755);
+  });
+
+  it('preserves the original file identity so ACLs and extended attributes stay attached', () => {
+    const root = workspace();
+    const file = join(root, 'protected.txt');
+    writeFileSync(file, 'before\n');
+    const before = statSync(file, { bigint: true });
+
+    const result = saveWorkspaceFile(root, 'protected.txt', 'after\n', digestOf('before\n'));
+    const after = statSync(file, { bigint: true });
+
+    expect(result.outcome).toBe('saved');
+    expect({ dev: after.dev, ino: after.ino }).toEqual({ dev: before.dev, ino: before.ino });
   });
 
   it('refuses to write more than the cap', () => {

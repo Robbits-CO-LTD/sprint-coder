@@ -3,17 +3,15 @@ import {
   closeSync,
   constants,
   copyFileSync,
-  fchmodSync,
   fstatSync,
   fsyncSync,
   ftruncateSync,
   openSync,
   readFileSync,
-  renameSync,
+  readSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
 import { resolveSafeWorkspaceFile } from './workspace-safe-path';
 
 // Reading a Workspace file in full so the user can edit it, and writing their edit back (issue #43).
@@ -107,9 +105,10 @@ export type SaveOutcome = {
  * silently winning.
  *
  * The target is opened once for validation. Replacement bytes are staged and durably flushed in a
- * random, exclusively-created sibling copied from that target, which retains its mode and Windows
- * ACL. The target identity is revalidated immediately before an atomic rename. A failed stage never
- * truncates the user's original file.
+ * random, exclusively-created sibling copied from that target. The target identity and digest are
+ * revalidated immediately before publishing. Publication writes through the original descriptor so
+ * the inode — including its ACLs and extended attributes — is retained. If publication fails after
+ * truncation starts, the original bytes are restored through that same descriptor.
  */
 export function saveWorkspaceFile(
   workspacePath: string,
@@ -130,6 +129,9 @@ export function saveWorkspaceFile(
   let descriptor: number | null = null;
   let temporaryDescriptor: number | null = null;
   let temporary: string | null = null;
+  let original: Buffer | null = null;
+  let targetMutationStarted = false;
+  let preserveRecoveryCopy = false;
   try {
     descriptor = openSync(
       absolute,
@@ -139,7 +141,8 @@ export function saveWorkspaceFile(
     if (!sameIdentity(stat, safe.identity)) return refuse('outside_workspace');
     if (!stat.isFile()) return refuse('not_a_file');
     if (stat.size > BigInt(MAX_EDITABLE_BYTES)) return refuse('too_large');
-    const current = readFileSync(descriptor);
+    const current = readDescriptor(descriptor, Number(stat.size));
+    original = current;
     // Not an error: the file changed under the editor, so this write is not the one to make.
     if (digestOf(current) !== baseDigest)
       return { outcome: 'conflict', digest: null, reason: null };
@@ -154,15 +157,10 @@ export function saveWorkspaceFile(
     const temporaryStat = fstatSync(temporaryDescriptor, { bigint: true });
     if (!temporaryStat.isFile() || temporaryStat.nlink !== 1n) return refuse('outside_workspace');
     // copyFileSync is pathname based. If the target changed during that copy, never publish it.
-    if (digestOf(readFileSync(temporaryDescriptor)) !== baseDigest)
+    if (digestOf(readDescriptor(temporaryDescriptor, Number(temporaryStat.size))) !== baseDigest)
       return { outcome: 'conflict', digest: null, reason: null };
 
-    ftruncateSync(temporaryDescriptor, 0);
-    let offset = 0;
-    while (offset < bytes.length)
-      offset += writeSync(temporaryDescriptor, bytes, offset, bytes.length - offset, offset);
-    if (process.platform !== 'win32') fchmodSync(temporaryDescriptor, Number(stat.mode & 0o7777n));
-    fsyncSync(temporaryDescriptor);
+    replaceDescriptorContents(temporaryDescriptor, bytes);
     closeSync(temporaryDescriptor);
     temporaryDescriptor = null;
 
@@ -173,17 +171,27 @@ export function saveWorkspaceFile(
       !sameIdentity(finalTarget.identity, safe.identity)
     )
       return refuse('outside_workspace');
-    // Windows does not allow replacing a file while our validation handle is open. The identity
-    // was just revalidated above; close only at the final publication boundary.
-    if (process.platform === 'win32') {
-      closeSync(descriptor);
-      descriptor = null;
-    }
-    renameSync(temporary, absolute);
-    temporary = null;
-    syncParentDirectory(dirname(absolute));
+
+    const latestStat = fstatSync(descriptor, { bigint: true });
+    if (!sameIdentity(latestStat, safe.identity)) return refuse('outside_workspace');
+    if (latestStat.size > BigInt(MAX_EDITABLE_BYTES)) return refuse('too_large');
+    if (digestOf(readDescriptor(descriptor, Number(latestStat.size))) !== baseDigest)
+      return { outcome: 'conflict', digest: null, reason: null };
+
+    targetMutationStarted = true;
+    replaceDescriptorContents(descriptor, bytes);
+    targetMutationStarted = false;
     return { outcome: 'saved', digest: digestOf(bytes), reason: null };
   } catch {
+    if (targetMutationStarted && descriptor !== null && original !== null) {
+      try {
+        replaceDescriptorContents(descriptor, original);
+        targetMutationStarted = false;
+      } catch {
+        // Keep the durable sibling copy for recovery if even restoring the original inode fails.
+        preserveRecoveryCopy = true;
+      }
+    }
     return refuse('io_error');
   } finally {
     if (temporaryDescriptor !== null)
@@ -192,7 +200,7 @@ export function saveWorkspaceFile(
       } catch {
         // The operation already failed; cleanup below is still attempted.
       }
-    if (temporary !== null)
+    if (temporary !== null && !preserveRecoveryCopy)
       try {
         unlinkSync(temporary);
       } catch {
@@ -208,6 +216,25 @@ function digestOf(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function readDescriptor(descriptor: number, size: number): Buffer {
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const count = readSync(descriptor, bytes, offset, size - offset, offset);
+    if (count === 0) break;
+    offset += count;
+  }
+  return offset === size ? bytes : bytes.subarray(0, offset);
+}
+
+function replaceDescriptorContents(descriptor: number, bytes: Buffer): void {
+  ftruncateSync(descriptor, 0);
+  let offset = 0;
+  while (offset < bytes.length)
+    offset += writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
+  fsyncSync(descriptor);
+}
+
 function sameIdentity(
   actual: Readonly<{ dev: bigint; ino: bigint; nlink: bigint }>,
   expected: Readonly<{ dev: bigint; ino: bigint; nlink: bigint }>,
@@ -218,15 +245,4 @@ function sameIdentity(
     actual.nlink === 1n &&
     expected.nlink === 1n
   );
-}
-
-function syncParentDirectory(parent: string): void {
-  if (process.platform === 'win32') return;
-  let descriptor: number | null = null;
-  try {
-    descriptor = openSync(parent, constants.O_RDONLY);
-    fsyncSync(descriptor);
-  } finally {
-    if (descriptor !== null) closeSync(descriptor);
-  }
 }
