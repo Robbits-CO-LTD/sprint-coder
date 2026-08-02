@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   secureWindowsPath,
@@ -12,6 +14,7 @@ import {
 } from './windows-acl';
 
 const cleanup: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -62,6 +65,34 @@ describe('Windows ACL runner', () => {
       await Promise.all(paths.map((path) => secureWindowsPath(path, 'file')));
       await Promise.all(paths.map((path) => verifyWindowsPathAcl(path, 'file')));
     },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'serializes ACL PowerShell hosts across independent Node processes',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-processes-'));
+      cleanup.push(root);
+      const paths = await Promise.all(
+        Array.from({ length: 4 }, async (_, index) => {
+          const path = join(root, `${index}.txt`);
+          await writeFile(path, 'private');
+          return path;
+        }),
+      );
+      const viteNode = resolve(process.cwd(), '../../node_modules/vite-node/vite-node.mjs');
+      const fixture = resolve(process.cwd(), 'src/main/windows-acl-process-fixture.ts');
+
+      await Promise.all(
+        paths.map((path) =>
+          execFileAsync(process.execPath, [viteNode, fixture, path], {
+            cwd: process.cwd(),
+            timeout: WINDOWS_ACL_TIMEOUT_MS + 5_000,
+          }),
+        ),
+      );
+      await verifyWindowsPaths(paths.map((path) => ({ path, kind: 'file' })));
+    },
+    WINDOWS_ACL_TIMEOUT_MS + 10_000,
   );
 
   it.runIf(process.platform === 'win32')(

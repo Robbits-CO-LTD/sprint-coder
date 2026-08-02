@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process';
+import { mkdir, rmdir, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { windowsPowerShellCommand } from './windows-powershell';
 
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+const ACL_PROCESS_LOCK = join(tmpdir(), 'sprint-coder-windows-acl.lock');
 // Keep the subprocess deadline below Vitest's 20 second integration-test ceiling while allowing
 // for PowerShell startup contention on two-core Windows runners. The previous 10 second deadline
 // expired when several ACL-backed stores were exercised in parallel, even though the commands
@@ -165,50 +169,101 @@ async function runAclBatch(
   operation: AclOperation,
 ): Promise<void> {
   const encodedItems = Buffer.from(JSON.stringify(paths), 'utf8').toString('base64');
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(POWERSHELL, windowsPowerShellCommand(secureAclScript), {
-      env: {
-        SystemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
-        WINDIR: process.env['WINDIR'] ?? 'C:\\Windows',
-        PATH: process.env['PATH'] ?? '',
-        TEMP: process.env['TEMP'] ?? '',
-        TMP: process.env['TMP'] ?? '',
-        USERPROFILE: process.env['USERPROFILE'] ?? '',
-        SPRINT_CODER_ACL_OPERATION: operation,
-        SPRINT_CODER_ACL_ITEMS: encodedItems,
-      },
-      stdio: 'ignore',
-      windowsHide: true,
+  const releaseProcessLock = await acquireAclProcessLock();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(POWERSHELL, windowsPowerShellCommand(secureAclScript), {
+        env: {
+          SystemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
+          WINDIR: process.env['WINDIR'] ?? 'C:\\Windows',
+          PATH: process.env['PATH'] ?? '',
+          TEMP: process.env['TEMP'] ?? '',
+          TMP: process.env['TMP'] ?? '',
+          USERPROFILE: process.env['USERPROFILE'] ?? '',
+          SPRINT_CODER_ACL_OPERATION: operation,
+          SPRINT_CODER_ACL_ITEMS: encodedItems,
+        },
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      let settled = false;
+      let timedOut = false;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error === undefined) resolve();
+        else reject(error);
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      }, WINDOWS_ACL_TIMEOUT_MS);
+      child.once('error', (error) => {
+        // Before the deadline this is a spawn failure, so no subprocess can mutate anything. After
+        // the deadline it may instead be a failed kill request (for example EPERM); the PowerShell
+        // process can still be alive, and the queue must remain blocked until its exit event.
+        if (!timedOut) finish(error);
+      });
+      // Wait for the PowerShell process itself, not pipe closure. GitHub runner helpers may inherit
+      // pipe handles and keep execFile's close callback pending after PowerShell has already exited.
+      child.once('exit', (code) => {
+        if (timedOut) {
+          finish(new Error(`Windows ACL ${operation} timed out`));
+          return;
+        }
+        finish(code === 0 ? undefined : new Error(`Windows ACL ${operation} exited with ${code}`));
+      });
     });
-    let settled = false;
-    let timedOut = false;
-    const finish = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error === undefined) resolve();
-      else reject(error);
-    };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGKILL');
-    }, WINDOWS_ACL_TIMEOUT_MS);
-    child.once('error', (error) => {
-      // Before the deadline this is a spawn failure, so no subprocess can mutate anything. After
-      // the deadline it may instead be a failed kill request (for example EPERM); the PowerShell
-      // process can still be alive, and the queue must remain blocked until its exit event.
-      if (!timedOut) finish(error);
-    });
-    // Wait for the PowerShell process itself, not pipe closure. GitHub runner helpers may inherit
-    // pipe handles and keep execFile's close callback pending after PowerShell has already exited.
-    child.once('exit', (code) => {
-      if (timedOut) {
-        finish(new Error(`Windows ACL ${operation} timed out`));
-        return;
+  } finally {
+    await releaseProcessLock();
+  }
+}
+
+async function acquireAclProcessLock(): Promise<() => Promise<void>> {
+  const deadline = Date.now() + WINDOWS_ACL_TIMEOUT_MS;
+  while (true) {
+    try {
+      await mkdir(ACL_PROCESS_LOCK);
+      return async () => {
+        await removeAclProcessLock();
+      };
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+      try {
+        const lockStat = await stat(ACL_PROCESS_LOCK);
+        // A killed test worker cannot release its directory. Reap only well beyond the maximum
+        // child deadline, so a live ACL operation is never unlocked underneath another process.
+        if (Date.now() - lockStat.mtimeMs > WINDOWS_ACL_TIMEOUT_MS * 2) {
+          await removeAclProcessLock();
+          continue;
+        }
+      } catch (statError) {
+        if (!isNotFound(statError)) throw statError;
+        continue;
       }
-      finish(code === 0 ? undefined : new Error(`Windows ACL ${operation} exited with ${code}`));
-    });
-  });
+      if (Date.now() >= deadline) {
+        throw new Error('Windows ACL process lock timed out', { cause: error });
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
+}
+
+async function removeAclProcessLock(): Promise<void> {
+  try {
+    await rmdir(ACL_PROCESS_LOCK);
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'EEXIST';
+}
+
+function isNotFound(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT';
 }
 
 function aclBatches(paths: readonly WindowsAclPath[]): WindowsAclPath[][] {
