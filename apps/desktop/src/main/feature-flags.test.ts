@@ -36,8 +36,8 @@ describe('settingsWorkspaceV2Enabled', () => {
 });
 
 describe('projectMultiFolderUxEnabled', () => {
-  it('stays gated until E2 and accepts only the explicit enable switch', () => {
-    expect(projectMultiFolderUxEnabled({})).toBe(false);
+  it('enables the completed E2 UX by default and keeps an explicit rollback', () => {
+    expect(projectMultiFolderUxEnabled({})).toBe(true);
     expect(projectMultiFolderUxEnabled({ SPRINT_CODER_PROJECT_MULTI_FOLDER_UX: '0' })).toBe(false);
     expect(projectMultiFolderUxEnabled({ SPRINT_CODER_PROJECT_MULTI_FOLDER_UX: '1' })).toBe(true);
   });

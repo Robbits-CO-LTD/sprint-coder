@@ -46,6 +46,9 @@ export function TeamListView({
   const teamBusy = useAppStore((state) => state.teamBusy);
   const stopTeamWorker = useAppStore((state) => state.stopTeamWorker);
   const resumeTeamMission = useAppStore((state) => state.resumeTeamMission);
+  const resumeTeamExecutionIntegration = useAppStore(
+    (state) => state.resumeTeamExecutionIntegration,
+  );
   const stopAllTeamWorkers = useAppStore((state) => state.stopAllTeamWorkers);
   const sectionRef = useRef<HTMLElement>(null);
   // Open state is local to the view, not the store: the dialog is a modal task (open, adjust,
@@ -144,6 +147,7 @@ export function TeamListView({
               .filter((m) => m.targetAgentId === worker.id || m.sourceAgentId === worker.id)
               .sort((a, b) => a.seq - b.seq)
               .slice(-4);
+            const execution = latestExecutionForWorker(detail.executions, worker.id);
             return (
               <li
                 key={worker.id}
@@ -208,14 +212,19 @@ export function TeamListView({
                 </div>
                 {/* Same component, same helper, same facts as the Canvas's Worker card. */}
                 <TeamExecutionStatus
-                  execution={latestExecutionForWorker(detail.executions, worker.id)}
+                  execution={execution}
                   variant="list"
+                  resumeDisabled={teamBusy}
                   onResume={(() => {
-                    const execution = latestExecutionForWorker(detail.executions, worker.id);
                     return execution?.missionId == null
                       ? undefined
                       : () => void resumeTeamMission(task.id, execution.missionId!);
                   })()}
+                  onResumeIntegration={
+                    execution === null
+                      ? undefined
+                      : () => void resumeTeamExecutionIntegration(task.id, execution.id)
+                  }
                 />
                 <dl className="tlv-usage">
                   <div>

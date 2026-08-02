@@ -1,4 +1,8 @@
-import type { TeamExecutionSummary, TeamMissionWorktreeSummary } from '../types/sprint-coder';
+import type {
+  TeamExecutionIsolation,
+  TeamExecutionSummary,
+  TeamMissionWorktreeSummary,
+} from '../types/sprint-coder';
 import { describeExecution } from '../lib/team-execution-display';
 
 /**
@@ -18,13 +22,22 @@ export function TeamExecutionStatus({
   execution,
   variant,
   onResume,
+  onResumeIntegration,
+  resumeDisabled = false,
 }: {
   execution: TeamExecutionSummary | null;
   variant: 'canvas' | 'list';
   onResume?: (() => void) | undefined;
+  onResumeIntegration?: (() => void) | undefined;
+  resumeDisabled?: boolean;
 }) {
   if (execution === null) return null;
   const display = describeExecution(execution);
+  const isolation = execution.isolation ?? null;
+  const integratedRepositories =
+    isolation?.repositories.filter(({ state }) => ['integrated', 'cleaned'].includes(state))
+      .length ?? 0;
+  const resume = isolationResumeAction(execution, onResume, onResumeIntegration);
 
   return (
     <div
@@ -60,18 +73,17 @@ export function TeamExecutionStatus({
           <span className="team-exec-value">{display.terminalReasonLabel}</span>
         </p>
       )}
-      {execution.state === 'waiting_resume' &&
-        execution.missionId !== null &&
-        onResume !== undefined && (
-          <button
-            type="button"
-            className="w-stop-btn"
-            data-testid="team-mission-resume"
-            onClick={onResume}
-          >
-            Missionを再開
-          </button>
-        )}
+      {resume !== null && (
+        <button
+          type="button"
+          className="w-stop-btn"
+          data-testid={resume.testId}
+          disabled={resumeDisabled}
+          onClick={resume.onClick}
+        >
+          {resume.label}
+        </button>
+      )}
       {execution.worktree !== null && (
         <p className="team-exec-row" data-testid="team-execution-worktree">
           <span className="team-exec-key">Worktree</span>
@@ -82,6 +94,37 @@ export function TeamExecutionStatus({
             {execution.worktree.reason !== null && ` · ${execution.worktree.reason}`}
           </span>
         </p>
+      )}
+      {isolation !== null && (
+        <div className="team-exec-isolation" data-testid="team-execution-isolation">
+          <p className="team-exec-row">
+            <span className="team-exec-key">Repository</span>
+            <span className="team-exec-value">
+              {integratedRepositories}/{isolation.repositories.length} repository統合済み ·{' '}
+              {isolationPhaseLabel(isolation.phase)}
+            </span>
+          </p>
+          <details className="team-exec-repositories">
+            <summary>repository別の状態</summary>
+            <div>
+              {isolation.repositories.map((repository) => (
+                <p className="team-exec-row" key={repository.ordinal}>
+                  <span className="team-exec-key">Repo {repository.ordinal}</span>
+                  <span className="team-exec-value">
+                    {isolationRepositoryStateLabel(repository.state)} ·{' '}
+                    {repository.changedFiles.length}件変更
+                  </span>
+                </p>
+              ))}
+            </div>
+          </details>
+          {isolation.reason !== null && (
+            <p className="team-exec-row team-exec-isolation-reason" role="alert">
+              <span className="team-exec-key">失敗理由</span>
+              <span className="team-exec-value">{isolation.reason}</span>
+            </p>
+          )}
+        </div>
       )}
       {display.isWaiting && (
         <p className="team-exec-row team-exec-wait" data-testid="team-execution-wait">
@@ -110,6 +153,59 @@ export function TeamExecutionStatus({
       </p>
     </div>
   );
+}
+
+function isolationResumeAction(
+  execution: TeamExecutionSummary,
+  onResumeMission: (() => void) | undefined,
+  onResumeIntegration: (() => void) | undefined,
+): { label: string; testId: string; onClick: () => void } | null {
+  if (execution.state !== 'waiting_resume') return null;
+  if (execution.isolation?.resumeKind === 'integration') {
+    const onClick = execution.missionId === null ? onResumeIntegration : onResumeMission;
+    return onClick === undefined
+      ? null
+      : { label: '統合を再開', testId: 'team-integration-resume', onClick };
+  }
+  return execution.missionId !== null && onResumeMission !== undefined
+    ? { label: 'Workerを再開', testId: 'team-worker-resume', onClick: onResumeMission }
+    : null;
+}
+
+function isolationPhaseLabel(phase: TeamExecutionIsolation['phase']): string {
+  switch (phase) {
+    case 'preparing':
+      return '隔離環境を準備中';
+    case 'running':
+      return '隔離環境で実行中';
+    case 'finalizing':
+      return 'commitを確定中';
+    case 'integrating':
+      return 'repositoryを統合中';
+    case 'waiting_resume':
+      return '再開待ち';
+    case 'completed':
+      return '統合完了';
+    case 'quarantined':
+      return '隔離して要確認';
+  }
+}
+
+function isolationRepositoryStateLabel(
+  state: TeamExecutionIsolation['repositories'][number]['state'],
+): string {
+  switch (state) {
+    case 'active':
+      return '実行中';
+    case 'ready':
+      return '統合待ち';
+    case 'integrated':
+      return '統合済み';
+    case 'cleaned':
+      return '統合・片付け済み';
+    case 'quarantined':
+      return '隔離済み';
+  }
 }
 
 function worktreeStateLabel(state: TeamMissionWorktreeSummary['state']): string {

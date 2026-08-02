@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectFolder, ProjectSummary } from '../types/sprint-coder';
-import { filterProjectsByQuery, projectSelectionAction } from './ProjectPicker';
+import {
+  filterProjectsByQuery,
+  isProjectPickerNavigationKey,
+  nextProjectPickerIndex,
+  projectSelectionAction,
+} from './ProjectPicker';
 
 const now = '2026-08-02T00:00:00.000Z';
 const project = (id: string, name: string): ProjectSummary => ({
@@ -38,6 +43,23 @@ describe('Project picker projection', () => {
     expect(filterProjectsByQuery(projects, folders, 'services/api').map(({ id }) => id)).toEqual([
       'p2',
     ]);
+  });
+
+  it('wraps Arrow navigation and supports Home/End for the complete menu', () => {
+    expect(nextProjectPickerIndex(-1, 5, 'ArrowDown')).toBe(0);
+    expect(nextProjectPickerIndex(4, 5, 'ArrowDown')).toBe(0);
+    expect(nextProjectPickerIndex(0, 5, 'ArrowUp')).toBe(4);
+    expect(nextProjectPickerIndex(2, 5, 'Home')).toBe(0);
+    expect(nextProjectPickerIndex(2, 5, 'End')).toBe(4);
+  });
+
+  it('preserves Home and End for caret movement in the search input', () => {
+    expect(isProjectPickerNavigationKey('Home', true)).toBe(false);
+    expect(isProjectPickerNavigationKey('End', true)).toBe(false);
+    expect(isProjectPickerNavigationKey('ArrowDown', true)).toBe(true);
+    expect(isProjectPickerNavigationKey('ArrowUp', true)).toBe(true);
+    expect(isProjectPickerNavigationKey('Home', false)).toBe(true);
+    expect(isProjectPickerNavigationKey('End', false)).toBe(true);
   });
 
   it('reassigns only an unstarted Task and creates a new Task after conversation starts', () => {

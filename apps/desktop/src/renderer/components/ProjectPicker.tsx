@@ -21,6 +21,7 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
   const [pending, setPending] = useState(false);
   const [creating, setCreating] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -63,6 +64,7 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
       }
       setOpen(false);
       setQuery('');
+      requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
     } finally {
       setPending(false);
       setProjectSwitching(task.id, false);
@@ -75,13 +77,30 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
         className="project-picker"
         ref={wrapRef}
         onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) return;
           if (event.key === 'Escape') {
             event.preventDefault();
             setOpen(false);
+            triggerRef.current?.focus({ preventScroll: true });
+            return;
           }
+          if (!isProjectPickerNavigationKey(event.key, event.target instanceof HTMLInputElement))
+            return;
+          const buttons = [
+            ...(wrapRef.current?.querySelectorAll<HTMLButtonElement>(
+              '.project-picker-options button:not(:disabled), .project-picker-actions button:not(:disabled)',
+            ) ?? []),
+          ];
+          if (buttons.length === 0) return;
+          event.preventDefault();
+          const current = buttons.indexOf(event.target as HTMLButtonElement);
+          const next = nextProjectPickerIndex(current, buttons.length, event.key);
+          buttons[next]?.focus({ preventScroll: true });
+          buttons[next]?.scrollIntoView({ block: 'nearest' });
         }}
       >
         <button
+          ref={triggerRef}
           type="button"
           className="ctx-chip project-picker-trigger"
           aria-haspopup="dialog"
@@ -103,15 +122,6 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
                 value={query}
                 placeholder="Projectを検索"
                 onChange={(event) => setQuery(event.target.value)}
-                onCompositionStart={(event) => event.stopPropagation()}
-                onKeyDown={(event) => {
-                  if (event.key === 'ArrowDown') {
-                    event.preventDefault();
-                    wrapRef.current
-                      ?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
-                      ?.focus();
-                  }
-                }}
               />
             </label>
             <div className="project-picker-options" role="menu" aria-label="Project一覧">
@@ -151,7 +161,7 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
               </button>
             </div>
             <div className="sr-only" aria-live="polite">
-              {pending ? 'Projectを変更中です' : ''}
+              {pending ? 'Projectを変更中です' : `${filtered.length}件のProject`}
             </div>
           </div>
         )}
@@ -167,6 +177,19 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
       />
     </>
   );
+}
+
+export function nextProjectPickerIndex(current: number, length: number, key: string): number {
+  if (length <= 0) return -1;
+  if (key === 'Home') return 0;
+  if (key === 'End') return length - 1;
+  if (key === 'ArrowUp') return current <= 0 ? length - 1 : current - 1;
+  return current < 0 || current >= length - 1 ? 0 : current + 1;
+}
+
+export function isProjectPickerNavigationKey(key: string, fromSearchInput: boolean): boolean {
+  if (key === 'ArrowDown' || key === 'ArrowUp') return true;
+  return !fromSearchInput && (key === 'Home' || key === 'End');
 }
 
 export function filterProjectsByQuery(
