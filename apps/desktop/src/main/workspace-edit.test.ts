@@ -96,7 +96,7 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
     expect(readFileSync(file)).toEqual(bytes);
   });
 
-  it('restores the durable recovery copy after a crash leaves a partial in-place write', () => {
+  it('fails closed and retains recovery after a crash leaves a partial in-place write', () => {
     const root = workspace();
     const file = join(root, 'important.txt');
     const original = Buffer.from('original 日本語\r\n', 'utf8');
@@ -112,18 +112,12 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
         newDigest: createHash('sha256').update(replacement).digest('hex'),
       }),
     );
-    const identityBeforeRecovery = statSync(file, { bigint: true });
-
     const opened = openWorkspaceFileForEdit(root, 'important.txt');
 
-    expect(opened).toMatchObject({ editable: true, text: 'original 日本語\r\n' });
-    expect(readFileSync(file)).toEqual(original);
-    const identityAfterRecovery = statSync(file, { bigint: true });
-    expect({ dev: identityAfterRecovery.dev, ino: identityAfterRecovery.ino }).toEqual({
-      dev: identityBeforeRecovery.dev,
-      ino: identityBeforeRecovery.ino,
-    });
-    expect(readdirSync(root)).toEqual(['important.txt']);
+    expect(opened).toMatchObject({ editable: false, reason: 'not_a_file' });
+    expect(readFileSync(file)).toEqual(replacement.subarray(0, 4));
+    expect(readFileSync(`${file}.sprint-coder-recovery.tmp`)).toEqual(original);
+    expect(readdirSync(root)).toHaveLength(4);
   });
 
   it('keeps a fully flushed replacement when a crash only interrupted transaction cleanup', () => {
@@ -155,7 +149,9 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
     const file = join(root, 'important.txt');
     const original = Buffer.from('original\n', 'utf8');
     const replacement = Buffer.from('replacement\n', 'utf8');
-    const external = Buffer.from('edited by another program\n', 'utf8');
+    // Empty is also a valid prefix of both original and replacement. Prefix matching therefore
+    // cannot prove that Sprint Coder, rather than another editor, produced the observed bytes.
+    const external = Buffer.alloc(0);
     writeFileSync(file, external);
     writeFileSync(`${file}.sprint-coder-recovery.tmp`, original);
     writeFileSync(`${file}.sprint-coder-stage.tmp`, replacement);
@@ -284,8 +280,9 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readdirSync(root).some((name) => name.endsWith('.sprint-coder-save.json'))).toBe(true);
 
     const recovered = openWorkspaceFileForEdit(root, 'important.txt');
-    expect(recovered).toMatchObject({ editable: true, text: 'original 日本語\r\n' });
-    expect(readdirSync(root)).toEqual(['important.txt']);
+    expect(recovered).toMatchObject({ editable: false, reason: 'not_a_file' });
+    expect(readFileSync(join(root, recovery!))).toEqual(original);
+    expect(readdirSync(root)).toHaveLength(4);
   });
 
   it('refuses to write outside the Workspace, and leaves the target untouched', () => {

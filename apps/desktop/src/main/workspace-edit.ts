@@ -329,7 +329,6 @@ function recoverInterruptedSave(absolute: string): void {
 
   let targetDescriptor: number | null = null;
   let recoveryDescriptor: number | null = null;
-  let stagingDescriptor: number | null = null;
   let journalDescriptor: number | null = null;
   try {
     // Publication never begins until both recovery bytes and the journal have been flushed. An
@@ -364,7 +363,7 @@ function recoverInterruptedSave(absolute: string): void {
     const targetDigest = digestOf(targetBytes);
 
     if (targetDigest !== parsed.originalDigest && targetDigest !== parsed.newDigest) {
-      if (!hasRecovery || !hasStage) throw new Error('Save recovery bytes are missing');
+      if (!hasRecovery) throw new Error('Save recovery bytes are missing');
       recoveryDescriptor = openSync(
         transaction.recovery,
         constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
@@ -379,30 +378,13 @@ function recoverInterruptedSave(absolute: string): void {
       const original = readDescriptor(recoveryDescriptor, Number(recoveryStat.size));
       if (digestOf(original) !== parsed.originalDigest)
         throw new Error('Save recovery digest mismatch');
-      stagingDescriptor = openSync(
-        transaction.staging,
-        constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
-      );
-      const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
-      if (
-        !stagingStat.isFile() ||
-        stagingStat.nlink !== 1n ||
-        stagingStat.size > BigInt(MAX_EDITABLE_BYTES)
-      )
-        throw new Error('Unsafe save staging file');
-      const replacement = readDescriptor(stagingDescriptor, Number(stagingStat.size));
-      if (digestOf(replacement) !== parsed.newDigest)
-        throw new Error('Save staging digest mismatch');
-      // Our in-place writer truncates and then writes from offset zero. Restore only a prefix it
-      // could have produced (or a prefix left by a failed rollback); never overwrite an unrelated
-      // external edit that happened while Sprint Coder was not running.
-      if (!isPrefixOf(targetBytes, replacement) && !isPrefixOf(targetBytes, original))
-        throw new Error('Save target changed outside the interrupted transaction');
-      replaceDescriptorContents(targetDescriptor, original);
+      // A partial write and a legitimate post-crash external edit can have identical bytes (empty
+      // is a prefix of every value). There is no safe automatic choice. Keep the verified original
+      // recovery copy and fail closed so Sprint Coder never overwrites a newer external edit.
+      throw new Error('Interrupted save requires explicit recovery');
     }
   } finally {
     if (journalDescriptor !== null) closeSync(journalDescriptor);
-    if (stagingDescriptor !== null) closeSync(stagingDescriptor);
     if (recoveryDescriptor !== null) closeSync(recoveryDescriptor);
     if (targetDescriptor !== null) closeSync(targetDescriptor);
   }
@@ -411,12 +393,6 @@ function recoverInterruptedSave(absolute: string): void {
   if (hasRecovery) unlinkSync(transaction.recovery);
   if (hasStage) unlinkSync(transaction.staging);
   unlinkSync(transaction.journal);
-}
-
-function isPrefixOf(candidate: Buffer, complete: Buffer): boolean {
-  return (
-    candidate.length <= complete.length && complete.subarray(0, candidate.length).equals(candidate)
-  );
 }
 
 function isSaveJournal(value: unknown): value is SaveJournal {
