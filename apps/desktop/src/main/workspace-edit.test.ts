@@ -19,6 +19,7 @@ import { MAX_EDITABLE_BYTES, openWorkspaceFileForEdit, saveWorkspaceFile } from 
 const fileSystemFault = vi.hoisted(() => ({
   failWrite: false,
   failWriteAtCall: null as number | null,
+  failWriteAtCalls: [] as number[],
   writeCalls: 0,
 }));
 
@@ -30,7 +31,8 @@ vi.mock('node:fs', async (importOriginal) => {
       fileSystemFault.writeCalls += 1;
       if (
         fileSystemFault.failWrite ||
-        fileSystemFault.writeCalls === fileSystemFault.failWriteAtCall
+        fileSystemFault.writeCalls === fileSystemFault.failWriteAtCall ||
+        fileSystemFault.failWriteAtCalls.includes(fileSystemFault.writeCalls)
       )
         throw new Error('simulated disk write failure');
       return actual.writeSync(...args);
@@ -174,6 +176,32 @@ describe('saveWorkspaceFile (issue #43)', () => {
     }
     expect(readFileSync(file)).toEqual(original);
     expect(readdirSync(root)).toEqual(['important.txt']);
+  });
+
+  it('keeps an untouched recovery copy when publishing and rollback both fail', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original 日本語\r\n', 'utf8');
+    writeFileSync(file, original);
+    fileSystemFault.writeCalls = 0;
+    fileSystemFault.failWriteAtCalls = [2, 3];
+    try {
+      const result = saveWorkspaceFile(
+        root,
+        'important.txt',
+        'replacement\r\n',
+        createHash('sha256').update(original).digest('hex'),
+      );
+      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+    } finally {
+      fileSystemFault.failWriteAtCalls = [];
+      fileSystemFault.writeCalls = 0;
+    }
+
+    const recovery = readdirSync(root).find((name) => name.includes('.sprint-coder-recovery-'));
+    expect(recovery).toBeDefined();
+    expect(readFileSync(join(root, recovery!))).toEqual(original);
+    expect(readdirSync(root).some((name) => name.includes('.sprint-coder-stage-'))).toBe(false);
   });
 
   it('refuses to write outside the Workspace, and leaves the target untouched', () => {

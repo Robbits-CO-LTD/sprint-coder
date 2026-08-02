@@ -127,8 +127,10 @@ export function saveWorkspaceFile(
   const absolute = safe.path;
 
   let descriptor: number | null = null;
-  let temporaryDescriptor: number | null = null;
-  let temporary: string | null = null;
+  let recoveryDescriptor: number | null = null;
+  let recovery: string | null = null;
+  let stagingDescriptor: number | null = null;
+  let staging: string | null = null;
   let original: Buffer | null = null;
   let targetMutationStarted = false;
   let preserveRecoveryCopy = false;
@@ -148,21 +150,38 @@ export function saveWorkspaceFile(
       return { outcome: 'conflict', digest: null, reason: null };
 
     const bytes = Buffer.from(text, 'utf8');
-    temporary = `${absolute}.sprint-coder-save-${randomUUID()}.tmp`;
-    copyFileSync(absolute, temporary, constants.COPYFILE_EXCL);
-    temporaryDescriptor = openSync(
-      temporary,
+    recovery = `${absolute}.sprint-coder-recovery-${randomUUID()}.tmp`;
+    copyFileSync(absolute, recovery, constants.COPYFILE_EXCL);
+    recoveryDescriptor = openSync(
+      recovery,
       constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
     );
-    const temporaryStat = fstatSync(temporaryDescriptor, { bigint: true });
-    if (!temporaryStat.isFile() || temporaryStat.nlink !== 1n) return refuse('outside_workspace');
+    const recoveryStat = fstatSync(recoveryDescriptor, { bigint: true });
+    if (!recoveryStat.isFile() || recoveryStat.nlink !== 1n) return refuse('outside_workspace');
     // copyFileSync is pathname based. If the target changed during that copy, never publish it.
-    if (digestOf(readDescriptor(temporaryDescriptor, Number(temporaryStat.size))) !== baseDigest)
+    if (digestOf(readDescriptor(recoveryDescriptor, Number(recoveryStat.size))) !== baseDigest)
       return { outcome: 'conflict', digest: null, reason: null };
+    fsyncSync(recoveryDescriptor);
+    closeSync(recoveryDescriptor);
+    recoveryDescriptor = null;
 
-    replaceDescriptorContents(temporaryDescriptor, bytes);
-    closeSync(temporaryDescriptor);
-    temporaryDescriptor = null;
+    staging = `${absolute}.sprint-coder-stage-${randomUUID()}.tmp`;
+    stagingDescriptor = openSync(
+      staging,
+      constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_RDWR |
+        (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+      0o600,
+    );
+    const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
+    if (!stagingStat.isFile() || stagingStat.nlink !== 1n) return refuse('outside_workspace');
+
+    replaceDescriptorContents(stagingDescriptor, bytes);
+    if (digestOf(readDescriptor(stagingDescriptor, bytes.length)) !== digestOf(bytes))
+      return refuse('io_error');
+    closeSync(stagingDescriptor);
+    stagingDescriptor = null;
 
     const finalTarget = resolveSafeWorkspaceFile(workspacePath, relativePath);
     if (
@@ -188,21 +207,33 @@ export function saveWorkspaceFile(
         replaceDescriptorContents(descriptor, original);
         targetMutationStarted = false;
       } catch {
-        // Keep the durable sibling copy for recovery if even restoring the original inode fails.
+        // Keep the untouched original bytes on disk if even restoring the original inode fails.
         preserveRecoveryCopy = true;
       }
     }
     return refuse('io_error');
   } finally {
-    if (temporaryDescriptor !== null)
+    if (recoveryDescriptor !== null)
       try {
-        closeSync(temporaryDescriptor);
+        closeSync(recoveryDescriptor);
       } catch {
         // The operation already failed; cleanup below is still attempted.
       }
-    if (temporary !== null && !preserveRecoveryCopy)
+    if (stagingDescriptor !== null)
       try {
-        unlinkSync(temporary);
+        closeSync(stagingDescriptor);
+      } catch {
+        // The operation already failed; cleanup below is still attempted.
+      }
+    if (staging !== null)
+      try {
+        unlinkSync(staging);
+      } catch {
+        // A failed stage must not obscure the original refusal.
+      }
+    if (recovery !== null && !preserveRecoveryCopy)
+      try {
+        unlinkSync(recovery);
       } catch {
         // A failed stage must not obscure the original refusal.
       }
