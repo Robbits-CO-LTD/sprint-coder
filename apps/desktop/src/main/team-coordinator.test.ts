@@ -215,6 +215,21 @@ class MultiRootWritingRuntime extends TestWorkerRuntime {
   }
 }
 
+class PrimaryRootWritingRuntime extends MultiRootWritingRuntime {
+  override async execute(input: Parameters<MultiRootWritingRuntime['execute']>[0]) {
+    if (input.workspaceSet !== undefined) this.allWorkspaceSets.push(input.workspaceSet);
+    if (input.worker.writeCapable) {
+      if (input.workspaceSet === undefined)
+        throw new Error('write step did not receive an isolated root set');
+      this.workspaceSets.push(input.workspaceSet);
+      const primary = input.workspaceSet.roots.find(({ role }) => role === 'primary');
+      if (primary === undefined) throw new Error('isolated root set has no Primary');
+      writeFileSync(join(primary.path, 'worker-output.txt'), `${primary.label}\n`);
+    }
+    return TestWorkerRuntime.prototype.execute.call(this, input);
+  }
+}
+
 class ConflictingWorktreeRuntime extends TestWorkerRuntime {
   constructor(private readonly primaryWorkspace: string) {
     super();
@@ -1399,6 +1414,117 @@ if (runsWithElectronAbi)
         ).toBe('2\n');
       persistence.close();
     });
+
+    it('revalidates a no-change repository before resuming partial integration', async () => {
+      const persistence = createPersistence();
+      const primaryRepo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-primary-')));
+      const secondaryRepo = realpathSync(
+        mkdtempSync(join(tmpdir(), 'sprint-coder-team-secondary-')),
+      );
+      const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-worktrees-'));
+      cleanup.push(primaryRepo, secondaryRepo, worktreesRoot);
+      for (const repo of [primaryRepo, secondaryRepo]) {
+        expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+        writeFileSync(join(repo, 'README.md'), 'base\n');
+        expect(spawnSync('git', ['-C', repo, 'add', 'README.md']).status).toBe(0);
+        expect(
+          spawnSync('git', [
+            '-C',
+            repo,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-q',
+            '-m',
+            'base',
+          ]).status,
+        ).toBe(0);
+      }
+      const project = persistence.createProject({
+        name: 'No-change repository resume',
+        folders: [
+          {
+            id: '31000000-0000-4000-8000-000000000001',
+            path: primaryRepo,
+            canonicalPath: primaryRepo,
+            label: 'primary',
+            role: 'primary',
+            workspaceKey: '9'.repeat(64),
+            rootIdentityDigest: '1'.repeat(64),
+          },
+          {
+            id: '31000000-0000-4000-8000-000000000002',
+            path: secondaryRepo,
+            canonicalPath: secondaryRepo,
+            label: 'secondary',
+            role: 'secondary',
+            workspaceKey: 'a'.repeat(64),
+            rootIdentityDigest: '2'.repeat(64),
+          },
+        ],
+      });
+      const task = persistence.createTask('No-change repository Mission', false, project.id);
+      const runtime = new PrimaryRootWritingRuntime();
+      const manager = new FailRepositoryOnceManager({ worktreesRoot }, 2);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write only Primary',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const reader = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reader',
+        objective: 'verify the integrated repositories',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'resume while Secondary has no Worker changes',
+        doneCriteria: ['Primary integrated'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'write Primary',
+            doneCriteria: ['Primary output exists'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: reader.id,
+            objective: 'verify both repositories',
+            doneCriteria: ['both repositories inspected'],
+            access: 'read-only',
+          },
+        ],
+      });
+
+      await waitFor(
+        () => persistence.getTeamMission(mission.id).state === 'waiting_resume',
+        20_000,
+      );
+      const executionId = mission.steps[0]!.executionId;
+      expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
+        phase: 'waiting_resume',
+        repositories: [{ state: 'ready' }, { state: 'integrated', workerHead: expect.any(String) }],
+      });
+      expect(runtime.workspaceSets).toHaveLength(1);
+      expect(persistence.listTeamAttempts(executionId)).toHaveLength(1);
+
+      writeFileSync(join(secondaryRepo, 'outside.txt'), 'unsealed after partial integration\n');
+      await expect(coordinator.resumeMission(task.id, mission.id)).rejects.toThrow(
+        'Workspace has changes outside the isolated Worker worktree',
+      );
+      expect(persistence.getTeamMission(mission.id).state).toBe('waiting_resume');
+      expect(runtime.workspaceSets).toHaveLength(1);
+      expect(persistence.listTeamAttempts(executionId)).toHaveLength(1);
+      expect(existsSync(join(primaryRepo, 'worker-output.txt'))).toBe(false);
+      persistence.close();
+    }, 30_000);
 
     it('maps sibling Project folders in one repository into one isolated worktree', async () => {
       const persistence = createPersistence();

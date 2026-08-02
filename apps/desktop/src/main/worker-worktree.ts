@@ -327,12 +327,25 @@ export class WorkerWorktreeManager {
   }: IntegrateWorktreeInput): Promise<IntegrateWorktreeResult> {
     validateGitHead(baseHead);
     validateGitHead(workerHead);
-    if (workerHead === baseHead) return { integratedHead: baseHead, outcome: 'no_changes' };
-    const workerTree = (
-      await this.runGit(repoPath, ['rev-parse', `${workerHead}^{tree}`], 'integration_failed')
-    ).stdout.trim();
     const currentHead = (
       await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
+    ).stdout.trim();
+    const status = await this.runGit(repoPath, ['status', '--porcelain'], 'integration_failed');
+    if (status.stdout.trim() !== '')
+      throw new WorktreeError(
+        'base_changed',
+        'Workspace has changes outside the isolated Worker worktree',
+      );
+    if (workerHead === baseHead) {
+      if (currentHead !== baseHead)
+        throw new WorktreeError(
+          'base_changed',
+          `Workspace HEAD changed before integration: expected ${baseHead}, got ${currentHead}`,
+        );
+      return { integratedHead: baseHead, outcome: 'no_changes' };
+    }
+    const workerTree = (
+      await this.runGit(repoPath, ['rev-parse', `${workerHead}^{tree}`], 'integration_failed')
     ).stdout.trim();
     if (currentHead !== baseHead) {
       const currentTree = (
@@ -346,12 +359,6 @@ export class WorkerWorktreeManager {
         `Workspace HEAD changed before integration: expected ${baseHead}, got ${currentHead}`,
       );
     }
-    const status = await this.runGit(repoPath, ['status', '--porcelain'], 'integration_failed');
-    if (status.stdout.trim() !== '')
-      throw new WorktreeError(
-        'base_changed',
-        'Workspace has changes outside the isolated Worker worktree',
-      );
     try {
       await this.runGit(
         repoPath,

@@ -219,6 +219,32 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     });
   });
 
+  it('revalidates a no-change repository before reporting it integrated', async () => {
+    const { repoPath, head, manager } = await fixture();
+
+    await writeFile(join(repoPath, 'outside.txt'), 'unsealed\n');
+    await expect(
+      manager.integrate({ repoPath, baseHead: head, workerHead: head }),
+    ).rejects.toMatchObject({ code: 'base_changed' });
+
+    await git(['-C', repoPath, 'add', 'outside.txt']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'external change',
+    ]);
+    await expect(
+      manager.integrate({ repoPath, baseHead: head, workerHead: head }),
+    ).rejects.toMatchObject({ code: 'base_changed' });
+  });
+
   it('refuses integration when the primary workspace changed and preserves both sides', async () => {
     const { repoPath, head, manager } = await fixture();
     const worktreeId = 'execution-3';
