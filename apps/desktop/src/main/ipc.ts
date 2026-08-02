@@ -1161,7 +1161,8 @@ export class IpcRouter {
             throw new InvalidModelError('provider');
         } else {
           const capability = await this.runtimeFor(runtime.runtimeKind).probe();
-          if (!capability.available) throw new RuntimeUnavailableError(runtime.runtimeKind);
+          if (capability.readiness !== 'ready')
+            throw new RuntimeUnavailableError(runtime.runtimeKind);
           if (!capability.models.some(({ id }) => id === runtime.model))
             throw new InvalidModelError(runtime.runtimeKind);
         }
@@ -1190,7 +1191,7 @@ export class IpcRouter {
       async (input, event, envelope) => {
         if (input.kind === 'codex' || input.kind === 'claude') {
           const capability = await this.runtimeFor(input.kind).probe();
-          if (!capability.available) throw new RuntimeUnavailableError(input.kind);
+          if (capability.readiness !== 'ready') throw new RuntimeUnavailableError(input.kind);
         }
         return this.runMutation(
           event,
@@ -1223,7 +1224,7 @@ export class IpcRouter {
         const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
         const runtimeKind = kind === 'claude' ? 'claude' : 'codex';
         const capability = await this.runtimeFor(runtimeKind).probe();
-        if (!capability.available) throw new RuntimeUnavailableError(runtimeKind);
+        if (capability.readiness !== 'ready') throw new RuntimeUnavailableError(runtimeKind);
         if (!capability.models.some(({ id }) => id === input.model))
           throw new InvalidModelError(runtimeKind);
         return this.runMutation(
@@ -1399,7 +1400,7 @@ export class IpcRouter {
         // valid levels is per-model (published in models_cache.json) rather than a fixed enum, and
         // an unsupported level does not fall back — it fails the turn with an API 400.
         const capability = await this.runtimeFor('codex').probe();
-        if (!capability.available) throw new RuntimeUnavailableError('codex');
+        if (capability.readiness !== 'ready') throw new RuntimeUnavailableError('codex');
         const selected = capability.models.find(({ id }) => id === this.persistence.getModel());
         if (!selected?.efforts?.some(({ id }) => id === input.effort))
           throw new InvalidEffortError(selected?.displayName ?? 'このモデル');
@@ -2998,7 +2999,7 @@ export class IpcRouter {
           'Codex CLI',
           'openai',
           codexCapability.models,
-          codexCapability.available,
+          codexCapability.readiness === 'ready',
           checkedAt,
         ),
         ...providerModelsForBuiltin(
@@ -3006,7 +3007,7 @@ export class IpcRouter {
           'Claude Code',
           'anthropic',
           claudeCapability.models,
-          claudeCapability.available,
+          claudeCapability.readiness === 'ready',
           checkedAt,
         ),
         ...externalModels,

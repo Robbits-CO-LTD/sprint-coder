@@ -29,6 +29,7 @@ const fileSystemFault = vi.hoisted(() => ({
   failAtomicReplace: false,
   failDirectorySync: false,
   failCopyAfterCreate: false,
+  concurrentWindowsContent: null as string | null,
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -38,6 +39,11 @@ vi.mock('node:child_process', async (importOriginal) => {
     execFileSync: (...args: Parameters<typeof actual.execFileSync>) => {
       if (fileSystemFault.failAtomicReplace)
         throw new Error('simulated atomic replacement failure');
+      if (fileSystemFault.concurrentWindowsContent !== null) {
+        const options = args[2] as { env?: NodeJS.ProcessEnv } | undefined;
+        const target = options?.env?.['SPRINT_CODER_TARGET'];
+        if (target !== undefined) writeFileSync(target, fileSystemFault.concurrentWindowsContent);
+      }
       return actual.execFileSync(...args);
     },
   };
@@ -214,26 +220,29 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readdirSync(root)).toEqual(['important.txt']);
   });
 
-  it('removes a partial staging file when copying fails after creating it', () => {
-    const root = workspace();
-    const file = join(root, 'important.txt');
-    const original = Buffer.from('original 日本語\r\n', 'utf8');
-    writeFileSync(file, original);
-    fileSystemFault.failCopyAfterCreate = true;
-    try {
-      const result = saveWorkspaceFile(
-        root,
-        'important.txt',
-        'replacement\r\n',
-        createHash('sha256').update(original).digest('hex'),
-      );
-      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
-    } finally {
-      fileSystemFault.failCopyAfterCreate = false;
-    }
-    expect(readFileSync(file)).toEqual(original);
-    expect(readdirSync(root)).toEqual(['important.txt']);
-  });
+  it.runIf(process.platform === 'win32')(
+    'removes a partial staging file when copying fails after creating it',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      const original = Buffer.from('original 日本語\r\n', 'utf8');
+      writeFileSync(file, original);
+      fileSystemFault.failCopyAfterCreate = true;
+      try {
+        const result = saveWorkspaceFile(
+          root,
+          'important.txt',
+          'replacement\r\n',
+          createHash('sha256').update(original).digest('hex'),
+        );
+        expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      } finally {
+        fileSystemFault.failCopyAfterCreate = false;
+      }
+      expect(readFileSync(file)).toEqual(original);
+      expect(readdirSync(root)).toEqual(['important.txt']);
+    },
+  );
 
   it('keeps the original bytes when publishing the staged edit fails', () => {
     const root = workspace();
@@ -257,6 +266,24 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readFileSync(file)).toEqual(original);
     expect(readdirSync(root)).toEqual(['important.txt']);
   });
+
+  it.runIf(process.platform === 'win32')(
+    'restores a concurrent Windows edit observed at the File.Replace boundary',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.concurrentWindowsContent = 'concurrent writer\n';
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+      } finally {
+        fileSystemFault.concurrentWindowsContent = null;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('concurrent writer\n');
+      expect(readdirSync(root)).toEqual(['important.txt']);
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'reports the committed save when the filesystem rejects parent directory sync',

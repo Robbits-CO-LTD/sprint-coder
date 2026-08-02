@@ -169,7 +169,7 @@ export function saveWorkspaceFile(
     // The nonce makes this name ours even if copyFileSync creates the destination and then throws
     // part-way through (ENOSPC/EIO). Claim it first so that partial copies are always cleaned up.
     ownsStaging = true;
-    copyFileSync(absolute, staging, constants.COPYFILE_EXCL);
+    stageTargetFile(absolute, staging);
     const originalMode = Number(stat.mode & 0o777n);
     chmodSync(staging, originalMode | 0o200);
     stagingDescriptor = openSync(
@@ -204,7 +204,8 @@ export function saveWorkspaceFile(
     // check keeps the race window as small as the filesystem API permits; rename itself is atomic.
     closeSync(descriptor);
     descriptor = null;
-    publishStagedFile(staging, absolute, backup);
+    const publication = publishStagedFile(staging, absolute, backup, baseDigest);
+    if (publication === 'conflict') return { outcome: 'conflict', digest: null, reason: null };
     ownsStaging = false;
     ownsBackup = process.platform === 'win32';
     try {
@@ -259,17 +260,34 @@ $ErrorActionPreference = 'Stop'
   $env:SPRINT_CODER_BACKUP,
   $false
 )
+$boundaryDigest = (Get-FileHash -LiteralPath $env:SPRINT_CODER_BACKUP -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($boundaryDigest -ne $env:SPRINT_CODER_EXPECTED_DIGEST) {
+  [System.IO.File]::Replace(
+    $env:SPRINT_CODER_BACKUP,
+    $env:SPRINT_CODER_TARGET,
+    $env:SPRINT_CODER_REPLACEMENT,
+    $false
+  )
+  [Console]::Out.Write('conflict')
+  exit 0
+}
+[Console]::Out.Write('published')
 `;
 
 /** Atomically publishes complete bytes while retaining the destination's Windows security data. */
-function publishStagedFile(staging: string, absolute: string, backup: string): void {
+function publishStagedFile(
+  staging: string,
+  absolute: string,
+  backup: string,
+  baseDigest: string,
+): 'published' | 'conflict' {
   if (process.platform !== 'win32') {
     renameSync(staging, absolute);
-    return;
+    return 'published';
   }
   // File.Replace maps to ReplaceFileW. Unlike MoveFileEx/rename, it retains the destination ACL and
   // other mergeable metadata while swapping the fully-flushed sibling into place atomically.
-  execFileSync(
+  const result = execFileSync(
     WINDOWS_POWERSHELL,
     [
       '-NoLogo',
@@ -288,6 +306,7 @@ function publishStagedFile(staging: string, absolute: string, backup: string): v
         SPRINT_CODER_REPLACEMENT: staging,
         SPRINT_CODER_TARGET: absolute,
         SPRINT_CODER_BACKUP: backup,
+        SPRINT_CODER_EXPECTED_DIGEST: baseDigest,
       },
       encoding: 'utf8',
       stdio: 'pipe',
@@ -295,6 +314,29 @@ function publishStagedFile(staging: string, absolute: string, backup: string): v
       windowsHide: true,
     },
   );
+  return result.trim() === 'conflict' ? 'conflict' : 'published';
+}
+
+function stageTargetFile(absolute: string, staging: string): void {
+  if (process.platform === 'win32') {
+    copyFileSync(absolute, staging, constants.COPYFILE_EXCL);
+    return;
+  }
+  // copyFile does not promise POSIX ACL/xattr retention. Use the trusted system copy command on
+  // supported hosts so an atomic editor save cannot silently strip security metadata.
+  if (process.platform === 'linux') {
+    execFileSync(
+      '/bin/cp',
+      ['--preserve=all', '--reflink=auto', '--no-target-directory', absolute, staging],
+      { stdio: 'ignore' },
+    );
+    return;
+  }
+  if (process.platform === 'darwin') {
+    execFileSync('/bin/cp', ['-p', absolute, staging], { stdio: 'ignore' });
+    return;
+  }
+  throw new Error(`Atomic metadata-preserving saves are unsupported on ${process.platform}`);
 }
 
 const EMPTY_DIGEST = createHash('sha256').update('').digest('hex');
