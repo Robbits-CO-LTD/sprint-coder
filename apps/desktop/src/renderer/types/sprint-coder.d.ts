@@ -285,7 +285,12 @@ export type GeneratedImage = {
 
 /** One file a Runtime changed during a Turn (issue #37). Workspace-relative — Main drops anything
  * that resolves outside the Workspace root rather than passing it here. */
-export type FileChange = { path: string; kind: 'add' | 'update' | 'delete' };
+export type FileChange = {
+  rootId: string;
+  rootLabel: string;
+  path: string;
+  kind: 'add' | 'update' | 'delete';
+};
 export type FileChangeRecord = { seq: number; turnId: string; changes: FileChange[] };
 /** A file read in full for editing, or a refusal with its reason (issue #43). */
 export type FileOpenResult = {
@@ -305,6 +310,8 @@ export type FileSaveResult = {
 export type FileEditFrame = {
   taskId: string;
   turnId: string;
+  rootId: string;
+  rootLabel: string;
   path: string;
   text: string;
   complete: boolean;

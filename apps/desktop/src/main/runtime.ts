@@ -362,8 +362,18 @@ function streamingPrefixes(body: string): string[] {
 export function mockFileChanges(input: string): FileChange[] {
   const slug = (input.match(/[A-Za-z0-9_-]{3,24}/)?.[0] ?? 'note').toLowerCase();
   return [
-    { path: `src/${slug}.ts`, kind: 'update' },
-    { path: `src/${slug}.test.ts`, kind: 'add' },
+    {
+      rootId: 'legacy-primary',
+      rootLabel: 'Workspace',
+      path: `src/${slug}.ts`,
+      kind: 'update',
+    },
+    {
+      rootId: 'legacy-primary',
+      rootLabel: 'Workspace',
+      path: `src/${slug}.test.ts`,
+      kind: 'add',
+    },
   ];
 }
 

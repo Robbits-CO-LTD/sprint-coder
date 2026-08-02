@@ -1057,6 +1057,16 @@ export type GeneratedImage = z.infer<typeof generatedImageSchema>;
 export const runtimeWriteScopeSchema = z.enum(['read-only', 'workspace-write', 'full']);
 export type RuntimeWriteScope = z.infer<typeof runtimeWriteScopeSchema>;
 
+export const rootedPathSchema = z
+  .object({
+    /** Missing on records written before multi-root support; interpreted as the legacy Primary. */
+    rootId: idSchema.default('legacy-primary'),
+    rootLabel: z.string().min(1).max(200).default('Workspace'),
+    path: z.string().min(1).max(4_096),
+  })
+  .strict();
+export type RootedPath = z.infer<typeof rootedPathSchema>;
+
 /**
  * One file a Runtime created, modified, or deleted during a Turn (issue #37).
  *
@@ -1067,6 +1077,8 @@ export type RuntimeWriteScope = z.infer<typeof runtimeWriteScopeSchema>;
  */
 export const fileChangeSchema = z
   .object({
+    rootId: idSchema.default('legacy-primary'),
+    rootLabel: z.string().min(1).max(200).default('Workspace'),
     /** Relative to the Workspace root. Absolute paths and anything escaping the root are dropped in
      * Main rather than shown, so this can be rendered as plain text without further checking. */
     path: z.string().min(1).max(1024),
@@ -1104,6 +1116,8 @@ export const fileEditFrameSchema = z
   .object({
     taskId: idSchema,
     turnId: idSchema,
+    rootId: idSchema.default('legacy-primary'),
+    rootLabel: z.string().min(1).max(200).default('Workspace'),
     /** Workspace-relative. Main drops anything resolving outside the Workspace root. */
     path: z.string().min(1).max(1024),
     text: z.string().max(262_144),

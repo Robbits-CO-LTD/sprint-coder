@@ -14,6 +14,8 @@ import {
   providerConnectionSchema,
   projectAssignTaskInputSchema,
   projectCreateInputSchema,
+  fileChangeSchema,
+  fileEditFrameSchema,
   projectFoldersReplaceInputSchema,
   effectiveWorkspaceSetSchema,
   projectInstructionSetInputSchema,
@@ -151,6 +153,27 @@ describe('public contracts', () => {
         digest: 'a'.repeat(64),
       }),
     ).toMatchObject({ source: 'none', roots: [] });
+  });
+
+  it('preserves rooted file identity and upgrades legacy Primary records', () => {
+    expect(fileChangeSchema.parse({ path: 'src/index.ts', kind: 'update' })).toMatchObject({
+      rootId: 'legacy-primary',
+      rootLabel: 'Workspace',
+      path: 'src/index.ts',
+    });
+    expect(
+      fileEditFrameSchema.parse({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        rootId: 'root-b',
+        rootLabel: 'test2',
+        path: 'src/index.ts',
+        text: 'changed',
+        complete: true,
+        source: 'disk',
+        baseline: null,
+      }),
+    ).toMatchObject({ rootId: 'root-b', rootLabel: 'test2' });
   });
 
   it('bounds Project instruction by UTF-8 bytes and upgrades legacy usage with zero Project tokens', () => {

@@ -3500,7 +3500,7 @@ export class IpcRouter {
     const safeText = state.safe.slice(-262_144);
     // The tail is what the user is watching; an early frame of a large file is not worth the IPC.
     // The cap matches the schema's.
-    this.sendFileEditFrame(taskId, turnId, path, safeText, options, null);
+    this.sendFileEditFrame(taskId, turnId, root.rootId, root.label, path, safeText, options, null);
     // The baseline can require a git call, so it is never waited for: the text goes out now and the
     // frame that carries the diff follows when there is one. Frames are cumulative, so the view
     // simply gains its diff. Only for a settled body — a diff recomputed against a half-written file
@@ -3513,7 +3513,16 @@ export class IpcRouter {
       .then((baseline) => {
         // Nothing to compare against, or the file is unchanged: no second frame, no wasted repaint.
         if (baseline === null || baseline === safeText) return;
-        this.sendFileEditFrame(taskId, turnId, path, safeText, options, baseline);
+        this.sendFileEditFrame(
+          taskId,
+          turnId,
+          root.rootId,
+          root.label,
+          path,
+          safeText,
+          options,
+          baseline,
+        );
       })
       .catch(() => undefined);
   }
@@ -3521,6 +3530,8 @@ export class IpcRouter {
   private sendFileEditFrame(
     taskId: string,
     turnId: string,
+    rootId: string,
+    rootLabel: string,
     path: string,
     text: string,
     options: { complete: boolean; source: 'stream' | 'disk' },
@@ -3532,6 +3543,8 @@ export class IpcRouter {
       fileEditFrameSchema.parse({
         taskId,
         turnId,
+        rootId,
+        rootLabel,
         path,
         text,
         complete: options.complete,
@@ -3559,7 +3572,7 @@ export class IpcRouter {
   ): void {
     const workspace = this.turnWorkspaceByTurn.get(turnId);
     if (workspace === undefined) return;
-    const inside: Array<FileChange & { rootId: string; rootPath: string }> = [];
+    const inside: Array<FileChange & { rootPath: string }> = [];
     for (const change of changes) {
       const rooted = resolveTurnRootedPath(workspace, change.path);
       if (rooted !== null)
@@ -3567,6 +3580,7 @@ export class IpcRouter {
           path: rooted.path,
           kind: change.kind,
           rootId: rooted.root.rootId,
+          rootLabel: rooted.root.label,
           rootPath: rooted.root.path,
         });
     }
@@ -3574,7 +3588,12 @@ export class IpcRouter {
     const event = this.persistence.recordFileChanges({
       taskId,
       turnId,
-      changes: inside.map(({ path, kind }) => ({ path, kind })),
+      changes: inside.map(({ rootId, rootLabel, path, kind }) => ({
+        rootId,
+        rootLabel,
+        path,
+        kind,
+      })),
     });
     if (event !== null) this.publish(event);
     // Codex reports no body at all while it writes (verified on 0.144.4: `file_change` carries only
