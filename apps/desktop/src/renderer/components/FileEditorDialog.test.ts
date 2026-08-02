@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { diskText, extractLineEndings } from './FileEditorDialog';
+import { diskText, EditorRequestGeneration, extractLineEndings } from './FileEditorDialog';
+
+describe('FileEditorDialog async request generation', () => {
+  it('invalidates a save/reload response captured before the editor closes', () => {
+    const generation = new EditorRequestGeneration();
+    const inFlight = generation.capture();
+
+    expect(generation.isCurrent(inFlight)).toBe(true);
+    generation.invalidate();
+    expect(generation.isCurrent(inFlight)).toBe(false);
+    expect(generation.isCurrent(generation.capture())).toBe(true);
+  });
+});
 
 describe('FileEditorDialog line endings', () => {
   it('preserves CRLF while allowing the textarea to use LF', () => {

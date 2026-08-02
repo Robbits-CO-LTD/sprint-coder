@@ -13,6 +13,22 @@ const REFUSAL_MESSAGE: Record<NonNullable<FileOpenResult['reason']>, string> = {
     '前回の保存が途中で終了しました。別のアプリによる変更か判別できないため、確認して元データを復元してください。',
 };
 
+export class EditorRequestGeneration {
+  private value = 0;
+
+  capture(): number {
+    return this.value;
+  }
+
+  invalidate(): void {
+    this.value += 1;
+  }
+
+  isCurrent(captured: number): boolean {
+    return captured === this.value;
+  }
+}
+
 export function FileEditorDialog({
   taskId,
   hasWorkspace,
@@ -29,6 +45,7 @@ export function FileEditorDialog({
   const [busy, setBusy] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState<'close' | 'reload' | null>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const editorGenerationRef = useRef(new EditorRequestGeneration());
   const filesApi = typeof window !== 'undefined' ? window.sprintCoder?.files : undefined;
   const supported = typeof filesApi?.pick === 'function';
   const dirty =
@@ -46,8 +63,10 @@ export function FileEditorDialog({
     }
     setBusy(true);
     setMessage('');
+    const generation = editorGenerationRef.current.capture();
     try {
       const result = await filesApi.pick(taskId);
+      if (!editorGenerationRef.current.isCurrent(generation)) return;
       if (result === null) return;
       if (!result.editable) {
         setOpened(result.reason === 'recovery_required' ? result : null);
@@ -56,13 +75,15 @@ export function FileEditorDialog({
       }
       loadResult(result);
     } catch {
-      setMessage('ファイル選択に失敗しました。もう一度お試しください。');
+      if (editorGenerationRef.current.isCurrent(generation))
+        setMessage('ファイル選択に失敗しました。もう一度お試しください。');
     } finally {
-      setBusy(false);
+      if (editorGenerationRef.current.isCurrent(generation)) setBusy(false);
     }
   }
 
   function loadResult(result: FileOpenResult): void {
+    editorGenerationRef.current.invalidate();
     const endings = extractLineEndings(result.text);
     const normalized = result.text.replaceAll('\r\n', '\n');
     const dominant = dominantLineEnding(endings);
@@ -73,38 +94,45 @@ export function FileEditorDialog({
     setSavedDraft(normalized);
     setMessage('読み込みました');
     setPendingDiscard(null);
+    setBusy(false);
   }
 
   async function reload(): Promise<void> {
-    if (!opened || !filesApi) return;
+    if (!opened || !filesApi || busy) return;
     setBusy(true);
+    const generation = editorGenerationRef.current.capture();
     try {
       const result = await filesApi.open(taskId, opened.rootId, opened.path);
+      if (!editorGenerationRef.current.isCurrent(generation)) return;
       if (result.editable) loadResult(result);
       else {
         setOpened(result.reason === 'recovery_required' ? result : null);
         setMessage(REFUSAL_MESSAGE[result.reason ?? 'not_a_file']);
       }
     } catch {
-      setMessage('再読み込みに失敗しました。');
+      if (editorGenerationRef.current.isCurrent(generation))
+        setMessage('再読み込みに失敗しました。');
     } finally {
-      setBusy(false);
+      if (editorGenerationRef.current.isCurrent(generation)) setBusy(false);
     }
   }
 
   async function recover(): Promise<void> {
-    if (!opened || opened.reason !== 'recovery_required' || !filesApi) return;
+    if (!opened || opened.reason !== 'recovery_required' || !filesApi || busy) return;
     setBusy(true);
+    const generation = editorGenerationRef.current.capture();
     try {
       const result = await filesApi.recover(taskId, opened.rootId, opened.path);
+      if (!editorGenerationRef.current.isCurrent(generation)) return;
       if (result.editable) {
         loadResult(result);
         setMessage('保存前の元データを復元しました');
       } else setMessage(REFUSAL_MESSAGE[result.reason ?? 'not_a_file']);
     } catch {
-      setMessage('元データを復元できませんでした。回復用ファイルは保持されています。');
+      if (editorGenerationRef.current.isCurrent(generation))
+        setMessage('元データを復元できませんでした。回復用ファイルは保持されています。');
     } finally {
-      setBusy(false);
+      if (editorGenerationRef.current.isCurrent(generation)) setBusy(false);
     }
   }
 
@@ -114,8 +142,9 @@ export function FileEditorDialog({
   }
 
   async function save(): Promise<void> {
-    if (!opened?.editable || busy || !filesApi) return;
+    if (!opened?.editable || busy || !dirty || !filesApi) return;
     setBusy(true);
+    const generation = editorGenerationRef.current.capture();
     try {
       const text = diskText(draft, { text: opened.text }, lineEnding);
       const result = await filesApi.save({
@@ -125,6 +154,7 @@ export function FileEditorDialog({
         text,
         baseDigest: opened.digest,
       });
+      if (!editorGenerationRef.current.isCurrent(generation)) return;
       if (result.outcome === 'saved' && result.digest) {
         setOpened({ ...opened, text, digest: result.digest });
         setSavedDraft(draft);
@@ -140,9 +170,10 @@ export function FileEditorDialog({
         );
       }
     } catch {
-      setMessage('保存に失敗しました。内容は画面に残っています。');
+      if (editorGenerationRef.current.isCurrent(generation))
+        setMessage('保存に失敗しました。内容は画面に残っています。');
     } finally {
-      setBusy(false);
+      if (editorGenerationRef.current.isCurrent(generation)) setBusy(false);
     }
   }
 
@@ -152,11 +183,13 @@ export function FileEditorDialog({
   }
 
   function close(): void {
+    editorGenerationRef.current.invalidate();
     setOpened(null);
     setDraft('');
     setSavedDraft('');
     setPendingDiscard(null);
     setMessage('');
+    setBusy(false);
   }
 
   return (
