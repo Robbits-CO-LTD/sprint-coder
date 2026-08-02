@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { access, chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
+  executionSpecPathGuard,
   prepareExecutionSpec,
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
 } from './command-runner';
+import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
 
@@ -39,6 +41,7 @@ describe('CommandRunner', () => {
   it('prepares an immutable spec from a canonical Workspace cwd and rejects escapes', async () => {
     const root = await workspace();
     const spec = await prepareExecutionSpec({
+      rootId: 'root-b',
       workspacePath: root,
       executable: process.execPath,
       argv: ['--version'],
@@ -47,6 +50,7 @@ describe('CommandRunner', () => {
 
     expect(spec.absoluteExecutable).toBe(process.execPath);
     expect(spec.cwdIdentity.canonicalPath).toBe(await realpath(root));
+    expect(executionSpecPathGuard(spec).rootId).toBe('root-b');
     expect(Object.isFrozen(spec)).toBe(true);
     await expect(
       prepareExecutionSpec({
@@ -56,6 +60,26 @@ describe('CommandRunner', () => {
         cwd: '..',
       }),
     ).rejects.toThrow();
+  });
+
+  it('rejects a replacement inode at a persisted Project root path', async () => {
+    const root = await workspace();
+    const binding = await workspaceMutationBinding(root);
+    const original = `${root}-original`;
+    await rename(root, original);
+    roots.push(original);
+    await mkdir(root);
+
+    await expect(
+      prepareExecutionSpec({
+        rootId: 'root-a',
+        workspacePath: root,
+        expectedRootIdentityDigest: binding.rootIdentityDigest,
+        executable: process.execPath,
+        argv: ['--version'],
+        cwd: '.',
+      }),
+    ).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
   });
 
   executionIt(

@@ -41,6 +41,7 @@ export type FileRevisionToken = Readonly<{
   mtimeHint: number;
   size: number;
   policyEpoch: number;
+  rootId: string;
   workspaceBinding: string;
   targetBinding: string;
   maxBytes: number;
@@ -65,7 +66,9 @@ export class FileRevisionRegistry {
 
   async read(input: {
     owner: FileRevisionOwner;
+    rootId?: string | undefined;
     workspacePath: string;
+    expectedRootIdentityDigest?: string | undefined;
     targetPath: string;
     policyEpoch: number;
     maxBytes?: number;
@@ -89,7 +92,9 @@ export class FileRevisionRegistry {
   async resolve(input: {
     owner: FileRevisionOwner;
     reference: FileRevisionReference;
+    rootId?: string | undefined;
     workspacePath: string;
+    expectedRootIdentityDigest?: string | undefined;
     targetPath: string;
     policyEpoch: number;
   }): Promise<RevisionBoundFile> {
@@ -104,7 +109,9 @@ export class FileRevisionRegistry {
       );
     await revalidateFileRevisionToken({
       token: record.token,
+      rootId: input.rootId,
       workspacePath: input.workspacePath,
+      expectedRootIdentityDigest: input.expectedRootIdentityDigest,
       targetPath: input.targetPath,
       policyEpoch: input.policyEpoch,
     });
@@ -124,7 +131,9 @@ export class FileRevisionRegistry {
 }
 
 export async function readRevisionBoundFile(input: {
+  rootId?: string | undefined;
   workspacePath: string;
+  expectedRootIdentityDigest?: string | undefined;
   targetPath: string;
   policyEpoch: number;
   maxBytes?: number;
@@ -132,7 +141,9 @@ export async function readRevisionBoundFile(input: {
   const policyEpoch = validateNonNegativeInteger(input.policyEpoch, 'policyEpoch');
   const maxBytes = validatePositiveInteger(input.maxBytes ?? DEFAULT_MAX_BYTES, 'maxBytes');
   const guard = await createPathGuard({
+    rootId: input.rootId,
     workspacePath: input.workspacePath,
+    expectedRootIdentityDigest: input.expectedRootIdentityDigest,
     targetPath: input.targetPath,
     operation: 'read',
   });
@@ -156,7 +167,8 @@ export async function readRevisionBoundFile(input: {
       mtimeHint: exactStatNumber(after.mtimeMs, 'mtimeMs'),
       size: bytes.byteLength,
       policyEpoch,
-      workspaceBinding: digest(guard.workspacePath),
+      rootId: guard.rootId,
+      workspaceBinding: digest(JSON.stringify([guard.rootId, guard.workspacePath])),
       targetBinding: targetBinding(guard),
       maxBytes,
     });
@@ -184,7 +196,9 @@ export function fileRevisionIdentityDigest(identity: Readonly<FileIdentity>): st
 
 export async function revalidateFileRevisionToken(input: {
   token: FileRevisionToken;
+  rootId?: string | undefined;
   workspacePath: string;
+  expectedRootIdentityDigest?: string | undefined;
   targetPath: string;
   policyEpoch: number;
 }): Promise<FileRevisionToken> {
@@ -198,18 +212,23 @@ export async function revalidateFileRevisionToken(input: {
     );
 
   const guard = await createPathGuard({
+    rootId: input.rootId,
     workspacePath: input.workspacePath,
+    expectedRootIdentityDigest: input.expectedRootIdentityDigest,
     targetPath: input.targetPath,
     operation: 'read',
   });
   if (
-    digest(guard.workspacePath) !== input.token.workspaceBinding ||
+    guard.rootId !== input.token.rootId ||
+    digest(JSON.stringify([guard.rootId, guard.workspacePath])) !== input.token.workspaceBinding ||
     targetBinding(guard) !== input.token.targetBinding
   )
     throw new FileRevisionError('TARGET_CHANGED', 'Revision token is bound to another target');
 
   const current = await readRevisionBoundFile({
+    rootId: input.rootId,
     workspacePath: input.workspacePath,
+    expectedRootIdentityDigest: input.expectedRootIdentityDigest,
     targetPath: input.targetPath,
     policyEpoch,
     maxBytes: input.token.maxBytes,

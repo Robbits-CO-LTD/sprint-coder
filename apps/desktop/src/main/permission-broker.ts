@@ -51,7 +51,8 @@ type PermissionPersistence = Pick<
   | 'recordPermissionAudit'
   | 'listPendingPermissionPolicyEpochs'
   | 'markPermissionPolicyEpochDelivered'
-  | 'getWorkspace'
+  | 'getEffectiveWorkspaceSet'
+  | 'readTurnWorkspaceSetForTask'
   | 'registerPermissionOneTimeToken'
   | 'consumePermissionOneTimeToken'
   | 'commitPermissionEvaluation'
@@ -110,6 +111,7 @@ export class PermissionBroker {
 
   evaluate(input: {
     taskId: string;
+    turnId?: string;
     request: PermissionRequest;
     basePolicy: PermissionPolicyBase;
     now: string;
@@ -122,6 +124,7 @@ export class PermissionBroker {
 
   preview(input: {
     taskId: string;
+    turnId?: string;
     request: PermissionRequest;
     basePolicy: PermissionPolicyBase;
     now: string;
@@ -135,6 +138,7 @@ export class PermissionBroker {
 
   previewExecutionSpec(input: {
     taskId: string;
+    turnId?: string;
     request: PermissionRequest;
     basePolicy: PermissionPolicyBase;
     now: string;
@@ -149,6 +153,7 @@ export class PermissionBroker {
   commitEvaluation(
     input: {
       taskId: string;
+      turnId?: string;
       request: PermissionRequest;
       basePolicy: PermissionPolicyBase;
       now: string;
@@ -170,6 +175,7 @@ export class PermissionBroker {
 
   evaluateExecutionSpec(input: {
     taskId: string;
+    turnId?: string;
     request: PermissionRequest;
     basePolicy: PermissionPolicyBase;
     now: string;
@@ -218,6 +224,7 @@ export class PermissionBroker {
 
   private evaluateSingle(input: {
     taskId: string;
+    turnId?: string;
     request: PermissionRequest;
     basePolicy: PermissionPolicyBase;
     now: string;
@@ -327,6 +334,7 @@ export class PermissionBroker {
 
   private assertTrustedRequestFacts(input: {
     taskId: string;
+    turnId?: string;
     request: PermissionRequest;
     pathGuard?: PathGuard;
   }): void {
@@ -336,14 +344,20 @@ export class PermissionBroker {
       throw new Error('External path execution boundary is not available');
     if (resource.kind !== 'workspace-path') return;
     const guard = input.pathGuard;
-    const workspacePath = this.persistence.getWorkspace(input.taskId);
+    const workspace =
+      input.turnId === undefined
+        ? this.persistence.getEffectiveWorkspaceSet(input.taskId)
+        : this.persistence.readTurnWorkspaceSetForTask(input.taskId, input.turnId);
+    if (workspace === null) throw new Error('Permission Turn Workspace snapshot is unavailable');
+    const rootId = guard?.rootId === 'legacy-primary' ? workspace.primaryRootId : guard?.rootId;
+    const root = workspace.roots.find((candidate) => candidate.rootId === rootId);
     if (
       guard === undefined ||
       !isIssuedPathGuard(guard) ||
-      workspacePath === null ||
-      guard.workspacePath !== workspacePath
+      root === undefined ||
+      guard.workspacePath !== root.path
     )
-      throw new Error('Permission path guard is not bound to the selected workspace');
+      throw new Error('Permission path guard is not bound to an effective Workspace root');
     const trusted = workspacePermissionResourceFromGuard(guard);
     if (
       trusted.workspaceId !== resource.workspaceId ||

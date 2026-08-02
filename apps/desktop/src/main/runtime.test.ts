@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { TurnEvent, TurnStage } from '@sprint-coder/contracts';
 import type { IntelligenceStepState, ReasoningEffort, StepSnapshot } from '@sprint-coder/domain';
 import type { PersistenceClient } from './persistence';
-import { MockRuntimeAdapter } from './runtime';
+import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
+import { MockRuntimeAdapter, mockFileChanges, mockWorkspaceBinding } from './runtime';
 
 class FakePersistence implements Pick<
   PersistenceClient,
@@ -102,6 +103,47 @@ class FakePersistence implements Pick<
 }
 
 describe('MockRuntimeAdapter', () => {
+  it('keeps workspace-bound tools reachable for Project roots', () => {
+    const binding = mockWorkspaceBinding(null, {
+      source: 'project',
+      projectId: 'project-1',
+      primaryRootId: 'root-a',
+      roots: [
+        {
+          rootId: 'root-a',
+          path: '/workspace/a',
+          label: 'a',
+          role: 'primary',
+          status: 'available',
+        },
+        {
+          rootId: 'root-b',
+          path: '/workspace/b',
+          label: 'b',
+          role: 'secondary',
+          status: 'available',
+        },
+      ],
+      digest: 'a'.repeat(64),
+    });
+    expect(binding.workspaceId).not.toBeNull();
+    expect(binding.workspaceRevision).toBe(`effective:${'a'.repeat(64)}`);
+    const catalog = startMockTurnCatalog(
+      createDefaultToolBroker(() => 0),
+      {
+        taskId: 'task',
+        turnId: 'turn',
+        workspaceId: binding.workspaceId,
+        policyEpoch: 0,
+      },
+    );
+    expect(catalog.entries.map(({ providerName }) => providerName)).toContain('run_command');
+    expect(mockFileChanges('example', { rootId: 'root-a', rootLabel: 'a' })[0]).toMatchObject({
+      rootId: 'root-a',
+      rootLabel: 'a',
+    });
+  });
+
   it('streams deterministic Japanese output through every stage', async () => {
     const persistence = new FakePersistence();
     const published: TurnEvent[] = [];

@@ -21,7 +21,11 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(process.cwd(), '.sprint-coder-path-guard-'));
+  // Windows temp lives under AppData, which is deliberately classified as app-private. The CI
+  // checkout is the ordinary path there; POSIX uses the system temp because local worktrees may
+  // themselves live under ~/.codex and carry the same protected classification.
+  const fixtureBase = process.platform === 'win32' ? process.cwd() : tmpdir();
+  const root = await mkdtemp(join(fixtureBase, '.sprint-coder-path-guard-'));
   temporaryRoots.push(root);
   const workspace = join(root, 'workspace');
   const outside = join(root, 'outside');
@@ -322,6 +326,24 @@ describe('path guard', () => {
     expect(afterRename.rootIdentityDigest).toBe(direct.rootIdentityDigest);
     expect(direct.workspaceKey).toMatch(/^[a-f0-9]{64}$/);
     expect(direct.rootIdentityDigest).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('rejects a different directory inode recreated at an approved root path', async () => {
+    const { workspace } = await fixture();
+    const binding = await workspaceMutationBinding(workspace);
+    await rename(workspace, `${workspace}-original`);
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    await writeFile(join(workspace, 'src', 'safe.txt'), 'replacement');
+
+    await expect(
+      createPathGuard({
+        rootId: 'root-a',
+        workspacePath: workspace,
+        expectedRootIdentityDigest: binding.rootIdentityDigest,
+        targetPath: 'src/safe.txt',
+        operation: 'read',
+      }),
+    ).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
   });
 
   // Adversarial fixtures (Phase 7 hardening, IMPLEMENTATION_PLAN §10.4): percent-encoded

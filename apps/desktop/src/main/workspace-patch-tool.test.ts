@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
@@ -10,6 +10,7 @@ import {
   type WorkspacePatchDeps,
 } from './workspace-patch-tool';
 import type { EditSagaApplyRequest, EditSagaSnapshot } from './edit-saga';
+import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
 const context = { taskId: 'task-1', turnId: 'turn-1' } as const;
@@ -25,9 +26,25 @@ async function harness(content = SOURCE) {
   roots.push(workspace);
   await mkdir(join(workspace, 'src'));
   await writeFile(join(workspace, 'src', 'a.txt'), content);
+  const identity = await workspaceMutationBinding(workspace);
   const applied: EditSagaApplyRequest[] = [];
   const deps: WorkspacePatchDeps = {
-    workspaceFor: () => workspace,
+    turnWorkspaceSetFor: () => ({
+      source: 'project',
+      projectId: 'project-1',
+      primaryRootId: 'root-a',
+      roots: [
+        {
+          rootId: 'root-a',
+          path: workspace,
+          label: 'a',
+          role: 'primary',
+          status: 'available',
+        },
+      ],
+      digest: 'a'.repeat(64),
+    }),
+    turnRootIdentitiesFor: () => new Map([['root-a', identity.rootIdentityDigest]]),
     revisions: new FileRevisionRegistry(),
     policyEpochFor: () => 1,
     apply: async (request) => {
@@ -72,6 +89,94 @@ describe('the agent edit tool', () => {
     });
     // The tool is not an effect boundary: the file is untouched until the Saga applies the plan.
     expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe(SOURCE);
+  });
+
+  it('selects a Secondary by rootId and never falls through to the Primary', async () => {
+    const { workspace: primary, deps, applied } = await harness('primary only\n');
+    const primaryIdentity = await workspaceMutationBinding(primary);
+    const secondary = await mkdtemp(join(tmpdir(), 'sprint-coder-patch-tool-secondary-'));
+    roots.push(secondary);
+    await mkdir(join(secondary, 'src'));
+    await writeFile(join(secondary, 'src', 'a.txt'), SOURCE);
+    const secondaryIdentity = await workspaceMutationBinding(secondary);
+    const result = await executeWorkspacePatch(
+      {
+        rootId: 'root-b',
+        path: 'src/a.txt',
+        edits: [{ oldText: '  return input + 1;', newText: '  return 42;' }],
+      },
+      context,
+      {
+        ...deps,
+        turnWorkspaceSetFor: () => ({
+          source: 'project',
+          projectId: 'project-1',
+          primaryRootId: 'root-a',
+          roots: [
+            {
+              rootId: 'root-a',
+              path: primary,
+              label: 'a',
+              role: 'primary',
+              status: 'available',
+            },
+            {
+              rootId: 'root-b',
+              path: secondary,
+              label: 'b',
+              role: 'secondary',
+              status: 'available',
+            },
+          ],
+          digest: 'b'.repeat(64),
+        }),
+        turnRootIdentitiesFor: () =>
+          new Map([
+            ['root-a', primaryIdentity.rootIdentityDigest],
+            ['root-b', secondaryIdentity.rootIdentityDigest],
+          ]),
+      },
+    );
+    expect(result.rootId).toBe('root-b');
+    expect(applied[0]?.plan.operations[0]?.canonicalPath).toBe(
+      join(await realpath(secondary), 'src/a.txt'),
+    );
+    expect(await readFile(join(primary, 'src/a.txt'), 'utf8')).toBe('primary only\n');
+  });
+
+  it('rejects an unknown rootId before reading a same-relative-path file', async () => {
+    const { deps } = await harness();
+    await expect(
+      executeWorkspacePatch(
+        {
+          rootId: 'forged-root',
+          path: 'src/a.txt',
+          edits: [{ oldText: 'x', newText: 'y' }],
+        },
+        context,
+        deps,
+      ),
+    ).rejects.toThrow('valid Workspace rootId');
+  });
+
+  it('rejects a replacement directory at the sealed root path', async () => {
+    const { workspace, deps } = await harness();
+    const original = `${workspace}-original`;
+    await rename(workspace, original);
+    roots.push(original);
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    await writeFile(join(workspace, 'src', 'a.txt'), SOURCE);
+
+    await expect(
+      executeWorkspacePatch(
+        {
+          path: 'src/a.txt',
+          edits: [{ oldText: '  return input + 1;', newText: '  return 42;' }],
+        },
+        context,
+        deps,
+      ),
+    ).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
   });
 
   it('reports the Saga state instead of claiming success for a patch that did not commit', async () => {
@@ -135,7 +240,13 @@ describe('refusing malformed or unsupported requests', () => {
         context,
         {
           ...deps,
-          workspaceFor: () => null,
+          turnWorkspaceSetFor: () => ({
+            source: 'none',
+            projectId: null,
+            primaryRootId: null,
+            roots: [],
+            digest: '0'.repeat(64),
+          }),
         },
       ),
     ).rejects.toThrow('requires a selected Workspace');

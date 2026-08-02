@@ -56,6 +56,7 @@ export const COMMAND_RUNNER_TOOL = createToolDefinition({
     properties: {
       executable: { type: 'string' },
       argv: { type: 'array', items: { type: 'string' } },
+      rootId: { type: 'string' },
       cwd: { type: 'string' },
       purpose: { type: 'string' },
     },
@@ -101,7 +102,8 @@ export function createDefaultToolBroker(
   command?: {
     persistence: Pick<
       PersistenceClient,
-      | 'getWorkspace'
+      | 'readTurnWorkspaceSet'
+      | 'getTurnWorkspaceRootIdentities'
       | 'prepareCommand'
       | 'beginCommand'
       | 'startCommand'
@@ -174,16 +176,29 @@ export function createDefaultToolBroker(
     prepare: async (input, context, control) => {
       if (command === undefined)
         throw new Error('CommandRunner execution boundary is not configured');
-      const workspacePath = command.persistence.getWorkspace(context.taskId);
-      if (workspacePath === null) throw new Error('CommandRunner requires a selected Workspace');
       const request = input as {
         executable: string;
         argv: string[];
+        rootId?: string;
         cwd?: string;
         purpose: string;
       };
+      const workspace = command.persistence.readTurnWorkspaceSet(context.turnId);
+      if (workspace === null)
+        throw new Error('CommandRunner requires a sealed Turn Workspace snapshot');
+      const requestedRootId = request.rootId ?? workspace.primaryRootId;
+      const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
+      if (root === undefined) throw new Error('CommandRunner requires a valid Workspace rootId');
+      const expectedRootIdentityDigest =
+        workspace.source === 'project'
+          ? command.persistence.getTurnWorkspaceRootIdentities(context.turnId).get(root.rootId)
+          : undefined;
+      if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
+        throw new Error('CommandRunner Turn Workspace identity is incomplete');
       const spec = await prepareExecutionSpec({
-        workspacePath,
+        rootId: root.rootId,
+        workspacePath: root.path,
+        ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
         executable: request.executable,
         argv: request.argv,
         ...(request.cwd === undefined ? {} : { cwd: request.cwd }),

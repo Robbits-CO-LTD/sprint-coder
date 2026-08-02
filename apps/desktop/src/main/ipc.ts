@@ -688,7 +688,10 @@ export class IpcRouter {
         this.pushFileEdit(
           taskId,
           turnId,
-          resolvePath(this.persistence.getWorkspace(taskId) ?? '/', path),
+          resolvePath(
+            primaryWorkspacePath(this.persistence.getEffectiveWorkspaceSet(taskId)) ?? '/',
+            path,
+          ),
           text,
           {
             complete,
@@ -2401,6 +2404,7 @@ export class IpcRouter {
     };
     const evaluationInput: Parameters<PermissionBroker['evaluate']>[0] = {
       taskId: request.context.taskId,
+      turnId: request.context.turnId,
       request: {
         ...permissionRequestBase,
         reviewerInputDigest: autoReviewerInputDigest({

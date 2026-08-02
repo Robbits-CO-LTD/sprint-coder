@@ -23,6 +23,7 @@ export type PathChainEntry = {
   linkTarget: string | null;
 };
 export type CanonicalPathIdentity = {
+  rootId: string;
   workspacePath: string;
   originalTargetPath: string;
   resolvedPath: string;
@@ -54,7 +55,9 @@ export class PathGuardError extends Error {
 }
 
 export async function canonicalizeResourcePath(input: {
+  rootId?: string | undefined;
   workspacePath: string;
+  expectedRootIdentityDigest?: string | undefined;
   targetPath: string;
   operation: PathOperation;
 }): Promise<CanonicalPathIdentity> {
@@ -63,6 +66,11 @@ export async function canonicalizeResourcePath(input: {
   const workspaceStats = await stat(workspacePath, { bigint: true });
   if (!workspaceStats.isDirectory())
     throw new PathGuardError('INVALID_PATH', 'Workspace must be a directory');
+  if (
+    input.expectedRootIdentityDigest !== undefined &&
+    workspaceRootIdentityDigest(workspaceStats) !== input.expectedRootIdentityDigest
+  )
+    throw new PathGuardError('IDENTITY_CHANGED', 'Workspace root identity changed');
 
   const lexicalTarget = isAbsolute(input.targetPath)
     ? resolve(input.targetPath)
@@ -96,6 +104,7 @@ export async function canonicalizeResourcePath(input: {
   const chain = await snapshotLexicalChain(workspacePath, lexicalTarget);
 
   return {
+    rootId: input.rootId ?? 'legacy-primary',
     workspacePath,
     originalTargetPath: input.targetPath,
     resolvedPath: canonicalTarget,
@@ -107,7 +116,9 @@ export async function canonicalizeResourcePath(input: {
 }
 
 export async function createPathGuard(input: {
+  rootId?: string | undefined;
   workspacePath: string;
+  expectedRootIdentityDigest?: string | undefined;
   targetPath: string;
   operation: PathOperation;
 }): Promise<PathGuard> {
@@ -135,6 +146,7 @@ export async function revalidatePathGuard(guard: PathGuard): Promise<CanonicalPa
   let current: CanonicalPathIdentity;
   try {
     current = await canonicalizeResourcePath({
+      rootId: guard.rootId,
       workspacePath: guard.workspacePath,
       targetPath: guard.originalTargetPath,
       operation: guard.operation,
@@ -144,6 +156,7 @@ export async function revalidatePathGuard(guard: PathGuard): Promise<CanonicalPa
     throw new PathGuardError('IDENTITY_CHANGED', 'Path identity changed before execution');
   }
   if (
+    current.rootId !== guard.rootId ||
     current.workspacePath !== guard.workspacePath ||
     current.resolvedPath !== guard.resolvedPath ||
     !sameIdentity(current.parentIdentity, guard.parentIdentity) ||
@@ -203,6 +216,7 @@ export function pathGuardIdentityDigest(guard: PathGuard): string {
   return createHash('sha256')
     .update(
       JSON.stringify([
+        guard.rootId,
         guard.workspacePath,
         guard.resolvedPath,
         guard.operation,
@@ -225,13 +239,27 @@ export async function workspaceMutationBinding(inputPath: string): Promise<
   const identity = toIdentity(await lstat(canonicalPath, { bigint: true }));
   if (identity.kind !== 'directory')
     throw new PathGuardError('INVALID_PATH', 'Workspace must be a directory');
-  const rootIdentityDigest = createHash('sha256')
-    .update(JSON.stringify(['workspace-root-v2', identity.dev, identity.ino, identity.kind]))
-    .digest('hex');
+  const rootIdentityDigest = workspaceRootIdentityDigest(identity);
   const workspaceKey = createHash('sha256')
     .update(JSON.stringify(['workspace-mutation-v2', rootIdentityDigest]))
     .digest('hex');
   return Object.freeze({ canonicalPath, rootIdentityDigest, workspaceKey });
+}
+
+function workspaceRootIdentityDigest(
+  identity: Pick<FileIdentity, 'dev' | 'ino' | 'kind'> | BigIntStats,
+): string {
+  const normalized = 'kind' in identity ? identity : toIdentity(identity);
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        'workspace-root-v2',
+        String(normalized.dev),
+        String(normalized.ino),
+        normalized.kind,
+      ]),
+    )
+    .digest('hex');
 }
 
 export function workspacePermissionResourceFromGuard(
@@ -241,7 +269,9 @@ export function workspacePermissionResourceFromGuard(
     throw new PathGuardError('INVALID_PATH', 'PathGuard was not issued by canonical validation');
   return Object.freeze({
     kind: 'workspace-path',
-    workspaceId: createHash('sha256').update(guard.workspacePath).digest('hex'),
+    workspaceId: createHash('sha256')
+      .update(JSON.stringify([guard.rootId, guard.workspacePath]))
+      .digest('hex'),
     canonicalPath: guard.resolvedPath,
     identityDigest: pathGuardIdentityDigest(guard),
     classification: classifyWorkspacePath(guard.workspacePath, guard.resolvedPath),
