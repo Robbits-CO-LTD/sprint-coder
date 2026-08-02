@@ -168,9 +168,11 @@ export function FileEditorDialog({
         );
       } else {
         setMessage(
-          result.reason === 'too_large'
-            ? REFUSAL_MESSAGE.too_large
-            : '保存できませんでした。ファイルとWorkspaceの状態を確認してください。',
+          result.conflictPath
+            ? `保存処理を完了できませんでした。退避した版を保持しました: ${result.conflictPath}`
+            : result.reason === 'too_large'
+              ? REFUSAL_MESSAGE.too_large
+              : '保存できませんでした。ファイルとWorkspaceの状態を確認してください。',
         );
       }
     } catch {

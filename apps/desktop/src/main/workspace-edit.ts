@@ -9,6 +9,7 @@ import {
   fchmodSync,
   fstatSync,
   futimesSync,
+  linkSync,
   fsyncSync,
   ftruncateSync,
   openSync,
@@ -215,22 +216,24 @@ export function saveWorkspaceFile(
     descriptor = null;
     publicationAttempted = true;
     const publication = publishStagedFile(staging, absolute, backup, baseDigest, digestOf(bytes));
-    if (publication === 'conflict') {
+    if (publication === 'conflict' || publication === 'conflict_backup') {
       // Atomic rollback moves the version displaced at rollback time into staging. Retaining it is
       // essential: deleting it could destroy a third-party edit made after the first exchange.
-      ownsStaging = false;
+      const preservedBackup = publication === 'conflict_backup';
+      if (preservedBackup) ownsBackup = false;
+      else ownsStaging = false;
       return {
         outcome: 'conflict',
         digest: null,
         reason: null,
-        conflictPath: stagingRelative,
+        conflictPath: preservedBackup ? backupRelative : stagingRelative,
       };
     }
     if (publication === 'intervened') {
-      ownsBackup = process.platform === 'win32';
+      ownsBackup = existsSync(backup);
       return { outcome: 'conflict', digest: null, reason: null, conflictPath: null };
     }
-    ownsBackup = process.platform === 'win32';
+    ownsBackup = existsSync(backup);
     try {
       syncParentDirectory(absolute);
     } catch {
@@ -301,17 +304,13 @@ function publishStagedFile(
   backup: string,
   baseDigest: string,
   replacementDigest: string,
-): 'published' | 'conflict' | 'intervened' {
+): 'published' | 'conflict' | 'conflict_backup' | 'intervened' {
   if (process.platform !== 'win32') {
     try {
       exchangePosixFiles(staging, absolute);
     } catch (error) {
       if (!isUnsupportedExchange(error)) throw error;
-      // Some network, FUSE, and removable filesystems do not implement atomic exchange. A sibling
-      // rename is still atomic; on those filesystems we deliberately fall back to the final digest
-      // validation already performed by the caller instead of making saves permanently unusable.
-      renameSync(staging, absolute);
-      return 'published';
+      return publishWithoutExchange(staging, absolute, backup, baseDigest, replacementDigest);
     }
     try {
       if (digestOf(readFileSync(staging)) === baseDigest)
@@ -350,6 +349,33 @@ function publishStagedFile(
     }
     throw error;
   }
+}
+
+function publishWithoutExchange(
+  staging: string,
+  absolute: string,
+  backup: string,
+  baseDigest: string,
+  replacementDigest: string,
+): 'published' | 'conflict_backup' | 'intervened' {
+  // Filesystems without atomic exchange can still avoid an overwrite race by first moving the
+  // boundary destination aside, then publishing with a no-replace hardlink. If hardlinks are not
+  // supported either, fail closed after restoring the target instead of reporting an unsafe save.
+  renameSync(absolute, backup);
+  try {
+    linkSync(staging, absolute);
+  } catch (error) {
+    if (existsSync(absolute)) return 'conflict_backup';
+    renameSync(backup, absolute);
+    throw error;
+  }
+  if (digestOf(readFileSync(backup)) !== baseDigest) {
+    unlinkSync(staging);
+    return 'conflict_backup';
+  }
+  if (digestOf(readFileSync(absolute)) !== replacementDigest) return 'intervened';
+  unlinkSync(staging);
+  return 'published';
 }
 
 function stageTargetFile(absolute: string, staging: string): void {
