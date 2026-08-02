@@ -44,7 +44,7 @@ async function harness(content = SOURCE) {
       ],
       digest: 'a'.repeat(64),
     }),
-    turnRootIdentitiesFor: () => new Map([['root-a', identity.rootIdentityDigest]]),
+    turnRootMutationBindingsFor: () => new Map([['root-a', identity]]),
     revisions: new FileRevisionRegistry(),
     policyEpochFor: () => 1,
     apply: async (request) => {
@@ -52,7 +52,7 @@ async function harness(content = SOURCE) {
       return { id: request.id, state: 'committed' } as unknown as EditSagaSnapshot;
     },
   };
-  return { workspace, deps, applied };
+  return { workspace, identity, deps, applied };
 }
 
 describe('the agent edit tool', () => {
@@ -75,7 +75,7 @@ describe('the agent edit tool', () => {
   });
 
   it('hands a validated plan to the Saga rather than writing anything itself', async () => {
-    const { workspace, deps, applied } = await harness();
+    const { workspace, identity, deps, applied } = await harness();
     const result = await executeWorkspacePatch(
       { path: 'src/a.txt', edits: [{ oldText: '  return input + 1;', newText: '  return 42;' }] },
       context,
@@ -86,6 +86,12 @@ describe('the agent edit tool', () => {
     expect(applied[0]?.plan.operations[0]).toMatchObject({
       kind: 'update',
       postImage: 'function alpha(input) {\n  return 42;\n}\n',
+    });
+    expect(applied[0]?.mutationBinding).toEqual({
+      rootId: 'root-a',
+      workspacePath: workspace,
+      workspaceKey: identity.workspaceKey,
+      rootIdentityDigest: identity.rootIdentityDigest,
     });
     // The tool is not an effect boundary: the file is untouched until the Saga applies the plan.
     expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe(SOURCE);
@@ -130,10 +136,10 @@ describe('the agent edit tool', () => {
           ],
           digest: 'b'.repeat(64),
         }),
-        turnRootIdentitiesFor: () =>
+        turnRootMutationBindingsFor: () =>
           new Map([
-            ['root-a', primaryIdentity.rootIdentityDigest],
-            ['root-b', secondaryIdentity.rootIdentityDigest],
+            ['root-a', primaryIdentity],
+            ['root-b', secondaryIdentity],
           ]),
       },
     );

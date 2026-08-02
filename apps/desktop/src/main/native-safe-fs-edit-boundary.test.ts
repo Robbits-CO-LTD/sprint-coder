@@ -115,7 +115,7 @@ class FakeNative {
 // digest recomputation, effect semantics) so persisted transitions are authentic.
 class FakeJournal {
   readonly intents = new Map<string, NativeMutationIntentSnapshot>();
-  getWorkspace(): string | null {
+  getMutationWorkspacePath(): string | null {
     return WORKSPACE;
   }
   prepareNativeMutationIntent(
@@ -209,6 +209,7 @@ async function stageSaga(
 function lease(): MutationLeaseToken {
   return Object.freeze({
     version: 1,
+    rootId: null,
     workspaceKey: 'a'.repeat(64),
     rootIdentityDigest: '2'.repeat(64),
     leaseId: 'lease-1',
@@ -230,6 +231,7 @@ function lease(): MutationLeaseToken {
 function session(): NativeSafeFsSession {
   return Object.freeze({
     id: '6'.repeat(32),
+    rootId: 'legacy-primary',
     workspaceKey: 'a'.repeat(64),
     fence: '7',
     rootDev: '10',

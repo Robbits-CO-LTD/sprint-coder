@@ -234,6 +234,7 @@ export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
       throw new MutationQuarantinedError();
     const now = this.now();
     const token = this.persistence.acquireMutationLease({
+      rootId: saga.rootId,
       workspaceKey: saga.workspaceKey,
       rootIdentityDigest: saga.rootIdentityDigest,
       holderInstanceId: this.holderInstanceId,
@@ -851,10 +852,12 @@ type EditSagaRow = {
   operation_id: string;
   plan_digest: string;
   policy_epoch: number;
+  root_id: string | null;
   workspace_key: string | null;
   root_identity_digest: string | null;
   binding_version: number;
   native_binding_version: number;
+  root_binding_version: number;
   state: EditSagaSnapshot['state'];
   revision: number;
   artifact_cleanup_pending: number;
@@ -907,6 +910,7 @@ type NativeMutationRecoveryBindingRow = {
 type WorkspaceMutationRow = {
   workspace_key: string;
   root_identity_digest: string;
+  root_id: string | null;
   state: 'idle' | 'held' | 'quarantined';
   fence: number;
   revision: number;
@@ -2853,6 +2857,16 @@ const migrations = [
     `,
     requiresForeignKeysOff: true,
   },
+  {
+    version: 61,
+    checksum: 'edit-saga-root-binding-v61',
+    sql: `
+      ALTER TABLE edit_sagas ADD COLUMN root_id TEXT;
+      ALTER TABLE edit_sagas ADD COLUMN root_binding_version INTEGER NOT NULL DEFAULT 0
+        CHECK (root_binding_version IN (0, 1));
+      ALTER TABLE workspace_mutation_state ADD COLUMN root_id TEXT;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3349,6 +3363,9 @@ export interface PersistenceClient {
   getProjectFolderRootIdentities(projectId: string): ReadonlyMap<string, string>;
   getEffectiveWorkspaceRootIdentities(taskId: string): ReadonlyMap<string, string>;
   getTurnWorkspaceRootIdentities(turnId: string): ReadonlyMap<string, string>;
+  getTurnWorkspaceMutationBindings(
+    turnId: string,
+  ): ReadonlyMap<string, Readonly<{ workspaceKey: string; rootIdentityDigest: string }>>;
   replaceProjectFolders(input: {
     projectId: string;
     expectedRevision: number;
@@ -3668,12 +3685,14 @@ export interface PersistenceClient {
     revision: number;
   }): CanvasViewRecord;
   getWorkspace(taskId: string): string | null;
+  getMutationWorkspacePath(taskId: string, turnId: string, rootId: string | null): string | null;
   setWorkspace(taskId: string, path: string): void;
   setWorkspaceBinding(
     taskId: string,
     binding: { path: string; workspaceKey: string; rootIdentityDigest: string },
   ): void;
   acquireMutationLease(input: {
+    rootId?: string | null;
     workspaceKey: string;
     rootIdentityDigest: string;
     holderInstanceId: string;
@@ -4153,6 +4172,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.backfillLegacyMutationScopes();
     this.backfillLegacyEditSagaBindings();
     this.backfillLegacyNativeEditSagaRevisions();
+    this.backfillLegacyEditSagaRootBindings();
     this.backfillAcceptanceContracts();
     this.interruptActiveCommands();
     this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
@@ -4427,16 +4447,27 @@ export class SqlitePersistenceClient implements PersistenceClient {
         raw['rootIdentityDigest'] = null;
         const steps = raw['steps'];
         if (!Array.isArray(steps)) throw new Error('Invalid legacy Edit Saga steps');
-        const journalDigest = journaledPatchDigest({
-          version: 2,
-          policyEpoch: raw['policyEpoch'] as number,
-          workspaceKey: null,
-          rootIdentityDigest: null,
-          operations: steps.map(
-            (step) =>
-              (step as { operation: EditSagaSnapshot['steps'][number]['operation'] }).operation,
-          ),
-        });
+        const operations = steps.map(
+          (step) =>
+            (step as { operation: EditSagaSnapshot['steps'][number]['operation'] }).operation,
+        );
+        const journalDigest =
+          'rootId' in raw
+            ? journaledPatchDigest({
+                version: 3,
+                policyEpoch: raw['policyEpoch'] as number,
+                rootId: raw['rootId'] as string | null,
+                workspaceKey: null,
+                rootIdentityDigest: null,
+                operations,
+              })
+            : journaledPatchDigest({
+                version: 2,
+                policyEpoch: raw['policyEpoch'] as number,
+                workspaceKey: null,
+                rootIdentityDigest: null,
+                operations,
+              });
         raw['journalDigest'] = journalDigest;
         update.run(JSON.stringify(raw), row.id);
       }
@@ -4481,9 +4512,50 @@ export class SqlitePersistenceClient implements PersistenceClient {
             nlink: 1,
           };
         }
+        const operations = steps.map(
+          (step) =>
+            (step as { operation: EditSagaSnapshot['steps'][number]['operation'] }).operation,
+        );
+        raw['journalDigest'] =
+          'rootId' in raw
+            ? journaledPatchDigest({
+                version: 3,
+                policyEpoch: raw['policyEpoch'] as number,
+                rootId: raw['rootId'] as string | null,
+                workspaceKey: raw['workspaceKey'] as string | null,
+                rootIdentityDigest: raw['rootIdentityDigest'] as string | null,
+                operations,
+              })
+            : journaledPatchDigest({
+                version: 2,
+                policyEpoch: raw['policyEpoch'] as number,
+                workspaceKey: raw['workspaceKey'] as string | null,
+                rootIdentityDigest: raw['rootIdentityDigest'] as string | null,
+                operations,
+              });
+        update.run(JSON.stringify(raw), row.id);
+      }
+    })();
+  }
+
+  private backfillLegacyEditSagaRootBindings(): void {
+    const rows = this.db
+      .prepare(`SELECT id, snapshot_json FROM edit_sagas WHERE root_binding_version = 0`)
+      .all() as { id: string; snapshot_json: string }[];
+    const update = this.db.prepare(
+      `UPDATE edit_sagas SET root_id = NULL, snapshot_json = ?, root_binding_version = 1
+       WHERE id = ? AND root_binding_version = 0`,
+    );
+    this.db.transaction(() => {
+      for (const row of rows) {
+        const raw = JSON.parse(row.snapshot_json) as Record<string, unknown>;
+        raw['rootId'] = null;
+        const steps = raw['steps'];
+        if (!Array.isArray(steps)) throw new Error('Invalid legacy Edit Saga steps');
         raw['journalDigest'] = journaledPatchDigest({
-          version: 2,
+          version: 3,
           policyEpoch: raw['policyEpoch'] as number,
+          rootId: null,
           workspaceKey: raw['workspaceKey'] as string | null,
           rootIdentityDigest: raw['rootIdentityDigest'] as string | null,
           operations: steps.map(
@@ -4745,6 +4817,31 @@ export class SqlitePersistenceClient implements PersistenceClient {
           )
           .all(turnId) as { root_id: string; root_identity_digest: string }[]
       ).map((root) => [root.root_id, root.root_identity_digest]),
+    );
+  }
+
+  getTurnWorkspaceMutationBindings(
+    turnId: string,
+  ): ReadonlyMap<string, Readonly<{ workspaceKey: string; rootIdentityDigest: string }>> {
+    return new Map(
+      (
+        this.db
+          .prepare(
+            `SELECT root_id, workspace_key, root_identity_digest
+             FROM turn_workspace_roots WHERE turn_id = ? ORDER BY ordinal`,
+          )
+          .all(turnId) as {
+          root_id: string;
+          workspace_key: string;
+          root_identity_digest: string;
+        }[]
+      ).map((root) => [
+        root.root_id,
+        Object.freeze({
+          workspaceKey: root.workspace_key,
+          rootIdentityDigest: root.root_identity_digest,
+        }),
+      ]),
     );
   }
 
@@ -7941,6 +8038,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
       : null;
   }
 
+  getMutationWorkspacePath(taskId: string, turnId: string, rootId: string | null): string | null {
+    if (rootId === null) return this.getWorkspace(taskId);
+    this.getTurn(taskId, turnId);
+    const row = this.db
+      .prepare(`SELECT canonical_path FROM turn_workspace_roots WHERE turn_id = ? AND root_id = ?`)
+      .get(turnId, rootId) as { canonical_path: string } | undefined;
+    return row?.canonical_path ?? null;
+  }
+
   getEffectiveWorkspaceSet(taskId: string): EffectiveWorkspaceSet {
     const task = this.getTaskRow(taskId);
     if (task.project_id !== null) {
@@ -9621,6 +9727,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   acquireMutationLease(input: {
+    rootId?: string | null;
     workspaceKey: string;
     rootIdentityDigest: string;
     holderInstanceId: string;
@@ -9633,20 +9740,34 @@ export class SqlitePersistenceClient implements PersistenceClient {
     now: string;
     expiresAt: string;
   }): MutationLeaseToken {
-    validateMutationLeaseInput(input);
+    const rootId = input.rootId ?? null;
+    validateMutationLeaseInput({ ...input, rootId });
     const outcome = this.db.transaction(() => {
       const task = this.getTaskRow(input.taskId);
-      if (
-        task.mutation_scope_key !== input.workspaceKey ||
-        task.mutation_root_identity_digest !== input.rootIdentityDigest
-      )
-        throw new MutationQuarantinedError();
+      const sealedRoot =
+        rootId === null
+          ? null
+          : (this.db
+              .prepare(
+                `SELECT workspace_key, root_identity_digest FROM turn_workspace_roots
+                 WHERE turn_id = ? AND root_id = ?`,
+              )
+              .get(input.turnId, rootId) as
+              { workspace_key: string; root_identity_digest: string } | undefined);
+      const bindingMatches =
+        rootId === null
+          ? task.mutation_scope_key === input.workspaceKey &&
+            task.mutation_root_identity_digest === input.rootIdentityDigest
+          : sealedRoot?.workspace_key === input.workspaceKey &&
+            sealedRoot.root_identity_digest === input.rootIdentityDigest;
+      if (!bindingMatches) throw new MutationQuarantinedError();
       this.getTurn(input.taskId, input.turnId);
       const saga = this.getEditSaga(input.sagaId);
       if (
         saga.taskId !== input.taskId ||
         saga.turnId !== input.turnId ||
         saga.policyEpoch !== input.policyEpoch ||
+        saga.rootId !== rootId ||
         saga.workspaceKey !== input.workspaceKey ||
         saga.rootIdentityDigest !== input.rootIdentityDigest ||
         saga.planDigest !== input.intentDigest ||
@@ -9718,7 +9839,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const result = this.db
         .prepare(
           `UPDATE workspace_mutation_state SET state = 'held', fence = ?, revision = ?,
-           lease_id = ?, holder_instance_id = ?, task_id = ?, turn_id = ?, saga_id = ?,
+           root_id = ?, lease_id = ?, holder_instance_id = ?, task_id = ?, turn_id = ?, saga_id = ?,
            purpose = ?, policy_epoch = ?, intent_digest = ?, acquired_at = ?, renewed_at = ?,
            expires_at = ?, last_observed_at = ?, quarantine_reason = NULL
            WHERE workspace_key = ? AND revision = ?`,
@@ -9726,6 +9847,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .run(
           fence,
           revision,
+          rootId,
           leaseId,
           input.holderInstanceId,
           input.taskId,
@@ -9745,6 +9867,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       return {
         token: mutationLeaseToken({
           ...input,
+          rootId,
           leaseId,
           fence,
           revision,
@@ -9845,7 +9968,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const changes = this.db
         .prepare(
           `UPDATE workspace_mutation_state SET state = 'idle', revision = revision + 1,
-           lease_id = NULL, holder_instance_id = NULL, task_id = NULL, turn_id = NULL,
+           root_id = NULL, lease_id = NULL, holder_instance_id = NULL, task_id = NULL, turn_id = NULL,
            saga_id = NULL, purpose = NULL, policy_epoch = NULL, intent_digest = NULL,
            acquired_at = NULL, renewed_at = NULL, expires_at = NULL, last_observed_at = ?,
            quarantine_reason = NULL WHERE workspace_key = ? AND revision = ? AND state = 'held'`,
@@ -10137,21 +10260,38 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const task = this.getTaskRow(request.taskId);
       if (this.getPermissionPolicy(request.taskId).policyEpoch !== request.policyEpoch)
         throw new OperationConflictError('Edit Saga policy epoch changed');
+      const sealedRoot =
+        request.rootId === null
+          ? null
+          : (this.db
+              .prepare(
+                `SELECT workspace_key, root_identity_digest FROM turn_workspace_roots
+                 WHERE turn_id = ? AND root_id = ?`,
+              )
+              .get(request.turnId, request.rootId) as
+              { workspace_key: string; root_identity_digest: string } | undefined);
+      if (request.rootId !== null && sealedRoot === undefined)
+        throw new OperationConflictError('Edit Saga root is not in the Turn Workspace snapshot');
+      const boundWorkspaceKey = sealedRoot?.workspace_key ?? task.mutation_scope_key;
+      const boundRootIdentityDigest =
+        sealedRoot?.root_identity_digest ?? task.mutation_root_identity_digest;
       if (
-        request.workspaceKey !== null &&
-        (request.workspaceKey !== task.mutation_scope_key ||
-          request.rootIdentityDigest !== task.mutation_root_identity_digest)
+        (request.workspaceKey !== null && request.workspaceKey !== boundWorkspaceKey) ||
+        (request.rootIdentityDigest !== null &&
+          request.rootIdentityDigest !== boundRootIdentityDigest)
       )
         throw new OperationConflictError('Edit Saga workspace binding changed');
       const boundRequest: EditSagaCreateRequest = {
         ...request,
-        workspaceKey: task.mutation_scope_key,
-        rootIdentityDigest: task.mutation_root_identity_digest,
+        rootId: request.rootId,
+        workspaceKey: boundWorkspaceKey,
+        rootIdentityDigest: boundRootIdentityDigest,
         journalDigest: journaledPatchDigest({
-          version: 2,
+          version: 3,
           policyEpoch: request.policyEpoch,
-          workspaceKey: task.mutation_scope_key,
-          rootIdentityDigest: task.mutation_root_identity_digest,
+          rootId: request.rootId,
+          workspaceKey: boundWorkspaceKey,
+          rootIdentityDigest: boundRootIdentityDigest,
           operations: request.operations,
         }),
       };
@@ -10162,6 +10302,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         const snapshot = toEditSaga(existing);
         if (
           snapshot.planDigest !== request.planDigest ||
+          snapshot.rootId !== boundRequest.rootId ||
           snapshot.workspaceKey !== boundRequest.workspaceKey ||
           snapshot.rootIdentityDigest !== boundRequest.rootIdentityDigest
         )
@@ -10184,10 +10325,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `INSERT INTO edit_sagas(
             id, task_id, turn_id, operation_id, plan_digest, policy_epoch,
-            workspace_key, root_identity_digest,
-            binding_version, native_binding_version, state, revision,
+            root_id, workspace_key, root_identity_digest,
+            binding_version, native_binding_version, root_binding_version, state, revision,
             artifact_cleanup_pending, snapshot_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           snapshot.id,
@@ -10196,6 +10337,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           snapshot.operationId,
           snapshot.planDigest,
           snapshot.policyEpoch,
+          snapshot.rootId,
           snapshot.workspaceKey,
           snapshot.rootIdentityDigest,
           snapshot.state,
@@ -14496,10 +14638,12 @@ function toEditSaga(row: EditSagaRow): EditSagaSnapshot {
     snapshot.operationId !== row.operation_id ||
     snapshot.planDigest !== row.plan_digest ||
     snapshot.policyEpoch !== row.policy_epoch ||
+    snapshot.rootId !== row.root_id ||
     snapshot.workspaceKey !== row.workspace_key ||
     snapshot.rootIdentityDigest !== row.root_identity_digest ||
     row.binding_version !== 1 ||
     row.native_binding_version !== 1 ||
+    row.root_binding_version !== 1 ||
     snapshot.state !== row.state ||
     snapshot.revision !== row.revision ||
     snapshot.artifactCleanupPending !== (row.artifact_cleanup_pending === 1) ||
@@ -14783,6 +14927,7 @@ function validateNativeMutationSagaCoordinator(value: string): void {
 }
 
 function validateMutationLeaseInput(input: {
+  rootId: string | null;
   workspaceKey: string;
   rootIdentityDigest: string;
   holderInstanceId: string;
@@ -14795,6 +14940,7 @@ function validateMutationLeaseInput(input: {
   now: string;
   expiresAt: string;
 }): void {
+  if (input.rootId !== null) validateMutationIdentifier(input.rootId, 'root id');
   validateMutationDigest(input.workspaceKey, 'workspace mutation key');
   validateMutationDigest(input.rootIdentityDigest, 'workspace root identity digest');
   validateMutationDigest(input.intentDigest, 'mutation intent digest');
@@ -14833,6 +14979,7 @@ function mutationTokenMatchesRow(token: MutationLeaseToken, row: WorkspaceMutati
     row.state === 'held' &&
     row.workspace_key === token.workspaceKey &&
     row.root_identity_digest === token.rootIdentityDigest &&
+    row.root_id === token.rootId &&
     row.lease_id === token.leaseId &&
     row.holder_instance_id === token.holderInstanceId &&
     row.task_id === token.taskId &&

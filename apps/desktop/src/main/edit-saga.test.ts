@@ -497,6 +497,31 @@ describe('EditSagaExecutor', () => {
     });
   });
 
+  it('rejects a patch whose operations escape its sealed root', async () => {
+    const original = plan();
+    const operations = original.operations.map((operation, index) =>
+      Object.freeze({
+        ...operation,
+        ...(index === 1 ? { canonicalPath: '/other-root/b.txt' } : {}),
+      }),
+    );
+    const facts = { version: 1 as const, policyEpoch: original.policyEpoch, operations };
+    const escapedPlan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+
+    await expect(
+      stageEditSagaRequest({
+        ...request(),
+        plan: escapedPlan,
+        mutationBinding: {
+          rootId: 'root-a',
+          workspacePath: '/workspace',
+          workspaceKey: 'a'.repeat(64),
+          rootIdentityDigest: 'b'.repeat(64),
+        },
+      }),
+    ).rejects.toThrow('cannot span multiple Workspace roots');
+  });
+
   it('aggregates repeated edits and rename chains from the Turn baseline', () => {
     const aggregated = aggregateTurnDiff([
       [diffEntry('update', 'a.txt', hash('A0'), hash('A1'))],

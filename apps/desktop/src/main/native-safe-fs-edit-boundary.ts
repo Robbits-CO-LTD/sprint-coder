@@ -28,7 +28,7 @@ import { randomBytes } from 'node:crypto';
 // The durable intent driver seam. SqlitePersistenceClient satisfies this; every
 // transition is journaled before the matching native effect (ADR §Decision).
 export interface NativeMutationJournal {
-  getWorkspace(taskId: string): string | null;
+  getMutationWorkspacePath(taskId: string, turnId: string, rootId: string | null): string | null;
   prepareNativeMutationIntent(
     seed: NativeMutationIntentSeed,
     lease: MutationLeaseToken,
@@ -112,7 +112,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       this.buildSeed(step, token, session, 'forward'),
       randomBytes(16).toString('hex'),
     );
-    this.assertSession(session);
+    this.assertSession(session, token);
     const effect = await this.native.observeIntent(session, intent);
     const observation = toSagaObservation('forward', step.operation.kind, effect);
     if (matchesPhase(step, observation, 'pre')) return { state: 'pre', observation };
@@ -132,17 +132,17 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       this.now(),
       'edit-saga-executor',
     );
-    this.assertSession(session);
+    this.assertSession(session, token);
     await this.native.observeIntent(session, intent);
     if (intent.temp !== null) {
       intent = this.transition(intent, token, session, { state: 'aux_pending' });
       const bytes = await this.artifacts.read(stagingArtifact(step, direction));
-      this.assertSession(session);
+      this.assertSession(session, token);
       const auxObservation = await this.native.stageIntentArtifact(session, intent, bytes);
       intent = this.transition(intent, token, session, { state: 'aux_observed', auxObservation });
     }
     intent = this.transition(intent, token, session, { state: 'effect_pending' });
-    this.assertSession(session);
+    this.assertSession(session, token);
     const effectObservation = await this.native.applyIntentEffect(session, intent);
     intent = this.transition(intent, token, session, {
       state: 'effect_observed',
@@ -150,7 +150,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     });
     if (intent.temp !== null || intent.tombstone !== null) {
       intent = this.transition(intent, token, session, { state: 'cleanup_pending' });
-      this.assertSession(session);
+      this.assertSession(session, token);
       await this.native.cleanupIntentAuxiliary(session, intent);
       this.transition(intent, token, session, {
         state: 'completed',
@@ -179,9 +179,17 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     );
   }
 
-  private assertSession(session: NativeSafeFsSession): void {
+  private assertSession(session: NativeSafeFsSession, token: MutationLeaseToken): void {
+    const expectedRootId = token.rootId ?? 'legacy-primary';
+    if (
+      session.rootId !== expectedRootId ||
+      session.workspaceKey !== token.workspaceKey ||
+      session.fence !== String(token.fence)
+    )
+      throw new MutationLeaseStaleError();
     this.native.assertSession({
       id: session.id,
+      rootId: session.rootId,
       workspaceKey: session.workspaceKey,
       fence: session.fence,
     });
@@ -193,7 +201,11 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     session: NativeSafeFsSession,
     direction: NativeMutationDirection,
   ): NativeMutationIntentSeed {
-    const workspacePath = this.journal.getWorkspace(token.taskId);
+    const workspacePath = this.journal.getMutationWorkspacePath(
+      token.taskId,
+      token.turnId,
+      token.rootId,
+    );
     if (workspacePath === null) throw new MutationLeaseStaleError();
     const binding = expectedNativeMutationBinding(
       step.operation,
@@ -301,6 +313,7 @@ function asMutationLease(lease: unknown): MutationLeaseToken {
   if (
     typeof token.sagaId !== 'string' ||
     typeof token.taskId !== 'string' ||
+    (token.rootId !== null && typeof token.rootId !== 'string') ||
     typeof token.workspaceKey !== 'string' ||
     typeof token.rootIdentityDigest !== 'string' ||
     typeof token.fence !== 'number' ||

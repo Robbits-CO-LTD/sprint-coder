@@ -130,6 +130,7 @@ function makeResolveSession(native: NativeSafeFs, env: Fixture) {
     let inFlight = pending.get(token.fence);
     if (inFlight === undefined) {
       inFlight = native.openSession({
+        rootId: token.rootId ?? 'legacy-primary',
         workspacePath: env.workspace,
         rootDev: env.rootDev,
         rootIno: env.rootIno,

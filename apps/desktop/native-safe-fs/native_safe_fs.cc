@@ -39,6 +39,7 @@ struct NativeFailure {
 
 struct Session {
   std::string id;
+  std::string root_id;
   std::string workspace_key;
   std::string workspace_path;
   std::string root_dev;
@@ -874,6 +875,7 @@ void CompleteOpen(napi_env env, napi_status status, void* data) {
     napi_value result;
     napi_create_object(env, &result);
     napi_set_named_property(env, result, "id", MakeString(env, context->session.id));
+    napi_set_named_property(env, result, "rootId", MakeString(env, context->session.root_id));
     napi_set_named_property(env, result, "workspaceKey",
                             MakeString(env, context->session.workspace_key));
     napi_set_named_property(env, result, "fence",
@@ -897,12 +899,14 @@ napi_value OpenSession(napi_env env, napi_callback_info info) {
   auto* context = new OpenWork();
   context->env = env;
   std::string fence_string;
-  if (!ReadString(env, argv[0], "workspacePath", &context->workspace_path) ||
+  if (!ReadString(env, argv[0], "rootId", &context->session.root_id) ||
+      !ReadString(env, argv[0], "workspacePath", &context->workspace_path) ||
       !ReadString(env, argv[0], "lockDirectoryPath", &context->lock_directory_path) ||
       !ReadString(env, argv[0], "workspaceKey", &context->session.workspace_key) ||
       !ReadString(env, argv[0], "rootDev", &context->session.root_dev) ||
       !ReadString(env, argv[0], "rootIno", &context->session.root_ino) ||
       !ReadString(env, argv[0], "fence", &fence_string) ||
+      context->session.root_id.empty() || context->session.root_id.size() > 200 ||
       !IsLowerHex(context->session.workspace_key, 64) ||
       !ParsePositiveDecimal(fence_string, &context->session.fence)) {
     delete context;

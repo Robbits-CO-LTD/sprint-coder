@@ -82,6 +82,7 @@ async function fixture() {
   const stats = await lstat(workspace, { bigint: true });
   return {
     root,
+    rootId: 'root-a',
     workspace,
     workspacePath: workspace,
     locks,
@@ -253,6 +254,7 @@ describe('NativeSafeFs authority boundary', () => {
     await expect(boundary.probe()).resolves.toMatchObject({ available: false });
     await expect(
       boundary.openSession({
+        rootId: 'root-a',
         workspacePath: '/tmp',
         rootDev: '1',
         rootIno: '1',
@@ -287,6 +289,7 @@ describe('NativeSafeFs authority boundary', () => {
     });
     await expect(
       loadNativeSafeFs({ addonPath: malformed }).openSession({
+        rootId: 'root-a',
         workspacePath: '/tmp',
         rootDev: '1',
         rootIno: '1',
@@ -411,6 +414,9 @@ describe('NativeSafeFs authority boundary', () => {
       const session = await boundary.openSession({ ...input, fence: '1' });
       expect(() => boundary.assertSession(session)).not.toThrow();
       expect(() => boundary.assertSession({ ...session, fence: '2' })).toThrow(
+        expect.objectContaining({ code: 'STALE_SESSION' }),
+      );
+      expect(() => boundary.assertSession({ ...session, rootId: 'root-b' })).toThrow(
         expect.objectContaining({ code: 'STALE_SESSION' }),
       );
       await boundary.closeSession(session);
