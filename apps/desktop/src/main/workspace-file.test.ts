@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readWorkspaceTextFile } from './workspace-file';
@@ -16,15 +16,25 @@ describe('readWorkspaceTextFile (issue #39)', () => {
     expect(readWorkspaceTextFile(root, 'src/a.ts')).toBe('const a = 1;\n');
   });
 
-  it('does not follow a symlink out of the Workspace', () => {
+  it('does not follow a parent junction out of the Workspace', () => {
     // The exact shape issue #11's generated-image collector was fixed for: the *link* is inside the
     // Workspace, so the upstream path check sees nothing wrong, and only refusing to follow it stops
     // the target's contents being rendered in the UI.
     const root = workspace();
-    const secret = join(workspace(), 'id_rsa');
+    const outside = workspace();
+    const secret = join(outside, 'id_rsa');
     writeFileSync(secret, 'PRIVATE KEY\n');
-    symlinkSync(secret, join(root, 'notes.md'));
-    expect(readWorkspaceTextFile(root, 'notes.md')).toBeNull();
+    symlinkSync(outside, join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    expect(readWorkspaceTextFile(root, 'escape/id_rsa')).toBeNull();
+  });
+
+  it('refuses a multiply-linked file that may alias data outside the Workspace', () => {
+    const outside = workspace();
+    const secret = join(outside, 'secret.txt');
+    writeFileSync(secret, 'SECRET\n');
+    const root = workspace();
+    linkSync(secret, join(root, 'alias.txt'));
+    expect(readWorkspaceTextFile(root, 'alias.txt')).toBeNull();
   });
 
   it('refuses a path that climbs out of the Workspace', () => {

@@ -23,7 +23,8 @@
     "lint:fix": "eslint \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\" --fix",
     "format": "prettier --write \"apps/*/src/**/*.{ts,tsx,css}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
     "format:check": "prettier --check \"apps/*/src/**/*.{ts,tsx,css}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "e2e:dev": "playwright test --config playwright.dev.config.ts"
   },
   "dependencies": {
     "react": "^19.1.1",

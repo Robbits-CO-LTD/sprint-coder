@@ -64,7 +64,11 @@ describe('path guard', () => {
 
   it('rejects a symlink that escapes the canonical workspace', async () => {
     const { workspace, outside } = await fixture();
-    await symlink(outside, join(workspace, 'escape'));
+    await symlink(
+      outside,
+      join(workspace, 'escape'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
 
     await expect(
       canonicalizeResourcePath({
@@ -113,7 +117,7 @@ describe('path guard', () => {
       operation: 'write',
     });
     await rename(guardedParent, join(workspace, 'src-original'));
-    await symlink(outside, guardedParent);
+    await symlink(outside, guardedParent, process.platform === 'win32' ? 'junction' : 'dir');
 
     await expect(revalidatePathGuard(guard)).rejects.toBeInstanceOf(PathGuardError);
   });
@@ -285,32 +289,35 @@ describe('path guard', () => {
     expect(workspacePermissionResourceFromGuard(guard).classification).toBe('os-protected');
   });
 
-  it('rejects directories and contained symlinks at the regular-file handle boundary', async () => {
-    const { workspace } = await fixture();
-    const directoryGuard = await createPathGuard({
-      workspacePath: workspace,
-      targetPath: 'src',
-      operation: 'read',
-    });
-    await symlink('safe.txt', join(workspace, 'src', 'inside-link'));
-    const symlinkGuard = await createPathGuard({
-      workspacePath: workspace,
-      targetPath: 'src/inside-link',
-      operation: 'read',
-    });
+  it.skipIf(process.platform === 'win32')(
+    'rejects directories and contained file symlinks at the regular-file handle boundary',
+    async () => {
+      const { workspace } = await fixture();
+      const directoryGuard = await createPathGuard({
+        workspacePath: workspace,
+        targetPath: 'src',
+        operation: 'read',
+      });
+      await symlink('safe.txt', join(workspace, 'src', 'inside-link'));
+      const symlinkGuard = await createPathGuard({
+        workspacePath: workspace,
+        targetPath: 'src/inside-link',
+        operation: 'read',
+      });
 
-    await expect(openGuardedExistingFile(directoryGuard, 'read')).rejects.toMatchObject({
-      code: 'SPECIAL_FILE',
-    } satisfies Partial<PathGuardError>);
-    await expect(openGuardedExistingFile(symlinkGuard, 'read')).rejects.toMatchObject({
-      code: 'SPECIAL_FILE',
-    } satisfies Partial<PathGuardError>);
-  });
+      await expect(openGuardedExistingFile(directoryGuard, 'read')).rejects.toMatchObject({
+        code: 'SPECIAL_FILE',
+      } satisfies Partial<PathGuardError>);
+      await expect(openGuardedExistingFile(symlinkGuard, 'read')).rejects.toMatchObject({
+        code: 'SPECIAL_FILE',
+      } satisfies Partial<PathGuardError>);
+    },
+  );
 
   it('binds canonical workspace aliases to one root identity and mutation scope', async () => {
     const { root, workspace } = await fixture();
     const alias = `${workspace}-alias`;
-    await symlink(workspace, alias);
+    await symlink(workspace, alias, process.platform === 'win32' ? 'junction' : 'dir');
 
     const direct = await workspaceMutationBinding(workspace);
     const throughAlias = await workspaceMutationBinding(alias);

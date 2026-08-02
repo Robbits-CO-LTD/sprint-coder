@@ -44,6 +44,7 @@ type EmitError = (error: PublicError) => void;
 
 export type ClaudeProbe = {
   available: boolean;
+  readiness: 'ready' | 'authentication_required' | 'unavailable';
   version?: string;
   models: CodexModelOption[];
 };
@@ -108,9 +109,9 @@ export async function probeClaude(
   // These E2E cases validate settings/catalog behavior and never execute Claude. Keep that UI
   // deterministic on credential-free CI runners without changing production discovery.
   if (environment['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1') {
-    return { available: true, version: 'e2e-fixture', models: CLAUDE_MODELS };
+    return { available: true, readiness: 'ready', version: 'e2e-fixture', models: CLAUDE_MODELS };
   }
-  const availability = await new Promise<Omit<ClaudeProbe, 'models'>>((resolve) => {
+  const availability = await new Promise<Omit<ClaudeProbe, 'models' | 'readiness'>>((resolve) => {
     let settled = false;
     const resolvedCommand = resolveClaudeCommand(command);
     const child = spawn(resolvedCommand, ['--version'], {
@@ -119,7 +120,7 @@ export async function probeClaude(
     });
     const chunks: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const finish = (result: Omit<ClaudeProbe, 'models'>): void => {
+    const finish = (result: Omit<ClaudeProbe, 'models' | 'readiness'>): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -139,8 +140,20 @@ export async function probeClaude(
       finish({ available: false });
     }, 5_000);
   });
+  const authenticated = availability.available
+    ? await probeAuthentication(
+        resolveClaudeCommand(command),
+        ['auth', 'status', '--json'],
+        environment,
+      )
+    : false;
   return {
     ...availability,
+    readiness: !availability.available
+      ? 'unavailable'
+      : authenticated
+        ? 'ready'
+        : 'authentication_required',
     models: availability.available ? CLAUDE_MODELS : [],
   };
 }
@@ -550,7 +563,7 @@ export function resolveClaudeCommand(
   return command;
 }
 
-function minimalEnvironment(): NodeJS.ProcessEnv {
+function minimalEnvironment(source: Readonly<NodeJS.ProcessEnv> = process.env): NodeJS.ProcessEnv {
   const allowlist = [
     'PATH',
     'HOME',
@@ -564,13 +577,43 @@ function minimalEnvironment(): NodeJS.ProcessEnv {
     'LC_CTYPE',
     'SSL_CERT_FILE',
     'SSL_CERT_DIR',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'SystemRoot',
+    'WINDIR',
+    'ComSpec',
+    'PATHEXT',
   ];
   return Object.fromEntries(
     allowlist.flatMap((key) => {
-      const value = process.env[key];
+      const value = source[key];
       return value === undefined ? [] : [[key, value]];
     }),
   );
+}
+
+async function probeAuthentication(
+  command: string,
+  args: readonly string[],
+  environment: Readonly<NodeJS.ProcessEnv>,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const child = spawn(command, args, { env: minimalEnvironment(environment), stdio: 'ignore' });
+    const finish = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ready);
+    };
+    child.once('error', () => finish(false));
+    child.once('exit', (code) => finish(code === 0));
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(false);
+    }, 3_000);
+  });
 }
 
 async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Promise<boolean> {

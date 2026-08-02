@@ -75,16 +75,17 @@ export function watchWorkspace(
     if (stopped || filename === null || filename === undefined) return;
     const relativePath = typeof filename === 'string' ? filename : filename.toString('utf8');
     if (!isWatchable(workspacePath, relativePath)) return;
-    if (!seen.has(relativePath)) {
+    const comparisonKey = watchComparisonKey(relativePath);
+    if (!seen.has(comparisonKey)) {
       if (seen.size >= MAX_TRACKED_FILES) return;
-      seen.add(relativePath);
+      seen.add(comparisonKey);
     }
-    const existing = timers.get(relativePath);
+    const existing = timers.get(comparisonKey);
     if (existing !== undefined) clearTimeout(existing);
     timers.set(
-      relativePath,
+      comparisonKey,
       setTimeout(() => {
-        timers.delete(relativePath);
+        timers.delete(comparisonKey);
         if (!stopped) onChanged(relativePath);
       }, DEBOUNCE_MS),
     );
@@ -118,9 +119,16 @@ export function isWatchable(workspacePath: string, relativePath: string): boolea
   const normalized = isAbsolute(relativePath)
     ? relative(workspacePath, relativePath)
     : relativePath;
-  if (normalized.length === 0 || normalized.startsWith('..')) return false;
+  if (
+    normalized.length === 0 ||
+    normalized === '..' ||
+    normalized.startsWith('../') ||
+    normalized.startsWith('..\\') ||
+    isAbsolute(normalized)
+  )
+    return false;
   const segments = normalized.split(/[\\/]/);
-  if (segments.some((segment) => IGNORED_SEGMENTS.has(segment))) return false;
+  if (segments.some((segment) => IGNORED_SEGMENTS.has(watchComparisonKey(segment)))) return false;
   const name = segments[segments.length - 1] ?? '';
   if (name.length === 0) return false;
   // Editor and tool scratch files. `~`-suffixed backups, vim swap files, and the numeric probe
@@ -128,4 +136,8 @@ export function isWatchable(workspacePath: string, relativePath: string): boolea
   if (name.endsWith('~') || name.endsWith('.swp') || name.endsWith('.swx')) return false;
   if (name.startsWith('.#') || /^\d+$/.test(name)) return false;
   return true;
+}
+
+export function watchComparisonKey(path: string): string {
+  return process.platform === 'win32' ? path.toLocaleLowerCase('en-US') : path;
 }

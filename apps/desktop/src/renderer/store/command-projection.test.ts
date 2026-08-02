@@ -59,6 +59,19 @@ describe('Command Card projection', () => {
     ).toBe(first);
   });
 
+  it('renders Windows CRLF as one logical line break without changing stored output', () => {
+    const output = {
+      seq: 1,
+      stream: 'stdout' as const,
+      text: '一行目\r\n二行目\r\n',
+      byteLength: 20,
+    };
+    const collapsed = appendCommandOutput({ lines: [], lastOutputSeq: 0 }, output);
+    expect(collapsed.lines.map(({ text }) => text)).toEqual(['一行目', '二行目']);
+    expect(projectCommandLines([output])[0]?.text).toBe('一行目↵ 二行目↵ ');
+    expect(output.text).toBe('一行目\r\n二行目\r\n');
+  });
+
   it('renders exact argv as an unambiguous JSON array and computes bounded duration', () => {
     expect(exactArgvDisplay('/bin/tool', ['', 'a b', '"quoted"', 'line\nbreak'])).toBe(
       '["/bin/tool","","a b","\\"quoted\\"","line\\nbreak"]',

@@ -2273,6 +2273,104 @@ button {
   padding: 7px;
   border-top: 1px solid var(--border-subtle);
 }
+.file-editor-inline-status {
+  max-width: min(360px, 60vw);
+  color: var(--warning);
+}
+.file-editor-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.58);
+}
+.file-editor-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(920px, 100%);
+  height: min(720px, 100%);
+  min-height: 320px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-primary);
+}
+.file-editor-header,
+.file-editor-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+}
+.file-editor-header {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.file-editor-header h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+.file-editor-header code {
+  display: block;
+  max-width: min(700px, 70vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.file-editor-textarea {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  padding: 16px;
+  outline: none;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font: 13px/1.6 var(--font-mono);
+  white-space: pre;
+  overflow: auto;
+}
+.file-editor-footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border-subtle);
+}
+.file-editor-footer [role='status'] {
+  margin-right: auto;
+  color: var(--text-secondary);
+}
+.file-editor-discard {
+  position: absolute;
+  inset: auto 12px 58px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--warning);
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+}
+.file-editor-discard span {
+  margin-right: auto;
+}
+@media (max-width: 760px), (max-height: 560px) {
+  .file-editor-backdrop {
+    padding: 8px;
+  }
+  .file-editor-dialog {
+    height: 100%;
+  }
+  .file-editor-discard {
+    flex-wrap: wrap;
+  }
+}
 .turn-context-button {
   align-self: flex-start;
   margin: -14px 0 0;

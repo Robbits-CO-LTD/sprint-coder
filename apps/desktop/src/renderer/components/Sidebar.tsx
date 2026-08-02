@@ -97,17 +97,28 @@ export function Sidebar({
   }, [dialog]);
 
   const focusLater = (selector: string, fallback = '[data-testid="sidebar-new-task-button"]') => {
+    // Project mutations cross the IPC/store boundary, so the target can appear after more than two
+    // animation frames on a busy Windows machine. Focusing the fallback immediately loses the
+    // keyboard position even though the requested heading appears a moment later. Observe the
+    // sidebar until the exact target is committed, with a bounded fallback for genuine failures.
+    const focusTarget = (): boolean => {
+      const target = document.querySelector<HTMLElement>(selector);
+      if (target === null) return false;
+      target.focus({ preventScroll: false });
+      return true;
+    };
     requestAnimationFrame(() => {
-      // A Project move can change both its section and its disclosure in separate React commits.
-      // The second frame waits for both without using a timing guess.
-      requestAnimationFrame(() => {
-        (
-          document.querySelector<HTMLElement>(selector) ??
-          document.querySelector<HTMLElement>(fallback)
-        )?.focus({
-          preventScroll: false,
-        });
+      if (focusTarget()) return;
+      const observer = new MutationObserver(() => {
+        if (!focusTarget()) return;
+        observer.disconnect();
+        clearTimeout(timeout);
       });
+      observer.observe(document.body, { childList: true, subtree: true });
+      const timeout = setTimeout(() => {
+        observer.disconnect();
+        document.querySelector<HTMLElement>(fallback)?.focus({ preventScroll: false });
+      }, 2_000);
     });
   };
 

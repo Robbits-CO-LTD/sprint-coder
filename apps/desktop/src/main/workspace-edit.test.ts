@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   symlinkSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -47,13 +50,34 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
     expect(openWorkspaceFileForEdit(root, 'blob.bin').reason).toBe('binary');
   });
 
-  it('refuses a symlink, a directory, and a missing file', () => {
+  it('refuses malformed UTF-8 instead of replacing bytes and corrupting them on save', () => {
     const root = workspace();
-    const outside = join(workspace(), 'id_rsa');
-    writeFileSync(outside, 'PRIVATE KEY\n');
-    symlinkSync(outside, join(root, 'link.ts'));
+    const bytes = Buffer.from([0x82, 0xa0, 0x82, 0xa2]);
+    writeFileSync(join(root, 'shift-jis.txt'), bytes);
+    expect(openWorkspaceFileForEdit(root, 'shift-jis.txt').reason).toBe('binary');
+    expect(readFileSync(join(root, 'shift-jis.txt'))).toEqual(bytes);
+  });
+
+  it('preserves a UTF-8 BOM when the opened text is saved', () => {
+    const root = workspace();
+    const file = join(root, 'bom.txt');
+    const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('日本語\r\n')]);
+    writeFileSync(file, bytes);
+    const opened = openWorkspaceFileForEdit(root, 'bom.txt');
+    expect(opened.editable).toBe(true);
+    expect(opened.text).toBe('\ufeff日本語\r\n');
+    const result = saveWorkspaceFile(root, 'bom.txt', opened.text, opened.digest);
+    expect(result.outcome).toBe('saved');
+    expect(readFileSync(file)).toEqual(bytes);
+  });
+
+  it('refuses a parent junction that escapes the Workspace, a directory, and a missing file', () => {
+    const root = workspace();
+    const outside = workspace();
+    writeFileSync(join(outside, 'id_rsa'), 'PRIVATE KEY\n');
+    symlinkSync(outside, join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
     mkdirSync(join(root, 'dir'));
-    expect(openWorkspaceFileForEdit(root, 'link.ts').reason).toBe('not_a_file');
+    expect(openWorkspaceFileForEdit(root, 'escape/id_rsa').reason).toBe('outside_workspace');
     expect(openWorkspaceFileForEdit(root, 'dir').reason).toBe('not_a_file');
     expect(openWorkspaceFileForEdit(root, 'missing.ts').reason).toBe('not_a_file');
   });
@@ -100,17 +124,44 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readFileSync(outside, 'utf8')).toBe('original\n');
   });
 
-  it('refuses to write through a symlink, and leaves the link target untouched', () => {
+  it('refuses to write through an escaping parent junction, and leaves the target untouched', () => {
     // The link is inside the Workspace, so a path check alone would let this through — which is why
     // the write path lstats rather than stats.
     const root = workspace();
-    const target = join(workspace(), 'id_rsa');
+    const outside = workspace();
+    const target = join(outside, 'id_rsa');
     writeFileSync(target, 'PRIVATE KEY\n');
-    symlinkSync(target, join(root, 'notes.md'));
-    const result = saveWorkspaceFile(root, 'notes.md', 'pwned\n', digestOf('PRIVATE KEY\n'));
+    symlinkSync(outside, join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    const result = saveWorkspaceFile(root, 'escape/id_rsa', 'pwned\n', digestOf('PRIVATE KEY\n'));
     expect(result.outcome).toBe('refused');
-    expect(result.reason).toBe('not_a_file');
+    expect(result.reason).toBe('outside_workspace');
     expect(readFileSync(target, 'utf8')).toBe('PRIVATE KEY\n');
+  });
+
+  it('refuses a multiply-linked file that could alias a target outside the Workspace', () => {
+    const outside = workspace();
+    const outsideFile = join(outside, 'secret.txt');
+    writeFileSync(outsideFile, 'secret\n');
+    const root = workspace();
+    linkSync(outsideFile, join(root, 'alias.txt'));
+    const result = saveWorkspaceFile(root, 'alias.txt', 'changed\n', digestOf('secret\n'));
+    expect(result.outcome).toBe('refused');
+    expect(readFileSync(outsideFile, 'utf8')).toBe('secret\n');
+  });
+
+  it.skipIf(process.platform === 'win32')('preserves the existing POSIX mode on save', () => {
+    const root = workspace();
+    const file = join(root, 'script.sh');
+    writeFileSync(file, '#!/bin/sh\n');
+    chmodSync(file, 0o755);
+    const result = saveWorkspaceFile(
+      root,
+      'script.sh',
+      '#!/bin/sh\necho ok\n',
+      digestOf('#!/bin/sh\n'),
+    );
+    expect(result.outcome).toBe('saved');
+    expect(statSync(file).mode & 0o777).toBe(0o755);
   });
 
   it('refuses to write more than the cap', () => {

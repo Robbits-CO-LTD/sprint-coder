@@ -53,6 +53,7 @@ type ContextAccepted = (
 ) => void;
 export type RuntimeCapabilityReport = {
   available: boolean;
+  readiness: 'ready' | 'authentication_required' | 'unavailable';
   models: CodexModelOption[];
 };
 
@@ -63,6 +64,7 @@ export class RuntimeHostClient {
   private resolveProbe: ((report: RuntimeCapabilityReport) => void) | null = null;
   private probeResult: Promise<RuntimeCapabilityReport> = Promise.resolve({
     available: false,
+    readiness: 'unavailable',
     models: [],
   });
   private readonly active = new Map<string, ActiveTurn>();
@@ -215,7 +217,7 @@ export class RuntimeHostClient {
       setTimeout(() => {
         if (this.resolveProbe === resolve) {
           this.resolveProbe = null;
-          resolve({ available: false, models: [] });
+          resolve({ available: false, readiness: 'unavailable', models: [] });
         }
       }, 7_000);
     });
@@ -233,7 +235,7 @@ export class RuntimeHostClient {
         },
       );
     } catch {
-      this.resolveProbe?.({ available: false, models: [] });
+      this.resolveProbe?.({ available: false, readiness: 'unavailable', models: [] });
       this.resolveProbe = null;
       this.process = null;
       return;
@@ -259,8 +261,16 @@ export class RuntimeHostClient {
     if (raw.type === 'hello') {
       this.resolveProbe?.(
         this.kind === 'claude'
-          ? { available: raw.claudeAvailable, models: raw.claudeModels }
-          : { available: raw.codexAvailable, models: raw.codexModels },
+          ? {
+              available: raw.claudeAvailable,
+              readiness: raw.claudeReadiness,
+              models: raw.claudeModels,
+            }
+          : {
+              available: raw.codexAvailable,
+              readiness: raw.codexReadiness,
+              models: raw.codexModels,
+            },
       );
       this.resolveProbe = null;
       return;
@@ -348,7 +358,7 @@ export class RuntimeHostClient {
 
   private handleExit(instanceId: string): void {
     if (instanceId !== this.runtimeInstanceId) return;
-    this.resolveProbe?.({ available: false, models: [] });
+    this.resolveProbe?.({ available: false, readiness: 'unavailable', models: [] });
     this.resolveProbe = null;
     this.process = null;
     const failures = [...this.active.entries()];

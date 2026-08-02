@@ -1,6 +1,15 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  fsyncSync,
+  ftruncateSync,
+  openSync,
+  readFileSync,
+  writeSync,
+} from 'node:fs';
+import { resolveSafeWorkspaceFile } from './workspace-safe-path';
 
 // Reading a Workspace file in full so the user can edit it, and writing their edit back (issue #43).
 //
@@ -40,25 +49,42 @@ export function openWorkspaceFileForEdit(workspacePath: string, relativePath: st
     digest: EMPTY_DIGEST,
     reason,
   });
-  const absolute = insideWorkspace(workspacePath, relativePath);
-  if (absolute === null) return refuse('outside_workspace');
+  const safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  if (safe.path === null) return refuse(safe.reason);
+  const absolute = safe.path;
+  let descriptor: number | null = null;
   try {
-    const stat = lstatSync(absolute);
+    descriptor = openSync(
+      absolute,
+      constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+    );
+    const stat = fstatSync(descriptor, { bigint: true });
+    if (!sameIdentity(stat, safe.identity)) return refuse('outside_workspace');
     if (!stat.isFile()) return refuse('not_a_file');
-    if (stat.size > MAX_EDITABLE_BYTES) return refuse('too_large');
-    const bytes = readFileSync(absolute);
-    // A NUL byte anywhere means this is not text. Round-tripping it through a UTF-8 string and back
-    // would not reproduce the original bytes, so editing it would corrupt the file.
+    if (stat.size > BigInt(MAX_EDITABLE_BYTES)) return refuse('too_large');
+    const bytes = readFileSync(descriptor);
     if (bytes.includes(0)) return refuse('binary');
+    let text: string;
+    try {
+      // Buffer.toString() silently replaces malformed sequences with U+FFFD. Saving that text would
+      // irreversibly corrupt Shift-JIS or damaged UTF-8, so only strict UTF-8 is editable.
+      // Keep U+FEFF in the editor value so a UTF-8 BOM is written back unchanged. TextDecoder's
+      // default consumes it, which would make an otherwise no-op save remove three bytes.
+      text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch {
+      return refuse('binary');
+    }
     return {
       editable: true,
       path: relativePath,
-      text: bytes.toString('utf8'),
+      text,
       digest: digestOf(bytes),
       reason: null,
     };
   } catch {
     return refuse('not_a_file');
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
   }
 }
 
@@ -75,8 +101,10 @@ export type SaveOutcome = {
  * same file while the user types; refusing lets the UI offer a real choice instead of one side
  * silently winning.
  *
- * Written to a temporary sibling and renamed, so a crash or a full disk cannot leave a half-written
- * file where working code used to be. The temp file is removed on any failure.
+ * The target is opened once and every check/write uses that same handle. This is deliberate: a
+ * Workspace-capable Runtime can replace a parent with a junction between pathname operations.
+ * Writing through the verified handle prevents that race from redirecting a user save outside the
+ * Workspace and also preserves the original file's mode and Windows ACL.
  */
 export function saveWorkspaceFile(
   workspacePath: string,
@@ -90,34 +118,36 @@ export function saveWorkspaceFile(
     reason,
   });
   if (Buffer.byteLength(text, 'utf8') > MAX_EDITABLE_BYTES) return refuse('too_large');
-  const absolute = insideWorkspace(workspacePath, relativePath);
-  if (absolute === null) return refuse('outside_workspace');
+  const safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  if (safe.path === null) return refuse(safe.reason);
+  const absolute = safe.path;
 
-  let current: Buffer;
+  let descriptor: number | null = null;
   try {
-    const stat = lstatSync(absolute);
+    descriptor = openSync(
+      absolute,
+      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+    );
+    const stat = fstatSync(descriptor, { bigint: true });
+    if (!sameIdentity(stat, safe.identity)) return refuse('outside_workspace');
     if (!stat.isFile()) return refuse('not_a_file');
-    if (stat.size > MAX_EDITABLE_BYTES) return refuse('too_large');
-    current = readFileSync(absolute);
-  } catch {
-    return refuse('not_a_file');
-  }
-  // Not an error: the file changed under the editor, so this write is not the one to make.
-  if (digestOf(current) !== baseDigest) return { outcome: 'conflict', digest: null, reason: null };
+    if (stat.size > BigInt(MAX_EDITABLE_BYTES)) return refuse('too_large');
+    const current = readFileSync(descriptor);
+    // Not an error: the file changed under the editor, so this write is not the one to make.
+    if (digestOf(current) !== baseDigest)
+      return { outcome: 'conflict', digest: null, reason: null };
 
-  const bytes = Buffer.from(text, 'utf8');
-  const temporary = `${absolute}.sprint-coder-save-${process.pid}`;
-  try {
-    writeFileSync(temporary, bytes, { mode: 0o600 });
-    renameSync(temporary, absolute);
+    const bytes = Buffer.from(text, 'utf8');
+    ftruncateSync(descriptor, 0);
+    let offset = 0;
+    while (offset < bytes.length)
+      offset += writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
+    fsyncSync(descriptor);
     return { outcome: 'saved', digest: digestOf(bytes), reason: null };
   } catch {
-    try {
-      unlinkSync(temporary);
-    } catch {
-      // Nothing further to do: the original file is untouched, which is what matters.
-    }
     return refuse('io_error');
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
   }
 }
 
@@ -127,27 +157,14 @@ function digestOf(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-/**
- * The absolute path, or null when it is not inside the Workspace.
- *
- * Compared on the resolved path with a trailing separator, so `/ws-other/a.ts` cannot pass as being
- * inside `/ws`. The parent directory is checked too: a path whose directory escapes the root would
- * otherwise let the atomic-rename temp file be written outside it.
- */
-function insideWorkspace(workspacePath: string, relativePath: string): string | null {
-  if (relativePath.length === 0 || relativePath.length > 1024) return null;
-  const root = resolve(workspacePath);
-  const absolute = resolve(root, relativePath);
-  if (!isInside(root, absolute) || !isInside(root, dirname(absolute), true)) return null;
-  return absolute;
-}
-
-function isInside(root: string, candidate: string, allowRoot = false): boolean {
-  const relation = relative(root, candidate);
+function sameIdentity(
+  actual: Readonly<{ dev: bigint; ino: bigint; nlink: bigint }>,
+  expected: Readonly<{ dev: bigint; ino: bigint; nlink: bigint }>,
+): boolean {
   return (
-    (allowRoot || relation.length > 0) &&
-    relation !== '..' &&
-    !relation.startsWith(`..${sep}`) &&
-    !isAbsolute(relation)
+    actual.dev === expected.dev &&
+    actual.ino === expected.ino &&
+    actual.nlink === 1n &&
+    expected.nlink === 1n
   );
 }

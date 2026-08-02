@@ -1,6 +1,7 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { MakerDMG } from '@electron-forge/maker-dmg';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
+import { MakerZIP } from '@electron-forge/maker-zip';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
@@ -58,6 +59,33 @@ const windowsSign =
         description: 'Sprint Coder',
       }
     : undefined;
+
+function verifiedBundledNodeResources(): string[] {
+  if (process.platform !== 'win32') return [];
+  if (process.versions.node.split('.')[0] !== '22')
+    throw new Error(`Windows packages must be built with Node 22, got ${process.version}`);
+  const nodeExecutable = process.execPath;
+  const nodeLicense = join(resolve(nodeExecutable, '..'), 'LICENSE');
+  const signature = execFileSync(
+    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `Import-Module "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $signature = Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_NODE; $signature.Status.ToString() + '|' + $signature.SignerCertificate.Subject`,
+    ],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, SPRINT_CODER_NODE: nodeExecutable },
+      windowsHide: true,
+    },
+  ).trim();
+  if (!signature.startsWith('Valid|') || !signature.includes('OpenJS Foundation'))
+    throw new Error(`Bundled Node signature is not trusted OpenJS: ${signature}`);
+  if (!lstatSync(nodeLicense).isFile()) throw new Error('Bundled Node LICENSE was not found');
+  return [nodeExecutable, nodeLicense];
+}
 
 if (
   process.platform === 'win32' &&
@@ -130,6 +158,7 @@ const config: ForgeConfig = {
     // @electron/asar matches `unpack` against the full source filename with matchBase enabled.
     // Native addons cannot be loaded from inside app.asar, so unpack only `.node` binaries.
     asar: { unpack: '*.node' },
+    extraResource: verifiedBundledNodeResources(),
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep
     // their per-process entitlements. Local ad-hoc packages are signed in the postPackage hook,
@@ -189,6 +218,7 @@ const config: ForgeConfig = {
       noMsi: true,
       ...(windowsSign === undefined ? {} : { windowsSign }),
     }),
+    new MakerZIP({}, ['win32']),
     new MakerDMG({
       name: 'Sprint Coder',
       format: 'ULFO',

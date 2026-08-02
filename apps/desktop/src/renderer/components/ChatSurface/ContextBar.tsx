@@ -6,6 +6,7 @@ import { accessDescription, accessEnforcement } from '../../lib/access-labels';
 import type { ContextUsage } from '../../types/sprint-coder';
 import type { AccessPreset } from '../../types/sprint-coder';
 import { ProjectPicker } from '../ProjectPicker';
+import { FileEditorDialog } from '../FileEditorDialog';
 
 const SOURCE_LABEL: Record<ContextUsage['fragments'][number]['source'], string> = {
   system: 'システム',
@@ -23,12 +24,14 @@ const WARNING_THRESHOLD_PCT = 80;
 export function ContextBar({ taskId }: { taskId: string }) {
   const projectMultiFolderUx = useAppStore((state) => state.projectMultiFolderUx);
   const task = useAppStore((state) => state.tasks.find(({ id }) => id === taskId));
+  const hasWorkspace = useAppStore((state) => state.workspaceByTask[taskId] !== undefined);
   return (
     <div className="context-bar">
       {projectMultiFolderUx && <ProjectPicker taskId={taskId} />}
       {(!projectMultiFolderUx || task?.projectId === null) && (
         <WorkspaceChip taskId={taskId} variant="context" />
       )}
+      <FileEditorDialog taskId={taskId} hasWorkspace={hasWorkspace} />
       <span className="ctx-spacer" />
       <ContextUsageChip taskId={taskId} />
     </div>

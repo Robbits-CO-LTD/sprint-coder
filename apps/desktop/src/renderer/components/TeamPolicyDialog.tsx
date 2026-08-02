@@ -93,6 +93,7 @@ export function TeamPolicyDialog({
   // The element focused when the dialog opened. Chromium's <dialog> restores focus on its own, but
   // capturing it makes the guarantee explicit and independently testable — same as SettingsDialog.
   const openerRef = useRef<HTMLElement | null>(null);
+  const closingRef = useRef(false);
   const fieldId = useId();
 
   const [values, setValues] = useState<TeamPolicyValues>(() => readPolicy(detail.team));
@@ -111,9 +112,16 @@ export function TeamPolicyDialog({
   }, [open]);
 
   function closeAndRestoreFocus(): void {
+    if (closingRef.current) return;
+    closingRef.current = true;
     const opener = openerRef.current;
     const openerTestId = opener?.dataset.testid;
     openerRef.current = null;
+    // Close the native top-layer entry before unmounting it. Removing an open <dialog> directly can
+    // make Chromium perform its own delayed focus restoration after our animation-frame callback,
+    // which overwrote the trigger focus under the slower Windows dev build. The closing guard
+    // prevents the synchronous native `close` event from entering this function a second time.
+    dialogRef.current?.close();
     onClose();
     // The parent conditionally renders this dialog, so closing means unmounting it. Restore focus
     // after that commit; doing it synchronously would target the trigger while the modal is still

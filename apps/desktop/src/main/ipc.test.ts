@@ -371,6 +371,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.skillsSetCreatedEnabled]: createdSkillEnabledInputSchema,
   [IPC_CHANNELS.skillsExportCreated]: createdSkillMutationInputSchema,
   [IPC_CHANNELS.filesList]: taskIdPayloadSchema,
+  [IPC_CHANNELS.filesPick]: taskIdPayloadSchema,
   [IPC_CHANNELS.filesOpen]: filePathPayloadSchema,
   [IPC_CHANNELS.filesSave]: fileSaveInputSchema,
   [IPC_CHANNELS.imagesList]: taskIdPayloadSchema,

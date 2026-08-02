@@ -865,9 +865,9 @@ export function readProcessStartIdentity(pid: number): string {
           '-NoProfile',
           '-NonInteractive',
           '-Command',
-          `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CreationDate.ToUniversalTime().Ticks`,
+          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
         ],
-        { encoding: 'utf8', timeout: 2_000, windowsHide: true },
+        { encoding: 'utf8', timeout: 3_000, windowsHide: true },
       ).trim()}`;
   } catch {
     return 'unavailable';

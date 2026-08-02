@@ -954,7 +954,9 @@ describe('public contracts', () => {
       runtimeSettingsSchema.parse({
         kind: 'codex',
         codexAvailable: true,
+        codexReadiness: 'ready',
         claudeAvailable: false,
+        claudeReadiness: 'unavailable',
         model: 'gpt-5.6-terra',
         models: [
           {

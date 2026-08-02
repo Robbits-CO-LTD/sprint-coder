@@ -45,6 +45,7 @@ type EmitError = (error: PublicError) => void;
 
 export type CodexProbe = {
   available: boolean;
+  readiness: 'ready' | 'authentication_required' | 'unavailable';
   version?: string;
   models: CodexModelOption[];
 };
@@ -73,9 +74,14 @@ export async function probeCodex(
   // have no Codex installation or credentials, so expose a deterministic catalog only to the
   // isolated E2E process. Adapter execution remains untouched and would still fail closed.
   if (environment['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1') {
-    return { available: true, version: 'e2e-fixture', models: E2E_CODEX_MODELS };
+    return {
+      available: true,
+      readiness: 'ready',
+      version: 'e2e-fixture',
+      models: E2E_CODEX_MODELS,
+    };
   }
-  const availability = await new Promise<Omit<CodexProbe, 'models'>>((resolve) => {
+  const availability = await new Promise<Omit<CodexProbe, 'models' | 'readiness'>>((resolve) => {
     let settled = false;
     const child = spawn(resolveCodexCommand(command), ['--version'], {
       env: minimalEnvironment(),
@@ -83,7 +89,7 @@ export async function probeCodex(
     });
     const chunks: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const finish = (result: Omit<CodexProbe, 'models'>): void => {
+    const finish = (result: Omit<CodexProbe, 'models' | 'readiness'>): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -103,8 +109,16 @@ export async function probeCodex(
       finish({ available: false });
     }, 5_000);
   });
+  const authenticated = availability.available
+    ? await probeAuthentication(resolveCodexCommand(command), ['login', 'status'], environment)
+    : false;
   return {
     ...availability,
+    readiness: !availability.available
+      ? 'unavailable'
+      : authenticated
+        ? 'ready'
+        : 'authentication_required',
     models: availability.available ? readCodexModels() : [],
   };
 }
@@ -854,7 +868,7 @@ function resolveCodexDesktopCommand(localAppData: string | null | undefined): st
   }
 }
 
-function minimalEnvironment(): NodeJS.ProcessEnv {
+function minimalEnvironment(source: Readonly<NodeJS.ProcessEnv> = process.env): NodeJS.ProcessEnv {
   const allowlist = [
     'PATH',
     'HOME',
@@ -869,13 +883,43 @@ function minimalEnvironment(): NodeJS.ProcessEnv {
     'SSL_CERT_FILE',
     'SSL_CERT_DIR',
     'CODEX_HOME',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'SystemRoot',
+    'WINDIR',
+    'ComSpec',
+    'PATHEXT',
   ];
   return Object.fromEntries(
     allowlist.flatMap((key) => {
-      const value = process.env[key];
+      const value = source[key];
       return value === undefined ? [] : [[key, value]];
     }),
   );
+}
+
+async function probeAuthentication(
+  command: string,
+  args: readonly string[],
+  environment: Readonly<NodeJS.ProcessEnv>,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const child = spawn(command, args, { env: minimalEnvironment(environment), stdio: 'ignore' });
+    const finish = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ready);
+    };
+    child.once('error', () => finish(false));
+    child.once('exit', (code) => finish(code === 0));
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(false);
+    }, 3_000);
+  });
 }
 
 export async function terminateCodexProcessTree(

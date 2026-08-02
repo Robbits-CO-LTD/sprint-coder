@@ -20,7 +20,8 @@ export function appendCommandOutput(
   output: CommandOutputRecord,
 ): CommandTailProjection {
   if (output.seq <= current.lastOutputSeq) return current;
-  const extracted = trailingSegments(output.text, COLLAPSED_LINE_LIMIT + 1);
+  const displayText = output.text.replaceAll('\r\n', '\n');
+  const extracted = trailingSegments(displayText, COLLAPSED_LINE_LIMIT + 1);
   const lines = extracted.truncated ? [] : [...current.lines];
   const segments = extracted.segments;
   let segmentIndex = 0;
@@ -90,7 +91,7 @@ export function projectCommandLines(
   for (const output of outputs) {
     if (output.seq <= lastSeq) continue;
     lastSeq = output.seq;
-    const display = output.text.replaceAll('\n', '↵ ');
+    const display = output.text.replaceAll('\r\n', '\n').replaceAll('\n', '↵ ');
     for (let offset = 0; offset < display.length; offset += COMMAND_VISUAL_ROW_CHAR_LIMIT)
       rows.push({
         stream: output.stream,

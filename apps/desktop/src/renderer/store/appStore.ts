@@ -73,7 +73,9 @@ export type WorkspaceInfo = { path: string; name: string };
 export type RuntimeState = {
   kind: RuntimeKind;
   codexAvailable: boolean;
+  codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
   claudeAvailable: boolean;
+  claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
   model: string;
   models: CodexModelOption[];
   effort: ClaudeEffort;
@@ -823,7 +825,9 @@ export const useAppStore = create<AppState>((set, get) => {
     runtime: {
       kind: 'mock',
       codexAvailable: false,
+      codexReadiness: 'unavailable',
       claudeAvailable: false,
+      claudeReadiness: 'unavailable',
       model: 'auto',
       models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
       effort: 'medium',

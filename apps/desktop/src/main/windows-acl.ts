@@ -6,10 +6,14 @@ const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.e
 
 const secureAclScript = String.raw`
 $ErrorActionPreference = 'Stop'
-$path = $env:SPRINT_CODER_ACL_PATH
-$kind = $env:SPRINT_CODER_ACL_KIND
+$items = @((([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
+  $env:SPRINT_CODER_ACL_ITEMS
+))) | ConvertFrom-Json))
 $operation = $env:SPRINT_CODER_ACL_OPERATION
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+foreach ($item in $items) {
+$path = [string]$item.path
+$kind = [string]$item.kind
 if ($operation -eq 'secure') {
   if ($kind -eq 'directory') {
     $acl = [System.Security.AccessControl.DirectorySecurity]::new()
@@ -54,27 +58,43 @@ if (($only.FileSystemRights -band [System.Security.AccessControl.FileSystemRight
     [System.Security.AccessControl.FileSystemRights]::FullControl) {
   throw 'ACL does not grant the current user full control'
 }
+}
 exit 0
 `;
 
+export type WindowsAclPath = Readonly<{ path: string; kind: 'directory' | 'file' }>;
+
 export async function secureWindowsPath(path: string, kind: 'directory' | 'file'): Promise<void> {
-  await runAcl(path, kind, 'secure');
+  await secureWindowsPaths([{ path, kind }]);
+}
+
+export async function secureWindowsPaths(paths: readonly WindowsAclPath[]): Promise<void> {
+  await runAcl(paths, 'secure');
 }
 
 export async function verifyWindowsPathAcl(
   path: string,
   kind: 'directory' | 'file',
 ): Promise<void> {
-  await runAcl(path, kind, 'verify');
+  await verifyWindowsPaths([{ path, kind }]);
+}
+
+export async function verifyWindowsPaths(paths: readonly WindowsAclPath[]): Promise<void> {
+  await runAcl(paths, 'verify');
 }
 
 async function runAcl(
-  path: string,
-  kind: 'directory' | 'file',
+  paths: readonly WindowsAclPath[],
   operation: 'secure' | 'verify',
 ): Promise<void> {
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32' || paths.length === 0) return;
+  const unique = [
+    ...new Map(
+      paths.map((item) => [`${item.kind}:${item.path.toLocaleLowerCase('en-US')}`, item]),
+    ).values(),
+  ];
   const encodedScript = Buffer.from(secureAclScript, 'utf16le').toString('base64');
+  const encodedItems = Buffer.from(JSON.stringify(unique), 'utf8').toString('base64');
   await execFileAsync(
     POWERSHELL,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript],
@@ -86,8 +106,7 @@ async function runAcl(
         TEMP: process.env['TEMP'] ?? '',
         TMP: process.env['TMP'] ?? '',
         USERPROFILE: process.env['USERPROFILE'] ?? '',
-        SPRINT_CODER_ACL_PATH: path,
-        SPRINT_CODER_ACL_KIND: kind,
+        SPRINT_CODER_ACL_ITEMS: encodedItems,
         SPRINT_CODER_ACL_OPERATION: operation,
       },
       encoding: 'utf8',

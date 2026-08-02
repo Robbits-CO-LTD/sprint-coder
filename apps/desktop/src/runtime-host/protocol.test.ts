@@ -196,8 +196,10 @@ describe('Runtime Host protocol', () => {
       operationId: 'probe',
       type: 'hello',
       codexAvailable: false,
+      codexReadiness: 'unavailable',
       codexModels: [],
       claudeAvailable: true,
+      claudeReadiness: 'ready',
       claudeVersion: '2.1.218',
       claudeModels: [{ id: 'auto', displayName: 'Auto', description: '' }],
     };

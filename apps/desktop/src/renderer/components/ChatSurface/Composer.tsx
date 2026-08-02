@@ -27,10 +27,10 @@ import {
   EFFORT_DESC,
   EFFORT_LABEL,
   EFFORT_LEVELS,
-  RUNTIME_CLI_MISSING_HINT,
   RUNTIME_DESC,
   RUNTIME_KINDS,
   RUNTIME_LABEL,
+  runtimeReadinessHint,
 } from '../../lib/runtime-labels';
 import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
 
@@ -118,7 +118,7 @@ export function Composer({ taskId }: { taskId: string }) {
       ...(!goalSupported ? { goal: 'Goal設定に対応していません' } : {}),
       ...(!workspaceSupported ? { workspace: 'Workspace選択に対応していません' } : {}),
       ...(!teamSupported ? { team: 'Teamビューに対応していません' } : {}),
-      ...(runtime.kind === 'codex' && runtime.codexAvailable
+      ...(runtime.kind === 'codex' && runtime.codexReadiness === 'ready'
         ? {}
         : {
             image:
@@ -127,7 +127,7 @@ export function Composer({ taskId }: { taskId: string }) {
                 : 'Codex Runtime選択時に画像生成を使えます',
           }),
     }),
-    [goalSupported, runtime.codexAvailable, runtime.kind, teamSupported, workspaceSupported],
+    [goalSupported, runtime.codexReadiness, runtime.kind, teamSupported, workspaceSupported],
   );
   const slashItems = useMemo<SlashMenuItem[]>(
     () => [
@@ -514,8 +514,8 @@ function RuntimeChip() {
   }
 
   function choose(kind: RuntimeKind) {
-    if (kind === 'codex' && !runtime.codexAvailable) return;
-    if (kind === 'claude' && !runtime.claudeAvailable) return;
+    if (kind === 'codex' && runtime.codexReadiness !== 'ready') return;
+    if (kind === 'claude' && runtime.claudeReadiness !== 'ready') return;
     setOpen(false);
     if (kind !== runtime.kind) void setRuntime(kind);
   }
@@ -546,8 +546,8 @@ function RuntimeChip() {
         <div className="runtime-menu" role="menu" aria-label="Runtime選択">
           {RUNTIME_KINDS.map((kind) => {
             const disabled =
-              (kind === 'codex' && !runtime.codexAvailable) ||
-              (kind === 'claude' && !runtime.claudeAvailable);
+              (kind === 'codex' && runtime.codexReadiness !== 'ready') ||
+              (kind === 'claude' && runtime.claudeReadiness !== 'ready');
             return (
               <button
                 data-testid={`runtime-option-${kind}`}
@@ -559,7 +559,10 @@ function RuntimeChip() {
                 disabled={disabled}
                 title={
                   disabled && (kind === 'codex' || kind === 'claude')
-                    ? RUNTIME_CLI_MISSING_HINT[kind]
+                    ? (runtimeReadinessHint(
+                        kind,
+                        kind === 'codex' ? runtime.codexReadiness : runtime.claudeReadiness,
+                      ) ?? undefined)
                     : undefined
                 }
                 onClick={() => choose(kind)}
@@ -584,8 +587,8 @@ function ModelChip() {
     typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.setModel === 'function';
   const enabled =
     supported &&
-    ((runtime.kind === 'codex' && runtime.codexAvailable) ||
-      (runtime.kind === 'claude' && runtime.claudeAvailable));
+    ((runtime.kind === 'codex' && runtime.codexReadiness === 'ready') ||
+      (runtime.kind === 'claude' && runtime.claudeReadiness === 'ready'));
   const selected = runtime.models.find(({ id }) => id === runtime.model) ?? {
     id: runtime.model,
     displayName: runtime.model,
@@ -697,7 +700,7 @@ function effortChoicesFor(runtime: RuntimeState): {
   disabledReason: string | null;
 } {
   if (runtime.kind === 'claude') {
-    if (!runtime.claudeAvailable)
+    if (runtime.claudeReadiness !== 'ready')
       return {
         choices: [],
         selected: runtime.effort,
@@ -714,7 +717,7 @@ function effortChoicesFor(runtime: RuntimeState): {
     };
   }
   if (runtime.kind === 'codex') {
-    if (!runtime.codexAvailable)
+    if (runtime.codexReadiness !== 'ready')
       return { choices: [], selected: '', disabledReason: 'Codex CLIが利用できません' };
     const model = runtime.models.find(({ id }) => id === runtime.model);
     const efforts = model?.efforts ?? [];
@@ -851,7 +854,7 @@ function PlusMenu({ onRequestImage }: { onRequestImage: () => void }) {
       description: '次の送信でCodexの画像生成を呼び出す',
       icon: <Plus size={14} />,
       // Codex-only: `$imagegen` is a Codex CLI facility with no Claude equivalent.
-      ...(runtime.kind === 'codex' && runtime.codexAvailable
+      ...(runtime.kind === 'codex' && runtime.codexReadiness === 'ready'
         ? { onSelect: onRequestImage }
         : {
             unavailableReason:

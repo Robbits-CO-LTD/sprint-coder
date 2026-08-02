@@ -25,6 +25,14 @@ describe('isWatchable (issue #39)', () => {
       expect(isWatchable(root, path), path).toBe(false);
   });
 
+  it.runIf(process.platform === 'win32')(
+    'matches ignored Windows segments case-insensitively',
+    () => {
+      expect(isWatchable(root, '.GIT/index')).toBe(false);
+      expect(isWatchable(root, 'Node_Modules/react/index.js')).toBe(false);
+    },
+  );
+
   it('does not confuse a real path segment with an ignored one', () => {
     // Matched as a whole segment, so a legitimately-named source directory is not swallowed.
     expect(isWatchable(root, 'src/git-utils/index.ts')).toBe(true);
@@ -40,6 +48,10 @@ describe('isWatchable (issue #39)', () => {
   it('rejects a path that escapes the Workspace', () => {
     expect(isWatchable(root, '../outside.txt')).toBe(false);
     expect(isWatchable(root, resolve('sprint-coder-watchable-elsewhere/a.ts'))).toBe(false);
+  });
+
+  it('does not mistake a legitimate name beginning with two dots for parent traversal', () => {
+    expect(isWatchable(root, '..notes/readme.md')).toBe(true);
   });
 
   it('accepts an absolute path that is genuinely inside, which some platforms report', () => {

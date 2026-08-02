@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
@@ -59,6 +59,17 @@ export function collectThreadImages(
   if (directory === null) return [];
   let entries: string[];
   try {
+    const directoryStat = lstatSync(directory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) return [];
+    const canonicalRoot = realpathSync(root);
+    const canonicalDirectory = realpathSync(directory);
+    const relation = canonicalDirectory.slice(canonicalRoot.length);
+    const pathEqual = (left: string, right: string) =>
+      process.platform === 'win32'
+        ? left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US')
+        : left === right;
+    if (!pathEqual(canonicalDirectory, directory)) return [];
+    if (relation !== '' && !relation.startsWith(sep)) return [];
     entries = readdirSync(directory);
   } catch {
     // No directory means the turn generated nothing, which is the common case.

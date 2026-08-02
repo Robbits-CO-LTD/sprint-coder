@@ -44,12 +44,16 @@ describe('readProjectReference', () => {
     expect(read.digest).toBe(createHash('sha256').update('hello').digest('hex'));
   });
 
-  it('rejects traversal, absolute paths, and symlinks', () => {
+  it('rejects traversal, absolute paths, and an escaping parent junction', () => {
     const ws = workspace();
     const outside = workspace();
     writeFileSync(join(outside.root, 'secret'), 'secret');
-    symlinkSync(join(outside.root, 'secret'), join(ws.root, 'link'));
-    for (const relativePath of ['../secret', join(outside.root, 'secret'), 'link']) {
+    symlinkSync(
+      outside.root,
+      join(ws.root, 'escape'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    for (const relativePath of ['../secret', join(outside.root, 'secret'), 'escape/secret']) {
       expect(
         readProjectReference({
           workspacePath: ws.root,

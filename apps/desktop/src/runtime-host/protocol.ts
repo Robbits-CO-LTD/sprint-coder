@@ -175,6 +175,7 @@ export type RuntimeToMainEnvelope =
   | (EnvelopeBase & {
       type: 'hello';
       codexAvailable: boolean;
+      codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
       codexVersion?: string;
       codexModels: CodexModelOption[];
       // Additive fields for the Claude CLI runtime (Slice 3.4). A given Runtime Host process
@@ -183,6 +184,7 @@ export type RuntimeToMainEnvelope =
       // always-supplied default (false/[]) rather than being made structurally optional, which
       // keeps existing `codexAvailable`/`codexModels` consumers unchanged.
       claudeAvailable: boolean;
+      claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
       claudeVersion?: string;
       claudeModels: CodexModelOption[];
     })
@@ -431,6 +433,10 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
     return (
       'codexAvailable' in value &&
       typeof value.codexAvailable === 'boolean' &&
+      'codexReadiness' in value &&
+      ['ready', 'authentication_required', 'unavailable'].includes(
+        value.codexReadiness as string,
+      ) &&
       (!('codexVersion' in value) || typeof value.codexVersion === 'string') &&
       'codexModels' in value &&
       Array.isArray(value.codexModels) &&
@@ -438,6 +444,10 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       value.codexModels.every((model) => codexModelOptionSchema.safeParse(model).success) &&
       'claudeAvailable' in value &&
       typeof value.claudeAvailable === 'boolean' &&
+      'claudeReadiness' in value &&
+      ['ready', 'authentication_required', 'unavailable'].includes(
+        value.claudeReadiness as string,
+      ) &&
       (!('claudeVersion' in value) || typeof value.claudeVersion === 'string') &&
       'claudeModels' in value &&
       Array.isArray(value.claudeModels) &&

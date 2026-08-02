@@ -21,6 +21,16 @@ export const RUNTIME_CLI_MISSING_HINT: Record<'codex' | 'claude', string> = {
   claude: 'Claude CLIが見つかりません',
 };
 
+export function runtimeReadinessHint(
+  kind: 'codex' | 'claude',
+  readiness: 'ready' | 'authentication_required' | 'unavailable',
+): string | null {
+  if (readiness === 'ready') return null;
+  if (readiness === 'authentication_required')
+    return `${RUNTIME_LABEL[kind]}はインストール済みですが、ログインが必要です`;
+  return RUNTIME_CLI_MISSING_HINT[kind];
+}
+
 export const RUNTIME_KINDS: readonly RuntimeKind[] = ['mock', 'codex', 'claude'];
 
 export const EFFORT_LEVELS: readonly ClaudeEffort[] = [

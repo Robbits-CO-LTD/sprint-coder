@@ -256,12 +256,19 @@ import {
 } from './team-tools';
 import {
   BUILTIN_TEAM_SKILL_AUDIT,
+  BUILTIN_TEAM_SKILL_CONTENT,
+  BUILTIN_TEAM_SKILL_DIGEST,
   BUILTIN_TEAM_SKILL_FRAGMENT_ID,
-  installBuiltinTeamSkill,
+  BUILTIN_TEAM_SKILL_ID,
   verifyBuiltinTeamSkillAcceptance,
   type TeamSkillResolutionAudit,
 } from './team-skill';
-import { installBuiltinSkillCreator } from './skill-creator-builtin';
+import {
+  BUILTIN_SKILL_CREATOR_CONTENT,
+  BUILTIN_SKILL_CREATOR_DIGEST,
+  BUILTIN_SKILL_CREATOR_ID,
+} from './skill-creator-builtin';
+import { SkillStore } from './skill-store';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import {
   PROJECT_MEMORY_MCP_GUIDANCE,
@@ -767,7 +774,9 @@ export class IpcRouter {
         return {
           kind,
           codexAvailable: codexCapability.available,
+          codexReadiness: codexCapability.readiness,
           claudeAvailable: claudeCapability.available,
+          claudeReadiness: claudeCapability.readiness,
           model,
           models: activeCapability.models,
           effort: this.persistence.getEffort(),
@@ -1239,6 +1248,36 @@ export class IpcRouter {
         ).value;
       },
     );
+    this.handle(
+      IPC_CHANNELS.filesPick,
+      taskIdPayloadSchema,
+      fileOpenResultSchema.nullable(),
+      async (input) => {
+        const workspace = this.persistence.getEffectiveWorkspaceSet(input.taskId);
+        const workspacePath = primaryWorkspacePath(workspace);
+        if (workspacePath === null) return null;
+        const selected = await dialog.showOpenDialog(this.window, {
+          title: 'Workspaceのファイルを開く',
+          defaultPath: workspacePath,
+          properties: ['openFile', 'dontAddToRecent'],
+        });
+        if (selected.canceled || selected.filePaths.length === 0) return null;
+        const rooted = resolveTurnRootedPath(workspace, selected.filePaths[0]!);
+        if (rooted === null)
+          return {
+            rootId: workspace.primaryRootId ?? 'legacy-primary',
+            path: selected.filePaths[0]!,
+            text: '',
+            digest: EMPTY_FILE_DIGEST,
+            editable: false,
+            reason: 'outside_workspace' as const,
+          };
+        return {
+          ...openWorkspaceFileForEdit(rooted.root.path, rooted.path),
+          rootId: rooted.root.rootId,
+        };
+      },
+    );
     this.handle(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, (input) => {
       const root = resolveEffectiveWorkspaceRoot(
         this.persistence.getEffectiveWorkspaceSet(input.taskId),
@@ -1248,13 +1287,14 @@ export class IpcRouter {
       // than an empty document the user could type into and then fail to save.
       if (root === null)
         return {
+          rootId: input.rootId,
           path: input.path,
           text: '',
           digest: EMPTY_FILE_DIGEST,
           editable: false,
           reason: 'outside_workspace' as const,
         };
-      return openWorkspaceFileForEdit(root.path, input.path);
+      return { ...openWorkspaceFileForEdit(root.path, input.path), rootId: root.rootId };
     });
     this.handleMutation(
       IPC_CHANNELS.filesSave,
@@ -2199,8 +2239,21 @@ export class IpcRouter {
     await this.teamMcpBridge.ensureStarted();
     try {
       const skillHome = process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home');
-      await installBuiltinTeamSkill(skillHome);
-      await installBuiltinSkillCreator(skillHome);
+      const store = await SkillStore.open({
+        rootPath: join(skillHome, '.sprintcoder', 'skills'),
+      });
+      await Promise.all([
+        store.installBuiltin(
+          BUILTIN_TEAM_SKILL_ID,
+          BUILTIN_TEAM_SKILL_CONTENT,
+          BUILTIN_TEAM_SKILL_DIGEST,
+        ),
+        store.installBuiltin(
+          BUILTIN_SKILL_CREATOR_ID,
+          BUILTIN_SKILL_CREATOR_CONTENT,
+          BUILTIN_SKILL_CREATOR_DIGEST,
+        ),
+      ]);
       this.teamSkillReady = true;
     } catch {
       this.teamSkillReady = false;
@@ -2233,11 +2286,8 @@ export class IpcRouter {
       ]);
       // Codex first only because it is the historical default of this app's settings key; neither is
       // "better", and the user changes it in one click either way.
-      const installed: RuntimeKind | null = codex.available
-        ? 'codex'
-        : claude.available
-          ? 'claude'
-          : null;
+      const installed: RuntimeKind | null =
+        codex.readiness === 'ready' ? 'codex' : claude.readiness === 'ready' ? 'claude' : null;
       if (installed === null) return;
       this.persistence.setRuntime(installed);
     } catch {

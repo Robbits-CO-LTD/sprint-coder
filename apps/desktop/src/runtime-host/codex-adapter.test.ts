@@ -261,6 +261,7 @@ describe('Codex runtime probe', () => {
   it('degrades to unavailable when the CLI cannot be spawned', async () => {
     await expect(probeCodex('__sprint_coder_codex_cli_does_not_exist__')).resolves.toEqual({
       available: false,
+      readiness: 'unavailable',
       models: [],
     });
   });

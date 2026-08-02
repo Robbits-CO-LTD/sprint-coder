@@ -21,14 +21,13 @@ import { basename, dirname, join, relative } from 'node:path';
  * `npm start` on its own is a dev-server launch and was never meant to be driven directly by
  * E2E. Two launch modes are supported:
  *
- *  - "packaged": launches the electron-forge packaged app under apps/desktop/out/** (original,
- *    preferred path — used automatically wherever packaging actually works, e.g. future CI).
+ *  - "packaged": launches a freshly-created electron-forge package under apps/desktop/out/**.
  *  - "dev": launches the repo's own Electron binary (node_modules/electron) directly against
  *    apps/desktop, reusing whatever `npm start` (dev server + main/preload dev build) is
- *    reachable. This is the fallback this environment relies on today.
+ *    reachable. This mode is requested explicitly by the faster `npm run e2e:dev` command.
  *
- * Mode selection: `SPRINT_CODER_E2E_MODE=packaged|dev` forces a mode; otherwise `packaged` is used if
- * apps/desktop/out/** already contains a usable build, else `dev`.
+ * Mode selection: `SPRINT_CODER_E2E_MODE=packaged|dev` forces a mode; otherwise production
+ * `packaged` mode is always used. The presence of an old `out/` never changes this choice.
  */
 
 export const DESKTOP_ROOT = join(__dirname, '..', '..', 'apps', 'desktop');
@@ -171,11 +170,11 @@ export function isPackagedAvailable(): boolean {
   }
 }
 
-/** `SPRINT_CODER_E2E_MODE` forces a mode; otherwise prefer "packaged" when it's actually usable. */
+/** Full E2E is packaged by default. Development mode must be requested explicitly. */
 export function resolveE2EMode(): E2EMode {
   const forced = process.env['SPRINT_CODER_E2E_MODE'];
   if (forced === 'packaged' || forced === 'dev') return forced;
-  return isPackagedAvailable() ? 'packaged' : 'dev';
+  return 'packaged';
 }
 
 /** Resolves the repo's own Electron binary via node_modules/electron/path.txt, the same

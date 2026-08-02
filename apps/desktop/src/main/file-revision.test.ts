@@ -144,7 +144,11 @@ describe('FileRevisionToken', () => {
 
   it('rejects escaping symlinks, invalid UTF-8, NUL content, and oversized files', async () => {
     const { workspace, outside } = await fixture();
-    await symlink(outside, join(workspace, 'escape'));
+    await symlink(
+      outside,
+      join(workspace, 'escape'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
     await expect(
       readRevisionBoundFile({
         workspacePath: workspace,

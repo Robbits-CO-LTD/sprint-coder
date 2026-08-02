@@ -114,18 +114,31 @@ describe('collectThreadImages', () => {
     expect(collectThreadImages(join(outside), root)).toEqual([]);
   });
 
-  it('refuses a symlink that points outside the thread directory', () => {
+  it.skipIf(process.platform === 'win32')(
+    'refuses a file symlink that points outside the thread directory',
+    () => {
+      const root = tempRoot();
+      const thread = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      mkdirSync(join(root, thread));
+      const secretDir = join(root, 'secrets');
+      mkdirSync(secretDir);
+      writeFileSync(join(secretDir, 'key'), 'not a png but sensitive');
+      symlinkSync(join(secretDir, 'key'), join(root, thread, 'leak.png'));
+      // The bytes would fail the PNG magic check downstream anyway, but refusing to open anything that
+      // is not a plain file means that check is not the only thing standing in the way.
+      const collected = collectThreadImages(thread, root);
+      expect(collected.map(({ fileName }) => fileName)).not.toContain('leak.png');
+    },
+  );
+
+  it('refuses a thread-directory junction that points outside the generated-images root', () => {
     const root = tempRoot();
-    const thread = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-    mkdirSync(join(root, thread));
-    const secretDir = join(root, 'secrets');
-    mkdirSync(secretDir);
-    writeFileSync(join(secretDir, 'key'), 'not a png but sensitive');
-    symlinkSync(join(secretDir, 'key'), join(root, thread, 'leak.png'));
-    // The bytes would fail the PNG magic check downstream anyway, but refusing to open anything that
-    // is not a plain file means that check is not the only thing standing in the way.
-    const collected = collectThreadImages(thread, root);
-    expect(collected.map(({ fileName }) => fileName)).not.toContain('leak.png');
+    const outside = tempRoot();
+    const thread = '33333333-3333-4333-8333-333333333333';
+    writeFileSync(join(outside, 'leak.png'), PNG);
+    symlinkSync(outside, join(root, thread), process.platform === 'win32' ? 'junction' : 'dir');
+
+    expect(collectThreadImages(thread, root)).toEqual([]);
   });
 
   it('caps how many images one turn can contribute', () => {
