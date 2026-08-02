@@ -2809,6 +2809,7 @@ export const appInfoSchema = z
     platform: z.string(),
     recovery: databaseRecoverySchema,
     settingsWorkspaceV2: z.boolean().optional(),
+    projectMultiFolderUx: z.boolean().optional(),
   })
   .strict();
 

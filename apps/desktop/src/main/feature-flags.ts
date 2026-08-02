@@ -13,3 +13,8 @@ export function multiProviderModelPickerV2Enabled(
 export function settingsWorkspaceV2Enabled(env: FeatureFlagEnvironment = process.env): boolean {
   return env['SPRINT_CODER_SETTINGS_WORKSPACE_V2'] !== '0';
 }
+
+/** Kept off until the Team status/resume UI ships in E2. */
+export function projectMultiFolderUxEnabled(env: FeatureFlagEnvironment = process.env): boolean {
+  return env['SPRINT_CODER_PROJECT_MULTI_FOLDER_UX'] === '1';
+}

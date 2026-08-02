@@ -46,6 +46,12 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
 ] as const;
 
+export function inheritedProjectForNewTask(
+  projectId: string | null | undefined,
+): string | undefined {
+  return projectId ?? undefined;
+}
+
 export type SlashTokenMatch = Readonly<{
   start: number;
   end: number;

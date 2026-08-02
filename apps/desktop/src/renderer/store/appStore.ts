@@ -24,6 +24,8 @@ import type {
   RuntimeKind,
   RuntimeStatus,
   ProjectSummary,
+  ProjectFolder,
+  ProjectFolderInput,
   TaskSummary,
   TeamDetail,
   TurnDiff,
@@ -190,6 +192,7 @@ type AppState = {
   teamByTask: Record<string, TeamDetail | null | undefined>;
   teamViewOpen: boolean;
   teamBusy: boolean;
+  projectSwitchingByTask: Record<string, boolean | undefined>;
 
   /** Runtime (Mock/Codex) selection surfaced by the Composer runtime chip (FR-SET-03).
    * Defaults to Mock/unavailable until `settings.getRuntime` resolves (or forever if the
@@ -210,6 +213,7 @@ type AppState = {
    * should not require persistence — it simply stops being shown for this session. */
   recoveryAcknowledged: boolean;
   settingsWorkspaceV2: boolean;
+  projectMultiFolderUx: boolean;
   /** Latest Runtime process liveness, pushed by main. Null until the first transition. */
   runtimeStatus: RuntimeStatus | null;
 
@@ -232,7 +236,17 @@ type AppState = {
   selectTask(taskId: string): Promise<void>;
   createTask(projectId?: string): Promise<TaskSummary | null>;
   refreshProjects(): Promise<void>;
-  createProject(name: string): Promise<ProjectSummary | null>;
+  createProject(name: string, folders?: ProjectFolderInput[]): Promise<ProjectSummary | null>;
+  pickProjectFolders(): Promise<
+    { canceled: true } | { canceled: false; folders: Array<{ path: string; label: string }> }
+  >;
+  listProjectFolders(projectId: string): Promise<ProjectFolder[] | null>;
+  replaceProjectFolders(
+    projectId: string,
+    expectedRevision: number,
+    folders: ProjectFolderInput[],
+  ): Promise<ProjectSummary | null>;
+  setProjectSwitching(taskId: string, switching: boolean): void;
   updateProject(
     projectId: string,
     expectedRevision: number,
@@ -805,6 +819,7 @@ export const useAppStore = create<AppState>((set, get) => {
     teamByTask: {},
     teamViewOpen: false,
     teamBusy: false,
+    projectSwitchingByTask: {},
     runtime: {
       kind: 'mock',
       codexAvailable: false,
@@ -819,6 +834,7 @@ export const useAppStore = create<AppState>((set, get) => {
     recovery: null,
     recoveryAcknowledged: false,
     settingsWorkspaceV2: true,
+    projectMultiFolderUx: false,
     runtimeStatus: null,
     stageAnnouncement: '',
     toast: null,
@@ -879,11 +895,11 @@ export const useAppStore = create<AppState>((set, get) => {
         void window.sprintCoder.app
           .getInfo()
           .then((info) => {
-            if (info.recovery !== undefined)
-              set({
-                recovery: info.recovery,
-                settingsWorkspaceV2: info.settingsWorkspaceV2 ?? true,
-              });
+            set({
+              ...(info.recovery === undefined ? {} : { recovery: info.recovery }),
+              settingsWorkspaceV2: info.settingsWorkspaceV2 ?? true,
+              projectMultiFolderUx: info.projectMultiFolderUx ?? false,
+            });
           })
           .catch(() => undefined);
       if (typeof window.sprintCoder.runtime?.subscribeStatus === 'function')
@@ -1439,17 +1455,71 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async createProject(name: string) {
+    async createProject(name: string, folders = []) {
       if (!window.sprintCoder || typeof window.sprintCoder.projects?.create !== 'function')
         return null;
       try {
-        const created = await window.sprintCoder.projects.create({ name });
+        const created = await window.sprintCoder.projects.create({ name, folders });
         set((state) => ({ projects: [created, ...state.projects], projectLoadState: 'ready' }));
         return created;
       } catch (err) {
         set({ error: describeError(err) });
         return null;
       }
+    },
+
+    async pickProjectFolders() {
+      if (!window.sprintCoder || typeof window.sprintCoder.projects?.pickFolders !== 'function')
+        return { canceled: true };
+      try {
+        return await window.sprintCoder.projects.pickFolders();
+      } catch (err) {
+        set({ error: describeError(err) });
+        return { canceled: true };
+      }
+    },
+
+    async listProjectFolders(projectId) {
+      if (!window.sprintCoder || typeof window.sprintCoder.projects?.folders?.list !== 'function')
+        return null;
+      try {
+        return await window.sprintCoder.projects.folders.list({ projectId });
+      } catch (err) {
+        set({ error: describeError(err) });
+        return null;
+      }
+    },
+
+    async replaceProjectFolders(projectId, expectedRevision, folders) {
+      if (
+        !window.sprintCoder ||
+        typeof window.sprintCoder.projects?.folders?.replace !== 'function'
+      )
+        return null;
+      try {
+        const updated = await window.sprintCoder.projects.folders.replace({
+          projectId,
+          expectedRevision,
+          folders,
+        });
+        set((state) => ({
+          projects: state.projects.map((project) => (project.id === projectId ? updated : project)),
+        }));
+        return updated;
+      } catch (err) {
+        set({ error: describeError(err) });
+        void get().refreshProjects();
+        return null;
+      }
+    },
+
+    setProjectSwitching(taskId, switching) {
+      set((state) => ({
+        projectSwitchingByTask: {
+          ...state.projectSwitchingByTask,
+          [taskId]: switching || undefined,
+        },
+      }));
     },
 
     async updateProject(projectId, expectedRevision, patch) {

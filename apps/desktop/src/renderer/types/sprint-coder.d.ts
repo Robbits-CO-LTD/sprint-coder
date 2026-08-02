@@ -745,6 +745,7 @@ export interface SprintCoderApi {
       platform: string;
       recovery: DatabaseRecovery;
       settingsWorkspaceV2?: boolean;
+      projectMultiFolderUx?: boolean;
     }>;
   };
   windowControls: {

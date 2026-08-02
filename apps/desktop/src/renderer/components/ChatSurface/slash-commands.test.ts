@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   filterSlashCommands,
+  inheritedProjectForNewTask,
   removeSlashToken,
   SLASH_COMMANDS,
   slashCommandQuery,
   slashTokenAtCursor,
 } from './slash-commands';
+
+describe('/new Project inheritance', () => {
+  it('inherits the current Project and keeps Projectなし as undefined', () => {
+    expect(inheritedProjectForNewTask('project-1')).toBe('project-1');
+    expect(inheritedProjectForNewTask(null)).toBeUndefined();
+    expect(inheritedProjectForNewTask(undefined)).toBeUndefined();
+  });
+});
 
 describe('slash commands', () => {
   it('preserves the legacy whole-draft query while cursor matching supports inline tokens', () => {

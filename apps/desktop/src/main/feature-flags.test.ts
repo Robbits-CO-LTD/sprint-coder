@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { multiProviderModelPickerV2Enabled, settingsWorkspaceV2Enabled } from './feature-flags';
+import {
+  multiProviderModelPickerV2Enabled,
+  projectMultiFolderUxEnabled,
+  settingsWorkspaceV2Enabled,
+} from './feature-flags';
 
 describe('multiProviderModelPickerV2Enabled', () => {
   it('enables the V2 picker by default', () => {
@@ -28,5 +32,13 @@ describe('settingsWorkspaceV2Enabled', () => {
     expect(settingsWorkspaceV2Enabled({})).toBe(true);
     expect(settingsWorkspaceV2Enabled({ SPRINT_CODER_SETTINGS_WORKSPACE_V2: '0' })).toBe(false);
     expect(settingsWorkspaceV2Enabled({ SPRINT_CODER_SETTINGS_WORKSPACE_V2: '1' })).toBe(true);
+  });
+});
+
+describe('projectMultiFolderUxEnabled', () => {
+  it('stays gated until E2 and accepts only the explicit enable switch', () => {
+    expect(projectMultiFolderUxEnabled({})).toBe(false);
+    expect(projectMultiFolderUxEnabled({ SPRINT_CODER_PROJECT_MULTI_FOLDER_UX: '0' })).toBe(false);
+    expect(projectMultiFolderUxEnabled({ SPRINT_CODER_PROJECT_MULTI_FOLDER_UX: '1' })).toBe(true);
   });
 });

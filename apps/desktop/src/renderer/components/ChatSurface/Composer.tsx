@@ -13,6 +13,7 @@ import type { ComposerMenuItem } from './ComposerMenu';
 import { SlashCommandMenu, type SlashMenuItem } from './SlashCommandMenu';
 import {
   filterSlashCommands,
+  inheritedProjectForNewTask,
   removeSlashToken,
   SLASH_COMMANDS,
   slashTokenAtCursor,
@@ -42,9 +43,13 @@ export function Composer({ taskId }: { taskId: string }) {
   const startTurn = useAppStore((s) => s.startTurn);
   const queueMessage = useAppStore((s) => s.queueMessage);
   const { createTask } = useTaskBoundary();
+  const currentProjectId = useAppStore(
+    (state) => state.tasks.find(({ id }) => id === taskId)?.projectId ?? null,
+  );
   const selectWorkspace = useAppStore((s) => s.selectWorkspace);
   const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const sending = useAppStore((s) => s.sendingByTask[taskId]) ?? false;
+  const projectSwitching = useAppStore((s) => s.projectSwitchingByTask[taskId]) ?? false;
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const queued = useAppStore((s) => s.queuedByTask[taskId]) ?? [];
   const toast = useAppStore((s) => s.toast);
@@ -206,7 +211,8 @@ export function Composer({ taskId }: { taskId: string }) {
     wasSendingRef.current = sending;
   }, [sending]);
 
-  const sendDisabled = !draft.trim() || sending || (turnActive && !goalRequested && !canQueue);
+  const sendDisabled =
+    !draft.trim() || sending || projectSwitching || (turnActive && !goalRequested && !canQueue);
 
   function handleSend() {
     const raw = draft.trim();
@@ -248,7 +254,7 @@ export function Composer({ taskId }: { taskId: string }) {
     setSlashDismissedDraft(null);
     switch (command.id) {
       case 'new':
-        void createTask();
+        void createTask(inheritedProjectForNewTask(currentProjectId));
         break;
       case 'goal':
         setImageRequested(false);
