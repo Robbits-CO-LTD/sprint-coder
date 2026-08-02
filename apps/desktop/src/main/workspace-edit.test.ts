@@ -95,7 +95,7 @@ vi.mock('node:child_process', async (importOriginal) => {
         fileSystemFault.stagingSymlinkTarget !== null &&
         args[0] === '/bin/cp' &&
         Array.isArray(args[1]) &&
-        args[1].includes('--preserve=all')
+        args[1].at(-1)?.includes('.sprint-coder-stage-') === true
       ) {
         const staging = args[1].at(-1);
         if (staging !== undefined) {

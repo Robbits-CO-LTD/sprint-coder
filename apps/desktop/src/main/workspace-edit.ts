@@ -259,7 +259,8 @@ export function saveWorkspaceFile(
       // succeeded. Reporting a refusal here would leave the editor stale and make a retry conflict.
     }
     return { outcome: 'saved', digest: digestOf(bytes), reason: null, conflictPath: null };
-  } catch {
+  } catch (error) {
+    if (error instanceof AtomicExchangeUnsupportedError) return refuse('io_error');
     if (publicationAttempted) {
       if (existsSync(staging)) {
         ownsStaging = false;
@@ -329,8 +330,7 @@ function publishStagedFile(
       // There is no portable sequence of ordinary POSIX rename/link operations that can both
       // publish and restore without overwriting a writer racing either boundary. On filesystems
       // without atomic exchange, leave the live destination untouched and fail closed.
-      if (isUnsupportedExchange(error))
-        throw new Error('Atomic file exchange is unsupported by this filesystem', { cause: error });
+      if (isUnsupportedExchange(error)) throw new AtomicExchangeUnsupportedError(error);
       throw error;
     }
     try {
@@ -422,6 +422,13 @@ function restoreStagedMetadata(
 
 function isUnsupportedExchange(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'UNSUPPORTED';
+}
+
+class AtomicExchangeUnsupportedError extends Error {
+  constructor(cause: unknown) {
+    super('Atomic file exchange is unsupported by this filesystem', { cause });
+    this.name = 'AtomicExchangeUnsupportedError';
+  }
 }
 
 const EMPTY_DIGEST = createHash('sha256').update('').digest('hex');
