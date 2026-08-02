@@ -339,6 +339,29 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('keeps name-only Project creation on the legacy Workspace flow', async () => {
+      const { persistence } = createPersistence();
+      const rootPath = mkdtempSync(join(tmpdir(), 'sprint-coder-legacy-project-root-'));
+      directories.push(rootPath);
+      const project = persistence.createProject('Legacy UI Project');
+      const task = persistence.createTask('Legacy Workspace Task', false, project.id);
+      const binding = await workspaceMutationBinding(rootPath);
+
+      expect(() =>
+        persistence.setWorkspaceBinding(task.id, {
+          path: binding.canonicalPath,
+          workspaceKey: binding.workspaceKey,
+          rootIdentityDigest: binding.rootIdentityDigest,
+        }),
+      ).not.toThrow();
+      expect(persistence.getWorkspace(task.id)).toBe(binding.canonicalPath);
+      expect(persistence.getEffectiveWorkspaceSet(task.id)).toMatchObject({
+        source: 'task',
+        roots: [expect.objectContaining({ path: binding.canonicalPath })],
+      });
+      persistence.close();
+    });
+
     it('replaces folders with revision CAS, preserves IDs by physical identity, and fixes Turn snapshots', () => {
       const { persistence } = createPersistence();
       const rootA = randomUUID();

@@ -2391,7 +2391,7 @@ export const taskCreateInputSchema = z
 export const projectCreateInputSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
-    folders: projectFolderInputsSchema.default([]),
+    folders: projectFolderInputsSchema.optional(),
   })
   .strict();
 export const projectFoldersListInputSchema = z.object({ projectId: idSchema }).strict();

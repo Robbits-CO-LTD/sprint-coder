@@ -1755,13 +1755,18 @@ export class IpcRouter {
       projectCreateInputSchema,
       projectSummarySchema,
       async (input, event, envelope) => {
-        const folders = await canonicalProjectFolderBindings(input.folders);
+        const folders =
+          input.folders === undefined
+            ? undefined
+            : await canonicalProjectFolderBindings(input.folders);
         await confirmHomeDirectoryAccess(
           this.window,
-          folders.map(({ canonicalPath }) => canonicalPath),
+          folders?.map(({ canonicalPath }) => canonicalPath) ?? [],
         );
         return this.runMutation(event, envelope, 'projects', IPC_CHANNELS.projectsCreate, () =>
-          this.persistence.createProject({ name: input.name, folders }),
+          this.persistence.createProject(
+            folders === undefined ? { name: input.name } : { name: input.name, folders },
+          ),
         ).value;
       },
     );

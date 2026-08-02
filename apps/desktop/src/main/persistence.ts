@@ -4588,15 +4588,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
       updatedAt: now,
     });
     this.db.transaction(() => {
-      if (projectId !== undefined) this.assertProjectAcceptsTask(projectId);
+      let legacyProjectWorkspaceFallback = 0;
+      if (projectId !== undefined) {
+        this.assertProjectAcceptsTask(projectId);
+        legacyProjectWorkspaceFallback =
+          this.getProjectRow(projectId).workspace_roots_configured === 0 ? 1 : 0;
+      }
       this.db
         .prepare(
           `INSERT INTO tasks(
              id, title, pinned, archived, goal, workspace_path, local_only, draft,
-             primary_thread_id, title_source, created_at, updated_at, project_id
-           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?, ?, ?)`,
+             primary_thread_id, title_source, created_at, updated_at, project_id,
+             legacy_project_workspace_fallback
+           ) VALUES (?, ?, 0, 0, NULL, NULL, ?, '', NULL, ?, ?, ?, ?, ?)`,
         )
-        .run(task.id, task.title, localOnly ? 1 : 0, titleSource, now, now, projectId ?? null);
+        .run(
+          task.id,
+          task.title,
+          localOnly ? 1 : 0,
+          titleSource,
+          now,
+          now,
+          projectId ?? null,
+          legacyProjectWorkspaceFallback,
+        );
       this.db
         .prepare(
           `INSERT INTO agent_threads(
@@ -4667,6 +4682,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   ): ProjectSummary {
     const parsedName = parseProjectName(typeof input === 'string' ? input : input.name);
     const folders = typeof input === 'string' ? [] : [...(input.folders ?? [])];
+    const workspaceRootsConfigured = typeof input !== 'string' && input.folders !== undefined;
     validateProjectFolderBindings(folders);
     const now = new Date().toISOString();
     const id = randomUUID();
@@ -4675,9 +4691,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `INSERT INTO projects(
              id, name, archived, revision, workspace_roots_configured, created_at, updated_at
-           ) VALUES (?, ?, 0, 1, 1, ?, ?)`,
+           ) VALUES (?, ?, 0, 1, ?, ?, ?)`,
         )
-        .run(id, parsedName, now, now);
+        .run(id, parsedName, workspaceRootsConfigured ? 1 : 0, now, now);
       this.insertProjectFolders(id, folders, now);
     })();
     return this.getProject(id);
@@ -5374,10 +5390,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (this.hasNonTerminalTeamWork(taskId)) throw new TaskAssignmentBlockedError();
       const result = this.db
         .prepare(
-          `UPDATE tasks SET project_id = ?, updated_at = ?
+          `UPDATE tasks
+           SET project_id = ?, legacy_project_workspace_fallback = ?, updated_at = ?
            WHERE id = ? AND project_id IS ?`,
         )
-        .run(nextProjectId, new Date().toISOString(), taskId, expectedProjectId);
+        .run(
+          nextProjectId,
+          nextProjectId !== null &&
+            this.getProjectRow(nextProjectId).workspace_roots_configured === 0
+            ? 1
+            : 0,
+          new Date().toISOString(),
+          taskId,
+          expectedProjectId,
+        );
       if (result.changes !== 1) throw new ProjectConflictError('Task Project membership changed');
       return this.getTask(taskId);
     })();

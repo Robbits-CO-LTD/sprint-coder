@@ -85,6 +85,9 @@ describe('public contracts', () => {
   it('validates Project summaries and mutation CAS inputs', () => {
     expect(projectCreateInputSchema.parse({ name: '  Project A  ' })).toEqual({
       name: 'Project A',
+    });
+    expect(projectCreateInputSchema.parse({ name: 'Project A', folders: [] })).toEqual({
+      name: 'Project A',
       folders: [],
     });
     expect(
