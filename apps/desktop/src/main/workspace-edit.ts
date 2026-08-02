@@ -1,14 +1,19 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants,
+  copyFileSync,
+  fchmodSync,
   fstatSync,
   fsyncSync,
   ftruncateSync,
   openSync,
   readFileSync,
+  renameSync,
+  unlinkSync,
   writeSync,
 } from 'node:fs';
+import { dirname } from 'node:path';
 import { resolveSafeWorkspaceFile } from './workspace-safe-path';
 
 // Reading a Workspace file in full so the user can edit it, and writing their edit back (issue #43).
@@ -101,10 +106,10 @@ export type SaveOutcome = {
  * same file while the user types; refusing lets the UI offer a real choice instead of one side
  * silently winning.
  *
- * The target is opened once and every check/write uses that same handle. This is deliberate: a
- * Workspace-capable Runtime can replace a parent with a junction between pathname operations.
- * Writing through the verified handle prevents that race from redirecting a user save outside the
- * Workspace and also preserves the original file's mode and Windows ACL.
+ * The target is opened once for validation. Replacement bytes are staged and durably flushed in a
+ * random, exclusively-created sibling copied from that target, which retains its mode and Windows
+ * ACL. The target identity is revalidated immediately before an atomic rename. A failed stage never
+ * truncates the user's original file.
  */
 export function saveWorkspaceFile(
   workspacePath: string,
@@ -123,6 +128,8 @@ export function saveWorkspaceFile(
   const absolute = safe.path;
 
   let descriptor: number | null = null;
+  let temporaryDescriptor: number | null = null;
+  let temporary: string | null = null;
   try {
     descriptor = openSync(
       absolute,
@@ -138,15 +145,59 @@ export function saveWorkspaceFile(
       return { outcome: 'conflict', digest: null, reason: null };
 
     const bytes = Buffer.from(text, 'utf8');
-    ftruncateSync(descriptor, 0);
+    temporary = `${absolute}.sprint-coder-save-${randomUUID()}.tmp`;
+    copyFileSync(absolute, temporary, constants.COPYFILE_EXCL);
+    temporaryDescriptor = openSync(
+      temporary,
+      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+    );
+    const temporaryStat = fstatSync(temporaryDescriptor, { bigint: true });
+    if (!temporaryStat.isFile() || temporaryStat.nlink !== 1n) return refuse('outside_workspace');
+    // copyFileSync is pathname based. If the target changed during that copy, never publish it.
+    if (digestOf(readFileSync(temporaryDescriptor)) !== baseDigest)
+      return { outcome: 'conflict', digest: null, reason: null };
+
+    ftruncateSync(temporaryDescriptor, 0);
     let offset = 0;
     while (offset < bytes.length)
-      offset += writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
-    fsyncSync(descriptor);
+      offset += writeSync(temporaryDescriptor, bytes, offset, bytes.length - offset, offset);
+    if (process.platform !== 'win32') fchmodSync(temporaryDescriptor, Number(stat.mode & 0o7777n));
+    fsyncSync(temporaryDescriptor);
+    closeSync(temporaryDescriptor);
+    temporaryDescriptor = null;
+
+    const finalTarget = resolveSafeWorkspaceFile(workspacePath, relativePath);
+    if (
+      finalTarget.path === null ||
+      finalTarget.path !== absolute ||
+      !sameIdentity(finalTarget.identity, safe.identity)
+    )
+      return refuse('outside_workspace');
+    // Windows does not allow replacing a file while our validation handle is open. The identity
+    // was just revalidated above; close only at the final publication boundary.
+    if (process.platform === 'win32') {
+      closeSync(descriptor);
+      descriptor = null;
+    }
+    renameSync(temporary, absolute);
+    temporary = null;
+    syncParentDirectory(dirname(absolute));
     return { outcome: 'saved', digest: digestOf(bytes), reason: null };
   } catch {
     return refuse('io_error');
   } finally {
+    if (temporaryDescriptor !== null)
+      try {
+        closeSync(temporaryDescriptor);
+      } catch {
+        // The operation already failed; cleanup below is still attempted.
+      }
+    if (temporary !== null)
+      try {
+        unlinkSync(temporary);
+      } catch {
+        // A failed stage must not obscure the original refusal.
+      }
     if (descriptor !== null) closeSync(descriptor);
   }
 }
@@ -167,4 +218,15 @@ function sameIdentity(
     actual.nlink === 1n &&
     expected.nlink === 1n
   );
+}
+
+function syncParentDirectory(parent: string): void {
+  if (process.platform === 'win32') return;
+  let descriptor: number | null = null;
+  try {
+    descriptor = openSync(parent, constants.O_RDONLY);
+    fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
+  }
 }

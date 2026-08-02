@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import type * as NodeFs from 'node:fs';
 import {
   chmodSync,
   linkSync,
@@ -14,6 +15,19 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_EDITABLE_BYTES, openWorkspaceFileForEdit, saveWorkspaceFile } from './workspace-edit';
+
+const fileSystemFault = vi.hoisted(() => ({ failWrite: false }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    writeSync: (...args: Parameters<typeof actual.writeSync>) => {
+      if (fileSystemFault.failWrite) throw new Error('simulated disk write failure');
+      return actual.writeSync(...args);
+    },
+  };
+});
 
 function workspace(): string {
   return mkdtempSync(join(tmpdir(), 'sprint-coder-edit-'));
@@ -107,6 +121,27 @@ describe('saveWorkspaceFile (issue #43)', () => {
     const result = saveWorkspaceFile(root, 'a.ts', 'my edit\n', digestOf('what I opened\n'));
     expect(result.outcome).toBe('conflict');
     expect(readFileSync(join(root, 'a.ts'), 'utf8')).toBe('the model rewrote this\n');
+  });
+
+  it('keeps the original byte-for-byte when staging the replacement fails', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original 日本語\r\n', 'utf8');
+    writeFileSync(file, original);
+    fileSystemFault.failWrite = true;
+    try {
+      const result = saveWorkspaceFile(
+        root,
+        'important.txt',
+        'replacement\r\n',
+        createHash('sha256').update(original).digest('hex'),
+      );
+      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+    } finally {
+      fileSystemFault.failWrite = false;
+    }
+    expect(readFileSync(file)).toEqual(original);
+    expect(readdirSync(root)).toEqual(['important.txt']);
   });
 
   it('refuses to write outside the Workspace, and leaves the target untouched', () => {
