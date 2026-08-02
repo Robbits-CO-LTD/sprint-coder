@@ -820,6 +820,48 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('exposes standalone integration-only resume without rerunning the Worker', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Standalone integration resume');
+      const runtime = new WorktreeWritingRuntime();
+      const { workspace, worktreesRoot } = configureGitWorkspace(persistence, task.id);
+      const manager = new FailRepositoryOnceManager({ worktreesRoot }, realpathSync(workspace));
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write once and resume integration',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write the output once',
+        doneCriteria: ['worker-output.txt is integrated'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'waiting_resume',
+        4_000,
+      );
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
+        phase: 'waiting_resume',
+        resumeKind: 'integration',
+      });
+      expect(runtime.workspacePaths).toHaveLength(1);
+      expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
+
+      await coordinator.resumeExecutionIntegration(task.id, submission.executionId);
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
+      expect(runtime.workspacePaths).toHaveLength(1);
+      expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
+      expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      persistence.close();
+    });
+
     it('maps two repositories into isolated roots and integrates Secondary before Primary', async () => {
       const persistence = createPersistence();
       const primaryRepo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-primary-')));

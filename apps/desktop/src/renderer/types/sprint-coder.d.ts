@@ -858,6 +858,7 @@ export interface SprintCoderApi {
       writeCapable: boolean;
     }): Promise<WorkerSummary>;
     resumeMission(input: { taskId: string; missionId: string }): Promise<TeamMissionSummary>;
+    resumeExecutionIntegration(input: { taskId: string; executionId: string }): Promise<TeamDetail>;
     sendToWorker(input: {
       taskId: string;
       targetAgentId: string;

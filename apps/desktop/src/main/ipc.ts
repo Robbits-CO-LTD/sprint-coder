@@ -131,6 +131,7 @@ import {
   teamHireWorkerInputSchema,
   teamMissionSummarySchema,
   teamResumeMissionInputSchema,
+  teamResumeExecutionIntegrationInputSchema,
   teamMessageSummarySchema,
   teamPolicyUpdateInputSchema,
   teamPolicySchema,
@@ -1866,6 +1867,12 @@ export class IpcRouter {
       teamResumeMissionInputSchema,
       teamMissionSummarySchema,
       (input) => this.teamCoordinator.resumeMission(input.taskId, input.missionId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsResumeExecutionIntegration,
+      teamResumeExecutionIntegrationInputSchema,
+      teamDetailSchema,
+      (input) => this.teamCoordinator.resumeExecutionIntegration(input.taskId, input.executionId),
     );
     this.handleMutation(
       IPC_CHANNELS.teamsSend,

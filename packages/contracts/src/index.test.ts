@@ -34,6 +34,7 @@ import {
   teamDetailSchema,
   teamExecutionSummarySchema,
   teamExecutionIsolationSchema,
+  teamResumeExecutionIntegrationInputSchema,
   teamEventSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
@@ -626,6 +627,12 @@ describe('public contracts', () => {
   });
 
   it('seals Team isolation root bindings and completion state', () => {
+    expect(
+      teamResumeExecutionIntegrationInputSchema.parse({
+        taskId: 'task-1',
+        executionId: 'execution-1',
+      }),
+    ).toEqual({ taskId: 'task-1', executionId: 'execution-1' });
     const isolation = {
       phase: 'running',
       resumeKind: null,

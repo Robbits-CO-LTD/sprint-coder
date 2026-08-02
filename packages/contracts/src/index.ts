@@ -696,6 +696,12 @@ export const teamResumeMissionInputSchema = z
   .object({ taskId: idSchema, missionId: idSchema })
   .strict();
 export type TeamResumeMissionInput = z.infer<typeof teamResumeMissionInputSchema>;
+export const teamResumeExecutionIntegrationInputSchema = z
+  .object({ taskId: idSchema, executionId: idSchema })
+  .strict();
+export type TeamResumeExecutionIntegrationInput = z.infer<
+  typeof teamResumeExecutionIntegrationInputSchema
+>;
 export const teamMissionCheckpointSchema = z
   .object({
     summary: z.string().min(1).max(4_000),
@@ -2945,6 +2951,7 @@ export interface SprintCoderApi {
     updatePolicy(input: TeamPolicyUpdateInput): Promise<TeamDetail>;
     hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary>;
     resumeMission(input: TeamResumeMissionInput): Promise<TeamMissionSummary>;
+    resumeExecutionIntegration(input: TeamResumeExecutionIntegrationInput): Promise<TeamDetail>;
     sendToWorker(input: TeamSendMessageInput): Promise<TeamMessageSummary>;
     stopWorker(input: TeamWorkerRef): Promise<WorkerSummary>;
     stopAll(taskId: string): Promise<TeamDetail>;
@@ -3129,6 +3136,7 @@ export const IPC_CHANNELS = {
   teamsStopWorker: 'sprint-coder:teams:stop-worker',
   teamsStopAll: 'sprint-coder:teams:stop-all',
   teamsResumeMission: 'sprint-coder:teams:resume-mission',
+  teamsResumeExecutionIntegration: 'sprint-coder:teams:resume-execution-integration',
   teamsSubscribe: 'sprint-coder:teams:subscribe',
   teamsUnsubscribe: 'sprint-coder:teams:unsubscribe',
   teamsEvent: 'sprint-coder:teams:event',

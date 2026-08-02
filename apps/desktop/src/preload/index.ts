@@ -104,6 +104,7 @@ import {
   teamHireWorkerInputSchema,
   teamMissionSummarySchema,
   teamResumeMissionInputSchema,
+  teamResumeExecutionIntegrationInputSchema,
   teamMessageSummarySchema,
   teamPolicyUpdateInputSchema,
   teamPolicySchema,
@@ -378,6 +379,13 @@ const api: SprintCoderApi = {
         IPC_CHANNELS.teamsResumeMission,
         teamResumeMissionInputSchema,
         teamMissionSummarySchema,
+        input,
+      ),
+    resumeExecutionIntegration: (input) =>
+      invoke(
+        IPC_CHANNELS.teamsResumeExecutionIntegration,
+        teamResumeExecutionIntegrationInputSchema,
+        teamDetailSchema,
         input,
       ),
     sendToWorker: (input) =>
