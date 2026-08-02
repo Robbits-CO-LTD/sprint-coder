@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ProviderModel, TeamModelIdentity } from '@sprint-coder/contracts';
 import {
   filterTeamModelGroups,
+  getTeamConnectionSelection,
   groupTeamModelsByConnection,
   setTeamConnectionSelected,
   setTeamModelSelected,
@@ -38,6 +39,13 @@ describe('Team model Connection groups', () => {
       providerId: 'openai',
       modelId: 'gpt-5.6-sol',
       displayName: 'GPT-5.6 Sol',
+    }),
+    model({
+      connectionId: 'builtin:codex-cli',
+      connectionDisplayName: 'Codex CLI',
+      providerId: 'openai',
+      modelId: 'gpt-5.6-terra',
+      displayName: 'GPT-5.6 Terra',
     }),
     model({
       connectionId: 'openai:production',
@@ -90,9 +98,39 @@ describe('Team model Connection groups', () => {
   });
 
   it('selects every available model in one Connection and clears stale values with that Connection', () => {
-    const group = groupTeamModelsByConnection(models, [])[0]!;
+    const group = groupTeamModelsByConnection(models, []).find(
+      ({ connectionId }) => connectionId === 'builtin:codex-cli',
+    )!;
     const selected = setTeamConnectionSelected([], group, true);
     expect(selected).toEqual(group.choices.map(({ identity }) => identity));
     expect(setTeamConnectionSelected(selected, group, false)).toEqual([]);
+  });
+
+  it('reports unchecked, partial, and whole-Connection permission states', () => {
+    const group = groupTeamModelsByConnection(models, []).find(
+      ({ connectionId }) => connectionId === 'builtin:codex-cli',
+    )!;
+    expect(getTeamConnectionSelection(group, [])).toMatchObject({
+      selectedCount: 0,
+      allAvailableSelected: false,
+      partiallySelected: false,
+    });
+    expect(getTeamConnectionSelection(group, [group.choices[0]!.identity])).toMatchObject({
+      selectedCount: 1,
+      allAvailableSelected: false,
+      partiallySelected: true,
+    });
+    expect(
+      getTeamConnectionSelection(
+        group,
+        group.choices.map(({ identity }) => identity),
+      ),
+    ).toMatchObject({
+      selectedCount: 2,
+      totalCount: 2,
+      availableCount: 2,
+      allAvailableSelected: true,
+      partiallySelected: false,
+    });
   });
 });
