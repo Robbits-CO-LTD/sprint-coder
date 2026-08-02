@@ -51,7 +51,7 @@ type PermissionPersistence = Pick<
   | 'recordPermissionAudit'
   | 'listPendingPermissionPolicyEpochs'
   | 'markPermissionPolicyEpochDelivered'
-  | 'getWorkspace'
+  | 'getEffectiveWorkspaceSet'
   | 'registerPermissionOneTimeToken'
   | 'consumePermissionOneTimeToken'
   | 'commitPermissionEvaluation'
@@ -336,14 +336,16 @@ export class PermissionBroker {
       throw new Error('External path execution boundary is not available');
     if (resource.kind !== 'workspace-path') return;
     const guard = input.pathGuard;
-    const workspacePath = this.persistence.getWorkspace(input.taskId);
+    const workspace = this.persistence.getEffectiveWorkspaceSet(input.taskId);
+    const rootId = guard?.rootId === 'legacy-primary' ? workspace.primaryRootId : guard?.rootId;
+    const root = workspace.roots.find((candidate) => candidate.rootId === rootId);
     if (
       guard === undefined ||
       !isIssuedPathGuard(guard) ||
-      workspacePath === null ||
-      guard.workspacePath !== workspacePath
+      root === undefined ||
+      guard.workspacePath !== root.path
     )
-      throw new Error('Permission path guard is not bound to the selected workspace');
+      throw new Error('Permission path guard is not bound to an effective Workspace root');
     const trusted = workspacePermissionResourceFromGuard(guard);
     if (
       trusted.workspaceId !== resource.workspaceId ||

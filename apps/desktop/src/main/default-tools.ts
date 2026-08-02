@@ -56,6 +56,7 @@ export const COMMAND_RUNNER_TOOL = createToolDefinition({
     properties: {
       executable: { type: 'string' },
       argv: { type: 'array', items: { type: 'string' } },
+      rootId: { type: 'string' },
       cwd: { type: 'string' },
       purpose: { type: 'string' },
     },
@@ -101,7 +102,7 @@ export function createDefaultToolBroker(
   command?: {
     persistence: Pick<
       PersistenceClient,
-      | 'getWorkspace'
+      | 'getEffectiveWorkspaceSet'
       | 'prepareCommand'
       | 'beginCommand'
       | 'startCommand'
@@ -174,16 +175,20 @@ export function createDefaultToolBroker(
     prepare: async (input, context, control) => {
       if (command === undefined)
         throw new Error('CommandRunner execution boundary is not configured');
-      const workspacePath = command.persistence.getWorkspace(context.taskId);
-      if (workspacePath === null) throw new Error('CommandRunner requires a selected Workspace');
       const request = input as {
         executable: string;
         argv: string[];
+        rootId?: string;
         cwd?: string;
         purpose: string;
       };
+      const workspace = command.persistence.getEffectiveWorkspaceSet(context.taskId);
+      const requestedRootId = request.rootId ?? workspace.primaryRootId;
+      const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
+      if (root === undefined) throw new Error('CommandRunner requires a valid Workspace rootId');
       const spec = await prepareExecutionSpec({
-        workspacePath,
+        rootId: root.rootId,
+        workspacePath: root.path,
         executable: request.executable,
         argv: request.argv,
         ...(request.cwd === undefined ? {} : { cwd: request.cwd }),

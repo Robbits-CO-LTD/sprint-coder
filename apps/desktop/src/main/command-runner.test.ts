@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
+  executionSpecPathGuard,
   prepareExecutionSpec,
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
@@ -39,6 +40,7 @@ describe('CommandRunner', () => {
   it('prepares an immutable spec from a canonical Workspace cwd and rejects escapes', async () => {
     const root = await workspace();
     const spec = await prepareExecutionSpec({
+      rootId: 'root-b',
       workspacePath: root,
       executable: process.execPath,
       argv: ['--version'],
@@ -47,6 +49,7 @@ describe('CommandRunner', () => {
 
     expect(spec.absoluteExecutable).toBe(process.execPath);
     expect(spec.cwdIdentity.canonicalPath).toBe(await realpath(root));
+    expect(executionSpecPathGuard(spec).rootId).toBe('root-b');
     expect(Object.isFrozen(spec)).toBe(true);
     await expect(
       prepareExecutionSpec({

@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(process.cwd(), '.sprint-coder-path-guard-'));
+  const root = await mkdtemp(join(tmpdir(), 'sprint-coder-path-guard-'));
   temporaryRoots.push(root);
   const workspace = join(root, 'workspace');
   const outside = join(root, 'outside');

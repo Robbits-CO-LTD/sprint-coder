@@ -23,6 +23,7 @@ export type PathChainEntry = {
   linkTarget: string | null;
 };
 export type CanonicalPathIdentity = {
+  rootId: string;
   workspacePath: string;
   originalTargetPath: string;
   resolvedPath: string;
@@ -54,6 +55,7 @@ export class PathGuardError extends Error {
 }
 
 export async function canonicalizeResourcePath(input: {
+  rootId?: string | undefined;
   workspacePath: string;
   targetPath: string;
   operation: PathOperation;
@@ -96,6 +98,7 @@ export async function canonicalizeResourcePath(input: {
   const chain = await snapshotLexicalChain(workspacePath, lexicalTarget);
 
   return {
+    rootId: input.rootId ?? 'legacy-primary',
     workspacePath,
     originalTargetPath: input.targetPath,
     resolvedPath: canonicalTarget,
@@ -107,6 +110,7 @@ export async function canonicalizeResourcePath(input: {
 }
 
 export async function createPathGuard(input: {
+  rootId?: string | undefined;
   workspacePath: string;
   targetPath: string;
   operation: PathOperation;
@@ -135,6 +139,7 @@ export async function revalidatePathGuard(guard: PathGuard): Promise<CanonicalPa
   let current: CanonicalPathIdentity;
   try {
     current = await canonicalizeResourcePath({
+      rootId: guard.rootId,
       workspacePath: guard.workspacePath,
       targetPath: guard.originalTargetPath,
       operation: guard.operation,
@@ -144,6 +149,7 @@ export async function revalidatePathGuard(guard: PathGuard): Promise<CanonicalPa
     throw new PathGuardError('IDENTITY_CHANGED', 'Path identity changed before execution');
   }
   if (
+    current.rootId !== guard.rootId ||
     current.workspacePath !== guard.workspacePath ||
     current.resolvedPath !== guard.resolvedPath ||
     !sameIdentity(current.parentIdentity, guard.parentIdentity) ||
@@ -203,6 +209,7 @@ export function pathGuardIdentityDigest(guard: PathGuard): string {
   return createHash('sha256')
     .update(
       JSON.stringify([
+        guard.rootId,
         guard.workspacePath,
         guard.resolvedPath,
         guard.operation,
@@ -241,7 +248,9 @@ export function workspacePermissionResourceFromGuard(
     throw new PathGuardError('INVALID_PATH', 'PathGuard was not issued by canonical validation');
   return Object.freeze({
     kind: 'workspace-path',
-    workspaceId: createHash('sha256').update(guard.workspacePath).digest('hex'),
+    workspaceId: createHash('sha256')
+      .update(JSON.stringify([guard.rootId, guard.workspacePath]))
+      .digest('hex'),
     canonicalPath: guard.resolvedPath,
     identityDigest: pathGuardIdentityDigest(guard),
     classification: classifyWorkspacePath(guard.workspacePath, guard.resolvedPath),

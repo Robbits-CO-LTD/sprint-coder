@@ -120,6 +120,7 @@ export class PatchValidationError extends Error {
 
 export async function prepareStructuredPatch(input: {
   owner: FileRevisionOwner;
+  rootId?: string | undefined;
   workspacePath: string;
   policyEpoch: number;
   registry: FileRevisionRegistry;
@@ -132,6 +133,7 @@ export async function prepareStructuredPatch(input: {
   const claimedPaths = new Set<string>();
   for (const operation of input.operations) {
     const sourceGuard = await canonicalizeResourcePath({
+      rootId: input.rootId,
       workspacePath: input.workspacePath,
       targetPath: operation.path,
       operation: operation.kind === 'add' ? 'write' : 'read',
@@ -163,6 +165,7 @@ export async function prepareStructuredPatch(input: {
     const revision = await input.registry.resolve({
       owner: input.owner,
       reference: operation.revision,
+      rootId: input.rootId,
       workspacePath: input.workspacePath,
       targetPath: operation.path,
       policyEpoch: input.policyEpoch,
@@ -214,6 +217,7 @@ export async function prepareStructuredPatch(input: {
     }
 
     const destinationGuard = await canonicalizeResourcePath({
+      rootId: input.rootId,
       workspacePath: input.workspacePath,
       targetPath: operation.destination,
       operation: 'write',

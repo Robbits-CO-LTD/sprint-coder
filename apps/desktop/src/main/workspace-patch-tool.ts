@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
 import { createToolDefinition, createToolId, type ToolDefinition } from '@sprint-coder/domain';
 import type { FileRevisionRegistry } from './file-revision';
 import type { EditSagaApplyRequest, EditSagaSnapshot } from './edit-saga';
@@ -32,6 +33,7 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
   inputSchema: {
     type: 'object',
     properties: {
+      rootId: { type: 'string' },
       path: { type: 'string' },
       edits: {
         type: 'array',
@@ -59,7 +61,7 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
 });
 
 export type WorkspacePatchDeps = Readonly<{
-  workspaceFor: (taskId: string) => string | null;
+  workspaceSetFor: (taskId: string) => EffectiveWorkspaceSet;
   revisions: FileRevisionRegistry;
   apply: (request: EditSagaApplyRequest) => Promise<EditSagaSnapshot>;
   policyEpochFor: (taskId: string) => number;
@@ -87,10 +89,13 @@ export async function executeWorkspacePatch(
   input: unknown,
   context: WorkspacePatchContext,
   deps: WorkspacePatchDeps,
-): Promise<{ path: string; sagaId: string; state: string; edits: number }> {
+): Promise<{ rootId: string; path: string; sagaId: string; state: string; edits: number }> {
   const request = parseInput(input);
-  const workspacePath = deps.workspaceFor(context.taskId);
-  if (workspacePath === null) throw new Error('apply_patch requires a selected Workspace');
+  const workspace = deps.workspaceSetFor(context.taskId);
+  if (workspace.roots.length === 0) throw new Error('apply_patch requires a selected Workspace');
+  const requestedRootId = request.rootId ?? workspace.primaryRootId;
+  const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
+  if (root === undefined) throw new Error('apply_patch requires a valid Workspace rootId');
 
   const owner = { taskId: context.taskId, turnId: context.turnId };
   const policyEpoch = deps.policyEpochFor(context.taskId);
@@ -98,7 +103,8 @@ export async function executeWorkspacePatch(
   // read and the write is a rejected patch rather than a silently clobbered edit.
   const revision = await deps.revisions.read({
     owner,
-    workspacePath,
+    rootId: root.rootId,
+    workspacePath: root.path,
     targetPath: request.path,
     policyEpoch,
   });
@@ -107,7 +113,8 @@ export async function executeWorkspacePatch(
   try {
     plan = await prepareStructuredPatch({
       owner,
-      workspacePath,
+      rootId: root.rootId,
+      workspacePath: root.path,
       policyEpoch,
       registry: deps.revisions,
       operations: [
@@ -140,6 +147,7 @@ export async function executeWorkspacePatch(
   // A Saga that did not commit left the file as it was; reporting the state rather than throwing
   // lets the model see the difference between "rejected" and "applied".
   return {
+    rootId: root.rootId,
     path: request.path,
     sagaId: saga.id,
     state: saga.state,
@@ -148,16 +156,24 @@ export async function executeWorkspacePatch(
 }
 
 function parseInput(input: unknown): {
+  rootId?: string;
   path: string;
   edits: { oldText: string; newText: string }[];
 } {
   if (typeof input !== 'object' || input === null)
     throw new Error('apply_patch requires an object');
-  const { path, edits } = input as { path?: unknown; edits?: unknown };
+  const { rootId, path, edits } = input as {
+    rootId?: unknown;
+    path?: unknown;
+    edits?: unknown;
+  };
+  if (rootId !== undefined && (typeof rootId !== 'string' || rootId.length === 0))
+    throw new Error('apply_patch rootId must be a non-empty string');
   if (typeof path !== 'string' || path.length === 0) throw new Error('apply_patch requires a path');
   if (!Array.isArray(edits) || edits.length === 0)
     throw new Error('apply_patch requires at least one edit');
   return {
+    ...(typeof rootId === 'string' ? { rootId } : {}),
     path,
     edits: edits.map((edit) => {
       if (typeof edit !== 'object' || edit === null) throw new Error('Each edit must be an object');

@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -27,7 +28,7 @@ let request: PermissionRequest & {
 let ceiling: CapabilityCeiling;
 
 beforeAll(async () => {
-  testRoot = await mkdtemp(join(process.cwd(), '.sprint-coder-main-permission-'));
+  testRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-main-permission-'));
   selectedWorkspacePath = join(testRoot, 'workspace');
   await mkdir(join(selectedWorkspacePath, 'src'), { recursive: true });
   await writeFile(join(selectedWorkspacePath, 'src', 'app.ts'), 'safe');
@@ -105,7 +106,21 @@ function fixture(notify?: () => void, revokedCapabilities: Capability[] = []) {
     },
     listPermissionGrants: () => [],
     revokePermissionCapability: () => 0,
-    getWorkspace: () => selectedWorkspacePath,
+    getEffectiveWorkspaceSet: () => ({
+      source: 'task' as const,
+      projectId: null,
+      primaryRootId: 'legacy-primary',
+      roots: [
+        {
+          rootId: 'legacy-primary',
+          path: selectedWorkspacePath,
+          label: 'Workspace',
+          role: 'primary' as const,
+          status: 'available' as const,
+        },
+      ],
+      digest: 'a'.repeat(64),
+    }),
     registerPermissionOneTimeToken: (_taskId: string, token: string) => {
       oneTimeTokens.add(token);
     },
@@ -202,6 +217,35 @@ describe('Main PermissionBroker', () => {
     await broker.setAccessPreset('task-1', 'ask', 2);
 
     expect(events).toEqual(['committed', 'subjects-stopped']);
+  });
+
+  it('rejects a guard whose rootId is not in the effective Workspace set', async () => {
+    const unknownRootGuard = await createPathGuard({
+      rootId: 'root-b',
+      workspacePath: selectedWorkspacePath,
+      targetPath: 'src/app.ts',
+      operation: 'read',
+    });
+    const unknownRootRequest = {
+      ...request,
+      resource: workspacePermissionResourceFromGuard(unknownRootGuard),
+    };
+    const { broker } = fixture();
+    expect(() =>
+      broker.evaluate({
+        taskId: 'task-1',
+        request: unknownRootRequest,
+        now: NOW,
+        basePolicy: {
+          managedDeny: [],
+          projectDeny: [],
+          parentCeiling: ceiling,
+          modeCeiling: ceiling,
+          sandbox: { feasible: true, profile: 'read-only' },
+        },
+        pathGuard: unknownRootGuard,
+      }),
+    ).toThrow('effective Workspace root');
   });
 
   it('rejects cross-Task requests before policy lookup or audit authority is issued', () => {

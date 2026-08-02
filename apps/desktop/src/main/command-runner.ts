@@ -45,6 +45,7 @@ export type CommandResult = Readonly<{
 }>;
 
 export type PrepareExecutionSpecInput = Readonly<{
+  rootId?: string | undefined;
   workspacePath: string;
   executable: string;
   argv: readonly string[];
@@ -91,6 +92,7 @@ export async function prepareExecutionSpec(
   if (!executableStats.isFile())
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
   const pathGuard = await createPathGuard({
+    rootId: input.rootId,
     workspacePath: input.workspacePath,
     targetPath: input.cwd ?? '.',
     operation: 'read',
