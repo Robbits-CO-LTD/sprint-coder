@@ -32,7 +32,7 @@ const fileSystemFault = vi.hoisted(() => ({
   unsupportedExchange: false,
   failAtomicReplace: false,
   failDirectorySync: false,
-  failCopyAfterCreate: false,
+  failStageAfterCreate: false,
   concurrentWindowsContent: null as string | null,
   concurrentPosixContent: null as string | null,
   afterPublicationContent: null as string | null,
@@ -124,12 +124,17 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.readFileSync(...args);
     },
-    copyFileSync: (...args: Parameters<typeof actual.copyFileSync>) => {
-      if (fileSystemFault.failCopyAfterCreate) {
-        actual.writeFileSync(args[1], 'partial copy');
-        throw new Error('simulated copy failure after destination creation');
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      if (
+        fileSystemFault.failStageAfterCreate &&
+        typeof args[0] === 'string' &&
+        args[0].includes('.sprint-coder-stage-')
+      ) {
+        const descriptor = actual.openSync(...args);
+        actual.closeSync(descriptor);
+        throw new Error('simulated staging failure after destination creation');
       }
-      return actual.copyFileSync(...args);
+      return actual.openSync(...args);
     },
     writeSync: (...args: Parameters<typeof actual.writeSync>) => {
       if (fileSystemFault.failWrite) throw new Error('simulated disk write failure');
@@ -312,13 +317,13 @@ describe('saveWorkspaceFile (issue #43)', () => {
   );
 
   it.runIf(process.platform === 'win32')(
-    'removes a partial staging file when copying fails after creating it',
+    'removes a partial staging file when exclusive creation fails after creating it',
     () => {
       const root = workspace();
       const file = join(root, 'important.txt');
       const original = Buffer.from('original 日本語\r\n', 'utf8');
       writeFileSync(file, original);
-      fileSystemFault.failCopyAfterCreate = true;
+      fileSystemFault.failStageAfterCreate = true;
       try {
         const result = saveWorkspaceFile(
           root,
@@ -328,7 +333,7 @@ describe('saveWorkspaceFile (issue #43)', () => {
         );
         expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
       } finally {
-        fileSystemFault.failCopyAfterCreate = false;
+        fileSystemFault.failStageAfterCreate = false;
       }
       expect(readFileSync(file)).toEqual(original);
       expect(readdirSync(root)).toEqual(['important.txt']);

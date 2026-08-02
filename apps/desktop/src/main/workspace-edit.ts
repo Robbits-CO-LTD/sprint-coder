@@ -2,9 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   closeSync,
-  chmodSync,
   constants,
-  copyFileSync,
   existsSync,
   fchmodSync,
   fstatSync,
@@ -172,17 +170,25 @@ export function saveWorkspaceFile(
       return { outcome: 'conflict', digest: null, reason: null, conflictPath: null };
 
     const bytes = Buffer.from(text, 'utf8');
-    // Start from a copy of the validated target so mode and other copyable metadata are retained.
-    // Windows publication below separately uses File.Replace to retain the destination ACL.
-    // The nonce makes this name ours even if copyFileSync creates the destination and then throws
-    // part-way through (ENOSPC/EIO). Claim it first so that partial copies are always cleaned up.
+    // POSIX starts from a copy of the validated target so copyable metadata is retained. Windows
+    // creates the staging inode through one exclusive handle; File.Replace retains the target ACL.
+    // Claim the nonce path first so a partial creation is always cleaned up after ENOSPC/EIO.
     ownsStaging = true;
-    stageTargetFile(absolute, staging);
     const originalMode = Number(stat.mode & 0o7777n);
     let stagedIdentity: ReturnType<typeof fstatSync> | null = null;
     if (process.platform === 'win32') {
-      chmodSync(staging, originalMode | 0o200);
+      // Create and retain the exclusive handle used for all writes. Reopening this pathname would
+      // let a Workspace watcher replace it with a symlink and redirect truncation outside the
+      // Workspace. File.Replace later retains the live destination's ACL.
+      stagingDescriptor = openSync(
+        staging,
+        constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
+        0o600,
+      );
+      const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
+      if (!stagingStat.isFile() || stagingStat.nlink !== 1n) return refuse('outside_workspace');
     } else {
+      stageTargetFile(absolute, staging);
       // A watcher can replace the freshly-copied pathname before we make a read-only staging file
       // writable. Open without following links first and mutate only that validated inode, so a
       // planted symlink cannot redirect chmod outside the Workspace.
@@ -194,17 +200,16 @@ export function saveWorkspaceFile(
       closeSync(stagingDescriptor);
       stagingDescriptor = null;
     }
-    stagingDescriptor = openSync(
-      staging,
-      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
-    );
-    const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
-    if (
-      !stagingStat.isFile() ||
-      stagingStat.nlink !== 1n ||
-      (stagedIdentity !== null && !sameIdentity(stagingStat, stagedIdentity))
-    )
-      return refuse('outside_workspace');
+    if (stagingDescriptor === null) {
+      stagingDescriptor = openSync(staging, constants.O_RDWR | constants.O_NOFOLLOW);
+      const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
+      if (
+        !stagingStat.isFile() ||
+        stagingStat.nlink !== 1n ||
+        (stagedIdentity !== null && !sameIdentity(stagingStat, stagedIdentity))
+      )
+        return refuse('outside_workspace');
+    }
 
     replaceDescriptorContents(stagingDescriptor, bytes);
     if (digestOf(readDescriptor(stagingDescriptor, bytes.length)) !== digestOf(bytes))
@@ -384,10 +389,6 @@ function publishStagedFile(
 }
 
 function stageTargetFile(absolute: string, staging: string): void {
-  if (process.platform === 'win32') {
-    copyFileSync(absolute, staging, constants.COPYFILE_EXCL);
-    return;
-  }
   // copyFile does not promise POSIX ACL/xattr retention. Use the trusted system copy command on
   // supported hosts so an atomic editor save cannot silently strip security metadata.
   if (process.platform === 'linux') {
