@@ -21,7 +21,11 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'sprint-coder-path-guard-'));
+  // Windows temp lives under AppData, which is deliberately classified as app-private. The CI
+  // checkout is the ordinary path there; POSIX uses the system temp because local worktrees may
+  // themselves live under ~/.codex and carry the same protected classification.
+  const fixtureBase = process.platform === 'win32' ? process.cwd() : tmpdir();
+  const root = await mkdtemp(join(fixtureBase, '.sprint-coder-path-guard-'));
   temporaryRoots.push(root);
   const workspace = join(root, 'workspace');
   const outside = join(root, 'outside');

@@ -28,7 +28,8 @@ let request: PermissionRequest & {
 let ceiling: CapabilityCeiling;
 
 beforeAll(async () => {
-  testRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-main-permission-'));
+  const fixtureBase = process.platform === 'win32' ? process.cwd() : tmpdir();
+  testRoot = await mkdtemp(join(fixtureBase, '.sprint-coder-main-permission-'));
   selectedWorkspacePath = join(testRoot, 'workspace');
   await mkdir(join(selectedWorkspacePath, 'src'), { recursive: true });
   await writeFile(join(selectedWorkspacePath, 'src', 'app.ts'), 'safe');
