@@ -1,10 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   closeSync,
   constants,
   copyFileSync,
-  existsSync,
   fstatSync,
   fsyncSync,
   ftruncateSync,
@@ -57,16 +56,7 @@ export function openWorkspaceFileForEdit(workspacePath: string, relativePath: st
     digest: EMPTY_DIGEST,
     reason,
   });
-  let safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
-  if (safe.path === null) return refuse(safe.reason);
-  try {
-    recoverInterruptedSave(safe.path);
-  } catch (error) {
-    return refuse(error instanceof RecoveryRequiredError ? 'recovery_required' : 'not_a_file');
-  }
-  // Recovery writes through the existing descriptor, but re-resolve anyway so this boundary never
-  // relies on identity information captured before filesystem repair.
-  safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  const safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
   if (safe.path === null) return refuse(safe.reason);
   const absolute = safe.path;
   let descriptor: number | null = null;
@@ -105,31 +95,11 @@ export function openWorkspaceFileForEdit(workspacePath: string, relativePath: st
   }
 }
 
-/** Explicit user choice to restore the verified pre-save bytes from an ambiguous transaction. */
+/** Compatibility entry point. Atomic saves never require workspace-side recovery data. */
 export function recoverWorkspaceFileForEdit(
   workspacePath: string,
   relativePath: string,
 ): OpenedFile {
-  const safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
-  if (safe.path === null)
-    return {
-      editable: false,
-      path: relativePath,
-      text: '',
-      digest: EMPTY_DIGEST,
-      reason: safe.reason,
-    };
-  try {
-    recoverInterruptedSave(safe.path, true);
-  } catch {
-    return {
-      editable: false,
-      path: relativePath,
-      text: '',
-      digest: EMPTY_DIGEST,
-      reason: 'not_a_file',
-    };
-  }
   return openWorkspaceFileForEdit(workspacePath, relativePath);
 }
 
@@ -147,12 +117,12 @@ export type SaveOutcome = {
  * silently winning.
  *
  * The target is opened once for validation. Replacement bytes are staged and durably flushed in a
- * exclusively-created sibling copied from that target. Before the live path is touched, a durable
- * journal records both the original and replacement digests. The target identity and digest are
- * revalidated immediately before publishing. Publication is one atomic sibling rename, so another
+ * uniquely-named, exclusively-created sibling copied from that target. The target identity and
+ * digest are revalidated immediately before publishing. Publication is one atomic sibling rename,
+ * so another
  * writer can observe the complete old file or the complete new file, never a truncated/interleaved
  * buffer. Copying the target to the staging sibling first retains the file metadata that the host
- * filesystem copies with it. The journal makes cleanup after a completed rename restart-safe.
+ * filesystem copies with it. Workspace files are never trusted as recovery metadata.
  */
 export function saveWorkspaceFile(
   workspacePath: string,
@@ -167,24 +137,17 @@ export function saveWorkspaceFile(
   });
   if (Buffer.byteLength(text, 'utf8') > MAX_EDITABLE_BYTES) return refuse('too_large');
   if (!SHA256_PATTERN.test(baseDigest)) return refuse('io_error');
-  let safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
-  if (safe.path === null) return refuse(safe.reason);
-  try {
-    recoverInterruptedSave(safe.path);
-  } catch {
-    return refuse('io_error');
-  }
-  safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  const safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
   if (safe.path === null) return refuse(safe.reason);
   const absolute = safe.path;
 
   let descriptor: number | null = null;
-  let recoveryDescriptor: number | null = null;
-  let recovery: string | null = null;
   let stagingDescriptor: number | null = null;
-  let staging: string | null = null;
-  let journalDescriptor: number | null = null;
-  let journal: string | null = null;
+  const nonce = randomBytes(16).toString('hex');
+  const staging = `${absolute}.sprint-coder-stage-${nonce}.tmp`;
+  const backup = `${absolute}.sprint-coder-backup-${nonce}.tmp`;
+  let ownsStaging = false;
+  let ownsBackup = false;
   try {
     descriptor = openSync(
       absolute,
@@ -200,47 +163,10 @@ export function saveWorkspaceFile(
       return { outcome: 'conflict', digest: null, reason: null };
 
     const bytes = Buffer.from(text, 'utf8');
-    const transaction = transactionPaths(absolute);
-    recovery = transaction.recovery;
-    staging = transaction.staging;
-    journal = transaction.journal;
-    // Create the durable intent before either sidecar. Therefore every sidecar this version creates
-    // is attributable to a journal, and an unrelated user file with a lookalike suffix is never
-    // silently deleted. At this point the target is still the verified original.
-    const journalBytes = Buffer.from(
-      JSON.stringify({ version: 1, originalDigest: baseDigest, newDigest: digestOf(bytes) }),
-      'utf8',
-    );
-    journalDescriptor = openSync(
-      journal,
-      constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_RDWR |
-        (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
-      0o600,
-    );
-    replaceDescriptorContents(journalDescriptor, journalBytes);
-    closeSync(journalDescriptor);
-    journalDescriptor = null;
-    syncParentDirectory(absolute);
-
-    copyFileSync(absolute, recovery, constants.COPYFILE_EXCL);
-    recoveryDescriptor = openSync(
-      recovery,
-      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
-    );
-    const recoveryStat = fstatSync(recoveryDescriptor, { bigint: true });
-    if (!recoveryStat.isFile() || recoveryStat.nlink !== 1n) return refuse('outside_workspace');
-    // copyFileSync is pathname based. If the target changed during that copy, never publish it.
-    if (digestOf(readDescriptor(recoveryDescriptor, Number(recoveryStat.size))) !== baseDigest)
-      return { outcome: 'conflict', digest: null, reason: null };
-    fsyncSync(recoveryDescriptor);
-    closeSync(recoveryDescriptor);
-    recoveryDescriptor = null;
-
     // Start from a copy of the validated target so mode and other copyable metadata are retained.
     // Windows publication below separately uses File.Replace to retain the destination ACL.
     copyFileSync(absolute, staging, constants.COPYFILE_EXCL);
+    ownsStaging = true;
     stagingDescriptor = openSync(
       staging,
       constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
@@ -272,177 +198,34 @@ export function saveWorkspaceFile(
     // check keeps the race window as small as the filesystem API permits; rename itself is atomic.
     closeSync(descriptor);
     descriptor = null;
-    // Windows File.Replace creates its backup as part of the same atomic operation. Removing our
-    // earlier flushed copy first is safe: until replacement starts the target still is the original,
-    // and after replacement the API has recreated the backup from that exact destination.
-    if (process.platform === 'win32') unlinkSync(recovery);
-    publishStagedFile(staging, absolute, recovery);
-    staging = null;
+    publishStagedFile(staging, absolute, backup);
+    ownsStaging = false;
+    ownsBackup = process.platform === 'win32';
     syncParentDirectory(absolute);
     return { outcome: 'saved', digest: digestOf(bytes), reason: null };
   } catch {
     return refuse('io_error');
   } finally {
-    if (recoveryDescriptor !== null)
-      try {
-        closeSync(recoveryDescriptor);
-      } catch {
-        // The operation already failed; cleanup below is still attempted.
-      }
     if (stagingDescriptor !== null)
       try {
         closeSync(stagingDescriptor);
       } catch {
-        // The operation already failed; cleanup below is still attempted.
+        // Cleanup below is still attempted.
       }
-    if (journalDescriptor !== null)
-      try {
-        closeSync(journalDescriptor);
-      } catch {
-        // The operation already failed; cleanup below is still attempted.
-      }
-    // Remove the recovery bytes first and the journal last. If the process stops during cleanup,
-    // the remaining journal can prove that an already-complete target is safe to keep.
-    let transactionPayloadRemoved = true;
-    if (recovery !== null)
-      try {
-        unlinkSync(recovery);
-      } catch (error) {
-        if (!isNotFound(error)) transactionPayloadRemoved = false;
-      }
-    if (staging !== null)
+    if (ownsStaging)
       try {
         unlinkSync(staging);
-      } catch (error) {
-        if (!isNotFound(error)) transactionPayloadRemoved = false;
-      }
-    if (journal !== null && transactionPayloadRemoved)
-      try {
-        unlinkSync(journal);
       } catch {
-        // A later open can safely repeat cleanup from the durable journal.
+        // A crash-safe atomic save never mutates the target before publication.
+      }
+    if (ownsBackup)
+      try {
+        unlinkSync(backup);
+      } catch {
+        // The backup remains an inert, untrusted file; no later open consumes or deletes it.
       }
     if (descriptor !== null) closeSync(descriptor);
   }
-}
-
-type SaveJournal = Readonly<{
-  version: 1;
-  originalDigest: string;
-  newDigest: string;
-}>;
-
-const RECOVERY_SUFFIX = '.sprint-coder-recovery.tmp';
-const STAGING_SUFFIX = '.sprint-coder-stage.tmp';
-const JOURNAL_SUFFIX = '.sprint-coder-save.json';
-
-function transactionPaths(absolute: string): Readonly<{
-  recovery: string;
-  staging: string;
-  journal: string;
-}> {
-  return {
-    recovery: `${absolute}${RECOVERY_SUFFIX}`,
-    staging: `${absolute}${STAGING_SUFFIX}`,
-    journal: `${absolute}${JOURNAL_SUFFIX}`,
-  };
-}
-
-/** Repairs an interrupted in-place publication before callers can observe or overwrite it. */
-class RecoveryRequiredError extends Error {}
-
-function recoverInterruptedSave(absolute: string, explicitlyRestore = false): void {
-  const transaction = transactionPaths(absolute);
-  const hasRecovery = existsSync(transaction.recovery);
-  const hasStage = existsSync(transaction.staging);
-  const hasJournal = existsSync(transaction.journal);
-  if (!hasRecovery && !hasStage && !hasJournal) return;
-
-  let targetDescriptor: number | null = null;
-  let recoveryDescriptor: number | null = null;
-  let journalDescriptor: number | null = null;
-  try {
-    // Older builds could leave a recovery/stage sidecar before writing a journal. Without that
-    // provenance it could instead be a user-created lookalike, so normal open must not delete it.
-    // Explicit recovery is the user's safe choice to keep the untouched target and discard only the
-    // stale sidecars; new saves journal first and cannot create this ambiguous state.
-    if (!hasJournal) {
-      if (!explicitlyRestore) throw new RecoveryRequiredError('Explicit recovery is required');
-      if (hasRecovery) unlinkSync(transaction.recovery);
-      if (hasStage) unlinkSync(transaction.staging);
-      return;
-    }
-
-    journalDescriptor = openSync(
-      transaction.journal,
-      constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
-    );
-    const journalStat = fstatSync(journalDescriptor, { bigint: true });
-    if (!journalStat.isFile() || journalStat.nlink !== 1n || journalStat.size > 1_024n)
-      throw new Error('Unsafe save journal');
-    const parsed: unknown = JSON.parse(
-      readDescriptor(journalDescriptor, Number(journalStat.size)).toString('utf8'),
-    );
-    if (!isSaveJournal(parsed)) throw new Error('Invalid save journal');
-
-    targetDescriptor = openSync(
-      absolute,
-      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
-    );
-    const targetStat = fstatSync(targetDescriptor, { bigint: true });
-    if (
-      !targetStat.isFile() ||
-      targetStat.nlink !== 1n ||
-      targetStat.size > BigInt(MAX_EDITABLE_BYTES)
-    )
-      throw new Error('Unsafe save target');
-    const targetBytes = readDescriptor(targetDescriptor, Number(targetStat.size));
-    const targetDigest = digestOf(targetBytes);
-
-    if (targetDigest !== parsed.originalDigest && targetDigest !== parsed.newDigest) {
-      if (!hasRecovery) throw new Error('Save recovery bytes are missing');
-      recoveryDescriptor = openSync(
-        transaction.recovery,
-        constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
-      );
-      const recoveryStat = fstatSync(recoveryDescriptor, { bigint: true });
-      if (
-        !recoveryStat.isFile() ||
-        recoveryStat.nlink !== 1n ||
-        recoveryStat.size > BigInt(MAX_EDITABLE_BYTES)
-      )
-        throw new Error('Unsafe save recovery file');
-      const original = readDescriptor(recoveryDescriptor, Number(recoveryStat.size));
-      if (digestOf(original) !== parsed.originalDigest)
-        throw new Error('Save recovery digest mismatch');
-      // A partial write and a legitimate post-crash external edit can have identical bytes (empty
-      // is a prefix of every value). There is no safe automatic choice. Keep the verified original
-      // recovery copy until the person explicitly chooses to restore it in the UI.
-      if (!explicitlyRestore) throw new RecoveryRequiredError('Explicit recovery is required');
-      replaceDescriptorContents(targetDescriptor, original);
-    }
-  } finally {
-    if (journalDescriptor !== null) closeSync(journalDescriptor);
-    if (recoveryDescriptor !== null) closeSync(recoveryDescriptor);
-    if (targetDescriptor !== null) closeSync(targetDescriptor);
-  }
-
-  // Journal-last deletion makes an interrupted cleanup distinguishable from an interrupted write.
-  if (hasRecovery) unlinkSync(transaction.recovery);
-  if (hasStage) unlinkSync(transaction.staging);
-  unlinkSync(transaction.journal);
-}
-
-function isSaveJournal(value: unknown): value is SaveJournal {
-  if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Partial<SaveJournal>;
-  return (
-    candidate.version === 1 &&
-    typeof candidate.originalDigest === 'string' &&
-    SHA256_PATTERN.test(candidate.originalDigest) &&
-    typeof candidate.newDigest === 'string' &&
-    SHA256_PATTERN.test(candidate.newDigest)
-  );
 }
 
 function syncParentDirectory(absolute: string): void {
@@ -470,7 +253,7 @@ $ErrorActionPreference = 'Stop'
 `;
 
 /** Atomically publishes complete bytes while retaining the destination's Windows security data. */
-function publishStagedFile(staging: string, absolute: string, recovery: string): void {
+function publishStagedFile(staging: string, absolute: string, backup: string): void {
   if (process.platform !== 'win32') {
     renameSync(staging, absolute);
     return;
@@ -495,7 +278,7 @@ function publishStagedFile(staging: string, absolute: string, recovery: string):
         USERPROFILE: process.env['USERPROFILE'] ?? '',
         SPRINT_CODER_REPLACEMENT: staging,
         SPRINT_CODER_TARGET: absolute,
-        SPRINT_CODER_BACKUP: recovery,
+        SPRINT_CODER_BACKUP: backup,
       },
       encoding: 'utf8',
       stdio: 'pipe',
@@ -510,15 +293,6 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 function digestOf(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
-}
-
-function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: unknown }).code === 'ENOENT'
-  );
 }
 
 function readDescriptor(descriptor: number, size: number): Buffer {
