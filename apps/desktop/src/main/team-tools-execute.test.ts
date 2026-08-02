@@ -404,6 +404,34 @@ describe('executeTeamTool routing', () => {
     expect(coordinator.assignMission).not.toHaveBeenCalled();
   });
 
+  it('allows a workspace-write Manager execution to delegate within the same ceiling', async () => {
+    const coordinator = fakeCoordinator();
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_task',
+        {
+          workerId: 'worker-1',
+          objective: 'write',
+          doneCriteria: ['done'],
+          access: 'workspace-write',
+        },
+        { requesterAgentId: 'manager-1', accessCeiling: 'workspace-write' },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    expect(coordinator.assignTaskAs).toHaveBeenCalledWith(
+      {
+        taskId: 'task-1',
+        targetAgentId: 'worker-1',
+        content: 'write',
+        doneCriteria: ['done'],
+        accessMode: 'workspace-write',
+      },
+      'manager-1',
+    );
+  });
+
   it('routes Manager tools with only the caller identity bound to the MCP registration', async () => {
     const coordinator = fakeCoordinator();
     const options = {
