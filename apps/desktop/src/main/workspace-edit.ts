@@ -13,6 +13,7 @@ import {
   readSync,
   renameSync,
   unlinkSync,
+  utimesSync,
   writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -350,6 +351,8 @@ function restoreStagedMetadata(absolute: string, staging: string): void {
     ['--attributes-only', '--preserve=all', '--no-target-directory', absolute, staging],
     { stdio: 'ignore' },
   );
+  const now = new Date();
+  utimesSync(staging, now, now);
 }
 
 const EMPTY_DIGEST = createHash('sha256').update('').digest('hex');

@@ -11,6 +11,7 @@ import {
   readdirSync,
   symlinkSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -350,6 +351,8 @@ describe('saveWorkspaceFile (issue #43)', () => {
       const file = join(root, 'script.sh');
       writeFileSync(file, '#!/bin/sh\n');
       chmodSync(file, 0o2755);
+      const oldTimestamp = new Date('2000-01-01T00:00:00.000Z');
+      utimesSync(file, oldTimestamp, oldTimestamp);
       const result = saveWorkspaceFile(
         root,
         'script.sh',
@@ -358,6 +361,7 @@ describe('saveWorkspaceFile (issue #43)', () => {
       );
       expect(result.outcome).toBe('saved');
       expect(statSync(file).mode & 0o7777).toBe(0o2755);
+      expect(statSync(file).mtimeMs).toBeGreaterThan(oldTimestamp.getTime());
     },
   );
 
