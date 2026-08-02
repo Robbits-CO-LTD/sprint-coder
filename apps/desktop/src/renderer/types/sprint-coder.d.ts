@@ -285,7 +285,12 @@ export type GeneratedImage = {
 
 /** One file a Runtime changed during a Turn (issue #37). Workspace-relative — Main drops anything
  * that resolves outside the Workspace root rather than passing it here. */
-export type FileChange = { path: string; kind: 'add' | 'update' | 'delete' };
+export type FileChange = {
+  rootId: string;
+  rootLabel: string;
+  path: string;
+  kind: 'add' | 'update' | 'delete';
+};
 export type FileChangeRecord = { seq: number; turnId: string; changes: FileChange[] };
 /** A file read in full for editing, or a refusal with its reason (issue #43). */
 export type FileOpenResult = {
@@ -305,6 +310,8 @@ export type FileSaveResult = {
 export type FileEditFrame = {
   taskId: string;
   turnId: string;
+  rootId: string;
+  rootLabel: string;
   path: string;
   text: string;
   complete: boolean;
@@ -413,7 +420,15 @@ export type TurnEvent =
       seq: number;
       image: GeneratedImage;
     }
-  | { type: 'file.saved'; taskId: string; seq: number; path: string; byteLength: number }
+  | {
+      type: 'file.saved';
+      taskId: string;
+      seq: number;
+      rootId: string;
+      rootLabel: string;
+      path: string;
+      byteLength: number;
+    }
   | {
       type: 'files.changed';
       taskId: string;
@@ -895,9 +910,10 @@ export interface SprintCoderApi {
   };
   files: {
     list(taskId: string): Promise<FileChangeRecord[]>;
-    open(taskId: string, path: string): Promise<FileOpenResult>;
+    open(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
     save(input: {
       taskId: string;
+      rootId: string;
       path: string;
       text: string;
       baseDigest: string;

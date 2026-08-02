@@ -24,15 +24,19 @@ export function FileChangeCard({ changes }: { changes: FileChange[] }) {
       <span className="filechange-title">ファイルを{changes.length}件変更しました</span>
       <ul className="filechange-list">
         {changes.map((change) => (
-          <li className="filechange-row" key={`${change.kind}:${change.path}`}>
+          <li className="filechange-row" key={`${change.rootId}:${change.kind}:${change.path}`}>
             <span
               className={`filechange-kind filechange-kind--${change.kind}`}
               data-kind={change.kind}
             >
               {KIND_LABEL[change.kind]}
             </span>
-            <bdi className="filechange-path" dir="ltr" title={change.path}>
-              {change.path}
+            <bdi
+              className="filechange-path"
+              dir="ltr"
+              title={`${change.rootLabel} › ${change.path}`}
+            >
+              {change.rootLabel} › {change.path}
             </bdi>
           </li>
         ))}

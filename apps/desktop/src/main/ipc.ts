@@ -152,6 +152,7 @@ import {
   turnSubscriptionInputSchema,
   workspaceSelectionSchema,
   effectiveWorkspaceSetSchema,
+  type EffectiveWorkspaceSet,
   type CommandEnvelope,
   type CommandResult,
   type AccessPreset,
@@ -190,7 +191,6 @@ import {
   ProjectArchivedError,
   ProjectConflictError,
   ProjectFolderMutationBlockedError,
-  ProjectWorkspaceRuntimeUnavailableError,
   ReferenceInUseError,
   SteerStaleError,
   TaskAssignmentBlockedError,
@@ -215,7 +215,7 @@ const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import type { ToolAuthorizationRequest } from './tool-broker';
-import type { RuntimeCanonicalEvent } from '../runtime-host/protocol';
+import type { RuntimeCanonicalEvent, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { permissionRequestFingerprint, type Capability } from '@sprint-coder/domain';
 import type { ExecutionSpec } from '@sprint-coder/domain';
@@ -345,10 +345,11 @@ export class IpcRouter {
   private readonly reasoningByTurn = new Map<string, ReasoningBatcher>();
   // Streaming redaction state per (turn, path) for live file bodies (issue #39). Bounded at 16
   // concurrent files and cleared when a body completes or its turn ends.
-  // One recursive Workspace watch per writing Turn (issue #39), stopped in finishAndAdvance.
-  private readonly workspaceWatchByTurn = new Map<string, WorkspaceWatcher>();
-  // "The file as this Turn found it", per Turn (issue #41). Disposed with the Turn.
-  private readonly baselinesByTurn = new Map<string, EditBaselines>();
+  // One recursive watch per sealed root for each writing Turn, stopped in finishAndAdvance.
+  private readonly workspaceWatchByTurn = new Map<string, readonly WorkspaceWatcher[]>();
+  // The immutable Workspace snapshot and per-root baselines owned by each Turn.
+  private readonly turnWorkspaceByTurn = new Map<string, EffectiveWorkspaceSet>();
+  private readonly baselinesByTurn = new Map<string, ReadonlyMap<string, EditBaselines>>();
   private readonly fileEditByKey = new Map<
     string,
     { redactor: ReturnType<typeof createStreamingSecretRedactor>; safe: string; consumed: number }
@@ -1219,10 +1220,13 @@ export class IpcRouter {
       },
     );
     this.handle(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, (input) => {
-      const workspacePath = this.persistence.getWorkspace(input.taskId);
+      const root = resolveEffectiveWorkspaceRoot(
+        this.persistence.getEffectiveWorkspaceSet(input.taskId),
+        input.rootId,
+      );
       // No Workspace means no file to open and nowhere to save one, so this is a refusal rather
       // than an empty document the user could type into and then fail to save.
-      if (workspacePath === null)
+      if (root === null)
         return {
           path: input.path,
           text: '',
@@ -1230,7 +1234,7 @@ export class IpcRouter {
           editable: false,
           reason: 'outside_workspace' as const,
         };
-      return openWorkspaceFileForEdit(workspacePath, input.path);
+      return openWorkspaceFileForEdit(root.path, input.path);
     });
     this.handleMutation(
       IPC_CHANNELS.filesSave,
@@ -1238,20 +1242,25 @@ export class IpcRouter {
       fileSaveResultSchema,
       (input, event, envelope) =>
         this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.filesSave, () => {
-          const workspacePath = this.persistence.getWorkspace(input.taskId);
-          if (workspacePath === null)
+          const root = resolveEffectiveWorkspaceRoot(
+            this.persistence.getEffectiveWorkspaceSet(input.taskId),
+            input.rootId,
+          );
+          if (root === null)
             return {
               outcome: 'refused' as const,
               digest: null,
               reason: 'outside_workspace' as const,
             };
-          const result = saveWorkspaceFile(workspacePath, input.path, input.text, input.baseDigest);
+          const result = saveWorkspaceFile(root.path, input.path, input.text, input.baseDigest);
           // Audited only on an actual write, and as its own event type: `files.changed` is the record
           // of what a Runtime did, and a human's edit does not belong in it (issue #43).
           if (result.outcome === 'saved')
             this.publish(
               this.persistence.recordUserFileSave({
                 taskId: input.taskId,
+                rootId: root.rootId,
+                rootLabel: root.label,
                 path: input.path,
                 byteLength: Buffer.byteLength(input.text, 'utf8'),
               }),
@@ -2218,7 +2227,8 @@ export class IpcRouter {
     this.approvalCoordinator.dispose();
     // A watch outlives its Turn only if the app is torn down mid-write; close them here so the
     // process can actually exit (issue #39).
-    for (const watcher of this.workspaceWatchByTurn.values()) watcher.stop();
+    for (const watchers of this.workspaceWatchByTurn.values())
+      for (const watcher of watchers) watcher.stop();
     this.workspaceWatchByTurn.clear();
     await this.mockRuntime.dispose();
     this.codexRuntime.dispose();
@@ -2314,8 +2324,9 @@ export class IpcRouter {
     this.reasoningByTurn.get(turnId)?.dispose();
     this.reasoningByTurn.delete(turnId);
     this.reasoningRedactorByTurn.delete(turnId);
-    this.workspaceWatchByTurn.get(turnId)?.stop();
+    for (const watcher of this.workspaceWatchByTurn.get(turnId) ?? []) watcher.stop();
     this.workspaceWatchByTurn.delete(turnId);
+    this.turnWorkspaceByTurn.delete(turnId);
     this.baselinesByTurn.delete(turnId);
     // A turn that ends mid-write leaves its redaction state behind otherwise (issue #39).
     for (const key of this.fileEditByKey.keys())
@@ -2516,7 +2527,7 @@ export class IpcRouter {
   private dispatchStarted(started: StartedTurn): void {
     this.publish(started.event);
     for (const event of started.contextUsageEvents) this.publish(event);
-    this.startSelectedRuntime(started);
+    void this.startSelectedRuntime(started);
   }
 
   private dispatchQueueTransition(transition: QueueTransition): void {
@@ -2524,17 +2535,33 @@ export class IpcRouter {
     this.publish(transition.started.event);
     for (const event of transition.started.contextUsageEvents) this.publish(event);
     this.publish(transition.queueEvent);
-    this.startSelectedRuntime(transition.started);
+    void this.startSelectedRuntime(transition.started);
   }
 
-  private startSelectedRuntime(started: StartedTurn): void {
+  private async startSelectedRuntime(started: StartedTurn): Promise<void> {
     const taskId = started.event.taskId;
+    if (started.runtimeKind !== 'mock') {
+      try {
+        await this.assertTurnWorkspaceHealthy(started);
+      } catch {
+        const kind = started.runtimeKind === 'claude' ? 'claude' : 'codex';
+        this.turnRuntimes.set(started.turnId, kind);
+        this.handleRuntimeFailure(kind, taskId, started.turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage:
+            'Projectのフォルダが見つからないか、読取不能、または別のフォルダへ変更されています。再リンクしてから再試行してください。',
+          retryable: false,
+        });
+        return;
+      }
+    }
     const externalConnectionId =
       builtinRuntimeForModelSelection(started.modelSelection) === null
         ? started.modelSelection.connectionId
         : null;
     if (externalConnectionId !== null) {
       this.turnRuntimes.set(started.turnId, 'provider');
+      this.turnWorkspaceByTurn.set(started.turnId, started.workspaceSet);
       void this.startProviderTurn(started, externalConnectionId, started.teamTurn);
       return;
     }
@@ -2594,6 +2621,7 @@ export class IpcRouter {
       kind = 'mock';
     }
     this.turnRuntimes.set(started.turnId, kind);
+    this.turnWorkspaceByTurn.set(started.turnId, started.workspaceSet);
     // Watch the Workspace for the duration of the Turn (issue #39). Above the mock early-return on
     // purpose: this is about what the Turn writes, not about which Runtime writes it.
     //
@@ -2604,17 +2632,22 @@ export class IpcRouter {
     //
     // Only started when the Turn can actually write: at read-only there is nothing to watch for, and
     // a recursive watch on a large repository is not free.
-    const turnWorkspace = this.persistence.getWorkspace(taskId);
+    const turnWorkspace = primaryWorkspacePath(started.workspaceSet);
     if (
       turnWorkspace !== null &&
       resolveWriteScope(this.persistence.getPermissionPolicy(taskId).preset, turnWorkspace) !==
         'read-only'
     ) {
-      this.startWorkspaceWatch(taskId, started.turnId, turnWorkspace);
+      this.startWorkspaceWatch(taskId, started.turnId, started.workspaceSet);
       // Baselines are per Turn: "the file as this Turn found it" is only meaningful inside one
       // (issue #41). Created here so `git status` is read once, at the moment the Turn starts,
       // rather than after the Runtime has already begun changing things.
-      this.baselinesByTurn.set(started.turnId, createEditBaselines(turnWorkspace));
+      this.baselinesByTurn.set(
+        started.turnId,
+        new Map(
+          started.workspaceSet.roots.map((root) => [root.rootId, createEditBaselines(root.path)]),
+        ),
+      );
     }
     if (kind === 'mock') {
       this.mockRuntime.start(taskId, started.turnId, started.text);
@@ -2622,7 +2655,7 @@ export class IpcRouter {
     }
     const workspacePath = turnWorkspace;
     const workspaceId =
-      workspacePath === null ? null : digestCanonical({ workspacePath: workspacePath });
+      started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest;
     const context = this.prepareContext(taskId, started.turnId, teamTurn && wantsLeaderMcp);
     // What this Turn may write (issue #37). Both inputs matter: the Access preset is the user's
     // choice, and the Workspace is what makes a write meaningful at all — without one the Runtime's
@@ -2660,7 +2693,7 @@ export class IpcRouter {
         context,
         now: new Date().toISOString(),
         payloadDigest: serializedPayload.digest,
-        adapterVersion: 'runtime-protocol-v6',
+        adapterVersion: 'runtime-protocol-v7',
         connectionId: kind === 'claude' ? 'builtin:claude-cli' : 'builtin:codex-cli',
         modelId: started.model,
         endpointTrust: 'trusted-remote',
@@ -2672,7 +2705,7 @@ export class IpcRouter {
           taskId,
           started.turnId,
           started.text,
-          workspacePath,
+          toRuntimeWorkspaceSet(started.workspaceSet),
           started.model,
           createEmptyToolCatalogSnapshot(kind, workspaceId),
           context,
@@ -2698,6 +2731,11 @@ export class IpcRouter {
       });
       return;
     }
+  }
+
+  private async assertTurnWorkspaceHealthy(started: StartedTurn): Promise<void> {
+    const expected = this.persistence.getTurnWorkspaceRootIdentities(started.turnId);
+    await verifyTurnWorkspaceIdentities(started.workspaceSet, expected);
   }
 
   /** Starts the bridge's socket if needed and mints a fresh bearer token bound to this one turn.
@@ -3402,21 +3440,28 @@ export class IpcRouter {
    * read itself refuses symlinks and binaries (see workspace-file.ts), so "anything that changed" is
    * a safe net to cast here.
    */
-  private startWorkspaceWatch(taskId: string, turnId: string, workspacePath: string): void {
-    this.workspaceWatchByTurn.get(turnId)?.stop();
-    const watcher = watchWorkspace(workspacePath, (relativePath) => {
-      // Turn already finished: a late filesystem event must not reopen a closed Turn's view.
-      if (!this.workspaceWatchByTurn.has(turnId)) return;
-      const body = readWorkspaceTextFile(workspacePath, relativePath);
-      if (body === null) return;
-      this.pushFileEdit(taskId, turnId, resolvePath(workspacePath, relativePath), body, {
-        // Never "complete": on disk there is no such thing as finished, only current. The Turn
-        // ending is what stops the view following.
-        complete: false,
-        source: 'disk',
+  private startWorkspaceWatch(
+    taskId: string,
+    turnId: string,
+    workspace: EffectiveWorkspaceSet,
+  ): void {
+    for (const watcher of this.workspaceWatchByTurn.get(turnId) ?? []) watcher.stop();
+    const watchers = workspace.roots.flatMap((root) => {
+      const watcher = watchWorkspace(root.path, (relativePath) => {
+        // Turn already finished: a late filesystem event must not reopen a closed Turn's view.
+        if (!this.workspaceWatchByTurn.has(turnId)) return;
+        const body = readWorkspaceTextFile(root.path, relativePath);
+        if (body === null) return;
+        this.pushFileEdit(taskId, turnId, resolvePath(root.path, relativePath), body, {
+          // Never "complete": on disk there is no such thing as finished, only current. The Turn
+          // ending is what stops the view following.
+          complete: false,
+          source: 'disk',
+        });
       });
+      return watcher === null ? [] : [watcher];
     });
-    if (watcher !== null) this.workspaceWatchByTurn.set(turnId, watcher);
+    if (watchers.length > 0) this.workspaceWatchByTurn.set(turnId, watchers);
   }
 
   /**
@@ -3438,11 +3483,12 @@ export class IpcRouter {
     text: string,
     options: { complete: boolean; source: 'stream' | 'disk' },
   ): void {
-    const workspacePath = this.persistence.getWorkspace(taskId);
-    if (workspacePath === null) return;
-    const path = relativizeWorkspacePath(workspacePath, absolutePath, resolvePath, relativePath);
-    if (path === null) return;
-    const key = `${turnId}\u0000${path}`;
+    const workspace = this.turnWorkspaceByTurn.get(turnId);
+    if (workspace === undefined) return;
+    const rooted = resolveTurnRootedPath(workspace, absolutePath);
+    if (rooted === null) return;
+    const { root, path } = rooted;
+    const key = `${turnId}\u0000${root.rootId}\u0000${path}`;
     let state = this.fileEditByKey.get(key);
     if (state === undefined) {
       if (this.fileEditByKey.size >= 16) return;
@@ -3451,7 +3497,7 @@ export class IpcRouter {
       // First time this Turn has mentioned this path — the last moment the file might still hold
       // its "before" content (issue #41). For a streamed write that is genuinely before the write;
       // for a watcher event it is already too late, which `note` handles by falling back to git.
-      this.baselinesByTurn.get(turnId)?.note(path);
+      this.baselinesByTurn.get(turnId)?.get(root.rootId)?.note(path);
     }
     // Frames are cumulative. A shorter body than last time means the Runtime restarted the value,
     // which the redactor cannot un-consume — drop rather than emit a spliced mixture of two bodies.
@@ -3462,20 +3508,29 @@ export class IpcRouter {
     const safeText = state.safe.slice(-262_144);
     // The tail is what the user is watching; an early frame of a large file is not worth the IPC.
     // The cap matches the schema's.
-    this.sendFileEditFrame(taskId, turnId, path, safeText, options, null);
+    this.sendFileEditFrame(taskId, turnId, root.rootId, root.label, path, safeText, options, null);
     // The baseline can require a git call, so it is never waited for: the text goes out now and the
     // frame that carries the diff follows when there is one. Frames are cumulative, so the view
     // simply gains its diff. Only for a settled body — a diff recomputed against a half-written file
     // would show every unfinished line as a change.
     if (!options.complete) return;
-    const baselines = this.baselinesByTurn.get(turnId);
+    const baselines = this.baselinesByTurn.get(turnId)?.get(root.rootId);
     if (baselines === undefined) return;
     void baselines
       .get(path)
       .then((baseline) => {
         // Nothing to compare against, or the file is unchanged: no second frame, no wasted repaint.
         if (baseline === null || baseline === safeText) return;
-        this.sendFileEditFrame(taskId, turnId, path, safeText, options, baseline);
+        this.sendFileEditFrame(
+          taskId,
+          turnId,
+          root.rootId,
+          root.label,
+          path,
+          safeText,
+          options,
+          baseline,
+        );
       })
       .catch(() => undefined);
   }
@@ -3483,6 +3538,8 @@ export class IpcRouter {
   private sendFileEditFrame(
     taskId: string,
     turnId: string,
+    rootId: string,
+    rootLabel: string,
     path: string,
     text: string,
     options: { complete: boolean; source: 'stream' | 'disk' },
@@ -3494,6 +3551,8 @@ export class IpcRouter {
       fileEditFrameSchema.parse({
         taskId,
         turnId,
+        rootId,
+        rootLabel,
         path,
         text,
         complete: options.complete,
@@ -3519,15 +3578,31 @@ export class IpcRouter {
     turnId: string,
     changes: readonly { path: string; kind: 'add' | 'update' | 'delete' }[],
   ): void {
-    const workspacePath = this.persistence.getWorkspace(taskId);
-    if (workspacePath === null) return;
-    const inside: FileChange[] = [];
+    const workspace = this.turnWorkspaceByTurn.get(turnId);
+    if (workspace === undefined) return;
+    const inside: Array<FileChange & { rootPath: string }> = [];
     for (const change of changes) {
-      const path = relativizeWorkspacePath(workspacePath, change.path, resolvePath, relativePath);
-      if (path !== null) inside.push({ path, kind: change.kind });
+      const rooted = resolveTurnRootedPath(workspace, change.path);
+      if (rooted !== null)
+        inside.push({
+          path: rooted.path,
+          kind: change.kind,
+          rootId: rooted.root.rootId,
+          rootLabel: rooted.root.label,
+          rootPath: rooted.root.path,
+        });
     }
     if (inside.length === 0) return;
-    const event = this.persistence.recordFileChanges({ taskId, turnId, changes: inside });
+    const event = this.persistence.recordFileChanges({
+      taskId,
+      turnId,
+      changes: inside.map(({ rootId, rootLabel, path, kind }) => ({
+        rootId,
+        rootLabel,
+        path,
+        kind,
+      })),
+    });
     if (event !== null) this.publish(event);
     // Codex reports no body at all while it writes (verified on 0.144.4: `file_change` carries only
     // path and kind, and apply_patch writes to a temp file and renames, so there is nothing to tail
@@ -3537,10 +3612,10 @@ export class IpcRouter {
     // same bytes.
     for (const change of inside) {
       if (change.kind === 'delete') continue;
-      if (this.fileEditByKey.has(`${turnId}\u0000${change.path}`)) continue;
-      const body = readWorkspaceTextFile(workspacePath, change.path);
+      if (this.fileEditByKey.has(`${turnId}\u0000${change.rootId}\u0000${change.path}`)) continue;
+      const body = readWorkspaceTextFile(change.rootPath, change.path);
       if (body !== null)
-        this.pushFileEdit(taskId, turnId, resolvePath(workspacePath, change.path), body, {
+        this.pushFileEdit(taskId, turnId, resolvePath(change.rootPath, change.path), body, {
           complete: true,
           source: 'disk',
         });
@@ -3914,6 +3989,59 @@ function workspaceValue(path: string | null): { path: string; name: string } | n
   return path === null ? null : { path, name: basename(path) || path };
 }
 
+function primaryWorkspacePath(workspace: EffectiveWorkspaceSet): string | null {
+  return workspace.roots.find(({ rootId }) => rootId === workspace.primaryRootId)?.path ?? null;
+}
+
+export function resolveEffectiveWorkspaceRoot(
+  workspace: EffectiveWorkspaceSet,
+  requestedRootId: string,
+): EffectiveWorkspaceSet['roots'][number] | null {
+  const rootId = requestedRootId === 'legacy-primary' ? workspace.primaryRootId : requestedRootId;
+  if (rootId === null) return null;
+  return workspace.roots.find((root) => root.rootId === rootId) ?? null;
+}
+
+function toRuntimeWorkspaceSet(workspace: EffectiveWorkspaceSet): RuntimeWorkspaceSet {
+  return {
+    primaryRootId: workspace.primaryRootId,
+    roots: workspace.roots.map(({ rootId, path, label, role }) => ({
+      rootId,
+      path,
+      label,
+      role,
+    })),
+    digest: workspace.digest,
+  };
+}
+
+function resolveTurnRootedPath(
+  workspace: EffectiveWorkspaceSet,
+  absolutePath: string,
+): { root: EffectiveWorkspaceSet['roots'][number]; path: string } | null {
+  for (const root of workspace.roots) {
+    const path = relativizeWorkspacePath(root.path, absolutePath, resolvePath, relativePath);
+    if (path !== null) return { root, path };
+  }
+  return null;
+}
+
+export async function verifyTurnWorkspaceIdentities(
+  workspace: EffectiveWorkspaceSet,
+  expected: ReadonlyMap<string, string>,
+  resolveIdentity: (
+    path: string,
+  ) => Promise<{ rootIdentityDigest: string }> = workspaceMutationBinding,
+): Promise<void> {
+  if (expected.size !== workspace.roots.length)
+    throw new Error('Turn Workspace snapshot identity set is incomplete');
+  for (const root of workspace.roots) {
+    const binding = await resolveIdentity(root.path);
+    if (binding.rootIdentityDigest !== expected.get(root.rootId))
+      throw new Error('Turn Workspace root identity changed');
+  }
+}
+
 async function canonicalProjectFolderBindings(
   folders: readonly ProjectFolderInput[],
 ): Promise<ProjectFolderBinding[]> {
@@ -4002,13 +4130,6 @@ function toPublicError(error: unknown): PublicError {
       code: 'OPERATION_CONFLICT',
       userMessage: '実行中または復旧中の作業があるため、Projectのフォルダを変更できません。',
       retryable: true,
-    };
-  if (error instanceof ProjectWorkspaceRuntimeUnavailableError)
-    return {
-      code: 'RUNTIME_UNAVAILABLE',
-      userMessage:
-        'このバージョンではProjectフォルダを使うTurnをまだ開始できません。multi-root runtime対応版へ更新してください。',
-      retryable: false,
     };
   if (error instanceof ProjectArchivedError)
     return {

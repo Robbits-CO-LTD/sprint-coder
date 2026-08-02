@@ -2994,6 +2994,8 @@ export type StartedTurn = {
   event: TurnEvent;
   sealId: string;
   contextUsageEvents: TurnEvent[];
+  /** Immutable Workspace roots sealed in the same transaction as the Turn. */
+  workspaceSet: EffectiveWorkspaceSet;
   /** Present only when this Turn's message triggered automatic naming (issue #4), so the caller
    * can push the new title to the renderer without a dedicated event. */
   renamedTask?: TaskSummary;
@@ -3346,6 +3348,7 @@ export interface PersistenceClient {
   listProjectFolders(projectId: string): ProjectFolder[];
   getProjectFolderRootIdentities(projectId: string): ReadonlyMap<string, string>;
   getEffectiveWorkspaceRootIdentities(taskId: string): ReadonlyMap<string, string>;
+  getTurnWorkspaceRootIdentities(turnId: string): ReadonlyMap<string, string>;
   replaceProjectFolders(input: {
     projectId: string;
     expectedRevision: number;
@@ -4014,7 +4017,13 @@ export interface PersistenceClient {
     turnId: string;
     changes: FileChange[];
   }): TurnEvent | null;
-  recordUserFileSave(input: { taskId: string; path: string; byteLength: number }): TurnEvent;
+  recordUserFileSave(input: {
+    taskId: string;
+    rootId: string;
+    rootLabel: string;
+    path: string;
+    byteLength: number;
+  }): TurnEvent;
   listGeneratedImages(taskId: string): GeneratedImage[];
   listFileChanges(taskId: string): FileChangeRecord[];
   readGeneratedImage(imageId: string): { image: GeneratedImage; bytes: Buffer } | null;
@@ -4722,6 +4731,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
         rootId,
         rootIdentityDigest,
       ]),
+    );
+  }
+
+  getTurnWorkspaceRootIdentities(turnId: string): ReadonlyMap<string, string> {
+    return new Map(
+      (
+        this.db
+          .prepare(
+            `SELECT root_id, root_identity_digest
+             FROM turn_workspace_roots WHERE turn_id = ? ORDER BY ordinal`,
+          )
+          .all(turnId) as { root_id: string; root_identity_digest: string }[]
+      ).map((root) => [root.root_id, root.root_identity_digest]),
     );
   }
 
@@ -11555,10 +11577,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * human's edit into it would make the timeline assert that the model wrote something it did not,
    * and the timeline is read as a record of fact.
    */
-  recordUserFileSave(input: { taskId: string; path: string; byteLength: number }): TurnEvent {
+  recordUserFileSave(input: {
+    taskId: string;
+    rootId: string;
+    rootLabel: string;
+    path: string;
+    byteLength: number;
+  }): TurnEvent {
     return this.appendEvent({
       type: 'file.saved',
       taskId: input.taskId,
+      rootId: input.rootId,
+      rootLabel: input.rootLabel,
       path: input.path,
       byteLength: input.byteLength,
     });
@@ -12122,9 +12152,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
     skills: readonly PersistedTurnSkill[] = [],
     includeBuiltinTeamSkill = false,
   ): StartedTurn {
-    const effectiveWorkspace = this.getEffectiveWorkspaceSet(taskId);
-    if (effectiveWorkspace.source === 'project' && effectiveWorkspace.roots.length > 0)
-      throw new ProjectWorkspaceRuntimeUnavailableError();
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
@@ -12206,6 +12233,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const renamedTask = this.autoNameTaskInTransaction(taskId, text, now);
     const prepared = this.assembleContextInTransaction(taskId, turnId, shouldSealBuiltinTeamSkill);
     const seal = this.createContextSealInTransaction('turn', turnId, taskId, prepared);
+    const workspaceSet = this.sealTurnWorkspaceSet(taskId, turnId);
     return {
       turnId,
       text,
@@ -12217,6 +12245,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       event,
       sealId: seal.sealId,
       contextUsageEvents: prepared.usageEvents,
+      workspaceSet,
       ...(renamedTask === null ? {} : { renamedTask }),
     };
   }
@@ -13192,7 +13221,6 @@ export class TaskAssignmentBlockedError extends Error {}
 export class ReferenceInUseError extends Error {}
 export class InvalidProjectError extends Error {}
 export class ProjectFolderMutationBlockedError extends Error {}
-export class ProjectWorkspaceRuntimeUnavailableError extends Error {}
 export class InvalidCanvasViewError extends Error {}
 export class CanvasViewConflictError extends Error {}
 export class AcceptanceEvidenceMissingError extends Error {

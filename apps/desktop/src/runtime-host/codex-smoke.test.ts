@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -114,6 +114,42 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
     ).toBe(true);
     expect(events.at(-1)).toMatchObject({ type: 'completed' });
   }, 60_000);
+
+  it('reads and writes both roots through the experimental app-server Workspace set', async () => {
+    const primary = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-primary-'));
+    const secondary = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-secondary-'));
+    cleanupDirs.push(primary, secondary);
+    const adapter = new CodexRuntimeAdapter();
+    const failures: PublicError[] = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'codex-smoke-multi-root',
+        `Use shell commands to write exactly "primary-ok" to ${join(primary, 'result.txt')} and exactly "secondary-ok" to ${join(secondary, 'result.txt')}. Do not modify any other file.`,
+        [],
+        () => undefined,
+        {
+          primaryRootId: 'primary',
+          roots: [
+            { rootId: 'primary', path: primary, label: 'primary', role: 'primary' },
+            { rootId: 'secondary', path: secondary, label: 'secondary', role: 'secondary' },
+          ],
+          digest: 'a'.repeat(64),
+        },
+        'auto',
+        () => undefined,
+        (error) => failures.push(error),
+        () => resolve(),
+        undefined,
+        undefined,
+        'workspace-write',
+      );
+    });
+
+    expect(failures).toEqual([]);
+    expect(readFileSync(join(primary, 'result.txt'), 'utf8')).toBe('primary-ok');
+    expect(readFileSync(join(secondary, 'result.txt'), 'utf8')).toBe('secondary-ok');
+  }, 120_000);
 
   // issue #11: proves the whole image path against the real CLI — that `$imagegen` runs, that the
   // adapter surfaces the thread id, and that the file the CLI wrote is findable from that id alone.

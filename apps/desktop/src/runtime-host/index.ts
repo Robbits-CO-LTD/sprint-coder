@@ -45,7 +45,7 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
           acceptedProjectSnapshotDigest: data.projectSnapshotDigest,
           acceptedPayloadDigest: data.payloadDigest,
         }),
-      data.workspacePath,
+      data.workspace,
       data.model,
       (event) => send(data.taskId, data.turnId, data.operationId, { type: 'event', event }),
       (error) => send(data.taskId, data.turnId, data.operationId, { type: 'error', error }),

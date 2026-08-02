@@ -13,6 +13,8 @@ import { changedLineIndices } from './changed-lines';
 
 export type LiveFileEdit = {
   turnId: string;
+  rootId: string;
+  rootLabel: string;
   path: string;
   text: string;
   complete: boolean;
@@ -48,10 +50,12 @@ export function applyFileEditFrame(frame: FileEditFrame): void {
     byKey.clear();
     currentTaskId = frame.taskId;
   }
-  const key = `${frame.turnId} ${frame.path}`;
+  const key = `${frame.turnId} ${frame.rootId} ${frame.path}`;
   const existing = byKey.get(key);
   byKey.set(key, {
     turnId: frame.turnId,
+    rootId: frame.rootId,
+    rootLabel: frame.rootLabel,
     path: frame.path,
     text: frame.text,
     complete: frame.complete,

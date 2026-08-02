@@ -10,7 +10,6 @@ import {
   ProjectArchivedError,
   ProjectConflictError,
   ProjectFolderMutationBlockedError,
-  ProjectWorkspaceRuntimeUnavailableError,
   ReferenceInUseError,
   SqlitePersistenceClient,
   TaskAssignmentBlockedError,
@@ -332,10 +331,16 @@ if (runsWithElectronAbi)
           expect.objectContaining({ rootId: secondaryId, path: '/tmp/project-root-b' }),
         ],
       });
-      expect(() => persistence.startTurn(task.id, 'must not use the legacy runtime')).toThrow(
-        ProjectWorkspaceRuntimeUnavailableError,
-      );
-      expect(persistence.listMessages(task.id)).toEqual([]);
+      const started = persistence.startTurn(task.id, 'use the sealed multi-root runtime');
+      expect(started.workspaceSet).toMatchObject({
+        source: 'project',
+        primaryRootId: primaryId,
+        roots: [
+          expect.objectContaining({ rootId: primaryId }),
+          expect.objectContaining({ rootId: secondaryId }),
+        ],
+      });
+      expect(persistence.readTurnWorkspaceSet(started.turnId)).toEqual(started.workspaceSet);
       persistence.close();
     });
 

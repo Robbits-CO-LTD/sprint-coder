@@ -50,25 +50,26 @@ export function summarizeRuntimeChanges(
   const order: string[] = [];
   for (const record of records) {
     for (const change of record.changes) {
-      if (!latestByPath.has(change.path)) order.push(change.path);
-      latestByPath.set(change.path, change);
+      const key = `${change.rootId}\u0000${change.path}`;
+      if (!latestByPath.has(key)) order.push(key);
+      latestByPath.set(key, change);
     }
   }
   if (order.length === 0) return null;
 
-  const editByPath = new Map(
+  const editByPath = new Map<string, LiveFileEdit>(
     liveEdits
       .filter((edit) => edit.turnId === turnId && edit.complete)
-      .map((edit) => [edit.path, edit] as const),
+      .map((edit) => [`${edit.rootId}\u0000${edit.path}`, edit] as const),
   );
   let added = 0;
   let deleted = 0;
   let incomplete = false;
 
-  const entries = order.flatMap((path, index) => {
-    const change = latestByPath.get(path);
+  const entries = order.flatMap((key, index) => {
+    const change = latestByPath.get(key);
     if (change === undefined) return [];
-    const edit = editByPath.get(path);
+    const edit = editByPath.get(key);
     if (change.kind === 'add' && edit !== undefined) {
       const stats = changedLineStats('', edit.text);
       if (stats === null) incomplete = true;
@@ -92,7 +93,7 @@ export function summarizeRuntimeChanges(
       {
         ordinal: index + 1,
         kind: change.kind,
-        path: change.path,
+        path: `${change.rootLabel} › ${change.path}`,
         destination: null,
         preHash: null,
         postHash: null,
