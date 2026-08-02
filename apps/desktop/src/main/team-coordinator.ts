@@ -2697,6 +2697,11 @@ export class TeamCoordinator {
     if (existing !== null) {
       if (existing.phase !== 'preparing' && existing.phase !== 'running')
         throw new Error(`Team execution isolation cannot run from ${existing.phase}`);
+      this.persistence.acquireTeamIntegrationRootLeases({
+        executionId,
+        roots: existing.roots,
+        now: this.isoNow(),
+      });
       return existing.phase === 'running'
         ? existing
         : this.persistence.updateTeamExecutionIsolation({
@@ -2712,6 +2717,20 @@ export class TeamCoordinator {
     const bindings = this.persistence.getEffectiveWorkspaceMutationBindings(taskId);
     const created: { repository: CleanRepository; ordinal: number; path: string }[] = [];
     try {
+      this.persistence.acquireTeamIntegrationRootLeases({
+        executionId,
+        roots: workspace.roots.map((root) => {
+          const binding = bindings.get(root.rootId);
+          if (binding === undefined)
+            throw new Error(`Workspace root mutation binding is unavailable: ${root.label}`);
+          return {
+            rootId: root.rootId,
+            mutationKey: binding.workspaceKey,
+            identity: binding.rootIdentityDigest,
+          };
+        }),
+        now: this.isoNow(),
+      });
       for (const [index, repository] of repositories.entries()) {
         const ordinal = index + 1;
         const worktree = await this.worktreeManager.create({
@@ -2787,6 +2806,7 @@ export class TeamCoordinator {
             repoPath: item.repository.repoPath,
           })
           .catch(() => undefined);
+      this.persistence.releaseTeamIntegrationRootLeases(executionId);
       throw error;
     }
   }

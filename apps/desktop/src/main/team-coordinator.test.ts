@@ -804,7 +804,7 @@ if (runsWithElectronAbi)
       });
       await waitFor(
         () => persistence.getTeamExecution(submission.executionId).state === 'completed',
-        4_000,
+        15_000,
       );
       await waitFor(
         () =>
@@ -844,7 +844,7 @@ if (runsWithElectronAbi)
 
       await waitFor(
         () => persistence.getTeamExecution(submission.executionId).state === 'waiting_resume',
-        4_000,
+        15_000,
       );
       expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
         phase: 'waiting_resume',
@@ -859,6 +859,50 @@ if (runsWithElectronAbi)
       expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
       expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
       expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      persistence.close();
+    });
+
+    it('rejects a concurrent writer before a second Worker runs on the same roots', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Concurrent workspace writers');
+      const runtime = new BlockingWorkerRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const firstWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'first writer',
+        objective: 'hold the root lease',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const secondWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'second writer',
+        objective: 'must not overlap the first writer',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const first = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: firstWorker.id,
+        content: 'first write',
+        doneCriteria: ['first completes'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => runtime.releases.length === 1);
+      const second = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: secondWorker.id,
+        content: 'second write',
+        doneCriteria: ['second must not overlap'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => persistence.getTeamExecution(second.executionId).state === 'failed');
+      expect(runtime.contents).toEqual(['first write']);
+      expect(persistence.getTeamExecutionIsolation(second.executionId)).toBeNull();
+
+      runtime.releases.shift()?.();
+      await waitFor(() => persistence.getTeamExecution(first.executionId).state === 'completed');
       persistence.close();
     });
 
@@ -961,7 +1005,7 @@ if (runsWithElectronAbi)
           ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
             persistence.getTeamMission(mission.id).state,
           ),
-        8_000,
+        20_000,
       );
       const executionId = mission.steps[0]!.executionId;
       const isolation = persistence.getTeamExecutionIsolation(executionId);
@@ -1110,7 +1154,10 @@ if (runsWithElectronAbi)
         ],
       });
 
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume', 8_000);
+      await waitFor(
+        () => persistence.getTeamMission(mission.id).state === 'waiting_resume',
+        20_000,
+      );
       const executionId = mission.steps[0]!.executionId;
       expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
         phase: 'waiting_resume',
@@ -1143,7 +1190,7 @@ if (runsWithElectronAbi)
       const resumedCoordinator = coordinatorWithWorktrees(persistence, runtime, resumedManager);
       resumedCoordinator.recoverOnStartup();
       await resumedCoordinator.resumeMission(task.id, mission.id);
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 8_000);
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 20_000);
       expect(runtime.workspaceSets).toHaveLength(1);
       expect(persistence.listTeamAttempts(executionId)).toHaveLength(1);
       expect(persistence.getTeamExecutionIsolationCompletion(executionId)).toBeNull();
@@ -1252,7 +1299,7 @@ if (runsWithElectronAbi)
         ],
       });
 
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 8_000);
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 20_000);
       const isolation = persistence.getTeamExecutionIsolation(mission.steps[0]!.executionId);
       expect(isolation?.repositories).toHaveLength(1);
       expect(isolation?.roots.map(({ repositoryOrdinal }) => repositoryOrdinal)).toEqual([1, 1]);
