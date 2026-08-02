@@ -1,4 +1,5 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -96,6 +97,33 @@ describe('Windows ACL runner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
+    'releases the interprocess ACL lock when its Node owner is terminated',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-owner-exit-'));
+      cleanup.push(root);
+      const path = join(root, 'private.txt');
+      await writeFile(path, 'private');
+      const viteNode = resolve(process.cwd(), '../../node_modules/vite-node/vite-node.mjs');
+      const fixture = resolve(process.cwd(), 'src/main/windows-acl-process-fixture.ts');
+      const child = spawn(process.execPath, [viteNode, fixture, '--hold-lock'], {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+
+      try {
+        await waitForLockReady(child.stdout);
+        child.kill('SIGKILL');
+        await once(child, 'exit');
+        await secureWindowsPath(path, 'file');
+        await verifyWindowsPathAcl(path, 'file');
+      } finally {
+        if (child.exitCode === null) child.kill('SIGKILL');
+      }
+    },
+    WINDOWS_ACL_TIMEOUT_MS + 10_000,
+  );
+
+  it.runIf(process.platform === 'win32')(
     'isolates a failing coalesced request from an unrelated valid request',
     async () => {
       const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-isolation-'));
@@ -114,3 +142,21 @@ describe('Windows ACL runner', () => {
     },
   );
 });
+
+async function waitForLockReady(stdout: NodeJS.ReadableStream): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error('ACL lock fixture did not become ready')),
+      WINDOWS_ACL_TIMEOUT_MS,
+    );
+    stdout.on('data', (chunk: Buffer) => {
+      if (!chunk.toString('utf8').includes('locked')) return;
+      clearTimeout(timer);
+      resolve();
+    });
+    stdout.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}

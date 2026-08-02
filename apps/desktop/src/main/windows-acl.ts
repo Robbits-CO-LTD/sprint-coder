@@ -1,11 +1,14 @@
 import { spawn } from 'node:child_process';
-import { mkdir, rmdir, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { windowsPowerShellCommand } from './windows-powershell';
 
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
-const ACL_PROCESS_LOCK = join(tmpdir(), 'sprint-coder-windows-acl.lock');
+const ACL_PROCESS_LOCK = `\\\\.\\pipe\\sprint-coder-windows-acl-${createHash('sha256')
+  .update(process.env['USERPROFILE'] ?? tmpdir())
+  .digest('hex')
+  .slice(0, 32)}`;
 // Keep the subprocess deadline below Vitest's 20 second integration-test ceiling while allowing
 // for PowerShell startup contention on two-core Windows runners. The previous 10 second deadline
 // expired when several ACL-backed stores were exercised in parallel, even though the commands
@@ -169,7 +172,7 @@ async function runAclBatch(
   operation: AclOperation,
 ): Promise<void> {
   const encodedItems = Buffer.from(JSON.stringify(paths), 'utf8').toString('base64');
-  const releaseProcessLock = await acquireAclProcessLock();
+  const releaseProcessLock = await acquireWindowsAclProcessLock();
   try {
     await new Promise<void>((resolve, reject) => {
       const child = spawn(POWERSHELL, windowsPowerShellCommand(secureAclScript), {
@@ -220,28 +223,16 @@ async function runAclBatch(
   }
 }
 
-async function acquireAclProcessLock(): Promise<() => Promise<void>> {
+/** @internal Exported so the crash-recovery behavior can be exercised by a child-process test. */
+export async function acquireWindowsAclProcessLock(): Promise<() => Promise<void>> {
   const deadline = Date.now() + WINDOWS_ACL_TIMEOUT_MS;
   while (true) {
+    const server = createServer((socket) => socket.destroy());
     try {
-      await mkdir(ACL_PROCESS_LOCK);
-      return async () => {
-        await removeAclProcessLock();
-      };
+      await listenOnAclLock(server);
+      return () => closeAclLock(server);
     } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
-      try {
-        const lockStat = await stat(ACL_PROCESS_LOCK);
-        // A killed test worker cannot release its directory. Reap only well beyond the maximum
-        // child deadline, so a live ACL operation is never unlocked underneath another process.
-        if (Date.now() - lockStat.mtimeMs > WINDOWS_ACL_TIMEOUT_MS * 2) {
-          await removeAclProcessLock();
-          continue;
-        }
-      } catch (statError) {
-        if (!isNotFound(statError)) throw statError;
-        continue;
-      }
+      if (!isAddressInUse(error)) throw error;
       if (Date.now() >= deadline) {
         throw new Error('Windows ACL process lock timed out', { cause: error });
       }
@@ -250,20 +241,28 @@ async function acquireAclProcessLock(): Promise<() => Promise<void>> {
   }
 }
 
-async function removeAclProcessLock(): Promise<void> {
-  try {
-    await rmdir(ACL_PROCESS_LOCK);
-  } catch (error) {
-    if (!isNotFound(error)) throw error;
-  }
+async function listenOnAclLock(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => reject(error);
+    server.once('error', onError);
+    server.listen(ACL_PROCESS_LOCK, () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
 }
 
-function isAlreadyExists(error: unknown): boolean {
-  return error instanceof Error && 'code' in error && error.code === 'EEXIST';
+async function closeAclLock(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error === undefined) resolve();
+      else reject(error);
+    });
+  });
 }
 
-function isNotFound(error: unknown): boolean {
-  return error instanceof Error && 'code' in error && error.code === 'ENOENT';
+function isAddressInUse(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'EADDRINUSE';
 }
 
 function aclBatches(paths: readonly WindowsAclPath[]): WindowsAclPath[][] {
