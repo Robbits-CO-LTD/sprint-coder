@@ -26,6 +26,7 @@ const fileSystemFault = vi.hoisted(() => ({
   failWriteAtCall: null as number | null,
   failWriteAtCalls: [] as number[],
   writeCalls: 0,
+  corruptAfterWriteCall: null as number | null,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -40,7 +41,13 @@ vi.mock('node:fs', async (importOriginal) => {
         fileSystemFault.failWriteAtCalls.includes(fileSystemFault.writeCalls)
       )
         throw new Error('simulated disk write failure');
-      return actual.writeSync(...args);
+      const written = actual.writeSync(...args);
+      if (fileSystemFault.writeCalls === fileSystemFault.corruptAfterWriteCall) {
+        const descriptor = args[0];
+        actual.ftruncateSync(descriptor, 0);
+        actual.writeSync(descriptor, Buffer.from('external concurrent edit\n'), 0, 25, 0);
+      }
+      return written;
     },
   };
 });
@@ -261,6 +268,34 @@ describe('saveWorkspaceFile (issue #43)', () => {
     }
     expect(readFileSync(file)).toEqual(original);
     expect(readdirSync(root)).toEqual(['important.txt']);
+  });
+
+  it('does not report success or delete recovery when another writer interleaves', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    const original = Buffer.from('original\n', 'utf8');
+    writeFileSync(file, original);
+    fileSystemFault.writeCalls = 0;
+    fileSystemFault.corruptAfterWriteCall = 3;
+    try {
+      const result = saveWorkspaceFile(
+        root,
+        'important.txt',
+        'replacement\n',
+        createHash('sha256').update(original).digest('hex'),
+      );
+      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+    } finally {
+      fileSystemFault.corruptAfterWriteCall = null;
+      fileSystemFault.writeCalls = 0;
+    }
+
+    expect(readFileSync(file, 'utf8')).toBe('external concurrent edit\n');
+    expect(readFileSync(`${file}.sprint-coder-recovery.tmp`)).toEqual(original);
+    expect(openWorkspaceFileForEdit(root, 'important.txt')).toMatchObject({
+      editable: false,
+      reason: 'recovery_required',
+    });
   });
 
   it('keeps an untouched recovery copy when publishing and rollback both fail', () => {

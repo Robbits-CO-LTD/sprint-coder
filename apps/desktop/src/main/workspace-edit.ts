@@ -269,6 +269,22 @@ export function saveWorkspaceFile(
 
     targetMutationStarted = true;
     replaceDescriptorContents(descriptor, bytes);
+    try {
+      const publishedStat = fstatSync(descriptor, { bigint: true });
+      const published = readDescriptor(descriptor, Number(publishedStat.size));
+      if (digestOf(published) !== digestOf(bytes)) {
+        // Another writer interleaved with publication. Its bytes are ambiguous, so never call this
+        // save successful and never overwrite them during automatic rollback. Keep the durable
+        // transaction for the explicit recovery UI instead.
+        preserveRecoveryCopy = true;
+        targetMutationStarted = false;
+        return refuse('io_error');
+      }
+    } catch {
+      preserveRecoveryCopy = true;
+      targetMutationStarted = false;
+      return refuse('io_error');
+    }
     targetMutationStarted = false;
     return { outcome: 'saved', digest: digestOf(bytes), reason: null };
   } catch {
