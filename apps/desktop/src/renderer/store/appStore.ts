@@ -1120,6 +1120,7 @@ export const useAppStore = create<AppState>((set, get) => {
               : state.permissionByTask,
         }));
       } catch (err) {
+        const userCanceled = errorCode(err) === 'USER_CANCELED';
         let restored = previous;
         try {
           restored = await window.sprintCoder.permissions.get(taskId);
@@ -1132,7 +1133,7 @@ export const useAppStore = create<AppState>((set, get) => {
             state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
               ? { ...state.permissionByTask, [taskId]: restored }
               : state.permissionByTask,
-          error: describeError(err),
+          ...(userCanceled ? {} : { error: describeError(err) }),
         }));
       }
     },
