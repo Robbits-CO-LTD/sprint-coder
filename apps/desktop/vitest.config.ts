@@ -1,10 +1,5 @@
 import { defineConfig } from 'vitest/config';
 
-// Worker processes inherit this run-scoped id. ACL integration tests use it to serialize the real
-// Windows PowerShell host across Vitest workers, rather than merely inside one isolated module.
-if (process.platform === 'win32')
-  process.env['SPRINT_CODER_ACL_LOCK_ID'] ??= process.env['GITHUB_RUN_ID'] ?? String(process.pid);
-
 // Only the timeouts are configured here; everything else stays on Vitest's defaults.
 //
 // Vitest's default 5s per-test timeout is written for pure unit tests. A large part of this
@@ -25,7 +20,8 @@ export default defineConfig({
     // The Windows suite launches real Electron, PowerShell, cmd, Git, and SQLite child processes.
     // Letting Vitest derive a larger worker count from the host causes those processes to contend
     // until otherwise healthy ACL checks hit their bounded deadline on two-core CI runners. Keep
-    // two-way parallelism on Windows; other platforms retain Vitest's automatic worker count.
-    ...(process.platform === 'win32' ? { maxWorkers: 2 } : {}),
+    // one worker on Windows so PowerShell-backed ACL tests still run as part of the complete suite
+    // without competing hosts; other platforms retain Vitest's automatic worker count.
+    ...(process.platform === 'win32' ? { maxWorkers: 1 } : {}),
   },
 });

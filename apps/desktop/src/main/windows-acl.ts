@@ -1,7 +1,4 @@
 import { execFile } from 'node:child_process';
-import { closeSync, constants, openSync, unlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 // Keep the subprocess deadline below Vitest's 20 second integration-test ceiling while allowing
@@ -146,44 +143,7 @@ async function executeAcl(
       paths.map((item) => [`${item.kind}:${item.path.toLocaleLowerCase('en-US')}`, item]),
     ).values(),
   ];
-  await withAclProcessLock(async () => {
-    for (const batch of aclBatches(unique)) await runAclBatch(batch, operation);
-  });
-}
-
-async function withAclProcessLock<T>(action: () => Promise<T>): Promise<T> {
-  const id = process.env['SPRINT_CODER_ACL_LOCK_ID'];
-  if (id === undefined || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return action();
-  const lockPath = join(tmpdir(), `sprint-coder-windows-acl-${id}.lock`);
-  const deadline = Date.now() + WINDOWS_ACL_TIMEOUT_MS;
-  let descriptor: number | null = null;
-  while (descriptor === null) {
-    try {
-      descriptor = openSync(
-        lockPath,
-        constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
-        0o600,
-      );
-    } catch (error) {
-      if (!isAlreadyExists(error) || Date.now() >= deadline) throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  try {
-    return await action();
-  } finally {
-    closeSync(descriptor);
-    unlinkSync(lockPath);
-  }
-}
-
-function isAlreadyExists(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: unknown }).code === 'EEXIST'
-  );
+  for (const batch of aclBatches(unique)) await runAclBatch(batch, operation);
 }
 
 async function runAclBatch(
