@@ -31,7 +31,7 @@ export function ContextBar({ taskId }: { taskId: string }) {
       {(!projectMultiFolderUx || task?.projectId === null) && (
         <WorkspaceChip taskId={taskId} variant="context" />
       )}
-      <FileEditorDialog taskId={taskId} hasWorkspace={hasWorkspace} />
+      <FileEditorDialog key={taskId} taskId={taskId} hasWorkspace={hasWorkspace} />
       <span className="ctx-spacer" />
       <ContextUsageChip taskId={taskId} />
     </div>

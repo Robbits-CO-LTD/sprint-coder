@@ -24,7 +24,7 @@ export function FileEditorDialog({
   const [originalLineEndings, setOriginalLineEndings] = useState<LineEnding[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [pendingDiscard, setPendingDiscard] = useState<'close' | 'reload' | null>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const filesApi = typeof window !== 'undefined' ? window.sprintCoder?.files : undefined;
   const supported = typeof filesApi?.pick === 'function';
@@ -64,7 +64,7 @@ export function FileEditorDialog({
     setLineEnding(dominantLineEnding(endings));
     setDraft(result.text.replaceAll('\r\n', '\n'));
     setMessage('読み込みました');
-    setConfirmDiscard(false);
+    setPendingDiscard(null);
   }
 
   async function reload(): Promise<void> {
@@ -79,6 +79,11 @@ export function FileEditorDialog({
     } finally {
       setBusy(false);
     }
+  }
+
+  function requestReload(): void {
+    if (dirty) setPendingDiscard('reload');
+    else void reload();
   }
 
   async function save(): Promise<void> {
@@ -114,7 +119,7 @@ export function FileEditorDialog({
   }
 
   function requestClose(): void {
-    if (dirty) setConfirmDiscard(true);
+    if (dirty) setPendingDiscard('close');
     else close();
   }
 
@@ -122,7 +127,7 @@ export function FileEditorDialog({
     setOpened(null);
     setDraft('');
     setOriginalLineEndings([]);
-    setConfirmDiscard(false);
+    setPendingDiscard(null);
     setMessage('');
   }
 
@@ -190,7 +195,7 @@ export function FileEditorDialog({
                 <span role="status" aria-live="polite">
                   {message || (dirty ? '未保存' : '保存済み')}
                 </span>
-                <button type="button" onClick={() => void reload()} disabled={busy}>
+                <button type="button" onClick={requestReload} disabled={busy}>
                   再読み込み
                 </button>
                 <button
@@ -202,14 +207,24 @@ export function FileEditorDialog({
                   保存
                 </button>
               </footer>
-              {confirmDiscard && (
+              {pendingDiscard !== null && (
                 <div className="file-editor-discard" role="alert">
-                  <span>未保存の変更を破棄しますか？</span>
-                  <button type="button" onClick={() => setConfirmDiscard(false)}>
+                  <span>
+                    未保存の変更を破棄して
+                    {pendingDiscard === 'reload' ? '再読み込みしますか？' : '閉じますか？'}
+                  </span>
+                  <button type="button" onClick={() => setPendingDiscard(null)}>
                     編集に戻る
                   </button>
-                  <button type="button" className="danger" onClick={close}>
-                    破棄して閉じる
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => {
+                      if (pendingDiscard === 'reload') void reload();
+                      else close();
+                    }}
+                  >
+                    破棄して{pendingDiscard === 'reload' ? '再読み込み' : '閉じる'}
                   </button>
                 </div>
               )}

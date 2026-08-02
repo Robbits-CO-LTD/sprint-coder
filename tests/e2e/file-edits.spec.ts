@@ -126,8 +126,15 @@ test.describe('file edits', () => {
     ).toBe(true);
 
     const save = editor.getByRole('button', { name: '保存' });
-    await editor.getByRole('textbox', { name: /の内容$/ }).fill('日本語の編集\n複数行');
+    const textbox = editor.getByRole('textbox', { name: /の内容$/ });
+    await textbox.fill('日本語の編集\n複数行');
     await expect(save).toBeEnabled();
+    await editor.getByRole('button', { name: '再読み込み' }).click();
+    const discard = editor.getByRole('alert');
+    await expect(discard).toContainText('未保存の変更を破棄して再読み込みしますか？');
+    await expect(textbox).toHaveValue('日本語の編集\n複数行');
+    await discard.getByRole('button', { name: '編集に戻る' }).click();
+    await expect(discard).toHaveCount(0);
     await save.click();
     await expect(editor.getByRole('status')).toHaveText('保存しました');
   });
