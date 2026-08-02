@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -9,11 +9,14 @@ import {
   OperationConflictError,
   ProjectArchivedError,
   ProjectConflictError,
+  ProjectFolderMutationBlockedError,
+  ReferenceInUseError,
   SqlitePersistenceClient,
   TaskAssignmentBlockedError,
   TurnActiveError,
 } from './persistence';
 import { electronTestExecutablePath } from './electron-test-runtime';
+import { workspaceMutationBinding } from './path-guard';
 
 const directories: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -29,6 +32,18 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
   directories.push(directory);
   const path = join(directory, 'sprint-coder.sqlite3');
   return { persistence: new SqlitePersistenceClient(path), path };
+}
+
+function folderBinding(path: string, role: 'primary' | 'secondary', identity: string, id?: string) {
+  return {
+    ...(id === undefined ? {} : { id }),
+    path,
+    canonicalPath: path,
+    label: path.split('/').at(-1) ?? path,
+    role,
+    workspaceKey: identity.repeat(64),
+    rootIdentityDigest: identity.repeat(64),
+  };
 }
 
 if (runsWithElectronAbi)
@@ -114,6 +129,88 @@ if (runsWithElectronAbi)
       migrated.close();
     });
 
+    it('migrates a v59 Project without inferring roots and preserves its legacy Task Workspace', () => {
+      const { persistence, path } = createPersistence();
+      const project = persistence.createProject('v59 Project');
+      const task = persistence.createTask('legacy Workspace', false, project.id);
+      persistence.setWorkspaceBinding(task.id, {
+        path: '/tmp/legacy-project-workspace',
+        workspaceKey: 'a'.repeat(64),
+        rootIdentityDigest: 'b'.repeat(64),
+      });
+      const turn = persistence.startTurn(task.id, 'legacy history');
+      persistence.cancelTurn(task.id, turn.turnId);
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.close();
+
+      const legacy = new Database(path);
+      legacy.pragma('foreign_keys = OFF');
+      legacy.exec(`
+        DROP TABLE turn_workspace_roots;
+        DROP TABLE turn_workspace_sets;
+        DROP INDEX project_references_project_root_idx;
+        DROP INDEX project_references_source_task_idx;
+        DROP INDEX project_references_project_order_idx;
+        DROP INDEX project_references_root_path_idx;
+        DROP INDEX project_references_task_path_idx;
+        ALTER TABLE project_references RENAME TO project_references_v60;
+        CREATE TABLE project_references (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+          relative_path TEXT NOT NULL CHECK (length(relative_path) >= 1 AND length(relative_path) <= 1024),
+          registered_root_identity TEXT NOT NULL CHECK (length(registered_root_identity) = 64),
+          enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+          revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+          last_sealed_digest TEXT CHECK (last_sealed_digest IS NULL OR length(last_sealed_digest) = 64),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(project_id, source_task_id, relative_path)
+        );
+        INSERT INTO project_references(
+          id, project_id, source_task_id, relative_path, registered_root_identity,
+          enabled, revision, last_sealed_digest, created_at, updated_at
+        ) SELECT id, project_id, source_task_id, relative_path, registered_root_identity,
+            enabled, revision, last_sealed_digest, created_at, updated_at
+          FROM project_references_v60 WHERE source_task_id IS NOT NULL;
+        DROP TABLE project_references_v60;
+        CREATE INDEX project_references_project_order_idx
+          ON project_references(project_id, created_at, id);
+        CREATE INDEX project_references_source_task_idx
+          ON project_references(source_task_id, id);
+        DROP INDEX project_workspace_roots_project_order_idx;
+        DROP INDEX project_workspace_roots_primary_idx;
+        DROP TABLE project_workspace_roots;
+        ALTER TABLE tasks DROP COLUMN legacy_project_workspace_fallback;
+        ALTER TABLE projects DROP COLUMN workspace_roots_configured;
+        DELETE FROM schema_migrations WHERE version = 60;
+      `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.listProjects()).toContainEqual(
+        expect.objectContaining({ id: project.id, folderCount: 0, primaryFolder: null }),
+      );
+      expect(migrated.listProjectFolders(project.id)).toEqual([]);
+      expect(migrated.getEffectiveWorkspaceSet(task.id)).toMatchObject({
+        source: 'task',
+        projectId: project.id,
+        primaryRootId: task.id,
+        roots: [expect.objectContaining({ path: '/tmp/legacy-project-workspace' })],
+      });
+      expect(migrated.getTaskLeader(task.id).teamId).toBe(team.id);
+      expect(migrated.listMessages(task.id)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ turnId: turn.turnId })]),
+      );
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection.prepare('SELECT checksum FROM schema_migrations WHERE version = 60').get(),
+      ).toEqual({ checksum: 'project-multi-folder-v60-foundation' });
+      expect(inspection.pragma('foreign_key_check')).toEqual([]);
+      inspection.close();
+      migrated.close();
+    });
+
     it('creates, updates, archives, and restores Projects with revision CAS', () => {
       const { persistence } = createPersistence();
       const created = persistence.createProject('  同名 Project  ');
@@ -179,6 +276,188 @@ if (runsWithElectronAbi)
           archived: false,
         }),
       ).toMatchObject({ archived: false, revision: 4 });
+      persistence.close();
+    });
+
+    it('stores up to sixteen ordered folders with one Primary and resolves them for Project Tasks', () => {
+      const { persistence } = createPersistence();
+      const primaryId = randomUUID();
+      const secondaryId = randomUUID();
+      const project = persistence.createProject({
+        name: 'Multi-root',
+        folders: [
+          folderBinding('/tmp/project-root-a', 'primary', 'a', primaryId),
+          folderBinding('/tmp/project-root-b', 'secondary', 'b', secondaryId),
+        ],
+      });
+      const task = persistence.createTask('Project Task', false, project.id);
+
+      expect(project).toMatchObject({
+        folderCount: 2,
+        primaryFolder: { id: primaryId, path: '/tmp/project-root-a' },
+      });
+      expect(persistence.listProjectFolders(project.id)).toEqual([
+        expect.objectContaining({ id: primaryId, role: 'primary', ordinal: 0 }),
+        expect.objectContaining({ id: secondaryId, role: 'secondary', ordinal: 1 }),
+      ]);
+      expect(persistence.getEffectiveWorkspaceSet(task.id)).toMatchObject({
+        source: 'project',
+        projectId: project.id,
+        primaryRootId: primaryId,
+        roots: [
+          expect.objectContaining({ rootId: primaryId, path: '/tmp/project-root-a' }),
+          expect.objectContaining({ rootId: secondaryId, path: '/tmp/project-root-b' }),
+        ],
+      });
+      persistence.close();
+    });
+
+    it('replaces folders with revision CAS, preserves IDs by physical identity, and fixes Turn snapshots', () => {
+      const { persistence } = createPersistence();
+      const rootA = randomUUID();
+      const rootB = randomUUID();
+      const project = persistence.createProject({
+        name: 'Mutable roots',
+        folders: [
+          folderBinding('/tmp/root-a', 'primary', 'a', rootA),
+          folderBinding('/tmp/root-b', 'secondary', 'b', rootB),
+        ],
+      });
+      const task = persistence.createTask('Snapshot', false, project.id);
+      const turn = persistence.startTurn(task.id, 'snapshot roots');
+      const sealed = persistence.sealTurnWorkspaceSet(task.id, turn.turnId);
+      persistence.cancelTurn(task.id, turn.turnId);
+
+      const replaced = persistence.replaceProjectFolders({
+        projectId: project.id,
+        expectedRevision: project.revision,
+        folders: [
+          folderBinding('/tmp/root-b-relocated', 'primary', 'b'),
+          folderBinding('/tmp/root-a', 'secondary', 'a'),
+        ],
+      });
+
+      expect(replaced).toMatchObject({
+        revision: project.revision + 1,
+        primaryFolder: { id: rootB, path: '/tmp/root-b-relocated' },
+      });
+      expect(persistence.listProjectFolders(project.id).map(({ id }) => id)).toEqual([
+        rootB,
+        rootA,
+      ]);
+      expect(persistence.readTurnWorkspaceSet(turn.turnId)).toEqual(sealed);
+      expect(() =>
+        persistence.replaceProjectFolders({
+          projectId: project.id,
+          expectedRevision: project.revision,
+          folders: [],
+        }),
+      ).toThrow(ProjectConflictError);
+      persistence.close();
+    });
+
+    it('rejects duplicate, nested, and active-work Project folder mutations', () => {
+      const { persistence } = createPersistence();
+      expect(() =>
+        persistence.createProject({
+          name: 'Duplicate',
+          folders: [
+            folderBinding('/tmp/duplicate-a', 'primary', 'a'),
+            folderBinding('/tmp/duplicate-b', 'secondary', 'a'),
+          ],
+        }),
+      ).toThrow('distinct directories');
+      expect(() =>
+        persistence.createProject({
+          name: 'Nested',
+          folders: [
+            folderBinding('/tmp/parent', 'primary', 'a'),
+            folderBinding('/tmp/parent/child', 'secondary', 'b'),
+          ],
+        }),
+      ).toThrow('Nested Project folders');
+
+      const project = persistence.createProject({
+        name: 'Busy',
+        folders: [folderBinding('/tmp/busy', 'primary', 'c')],
+      });
+      const task = persistence.createTask('Busy task', false, project.id);
+      persistence.startTurn(task.id, 'working');
+      expect(() =>
+        persistence.replaceProjectFolders({
+          projectId: project.id,
+          expectedRevision: project.revision,
+          folders: [],
+        }),
+      ).toThrow(ProjectFolderMutationBlockedError);
+      persistence.close();
+    });
+
+    it('binds new references to a Project root and refuses to remove a referenced root', async () => {
+      const { persistence } = createPersistence();
+      const rootPath = mkdtempSync(join(tmpdir(), 'sprint-coder-project-root-'));
+      directories.push(rootPath);
+      writeFileSync(join(rootPath, 'README.md'), '# Project root');
+      const binding = await workspaceMutationBinding(rootPath);
+      const project = persistence.createProject({
+        name: 'Root reference',
+        folders: [
+          {
+            path: binding.canonicalPath,
+            canonicalPath: binding.canonicalPath,
+            label: 'root',
+            role: 'primary',
+            workspaceKey: binding.workspaceKey,
+            rootIdentityDigest: binding.rootIdentityDigest,
+          },
+        ],
+      });
+      const root = persistence.listProjectFolders(project.id)[0]!;
+      expect(
+        persistence.addProjectReference({
+          projectId: project.id,
+          projectRootId: root.id,
+          relativePath: 'README.md',
+          registeredRootIdentity: binding.rootIdentityDigest,
+        }),
+      ).toMatchObject({ sourceTaskId: null, projectRootId: root.id, status: 'healthy' });
+      const otherRootPath = mkdtempSync(join(tmpdir(), 'sprint-coder-project-root-'));
+      directories.push(otherRootPath);
+      const otherBinding = await workspaceMutationBinding(otherRootPath);
+      const reprioritized = persistence.replaceProjectFolders({
+        projectId: project.id,
+        expectedRevision: project.revision + 1,
+        folders: [
+          {
+            path: otherBinding.canonicalPath,
+            canonicalPath: otherBinding.canonicalPath,
+            label: 'other',
+            role: 'primary',
+            workspaceKey: otherBinding.workspaceKey,
+            rootIdentityDigest: otherBinding.rootIdentityDigest,
+          },
+          {
+            id: root.id,
+            path: binding.canonicalPath,
+            canonicalPath: binding.canonicalPath,
+            label: 'root',
+            role: 'secondary',
+            workspaceKey: binding.workspaceKey,
+            rootIdentityDigest: binding.rootIdentityDigest,
+          },
+        ],
+      });
+      expect(persistence.listProjectReferences(project.id)[0]).toMatchObject({
+        projectRootId: root.id,
+        status: 'healthy',
+      });
+      expect(() =>
+        persistence.replaceProjectFolders({
+          projectId: project.id,
+          expectedRevision: reprioritized.revision,
+          folders: [],
+        }),
+      ).toThrow(ReferenceInUseError);
       persistence.close();
     });
 

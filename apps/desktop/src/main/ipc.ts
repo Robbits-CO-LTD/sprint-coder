@@ -9,6 +9,7 @@ import {
 } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, join, relative as relativePath, resolve as resolvePath } from 'node:path';
 import { workspaceMutationBinding } from './path-guard';
 import { z } from 'zod';
@@ -57,6 +58,10 @@ import {
   projectContextManifestsListInputSchema,
   projectContextManifestSummarySchema,
   projectCreateInputSchema,
+  projectFolderPickerResultSchema,
+  projectFolderSchema,
+  projectFoldersListInputSchema,
+  projectFoldersReplaceInputSchema,
   projectGetInputSchema,
   projectInstructionResultSchema,
   projectInstructionSetInputSchema,
@@ -139,6 +144,7 @@ import {
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
   workspaceSelectionSchema,
+  effectiveWorkspaceSetSchema,
   type CommandEnvelope,
   type CommandResult,
   type AccessPreset,
@@ -149,6 +155,8 @@ import {
   type ProviderMessageToolCall,
   type ProviderModel,
   type PublicError,
+  type ProjectFolderInput,
+  type ProjectFolder,
   type ProjectReference,
   type RuntimeKind,
   type TurnEvent,
@@ -162,6 +170,7 @@ import type {
   QueueTransition,
   StartedTurn,
   StopAndSendTransition,
+  ProjectFolderBinding,
 } from './persistence';
 import { toApprovalAuditSummary, toApprovalSummary } from './persistence';
 import {
@@ -173,6 +182,7 @@ import {
   InvalidProjectError,
   ProjectArchivedError,
   ProjectConflictError,
+  ProjectFolderMutationBlockedError,
   ReferenceInUseError,
   SteerStaleError,
   TaskAssignmentBlockedError,
@@ -1497,6 +1507,67 @@ export class IpcRouter {
       this.persistence.listProjects(),
     );
     this.handle(
+      IPC_CHANNELS.projectsPickFolders,
+      emptyPayloadSchema,
+      projectFolderPickerResultSchema,
+      async () => {
+        const selected = await dialog.showOpenDialog(this.window, {
+          properties: ['openDirectory', 'multiSelections'],
+        });
+        if (selected.canceled) return { canceled: true as const };
+        if (selected.filePaths.length > 16)
+          throw new InvalidProjectError('Project folder limit reached');
+        const bindings = await canonicalProjectFolderBindings(
+          selected.filePaths.map((path, ordinal) => ({
+            path,
+            role: ordinal === 0 ? ('primary' as const) : ('secondary' as const),
+          })),
+        );
+        await confirmHomeDirectoryAccess(
+          this.window,
+          bindings.map(({ canonicalPath }) => canonicalPath),
+        );
+        return {
+          canceled: false as const,
+          folders: bindings.map(({ canonicalPath, label }) => ({ path: canonicalPath, label })),
+        };
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.projectsFoldersList,
+      projectFoldersListInputSchema,
+      z.array(projectFolderSchema),
+      async (input) => {
+        const folders = this.persistence.listProjectFolders(input.projectId);
+        const identities = this.persistence.getProjectFolderRootIdentities(input.projectId);
+        return Promise.all(
+          folders.map(async (folder) => ({
+            ...folder,
+            status: await projectFolderHealth(folder.path, identities.get(folder.id)),
+          })),
+        );
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.projectsFoldersReplace,
+      projectFoldersReplaceInputSchema,
+      projectSummarySchema,
+      async (input, event, envelope) => {
+        const folders = await canonicalProjectFolderBindings(input.folders);
+        await confirmHomeDirectoryAccess(
+          this.window,
+          folders.map(({ canonicalPath }) => canonicalPath),
+        );
+        return this.runMutation(
+          event,
+          envelope,
+          `project:${input.projectId}`,
+          IPC_CHANNELS.projectsFoldersReplace,
+          () => this.persistence.replaceProjectFolders({ ...input, folders }),
+        ).value;
+      },
+    );
+    this.handle(
       IPC_CHANNELS.projectsGet,
       projectGetInputSchema,
       projectInstructionResultSchema,
@@ -1546,7 +1617,12 @@ export class IpcRouter {
           requestHash(envelope.payload),
         );
         if (cached.found && cached.value !== null) return cached.value;
-        const workspace = this.persistence.getWorkspace(input.sourceTaskId);
+        const workspace =
+          input.projectRootId === undefined
+            ? this.persistence.getWorkspace(input.sourceTaskId!)
+            : (this.persistence
+                .listProjectFolders(input.projectId)
+                .find(({ id }) => id === input.projectRootId)?.path ?? null);
         if (workspace === null) throw new InvalidProjectError('Source Task has no Workspace');
         const binding = await workspaceMutationBinding(workspace);
         return this.runMutation(
@@ -1556,7 +1632,10 @@ export class IpcRouter {
           IPC_CHANNELS.projectsReferencesAdd,
           () =>
             this.persistence.addProjectReference({
-              ...input,
+              projectId: input.projectId,
+              ...(input.sourceTaskId === undefined ? {} : { sourceTaskId: input.sourceTaskId }),
+              ...(input.projectRootId === undefined ? {} : { projectRootId: input.projectRootId }),
+              relativePath: input.relativePath,
               registeredRootIdentity: binding.rootIdentityDigest,
             }),
         ).value;
@@ -1567,7 +1646,12 @@ export class IpcRouter {
       projectReferencePickInputSchema,
       projectReferenceSchema.nullable(),
       async (input, event, envelope) => {
-        const workspace = this.persistence.getWorkspace(input.sourceTaskId);
+        const workspace =
+          input.projectRootId === undefined
+            ? this.persistence.getWorkspace(input.sourceTaskId!)
+            : (this.persistence
+                .listProjectFolders(input.projectId)
+                .find(({ id }) => id === input.projectRootId)?.path ?? null);
         if (workspace === null) throw new InvalidProjectError('Source Task has no Workspace');
         const cached = this.persistence.getOperationResult<ProjectReference | null>(
           principalFor(event),
@@ -1598,7 +1682,9 @@ export class IpcRouter {
           IPC_CHANNELS.projectsReferencesPick,
           () =>
             this.persistence.addProjectReference({
-              ...input,
+              projectId: input.projectId,
+              ...(input.sourceTaskId === undefined ? {} : { sourceTaskId: input.sourceTaskId }),
+              ...(input.projectRootId === undefined ? {} : { projectRootId: input.projectRootId }),
               relativePath: relative,
               registeredRootIdentity: binding.rootIdentityDigest,
             }),
@@ -1667,10 +1753,16 @@ export class IpcRouter {
       IPC_CHANNELS.projectsCreate,
       projectCreateInputSchema,
       projectSummarySchema,
-      (input, event, envelope) =>
-        this.runMutation(event, envelope, 'projects', IPC_CHANNELS.projectsCreate, () =>
-          this.persistence.createProject(input.name),
-        ).value,
+      async (input, event, envelope) => {
+        const folders = await canonicalProjectFolderBindings(input.folders);
+        await confirmHomeDirectoryAccess(
+          this.window,
+          folders.map(({ canonicalPath }) => canonicalPath),
+        );
+        return this.runMutation(event, envelope, 'projects', IPC_CHANNELS.projectsCreate, () =>
+          this.persistence.createProject({ name: input.name, folders }),
+        ).value;
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.projectsUpdate,
@@ -1781,6 +1873,24 @@ export class IpcRouter {
 
     this.handle(IPC_CHANNELS.workspaceGet, taskIdPayloadSchema, workspaceSelectionSchema, (input) =>
       workspaceValue(this.persistence.getWorkspace(input.taskId)),
+    );
+    this.handle(
+      IPC_CHANNELS.workspaceGetEffective,
+      taskIdPayloadSchema,
+      effectiveWorkspaceSetSchema,
+      async (input) => {
+        const effective = this.persistence.getEffectiveWorkspaceSet(input.taskId);
+        const identities = this.persistence.getEffectiveWorkspaceRootIdentities(input.taskId);
+        return {
+          ...effective,
+          roots: await Promise.all(
+            effective.roots.map(async (root) => ({
+              ...root,
+              status: await projectFolderHealth(root.path, identities.get(root.rootId)),
+            })),
+          ),
+        };
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.workspaceSelect,
@@ -3791,6 +3901,62 @@ function workspaceValue(path: string | null): { path: string; name: string } | n
   return path === null ? null : { path, name: basename(path) || path };
 }
 
+async function canonicalProjectFolderBindings(
+  folders: readonly ProjectFolderInput[],
+): Promise<ProjectFolderBinding[]> {
+  if (folders.length > 16) throw new InvalidProjectError('Project folder limit reached');
+  return Promise.all(
+    folders.map(async (folder) => {
+      const binding = await workspaceMutationBinding(folder.path);
+      return {
+        id: folder.id,
+        path: binding.canonicalPath,
+        canonicalPath: binding.canonicalPath,
+        label: folder.label?.trim() || basename(binding.canonicalPath) || binding.canonicalPath,
+        role: folder.role,
+        workspaceKey: binding.workspaceKey,
+        rootIdentityDigest: binding.rootIdentityDigest,
+      };
+    }),
+  );
+}
+
+async function confirmHomeDirectoryAccess(
+  window: BrowserWindow,
+  canonicalPaths: readonly string[],
+): Promise<void> {
+  if (canonicalPaths.length === 0) return;
+  const canonicalHome = (await workspaceMutationBinding(homedir())).canonicalPath;
+  if (!canonicalPaths.includes(canonicalHome)) return;
+  const confirmation = await dialog.showMessageBox(window, {
+    type: 'warning',
+    buttons: ['許可する', 'キャンセル'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'ホームフォルダへのアクセス',
+    message: 'ホームフォルダ全体をProjectに追加しますか？',
+    detail: '広い範囲のファイルが読み書き対象になります。',
+  });
+  if (confirmation.response !== 0)
+    throw new InvalidProjectError('Home directory access was canceled');
+}
+
+async function projectFolderHealth(
+  path: string,
+  expectedIdentity: string | undefined,
+): Promise<ProjectFolder['status']> {
+  try {
+    const binding = await workspaceMutationBinding(path);
+    return expectedIdentity === undefined || binding.rootIdentityDigest !== expectedIdentity
+      ? 'identity_changed'
+      : 'available';
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
+    return 'unreadable';
+  }
+}
+
 function toPublicError(error: unknown): PublicError {
   if (error instanceof NotFoundError)
     return { code: 'NOT_FOUND', userMessage: '対象が見つかりません。', retryable: false };
@@ -3804,6 +3970,12 @@ function toPublicError(error: unknown): PublicError {
     return {
       code: 'OPERATION_CONFLICT',
       userMessage: 'Projectが別の操作で更新されました。最新状態を読み直してください。',
+      retryable: true,
+    };
+  if (error instanceof ProjectFolderMutationBlockedError)
+    return {
+      code: 'OPERATION_CONFLICT',
+      userMessage: '実行中または復旧中の作業があるため、Projectのフォルダを変更できません。',
       retryable: true,
     };
   if (error instanceof ProjectArchivedError)

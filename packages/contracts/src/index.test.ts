@@ -14,6 +14,8 @@ import {
   providerConnectionSchema,
   projectAssignTaskInputSchema,
   projectCreateInputSchema,
+  projectFoldersReplaceInputSchema,
+  effectiveWorkspaceSetSchema,
   projectInstructionSetInputSchema,
   projectSummarySchema,
   projectUpdateInputSchema,
@@ -83,6 +85,7 @@ describe('public contracts', () => {
   it('validates Project summaries and mutation CAS inputs', () => {
     expect(projectCreateInputSchema.parse({ name: '  Project A  ' })).toEqual({
       name: 'Project A',
+      folders: [],
     });
     expect(
       projectUpdateInputSchema.parse({
@@ -113,7 +116,38 @@ describe('public contracts', () => {
         createdAt: '2026-07-31T00:00:00.000Z',
         updatedAt: '2026-07-31T00:00:00.000Z',
       }),
-    ).toMatchObject({ id: 'project-1', revision: 1 });
+    ).toMatchObject({
+      id: 'project-1',
+      revision: 1,
+      folderCount: 0,
+      primaryFolder: null,
+    });
+    expect(
+      projectFoldersReplaceInputSchema.parse({
+        projectId: 'project-1',
+        expectedRevision: 1,
+        folders: [
+          { path: '/tmp/a', role: 'primary' },
+          { path: '/tmp/b', role: 'secondary' },
+        ],
+      }).folders,
+    ).toHaveLength(2);
+    expect(() =>
+      projectFoldersReplaceInputSchema.parse({
+        projectId: 'project-1',
+        expectedRevision: 1,
+        folders: [{ path: '/tmp/a', role: 'secondary' }],
+      }),
+    ).toThrow('Primary');
+    expect(
+      effectiveWorkspaceSetSchema.parse({
+        source: 'none',
+        projectId: 'project-1',
+        primaryRootId: null,
+        roots: [],
+        digest: 'a'.repeat(64),
+      }),
+    ).toMatchObject({ source: 'none', roots: [] });
   });
 
   it('bounds Project instruction by UTF-8 bytes and upgrades legacy usage with zero Project tokens', () => {

@@ -36,6 +36,10 @@ import {
   projectContextManifestsListInputSchema,
   projectContextManifestSummarySchema,
   projectCreateInputSchema,
+  projectFolderPickerResultSchema,
+  projectFolderSchema,
+  projectFoldersListInputSchema,
+  projectFoldersReplaceInputSchema,
   projectGetInputSchema,
   projectInstructionResultSchema,
   projectInstructionSetInputSchema,
@@ -124,6 +128,7 @@ import {
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
   workspaceSelectionSchema,
+  effectiveWorkspaceSetSchema,
   type CommandEnvelope,
   type CommandResult,
   type SprintCoderApi,
@@ -229,6 +234,29 @@ const api: SprintCoderApi = {
   projects: {
     list: () =>
       invoke(IPC_CHANNELS.projectsList, emptyPayloadSchema, z.array(projectSummarySchema), {}),
+    pickFolders: () =>
+      invoke(
+        IPC_CHANNELS.projectsPickFolders,
+        emptyPayloadSchema,
+        projectFolderPickerResultSchema,
+        {},
+      ),
+    folders: {
+      list: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsFoldersList,
+          projectFoldersListInputSchema,
+          z.array(projectFolderSchema),
+          input,
+        ),
+      replace: (input) =>
+        invoke(
+          IPC_CHANNELS.projectsFoldersReplace,
+          projectFoldersReplaceInputSchema,
+          projectSummarySchema,
+          input,
+        ),
+    },
     get: (input) =>
       invoke(
         IPC_CHANNELS.projectsGet,
@@ -390,6 +418,10 @@ const api: SprintCoderApi = {
   workspace: {
     get: (taskId) =>
       invoke(IPC_CHANNELS.workspaceGet, taskIdPayloadSchema, workspaceSelectionSchema, { taskId }),
+    getEffective: (taskId) =>
+      invoke(IPC_CHANNELS.workspaceGetEffective, taskIdPayloadSchema, effectiveWorkspaceSetSchema, {
+        taskId,
+      }),
     select: (taskId) =>
       invoke(IPC_CHANNELS.workspaceSelect, taskIdPayloadSchema, workspaceSelectionSchema, {
         taskId,

@@ -27,15 +27,49 @@ export type ProjectSummary = {
   archived: boolean;
   revision: number;
   taskCount: number;
+  folderCount?: number;
+  primaryFolder?: { id: string; path: string; label: string } | null;
   lastActivityAt: string;
   createdAt: string;
   updatedAt: string;
 };
 
+export type ProjectFolder = {
+  id: string;
+  projectId: string;
+  path: string;
+  label: string;
+  role: 'primary' | 'secondary';
+  ordinal: number;
+  status: 'available' | 'missing' | 'unreadable' | 'identity_changed';
+};
+
+export type ProjectFolderInput = {
+  id?: string;
+  path: string;
+  label?: string;
+  role: 'primary' | 'secondary';
+};
+
+export type EffectiveWorkspaceSet = {
+  source: 'project' | 'task' | 'none';
+  projectId: string | null;
+  primaryRootId: string | null;
+  roots: Array<{
+    rootId: string;
+    path: string;
+    label: string;
+    role: 'primary' | 'secondary';
+    status: 'available' | 'missing' | 'unreadable' | 'identity_changed';
+  }>;
+  digest: string;
+};
+
 export type ProjectReference = {
   id: string;
   projectId: string;
-  sourceTaskId: string;
+  sourceTaskId: string | null;
+  projectRootId: string | null;
   relativePath: string;
   enabled: boolean;
   revision: number;
@@ -726,6 +760,17 @@ export interface SprintCoderApi {
   };
   projects: {
     list(): Promise<ProjectSummary[]>;
+    pickFolders(): Promise<
+      { canceled: true } | { canceled: false; folders: Array<{ path: string; label: string }> }
+    >;
+    folders: {
+      list(input: { projectId: string }): Promise<ProjectFolder[]>;
+      replace(input: {
+        projectId: string;
+        expectedRevision: number;
+        folders: ProjectFolderInput[];
+      }): Promise<ProjectSummary>;
+    };
     get(input: { projectId: string }): Promise<ProjectInstruction>;
     setInstruction(input: {
       projectId: string;
@@ -736,10 +781,15 @@ export interface SprintCoderApi {
     getContextManifest(input: { taskId: string; turnId: string }): Promise<ProjectContextManifest>;
     references: {
       list(input: { projectId: string }): Promise<ProjectReference[]>;
-      pick(input: { projectId: string; sourceTaskId: string }): Promise<ProjectReference | null>;
+      pick(input: {
+        projectId: string;
+        sourceTaskId?: string;
+        projectRootId?: string;
+      }): Promise<ProjectReference | null>;
       add(input: {
         projectId: string;
-        sourceTaskId: string;
+        sourceTaskId?: string;
+        projectRootId?: string;
         relativePath: string;
       }): Promise<ProjectReference>;
       update(input: {
@@ -763,7 +813,7 @@ export interface SprintCoderApi {
         status?: 'active' | 'disabled';
       }): Promise<ProjectMemory>;
     };
-    create(input: { name: string }): Promise<ProjectSummary>;
+    create(input: { name: string; folders?: ProjectFolderInput[] }): Promise<ProjectSummary>;
     update(input: {
       projectId: string;
       expectedRevision: number;
@@ -809,6 +859,7 @@ export interface SprintCoderApi {
   };
   workspace: {
     get(taskId: string): Promise<{ path: string; name: string } | null>;
+    getEffective(taskId: string): Promise<EffectiveWorkspaceSet>;
     select(taskId: string): Promise<{ path: string; name: string } | null>;
   };
   turns: {

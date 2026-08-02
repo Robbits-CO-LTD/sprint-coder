@@ -149,12 +149,105 @@ export const projectSummarySchema = z
     archived: z.boolean(),
     revision: z.number().int().positive(),
     taskCount: z.number().int().nonnegative(),
+    folderCount: z.number().int().min(0).max(16).default(0),
+    primaryFolder: z
+      .object({ id: idSchema, path: z.string().min(1), label: z.string().min(1).max(255) })
+      .strict()
+      .nullable()
+      .default(null),
     lastActivityAt: timestampSchema,
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })
   .strict();
 export type ProjectSummary = z.infer<typeof projectSummarySchema>;
+
+export const projectFolderRoleSchema = z.enum(['primary', 'secondary']);
+export const projectFolderStatusSchema = z.enum([
+  'available',
+  'missing',
+  'unreadable',
+  'identity_changed',
+]);
+export const projectFolderSchema = z
+  .object({
+    id: idSchema,
+    projectId: idSchema,
+    path: z.string().min(1),
+    label: z.string().min(1).max(255),
+    role: projectFolderRoleSchema,
+    ordinal: z.number().int().min(0).max(15),
+    status: projectFolderStatusSchema,
+  })
+  .strict();
+export type ProjectFolder = z.infer<typeof projectFolderSchema>;
+
+export const projectFolderInputSchema = z
+  .object({
+    id: idSchema.optional(),
+    path: z.string().min(1),
+    label: z.string().trim().min(1).max(255).optional(),
+    role: projectFolderRoleSchema,
+  })
+  .strict();
+export type ProjectFolderInput = z.infer<typeof projectFolderInputSchema>;
+
+const projectFolderInputsSchema = z
+  .array(projectFolderInputSchema)
+  .max(16)
+  .superRefine((folders, context) => {
+    const primaryCount = folders.filter(({ role }) => role === 'primary').length;
+    if ((folders.length === 0 && primaryCount !== 0) || (folders.length > 0 && primaryCount !== 1))
+      context.addIssue({
+        code: 'custom',
+        message: 'A non-empty Project must have exactly one Primary folder',
+      });
+  });
+
+export const effectiveWorkspaceRootSchema = projectFolderSchema
+  .omit({ projectId: true, ordinal: true })
+  .extend({ rootId: idSchema })
+  .omit({ id: true })
+  .strict();
+export type EffectiveWorkspaceRoot = z.infer<typeof effectiveWorkspaceRootSchema>;
+export const effectiveWorkspaceSetSchema = z
+  .object({
+    source: z.enum(['project', 'task', 'none']),
+    projectId: idSchema.nullable(),
+    primaryRootId: idSchema.nullable(),
+    roots: z.array(effectiveWorkspaceRootSchema).max(16),
+    digest: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict()
+  .superRefine((workspace, context) => {
+    if (workspace.roots.length === 0 && workspace.primaryRootId !== null)
+      context.addIssue({
+        code: 'custom',
+        message: 'An empty Workspace cannot have a Primary root',
+      });
+    if (
+      workspace.roots.length > 0 &&
+      (workspace.primaryRootId === null ||
+        !workspace.roots.some(
+          ({ rootId, role }) => rootId === workspace.primaryRootId && role === 'primary',
+        ))
+    )
+      context.addIssue({ code: 'custom', message: 'Workspace Primary root is invalid' });
+  });
+export type EffectiveWorkspaceSet = z.infer<typeof effectiveWorkspaceSetSchema>;
+
+export const projectFolderPickerResultSchema = z.discriminatedUnion('canceled', [
+  z.object({ canceled: z.literal(true) }).strict(),
+  z
+    .object({
+      canceled: z.literal(false),
+      folders: z
+        .array(z.object({ path: z.string().min(1), label: z.string().min(1).max(255) }).strict())
+        .max(16),
+    })
+    .strict(),
+]);
+export type ProjectFolderPickerResult = z.infer<typeof projectFolderPickerResultSchema>;
 
 export const teamStateSchema = z.enum([
   'draft',
@@ -2296,7 +2389,18 @@ export const taskCreateInputSchema = z
   })
   .strict();
 export const projectCreateInputSchema = z
-  .object({ name: z.string().trim().min(1).max(120) })
+  .object({
+    name: z.string().trim().min(1).max(120),
+    folders: projectFolderInputsSchema.default([]),
+  })
+  .strict();
+export const projectFoldersListInputSchema = z.object({ projectId: idSchema }).strict();
+export const projectFoldersReplaceInputSchema = z
+  .object({
+    projectId: idSchema,
+    expectedRevision: z.number().int().positive(),
+    folders: projectFolderInputsSchema,
+  })
   .strict();
 export const projectUpdateInputSchema = z
   .object({
@@ -2394,7 +2498,8 @@ export const projectReferenceSchema = z
   .object({
     id: idSchema,
     projectId: idSchema,
-    sourceTaskId: idSchema,
+    sourceTaskId: idSchema.nullable(),
+    projectRootId: idSchema.nullable().default(null),
     relativePath: z.string().min(1).max(1024),
     enabled: z.boolean(),
     revision: z.number().int().positive(),
@@ -2409,13 +2514,28 @@ export const projectReferencesListInputSchema = z.object({ projectId: idSchema }
 export const projectReferenceAddInputSchema = z
   .object({
     projectId: idSchema,
-    sourceTaskId: idSchema,
+    sourceTaskId: idSchema.optional(),
+    projectRootId: idSchema.optional(),
     relativePath: z.string().min(1).max(1024),
   })
-  .strict();
+  .strict()
+  .refine(
+    ({ sourceTaskId, projectRootId }) =>
+      (sourceTaskId === undefined) !== (projectRootId === undefined),
+    { message: 'Exactly one reference root must be supplied' },
+  );
 export const projectReferencePickInputSchema = z
-  .object({ projectId: idSchema, sourceTaskId: idSchema })
-  .strict();
+  .object({
+    projectId: idSchema,
+    sourceTaskId: idSchema.optional(),
+    projectRootId: idSchema.optional(),
+  })
+  .strict()
+  .refine(
+    ({ sourceTaskId, projectRootId }) =>
+      (sourceTaskId === undefined) !== (projectRootId === undefined),
+    { message: 'Exactly one reference root must be supplied' },
+  );
 export const projectReferenceUpdateInputSchema = z
   .object({
     referenceId: idSchema,
@@ -2624,6 +2744,15 @@ export interface SprintCoderApi {
   };
   projects: {
     list(): Promise<ProjectSummary[]>;
+    pickFolders(): Promise<ProjectFolderPickerResult>;
+    folders: {
+      list(input: { projectId: string }): Promise<ProjectFolder[]>;
+      replace(input: {
+        projectId: string;
+        expectedRevision: number;
+        folders: ProjectFolderInput[];
+      }): Promise<ProjectSummary>;
+    };
     get(input: { projectId: string }): Promise<ProjectInstruction>;
     setInstruction(input: {
       projectId: string;
@@ -2634,10 +2763,15 @@ export interface SprintCoderApi {
     getContextManifest(input: { taskId: string; turnId: string }): Promise<ProjectContextManifest>;
     references: {
       list(input: { projectId: string }): Promise<ProjectReference[]>;
-      pick(input: { projectId: string; sourceTaskId: string }): Promise<ProjectReference | null>;
+      pick(input: {
+        projectId: string;
+        sourceTaskId?: string;
+        projectRootId?: string;
+      }): Promise<ProjectReference | null>;
       add(input: {
         projectId: string;
-        sourceTaskId: string;
+        sourceTaskId?: string;
+        projectRootId?: string;
         relativePath: string;
       }): Promise<ProjectReference>;
       update(input: {
@@ -2661,7 +2795,7 @@ export interface SprintCoderApi {
         status?: 'active' | 'disabled';
       }): Promise<ProjectMemory>;
     };
-    create(input: { name: string }): Promise<ProjectSummary>;
+    create(input: { name: string; folders?: ProjectFolderInput[] }): Promise<ProjectSummary>;
     update(input: {
       projectId: string;
       expectedRevision: number;
@@ -2690,6 +2824,7 @@ export interface SprintCoderApi {
   };
   workspace: {
     get(taskId: string): Promise<WorkspaceSelection>;
+    getEffective(taskId: string): Promise<EffectiveWorkspaceSet>;
     select(taskId: string): Promise<WorkspaceSelection>;
   };
   reasoning: {
@@ -2836,6 +2971,9 @@ export const IPC_CHANNELS = {
   tasksGetDraft: 'sprint-coder:tasks:get-draft',
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
   projectsList: 'sprint-coder:projects:list',
+  projectsPickFolders: 'sprint-coder:projects:pick-folders',
+  projectsFoldersList: 'sprint-coder:projects:folders:list',
+  projectsFoldersReplace: 'sprint-coder:projects:folders:replace',
   projectsGet: 'sprint-coder:projects:get',
   projectsSetInstruction: 'sprint-coder:projects:set-instruction',
   projectsListContextManifests: 'sprint-coder:projects:list-context-manifests',
@@ -2866,6 +3004,7 @@ export const IPC_CHANNELS = {
   teamsGetCanvasView: 'sprint-coder:teams:get-canvas-view',
   teamsSaveCanvasView: 'sprint-coder:teams:save-canvas-view',
   workspaceGet: 'sprint-coder:workspace:get',
+  workspaceGetEffective: 'sprint-coder:workspace:get-effective',
   workspaceSelect: 'sprint-coder:workspace:select',
   settingsGetRuntime: 'sprint-coder:settings:get-runtime',
   settingsSetRuntime: 'sprint-coder:settings:set-runtime',
