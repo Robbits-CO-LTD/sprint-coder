@@ -60,8 +60,14 @@ const windowsSign =
       }
     : undefined;
 
-function verifiedBundledNodeResources(): string[] {
+function bundledNodeResources(): string[] {
   if (process.platform !== 'win32') return [];
+  const nodeExecutable = process.execPath;
+  return [nodeExecutable, join(resolve(nodeExecutable, '..'), 'LICENSE')];
+}
+
+function verifyBundledNodeResources(): void {
+  if (process.platform !== 'win32') return;
   if (process.versions.node.split('.')[0] !== '22')
     throw new Error(`Windows packages must be built with Node 22, got ${process.version}`);
   const nodeExecutable = process.execPath;
@@ -84,7 +90,6 @@ function verifiedBundledNodeResources(): string[] {
   if (!signature.startsWith('Valid|') || !signature.includes('OpenJS Foundation'))
     throw new Error(`Bundled Node signature is not trusted OpenJS: ${signature}`);
   if (!lstatSync(nodeLicense).isFile()) throw new Error('Bundled Node LICENSE was not found');
-  return [nodeExecutable, nodeLicense];
 }
 
 export function assertNativePackagingHost(targetPlatform: ForgePlatform): void {
@@ -165,7 +170,7 @@ const config: ForgeConfig = {
     // @electron/asar matches `unpack` against the full source filename with matchBase enabled.
     // Native addons cannot be loaded from inside app.asar, so unpack only `.node` binaries.
     asar: { unpack: '*.node' },
-    extraResource: verifiedBundledNodeResources(),
+    extraResource: bundledNodeResources(),
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep
     // their per-process entitlements. Local ad-hoc packages are signed in the postPackage hook,
@@ -192,6 +197,7 @@ const config: ForgeConfig = {
   hooks: {
     prePackage: async (_forgeConfig, platform) => {
       assertNativePackagingHost(platform);
+      if (platform === 'win32') verifyBundledNodeResources();
     },
     postPackage: async (_forgeConfig, packageResult) => {
       if (packageResult.platform !== 'darwin') return;

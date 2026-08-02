@@ -120,10 +120,10 @@ export type SaveOutcome = {
  * The target is opened once for validation. Replacement bytes are staged and durably flushed in a
  * uniquely-named, exclusively-created sibling copied from that target. The target identity and
  * digest are revalidated immediately before publishing. Publication is one atomic sibling rename,
- * so another
- * writer can observe the complete old file or the complete new file, never a truncated/interleaved
- * buffer. Copying the target to the staging sibling first retains the file metadata that the host
- * filesystem copies with it. Workspace files are never trusted as recovery metadata.
+ * so another writer can observe the complete old file or the complete new file, never a
+ * truncated/interleaved buffer. Copying the target to the staging sibling first retains the file
+ * metadata that the host filesystem copies with it. Workspace files are never trusted as recovery
+ * metadata.
  */
 export function saveWorkspaceFile(
   workspacePath: string,

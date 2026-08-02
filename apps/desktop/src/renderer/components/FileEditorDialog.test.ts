@@ -14,7 +14,12 @@ describe('FileEditorDialog line endings', () => {
     const original = 'a\r\nb\nc\r\n';
     const endings = extractLineEndings(original);
     expect(endings).toEqual(['crlf', 'lf', 'crlf']);
-    expect(diskText('a\nb\nc\n', endings, 'lf')).toBe(original);
-    expect(diskText('edited\nb\nc\nnew\n', endings, 'lf')).toBe('edited\r\nb\nc\r\nnew\n');
+    expect(diskText('a\nb\nc\n', { text: original }, 'lf')).toBe(original);
+    expect(diskText('edited\nb\nc\n', { text: original }, 'lf')).toBe('edited\nb\nc\r\n');
+  });
+
+  it('does not shift mixed endings onto unrelated lines after an insertion', () => {
+    const original = 'a\r\nb\nc\r\n';
+    expect(diskText('new\na\nb\nc\n', { text: original }, 'lf')).toBe('new\na\nb\nc\n');
   });
 });

@@ -25,7 +25,6 @@ export function FileEditorDialog({
   const [savedDraft, setSavedDraft] = useState('');
   const [lineEnding, setLineEnding] = useState<LineEnding>('lf');
   const [savedLineEnding, setSavedLineEnding] = useState<LineEnding>('lf');
-  const [originalLineEndings, setOriginalLineEndings] = useState<LineEnding[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState<'close' | 'reload' | null>(null);
@@ -64,7 +63,6 @@ export function FileEditorDialog({
     const normalized = result.text.replaceAll('\r\n', '\n');
     const dominant = dominantLineEnding(endings);
     setOpened(result);
-    setOriginalLineEndings(endings);
     setLineEnding(dominant);
     setSavedLineEnding(dominant);
     setDraft(normalized);
@@ -115,7 +113,7 @@ export function FileEditorDialog({
     if (!opened?.editable || busy || !filesApi) return;
     setBusy(true);
     try {
-      const text = diskText(draft, originalLineEndings, lineEnding);
+      const text = diskText(draft, { text: opened.text }, lineEnding);
       const result = await filesApi.save({
         taskId,
         rootId: opened.rootId,
@@ -125,7 +123,6 @@ export function FileEditorDialog({
       });
       if (result.outcome === 'saved' && result.digest) {
         setOpened({ ...opened, text, digest: result.digest });
-        setOriginalLineEndings(extractLineEndings(text));
         setSavedDraft(draft);
         setSavedLineEnding(lineEnding);
         setMessage('保存しました');
@@ -154,7 +151,6 @@ export function FileEditorDialog({
     setOpened(null);
     setDraft('');
     setSavedDraft('');
-    setOriginalLineEndings([]);
     setPendingDiscard(null);
     setMessage('');
   }
@@ -276,15 +272,28 @@ export function FileEditorDialog({
 
 export function diskText(
   editorText: string,
-  originalLineEndings: LineEnding | readonly LineEnding[],
+  original: LineEnding | readonly LineEnding[] | Readonly<{ text: string }>,
   fallback: LineEnding = 'lf',
 ): string {
   const normalized = editorText.replaceAll('\r\n', '\n');
-  const endings = typeof originalLineEndings === 'string' ? null : originalLineEndings;
-  const newLineEnding = typeof originalLineEndings === 'string' ? originalLineEndings : fallback;
+  const originalText = typeof original === 'object' && 'text' in original ? original.text : null;
+  const endings: readonly LineEnding[] | null =
+    originalText === null
+      ? typeof original === 'string'
+        ? null
+        : (original as readonly LineEnding[])
+      : extractLineEndings(originalText);
+  const originalLines = originalText?.replaceAll('\r\n', '\n').split('\n') ?? null;
+  const editedLines = normalized.split('\n');
+  const newLineEnding = typeof original === 'string' ? original : fallback;
   let newlineIndex = 0;
   return normalized.replaceAll('\n', () => {
-    const ending = endings?.[newlineIndex++] ?? newLineEnding;
+    const lineIndex = newlineIndex++;
+    // Positional line-ending reuse is safe only when the line at that position is unchanged.
+    // Inserted/deleted lines otherwise shift every following ending onto unrelated content.
+    const unchangedLine =
+      originalLines === null || originalLines[lineIndex] === editedLines[lineIndex];
+    const ending = unchangedLine ? (endings?.[lineIndex] ?? newLineEnding) : newLineEnding;
     return ending === 'crlf' ? '\r\n' : '\n';
   });
 }
