@@ -379,21 +379,22 @@ function restoreStagedMetadata(
   stagingDescriptor: number,
   originalMode: number,
 ): void {
-  if (process.platform !== 'linux') return;
-  // Linux clears security.capability when file contents change. Reapply attributes after the
-  // write without reopening either pathname. Passing the already-validated descriptors to fixed
-  // child fds keeps a hostile rename/symlink swap from redirecting metadata outside the Workspace.
-  execFileSync(
-    '/bin/cp',
-    [
-      '--attributes-only',
-      '--preserve=all',
-      '--no-target-directory',
-      '/proc/self/fd/3',
-      '/proc/self/fd/4',
-    ],
-    { stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor, stagingDescriptor] },
-  );
+  if (process.platform === 'linux') {
+    // Linux clears security.capability when file contents change. Reapply attributes after the
+    // write without reopening either pathname. Passing the already-validated descriptors to fixed
+    // child fds keeps a hostile rename/symlink swap from redirecting metadata outside the Workspace.
+    execFileSync(
+      '/bin/cp',
+      [
+        '--attributes-only',
+        '--preserve=all',
+        '--no-target-directory',
+        '/proc/self/fd/3',
+        '/proc/self/fd/4',
+      ],
+      { stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor, stagingDescriptor] },
+    );
+  }
   const now = new Date();
   futimesSync(stagingDescriptor, now, now);
   fchmodSync(stagingDescriptor, originalMode);
