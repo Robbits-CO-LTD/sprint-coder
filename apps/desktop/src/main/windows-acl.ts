@@ -197,7 +197,12 @@ async function runAclBatch(
       timedOut = true;
       child.kill('SIGKILL');
     }, WINDOWS_ACL_TIMEOUT_MS);
-    child.once('error', (error) => finish(error));
+    child.once('error', (error) => {
+      // Before the deadline this is a spawn failure, so no subprocess can mutate anything. After
+      // the deadline it may instead be a failed kill request (for example EPERM); the PowerShell
+      // process can still be alive, and the queue must remain blocked until its exit event.
+      if (!timedOut) finish(error);
+    });
     // Wait for the PowerShell process itself, not pipe closure. GitHub runner helpers may inherit
     // pipe handles and keep execFile's close callback pending after PowerShell has already exited.
     child.once('exit', (code) => {
