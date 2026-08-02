@@ -53,6 +53,7 @@ export function WorkerNode({
   selected = false,
   onStop,
   onResumeMission,
+  onResumeIntegration,
   ref,
 }: {
   worker: WorkerSummary;
@@ -77,6 +78,7 @@ export function WorkerNode({
   selected?: boolean;
   onStop: () => void;
   onResumeMission: (() => void) | undefined;
+  onResumeIntegration: (() => void) | undefined;
   ref?: Ref<HTMLDivElement>;
 }) {
   const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
@@ -161,7 +163,13 @@ export function WorkerNode({
           <span className="team-exec-value team-exec-instruction">{model.connectionLabel}</span>
         </p>
       </div>
-      <TeamExecutionStatus execution={execution} variant="canvas" onResume={onResumeMission} />
+      <TeamExecutionStatus
+        execution={execution}
+        variant="canvas"
+        onResume={onResumeMission}
+        onResumeIntegration={onResumeIntegration}
+        resumeDisabled={teamBusy}
+      />
       <div
         className="w-body"
         ref={historyRef}

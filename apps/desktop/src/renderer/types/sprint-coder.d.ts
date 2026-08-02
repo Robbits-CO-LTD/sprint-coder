@@ -586,6 +586,7 @@ export type TeamExecutionSummary = {
   teamId: string;
   assigneeAgentId: string;
   createdByAgentId: string;
+  accessMode: 'read-only' | 'workspace-write';
   state:
     | 'assigned'
     | 'queued'
@@ -618,6 +619,7 @@ export type TeamExecutionSummary = {
   missionStepOrdinal: number | null;
   missionStepCount: number | null;
   worktree: TeamMissionWorktreeSummary | null;
+  isolation: TeamExecutionIsolation | null;
   assignedAt: string;
   queuedAt: string | null;
   startedAt: string | null;
@@ -680,6 +682,38 @@ export type TeamMissionWorktreeSummary = {
   workerHead: string | null;
   integratedHead: string | null;
   changedFiles: string[];
+  reason: string | null;
+};
+export type TeamExecutionIsolation = {
+  phase:
+    | 'preparing'
+    | 'running'
+    | 'finalizing'
+    | 'integrating'
+    | 'waiting_resume'
+    | 'completed'
+    | 'quarantined';
+  resumeKind: 'worker' | 'integration' | null;
+  repositories: Array<{
+    ordinal: number;
+    repoPath: string;
+    worktreePath: string;
+    baseHead: string;
+    workerHead: string | null;
+    integratedHead: string | null;
+    state: 'active' | 'ready' | 'integrated' | 'cleaned' | 'quarantined';
+    changedFiles: string[];
+  }>;
+  roots: Array<{
+    rootId: string;
+    rootLabel: string;
+    role: 'primary' | 'secondary';
+    repositoryOrdinal: number;
+    sourcePath: string;
+    isolatedPath: string;
+    identity: string;
+    mutationKey: string;
+  }>;
   reason: string | null;
 };
 export type TeamMissionSummary = {
