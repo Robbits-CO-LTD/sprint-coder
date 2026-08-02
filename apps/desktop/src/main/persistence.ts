@@ -12083,6 +12083,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     skills: readonly PersistedTurnSkill[] = [],
     includeBuiltinTeamSkill = false,
   ): StartedTurn {
+    const effectiveWorkspace = this.getEffectiveWorkspaceSet(taskId);
+    if (effectiveWorkspace.source === 'project' && effectiveWorkspace.roots.length > 0)
+      throw new ProjectWorkspaceRuntimeUnavailableError();
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
@@ -13150,6 +13153,7 @@ export class TaskAssignmentBlockedError extends Error {}
 export class ReferenceInUseError extends Error {}
 export class InvalidProjectError extends Error {}
 export class ProjectFolderMutationBlockedError extends Error {}
+export class ProjectWorkspaceRuntimeUnavailableError extends Error {}
 export class InvalidCanvasViewError extends Error {}
 export class CanvasViewConflictError extends Error {}
 export class AcceptanceEvidenceMissingError extends Error {

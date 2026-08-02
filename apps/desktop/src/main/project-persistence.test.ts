@@ -10,6 +10,7 @@ import {
   ProjectArchivedError,
   ProjectConflictError,
   ProjectFolderMutationBlockedError,
+  ProjectWorkspaceRuntimeUnavailableError,
   ReferenceInUseError,
   SqlitePersistenceClient,
   TaskAssignmentBlockedError,
@@ -309,6 +310,10 @@ if (runsWithElectronAbi)
           expect.objectContaining({ rootId: secondaryId, path: '/tmp/project-root-b' }),
         ],
       });
+      expect(() => persistence.startTurn(task.id, 'must not use the legacy runtime')).toThrow(
+        ProjectWorkspaceRuntimeUnavailableError,
+      );
+      expect(persistence.listMessages(task.id)).toEqual([]);
       persistence.close();
     });
 
@@ -316,21 +321,24 @@ if (runsWithElectronAbi)
       const { persistence } = createPersistence();
       const rootA = randomUUID();
       const rootB = randomUUID();
-      const project = persistence.createProject({
-        name: 'Mutable roots',
+      const project = persistence.createProject('Mutable roots');
+      const task = persistence.createTask('Snapshot', false, project.id);
+      const turn = persistence.startTurn(task.id, 'snapshot roots');
+      persistence.cancelTurn(task.id, turn.turnId);
+      const configured = persistence.replaceProjectFolders({
+        projectId: project.id,
+        expectedRevision: project.revision,
         folders: [
           folderBinding('/tmp/root-a', 'primary', 'a', rootA),
           folderBinding('/tmp/root-b', 'secondary', 'b', rootB),
         ],
       });
-      const task = persistence.createTask('Snapshot', false, project.id);
-      const turn = persistence.startTurn(task.id, 'snapshot roots');
       const sealed = persistence.sealTurnWorkspaceSet(task.id, turn.turnId);
-      persistence.cancelTurn(task.id, turn.turnId);
+      const [configuredRootA, configuredRootB] = persistence.listProjectFolders(project.id);
 
       const replaced = persistence.replaceProjectFolders({
         projectId: project.id,
-        expectedRevision: project.revision,
+        expectedRevision: configured.revision,
         folders: [
           folderBinding('/tmp/root-b-relocated', 'primary', 'b'),
           folderBinding('/tmp/root-a', 'secondary', 'a'),
@@ -338,12 +346,12 @@ if (runsWithElectronAbi)
       });
 
       expect(replaced).toMatchObject({
-        revision: project.revision + 1,
-        primaryFolder: { id: rootB, path: '/tmp/root-b-relocated' },
+        revision: configured.revision + 1,
+        primaryFolder: { id: configuredRootB!.id, path: '/tmp/root-b-relocated' },
       });
       expect(persistence.listProjectFolders(project.id).map(({ id }) => id)).toEqual([
-        rootB,
-        rootA,
+        configuredRootB!.id,
+        configuredRootA!.id,
       ]);
       expect(persistence.readTurnWorkspaceSet(turn.turnId)).toEqual(sealed);
       expect(() =>
@@ -379,7 +387,7 @@ if (runsWithElectronAbi)
 
       const project = persistence.createProject({
         name: 'Busy',
-        folders: [folderBinding('/tmp/busy', 'primary', 'c')],
+        folders: [],
       });
       const task = persistence.createTask('Busy task', false, project.id);
       persistence.startTurn(task.id, 'working');
@@ -387,7 +395,7 @@ if (runsWithElectronAbi)
         persistence.replaceProjectFolders({
           projectId: project.id,
           expectedRevision: project.revision,
-          folders: [],
+          folders: [folderBinding('/tmp/busy', 'primary', 'c')],
         }),
       ).toThrow(ProjectFolderMutationBlockedError);
       persistence.close();

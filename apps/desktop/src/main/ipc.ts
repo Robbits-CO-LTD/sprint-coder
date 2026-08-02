@@ -183,6 +183,7 @@ import {
   ProjectArchivedError,
   ProjectConflictError,
   ProjectFolderMutationBlockedError,
+  ProjectWorkspaceRuntimeUnavailableError,
   ReferenceInUseError,
   SteerStaleError,
   TaskAssignmentBlockedError,
@@ -3977,6 +3978,13 @@ function toPublicError(error: unknown): PublicError {
       code: 'OPERATION_CONFLICT',
       userMessage: '実行中または復旧中の作業があるため、Projectのフォルダを変更できません。',
       retryable: true,
+    };
+  if (error instanceof ProjectWorkspaceRuntimeUnavailableError)
+    return {
+      code: 'RUNTIME_UNAVAILABLE',
+      userMessage:
+        'このバージョンではProjectフォルダを使うTurnをまだ開始できません。multi-root runtime対応版へ更新してください。',
+      retryable: false,
     };
   if (error instanceof ProjectArchivedError)
     return {
