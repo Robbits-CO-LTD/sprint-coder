@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { basename, join, sep } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import type { AgentRecord, TeamSnapshot } from './persistence';
@@ -248,18 +248,18 @@ class CrashAfterIntegrationManager extends WorkerWorktreeManager {
 }
 
 class FailRepositoryOnceManager extends WorkerWorktreeManager {
-  private failed = false;
+  private integrationAttempt = 0;
 
   constructor(
     options: ConstructorParameters<typeof WorkerWorktreeManager>[0],
-    private readonly failingRepoPath: string,
+    private readonly failingAttempt: number,
   ) {
     super(options);
   }
 
   override async integrate(input: Parameters<WorkerWorktreeManager['integrate']>[0]) {
-    if (!this.failed && input.repoPath === this.failingRepoPath) {
-      this.failed = true;
+    this.integrationAttempt += 1;
+    if (this.integrationAttempt === this.failingAttempt) {
       throw new Error('simulated primary integration conflict');
     }
     return super.integrate(input);
@@ -825,7 +825,7 @@ if (runsWithElectronAbi)
       const task = persistence.createTask('Standalone integration resume');
       const runtime = new WorktreeWritingRuntime();
       const { workspace, worktreesRoot } = configureGitWorkspace(persistence, task.id);
-      const manager = new FailRepositoryOnceManager({ worktreesRoot }, realpathSync(workspace));
+      const manager = new FailRepositoryOnceManager({ worktreesRoot }, 1);
       const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
       const writer = await coordinator.hireWorker({
         taskId: task.id,
@@ -988,9 +988,9 @@ if (runsWithElectronAbi)
       ]);
       expect(readFileSync(join(primaryRepo, 'worker-output.txt'), 'utf8')).toBe('primary\n');
       expect(readFileSync(join(secondaryRepo, 'worker-output.txt'), 'utf8')).toBe('secondary\n');
-      expect(integrate.mock.calls.map(([input]) => input.repoPath)).toEqual([
-        secondaryRepo,
-        primaryRepo,
+      expect(integrate.mock.calls.map(([input]) => basename(input.repoPath))).toEqual([
+        basename(secondaryRepo),
+        basename(primaryRepo),
       ]);
       expect(isolation).toMatchObject({
         phase: 'completed',
@@ -1073,7 +1073,7 @@ if (runsWithElectronAbi)
       });
       const task = persistence.createTask('Resumable multi-repository Mission', false, project.id);
       const runtime = new MultiRootWritingRuntime();
-      const manager = new FailRepositoryOnceManager({ worktreesRoot }, primaryRepo);
+      const manager = new FailRepositoryOnceManager({ worktreesRoot }, 2);
       const integrate = vi.spyOn(manager, 'integrate');
       const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
       const writer = await coordinator.hireWorker({
@@ -1130,9 +1130,9 @@ if (runsWithElectronAbi)
           encoding: 'utf8',
         }).stdout,
       ).toBe('2\n');
-      expect(integrate.mock.calls.map(([input]) => input.repoPath)).toEqual([
-        secondaryRepo,
-        primaryRepo,
+      expect(integrate.mock.calls.map(([input]) => basename(input.repoPath))).toEqual([
+        basename(secondaryRepo),
+        basename(primaryRepo),
       ]);
 
       persistence.close();
@@ -1147,7 +1147,9 @@ if (runsWithElectronAbi)
       expect(runtime.workspaceSets).toHaveLength(1);
       expect(persistence.listTeamAttempts(executionId)).toHaveLength(1);
       expect(persistence.getTeamExecutionIsolationCompletion(executionId)).toBeNull();
-      expect(resumedIntegrate.mock.calls.map(([input]) => input.repoPath)).toEqual([primaryRepo]);
+      expect(resumedIntegrate.mock.calls.map(([input]) => basename(input.repoPath))).toEqual([
+        basename(primaryRepo),
+      ]);
       expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
         phase: 'completed',
         resumeKind: null,
