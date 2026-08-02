@@ -1,4 +1,4 @@
-import type { ForgeConfig } from '@electron-forge/shared-types';
+import type { ForgeConfig, ForgePlatform } from '@electron-forge/shared-types';
 import { MakerDMG } from '@electron-forge/maker-dmg';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
 import { MakerZIP } from '@electron-forge/maker-zip';
@@ -85,6 +85,13 @@ function verifiedBundledNodeResources(): string[] {
     throw new Error(`Bundled Node signature is not trusted OpenJS: ${signature}`);
   if (!lstatSync(nodeLicense).isFile()) throw new Error('Bundled Node LICENSE was not found');
   return [nodeExecutable, nodeLicense];
+}
+
+export function assertNativePackagingHost(targetPlatform: ForgePlatform): void {
+  if (targetPlatform === process.platform) return;
+  throw new Error(
+    `Cross-platform packaging is unsupported: target ${targetPlatform} must be built on ${targetPlatform}, not ${process.platform}. The package contains target-native Node and Electron addons.`,
+  );
 }
 
 if (
@@ -183,6 +190,9 @@ const config: ForgeConfig = {
     ],
   },
   hooks: {
+    prePackage: async (_forgeConfig, platform) => {
+      assertNativePackagingHost(platform);
+    },
     postPackage: async (_forgeConfig, packageResult) => {
       if (packageResult.platform !== 'darwin') return;
       if ((releasePackage || ciPackage) && macCodeSignIdentity === '-' && !allowAdhocCodeSign)
