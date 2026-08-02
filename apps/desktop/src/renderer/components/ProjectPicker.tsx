@@ -84,7 +84,8 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
             triggerRef.current?.focus({ preventScroll: true });
             return;
           }
-          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+          if (!isProjectPickerNavigationKey(event.key, event.target instanceof HTMLInputElement))
+            return;
           const buttons = [
             ...(wrapRef.current?.querySelectorAll<HTMLButtonElement>(
               '.project-picker-options button:not(:disabled), .project-picker-actions button:not(:disabled)',
@@ -184,6 +185,11 @@ export function nextProjectPickerIndex(current: number, length: number, key: str
   if (key === 'End') return length - 1;
   if (key === 'ArrowUp') return current <= 0 ? length - 1 : current - 1;
   return current < 0 || current >= length - 1 ? 0 : current + 1;
+}
+
+export function isProjectPickerNavigationKey(key: string, fromSearchInput: boolean): boolean {
+  if (key === 'ArrowDown' || key === 'ArrowUp') return true;
+  return !fromSearchInput && (key === 'Home' || key === 'End');
 }
 
 export function filterProjectsByQuery(
