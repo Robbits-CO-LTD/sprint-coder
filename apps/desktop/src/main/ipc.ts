@@ -688,7 +688,10 @@ export class IpcRouter {
         this.pushFileEdit(
           taskId,
           turnId,
-          resolvePath(this.persistence.getWorkspace(taskId) ?? '/', path),
+          resolvePath(
+            primaryWorkspacePath(this.persistence.getEffectiveWorkspaceSet(taskId)) ?? '/',
+            path,
+          ),
           text,
           {
             complete,

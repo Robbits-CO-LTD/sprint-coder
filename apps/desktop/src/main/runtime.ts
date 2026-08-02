@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { FileChange, TurnEvent, TurnStage } from '@sprint-coder/contracts';
+import type {
+  EffectiveWorkspaceSet,
+  FileChange,
+  TurnEvent,
+  TurnStage,
+} from '@sprint-coder/contracts';
 import type { PersistenceClient } from './persistence';
 import type { PreparedContext } from './context-ledger';
 import { digestCanonical } from './context-compiler';
@@ -181,7 +186,11 @@ export class MockRuntimeAdapter {
           }
       }
 
-      const workspacePath = this.persistence.getWorkspace?.(taskId) ?? null;
+      const effectiveWorkspace = this.persistence.getEffectiveWorkspaceSet?.(taskId);
+      const workspaceBinding = mockWorkspaceBinding(
+        this.persistence.getWorkspace?.(taskId) ?? null,
+        effectiveWorkspace,
+      );
       const policyEpoch = this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0;
       // Pseudo file changes (issue #37). Mock is the ONLY runtime under SPRINT_CODER_E2E_MODE=dev,
       // so without this the timeline and replay-after-restart edit path has no producer in any E2E
@@ -189,10 +198,18 @@ export class MockRuntimeAdapter {
       // Runtime (see write-scope.ts), so the mock cannot report an edit in a configuration where a
       // real Runtime would have been refused one.
       if (
-        workspacePath !== null &&
+        workspaceBinding.workspaceId !== null &&
         (this.persistence.getPermissionPolicy?.(taskId).preset ?? 'ask') !== 'ask'
       ) {
-        const changes = mockFileChanges(input);
+        const primaryRoot = effectiveWorkspace?.roots.find(
+          ({ rootId }) => rootId === effectiveWorkspace.primaryRootId,
+        );
+        const changes = mockFileChanges(
+          input,
+          primaryRoot === undefined
+            ? undefined
+            : { rootId: primaryRoot.rootId, rootLabel: primaryRoot.label },
+        );
         // Stream each body before recording the change, in that order, because that is the order a
         // real Runtime produces them in: the file is written, then reported (issue #39). An E2E
         // that saw the summary first would be asserting on a sequence the real thing never emits.
@@ -209,7 +226,7 @@ export class MockRuntimeAdapter {
           if (event !== undefined && event !== null) this.publish(event);
         });
       }
-      const workspaceId = workspacePath === null ? null : digestCanonical({ workspacePath });
+      const workspaceId = workspaceBinding.workspaceId;
       const contractRevision =
         this.persistence.getAcceptanceContract?.(taskId, turnId).revision ?? null;
       const toolContext = { taskId, turnId, workspaceId, policyEpoch } as const;
@@ -229,7 +246,7 @@ export class MockRuntimeAdapter {
         model: 'mock-v1',
         effort: 'low',
         policyEpoch,
-        workspaceRevision: `untracked:${digestCanonical({ workspacePath })}`,
+        workspaceRevision: workspaceBinding.workspaceRevision,
         contractRevision,
         toolCatalogSnapshot,
         sample: teamScenarioActive
@@ -360,22 +377,44 @@ function streamingPrefixes(body: string): string[] {
  * feature. Always relative and always inside the Workspace, exactly like the real path Main lets
  * through.
  */
-export function mockFileChanges(input: string): FileChange[] {
+export function mockFileChanges(
+  input: string,
+  root: { rootId: string; rootLabel: string } = {
+    rootId: 'legacy-primary',
+    rootLabel: 'Workspace',
+  },
+): FileChange[] {
   const slug = (input.match(/[A-Za-z0-9_-]{3,24}/)?.[0] ?? 'note').toLowerCase();
   return [
     {
-      rootId: 'legacy-primary',
-      rootLabel: 'Workspace',
+      rootId: root.rootId,
+      rootLabel: root.rootLabel,
       path: `src/${slug}.ts`,
       kind: 'update',
     },
     {
-      rootId: 'legacy-primary',
-      rootLabel: 'Workspace',
+      rootId: root.rootId,
+      rootLabel: root.rootLabel,
       path: `src/${slug}.test.ts`,
       kind: 'add',
     },
   ];
+}
+
+export function mockWorkspaceBinding(
+  legacyWorkspacePath: string | null,
+  effective?: EffectiveWorkspaceSet,
+): { workspaceId: string | null; workspaceRevision: string } {
+  if (effective !== undefined && effective.roots.length > 0) {
+    const workspaceId = digestCanonical({ effectiveWorkspaceDigest: effective.digest });
+    return { workspaceId, workspaceRevision: `effective:${effective.digest}` };
+  }
+  const workspaceId =
+    legacyWorkspacePath === null ? null : digestCanonical({ workspacePath: legacyWorkspacePath });
+  return {
+    workspaceId,
+    workspaceRevision: `untracked:${digestCanonical({ workspacePath: legacyWorkspacePath })}`,
+  };
 }
 
 /**
