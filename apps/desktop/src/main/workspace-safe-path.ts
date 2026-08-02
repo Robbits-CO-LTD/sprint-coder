@@ -34,7 +34,13 @@ export function resolveSafeWorkspaceFile(
       // Workspace root, while lstat below still sees and rejects a symlink at the file leaf.
       absolute = join(realpathSync(dirname(absolute)), basename(absolute));
     } catch {
-      return { path: null, reason: 'not_a_file' };
+      const lexicalRoot = resolve(workspacePath);
+      const lexicalRelation = relative(lexicalRoot, absolute);
+      const outside =
+        lexicalRelation === '..' ||
+        lexicalRelation.startsWith(`..${sep}`) ||
+        isAbsolute(lexicalRelation);
+      return { path: null, reason: outside ? 'outside_workspace' : 'not_a_file' };
     }
   }
   const relation = relative(root, absolute);
