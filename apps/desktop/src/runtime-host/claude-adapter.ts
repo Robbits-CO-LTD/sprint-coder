@@ -627,13 +627,10 @@ async function probeAuthentication(
     child.once('exit', (code) =>
       finish(code === 0 ? 'authenticated' : code === 1 ? 'unauthenticated' : 'unknown'),
     );
-    const timer = setTimeout(
-      () => {
-        child.kill('SIGKILL');
-        finish('unknown');
-      },
-      Math.max(RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS),
-    );
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish('unknown');
+    }, RUNTIME_AUTH_PROBE_TIMEOUT_MS);
   });
 }
 

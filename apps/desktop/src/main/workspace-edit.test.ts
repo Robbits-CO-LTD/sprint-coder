@@ -293,7 +293,7 @@ describe('saveWorkspaceFile (issue #43)', () => {
   });
 
   it.runIf(process.platform !== 'win32')(
-    'falls back to an atomic sibling rename when the filesystem cannot exchange files',
+    'fails closed without moving the target when the filesystem cannot exchange files',
     () => {
       const root = workspace();
       const file = join(root, 'important.txt');
@@ -302,11 +302,12 @@ describe('saveWorkspaceFile (issue #43)', () => {
       try {
         expect(
           saveWorkspaceFile(root, 'important.txt', 'after\n', digestOf('before\n')),
-        ).toMatchObject({ outcome: 'saved', digest: digestOf('after\n') });
+        ).toMatchObject({ outcome: 'refused', reason: 'io_error', conflictPath: null });
       } finally {
         fileSystemFault.unsupportedExchange = false;
       }
-      expect(readFileSync(file, 'utf8')).toBe('after\n');
+      expect(readFileSync(file, 'utf8')).toBe('before\n');
+      expect(readdirSync(root)).toEqual(['important.txt']);
     },
   );
 

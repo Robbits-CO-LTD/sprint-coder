@@ -9,13 +9,11 @@ import {
   fchmodSync,
   fstatSync,
   futimesSync,
-  linkSync,
   fsyncSync,
   ftruncateSync,
   openSync,
   readFileSync,
   readSync,
-  renameSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
@@ -328,8 +326,12 @@ function publishStagedFile(
     try {
       exchangePosixFiles(staging, absolute);
     } catch (error) {
-      if (!isUnsupportedExchange(error)) throw error;
-      return publishWithoutExchange(staging, absolute, backup, baseDigest, replacementDigest);
+      // There is no portable sequence of ordinary POSIX rename/link operations that can both
+      // publish and restore without overwriting a writer racing either boundary. On filesystems
+      // without atomic exchange, leave the live destination untouched and fail closed.
+      if (isUnsupportedExchange(error))
+        throw new Error('Atomic file exchange is unsupported by this filesystem', { cause: error });
+      throw error;
     }
     try {
       if (digestOf(readFileSync(staging)) === baseDigest)
@@ -368,33 +370,6 @@ function publishStagedFile(
     }
     throw error;
   }
-}
-
-function publishWithoutExchange(
-  staging: string,
-  absolute: string,
-  backup: string,
-  baseDigest: string,
-  replacementDigest: string,
-): 'published' | 'conflict_backup' | 'intervened' {
-  // Filesystems without atomic exchange can still avoid an overwrite race by first moving the
-  // boundary destination aside, then publishing with a no-replace hardlink. If hardlinks are not
-  // supported either, fail closed after restoring the target instead of reporting an unsafe save.
-  renameSync(absolute, backup);
-  try {
-    linkSync(staging, absolute);
-  } catch (error) {
-    if (existsSync(absolute)) return 'conflict_backup';
-    renameSync(backup, absolute);
-    throw error;
-  }
-  if (digestOf(readFileSync(backup)) !== baseDigest) {
-    unlinkSync(staging);
-    return 'conflict_backup';
-  }
-  if (digestOf(readFileSync(absolute)) !== replacementDigest) return 'intervened';
-  unlinkSync(staging);
-  return 'published';
 }
 
 function stageTargetFile(absolute: string, staging: string): void {
