@@ -406,13 +406,13 @@ describe('saveWorkspaceFile (issue #43)', () => {
         createHash('sha256').update(original).digest('hex'),
       );
       expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
-      expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-stage-/);
+      expect(result.conflictPath).toBeNull();
     } finally {
       fileSystemFault.failRename = false;
       fileSystemFault.failAtomicReplace = false;
     }
     expect(readFileSync(file)).toEqual(original);
-    expect(readdirSync(root)).toHaveLength(2);
+    expect(readdirSync(root)).toEqual(['important.txt']);
   });
 
   it.runIf(process.platform === 'win32')(

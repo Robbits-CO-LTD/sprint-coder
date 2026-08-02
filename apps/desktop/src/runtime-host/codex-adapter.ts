@@ -35,6 +35,7 @@ import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
 import { serializeCliExecutionPayload } from './execution-payload';
+import { probeCliAuthentication } from './authentication-probe';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -111,7 +112,13 @@ export async function probeCodex(
     }, RUNTIME_VERSION_PROBE_TIMEOUT_MS);
   });
   const authentication = availability.available
-    ? await probeAuthentication(resolveCodexCommand(command), ['login', 'status'], environment)
+    ? await probeCliAuthentication(
+        'codex',
+        resolveCodexCommand(command),
+        ['login', 'status'],
+        minimalEnvironment(environment),
+        RUNTIME_AUTH_PROBE_TIMEOUT_MS,
+      )
     : 'unknown';
   return {
     ...availability,
@@ -913,31 +920,6 @@ function minimalEnvironment(source: Readonly<NodeJS.ProcessEnv> = process.env): 
       return value === undefined ? [] : [[key, value]];
     }),
   );
-}
-
-async function probeAuthentication(
-  command: string,
-  args: readonly string[],
-  environment: Readonly<NodeJS.ProcessEnv>,
-): Promise<'authenticated' | 'unauthenticated' | 'unknown'> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const child = spawn(command, args, { env: minimalEnvironment(environment), stdio: 'ignore' });
-    const finish = (result: 'authenticated' | 'unauthenticated' | 'unknown') => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    child.once('error', () => finish('unknown'));
-    child.once('exit', (code) =>
-      finish(code === 0 ? 'authenticated' : code === 1 ? 'unauthenticated' : 'unknown'),
-    );
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish('unknown');
-    }, RUNTIME_AUTH_PROBE_TIMEOUT_MS);
-  });
 }
 
 export async function terminateCodexProcessTree(

@@ -231,8 +231,16 @@ export function saveWorkspaceFile(
     // check keeps the race window as small as the filesystem API permits; rename itself is atomic.
     closeSync(descriptor);
     descriptor = null;
-    publicationAttempted = true;
-    const publication = publishStagedFile(staging, absolute, backup, baseDigest, digestOf(bytes));
+    const publication = publishStagedFile(
+      staging,
+      absolute,
+      backup,
+      baseDigest,
+      digestOf(bytes),
+      () => {
+        publicationAttempted = true;
+      },
+    );
     if (publication === 'conflict' || publication === 'conflict_backup') {
       // Atomic rollback moves the version displaced at rollback time into staging. Retaining it is
       // essential: deleting it could destroy a third-party edit made after the first exchange.
@@ -322,6 +330,7 @@ function publishStagedFile(
   backup: string,
   baseDigest: string,
   replacementDigest: string,
+  markPublished: () => void,
 ): 'published' | 'conflict' | 'conflict_backup' | 'intervened' {
   if (process.platform !== 'win32') {
     try {
@@ -333,6 +342,7 @@ function publishStagedFile(
       if (isUnsupportedExchange(error)) throw new AtomicExchangeUnsupportedError(error);
       throw error;
     }
+    markPublished();
     try {
       if (digestOf(readFileSync(staging)) === baseDigest)
         return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
@@ -353,6 +363,7 @@ function publishStagedFile(
   }
   // ReplaceFileW retains the destination ACL and atomically places its boundary version in backup.
   replaceWindowsFileWithBackup(staging, absolute, backup);
+  markPublished();
   try {
     if (digestOf(readFileSync(backup)) === baseDigest)
       return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
