@@ -207,15 +207,29 @@ if (runsWithElectronAbi)
         }),
       ).not.toThrow();
       persistence.releaseTeamIntegrationRootLeases(second.id);
+      persistence.acquireTeamIntegrationRootLeases({
+        executionId: first.id,
+        roots,
+        now: '2026-08-02T00:00:05.000Z',
+      });
       persistence.close();
 
       const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('replacement-instance', '2026-08-02T00:01:00.000Z');
       expect(reopened.getTeamExecutionIsolation(first.id)).toMatchObject({
         phase: 'running',
         revision: 2,
         repositories,
         roots,
       });
+      expect(() =>
+        reopened.acquireTeamIntegrationRootLeases({
+          executionId: second.id,
+          roots,
+          now: '2026-08-02T00:01:01.000Z',
+        }),
+      ).not.toThrow();
+      reopened.releaseTeamIntegrationRootLeases(second.id);
       reopened.close();
     });
 

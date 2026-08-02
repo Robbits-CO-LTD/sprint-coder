@@ -59,6 +59,7 @@ import {
   type TeamMissionState,
   type TeamMissionWorktreeState,
   type TeamExecutionIsolation,
+  type WorkerReport,
   type TeamModelRestriction,
   type TeamUsageTotals,
   type TurnEvent,
@@ -514,6 +515,15 @@ type TeamExecutionIsolationRow = {
   revision: number;
   created_at: string;
   updated_at: string;
+};
+type TeamExecutionIsolationCompletionRow = {
+  execution_id: string;
+  attempt_id: string;
+  team_task_id: string;
+  agent_id: string;
+  report_json: string;
+  done_evidence_json: string;
+  created_at: string;
 };
 type TeamMessageRow = {
   id: string;
@@ -2924,6 +2934,16 @@ const migrations = [
       );
       CREATE INDEX team_integration_root_leases_execution_idx
         ON team_integration_root_leases(execution_id, root_id);
+
+      CREATE TABLE team_execution_isolation_completions (
+        execution_id TEXT PRIMARY KEY REFERENCES team_execution_isolations(execution_id) ON DELETE CASCADE,
+        attempt_id TEXT NOT NULL REFERENCES team_attempts(id),
+        team_task_id TEXT NOT NULL REFERENCES team_tasks(id),
+        agent_id TEXT NOT NULL REFERENCES agents(id),
+        report_json TEXT NOT NULL,
+        done_evidence_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `,
   },
 ];
@@ -3353,6 +3373,15 @@ export type TeamExecutionIsolationRecord = Readonly<
     updatedAt: string;
   }
 >;
+export type TeamExecutionIsolationCompletionRecord = Readonly<{
+  executionId: string;
+  attemptId: string;
+  teamTaskId: string;
+  agentId: string;
+  report: WorkerReport;
+  doneEvidence: readonly { criterion: string; evidence: string }[];
+  createdAt: string;
+}>;
 export type TeamMissionRecord = Readonly<{
   id: string;
   teamId: string;
@@ -3627,6 +3656,19 @@ export interface PersistenceClient {
     now: string;
   }): TeamExecutionIsolationRecord;
   getTeamExecutionIsolation(executionId: string): TeamExecutionIsolationRecord | null;
+  saveTeamExecutionIsolationCompletion(input: {
+    executionId: string;
+    attemptId: string;
+    teamTaskId: string;
+    agentId: string;
+    report: WorkerReport;
+    doneEvidence: readonly { criterion: string; evidence: string }[];
+    now: string;
+  }): TeamExecutionIsolationCompletionRecord;
+  getTeamExecutionIsolationCompletion(
+    executionId: string,
+  ): TeamExecutionIsolationCompletionRecord | null;
+  deleteTeamExecutionIsolationCompletion(executionId: string): void;
   acquireTeamIntegrationRootLeases(input: {
     executionId: string;
     roots: readonly Pick<
@@ -6867,7 +6909,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       running: ['finalizing', 'quarantined'],
       finalizing: ['integrating', 'waiting_resume', 'quarantined'],
       integrating: ['waiting_resume', 'completed', 'quarantined'],
-      waiting_resume: ['integrating', 'quarantined'],
+      waiting_resume: ['finalizing', 'integrating', 'quarantined'],
       completed: ['quarantined'],
       quarantined: [],
     };
@@ -6909,6 +6951,74 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('SELECT * FROM team_execution_isolations WHERE execution_id = ?')
       .get(executionId) as TeamExecutionIsolationRow | undefined;
     return row === undefined ? null : toTeamExecutionIsolation(row);
+  }
+
+  saveTeamExecutionIsolationCompletion(input: {
+    executionId: string;
+    attemptId: string;
+    teamTaskId: string;
+    agentId: string;
+    report: WorkerReport;
+    doneEvidence: readonly { criterion: string; evidence: string }[];
+    now: string;
+  }): TeamExecutionIsolationCompletionRecord {
+    const report = workerReportSchema.parse(input.report);
+    const attempt = this.getTeamAttempt(input.attemptId);
+    const dispatch = this.getTeamExecutionDispatch(input.executionId);
+    if (attempt.executionId !== input.executionId || dispatch.teamTaskId !== input.teamTaskId)
+      throw new Error('Team isolation completion does not match its execution');
+    if (this.getTeamTask(input.teamTaskId).assigneeAgentId !== input.agentId)
+      throw new Error('Team isolation completion does not match its Worker');
+    const existing = this.getTeamExecutionIsolationCompletion(input.executionId);
+    if (
+      existing !== null &&
+      (existing.attemptId !== input.attemptId ||
+        existing.teamTaskId !== input.teamTaskId ||
+        existing.agentId !== input.agentId)
+    )
+      throw new Error('Team isolation completion is already sealed to another dispatch');
+    if (existing !== null) {
+      this.db
+        .prepare(
+          `UPDATE team_execution_isolation_completions
+           SET report_json = ?, done_evidence_json = ?
+           WHERE execution_id = ?`,
+        )
+        .run(JSON.stringify(report), JSON.stringify(input.doneEvidence), input.executionId);
+      return this.requireTeamExecutionIsolationCompletion(input.executionId);
+    }
+    this.db
+      .prepare(
+        `INSERT INTO team_execution_isolation_completions(
+           execution_id, attempt_id, team_task_id, agent_id, report_json,
+           done_evidence_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.executionId,
+        input.attemptId,
+        input.teamTaskId,
+        input.agentId,
+        JSON.stringify(report),
+        JSON.stringify(input.doneEvidence),
+        input.now,
+      );
+    return this.requireTeamExecutionIsolationCompletion(input.executionId);
+  }
+
+  getTeamExecutionIsolationCompletion(
+    executionId: string,
+  ): TeamExecutionIsolationCompletionRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM team_execution_isolation_completions WHERE execution_id = ?')
+      .get(executionId) as TeamExecutionIsolationCompletionRow | undefined;
+    return row === undefined ? null : toTeamExecutionIsolationCompletion(row);
+  }
+
+  deleteTeamExecutionIsolationCompletion(executionId: string): void {
+    this.db
+      .prepare('DELETE FROM team_execution_isolation_completions WHERE execution_id = ?')
+      .run(executionId);
   }
 
   acquireTeamIntegrationRootLeases(input: {
@@ -7166,6 +7276,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   recoverInterruptedTeamExecutions(now: string): number {
     return this.db.transaction(() => {
+      this.db.prepare('DELETE FROM team_integration_root_leases').run();
+      this.db
+        .prepare(
+          `UPDATE team_execution_isolations
+           SET phase = 'waiting_resume', resume_kind = 'integration',
+               reason = COALESCE(reason, 'Application restarted before repository integration completed'),
+               revision = revision + 1, updated_at = ?
+           WHERE phase IN ('finalizing', 'integrating')
+              OR (
+                phase = 'running'
+                AND EXISTS (
+                  SELECT 1 FROM team_execution_isolation_completions c
+                  WHERE c.execution_id = team_execution_isolations.execution_id
+                )
+              )`,
+        )
+        .run(now);
       const running = this.db
         .prepare("SELECT id, execution_id, start_reason FROM team_attempts WHERE state = 'running'")
         .all() as {
@@ -13518,6 +13645,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return isolation;
   }
 
+  private requireTeamExecutionIsolationCompletion(
+    executionId: string,
+  ): TeamExecutionIsolationCompletionRecord {
+    const completion = this.getTeamExecutionIsolationCompletion(executionId);
+    if (completion === null)
+      throw new NotFoundError('Team execution isolation completion not found');
+    return completion;
+  }
+
   private getGlobalLimits(): Partial<Record<BudgetKind, number>> {
     const row = this.db.prepare('SELECT limits_json FROM team_global_limits WHERE id = 1').get() as
       { limits_json: string } | undefined;
@@ -14176,6 +14312,32 @@ function toTeamExecutionIsolation(row: TeamExecutionIsolationRow): TeamExecution
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toTeamExecutionIsolationCompletion(
+  row: TeamExecutionIsolationCompletionRow,
+): TeamExecutionIsolationCompletionRecord {
+  const doneEvidence = JSON.parse(row.done_evidence_json) as unknown;
+  if (
+    !Array.isArray(doneEvidence) ||
+    doneEvidence.some(
+      (item) =>
+        typeof item !== 'object' ||
+        item === null ||
+        typeof (item as { criterion?: unknown }).criterion !== 'string' ||
+        typeof (item as { evidence?: unknown }).evidence !== 'string',
+    )
+  )
+    throw new Error('Invalid Team isolation completion evidence');
+  return {
+    executionId: row.execution_id,
+    attemptId: row.attempt_id,
+    teamTaskId: row.team_task_id,
+    agentId: row.agent_id,
+    report: workerReportSchema.parse(JSON.parse(row.report_json)),
+    doneEvidence: doneEvidence as { criterion: string; evidence: string }[],
+    createdAt: row.created_at,
   };
 }
 

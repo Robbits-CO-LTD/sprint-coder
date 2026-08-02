@@ -247,6 +247,25 @@ class CrashAfterIntegrationManager extends WorkerWorktreeManager {
   }
 }
 
+class FailRepositoryOnceManager extends WorkerWorktreeManager {
+  private failed = false;
+
+  constructor(
+    options: ConstructorParameters<typeof WorkerWorktreeManager>[0],
+    private readonly failingRepoPath: string,
+  ) {
+    super(options);
+  }
+
+  override async integrate(input: Parameters<WorkerWorktreeManager['integrate']>[0]) {
+    if (!this.failed && input.repoPath === this.failingRepoPath) {
+      this.failed = true;
+      throw new Error('simulated primary integration conflict');
+    }
+    return super.integrate(input);
+  }
+}
+
 class BlockingWorkerRuntime extends TestWorkerRuntime {
   activeExecutions = 0;
   maxActiveExecutions = 0;
@@ -949,6 +968,154 @@ if (runsWithElectronAbi)
           spawnSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
         ).toBe('');
       }
+      persistence.close();
+    });
+
+    it('resumes only remaining repository integrations without rerunning the Worker', async () => {
+      const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-resume-db-'));
+      const databasePath = join(databaseDirectory, 'test.sqlite3');
+      cleanup.push(databaseDirectory);
+      let persistence = new SqlitePersistenceClient(databasePath);
+      const primaryRepo = realpathSync(
+        mkdtempSync(join(tmpdir(), 'sprint-coder-team-resume-primary-')),
+      );
+      const secondaryRepo = realpathSync(
+        mkdtempSync(join(tmpdir(), 'sprint-coder-team-resume-secondary-')),
+      );
+      const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-resume-worktrees-'));
+      cleanup.push(primaryRepo, secondaryRepo, worktreesRoot);
+      for (const [repo, label] of [
+        [primaryRepo, 'primary'],
+        [secondaryRepo, 'secondary'],
+      ] as const) {
+        expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+        writeFileSync(join(repo, 'README.md'), `${label}\n`);
+        expect(spawnSync('git', ['-C', repo, 'add', 'README.md']).status).toBe(0);
+        expect(
+          spawnSync('git', [
+            '-C',
+            repo,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-q',
+            '-m',
+            'base',
+          ]).status,
+        ).toBe(0);
+      }
+      const project = persistence.createProject({
+        name: 'Resumable repositories',
+        folders: [
+          {
+            id: '30000000-0000-4000-8000-000000000001',
+            path: primaryRepo,
+            canonicalPath: primaryRepo,
+            label: 'primary',
+            role: 'primary',
+            workspaceKey: '7'.repeat(64),
+            rootIdentityDigest: 'e'.repeat(64),
+          },
+          {
+            id: '30000000-0000-4000-8000-000000000002',
+            path: secondaryRepo,
+            canonicalPath: secondaryRepo,
+            label: 'secondary',
+            role: 'secondary',
+            workspaceKey: '8'.repeat(64),
+            rootIdentityDigest: 'f'.repeat(64),
+          },
+        ],
+      });
+      const task = persistence.createTask('Resumable multi-repository Mission', false, project.id);
+      const runtime = new MultiRootWritingRuntime();
+      const manager = new FailRepositoryOnceManager({ worktreesRoot }, primaryRepo);
+      const integrate = vi.spyOn(manager, 'integrate');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write both repositories once',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const reader = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reader',
+        objective: 'verify integrated repositories',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'resume a partial integration',
+        doneCriteria: ['both repositories integrated'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'write both roots',
+            doneCriteria: ['both outputs exist'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: reader.id,
+            objective: 'verify both roots',
+            doneCriteria: ['both outputs inspected'],
+            access: 'read-only',
+          },
+        ],
+      });
+
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume', 8_000);
+      const executionId = mission.steps[0]!.executionId;
+      expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
+        phase: 'waiting_resume',
+        resumeKind: 'integration',
+        repositories: [{ state: 'ready' }, { state: 'integrated' }],
+        reason: 'simulated primary integration conflict',
+      });
+      expect(persistence.getTeamExecutionIsolationCompletion(executionId)).not.toBeNull();
+      expect(runtime.workspaceSets).toHaveLength(1);
+      expect(persistence.listTeamAttempts(executionId)).toHaveLength(1);
+      expect(
+        spawnSync('git', ['-C', primaryRepo, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' })
+          .stdout,
+      ).toBe('1\n');
+      expect(
+        spawnSync('git', ['-C', secondaryRepo, 'rev-list', '--count', 'HEAD'], {
+          encoding: 'utf8',
+        }).stdout,
+      ).toBe('2\n');
+      expect(integrate.mock.calls.map(([input]) => input.repoPath)).toEqual([
+        secondaryRepo,
+        primaryRepo,
+      ]);
+
+      persistence.close();
+      persistence = new SqlitePersistenceClient(databasePath);
+      persistence.initializeMutationRecovery('resumed-instance', '2026-08-02T00:10:00.000Z');
+      const resumedManager = new WorkerWorktreeManager({ worktreesRoot });
+      const resumedIntegrate = vi.spyOn(resumedManager, 'integrate');
+      const resumedCoordinator = coordinatorWithWorktrees(persistence, runtime, resumedManager);
+      resumedCoordinator.recoverOnStartup();
+      await resumedCoordinator.resumeMission(task.id, mission.id);
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 8_000);
+      expect(runtime.workspaceSets).toHaveLength(1);
+      expect(persistence.listTeamAttempts(executionId)).toHaveLength(1);
+      expect(persistence.getTeamExecutionIsolationCompletion(executionId)).toBeNull();
+      expect(resumedIntegrate.mock.calls.map(([input]) => input.repoPath)).toEqual([primaryRepo]);
+      expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
+        phase: 'completed',
+        resumeKind: null,
+        repositories: [{ state: 'cleaned' }, { state: 'cleaned' }],
+      });
+      for (const repo of [primaryRepo, secondaryRepo])
+        expect(
+          spawnSync('git', ['-C', repo, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' })
+            .stdout,
+        ).toBe('2\n');
       persistence.close();
     });
 

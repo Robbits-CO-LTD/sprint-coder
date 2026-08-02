@@ -657,6 +657,14 @@ describe('public contracts', () => {
     } as const;
     expect(teamExecutionIsolationSchema.parse(isolation)).toMatchObject({ phase: 'running' });
     expect(
+      teamExecutionIsolationSchema.parse({
+        ...isolation,
+        phase: 'waiting_resume',
+        resumeKind: 'integration',
+        reason: 'resume finalization',
+      }),
+    ).toMatchObject({ phase: 'waiting_resume', repositories: [{ state: 'active' }] });
+    expect(
       teamExecutionIsolationSchema.safeParse({
         ...isolation,
         roots: [isolation.roots[0], { ...isolation.roots[0], role: 'secondary' }],

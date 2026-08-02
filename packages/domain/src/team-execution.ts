@@ -53,7 +53,7 @@ const executionTransitions: Readonly<Record<TeamExecutionState, readonly TeamExe
   waiting_verification: ['queued', 'running', 'waiting_resume', 'failed', 'canceled'],
   waiting_rate_limit: ['queued', 'running', 'waiting_resume', 'failed', 'canceled'],
   running: ['queued', 'waiting_rate_limit', 'waiting_resume', 'completed', 'failed', 'canceled'],
-  waiting_resume: ['queued', 'failed', 'canceled'],
+  waiting_resume: ['queued', 'completed', 'failed', 'canceled'],
   completed: [],
   failed: [],
   canceled: [],

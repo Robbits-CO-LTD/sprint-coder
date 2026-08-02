@@ -25,6 +25,7 @@ describe('Team execution domain', () => {
     expect(transitionTeamExecution('queued', 'waiting_rate_limit')).toBe('waiting_rate_limit');
     expect(transitionTeamExecution('running', 'waiting_rate_limit')).toBe('waiting_rate_limit');
     expect(transitionTeamExecution('running', 'queued')).toBe('queued');
+    expect(transitionTeamExecution('waiting_resume', 'completed')).toBe('completed');
   });
 
   it('reuses the same attempt across a rate-limit wait', () => {
