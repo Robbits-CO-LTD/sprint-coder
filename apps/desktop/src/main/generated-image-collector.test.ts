@@ -104,6 +104,23 @@ describe('collectThreadImages', () => {
     expect(collectThreadImages(thread, root)).toEqual([]);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'accepts a safe root alias while still resolving the thread beneath its canonical root',
+    () => {
+      const physicalRoot = tempRoot();
+      const aliasParent = tempRoot();
+      const aliasRoot = join(aliasParent, 'root-alias');
+      symlinkSync(physicalRoot, aliasRoot, 'dir');
+      const thread = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      mkdirSync(join(physicalRoot, thread));
+      writeFileSync(join(physicalRoot, thread, 'call.png'), PNG);
+
+      expect(collectThreadImages(thread, aliasRoot).map(({ fileName }) => fileName)).toEqual([
+        'call.png',
+      ]);
+    },
+  );
+
   it('never follows a traversing thread id out of the root', () => {
     const root = tempRoot();
     const outside = join(root, 'outside');
