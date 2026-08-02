@@ -12,6 +12,7 @@ import {
   readdirSync,
   symlinkSync,
   statSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -36,6 +37,7 @@ const fileSystemFault = vi.hoisted(() => ({
   concurrentPosixContent: null as string | null,
   afterPublicationContent: null as string | null,
   failBoundaryRead: false,
+  stagingSymlinkTarget: null as string | null,
 }));
 
 vi.mock('./native-file-publication', async (importOriginal) => {
@@ -88,7 +90,21 @@ vi.mock('node:child_process', async (importOriginal) => {
         const target = options?.env?.['SPRINT_CODER_TARGET'];
         if (target !== undefined) writeFileSync(target, fileSystemFault.concurrentWindowsContent);
       }
-      return actual.execFileSync(...args);
+      const result = actual.execFileSync(...args);
+      if (
+        fileSystemFault.stagingSymlinkTarget !== null &&
+        args[0] === '/bin/cp' &&
+        Array.isArray(args[1]) &&
+        args[1].includes('--preserve=all')
+      ) {
+        const staging = args[1].at(-1);
+        if (staging !== undefined) {
+          unlinkSync(staging);
+          symlinkSync(fileSystemFault.stagingSymlinkTarget, staging);
+        }
+        fileSystemFault.stagingSymlinkTarget = null;
+      }
+      return result;
     },
   };
 });
@@ -495,6 +511,29 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(result.outcome).toBe('refused');
     expect(readFileSync(outsideFile, 'utf8')).toBe('secret\n');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not chmod a symlink planted over the staging file',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      const outsideRoot = workspace();
+      const outside = join(outsideRoot, 'outside.txt');
+      writeFileSync(outside, 'outside\n');
+      chmodSync(outside, 0o444);
+      fileSystemFault.stagingSymlinkTarget = outside;
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'after\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      } finally {
+        fileSystemFault.stagingSymlinkTarget = null;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('before\n');
+      expect(readFileSync(outside, 'utf8')).toBe('outside\n');
+      expect(statSync(outside).mode & 0o222).toBe(0);
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'preserves POSIX special permission bits and ordinary mode on save',

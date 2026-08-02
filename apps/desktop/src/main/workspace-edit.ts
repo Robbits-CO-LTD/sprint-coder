@@ -181,13 +181,32 @@ export function saveWorkspaceFile(
     ownsStaging = true;
     stageTargetFile(absolute, staging);
     const originalMode = Number(stat.mode & 0o7777n);
-    chmodSync(staging, originalMode | 0o200);
+    let stagedIdentity: ReturnType<typeof fstatSync> | null = null;
+    if (process.platform === 'win32') {
+      chmodSync(staging, originalMode | 0o200);
+    } else {
+      // A watcher can replace the freshly-copied pathname before we make a read-only staging file
+      // writable. Open without following links first and mutate only that validated inode, so a
+      // planted symlink cannot redirect chmod outside the Workspace.
+      stagingDescriptor = openSync(staging, constants.O_RDONLY | constants.O_NOFOLLOW);
+      stagedIdentity = fstatSync(stagingDescriptor, { bigint: true });
+      if (!stagedIdentity.isFile() || stagedIdentity.nlink !== 1n)
+        return refuse('outside_workspace');
+      fchmodSync(stagingDescriptor, originalMode | 0o200);
+      closeSync(stagingDescriptor);
+      stagingDescriptor = null;
+    }
     stagingDescriptor = openSync(
       staging,
       constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
     );
     const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
-    if (!stagingStat.isFile() || stagingStat.nlink !== 1n) return refuse('outside_workspace');
+    if (
+      !stagingStat.isFile() ||
+      stagingStat.nlink !== 1n ||
+      (stagedIdentity !== null && !sameIdentity(stagingStat, stagedIdentity))
+    )
+      return refuse('outside_workspace');
 
     replaceDescriptorContents(stagingDescriptor, bytes);
     if (digestOf(readDescriptor(stagingDescriptor, bytes.length)) !== digestOf(bytes))
