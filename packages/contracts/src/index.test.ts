@@ -16,6 +16,8 @@ import {
   projectCreateInputSchema,
   fileChangeSchema,
   fileEditFrameSchema,
+  filePathPayloadSchema,
+  fileSaveInputSchema,
   projectFoldersReplaceInputSchema,
   effectiveWorkspaceSetSchema,
   projectInstructionSetInputSchema,
@@ -174,6 +176,18 @@ describe('public contracts', () => {
         baseline: null,
       }),
     ).toMatchObject({ rootId: 'root-b', rootLabel: 'test2' });
+    expect(filePathPayloadSchema.parse({ taskId: 'task-1', path: 'src/index.ts' })).toMatchObject({
+      rootId: 'legacy-primary',
+    });
+    expect(
+      fileSaveInputSchema.parse({
+        taskId: 'task-1',
+        rootId: 'root-b',
+        path: 'src/index.ts',
+        text: 'changed',
+        baseDigest: 'a'.repeat(64),
+      }),
+    ).toMatchObject({ rootId: 'root-b' });
   });
 
   it('bounds Project instruction by UTF-8 bytes and upgrades legacy usage with zero Project tokens', () => {

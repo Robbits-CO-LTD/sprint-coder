@@ -85,6 +85,7 @@ import {
   shouldBlockProviderLeaderCompletion,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
+  resolveEffectiveWorkspaceRoot,
   verifyTurnWorkspaceIdentities,
 } from './ipc';
 
@@ -161,6 +162,40 @@ describe('Turn Workspace health gate', () => {
         },
       ),
     ).rejects.toThrow('ENOENT');
+  });
+});
+
+describe('root-aware file selection', () => {
+  const workspace: EffectiveWorkspaceSet = {
+    source: 'project',
+    projectId: 'project-1',
+    primaryRootId: 'root-a',
+    roots: [
+      {
+        rootId: 'root-a',
+        path: '/workspace/a',
+        label: 'a',
+        role: 'primary',
+        status: 'available',
+      },
+      {
+        rootId: 'root-b',
+        path: '/workspace/b',
+        label: 'b',
+        role: 'secondary',
+        status: 'available',
+      },
+    ],
+    digest: 'b'.repeat(64),
+  };
+
+  it('selects an explicit Secondary and rejects unknown roots', () => {
+    expect(resolveEffectiveWorkspaceRoot(workspace, 'root-b')?.path).toBe('/workspace/b');
+    expect(resolveEffectiveWorkspaceRoot(workspace, 'not-a-root')).toBeNull();
+  });
+
+  it('maps replayed legacy requests only to the current Primary', () => {
+    expect(resolveEffectiveWorkspaceRoot(workspace, 'legacy-primary')?.rootId).toBe('root-a');
   });
 });
 

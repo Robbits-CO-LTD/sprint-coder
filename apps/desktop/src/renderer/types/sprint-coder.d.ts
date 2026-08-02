@@ -420,7 +420,15 @@ export type TurnEvent =
       seq: number;
       image: GeneratedImage;
     }
-  | { type: 'file.saved'; taskId: string; seq: number; path: string; byteLength: number }
+  | {
+      type: 'file.saved';
+      taskId: string;
+      seq: number;
+      rootId: string;
+      rootLabel: string;
+      path: string;
+      byteLength: number;
+    }
   | {
       type: 'files.changed';
       taskId: string;
@@ -902,9 +910,10 @@ export interface SprintCoderApi {
   };
   files: {
     list(taskId: string): Promise<FileChangeRecord[]>;
-    open(taskId: string, path: string): Promise<FileOpenResult>;
+    open(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
     save(input: {
       taskId: string;
+      rootId: string;
       path: string;
       text: string;
       baseDigest: string;

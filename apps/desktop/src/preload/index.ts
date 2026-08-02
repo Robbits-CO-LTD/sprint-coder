@@ -470,8 +470,12 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.filesList, taskIdPayloadSchema, z.array(fileChangeRecordSchema), {
         taskId,
       }),
-    open: (taskId, path) =>
-      invoke(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, { taskId, path }),
+    open: (taskId, rootId, path) =>
+      invoke(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, {
+        taskId,
+        rootId,
+        path,
+      }),
     // `invoke` already mints an operationId per call, which is what makes the save idempotent on the
     // Main side if the same request is retried.
     save: (input) =>

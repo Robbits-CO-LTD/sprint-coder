@@ -1180,6 +1180,8 @@ export type FileOpenResult = z.infer<typeof fileOpenResultSchema>;
 export const fileSaveInputSchema = z
   .object({
     taskId: idSchema,
+    /** Missing on operations created before multi-root support; resolves to the current Primary. */
+    rootId: idSchema.default('legacy-primary'),
     path: z.string().min(1).max(1024),
     text: z.string().max(2_097_152),
     /** The digest the editor started from. A mismatch means someone else wrote the file since. */
@@ -1509,6 +1511,8 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       type: z.literal('file.saved'),
       taskId: idSchema,
       seq: z.number().int().positive(),
+      rootId: idSchema.default('legacy-primary'),
+      rootLabel: z.string().min(1).max(200).default('Workspace'),
       path: z.string().min(1).max(1024),
       byteLength: z.number().int().nonnegative(),
     })
@@ -2600,7 +2604,12 @@ export const taskIdPayloadSchema = z.object({ taskId: idSchema }).strict();
 /** A Workspace-relative path within a Task. Validated as a bounded string here; whether it is
  * actually inside the Workspace is Main's decision, not the schema's (issue #43). */
 export const filePathPayloadSchema = z
-  .object({ taskId: idSchema, path: z.string().min(1).max(1024) })
+  .object({
+    taskId: idSchema,
+    /** Missing on operations created before multi-root support; resolves to the current Primary. */
+    rootId: idSchema.default('legacy-primary'),
+    path: z.string().min(1).max(1024),
+  })
   .strict();
 export const taskRenameInputSchema = z
   .object({ taskId: idSchema, title: z.string().trim().min(1).max(200) })
@@ -2858,10 +2867,11 @@ export interface SprintCoderApi {
      * the event port, which only carries events newer than the snapshot's lastSeq. */
     list(taskId: string): Promise<FileChangeRecord[]>;
     /** Reads a file in full so it can be edited, or refuses with a reason. */
-    open(taskId: string, path: string): Promise<FileOpenResult>;
+    open(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
     /** Writes the user's own edit. Refuses rather than overwriting when the file changed underneath. */
     save(input: {
       taskId: string;
+      rootId: string;
       path: string;
       text: string;
       baseDigest: string;

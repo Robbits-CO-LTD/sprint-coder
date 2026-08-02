@@ -4017,7 +4017,13 @@ export interface PersistenceClient {
     turnId: string;
     changes: FileChange[];
   }): TurnEvent | null;
-  recordUserFileSave(input: { taskId: string; path: string; byteLength: number }): TurnEvent;
+  recordUserFileSave(input: {
+    taskId: string;
+    rootId: string;
+    rootLabel: string;
+    path: string;
+    byteLength: number;
+  }): TurnEvent;
   listGeneratedImages(taskId: string): GeneratedImage[];
   listFileChanges(taskId: string): FileChangeRecord[];
   readGeneratedImage(imageId: string): { image: GeneratedImage; bytes: Buffer } | null;
@@ -11571,10 +11577,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * human's edit into it would make the timeline assert that the model wrote something it did not,
    * and the timeline is read as a record of fact.
    */
-  recordUserFileSave(input: { taskId: string; path: string; byteLength: number }): TurnEvent {
+  recordUserFileSave(input: {
+    taskId: string;
+    rootId: string;
+    rootLabel: string;
+    path: string;
+    byteLength: number;
+  }): TurnEvent {
     return this.appendEvent({
       type: 'file.saved',
       taskId: input.taskId,
+      rootId: input.rootId,
+      rootLabel: input.rootLabel,
       path: input.path,
       byteLength: input.byteLength,
     });

@@ -1220,10 +1220,13 @@ export class IpcRouter {
       },
     );
     this.handle(IPC_CHANNELS.filesOpen, filePathPayloadSchema, fileOpenResultSchema, (input) => {
-      const workspacePath = this.persistence.getWorkspace(input.taskId);
+      const root = resolveEffectiveWorkspaceRoot(
+        this.persistence.getEffectiveWorkspaceSet(input.taskId),
+        input.rootId,
+      );
       // No Workspace means no file to open and nowhere to save one, so this is a refusal rather
       // than an empty document the user could type into and then fail to save.
-      if (workspacePath === null)
+      if (root === null)
         return {
           path: input.path,
           text: '',
@@ -1231,7 +1234,7 @@ export class IpcRouter {
           editable: false,
           reason: 'outside_workspace' as const,
         };
-      return openWorkspaceFileForEdit(workspacePath, input.path);
+      return openWorkspaceFileForEdit(root.path, input.path);
     });
     this.handleMutation(
       IPC_CHANNELS.filesSave,
@@ -1239,20 +1242,25 @@ export class IpcRouter {
       fileSaveResultSchema,
       (input, event, envelope) =>
         this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.filesSave, () => {
-          const workspacePath = this.persistence.getWorkspace(input.taskId);
-          if (workspacePath === null)
+          const root = resolveEffectiveWorkspaceRoot(
+            this.persistence.getEffectiveWorkspaceSet(input.taskId),
+            input.rootId,
+          );
+          if (root === null)
             return {
               outcome: 'refused' as const,
               digest: null,
               reason: 'outside_workspace' as const,
             };
-          const result = saveWorkspaceFile(workspacePath, input.path, input.text, input.baseDigest);
+          const result = saveWorkspaceFile(root.path, input.path, input.text, input.baseDigest);
           // Audited only on an actual write, and as its own event type: `files.changed` is the record
           // of what a Runtime did, and a human's edit does not belong in it (issue #43).
           if (result.outcome === 'saved')
             this.publish(
               this.persistence.recordUserFileSave({
                 taskId: input.taskId,
+                rootId: root.rootId,
+                rootLabel: root.label,
                 path: input.path,
                 byteLength: Buffer.byteLength(input.text, 'utf8'),
               }),
@@ -3983,6 +3991,15 @@ function workspaceValue(path: string | null): { path: string; name: string } | n
 
 function primaryWorkspacePath(workspace: EffectiveWorkspaceSet): string | null {
   return workspace.roots.find(({ rootId }) => rootId === workspace.primaryRootId)?.path ?? null;
+}
+
+export function resolveEffectiveWorkspaceRoot(
+  workspace: EffectiveWorkspaceSet,
+  requestedRootId: string,
+): EffectiveWorkspaceSet['roots'][number] | null {
+  const rootId = requestedRootId === 'legacy-primary' ? workspace.primaryRootId : requestedRootId;
+  if (rootId === null) return null;
+  return workspace.roots.find((root) => root.rootId === rootId) ?? null;
 }
 
 function toRuntimeWorkspaceSet(workspace: EffectiveWorkspaceSet): RuntimeWorkspaceSet {
