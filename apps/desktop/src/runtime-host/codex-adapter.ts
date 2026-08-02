@@ -265,7 +265,7 @@ export class CodexRuntimeAdapter {
           clientInfo: {
             name: 'sprint-coder',
             title: 'Sprint Coder',
-            version: '0.0.1-beta.2',
+            version: '0.0.1-beta.3',
           },
           capabilities: {},
         });
