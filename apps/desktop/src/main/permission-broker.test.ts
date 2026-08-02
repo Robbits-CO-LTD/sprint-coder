@@ -122,6 +122,24 @@ function fixture(notify?: () => void, revokedCapabilities: Capability[] = []) {
       ],
       digest: 'a'.repeat(64),
     }),
+    readTurnWorkspaceSetForTask: (taskId: string, turnId: string) => {
+      if (taskId !== 'task-1' || turnId !== 'turn-1') throw new Error('Turn not found for Task');
+      return {
+        source: 'project' as const,
+        projectId: 'project-1',
+        primaryRootId: 'root-a',
+        roots: [
+          {
+            rootId: 'root-a',
+            path: selectedWorkspacePath,
+            label: 'Workspace at Turn start',
+            role: 'primary' as const,
+            status: 'available' as const,
+          },
+        ],
+        digest: 'd'.repeat(64),
+      };
+    },
     registerPermissionOneTimeToken: (_taskId: string, token: string) => {
       oneTimeTokens.add(token);
     },
@@ -247,6 +265,72 @@ describe('Main PermissionBroker', () => {
         pathGuard: unknownRootGuard,
       }),
     ).toThrow('effective Workspace root');
+  });
+
+  it('authorizes a command guard against its sealed Turn roots', async () => {
+    const sealedGuard = await createPathGuard({
+      rootId: 'root-a',
+      workspacePath: selectedWorkspacePath,
+      targetPath: '.',
+      operation: 'read',
+    });
+    const sealedRequest: PermissionRequest = {
+      ...request,
+      capability: 'shell.execute',
+      operation: 'execute',
+      resource: workspacePermissionResourceFromGuard(sealedGuard),
+    };
+    const { broker } = fixture();
+
+    expect(() =>
+      broker.previewExecutionSpec({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        request: sealedRequest,
+        now: NOW,
+        basePolicy: {
+          managedDeny: [],
+          projectDeny: [],
+          parentCeiling: ceiling,
+          modeCeiling: ceiling,
+          sandbox: { feasible: true, profile: 'read-only' },
+        },
+        pathGuard: sealedGuard,
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects a Turn snapshot that belongs to another Task', async () => {
+    const sealedGuard = await createPathGuard({
+      rootId: 'root-a',
+      workspacePath: selectedWorkspacePath,
+      targetPath: '.',
+      operation: 'read',
+    });
+    const sealedRequest: PermissionRequest = {
+      ...request,
+      capability: 'shell.execute',
+      operation: 'execute',
+      resource: workspacePermissionResourceFromGuard(sealedGuard),
+    };
+    const { broker } = fixture();
+
+    expect(() =>
+      broker.previewExecutionSpec({
+        taskId: 'task-other',
+        turnId: 'turn-1',
+        request: { ...sealedRequest, taskId: 'task-other' },
+        now: NOW,
+        basePolicy: {
+          managedDeny: [],
+          projectDeny: [],
+          parentCeiling: ceiling,
+          modeCeiling: ceiling,
+          sandbox: { feasible: true, profile: 'read-only' },
+        },
+        pathGuard: sealedGuard,
+      }),
+    ).toThrow('Turn not found for Task');
   });
 
   it('rejects cross-Task requests before policy lookup or audit authority is issued', () => {

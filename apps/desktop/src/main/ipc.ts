@@ -2404,6 +2404,7 @@ export class IpcRouter {
     };
     const evaluationInput: Parameters<PermissionBroker['evaluate']>[0] = {
       taskId: request.context.taskId,
+      turnId: request.context.turnId,
       request: {
         ...permissionRequestBase,
         reviewerInputDigest: autoReviewerInputDigest({

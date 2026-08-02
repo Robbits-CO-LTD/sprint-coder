@@ -3387,6 +3387,7 @@ export interface PersistenceClient {
   getEffectiveWorkspaceSet(taskId: string): EffectiveWorkspaceSet;
   sealTurnWorkspaceSet(taskId: string, turnId: string): EffectiveWorkspaceSet;
   readTurnWorkspaceSet(turnId: string): EffectiveWorkspaceSet | null;
+  readTurnWorkspaceSetForTask(taskId: string, turnId: string): EffectiveWorkspaceSet | null;
   listProjectMemories(projectId: string): ProjectMemory[];
   createProjectMemoryFromTurn(input: {
     projectId: string;
@@ -8049,6 +8050,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
       })),
       digest: set.root_set_digest,
     };
+  }
+
+  readTurnWorkspaceSetForTask(taskId: string, turnId: string): EffectiveWorkspaceSet | null {
+    this.getTurn(taskId, turnId);
+    return this.readTurnWorkspaceSet(turnId);
   }
 
   setWorkspace(taskId: string, path: string): void {
