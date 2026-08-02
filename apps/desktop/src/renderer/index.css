@@ -578,6 +578,19 @@ button {
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
+.sb-project-new-task {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+}
+.sb-project-new-task:hover,
+.sb-project-new-task:focus-visible {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
 .sb-project-tasks {
   margin-left: 10px;
   padding-left: 5px;
@@ -833,6 +846,77 @@ button {
 }
 .project-dialog-actions button:disabled {
   opacity: 0.5;
+}
+.project-editor-dialog {
+  width: min(680px, calc(100vw - 32px));
+}
+.project-folders-heading,
+.project-folders-heading > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.project-folders-heading span {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.project-folders-heading button,
+.project-folder-list button,
+.project-folders-clear {
+  padding: 6px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-xs);
+  color: var(--text-primary);
+}
+.project-folder-list {
+  display: grid;
+  max-height: 310px;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+.project-folder-list li {
+  display: grid;
+  grid-template-columns: auto minmax(90px, 0.7fr) minmax(140px, 1.5fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-app);
+}
+.project-folder-list li[data-folder-status]:not([data-folder-status='available']) {
+  border-color: var(--warning-border, var(--border-subtle));
+}
+.project-dialog .project-folder-primary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-primary);
+}
+.project-dialog .project-folder-primary input {
+  width: auto;
+}
+.project-folder-label,
+.project-folder-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-folder-path {
+  color: var(--text-secondary);
+  font: 10.5px/1.4 var(--font-mono);
+}
+.project-folder-health {
+  color: var(--warning);
+  font-size: 11px;
+}
+.project-folders-clear {
+  justify-self: start;
+  color: var(--text-secondary);
 }
 
 .sb-archived {
@@ -2109,6 +2193,85 @@ button {
 }
 .ctx-spacer {
   margin-left: auto;
+}
+.project-picker {
+  position: relative;
+}
+.project-picker-trigger {
+  max-width: 220px;
+  color: var(--text-primary);
+}
+.project-picker-popover {
+  position: absolute;
+  z-index: 30;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: grid;
+  width: min(420px, calc(100vw - 56px));
+  max-height: min(520px, calc(100vh - 120px));
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-3);
+}
+.project-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.project-picker-search input {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.project-picker-options {
+  display: grid;
+  gap: 2px;
+  padding: 7px;
+  overflow: auto;
+}
+.project-picker-options button,
+.project-picker-actions button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 9px;
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  text-align: left;
+}
+.project-picker-options button:hover,
+.project-picker-options button:focus-visible,
+.project-picker-actions button:hover,
+.project-picker-actions button:focus-visible {
+  background: var(--bg-hover);
+}
+.project-picker-options button > span:nth-child(2) {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+.project-picker-options small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font: 10px/1.4 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-picker-options p {
+  padding: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+.project-picker-actions {
+  display: grid;
+  padding: 7px;
+  border-top: 1px solid var(--border-subtle);
 }
 .turn-context-button {
   align-self: flex-start;

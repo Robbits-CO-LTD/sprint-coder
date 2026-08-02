@@ -17,6 +17,7 @@ import {
 } from './icons';
 import { useTaskBoundary } from './TaskBoundary';
 import type { ProjectSummary, TaskSummary } from '../types/sprint-coder';
+import { ProjectEditorDialog } from './ProjectEditorDialog';
 
 const COLLAPSED_PROJECTS_KEY = 'sprint-coder:collapsed-projects';
 
@@ -43,7 +44,6 @@ type DialogState =
   | { kind: 'create-project' }
   | { kind: 'rename-project'; project: ProjectSummary }
   | { kind: 'archive-project'; project: ProjectSummary }
-  | { kind: 'create-task'; project: ProjectSummary }
   | { kind: 'move-task'; task: TaskSummary }
   | null;
 
@@ -60,6 +60,7 @@ export function Sidebar({
   const projects = useAppStore((s) => s.projects);
   const projectLoadState = useAppStore((s) => s.projectLoadState);
   const projectLoadError = useAppStore((s) => s.projectLoadError);
+  const projectMultiFolderUx = useAppStore((s) => s.projectMultiFolderUx);
   const refreshProjects = useAppStore((s) => s.refreshProjects);
   const createProject = useAppStore((s) => s.createProject);
   const updateProject = useAppStore((s) => s.updateProject);
@@ -74,6 +75,7 @@ export function Sidebar({
   const [archivedProjectsExpanded, setArchivedProjectsExpanded] = useState(false);
   const [archivedTaskGroups, setArchivedTaskGroups] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [editorProject, setEditorProject] = useState<ProjectSummary | null | undefined>(undefined);
   const [dialogValue, setDialogValue] = useState('');
   const [moveTarget, setMoveTarget] = useState('');
   const [pending, setPending] = useState(false);
@@ -178,11 +180,6 @@ export function Sidebar({
         setArchivedProjectsExpanded(true);
         ensureProjectExpanded(updated.id);
         completeDialog(`[data-project-heading="${updated.id}"]`);
-      } else if (dialog.kind === 'create-task') {
-        ensureProjectExpanded(dialog.project.id);
-        const created = await createTask(dialog.project.id);
-        if (created === null) return;
-        completeDialog(`[data-task-id="${created.id}"]`);
       } else {
         const updated =
           moveTarget === ''
@@ -247,7 +244,9 @@ export function Sidebar({
             className="sb-icon-primary"
             aria-label="Projectを作成"
             title="Projectを作成"
-            onClick={() => openDialog({ kind: 'create-project' })}
+            onClick={() =>
+              projectMultiFolderUx ? setEditorProject(null) : openDialog({ kind: 'create-project' })
+            }
           >
             <Plus size={15} />
           </button>
@@ -344,8 +343,17 @@ export function Sidebar({
                     return next;
                   })
                 }
-                onCreateTask={() => openDialog({ kind: 'create-task', project: group.project })}
-                onRename={() => openDialog({ kind: 'rename-project', project: group.project })}
+                onCreateTask={() => {
+                  ensureProjectExpanded(group.project.id);
+                  void createTask(group.project.id).then((created) => {
+                    if (created !== null) focusLater(`[data-task-id="${created.id}"]`);
+                  });
+                }}
+                onRename={() =>
+                  projectMultiFolderUx
+                    ? setEditorProject(group.project)
+                    : openDialog({ kind: 'rename-project', project: group.project })
+                }
                 onArchive={() => openDialog({ kind: 'archive-project', project: group.project })}
                 {...rowProps}
               />
@@ -497,6 +505,18 @@ export function Sidebar({
           </form>
         )}
       </dialog>
+      {projectMultiFolderUx && (
+        <ProjectEditorDialog
+          open={editorProject !== undefined}
+          project={editorProject ?? null}
+          onClose={() => setEditorProject(undefined)}
+          onSaved={(saved) => {
+            ensureProjectExpanded(saved.id);
+            setEditorProject(undefined);
+            focusLater(`[data-project-heading="${saved.id}"]`);
+          }}
+        />
+      )}
     </nav>
   );
 }
@@ -551,12 +571,22 @@ function ProjectGroup({
           <span>{project.name}</span>
           <span className="sb-count">{project.taskCount}</span>
         </button>
+        {onCreateTask && (
+          <button
+            type="button"
+            className="sb-project-new-task"
+            aria-label={`${project.name}にTaskを作成`}
+            title={`${project.name}にTaskを作成`}
+            onClick={onCreateTask}
+          >
+            <Plus size={14} />
+          </button>
+        )}
         <details className="sb-menu">
           <summary aria-label={`${project.name}のメニュー`} title="Projectメニュー">
             <MoreHorizontal size={15} />
           </summary>
           <div className="sb-menu-popover">
-            {onCreateTask && <button onClick={onCreateTask}>新しいTask</button>}
             {onRename && <button onClick={onRename}>名前を変更</button>}
             {onArchive && <button onClick={onArchive}>アーカイブ</button>}
             {onRestore && <button onClick={onRestore}>復元</button>}
@@ -656,8 +686,6 @@ function dialogTitle(dialog: Exclude<DialogState, null>): string {
       return 'Project名を変更';
     case 'archive-project':
       return 'Projectをアーカイブ';
-    case 'create-task':
-      return `${dialog.project.name}にTaskを作成`;
     case 'move-task':
       return 'Taskを移動';
   }
@@ -666,8 +694,6 @@ function dialogTitle(dialog: Exclude<DialogState, null>): string {
 function dialogDescription(dialog: Exclude<DialogState, null>): string {
   if (dialog.kind === 'archive-project')
     return `「${dialog.project.name}」をアーカイブします。配下のTaskと設定は維持されます。`;
-  if (dialog.kind === 'create-task')
-    return `「${dialog.project.name}」に未開始のTaskを作成します。`;
   return '';
 }
 

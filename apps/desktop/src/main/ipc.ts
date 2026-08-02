@@ -276,7 +276,11 @@ import {
   builtinRuntimeForModelSelection,
   modelSelectionForRuntime,
 } from './connection-identity';
-import { multiProviderModelPickerV2Enabled, settingsWorkspaceV2Enabled } from './feature-flags';
+import {
+  multiProviderModelPickerV2Enabled,
+  projectMultiFolderUxEnabled,
+  settingsWorkspaceV2Enabled,
+} from './feature-flags';
 import {
   ProviderSecretStorage,
   ProviderSecretStorageUnavailableError,
@@ -736,6 +740,7 @@ export class IpcRouter {
       version: app.getVersion(),
       platform: process.platform,
       settingsWorkspaceV2: settingsWorkspaceV2Enabled(),
+      projectMultiFolderUx: projectMultiFolderUxEnabled(),
       // Startup recovery outcome (issue #9). Already computed before the window existed — this is
       // just the first path that ever carried it to the renderer.
       recovery: this.persistence.getStartupRecovery(),
