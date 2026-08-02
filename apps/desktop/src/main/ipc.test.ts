@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
@@ -82,7 +83,22 @@ import {
   isTrustedIpcSender,
   shouldBlockProviderLeaderCompletion,
   shouldFailRequiredTeamTurn,
+  requiresHomeDirectoryConfirmation,
 } from './ipc';
+
+describe('Project home-directory confirmation', () => {
+  const home = join(dirname(process.cwd()), 'home-owner');
+
+  it('requires confirmation for the home directory and any selected ancestor', () => {
+    expect(requiresHomeDirectoryConfirmation(home, home)).toBe(true);
+    expect(requiresHomeDirectoryConfirmation(dirname(home), home)).toBe(true);
+  });
+
+  it('does not warn for a child or path-component sibling of home', () => {
+    expect(requiresHomeDirectoryConfirmation(join(home, 'project'), home)).toBe(false);
+    expect(requiresHomeDirectoryConfirmation(`${home}-other`, home)).toBe(false);
+  });
+});
 
 describe('Provider Team completion and model errors', () => {
   it('does not mislabel an external Provider model error as a Codex CLI error', () => {

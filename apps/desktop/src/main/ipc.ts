@@ -10,7 +10,14 @@ import {
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, relative as relativePath, resolve as resolvePath } from 'node:path';
+import {
+  basename,
+  isAbsolute,
+  join,
+  relative as relativePath,
+  resolve as resolvePath,
+  sep,
+} from 'node:path';
 import { workspaceMutationBinding } from './path-guard';
 import { z } from 'zod';
 import {
@@ -3933,7 +3940,8 @@ async function confirmHomeDirectoryAccess(
 ): Promise<void> {
   if (canonicalPaths.length === 0) return;
   const canonicalHome = (await workspaceMutationBinding(homedir())).canonicalPath;
-  if (!canonicalPaths.includes(canonicalHome)) return;
+  if (!canonicalPaths.some((path) => requiresHomeDirectoryConfirmation(path, canonicalHome)))
+    return;
   const confirmation = await dialog.showMessageBox(window, {
     type: 'warning',
     buttons: ['許可する', 'キャンセル'],
@@ -3945,6 +3953,17 @@ async function confirmHomeDirectoryAccess(
   });
   if (confirmation.response !== 0)
     throw new InvalidProjectError('Home directory access was canceled');
+}
+
+export function requiresHomeDirectoryConfirmation(
+  canonicalSelectedPath: string,
+  canonicalHomePath: string,
+): boolean {
+  const relative = relativePath(canonicalSelectedPath, canonicalHomePath);
+  return (
+    relative === '' ||
+    (!relative.startsWith(`..${sep}`) && relative !== '..' && !isAbsolute(relative))
+  );
 }
 
 async function projectFolderHealth(
