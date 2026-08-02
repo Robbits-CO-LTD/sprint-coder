@@ -3,6 +3,11 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+// Keep the subprocess deadline below Vitest's 20 second integration-test ceiling while allowing
+// for PowerShell startup contention on two-core Windows runners. The previous 10 second deadline
+// expired when several ACL-backed stores were exercised in parallel, even though the commands
+// completed normally when run in isolation.
+export const WINDOWS_ACL_TIMEOUT_MS = 18_000;
 
 const secureAclScript = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -110,7 +115,7 @@ async function runAcl(
         SPRINT_CODER_ACL_OPERATION: operation,
       },
       encoding: 'utf8',
-      timeout: 10_000,
+      timeout: WINDOWS_ACL_TIMEOUT_MS,
       windowsHide: true,
       maxBuffer: 64 * 1024,
     },
