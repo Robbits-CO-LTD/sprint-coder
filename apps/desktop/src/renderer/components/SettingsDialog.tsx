@@ -13,12 +13,17 @@ import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/spri
 import { ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
 import { useTaskBoundary } from './TaskBoundary';
-import type {
-  ProviderModel,
-  TeamModelIdentity,
-  TeamModelRestriction,
-  TeamPolicy,
-} from '@sprint-coder/contracts';
+import type { ProviderModel, TeamModelRestriction, TeamPolicy } from '@sprint-coder/contracts';
+import {
+  filterTeamModelGroups,
+  groupTeamModelsByConnection,
+  providerModelIdentity,
+  sameModelRestriction,
+  setTeamConnectionSelected,
+  setTeamModelSelected,
+  teamModelKey,
+  type TeamModelConnectionGroup,
+} from '../lib/team-model-groups';
 import {
   readAccessPresetDefault,
   writeAccessPresetDefault,
@@ -778,29 +783,6 @@ const FALLBACK_POLICY: TeamPolicy = {
   budgetMode: 'bounded',
 };
 
-function teamModelKey(model: TeamModelIdentity): string {
-  return `${model.connectionId}\0${model.providerId}\0${model.modelId}`;
-}
-
-function providerModelIdentity(model: ProviderModel): TeamModelIdentity {
-  return {
-    connectionId: model.connectionId,
-    providerId: model.providerId,
-    modelId: model.modelId,
-  };
-}
-
-function sameModelRestriction(
-  left: TeamModelRestriction | null,
-  right: TeamModelRestriction | null,
-): boolean {
-  if (left === null || right === null) return left === right;
-  if (left.mode !== right.mode || left.allowedModels.length !== right.allowedModels.length)
-    return false;
-  const rightKeys = new Set(right.allowedModels.map(teamModelKey));
-  return left.allowedModels.every((model) => rightKeys.has(teamModelKey(model)));
-}
-
 function TeamModelRestrictionSetting({ active }: { active: boolean }) {
   const [api] = useState(teamModelSettingsApi);
   const [models, setModels] = useState<readonly ProviderModel[]>([]);
@@ -838,15 +820,17 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
     };
   }, [active, api]);
 
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  const visibleModels = models.filter((model) =>
-    `${model.displayName} ${model.modelId} ${model.connectionDisplayName ?? ''} ${model.providerId}`
-      .toLocaleLowerCase()
-      .includes(normalizedQuery),
-  );
   const selectedKeys = new Set(draft?.allowedModels.map(teamModelKey) ?? []);
+  const availableKeys = new Set(models.map((model) => teamModelKey(providerModelIdentity(model))));
+  const groups = groupTeamModelsByConnection(models, draft?.allowedModels ?? []);
+  const visibleGroups = filterTeamModelGroups(groups, query);
   const dirty = !sameModelRestriction(draft, canonical);
   const selectedCount = draft?.mode === 'selected' ? draft.allowedModels.length : models.length;
+  const availableSelectedCount =
+    draft?.mode === 'selected'
+      ? draft.allowedModels.filter((model) => availableKeys.has(teamModelKey(model))).length
+      : models.length;
+  const unavailableSelectedCount = Math.max(0, selectedCount - availableSelectedCount);
 
   function chooseMode(mode: TeamModelRestriction['mode']): void {
     setDraft((current) => {
@@ -857,14 +841,26 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
     });
   }
 
-  function toggleModel(model: ProviderModel, checked: boolean): void {
-    const identity = providerModelIdentity(model);
-    const key = teamModelKey(identity);
+  function toggleModel(
+    identity: TeamModelConnectionGroup['choices'][number]['identity'],
+    checked: boolean,
+  ): void {
     setDraft((current) => {
       if (current === null) return current;
-      const next = current.allowedModels.filter((candidate) => teamModelKey(candidate) !== key);
-      if (checked) next.push(identity);
-      return { mode: 'selected', allowedModels: next };
+      return {
+        mode: 'selected',
+        allowedModels: setTeamModelSelected(current.allowedModels, identity, checked),
+      };
+    });
+  }
+
+  function toggleConnection(group: TeamModelConnectionGroup, checked: boolean): void {
+    setDraft((current) => {
+      if (current === null) return current;
+      return {
+        mode: 'selected',
+        allowedModels: setTeamConnectionSelected(current.allowedModels, group, checked),
+      };
     });
   }
 
@@ -902,10 +898,14 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
       <div className="settings-section-heading">
         <div>
           <h3>Teamで使用するモデル</h3>
-          <p>LeaderとWorkerが選べるモデルを、この一覧に限定できます。</p>
+          <p>新しく採用するWorkerとManagerが選べるモデルを、接続ごとに限定できます。</p>
         </div>
         <span className="settings-count-badge">
-          {phase === 'loading' ? '読み込み中' : `${selectedCount} / ${models.length}`}
+          {phase === 'loading'
+            ? '読み込み中'
+            : unavailableSelectedCount > 0
+              ? `${availableSelectedCount} / ${models.length} · 利用不可 ${unavailableSelectedCount}`
+              : `${availableSelectedCount} / ${models.length}`}
         </span>
       </div>
 
@@ -918,7 +918,7 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
             disabled={disabled}
             onChange={() => chooseMode('all')}
           />
-          すべての利用可能なモデル
+          すべての接続・モデルを許可
         </label>
         <label>
           <input
@@ -928,7 +928,7 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
             disabled={disabled || models.length === 0}
             onChange={() => chooseMode('selected')}
           />
-          選択したモデルのみ
+          接続ごとに指定
         </label>
       </div>
 
@@ -943,28 +943,94 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
               placeholder="モデル名、Provider、接続名"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                // Search never submits this settings form. In particular, the Enter that commits a
+                // Japanese IME composition must not save a half-finished provider selection.
+                if (event.key === 'Enter') event.preventDefault();
+              }}
             />
           </label>
-          <div className="team-model-list" aria-label="使用を許可するモデル">
-            {visibleModels.length === 0 ? (
+          <div className="team-model-connections" aria-label="使用を許可する接続とモデル">
+            {visibleGroups.length === 0 ? (
               <p className="settings-hint">条件に一致するモデルはありません。</p>
             ) : (
-              visibleModels.map((model) => (
-                <label className="team-model-row" key={teamModelKey(providerModelIdentity(model))}>
-                  <input
-                    type="checkbox"
-                    checked={selectedKeys.has(teamModelKey(providerModelIdentity(model)))}
-                    disabled={phase !== 'idle'}
-                    onChange={(event) => toggleModel(model, event.target.checked)}
-                  />
-                  <span>
-                    <strong>{model.displayName}</strong>
-                    <small>
-                      {model.connectionDisplayName ?? model.connectionId} · {model.modelId}
-                    </small>
-                  </span>
-                </label>
-              ))
+              visibleGroups.map((group) => {
+                // Search narrows only the rendered rows. Counts and bulk actions still target the
+                // complete Connection, including models currently hidden by the query.
+                const fullGroup = groups.find(
+                  (candidate) => candidate.connectionId === group.connectionId,
+                )!;
+                const selectedInGroup = fullGroup.choices.filter((choice) =>
+                  selectedKeys.has(teamModelKey(choice.identity)),
+                ).length;
+                const availableChoices = fullGroup.choices.filter((choice) => choice.available);
+                const allAvailableSelected =
+                  availableChoices.length > 0 &&
+                  availableChoices.every((choice) =>
+                    selectedKeys.has(teamModelKey(choice.identity)),
+                  );
+                return (
+                  <fieldset
+                    className="team-model-connection"
+                    data-testid={`settings-team-model-connection-${group.connectionId}`}
+                    key={group.connectionId}
+                  >
+                    <legend>
+                      <strong>{group.label}</strong>
+                      <small>
+                        {group.providerId} · {group.connectionId}
+                      </small>
+                    </legend>
+                    <div className="team-model-connection-actions">
+                      <span className="settings-count-badge">
+                        {selectedInGroup} / {fullGroup.choices.length}
+                      </span>
+                      <button
+                        type="button"
+                        className="settings-text-button"
+                        disabled={
+                          phase !== 'idle' || allAvailableSelected || availableChoices.length === 0
+                        }
+                        aria-label={`${group.label}の利用可能なモデルをすべて選択`}
+                        onClick={() => toggleConnection(fullGroup, true)}
+                      >
+                        すべて選択
+                      </button>
+                      <button
+                        type="button"
+                        className="settings-text-button"
+                        disabled={phase !== 'idle' || selectedInGroup === 0}
+                        aria-label={`${group.label}のモデル選択をすべて解除`}
+                        onClick={() => toggleConnection(fullGroup, false)}
+                      >
+                        解除
+                      </button>
+                    </div>
+                    <div className="team-model-list">
+                      {group.choices.map((choice) => (
+                        <label
+                          className={`team-model-row${choice.available ? '' : ' unavailable'}`}
+                          key={teamModelKey(choice.identity)}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedKeys.has(teamModelKey(choice.identity))}
+                            disabled={phase !== 'idle'}
+                            onChange={(event) => toggleModel(choice.identity, event.target.checked)}
+                          />
+                          <span>
+                            <strong>{choice.displayName}</strong>
+                            <small>
+                              {choice.identity.modelId}
+                              {choice.available ? '' : ' · 現在利用不可'}
+                            </small>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                );
+              })
             )}
           </div>
         </>
@@ -972,14 +1038,14 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
 
       <div className="settings-inline-actions">
         <p className="settings-hint">
-          この制限は新しい採用だけでなく、Teamのモデル候補一覧にも適用されます。
+          保存後の新しい採用から全Teamに適用されます。あとから追加した接続は、モデルを選ぶまで候補に入りません。
         </p>
         <button
           type="submit"
           className="settings-secondary-button"
           data-testid="settings-team-models-save"
           disabled={
-            disabled || !dirty || (draft?.mode === 'selected' && draft.allowedModels.length === 0)
+            disabled || !dirty || (draft?.mode === 'selected' && availableSelectedCount === 0)
           }
         >
           {phase === 'saving' ? '保存中…' : 'モデル設定を保存'}

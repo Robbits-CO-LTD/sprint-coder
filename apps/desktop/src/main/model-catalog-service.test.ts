@@ -133,4 +133,51 @@ describe('ModelCatalogService', () => {
     expect(result.items.map(({ modelId }) => modelId)).toEqual(['model-2']);
     expect(result.nextCursor).toBeNull();
   });
+
+  it('admits multiple selected models but excludes a later unconfigured Connection', () => {
+    const service = new ModelCatalogService();
+    const codexCli = {
+      ...model(2),
+      connectionId: 'builtin:codex-cli',
+      providerId: 'openai',
+      modelId: 'gpt-5.6-sol',
+    };
+    const openAiProduction = {
+      ...model(4),
+      connectionId: 'openai:production',
+      providerId: 'openai',
+      modelId: 'gpt-5.6-sol',
+    };
+    const laterOpenAiConnection = {
+      ...model(6),
+      connectionId: 'openai:added-later',
+      providerId: 'openai',
+      modelId: 'gpt-5.6-sol',
+    };
+    service.replaceCatalog([codexCli, openAiProduction, laterOpenAiConnection]);
+    const allowed = new Set([
+      'builtin:codex-cli\u0000openai\u0000gpt-5.6-sol',
+      'openai:production\u0000openai\u0000gpt-5.6-sol',
+    ]);
+
+    const result = service.query(
+      {
+        taskId: 'task-1',
+        text: '',
+        connectionIds: [],
+        providerIds: [],
+        accessTypes: [],
+        capabilities: [],
+        availableOnly: true,
+        cursor: null,
+        limit: 10,
+      },
+      allowed,
+    );
+
+    expect(result.items.map(({ connectionId }) => connectionId).sort()).toEqual([
+      'builtin:codex-cli',
+      'openai:production',
+    ]);
+  });
 });
