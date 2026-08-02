@@ -11,7 +11,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('access preset errors', () => {
-  it('restores Ask without reporting an error when full access is deliberately canceled', async () => {
+  it('restores Ask without an error when inherited full access is canceled for a new Task', async () => {
     const cancellation = Object.assign(new Error('フルアクセスへの変更をキャンセルしました。'), {
       code: 'USER_CANCELED',
     });
