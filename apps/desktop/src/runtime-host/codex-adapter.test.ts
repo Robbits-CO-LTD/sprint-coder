@@ -47,6 +47,29 @@ describe('Codex runtime probe', () => {
     expect(readCodexModels({}, home).map(({ id }) => id)).toEqual(['auto', 'gpt-test']);
   });
 
+  it('preserves an explicit HOME override when CODEX_HOME is absent', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-model-override-'));
+    temporaryRoots.push(home);
+    await mkdir(join(home, '.codex'), { recursive: true });
+    await writeFile(
+      join(home, '.codex', 'models_cache.json'),
+      JSON.stringify({
+        models: [
+          {
+            slug: 'gpt-home-override',
+            display_name: 'GPT Home Override',
+            description: 'Explicit HOME fixture',
+            visibility: 'list',
+          },
+        ],
+      }),
+    );
+
+    expect(
+      readCodexModels({ HOME: home }, join(home, 'ignored-os-home')).map(({ id }) => id),
+    ).toEqual(['auto', 'gpt-home-override']);
+  });
+
   it('resolves the user-local Codex CLI when a packaged macOS app has a system-only PATH', async () => {
     const home = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-home-'));
     temporaryRoots.push(home);

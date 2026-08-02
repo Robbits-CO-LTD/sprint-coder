@@ -721,7 +721,7 @@ export function readCodexModels(
   environment: Readonly<NodeJS.ProcessEnv> = process.env,
   userHome: string = homedir(),
 ): CodexModelOption[] {
-  const codexRoot = environment['CODEX_HOME'] ?? join(userHome, '.codex');
+  const codexRoot = environment['CODEX_HOME'] ?? join(environment['HOME'] ?? userHome, '.codex');
   try {
     const parsed = JSON.parse(
       readFileSync(join(codexRoot, 'models_cache.json'), 'utf8'),
