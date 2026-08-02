@@ -24,6 +24,17 @@ describe('readWorkspaceTextFile (issue #39)', () => {
     expect(readWorkspaceTextFile(root, file)).toBe('inside\n');
   });
 
+  it('accepts an absolute path through a canonical alias of the Workspace parent', () => {
+    const root = workspace();
+    const file = join(root, 'aliased.txt');
+    writeFileSync(file, 'aliased\n');
+    const aliasParent = workspace();
+    const alias = join(aliasParent, 'workspace-alias');
+    symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+
+    expect(readWorkspaceTextFile(root, join(alias, 'aliased.txt'))).toBe('aliased\n');
+  });
+
   it('rejects an absolute path outside the Workspace', () => {
     const root = workspace();
     const outside = join(workspace(), 'outside.txt');

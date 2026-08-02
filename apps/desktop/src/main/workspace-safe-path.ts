@@ -1,5 +1,5 @@
 import { lstatSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * Resolves an existing regular file without following a reparse-point/symlink chain out of the
@@ -26,7 +26,17 @@ export function resolveSafeWorkspaceFile(
   } catch {
     return { path: null, reason: 'outside_workspace' };
   }
-  const absolute = resolve(root, relativePath);
+  let absolute = resolve(root, relativePath);
+  if (isAbsolute(relativePath)) {
+    try {
+      // macOS commonly exposes /var through the /private/var symlink. Canonicalize only the
+      // parent so an absolute path selected by the native dialog compares against the canonical
+      // Workspace root, while lstat below still sees and rejects a symlink at the file leaf.
+      absolute = join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch {
+      return { path: null, reason: 'not_a_file' };
+    }
+  }
   const relation = relative(root, absolute);
   if (
     relation.length === 0 ||
