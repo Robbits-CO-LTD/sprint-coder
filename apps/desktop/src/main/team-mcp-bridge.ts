@@ -103,6 +103,7 @@ export type TeamMcpRegistration = Readonly<{
   taskId: string;
   token: string;
   requesterAgentId?: string;
+  accessCeiling?: 'read-only' | 'workspace-write';
   requireModelResearch?: boolean;
   allowSkillDrafts?: boolean;
   allowProjectMemory?: boolean;
@@ -361,6 +362,9 @@ export class TeamMcpBridge {
                     ...(registration.requesterAgentId === undefined
                       ? {}
                       : { requesterAgentId: registration.requesterAgentId }),
+                    ...(registration.accessCeiling === undefined
+                      ? {}
+                      : { accessCeiling: registration.accessCeiling }),
                     ...(registration.contextOwner === undefined
                       ? {}
                       : { contextOwner: registration.contextOwner }),

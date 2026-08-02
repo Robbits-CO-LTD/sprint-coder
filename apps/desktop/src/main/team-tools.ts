@@ -521,6 +521,9 @@ export type TeamWaitReportsCursor = Readonly<{
 export type ExecuteTeamToolOptions = Readonly<{
   /** Trusted caller identity supplied by the token registration, never by model arguments. */
   requesterAgentId?: string;
+  /** Access ceiling sealed by the caller's parent Team execution. Delegated callers default to
+   * read-only when an older registration did not persist this field. */
+  accessCeiling?: 'read-only' | 'workspace-write';
   /** Immutable root Turn or parent Team execution context to inherit for newly-created work. */
   contextOwner?: { type: 'turn' | 'team_execution'; id: string };
   /** Long-poll team_wait_reports instead of returning immediately (real Leader over MCP). The
@@ -810,6 +813,12 @@ export async function executeTeamTool(
     case 'team_assign_task': {
       const request = assignArgsSchema.parse(args);
       try {
+        if (
+          options.requesterAgentId !== undefined &&
+          (options.accessCeiling ?? 'read-only') === 'read-only' &&
+          request.access === 'workspace-write'
+        )
+          throw new Error('read-only execution cannot delegate workspace-write access');
         const assignInput = {
           taskId,
           targetAgentId: request.workerId,
@@ -842,6 +851,12 @@ export async function executeTeamTool(
     case 'team_assign_mission': {
       const request = assignMissionArgsSchema.parse(args);
       try {
+        if (
+          options.requesterAgentId !== undefined &&
+          (options.accessCeiling ?? 'read-only') === 'read-only' &&
+          request.steps.some(({ access }) => access === 'workspace-write')
+        )
+          throw new Error('read-only execution cannot delegate workspace-write access');
         const missionInput = {
           taskId,
           objective: request.objective,
@@ -877,6 +892,7 @@ export async function executeTeamTool(
           taskId,
           request.missionId,
           options.requesterAgentId ?? null,
+          options.accessCeiling ?? 'read-only',
         );
         return {
           ok: true,
@@ -896,6 +912,7 @@ export async function executeTeamTool(
           request.executionId,
           request.instruction,
           options.requesterAgentId ?? null,
+          options.accessCeiling ?? 'read-only',
         );
         return { ok: true, executionId: execution.executionId, state: execution.state };
       } catch (error) {

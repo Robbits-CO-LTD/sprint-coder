@@ -39,6 +39,14 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
     ),
     assignTask: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
     assignTaskAs: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
+    assignMission: vi.fn(
+      async () =>
+        ({ id: 'mission-1', state: 'running', currentStepOrdinal: 0, steps: [] }) as never,
+    ),
+    resumeMission: vi.fn(
+      async () =>
+        ({ id: 'mission-1', state: 'running', currentStepOrdinal: 0, steps: [] }) as never,
+    ),
     steerExecution: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
     cancelExecution: vi.fn(
       async () => ({ executionId: 'execution-2', state: 'canceled' }) as never,
@@ -324,6 +332,7 @@ describe('executeTeamTool routing', () => {
       'execution-2',
       'add the regression test',
       null,
+      'read-only',
     );
     expect(
       await executeTeamTool(coordinator, 'task-1', 'team_cancel_execution', {
@@ -351,6 +360,48 @@ describe('executeTeamTool routing', () => {
     expect(coordinator.assignTask).toHaveBeenCalledWith(
       expect.objectContaining({ accessMode: 'workspace-write' }),
     );
+  });
+
+  it('prevents a read-only Manager execution from delegating workspace writes', async () => {
+    const coordinator = fakeCoordinator();
+    const options = { requesterAgentId: 'manager-1', accessCeiling: 'read-only' as const };
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_task',
+        {
+          workerId: 'worker-1',
+          objective: 'write',
+          doneCriteria: ['done'],
+          access: 'workspace-write',
+        },
+        options,
+      ),
+    ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('read-only') });
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_mission',
+        {
+          objective: 'write mission',
+          doneCriteria: ['done'],
+          steps: [
+            { workerId: 'worker-1', objective: 'one', doneCriteria: ['one'], access: 'read-only' },
+            {
+              workerId: 'worker-2',
+              objective: 'two',
+              doneCriteria: ['two'],
+              access: 'workspace-write',
+            },
+          ],
+        },
+        options,
+      ),
+    ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('read-only') });
+    expect(coordinator.assignTaskAs).not.toHaveBeenCalled();
+    expect(coordinator.assignMission).not.toHaveBeenCalled();
   });
 
   it('routes Manager tools with only the caller identity bound to the MCP registration', async () => {
@@ -406,6 +457,20 @@ describe('executeTeamTool routing', () => {
     await executeTeamTool(
       coordinator,
       'task-1',
+      'team_resume_mission',
+      { missionId: 'mission-1' },
+      options,
+    );
+    expect(coordinator.resumeMission).toHaveBeenCalledWith(
+      'task-1',
+      'mission-1',
+      'manager-1',
+      'read-only',
+    );
+
+    await executeTeamTool(
+      coordinator,
+      'task-1',
       'team_steer_execution',
       { executionId: 'execution-2', instruction: '修正する' },
       options,
@@ -415,6 +480,7 @@ describe('executeTeamTool routing', () => {
       'execution-2',
       '修正する',
       'manager-1',
+      'read-only',
     );
 
     await executeTeamTool(

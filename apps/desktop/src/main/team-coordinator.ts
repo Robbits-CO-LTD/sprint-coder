@@ -808,6 +808,7 @@ export class TeamCoordinator {
     taskId: string,
     missionId: string,
     requesterAgentId: string | null = null,
+    accessCeiling: TeamExecutionAccess = 'read-only',
   ): Promise<TeamMissionSummary> {
     return this.enqueue(taskId, async () => {
       const team = this.persistence.getTeamByTask(taskId);
@@ -817,6 +818,12 @@ export class TeamCoordinator {
       if (mission.state !== 'waiting_resume') throw new Error('Mission is not waiting to resume');
       if (requesterAgentId !== null && mission.createdByAgentId !== requesterAgentId)
         throw new Error('Manager may only resume a Mission it created');
+      if (
+        requesterAgentId !== null &&
+        accessCeiling === 'read-only' &&
+        mission.steps.some(({ access }) => access === 'workspace-write')
+      )
+        throw new Error('read-only execution cannot resume a workspace-write Mission');
       const step = mission.steps.find(({ ordinal }) => ordinal === mission.currentStepOrdinal);
       if (step === undefined) throw new Error('Current Mission step not found');
       const execution = this.persistence.getTeamExecution(step.executionId);
@@ -936,6 +943,7 @@ export class TeamCoordinator {
     executionId: string,
     instruction: string,
     requesterAgentId: string | null = null,
+    accessCeiling: TeamExecutionAccess = 'read-only',
   ): Promise<TeamExecutionSubmission> {
     return this.enqueue(taskId, async () => {
       const team = this.persistence.getTeamByTask(taskId);
@@ -944,6 +952,12 @@ export class TeamCoordinator {
       if (execution.teamId !== team.id) throw new Error('Execution does not belong to Task Team');
       if (requesterAgentId !== null && execution.createdByAgentId !== requesterAgentId)
         throw new Error('Manager may only steer executions it assigned');
+      if (
+        requesterAgentId !== null &&
+        accessCeiling === 'read-only' &&
+        execution.accessMode === 'workspace-write'
+      )
+        throw new Error('read-only execution cannot steer a workspace-write execution');
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'steer', instruction);
       const revised = this.persistence.reviseQueuedTeamExecution({
