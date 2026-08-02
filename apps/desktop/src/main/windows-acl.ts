@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { windowsPowerShellCommand } from './windows-powershell';
 
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 // Keep the subprocess deadline below Vitest's 20 second integration-test ceiling while allowing
@@ -163,27 +164,22 @@ async function runAclBatch(
   paths: readonly WindowsAclPath[],
   operation: AclOperation,
 ): Promise<void> {
-  const encodedScript = Buffer.from(secureAclScript, 'utf16le').toString('base64');
   const encodedItems = Buffer.from(JSON.stringify(paths), 'utf8').toString('base64');
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      POWERSHELL,
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript],
-      {
-        env: {
-          SystemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
-          WINDIR: process.env['WINDIR'] ?? 'C:\\Windows',
-          PATH: process.env['PATH'] ?? '',
-          TEMP: process.env['TEMP'] ?? '',
-          TMP: process.env['TMP'] ?? '',
-          USERPROFILE: process.env['USERPROFILE'] ?? '',
-          SPRINT_CODER_ACL_OPERATION: operation,
-          SPRINT_CODER_ACL_ITEMS: encodedItems,
-        },
-        stdio: 'ignore',
-        windowsHide: true,
+    const child = spawn(POWERSHELL, windowsPowerShellCommand(secureAclScript), {
+      env: {
+        SystemRoot: process.env['SystemRoot'] ?? 'C:\\Windows',
+        WINDIR: process.env['WINDIR'] ?? 'C:\\Windows',
+        PATH: process.env['PATH'] ?? '',
+        TEMP: process.env['TEMP'] ?? '',
+        TMP: process.env['TMP'] ?? '',
+        USERPROFILE: process.env['USERPROFILE'] ?? '',
+        SPRINT_CODER_ACL_OPERATION: operation,
+        SPRINT_CODER_ACL_ITEMS: encodedItems,
       },
-    );
+      stdio: 'ignore',
+      windowsHide: true,
+    });
     let settled = false;
     let timedOut = false;
     const finish = (error?: Error): void => {

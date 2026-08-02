@@ -18,6 +18,7 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { resolveSafeWorkspaceFile } from './workspace-safe-path';
+import { windowsPowerShellCommand } from './windows-powershell';
 
 // Reading a Workspace file in full so the user can edit it, and writing their edit back (issue #43).
 //
@@ -291,13 +292,7 @@ function publishStagedFile(
   // other mergeable metadata while swapping the fully-flushed sibling into place atomically.
   const result = execFileSync(
     WINDOWS_POWERSHELL,
-    [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-EncodedCommand',
-      Buffer.from(WINDOWS_ATOMIC_REPLACE_SCRIPT, 'utf16le').toString('base64'),
-    ],
+    windowsPowerShellCommand(WINDOWS_ATOMIC_REPLACE_SCRIPT),
     {
       env: {
         SystemRoot: process.env['SystemRoot'] ?? '',
