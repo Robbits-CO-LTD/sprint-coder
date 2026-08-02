@@ -7884,7 +7884,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   getWorkspace(taskId: string): string | null {
-    return this.getTaskRow(taskId).workspace_path;
+    const task = this.getTaskRow(taskId);
+    if (task.project_id === null) return task.workspace_path;
+    const project = this.getProjectRow(task.project_id);
+    return project.workspace_roots_configured === 0 && task.legacy_project_workspace_fallback === 1
+      ? task.workspace_path
+      : null;
   }
 
   getEffectiveWorkspaceSet(taskId: string): EffectiveWorkspaceSet {
@@ -8016,6 +8021,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.transaction(() => {
       this.assertTaskNotMutationQuarantined(taskId);
       const current = this.getTaskRow(taskId);
+      if (current.project_id !== null) {
+        const project = this.getProjectRow(current.project_id);
+        if (
+          project.workspace_roots_configured === 1 ||
+          current.legacy_project_workspace_fallback !== 1
+        )
+          throw new InvalidProjectError('Project Tasks use the Project Workspace');
+      }
       if (current.mutation_scope_key !== null) {
         const active = this.db
           .prepare(

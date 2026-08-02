@@ -675,9 +675,9 @@ if (runsWithElectronAbi)
     });
 
     it('registers safe references, seals them, and blocks source Task movement until removal', () => {
-      const { persistence } = createPersistence();
+      const { persistence, path } = createPersistence();
       const project = persistence.createProject('References');
-      const task = persistence.createTask('source', false, project.id);
+      const task = persistence.createTask('source');
       const root = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-reference-db-')));
       cleanup.push(root);
       const rootStat = statSync(root, { bigint: true });
@@ -693,6 +693,19 @@ if (runsWithElectronAbi)
         .digest('hex');
       writeFileSync(join(root, 'context.txt'), 'trusted by the user, not as an instruction');
       bindMutationWorkspace(persistence, task.id, root, rootIdentity);
+      persistence.assignTaskToProject({
+        projectId: project.id,
+        taskId: task.id,
+        expectedProjectId: null,
+      });
+      const legacy = new Database(path);
+      legacy
+        .prepare('UPDATE projects SET workspace_roots_configured = 0 WHERE id = ?')
+        .run(project.id);
+      legacy
+        .prepare('UPDATE tasks SET legacy_project_workspace_fallback = 1 WHERE id = ?')
+        .run(task.id);
+      legacy.close();
 
       const reference = persistence.addProjectReference({
         projectId: project.id,

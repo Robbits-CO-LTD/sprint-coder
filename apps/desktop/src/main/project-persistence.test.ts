@@ -134,11 +134,6 @@ if (runsWithElectronAbi)
       const { persistence, path } = createPersistence();
       const project = persistence.createProject('v59 Project');
       const task = persistence.createTask('legacy Workspace', false, project.id);
-      persistence.setWorkspaceBinding(task.id, {
-        path: '/tmp/legacy-project-workspace',
-        workspaceKey: 'a'.repeat(64),
-        rootIdentityDigest: 'b'.repeat(64),
-      });
       const turn = persistence.startTurn(task.id, 'legacy history');
       persistence.cancelTurn(task.id, turn.turnId);
       const team = persistence.promoteTaskToTeam(task.id);
@@ -146,6 +141,12 @@ if (runsWithElectronAbi)
 
       const legacy = new Database(path);
       legacy.pragma('foreign_keys = OFF');
+      legacy
+        .prepare(
+          `UPDATE tasks SET workspace_path = ?, mutation_scope_key = ?,
+             mutation_root_identity_digest = ? WHERE id = ?`,
+        )
+        .run('/tmp/legacy-project-workspace', 'a'.repeat(64), 'b'.repeat(64), task.id);
       legacy.exec(`
         DROP TABLE turn_workspace_roots;
         DROP TABLE turn_workspace_sets;
@@ -199,10 +200,22 @@ if (runsWithElectronAbi)
         primaryRootId: task.id,
         roots: [expect.objectContaining({ path: '/tmp/legacy-project-workspace' })],
       });
+      expect(migrated.getWorkspace(task.id)).toBe('/tmp/legacy-project-workspace');
       expect(migrated.getTaskLeader(task.id).teamId).toBe(team.id);
       expect(migrated.listMessages(task.id)).toEqual(
         expect.arrayContaining([expect.objectContaining({ turnId: turn.turnId })]),
       );
+      const explicitlyEmpty = migrated.replaceProjectFolders({
+        projectId: project.id,
+        expectedRevision: project.revision,
+        folders: [],
+      });
+      expect(explicitlyEmpty).toMatchObject({ folderCount: 0, primaryFolder: null });
+      expect(migrated.getEffectiveWorkspaceSet(task.id)).toMatchObject({
+        source: 'none',
+        roots: [],
+      });
+      expect(migrated.getWorkspace(task.id)).toBeNull();
       const inspection = new Database(path, { readonly: true });
       expect(
         inspection.prepare('SELECT checksum FROM schema_migrations WHERE version = 60').get(),
@@ -292,6 +305,14 @@ if (runsWithElectronAbi)
         ],
       });
       const task = persistence.createTask('Project Task', false, project.id);
+
+      expect(() =>
+        persistence.setWorkspaceBinding(task.id, {
+          path: '/tmp/hidden-legacy-root',
+          workspaceKey: 'c'.repeat(64),
+          rootIdentityDigest: 'd'.repeat(64),
+        }),
+      ).toThrow('Project Tasks use the Project Workspace');
 
       expect(project).toMatchObject({
         folderCount: 2,
