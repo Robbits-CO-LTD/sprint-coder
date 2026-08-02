@@ -28,12 +28,14 @@ import { secureWindowsPath, verifyWindowsPathAcl } from './windows-acl';
 const fileSystemFault = vi.hoisted(() => ({
   failWrite: false,
   failRename: false,
+  unsupportedExchange: false,
   failAtomicReplace: false,
   failDirectorySync: false,
   failCopyAfterCreate: false,
   concurrentWindowsContent: null as string | null,
   concurrentPosixContent: null as string | null,
   afterPublicationContent: null as string | null,
+  failBoundaryRead: false,
 }));
 
 vi.mock('./native-file-publication', async (importOriginal) => {
@@ -57,6 +59,8 @@ vi.mock('./native-file-publication', async (importOriginal) => {
       return result;
     },
     exchangePosixFiles: (...args: Parameters<typeof actual.exchangePosixFiles>) => {
+      if (fileSystemFault.unsupportedExchange)
+        throw Object.assign(new Error('exchange unsupported'), { code: 'UNSUPPORTED' });
       if (fileSystemFault.failRename) throw new Error('simulated atomic exchange failure');
       if (fileSystemFault.concurrentPosixContent !== null) {
         writeFileSync(args[1], fileSystemFault.concurrentPosixContent);
@@ -93,6 +97,17 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
+    readFileSync: (...args: Parameters<typeof actual.readFileSync>) => {
+      if (
+        fileSystemFault.failBoundaryRead &&
+        typeof args[0] !== 'number' &&
+        String(args[0]).includes('.sprint-coder-')
+      ) {
+        fileSystemFault.failBoundaryRead = false;
+        throw new Error('simulated boundary read failure');
+      }
+      return actual.readFileSync(...args);
+    },
     copyFileSync: (...args: Parameters<typeof actual.copyFileSync>) => {
       if (fileSystemFault.failCopyAfterCreate) {
         actual.writeFileSync(args[1], 'partial copy');
@@ -253,12 +268,31 @@ describe('saveWorkspaceFile (issue #43)', () => {
         createHash('sha256').update(original).digest('hex'),
       );
       expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      expect(result.conflictPath).toBeNull();
     } finally {
       fileSystemFault.failWrite = false;
     }
     expect(readFileSync(file)).toEqual(original);
     expect(readdirSync(root)).toEqual(['important.txt']);
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'falls back to an atomic sibling rename when the filesystem cannot exchange files',
+    () => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      fileSystemFault.unsupportedExchange = true;
+      try {
+        expect(
+          saveWorkspaceFile(root, 'important.txt', 'after\n', digestOf('before\n')),
+        ).toMatchObject({ outcome: 'saved', digest: digestOf('after\n') });
+      } finally {
+        fileSystemFault.unsupportedExchange = false;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('after\n');
+    },
+  );
 
   it.runIf(process.platform === 'win32')(
     'removes a partial staging file when copying fails after creating it',
@@ -283,6 +317,22 @@ describe('saveWorkspaceFile (issue #43)', () => {
       expect(readdirSync(root)).toEqual(['important.txt']);
     },
   );
+
+  it('retains the displaced file when validation fails after publication', () => {
+    const root = workspace();
+    const file = join(root, 'important.txt');
+    writeFileSync(file, 'before\n');
+    fileSystemFault.failBoundaryRead = true;
+    try {
+      const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+      expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-/);
+      expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
+      expect(readFileSync(file, 'utf8')).toBe('before\n');
+    } finally {
+      fileSystemFault.failBoundaryRead = false;
+    }
+  });
 
   it.runIf(process.platform !== 'win32')(
     'restores a concurrent POSIX edit observed at the atomic exchange boundary',
@@ -339,12 +389,13 @@ describe('saveWorkspaceFile (issue #43)', () => {
         createHash('sha256').update(original).digest('hex'),
       );
       expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+      expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-stage-/);
     } finally {
       fileSystemFault.failRename = false;
       fileSystemFault.failAtomicReplace = false;
     }
     expect(readFileSync(file)).toEqual(original);
-    expect(readdirSync(root)).toEqual(['important.txt']);
+    expect(readdirSync(root)).toHaveLength(2);
   });
 
   it.runIf(process.platform === 'win32')(

@@ -5,14 +5,17 @@ import {
   chmodSync,
   constants,
   copyFileSync,
+  existsSync,
+  fchmodSync,
   fstatSync,
+  futimesSync,
   fsyncSync,
   ftruncateSync,
   openSync,
   readFileSync,
   readSync,
+  renameSync,
   unlinkSync,
-  utimesSync,
   writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -148,10 +151,13 @@ export function saveWorkspaceFile(
   let descriptor: number | null = null;
   let stagingDescriptor: number | null = null;
   const nonce = randomBytes(16).toString('hex');
+  const stagingRelative = `${relativePath}.sprint-coder-stage-${nonce}.tmp`;
+  const backupRelative = `${relativePath}.sprint-coder-backup-${nonce}.tmp`;
   const staging = `${absolute}.sprint-coder-stage-${nonce}.tmp`;
   const backup = `${absolute}.sprint-coder-backup-${nonce}.tmp`;
   let ownsStaging = false;
   let ownsBackup = false;
+  let publicationAttempted = false;
   try {
     descriptor = openSync(
       absolute,
@@ -185,10 +191,9 @@ export function saveWorkspaceFile(
     replaceDescriptorContents(stagingDescriptor, bytes);
     if (digestOf(readDescriptor(stagingDescriptor, bytes.length)) !== digestOf(bytes))
       return refuse('io_error');
+    restoreStagedMetadata(descriptor, stagingDescriptor, originalMode);
     closeSync(stagingDescriptor);
     stagingDescriptor = null;
-    restoreStagedMetadata(absolute, staging);
-    chmodSync(staging, originalMode);
 
     const finalTarget = resolveSafeWorkspaceFile(workspacePath, relativePath);
     if (
@@ -208,6 +213,7 @@ export function saveWorkspaceFile(
     // check keeps the race window as small as the filesystem API permits; rename itself is atomic.
     closeSync(descriptor);
     descriptor = null;
+    publicationAttempted = true;
     const publication = publishStagedFile(staging, absolute, backup, baseDigest, digestOf(bytes));
     if (publication === 'conflict') {
       // Atomic rollback moves the version displaced at rollback time into staging. Retaining it is
@@ -217,7 +223,7 @@ export function saveWorkspaceFile(
         outcome: 'conflict',
         digest: null,
         reason: null,
-        conflictPath: `${relativePath}.sprint-coder-stage-${nonce}.tmp`,
+        conflictPath: stagingRelative,
       };
     }
     if (publication === 'intervened') {
@@ -234,6 +240,26 @@ export function saveWorkspaceFile(
     }
     return { outcome: 'saved', digest: digestOf(bytes), reason: null, conflictPath: null };
   } catch {
+    if (publicationAttempted) {
+      if (existsSync(staging)) {
+        ownsStaging = false;
+        return {
+          outcome: 'refused',
+          digest: null,
+          reason: 'io_error',
+          conflictPath: stagingRelative,
+        };
+      }
+      if (existsSync(backup)) {
+        ownsBackup = false;
+        return {
+          outcome: 'refused',
+          digest: null,
+          reason: 'io_error',
+          conflictPath: backupRelative,
+        };
+      }
+    }
     return refuse('io_error');
   } finally {
     if (stagingDescriptor !== null)
@@ -277,7 +303,16 @@ function publishStagedFile(
   replacementDigest: string,
 ): 'published' | 'conflict' | 'intervened' {
   if (process.platform !== 'win32') {
-    exchangePosixFiles(staging, absolute);
+    try {
+      exchangePosixFiles(staging, absolute);
+    } catch (error) {
+      if (!isUnsupportedExchange(error)) throw error;
+      // Some network, FUSE, and removable filesystems do not implement atomic exchange. A sibling
+      // rename is still atomic; on those filesystems we deliberately fall back to the final digest
+      // validation already performed by the caller instead of making saves permanently unusable.
+      renameSync(staging, absolute);
+      return 'published';
+    }
     try {
       if (digestOf(readFileSync(staging)) === baseDigest)
         return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
@@ -339,18 +374,33 @@ function stageTargetFile(absolute: string, staging: string): void {
   throw new Error(`Atomic metadata-preserving saves are unsupported on ${process.platform}`);
 }
 
-function restoreStagedMetadata(absolute: string, staging: string): void {
+function restoreStagedMetadata(
+  sourceDescriptor: number,
+  stagingDescriptor: number,
+  originalMode: number,
+): void {
   if (process.platform !== 'linux') return;
   // Linux clears security.capability when file contents change. Reapply attributes after the
-  // write without copying the old bytes back; failure is fatal so capabilities are never lost
-  // silently. The final chmod below restores all ordinary and special permission bits as well.
+  // write without reopening either pathname. Passing the already-validated descriptors to fixed
+  // child fds keeps a hostile rename/symlink swap from redirecting metadata outside the Workspace.
   execFileSync(
     '/bin/cp',
-    ['--attributes-only', '--preserve=all', '--no-target-directory', absolute, staging],
-    { stdio: 'ignore' },
+    [
+      '--attributes-only',
+      '--preserve=all',
+      '--no-target-directory',
+      '/proc/self/fd/3',
+      '/proc/self/fd/4',
+    ],
+    { stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor, stagingDescriptor] },
   );
   const now = new Date();
-  utimesSync(staging, now, now);
+  futimesSync(stagingDescriptor, now, now);
+  fchmodSync(stagingDescriptor, originalMode);
+}
+
+function isUnsupportedExchange(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'UNSUPPORTED';
 }
 
 const EMPTY_DIGEST = createHash('sha256').update('').digest('hex');

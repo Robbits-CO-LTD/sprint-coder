@@ -1794,6 +1794,8 @@ napi_value ExchangeFiles(napi_env env, napi_callback_info info) {
       first[0] != '/' || second[0] != '/')
     return ThrowFailure(env, "INVALID_INPUT", "Invalid exchangeFiles path pair");
   if (AtomicExchange(AT_FDCWD, first.c_str(), AT_FDCWD, second.c_str()) != 0) {
+    if (errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP || errno == EXDEV)
+      return ThrowFailure(env, "UNSUPPORTED", ErrnoMessage("exchange files"));
     const NativeFailure failure = AtomicMutationFailure("exchange files");
     return ThrowFailure(env, failure.code, failure.message);
   }

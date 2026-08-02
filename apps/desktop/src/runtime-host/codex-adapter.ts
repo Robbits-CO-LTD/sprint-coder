@@ -110,16 +110,16 @@ export async function probeCodex(
       finish({ available: false });
     }, RUNTIME_VERSION_PROBE_TIMEOUT_MS);
   });
-  const authenticated = availability.available
+  const authentication = availability.available
     ? await probeAuthentication(resolveCodexCommand(command), ['login', 'status'], environment)
-    : false;
+    : 'unknown';
   return {
     ...availability,
     readiness: !availability.available
       ? 'unavailable'
-      : authenticated
-        ? 'ready'
-        : 'authentication_required',
+      : authentication === 'unauthenticated'
+        ? 'authentication_required'
+        : 'ready',
     models: availability.available ? readCodexModels() : [],
   };
 }
@@ -919,22 +919,27 @@ async function probeAuthentication(
   command: string,
   args: readonly string[],
   environment: Readonly<NodeJS.ProcessEnv>,
-): Promise<boolean> {
+): Promise<'authenticated' | 'unauthenticated' | 'unknown'> {
   return new Promise((resolve) => {
     let settled = false;
     const child = spawn(command, args, { env: minimalEnvironment(environment), stdio: 'ignore' });
-    const finish = (ready: boolean) => {
+    const finish = (result: 'authenticated' | 'unauthenticated' | 'unknown') => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(ready);
+      resolve(result);
     };
-    child.once('error', () => finish(false));
-    child.once('exit', (code) => finish(code === 0));
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish(false);
-    }, RUNTIME_AUTH_PROBE_TIMEOUT_MS);
+    child.once('error', () => finish('unknown'));
+    child.once('exit', (code) =>
+      finish(code === 0 ? 'authenticated' : code === 1 ? 'unauthenticated' : 'unknown'),
+    );
+    const timer = setTimeout(
+      () => {
+        child.kill('SIGKILL');
+        finish('unknown');
+      },
+      Math.max(RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS),
+    );
   });
 }
 
