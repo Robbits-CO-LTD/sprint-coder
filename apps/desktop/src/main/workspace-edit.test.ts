@@ -343,20 +343,23 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readFileSync(outsideFile, 'utf8')).toBe('secret\n');
   });
 
-  it.skipIf(process.platform === 'win32')('preserves the existing POSIX mode on save', () => {
-    const root = workspace();
-    const file = join(root, 'script.sh');
-    writeFileSync(file, '#!/bin/sh\n');
-    chmodSync(file, 0o755);
-    const result = saveWorkspaceFile(
-      root,
-      'script.sh',
-      '#!/bin/sh\necho ok\n',
-      digestOf('#!/bin/sh\n'),
-    );
-    expect(result.outcome).toBe('saved');
-    expect(statSync(file).mode & 0o777).toBe(0o755);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'preserves POSIX special permission bits and ordinary mode on save',
+    () => {
+      const root = workspace();
+      const file = join(root, 'script.sh');
+      writeFileSync(file, '#!/bin/sh\n');
+      chmodSync(file, 0o2755);
+      const result = saveWorkspaceFile(
+        root,
+        'script.sh',
+        '#!/bin/sh\necho ok\n',
+        digestOf('#!/bin/sh\n'),
+      );
+      expect(result.outcome).toBe('saved');
+      expect(statSync(file).mode & 0o7777).toBe(0o2755);
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'atomically saves a readable file while preserving its read-only mode',

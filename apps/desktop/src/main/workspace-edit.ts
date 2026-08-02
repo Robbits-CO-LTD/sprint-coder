@@ -170,7 +170,7 @@ export function saveWorkspaceFile(
     // part-way through (ENOSPC/EIO). Claim it first so that partial copies are always cleaned up.
     ownsStaging = true;
     stageTargetFile(absolute, staging);
-    const originalMode = Number(stat.mode & 0o777n);
+    const originalMode = Number(stat.mode & 0o7777n);
     chmodSync(staging, originalMode | 0o200);
     stagingDescriptor = openSync(
       staging,
