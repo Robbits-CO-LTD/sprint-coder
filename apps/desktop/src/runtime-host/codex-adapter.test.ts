@@ -14,6 +14,7 @@ import {
   readCodexModels,
   resolveCodexCommand,
   terminateCodexProcessTree,
+  isUnsupportedMultiRootError,
 } from './codex-adapter';
 import { TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 
@@ -26,6 +27,12 @@ afterEach(async () => {
 });
 
 describe('Codex runtime probe', () => {
+  it('distinguishes an unsupported experimental multi-root protocol from ordinary failures', () => {
+    expect(isUnsupportedMultiRootError(new Error('unknown field `runtimeWorkspaceRoots`'))).toBe(
+      true,
+    );
+    expect(isUnsupportedMultiRootError(new Error('authentication failed'))).toBe(false);
+  });
   it('reads the default model cache from the OS user home when HOME is absent', async () => {
     const home = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-model-home-'));
     temporaryRoots.push(home);

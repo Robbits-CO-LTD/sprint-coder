@@ -26,7 +26,9 @@ import type {
   RuntimeProjectContextItem,
   RuntimeSkillInput,
   RuntimeTeamMcpOption,
+  RuntimeWorkspaceSet,
 } from './protocol';
+import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
@@ -153,7 +155,7 @@ export class ClaudeRuntimeAdapter {
     input: string,
     contextFragments: readonly RuntimeContextFragment[],
     accepted: () => void,
-    workspacePath: string | null,
+    workspaceInput: RuntimeWorkspaceSet | string | null,
     model: string,
     emit: EmitEvent,
     fail: EmitError,
@@ -170,8 +172,15 @@ export class ClaudeRuntimeAdapter {
       return;
     }
     let temporaryDirectory: string | null = null;
+    const workspace =
+      typeof workspaceInput === 'string' || workspaceInput === null
+        ? runtimeWorkspaceSetFromLegacyPath(workspaceInput)
+        : workspaceInput;
+    const primaryRoot = workspace.roots.find(({ rootId }) => rootId === workspace.primaryRootId);
     const cwd =
-      workspacePath ?? (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-')));
+      primaryRoot?.path ??
+      (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-')));
+    const runtimeWorkspaceRoots = workspace.roots.map(({ path }) => path);
     let teamMcpDirectory: string | null = null;
     let teamMcpArgs: { configPath: string; guidance: string; enableWebSearch: boolean } | undefined;
     if (teamMcp !== undefined) {
@@ -204,7 +213,7 @@ export class ClaudeRuntimeAdapter {
     }
     // Same independent refusal as the Codex adapter: with no Workspace the cwd is a throwaway temp
     // directory, so nothing may be written there whatever Main asked for.
-    const effectiveScope: RuntimeWriteScope = workspacePath === null ? 'read-only' : writeScope;
+    const effectiveScope: RuntimeWriteScope = primaryRoot === undefined ? 'read-only' : writeScope;
     const normalizer = new ClaudeJsonlNormalizer(
       claudeExpectedCapabilities(
         effectiveScope,
@@ -214,7 +223,7 @@ export class ClaudeRuntimeAdapter {
     );
     const child = spawn(
       resolveClaudeCommand('claude'),
-      buildClaudeArgs(model, teamMcpArgs, effort, effectiveScope, workspacePath),
+      buildClaudeArgs(model, teamMcpArgs, effort, effectiveScope, runtimeWorkspaceRoots),
       {
         cwd,
         env: minimalEnvironment(),
@@ -429,17 +438,7 @@ export function buildClaudePrompt(
  */
 const CLAUDE_TOOLS_BY_SCOPE: Record<RuntimeWriteScope, readonly string[] | 'default'> = {
   'read-only': ['Read', 'Glob', 'Grep'],
-  'workspace-write': [
-    'Read',
-    'Glob',
-    'Grep',
-    'Edit',
-    'Write',
-    'MultiEdit',
-    'NotebookEdit',
-    'Bash',
-    'TodoWrite',
-  ],
+  'workspace-write': ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'NotebookEdit', 'Bash'],
   full: 'default',
 };
 
@@ -454,7 +453,7 @@ export function buildClaudeArgs(
   teamMcp?: { configPath: string; guidance: string; enableWebSearch?: boolean },
   effort?: string,
   writeScope: RuntimeWriteScope = 'read-only',
-  workspacePath?: string | null,
+  workspaceRoots: readonly string[] = [],
 ): string[] {
   const configuredTools = CLAUDE_TOOLS_BY_SCOPE[writeScope];
   const tools =
@@ -478,9 +477,7 @@ export function buildClaudeArgs(
     // Pins writable paths to the Workspace even at workspace-write. Without it the CLI's own notion
     // of the project root is the cwd, which is the same directory — this makes the intent explicit
     // and survives a future change to how cwd is chosen.
-    ...(writeScope === 'workspace-write' && workspacePath !== undefined && workspacePath !== null
-      ? ['--add-dir', workspacePath]
-      : []),
+    ...workspaceRoots.flatMap((path) => ['--add-dir', path]),
     '--strict-mcp-config',
     ...(teamMcp === undefined
       ? ['--safe-mode']

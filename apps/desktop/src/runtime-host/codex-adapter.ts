@@ -27,7 +27,9 @@ import type {
   RuntimeProjectContextItem,
   RuntimeSkillInput,
   RuntimeTeamMcpOption,
+  RuntimeWorkspaceSet,
 } from './protocol';
+import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
@@ -117,7 +119,7 @@ export class CodexRuntimeAdapter {
     input: string,
     contextFragments: readonly RuntimeContextFragment[],
     accepted: () => void,
-    workspacePath: string | null,
+    workspaceInput: RuntimeWorkspaceSet | string | null,
     model: string,
     emit: EmitEvent,
     fail: EmitError,
@@ -137,8 +139,16 @@ export class CodexRuntimeAdapter {
       return;
     }
     let temporaryDirectory: string | null = null;
+    const workspace =
+      typeof workspaceInput === 'string' || workspaceInput === null
+        ? runtimeWorkspaceSetFromLegacyPath(workspaceInput)
+        : workspaceInput;
+    const primaryRoot = workspace.roots.find(({ rootId }) => rootId === workspace.primaryRootId);
     const cwd =
-      workspacePath ?? (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-')));
+      primaryRoot?.path ??
+      (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-')));
+    const runtimeWorkspaceRoots = workspace.roots.map(({ path }) => path);
+    const multiRoot = runtimeWorkspaceRoots.length > 1;
     let teamMcpDirectory: string | null = null;
     let teamMcpProfile: CodexTeamMcpProfile | undefined;
     if (teamMcp !== undefined) {
@@ -155,7 +165,7 @@ export class CodexRuntimeAdapter {
     // produce edits the user can never see. Main already refuses to send anything but 'read-only'
     // in that case; this is the adapter refusing independently, so the two would have to fail
     // together for a write to escape.
-    const effectiveScope: RuntimeWriteScope = workspacePath === null ? 'read-only' : writeScope;
+    const effectiveScope: RuntimeWriteScope = primaryRoot === undefined ? 'read-only' : writeScope;
     const child = spawn(
       resolveCodexCommand('codex'),
       buildCodexArgs(model, effort, effectiveScope, teamMcpProfile),
@@ -267,7 +277,7 @@ export class CodexRuntimeAdapter {
             title: 'Sprint Coder',
             version: '0.0.1-beta.3',
           },
-          capabilities: {},
+          capabilities: multiRoot ? { experimentalApi: true } : {},
         });
         child.stdin.write(
           `${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`,
@@ -275,6 +285,7 @@ export class CodexRuntimeAdapter {
         const threadResult = asRecord(
           await send('thread/start', {
             cwd,
+            ...(multiRoot ? { runtimeWorkspaceRoots } : {}),
             approvalPolicy: 'never',
             sandbox: CODEX_SANDBOX_BY_SCOPE[effectiveScope],
             ephemeral: true,
@@ -295,12 +306,21 @@ export class CodexRuntimeAdapter {
             },
             ...skills.map((skill) => ({ type: 'skill', name: skill.name, path: skill.path })),
           ],
+          ...(multiRoot ? { cwd, runtimeWorkspaceRoots } : {}),
           ...(effort === undefined || effort === '' ? {} : { effort }),
         });
-      } catch {
+      } catch (error) {
         if (failed || control.canceled) return;
         failed = true;
-        fail(publicError('RUNTIME_FAILED', 'Codex app-serverを開始できませんでした。', true));
+        fail(
+          multiRoot && isUnsupportedMultiRootError(error)
+            ? publicError(
+                'RUNTIME_FAILED',
+                'このCodex CLIは複数フォルダに対応していません。Codexを更新してから再試行してください。',
+                false,
+              )
+            : publicError('RUNTIME_FAILED', 'Codex app-serverを開始できませんでした。', true),
+        );
         void terminateCodexProcessTree(child);
       }
     })();
@@ -344,6 +364,13 @@ export class CodexRuntimeAdapter {
   dispose(): void {
     for (const [turnId] of this.active) void this.cancel(turnId);
   }
+}
+
+export function isUnsupportedMultiRootError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /experimentalApi|runtimeWorkspaceRoots|experimental|invalid (?:params|field)|unknown field/i.test(
+    message,
+  );
 }
 
 function handleCodexNotification(

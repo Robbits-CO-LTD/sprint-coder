@@ -17,6 +17,8 @@ import {
   type RuntimeProjectContextItem,
   type RuntimeSkillInput,
   type RuntimeTeamMcpOption,
+  type RuntimeWorkspaceSet,
+  runtimeWorkspaceSetFromLegacyPath,
 } from '../runtime-host/protocol';
 
 type ActiveTurn = {
@@ -86,7 +88,7 @@ export class RuntimeHostClient {
     taskId: string,
     turnId: string,
     input: string,
-    workspacePath: string | null,
+    workspaceInput: RuntimeWorkspaceSet | string | null,
     model: string,
     toolCatalogSnapshot: ToolCatalogSnapshot,
     preparedContext?: PreparedContext,
@@ -100,6 +102,10 @@ export class RuntimeHostClient {
     serializedPayload?: SerializedExecutionPayload,
   ): void {
     const prepared = preparedContext ?? this.prepareContext?.(taskId, turnId);
+    const workspace =
+      typeof workspaceInput === 'string' || workspaceInput === null
+        ? runtimeWorkspaceSetFromLegacyPath(workspaceInput)
+        : workspaceInput;
     const contextFragments = (prepared?.fragments ?? []).map(toRuntimeContextFragment);
     const projectItems = (prepared?.projectItems ?? []).map(toRuntimeProjectContextItem);
     const projectSnapshotDigest = prepared?.projectSnapshotDigest ?? null;
@@ -136,7 +142,7 @@ export class RuntimeHostClient {
       ...this.base(taskId, turnId, operationId, 1),
       type: 'start',
       input,
-      workspacePath,
+      workspace,
       model,
       contextFragments,
       projectItems,

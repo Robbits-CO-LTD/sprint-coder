@@ -10,11 +10,48 @@ import {
   type TurnStage,
 } from '@sprint-coder/contracts';
 import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
-import { isAbsolute, normalize, sep } from 'node:path';
+import { basename, isAbsolute, normalize, sep } from 'node:path';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 
-export const RUNTIME_PROTOCOL_VERSION = 6;
+export const RUNTIME_PROTOCOL_VERSION = 7;
+
+export type RuntimeWorkspaceRoot = Readonly<{
+  rootId: string;
+  path: string;
+  label: string;
+  role: 'primary' | 'secondary';
+}>;
+
+export type RuntimeWorkspaceSet = Readonly<{
+  primaryRootId: string | null;
+  roots: readonly RuntimeWorkspaceRoot[];
+  digest: string;
+}>;
+
+/** Compatibility adapter for in-process callers that still own one isolated Workspace. */
+export function runtimeWorkspaceSetFromLegacyPath(path: string | null): RuntimeWorkspaceSet {
+  if (path === null)
+    return {
+      primaryRootId: null,
+      roots: [],
+      digest: createHash('sha256').update('').digest('hex'),
+    };
+  const canonicalPath = normalize(path);
+  const rootId = createHash('sha256').update(canonicalPath).digest('hex');
+  return {
+    primaryRootId: rootId,
+    roots: [
+      {
+        rootId,
+        path: canonicalPath,
+        label: basename(canonicalPath) || canonicalPath,
+        role: 'primary',
+      },
+    ],
+    digest: createHash('sha256').update(`legacy\0${canonicalPath}`).digest('hex'),
+  };
+}
 
 export type RuntimeContextFragment = Readonly<{
   id: string;
@@ -113,7 +150,7 @@ export type MainToRuntimeEnvelope =
   | (EnvelopeBase & {
       type: 'start';
       input: string;
-      workspacePath: string | null;
+      workspace: RuntimeWorkspaceSet;
       model: string;
       // Additive, optional: only meaningful for the Claude adapter (see buildClaudeArgs' effort
       // param) — Codex has no equivalent CLI flag on this version and its adapter ignores it.
@@ -168,8 +205,8 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     value.type === 'start' &&
     'input' in value &&
     typeof value.input === 'string' &&
-    'workspacePath' in value &&
-    (value.workspacePath === null || typeof value.workspacePath === 'string') &&
+    'workspace' in value &&
+    isRuntimeWorkspaceSet(value.workspace) &&
     'model' in value &&
     codexModelIdSchema.safeParse(value.model).success &&
     (!('effort' in value) ||
@@ -200,6 +237,45 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot) &&
     (!('teamMcp' in value) || value.teamMcp === undefined || isRuntimeTeamMcpOption(value.teamMcp))
   );
+}
+
+function isRuntimeWorkspaceSet(value: unknown): value is RuntimeWorkspaceSet {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (!isSha256(record['digest']) || !Array.isArray(record['roots']) || record['roots'].length > 16)
+    return false;
+  const roots = record['roots'];
+  const primaryRootId = record['primaryRootId'];
+  if (primaryRootId !== null && typeof primaryRootId !== 'string') return false;
+  const ids = new Set<string>();
+  const paths = new Set<string>();
+  let primaryCount = 0;
+  for (const root of roots) {
+    if (typeof root !== 'object' || root === null) return false;
+    const item = root as Record<string, unknown>;
+    if (
+      typeof item['rootId'] !== 'string' ||
+      item['rootId'].length === 0 ||
+      typeof item['path'] !== 'string' ||
+      !isAbsolute(item['path']) ||
+      normalize(item['path']) !== item['path'] ||
+      typeof item['label'] !== 'string' ||
+      item['label'].length === 0 ||
+      (item['role'] !== 'primary' && item['role'] !== 'secondary') ||
+      ids.has(item['rootId']) ||
+      paths.has(item['path'])
+    )
+      return false;
+    ids.add(item['rootId']);
+    paths.add(item['path']);
+    if (item['role'] === 'primary') {
+      primaryCount += 1;
+      if (item['rootId'] !== primaryRootId) return false;
+    }
+  }
+  return roots.length === 0
+    ? primaryRootId === null && primaryCount === 0
+    : typeof primaryRootId === 'string' && primaryCount === 1;
 }
 
 function isRuntimeSkillInputs(value: unknown): value is RuntimeSkillInput[] {

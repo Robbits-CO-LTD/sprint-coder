@@ -76,6 +76,7 @@ import {
   turnStopAndSendInputSchema,
   turnSubscriptionInputSchema,
   xAIConnectionCreateInputSchema,
+  type EffectiveWorkspaceSet,
 } from '@sprint-coder/contracts';
 import {
   clampCodexEffort,
@@ -84,6 +85,7 @@ import {
   shouldBlockProviderLeaderCompletion,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
+  verifyTurnWorkspaceIdentities,
 } from './ipc';
 
 describe('Project home-directory confirmation', () => {
@@ -97,6 +99,68 @@ describe('Project home-directory confirmation', () => {
   it('does not warn for a child or path-component sibling of home', () => {
     expect(requiresHomeDirectoryConfirmation(join(home, 'project'), home)).toBe(false);
     expect(requiresHomeDirectoryConfirmation(`${home}-other`, home)).toBe(false);
+  });
+});
+
+describe('Turn Workspace health gate', () => {
+  const workspace: EffectiveWorkspaceSet = {
+    source: 'project',
+    projectId: 'project-1',
+    primaryRootId: 'root-a',
+    roots: [
+      {
+        rootId: 'root-a',
+        path: '/workspace/a',
+        label: 'a',
+        role: 'primary',
+        status: 'available',
+      },
+      {
+        rootId: 'root-b',
+        path: '/workspace/b',
+        label: 'b',
+        role: 'secondary',
+        status: 'available',
+      },
+    ],
+    digest: 'a'.repeat(64),
+  };
+
+  it('accepts only the identities sealed for every root', async () => {
+    const expected = new Map([
+      ['root-a', 'identity-a'],
+      ['root-b', 'identity-b'],
+    ]);
+    await expect(
+      verifyTurnWorkspaceIdentities(workspace, expected, async (path) => ({
+        rootIdentityDigest: path.endsWith('/a') ? 'identity-a' : 'identity-b',
+      })),
+    ).resolves.toBeUndefined();
+    await expect(
+      verifyTurnWorkspaceIdentities(workspace, expected, async () => ({
+        rootIdentityDigest: 'replacement',
+      })),
+    ).rejects.toThrow('identity changed');
+  });
+
+  it('fails closed when an identity is absent or a root cannot be read', async () => {
+    await expect(
+      verifyTurnWorkspaceIdentities(workspace, new Map([['root-a', 'identity-a']]), async () => ({
+        rootIdentityDigest: 'identity-a',
+      })),
+    ).rejects.toThrow('identity set is incomplete');
+    await expect(
+      verifyTurnWorkspaceIdentities(
+        workspace,
+        new Map([
+          ['root-a', 'identity-a'],
+          ['root-b', 'identity-b'],
+        ]),
+        async () => {
+          throw new Error('ENOENT');
+        },
+      ),
+    ).rejects.toThrow('ENOENT');
   });
 });
 

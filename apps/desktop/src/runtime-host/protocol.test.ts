@@ -20,7 +20,11 @@ function startEnvelope() {
     operationId: 'operation-1',
     type: 'start',
     input: 'hello',
-    workspacePath: null,
+    workspace: {
+      primaryRootId: null,
+      roots: [],
+      digest: createHash('sha256').update('').digest('hex'),
+    },
     model: 'auto',
     contextFragments: [],
     projectItems: [],
@@ -75,6 +79,24 @@ describe('Runtime Host protocol', () => {
 
   it('rejects old protocol versions', () => {
     expect(isMainToRuntimeEnvelope({ ...startEnvelope(), protocolVersion: 3 })).toBe(false);
+    const { workspace: _workspace, ...legacy } = startEnvelope();
+    expect(isMainToRuntimeEnvelope({ ...legacy, workspacePath: null })).toBe(false);
+  });
+
+  it('accepts one Primary plus secondary roots and rejects inconsistent Primary metadata', () => {
+    const valid = startEnvelope();
+    const workspace = {
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: join(tmpdir(), 'root-a'), label: 'a', role: 'primary' },
+        { rootId: 'root-b', path: join(tmpdir(), 'root-b'), label: 'b', role: 'secondary' },
+      ],
+      digest: 'a'.repeat(64),
+    } as const;
+    expect(isMainToRuntimeEnvelope({ ...valid, workspace })).toBe(true);
+    expect(
+      isMainToRuntimeEnvelope({ ...valid, workspace: { ...workspace, primaryRootId: 'root-b' } }),
+    ).toBe(false);
   });
 
   it('bounds and strictly validates Runtime context fragments', () => {
