@@ -16,6 +16,7 @@ import { useTaskBoundary } from './TaskBoundary';
 import type { ProviderModel, TeamModelRestriction, TeamPolicy } from '@sprint-coder/contracts';
 import {
   filterTeamModelGroups,
+  getTeamConnectionSelection,
   groupTeamModelsByConnection,
   providerModelIdentity,
   sameModelRestriction,
@@ -783,12 +784,45 @@ const FALLBACK_POLICY: TeamPolicy = {
   budgetMode: 'bounded',
 };
 
+function TeamProviderPermissionCheckbox({
+  checked,
+  mixed,
+  disabled,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  mixed: boolean;
+  disabled: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (inputRef.current !== null) inputRef.current.indeterminate = mixed;
+  }, [mixed]);
+  return (
+    <input
+      ref={inputRef}
+      type="checkbox"
+      checked={checked}
+      aria-checked={mixed ? 'mixed' : checked}
+      aria-label={`${label}をTeamで許可`}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.checked)}
+    />
+  );
+}
+
 function TeamModelRestrictionSetting({ active }: { active: boolean }) {
   const [api] = useState(teamModelSettingsApi);
   const [models, setModels] = useState<readonly ProviderModel[]>([]);
   const [canonical, setCanonical] = useState<TeamModelRestriction | null>(null);
   const [draft, setDraft] = useState<TeamModelRestriction | null>(null);
   const [query, setQuery] = useState('');
+  const [expandedConnections, setExpandedConnections] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [phase, setPhase] = useState<'idle' | 'loading' | 'saving'>('idle');
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState('');
@@ -864,6 +898,15 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
     });
   }
 
+  function toggleConnectionExpanded(connectionId: string): void {
+    setExpandedConnections((current) => {
+      const next = new Set(current);
+      if (next.has(connectionId)) next.delete(connectionId);
+      else next.add(connectionId);
+      return next;
+    });
+  }
+
   async function save(): Promise<void> {
     if (api === null || draft === null || phase !== 'idle') return;
     const request = ++generation.current;
@@ -898,7 +941,7 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
       <div className="settings-section-heading">
         <div>
           <h3>Teamで使用するモデル</h3>
-          <p>新しく採用するWorkerとManagerが選べるモデルを、接続ごとに限定できます。</p>
+          <p>Providerごとにまとめて許可するか、開いて使用するモデルを指定できます。</p>
         </div>
         <span className="settings-count-badge">
           {phase === 'loading'
@@ -928,7 +971,7 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
             disabled={disabled || models.length === 0}
             onChange={() => chooseMode('selected')}
           />
-          接続ごとに指定
+          Providerごとに指定
         </label>
       </div>
 
@@ -950,85 +993,100 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
               }}
             />
           </label>
-          <div className="team-model-connections" aria-label="使用を許可する接続とモデル">
+          <div className="team-model-connections" aria-label="使用を許可するProviderとモデル">
             {visibleGroups.length === 0 ? (
               <p className="settings-hint">条件に一致するモデルはありません。</p>
             ) : (
-              visibleGroups.map((group) => {
+              visibleGroups.map((group, index) => {
                 // Search narrows only the rendered rows. Counts and bulk actions still target the
                 // complete Connection, including models currently hidden by the query.
                 const fullGroup = groups.find(
                   (candidate) => candidate.connectionId === group.connectionId,
                 )!;
-                const selectedInGroup = fullGroup.choices.filter((choice) =>
-                  selectedKeys.has(teamModelKey(choice.identity)),
-                ).length;
-                const availableChoices = fullGroup.choices.filter((choice) => choice.available);
-                const allAvailableSelected =
-                  availableChoices.length > 0 &&
-                  availableChoices.every((choice) =>
-                    selectedKeys.has(teamModelKey(choice.identity)),
-                  );
+                const selection = getTeamConnectionSelection(fullGroup, draft.allowedModels);
+                const searchActive = query.trim() !== '';
+                const expanded = searchActive || expandedConnections.has(group.connectionId);
+                const modelRegionId = `team-provider-models-${index}-${group.connectionId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
                 return (
-                  <fieldset
-                    className="team-model-connection"
+                  <div
+                    className={`team-model-connection${expanded ? ' expanded' : ''}`}
                     data-testid={`settings-team-model-connection-${group.connectionId}`}
                     key={group.connectionId}
                   >
-                    <legend>
-                      <strong>{group.label}</strong>
-                      <small>
-                        {group.providerId} · {group.connectionId}
-                      </small>
-                    </legend>
-                    <div className="team-model-connection-actions">
-                      <span className="settings-count-badge">
-                        {selectedInGroup} / {fullGroup.choices.length}
-                      </span>
-                      <button
-                        type="button"
-                        className="settings-text-button"
-                        disabled={
-                          phase !== 'idle' || allAvailableSelected || availableChoices.length === 0
-                        }
-                        aria-label={`${group.label}の利用可能なモデルをすべて選択`}
-                        onClick={() => toggleConnection(fullGroup, true)}
-                      >
-                        すべて選択
-                      </button>
-                      <button
-                        type="button"
-                        className="settings-text-button"
-                        disabled={phase !== 'idle' || selectedInGroup === 0}
-                        aria-label={`${group.label}のモデル選択をすべて解除`}
-                        onClick={() => toggleConnection(fullGroup, false)}
-                      >
-                        解除
-                      </button>
-                    </div>
-                    <div className="team-model-list">
-                      {group.choices.map((choice) => (
-                        <label
-                          className={`team-model-row${choice.available ? '' : ' unavailable'}`}
-                          key={teamModelKey(choice.identity)}
+                    <div className="team-provider-summary">
+                      <label className="team-provider-permission">
+                        <TeamProviderPermissionCheckbox
+                          checked={selection.allAvailableSelected}
+                          mixed={selection.partiallySelected}
+                          disabled={
+                            phase !== 'idle' ||
+                            (selection.availableCount === 0 && selection.selectedCount === 0)
+                          }
+                          label={group.label}
+                          onChange={(checked) => toggleConnection(fullGroup, checked)}
+                        />
+                        <span>
+                          <strong>{group.label}</strong>
+                          <small>
+                            {group.providerId} · {selection.totalCount}モデル
+                          </small>
+                        </span>
+                      </label>
+                      <div className="team-provider-actions">
+                        <span className="settings-count-badge">
+                          {selection.selectedCount === selection.totalCount
+                            ? 'すべて許可'
+                            : selection.selectedCount === 0
+                              ? '許可なし'
+                              : `${selection.selectedCount} / ${selection.totalCount}`}
+                        </span>
+                        <button
+                          type="button"
+                          className="team-provider-expand"
+                          aria-expanded={expanded}
+                          aria-controls={modelRegionId}
+                          aria-label={
+                            searchActive
+                              ? `${group.label}の検索結果を表示中`
+                              : `${group.label}のモデルを${expanded ? '閉じる' : '開く'}`
+                          }
+                          disabled={searchActive}
+                          onClick={() => toggleConnectionExpanded(group.connectionId)}
                         >
-                          <input
-                            type="checkbox"
-                            checked={selectedKeys.has(teamModelKey(choice.identity))}
-                            disabled={phase !== 'idle'}
-                            onChange={(event) => toggleModel(choice.identity, event.target.checked)}
-                          />
-                          <span>
-                            <strong>{choice.displayName}</strong>
-                            <small>
-                              {choice.identity.modelId}
-                              {choice.available ? '' : ' · 現在利用不可'}
-                            </small>
-                          </span>
-                        </label>
-                      ))}
+                          <span aria-hidden="true">›</span>
+                        </button>
+                      </div>
                     </div>
-                  </fieldset>
+                    {expanded && (
+                      <fieldset id={modelRegionId} className="team-model-detail">
+                        <legend className="sr-only">{group.label}で使用するモデル</legend>
+                        <div className="team-model-list">
+                          {group.choices.map((choice) => (
+                            <label
+                              className={`team-model-row${choice.available ? '' : ' unavailable'}`}
+                              key={teamModelKey(choice.identity)}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedKeys.has(teamModelKey(choice.identity))}
+                                disabled={phase !== 'idle'}
+                                onChange={(event) =>
+                                  toggleModel(choice.identity, event.target.checked)
+                                }
+                              />
+                              <span>
+                                <strong>{choice.displayName}</strong>
+                                <small>
+                                  {choice.identity.modelId}
+                                  {choice.available ? '' : ' · 現在利用不可'}
+                                </small>
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                    )}
+                  </div>
                 );
               })
             )}

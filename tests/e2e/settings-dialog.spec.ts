@@ -216,7 +216,7 @@ test.describe('settings dialog', () => {
     await page.keyboard.press('Escape');
   });
 
-  test('groups Team models by Connection and restores multiple selections exactly', async () => {
+  test('sets Team permission by Provider or by models inside an expanded Provider', async ({}, testInfo) => {
     const page: Page = await firstWindow(app!);
     await page.getByTestId('sidebar-settings-button').click();
     await expect(page.getByTestId('settings-page-models')).toBeVisible();
@@ -227,36 +227,78 @@ test.describe('settings dialog', () => {
     await expect(page.getByTestId('settings-page-team')).toBeVisible();
 
     const settings = page.getByTestId('settings-team-models');
-    await settings.getByRole('radio', { name: '接続ごとに指定' }).check();
-    const connections = settings.locator('.team-model-connection');
-    expect(await connections.count()).toBeGreaterThan(1);
+    await settings.getByRole('radio', { name: 'Providerごとに指定' }).check();
+    const providers = settings.locator('.team-model-connection');
+    const providerCount = await providers.count();
+    expect(providerCount).toBeGreaterThan(1);
+    const providerCheckboxes = settings.locator('.team-provider-permission input[type="checkbox"]');
+    await expect(providerCheckboxes).toHaveCount(providerCount);
+    await expect(settings.locator('.team-model-row')).toHaveCount(0);
 
-    // Search Enter (including an IME commit) must not submit the surrounding settings form.
+    const providerTops = await providers.evaluateAll((elements) =>
+      elements.map((element) => element.getBoundingClientRect().top),
+    );
+    expect(providerTops.every((top, index) => index === 0 || top > providerTops[index - 1]!)).toBe(
+      true,
+    );
+
+    // Search opens matching Provider details. Enter (including an IME commit) must not submit.
     const search = settings.getByRole('searchbox', { name: 'モデルを検索' });
     await search.fill('codex');
+    expect(await settings.locator('.team-model-row').count()).toBeGreaterThan(0);
     await search.press('Enter');
     await expect(settings.getByTestId('settings-team-models-save')).toBeEnabled();
-
-    // A Connection bulk action includes models hidden by search. Clearing every Connection makes
-    // the draft invalid; selecting two exact identities makes it saveable again.
     await search.fill('');
-    for (const connection of await connections.all()) {
-      const clear = connection.getByRole('button', { name: /モデル選択をすべて解除/ });
-      if (await clear.isEnabled()) await clear.click();
+    await expect(settings.locator('.team-model-row')).toHaveCount(0);
+
+    // Each Provider can be allowed or cleared without opening hundreds of model rows.
+    for (const checkbox of await providerCheckboxes.all()) {
+      await checkbox.uncheck();
     }
     await expect(settings.getByTestId('settings-team-models-save')).toBeDisabled();
-    const modelChoices = settings.locator('.team-model-row input[type="checkbox"]');
-    const count = await modelChoices.count();
-    expect(count).toBeGreaterThan(1);
-    await modelChoices.nth(0).check();
-    await modelChoices.nth(1).check();
+
+    const firstProvider = providers.nth(0);
+    const secondProvider = providers.nth(1);
+    const firstProviderPermission = firstProvider.locator(
+      '.team-provider-permission input[type="checkbox"]',
+    );
+    const secondProviderPermission = secondProvider.locator(
+      '.team-provider-permission input[type="checkbox"]',
+    );
+    await firstProviderPermission.check();
+    await expect(firstProvider.getByText('すべて許可', { exact: true })).toBeVisible();
+
+    // Opening one Provider reveals a vertical native-checkbox list for exact model selection.
+    const firstExpand = firstProvider.getByRole('button', { name: /のモデルを開く/ });
+    await firstExpand.click();
+    const firstProviderModels = firstProvider.locator('.team-model-row input[type="checkbox"]');
+    const firstProviderModelCount = await firstProviderModels.count();
+    expect(firstProviderModelCount).toBeGreaterThan(1);
+    for (let index = 1; index < firstProviderModelCount; index += 1) {
+      await firstProviderModels.nth(index).uncheck();
+    }
+    await expect(firstProviderPermission).toHaveAttribute('aria-checked', 'mixed');
+
+    // A second Provider is allowed wholesale while its model details stay collapsed.
+    await secondProviderPermission.check();
+    await expect(secondProvider.getByText('すべて許可', { exact: true })).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath('team-provider-model-permissions.png'),
+      fullPage: true,
+    });
+    await firstProvider.getByRole('button', { name: /のモデルを閉じる/ }).click();
     await settings.getByTestId('settings-team-models-save').click();
     await expect(settings.getByTestId('settings-team-models-save')).toBeDisabled();
 
     await page.keyboard.press('Escape');
     await page.getByTestId('sidebar-settings-button').click();
     await page.getByTestId('settings-nav-team').click();
-    await expect(settings.locator('.team-model-row input[type="checkbox"]:checked')).toHaveCount(2);
+    await expect(firstProviderPermission).toHaveAttribute('aria-checked', 'mixed');
+    await expect(secondProviderPermission).toBeChecked();
+    await firstProvider.getByRole('button', { name: /のモデルを開く/ }).click();
+    await expect(
+      firstProvider.locator('.team-model-row input[type="checkbox"]:checked'),
+    ).toHaveCount(1);
     await page.keyboard.press('Escape');
   });
 });

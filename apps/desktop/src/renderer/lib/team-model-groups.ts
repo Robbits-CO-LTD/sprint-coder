@@ -17,6 +17,14 @@ export type TeamModelConnectionGroup = Readonly<{
   choices: readonly TeamModelChoice[];
 }>;
 
+export type TeamModelConnectionSelection = Readonly<{
+  selectedCount: number;
+  totalCount: number;
+  availableCount: number;
+  allAvailableSelected: boolean;
+  partiallySelected: boolean;
+}>;
+
 export function teamModelKey(model: TeamModelIdentity): string {
   return `${model.connectionId}\0${model.providerId}\0${model.modelId}`;
 }
@@ -157,4 +165,25 @@ export function setTeamConnectionSelected(
       ...group.choices.filter((choice) => choice.available).map((choice) => choice.identity),
     );
   return next;
+}
+
+export function getTeamConnectionSelection(
+  group: TeamModelConnectionGroup,
+  allowedModels: readonly TeamModelIdentity[],
+): TeamModelConnectionSelection {
+  const allowedKeys = new Set(allowedModels.map(teamModelKey));
+  const selectedCount = group.choices.filter((choice) =>
+    allowedKeys.has(teamModelKey(choice.identity)),
+  ).length;
+  const availableChoices = group.choices.filter((choice) => choice.available);
+  const allAvailableSelected =
+    availableChoices.length > 0 &&
+    availableChoices.every((choice) => allowedKeys.has(teamModelKey(choice.identity)));
+  return {
+    selectedCount,
+    totalCount: group.choices.length,
+    availableCount: availableChoices.length,
+    allAvailableSelected,
+    partiallySelected: selectedCount > 0 && !allAvailableSelected,
+  };
 }
