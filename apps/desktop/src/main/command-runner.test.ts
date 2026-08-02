@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { access, chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -65,7 +65,9 @@ describe('CommandRunner', () => {
   it('rejects a replacement inode at a persisted Project root path', async () => {
     const root = await workspace();
     const binding = await workspaceMutationBinding(root);
-    await rm(root, { recursive: true });
+    const original = `${root}-original`;
+    await rename(root, original);
+    roots.push(original);
     await mkdir(root);
 
     await expect(

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
@@ -161,7 +161,9 @@ describe('the agent edit tool', () => {
 
   it('rejects a replacement directory at the sealed root path', async () => {
     const { workspace, deps } = await harness();
-    await rm(workspace, { recursive: true });
+    const original = `${workspace}-original`;
+    await rename(workspace, original);
+    roots.push(original);
     await mkdir(join(workspace, 'src'), { recursive: true });
     await writeFile(join(workspace, 'src', 'a.txt'), SOURCE);
 

@@ -331,7 +331,7 @@ describe('path guard', () => {
   it('rejects a different directory inode recreated at an approved root path', async () => {
     const { workspace } = await fixture();
     const binding = await workspaceMutationBinding(workspace);
-    await rm(workspace, { recursive: true });
+    await rename(workspace, `${workspace}-original`);
     await mkdir(join(workspace, 'src'), { recursive: true });
     await writeFile(join(workspace, 'src', 'safe.txt'), 'replacement');
 
