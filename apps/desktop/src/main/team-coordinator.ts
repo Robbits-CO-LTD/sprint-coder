@@ -1488,6 +1488,11 @@ export class TeamCoordinator {
       const failedWorkspaceWrite =
         (missionWorktree !== null || executionIsolation !== null) &&
         completion.value.status !== 'succeeded';
+      // Legacy single-worktree failures can be rerun in a fresh Attempt. A Project isolation seals
+      // every repository as quarantined, so presenting that state as resumable would strand the
+      // execution: preparation cannot safely reactivate those worktrees and there is no successful
+      // completion to resume integration from.
+      const resumableFailedWorkspaceWrite = failedWorkspaceWrite && missionWorktree !== null;
       if (missionWorktree !== null) {
         if (this.worktreeManager === undefined)
           throw new Error('Mission worktree manager is unavailable');
@@ -1647,7 +1652,7 @@ export class TeamCoordinator {
         });
         this.persistence.transitionTeamExecution({
           executionId: input.executionId,
-          to: failedWorkspaceWrite
+          to: resumableFailedWorkspaceWrite
             ? 'waiting_resume'
             : completion.value.status === 'succeeded'
               ? 'completed'
@@ -1655,7 +1660,7 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
         if (mission !== null && mission.state === 'running') {
-          if (failedWorkspaceWrite)
+          if (resumableFailedWorkspaceWrite)
             this.persistence.transitionTeamMission(mission.id, 'waiting_resume', this.isoNow());
           else this.cancelMissionRemainder(input.executionId, 'failed');
         }
@@ -1682,7 +1687,7 @@ export class TeamCoordinator {
           ? mission !== null && !completedMission
             ? 'waiting'
             : 'done'
-          : failedWorkspaceWrite
+          : resumableFailedWorkspaceWrite
             ? 'waiting'
             : 'failed',
       );

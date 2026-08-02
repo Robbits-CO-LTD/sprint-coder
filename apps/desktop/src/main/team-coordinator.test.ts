@@ -1415,6 +1415,100 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('makes a failed multi-repository Worker terminal instead of offering a broken resume', async () => {
+      const persistence = createPersistence();
+      const primaryRepo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-primary-')));
+      const secondaryRepo = realpathSync(
+        mkdtempSync(join(tmpdir(), 'sprint-coder-team-secondary-')),
+      );
+      const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-worktrees-'));
+      cleanup.push(primaryRepo, secondaryRepo, worktreesRoot);
+      for (const repo of [primaryRepo, secondaryRepo]) {
+        expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+        writeFileSync(join(repo, 'README.md'), 'base\n');
+        expect(spawnSync('git', ['-C', repo, 'add', 'README.md']).status).toBe(0);
+        expect(
+          spawnSync('git', [
+            '-C',
+            repo,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-q',
+            '-m',
+            'base',
+          ]).status,
+        ).toBe(0);
+      }
+      const project = persistence.createProject({
+        name: 'Failed multi-repository execution',
+        folders: [
+          {
+            id: '32000000-0000-4000-8000-000000000001',
+            path: primaryRepo,
+            canonicalPath: primaryRepo,
+            label: 'primary',
+            role: 'primary',
+            workspaceKey: '3'.repeat(64),
+            rootIdentityDigest: '4'.repeat(64),
+          },
+          {
+            id: '32000000-0000-4000-8000-000000000002',
+            path: secondaryRepo,
+            canonicalPath: secondaryRepo,
+            label: 'secondary',
+            role: 'secondary',
+            workspaceKey: '5'.repeat(64),
+            rootIdentityDigest: '6'.repeat(64),
+          },
+        ],
+      });
+      const task = persistence.createTask('Failed multi-repository Task', false, project.id);
+      const runtime = new MultiRootWritingRuntime();
+      runtime.completionStatus = 'failed';
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new WorkerWorktreeManager({ worktreesRoot }),
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'report a failed repository write',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'attempt both repository writes',
+        doneCriteria: ['result succeeds'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
+      );
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
+        phase: 'quarantined',
+        resumeKind: null,
+        repositories: [{ state: 'quarantined' }, { state: 'quarantined' }],
+      });
+      expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'failed', terminalReason: 'worker_reported_failure' },
+      ]);
+      await expect(
+        coordinator.resumeExecutionIntegration(task.id, submission.executionId),
+      ).rejects.toThrow('Team execution is not waiting to resume');
+      expect(existsSync(join(primaryRepo, 'worker-output.txt'))).toBe(false);
+      expect(existsSync(join(secondaryRepo, 'worker-output.txt'))).toBe(false);
+      persistence.close();
+    }, 30_000);
+
     it('revalidates a no-change repository before resuming partial integration', async () => {
       const persistence = createPersistence();
       const primaryRepo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-primary-')));
