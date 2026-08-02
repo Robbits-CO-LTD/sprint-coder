@@ -216,7 +216,7 @@ test.describe('settings dialog', () => {
     await page.keyboard.press('Escape');
   });
 
-  test('shows one settings page at a time and persists a Team model restriction', async () => {
+  test('groups Team models by Connection and restores multiple selections exactly', async () => {
     const page: Page = await firstWindow(app!);
     await page.getByTestId('sidebar-settings-button').click();
     await expect(page.getByTestId('settings-page-models')).toBeVisible();
@@ -227,18 +227,36 @@ test.describe('settings dialog', () => {
     await expect(page.getByTestId('settings-page-team')).toBeVisible();
 
     const settings = page.getByTestId('settings-team-models');
-    await settings.getByRole('radio', { name: '選択したモデルのみ' }).check();
+    await settings.getByRole('radio', { name: '接続ごとに指定' }).check();
+    const connections = settings.locator('.team-model-connection');
+    expect(await connections.count()).toBeGreaterThan(1);
+
+    // Search Enter (including an IME commit) must not submit the surrounding settings form.
+    const search = settings.getByRole('searchbox', { name: 'モデルを検索' });
+    await search.fill('codex');
+    await search.press('Enter');
+    await expect(settings.getByTestId('settings-team-models-save')).toBeEnabled();
+
+    // A Connection bulk action includes models hidden by search. Clearing every Connection makes
+    // the draft invalid; selecting two exact identities makes it saveable again.
+    await search.fill('');
+    for (const connection of await connections.all()) {
+      const clear = connection.getByRole('button', { name: /モデル選択をすべて解除/ });
+      if (await clear.isEnabled()) await clear.click();
+    }
+    await expect(settings.getByTestId('settings-team-models-save')).toBeDisabled();
     const modelChoices = settings.locator('.team-model-row input[type="checkbox"]');
     const count = await modelChoices.count();
     expect(count).toBeGreaterThan(1);
-    for (let index = 0; index < count - 1; index += 1) await modelChoices.nth(index).uncheck();
+    await modelChoices.nth(0).check();
+    await modelChoices.nth(1).check();
     await settings.getByTestId('settings-team-models-save').click();
     await expect(settings.getByTestId('settings-team-models-save')).toBeDisabled();
 
     await page.keyboard.press('Escape');
     await page.getByTestId('sidebar-settings-button').click();
     await page.getByTestId('settings-nav-team').click();
-    await expect(settings.locator('.team-model-row input[type="checkbox"]:checked')).toHaveCount(1);
+    await expect(settings.locator('.team-model-row input[type="checkbox"]:checked')).toHaveCount(2);
     await page.keyboard.press('Escape');
   });
 });
