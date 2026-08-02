@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import {
   closeSync,
   constants,
@@ -10,6 +11,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  renameSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
@@ -145,11 +147,12 @@ export type SaveOutcome = {
  * silently winning.
  *
  * The target is opened once for validation. Replacement bytes are staged and durably flushed in a
- * exclusively-created sibling copied from that target. Before the live inode is touched, a durable
+ * exclusively-created sibling copied from that target. Before the live path is touched, a durable
  * journal records both the original and replacement digests. The target identity and digest are
- * revalidated immediately before publishing. Publication writes through the original descriptor so
- * the inode — including its ACLs and extended attributes — is retained. If the process or machine
- * stops mid-write, the next open/save restores the flushed recovery copy before exposing the file.
+ * revalidated immediately before publishing. Publication is one atomic sibling rename, so another
+ * writer can observe the complete old file or the complete new file, never a truncated/interleaved
+ * buffer. Copying the target to the staging sibling first retains the file metadata that the host
+ * filesystem copies with it. The journal makes cleanup after a completed rename restart-safe.
  */
 export function saveWorkspaceFile(
   workspacePath: string,
@@ -182,9 +185,6 @@ export function saveWorkspaceFile(
   let staging: string | null = null;
   let journalDescriptor: number | null = null;
   let journal: string | null = null;
-  let original: Buffer | null = null;
-  let targetMutationStarted = false;
-  let preserveRecoveryCopy = false;
   try {
     descriptor = openSync(
       absolute,
@@ -195,7 +195,6 @@ export function saveWorkspaceFile(
     if (!stat.isFile()) return refuse('not_a_file');
     if (stat.size > BigInt(MAX_EDITABLE_BYTES)) return refuse('too_large');
     const current = readDescriptor(descriptor, Number(stat.size));
-    original = current;
     // Not an error: the file changed under the editor, so this write is not the one to make.
     if (digestOf(current) !== baseDigest)
       return { outcome: 'conflict', digest: null, reason: null };
@@ -205,37 +204,9 @@ export function saveWorkspaceFile(
     recovery = transaction.recovery;
     staging = transaction.staging;
     journal = transaction.journal;
-    copyFileSync(absolute, recovery, constants.COPYFILE_EXCL);
-    recoveryDescriptor = openSync(
-      recovery,
-      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
-    );
-    const recoveryStat = fstatSync(recoveryDescriptor, { bigint: true });
-    if (!recoveryStat.isFile() || recoveryStat.nlink !== 1n) return refuse('outside_workspace');
-    // copyFileSync is pathname based. If the target changed during that copy, never publish it.
-    if (digestOf(readDescriptor(recoveryDescriptor, Number(recoveryStat.size))) !== baseDigest)
-      return { outcome: 'conflict', digest: null, reason: null };
-    fsyncSync(recoveryDescriptor);
-    closeSync(recoveryDescriptor);
-    recoveryDescriptor = null;
-
-    stagingDescriptor = openSync(
-      staging,
-      constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_RDWR |
-        (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
-      0o600,
-    );
-    const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
-    if (!stagingStat.isFile() || stagingStat.nlink !== 1n) return refuse('outside_workspace');
-
-    replaceDescriptorContents(stagingDescriptor, bytes);
-    if (digestOf(readDescriptor(stagingDescriptor, bytes.length)) !== digestOf(bytes))
-      return refuse('io_error');
-    closeSync(stagingDescriptor);
-    stagingDescriptor = null;
-
+    // Create the durable intent before either sidecar. Therefore every sidecar this version creates
+    // is attributable to a journal, and an unrelated user file with a lookalike suffix is never
+    // silently deleted. At this point the target is still the verified original.
     const journalBytes = Buffer.from(
       JSON.stringify({ version: 1, originalDigest: baseDigest, newDigest: digestOf(bytes) }),
       'utf8',
@@ -253,6 +224,36 @@ export function saveWorkspaceFile(
     journalDescriptor = null;
     syncParentDirectory(absolute);
 
+    copyFileSync(absolute, recovery, constants.COPYFILE_EXCL);
+    recoveryDescriptor = openSync(
+      recovery,
+      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+    );
+    const recoveryStat = fstatSync(recoveryDescriptor, { bigint: true });
+    if (!recoveryStat.isFile() || recoveryStat.nlink !== 1n) return refuse('outside_workspace');
+    // copyFileSync is pathname based. If the target changed during that copy, never publish it.
+    if (digestOf(readDescriptor(recoveryDescriptor, Number(recoveryStat.size))) !== baseDigest)
+      return { outcome: 'conflict', digest: null, reason: null };
+    fsyncSync(recoveryDescriptor);
+    closeSync(recoveryDescriptor);
+    recoveryDescriptor = null;
+
+    // Start from a copy of the validated target so mode and other copyable metadata are retained.
+    // Windows publication below separately uses File.Replace to retain the destination ACL.
+    copyFileSync(absolute, staging, constants.COPYFILE_EXCL);
+    stagingDescriptor = openSync(
+      staging,
+      constants.O_RDWR | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW),
+    );
+    const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
+    if (!stagingStat.isFile() || stagingStat.nlink !== 1n) return refuse('outside_workspace');
+
+    replaceDescriptorContents(stagingDescriptor, bytes);
+    if (digestOf(readDescriptor(stagingDescriptor, bytes.length)) !== digestOf(bytes))
+      return refuse('io_error');
+    closeSync(stagingDescriptor);
+    stagingDescriptor = null;
+
     const finalTarget = resolveSafeWorkspaceFile(workspacePath, relativePath);
     if (
       finalTarget.path === null ||
@@ -267,36 +268,19 @@ export function saveWorkspaceFile(
     if (digestOf(readDescriptor(descriptor, Number(latestStat.size))) !== baseDigest)
       return { outcome: 'conflict', digest: null, reason: null };
 
-    targetMutationStarted = true;
-    replaceDescriptorContents(descriptor, bytes);
-    try {
-      const publishedStat = fstatSync(descriptor, { bigint: true });
-      const published = readDescriptor(descriptor, Number(publishedStat.size));
-      if (digestOf(published) !== digestOf(bytes)) {
-        // Another writer interleaved with publication. Its bytes are ambiguous, so never call this
-        // save successful and never overwrite them during automatic rollback. Keep the durable
-        // transaction for the explicit recovery UI instead.
-        preserveRecoveryCopy = true;
-        targetMutationStarted = false;
-        return refuse('io_error');
-      }
-    } catch {
-      preserveRecoveryCopy = true;
-      targetMutationStarted = false;
-      return refuse('io_error');
-    }
-    targetMutationStarted = false;
+    // Windows will not replace an open destination. Closing only after the final identity/digest
+    // check keeps the race window as small as the filesystem API permits; rename itself is atomic.
+    closeSync(descriptor);
+    descriptor = null;
+    // Windows File.Replace creates its backup as part of the same atomic operation. Removing our
+    // earlier flushed copy first is safe: until replacement starts the target still is the original,
+    // and after replacement the API has recreated the backup from that exact destination.
+    if (process.platform === 'win32') unlinkSync(recovery);
+    publishStagedFile(staging, absolute, recovery);
+    staging = null;
+    syncParentDirectory(absolute);
     return { outcome: 'saved', digest: digestOf(bytes), reason: null };
   } catch {
-    if (targetMutationStarted && descriptor !== null && original !== null) {
-      try {
-        replaceDescriptorContents(descriptor, original);
-        targetMutationStarted = false;
-      } catch {
-        // Keep the untouched original bytes on disk if even restoring the original inode fails.
-        preserveRecoveryCopy = true;
-      }
-    }
     return refuse('io_error');
   } finally {
     if (recoveryDescriptor !== null)
@@ -320,19 +304,19 @@ export function saveWorkspaceFile(
     // Remove the recovery bytes first and the journal last. If the process stops during cleanup,
     // the remaining journal can prove that an already-complete target is safe to keep.
     let transactionPayloadRemoved = true;
-    if (recovery !== null && !preserveRecoveryCopy)
+    if (recovery !== null)
       try {
         unlinkSync(recovery);
-      } catch {
-        transactionPayloadRemoved = false;
+      } catch (error) {
+        if (!isNotFound(error)) transactionPayloadRemoved = false;
       }
-    if (staging !== null && !preserveRecoveryCopy)
+    if (staging !== null)
       try {
         unlinkSync(staging);
-      } catch {
-        transactionPayloadRemoved = false;
+      } catch (error) {
+        if (!isNotFound(error)) transactionPayloadRemoved = false;
       }
-    if (journal !== null && !preserveRecoveryCopy && transactionPayloadRemoved)
+    if (journal !== null && transactionPayloadRemoved)
       try {
         unlinkSync(journal);
       } catch {
@@ -378,10 +362,16 @@ function recoverInterruptedSave(absolute: string, explicitlyRestore = false): vo
   let recoveryDescriptor: number | null = null;
   let journalDescriptor: number | null = null;
   try {
-    // Publication never begins until both recovery bytes and the journal have been flushed. An
-    // incomplete pre-journal transaction is deliberately left fail-closed instead of deleting a
-    // user-created lookalike file.
-    if (!hasJournal) throw new Error('Incomplete save transaction');
+    // Older builds could leave a recovery/stage sidecar before writing a journal. Without that
+    // provenance it could instead be a user-created lookalike, so normal open must not delete it.
+    // Explicit recovery is the user's safe choice to keep the untouched target and discard only the
+    // stale sidecars; new saves journal first and cannot create this ambiguous state.
+    if (!hasJournal) {
+      if (!explicitlyRestore) throw new RecoveryRequiredError('Explicit recovery is required');
+      if (hasRecovery) unlinkSync(transaction.recovery);
+      if (hasStage) unlinkSync(transaction.staging);
+      return;
+    }
 
     journalDescriptor = openSync(
       transaction.journal,
@@ -465,11 +455,70 @@ function syncParentDirectory(absolute: string): void {
   }
 }
 
+const WINDOWS_POWERSHELL =
+  process.env['SystemRoot'] === undefined
+    ? 'powershell.exe'
+    : `${process.env['SystemRoot']}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+const WINDOWS_ATOMIC_REPLACE_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+[System.IO.File]::Replace(
+  $env:SPRINT_CODER_REPLACEMENT,
+  $env:SPRINT_CODER_TARGET,
+  $env:SPRINT_CODER_BACKUP,
+  $false
+)
+`;
+
+/** Atomically publishes complete bytes while retaining the destination's Windows security data. */
+function publishStagedFile(staging: string, absolute: string, recovery: string): void {
+  if (process.platform !== 'win32') {
+    renameSync(staging, absolute);
+    return;
+  }
+  // File.Replace maps to ReplaceFileW. Unlike MoveFileEx/rename, it retains the destination ACL and
+  // other mergeable metadata while swapping the fully-flushed sibling into place atomically.
+  execFileSync(
+    WINDOWS_POWERSHELL,
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-EncodedCommand',
+      Buffer.from(WINDOWS_ATOMIC_REPLACE_SCRIPT, 'utf16le').toString('base64'),
+    ],
+    {
+      env: {
+        SystemRoot: process.env['SystemRoot'] ?? '',
+        WINDIR: process.env['WINDIR'] ?? '',
+        TEMP: process.env['TEMP'] ?? '',
+        TMP: process.env['TMP'] ?? '',
+        USERPROFILE: process.env['USERPROFILE'] ?? '',
+        SPRINT_CODER_REPLACEMENT: staging,
+        SPRINT_CODER_TARGET: absolute,
+        SPRINT_CODER_BACKUP: recovery,
+      },
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: 10_000,
+      windowsHide: true,
+    },
+  );
+}
+
 const EMPTY_DIGEST = createHash('sha256').update('').digest('hex');
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 function digestOf(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'ENOENT'
+  );
 }
 
 function readDescriptor(descriptor: number, size: number): Buffer {
