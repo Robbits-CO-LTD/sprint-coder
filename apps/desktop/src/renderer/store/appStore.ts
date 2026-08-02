@@ -1397,6 +1397,9 @@ export const useAppStore = create<AppState>((set, get) => {
         set((state) => ({ tasks: [task, ...state.tasks] }));
         await get().selectTask(task.id);
         const preset = accessPresetForNewTask();
+        // `setAccessPreset` crosses the permissions IPC boundary. Main always shows its native
+        // confirmation before accepting `full`, including this inherited/default path; declining
+        // leaves the newly created Task at the initial `ask` preset.
         if (preset !== 'ask') await get().setAccessPreset(task.id, preset);
         if (projectId !== undefined) void get().refreshProjects();
         return task;

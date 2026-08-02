@@ -456,7 +456,7 @@ function AccessDefaultGroup() {
       </label>
       <p className="settings-hint">
         「前回選択した設定」は直近の選択を引き継ぎます。フルアクセスを新しいタスクへ
-        適用するときも、確認ダイアログを表示します。
+        適用するときも、Mainプロセスの確認ダイアログを表示します。
       </p>
     </div>
   );
