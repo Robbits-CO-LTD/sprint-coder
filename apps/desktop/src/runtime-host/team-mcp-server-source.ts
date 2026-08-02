@@ -219,6 +219,7 @@ const TOOLS = [
         workerId: { type: 'string' },
         objective: { type: 'string' },
         doneCriteria: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 },
+        access: { type: 'string', enum: ['read-only', 'workspace-write'] },
       },
       required: ['workerId', 'objective', 'doneCriteria'],
       additionalProperties: false,

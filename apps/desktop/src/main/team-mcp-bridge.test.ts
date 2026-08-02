@@ -377,6 +377,7 @@ describe('TeamMcpBridge', () => {
         targetAgentId: 'worker-1',
         content: '実装する',
         doneCriteria: ['完了'],
+        accessMode: 'read-only',
       },
       'manager-1',
       { type: 'team_execution', id: 'parent-execution-1' },

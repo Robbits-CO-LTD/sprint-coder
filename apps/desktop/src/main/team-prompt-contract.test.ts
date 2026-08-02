@@ -76,7 +76,7 @@ describe('Leader guidance describes the real assign-task arguments', () => {
   };
 
   it('names exactly the accepted arguments', () => {
-    const promised = ['workerId', 'objective', 'doneCriteria'];
+    const promised = ['workerId', 'objective', 'doneCriteria', 'access'];
     expect(Object.keys(schema.properties).slice().sort()).toEqual(promised.slice().sort());
     for (const argument of promised)
       expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(`\`${argument}\``);

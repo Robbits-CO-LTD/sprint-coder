@@ -124,20 +124,21 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     ]);
     const subject = runtime({
       contextFor: () => inherited,
-      writeScopeFor: () => 'workspace-write',
+      writeScopeFor: () => 'full',
     });
 
     await subject.execute({
       worker: writableWorker,
       envelope: { ...envelope, targetAgentId: writableWorker.id },
       content: '実装する',
+      accessMode: 'workspace-write',
       workspacePath: '/isolated/worktree',
     });
 
     expect(runtimeHostMock.starts[0]?.[3]).toBe('/isolated/worktree');
     expect(runtimeHostMock.starts[0]?.[6]).toEqual(inherited);
     expect(runtimeHostMock.starts[0]?.[9]).toBe('workspace-write');
-    expect(runtimeHostMock.starts[0]?.[2]).toContain('Workspace書き込み: 許可範囲内で可');
+    expect(runtimeHostMock.starts[0]?.[2]).toContain('Workspace書き込み: 隔離範囲内で可');
     expect(runtimeHostMock.starts[0]?.[2]).toContain('隔離worktree: /isolated/worktree');
   });
 

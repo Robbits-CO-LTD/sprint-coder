@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -25,6 +25,63 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
 
     expect(result.baseHead).toBe(head);
     expect((await stat(result.path)).isDirectory()).toBe(true);
+  });
+
+  it('groups multiple roots from the same clean repository', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const secondary = join(repoPath, 'packages', 'secondary');
+    await mkdir(secondary, { recursive: true });
+
+    await expect(manager.requireCleanRepositorySet([repoPath, secondary])).resolves.toEqual([
+      {
+        repoPath: await realpath(repoPath),
+        head,
+        rootPaths: [await realpath(repoPath), await realpath(secondary)],
+      },
+    ]);
+  });
+
+  it('rejects dirty, non-Git, and in-progress repositories', async () => {
+    const dirty = await fixture();
+    await writeFile(join(dirty.repoPath, 'dirty.txt'), 'dirty\n');
+    await expect(dirty.manager.requireCleanRepositorySet([dirty.repoPath])).rejects.toMatchObject({
+      code: 'base_changed',
+    });
+
+    const nonGit = await mkdtemp(join(tmpdir(), 'sprint-coder-non-git-'));
+    cleanupRoots.push(nonGit);
+    await expect(dirty.manager.requireCleanRepositorySet([nonGit])).rejects.toMatchObject({
+      code: 'create_failed',
+    });
+
+    const progressing = await fixture();
+    const gitDirectory = (await git(['-C', progressing.repoPath, 'rev-parse', '--git-dir'])).trim();
+    await writeFile(join(progressing.repoPath, gitDirectory, 'MERGE_HEAD'), progressing.head);
+    await expect(
+      progressing.manager.requireCleanRepositorySet([progressing.repoPath]),
+    ).rejects.toMatchObject({ code: 'base_changed' });
+
+    const nested = await fixture();
+    const nestedRepo = join(nested.repoPath, 'nested-repository');
+    await mkdir(nestedRepo);
+    await git(['init', '-q', nestedRepo]);
+    await writeFile(join(nestedRepo, 'README.md'), 'nested\n');
+    await git(['-C', nestedRepo, 'add', 'README.md']);
+    await git([
+      '-C',
+      nestedRepo,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'nested',
+    ]);
+    await expect(
+      nested.manager.requireCleanRepositorySet([nested.repoPath, nestedRepo]),
+    ).rejects.toThrow('Nested Git repositories');
   });
 
   it('rejects a second create for the same agentId', async () => {

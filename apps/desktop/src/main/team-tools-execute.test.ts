@@ -309,6 +309,7 @@ describe('executeTeamTool routing', () => {
       targetAgentId: 'worker-1',
       content: '実装する',
       doneCriteria: ['targeted test passes'],
+      accessMode: 'read-only',
     });
     expect(assigned).toMatchObject({ ok: true, executionId: 'execution-2', state: 'queued' });
 
@@ -337,6 +338,19 @@ describe('executeTeamTool routing', () => {
     });
     await executeTeamTool(coordinator, 'task-1', 'team_wait_events', { cursor: 7 });
     expect(coordinator.listWorkerReports).toHaveBeenCalledWith('task-1', 7, undefined);
+  });
+
+  it('passes an explicit workspace-write mode to the execution contract', async () => {
+    const coordinator = fakeCoordinator();
+    await executeTeamTool(coordinator, 'task-1', 'team_assign_task', {
+      workerId: 'worker-1',
+      objective: '隔離環境で実装する',
+      doneCriteria: ['tests pass'],
+      access: 'workspace-write',
+    });
+    expect(coordinator.assignTask).toHaveBeenCalledWith(
+      expect.objectContaining({ accessMode: 'workspace-write' }),
+    );
   });
 
   it('routes Manager tools with only the caller identity bound to the MCP registration', async () => {
@@ -383,6 +397,7 @@ describe('executeTeamTool routing', () => {
         targetAgentId: 'worker-1',
         content: '実装する',
         doneCriteria: ['完了'],
+        accessMode: 'read-only',
       },
       'manager-1',
       { type: 'team_execution', id: 'parent-execution-1' },

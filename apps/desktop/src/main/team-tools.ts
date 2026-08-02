@@ -151,6 +151,7 @@ export const TEAM_ASSIGN_TASK_TOOL = teamToolDefinition(
     workerId: { type: 'string' },
     objective: { type: 'string' },
     doneCriteria: { type: 'array', items: { type: 'string' } },
+    access: { type: 'string', enum: ['read-only', 'workspace-write'] },
   },
   ['workerId', 'objective', 'doneCriteria'],
 );
@@ -477,6 +478,7 @@ const assignArgsSchema = z
     workerId: z.string().min(1).max(128),
     objective: z.string().min(1).max(10_000),
     doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(20),
+    access: z.enum(['read-only', 'workspace-write']).default('read-only'),
   })
   .strict();
 const assignMissionArgsSchema = z
@@ -813,6 +815,7 @@ export async function executeTeamTool(
           targetAgentId: request.workerId,
           content: request.objective,
           doneCriteria: request.doneCriteria,
+          accessMode: request.access,
         };
         const execution =
           options.requesterAgentId === undefined

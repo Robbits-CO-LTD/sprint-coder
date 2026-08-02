@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, realpath, stat } from 'node:fs/promises';
 import { devNull } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 // Independent git-worktree isolation manager for write-capable Workers. Each agent gets
 // its own worktree under `worktreesRoot`, checked out --detach from a base ref, so a
@@ -93,6 +93,11 @@ export type IntegrateWorktreeResult = Readonly<{
 }>;
 
 export type CleanRepositoryBase = Readonly<{ head: string }>;
+export type CleanRepository = Readonly<{
+  repoPath: string;
+  head: string;
+  rootPaths: readonly string[];
+}>;
 
 const WORKTREE_ID_PATTERN = /^[0-9a-zA-Z-]+$/;
 const GIT_TIMEOUT_MS = 30_000;
@@ -123,6 +128,61 @@ export class WorkerWorktreeManager {
         'Workspace must be clean before a workspace-write Mission step starts',
       );
     return { head };
+  }
+
+  async requireCleanRepositorySet(
+    rootPaths: readonly string[],
+  ): Promise<readonly CleanRepository[]> {
+    if (rootPaths.length === 0) throw new WorktreeError('invalid_input', 'Workspace has no roots');
+    const rootsByRepository = new Map<string, string[]>();
+    for (const rootPath of rootPaths) {
+      const result = await this.runGit(rootPath, ['rev-parse', '--show-toplevel'], 'create_failed');
+      const repoPath = await realpath(resolve(result.stdout.trim()));
+      if (!isAbsolute(repoPath))
+        throw new WorktreeError('create_failed', 'Git returned an invalid repository path');
+      const roots = rootsByRepository.get(repoPath) ?? [];
+      roots.push(await realpath(resolve(rootPath)));
+      rootsByRepository.set(repoPath, roots);
+    }
+    const repoPaths = [...rootsByRepository.keys()].sort();
+    for (const [index, repoPath] of repoPaths.entries())
+      for (const candidate of repoPaths.slice(index + 1))
+        if (isInside(repoPath, candidate) || isInside(candidate, repoPath))
+          throw new WorktreeError(
+            'create_failed',
+            'Nested Git repositories cannot share a workspace-write execution',
+          );
+    const repositories: CleanRepository[] = [];
+    for (const repoPath of repoPaths) {
+      const { head } = await this.requireCleanBase(repoPath);
+      for (const marker of [
+        'MERGE_HEAD',
+        'CHERRY_PICK_HEAD',
+        'REVERT_HEAD',
+        'BISECT_LOG',
+        'rebase-apply',
+        'rebase-merge',
+      ]) {
+        const gitPath = await this.runGit(
+          repoPath,
+          ['rev-parse', '--git-path', marker],
+          'create_failed',
+        );
+        if (await pathExists(resolve(repoPath, gitPath.stdout.trim())))
+          throw new WorktreeError(
+            'base_changed',
+            'Git operation is already in progress in a workspace repository',
+          );
+      }
+      repositories.push(
+        Object.freeze({
+          repoPath,
+          head,
+          rootPaths: Object.freeze(rootsByRepository.get(repoPath)!),
+        }),
+      );
+    }
+    return Object.freeze(repositories);
   }
 
   /** Deterministic worktree directory for an execution or agent. */
@@ -327,6 +387,16 @@ export class WorkerWorktreeManager {
       return null;
     }
   }
+}
+
+function isInside(parent: string, child: string): boolean {
+  const fromParent = relative(parent, child);
+  return (
+    fromParent !== '' &&
+    fromParent !== '..' &&
+    !fromParent.startsWith(`..${sep}`) &&
+    !isAbsolute(fromParent)
+  );
 }
 
 function validateWorktreeId(worktreeId: string): void {
