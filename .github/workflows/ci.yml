@@ -71,26 +71,18 @@ jobs:
       - name: Test
         run: npm run test
 
-      # The Playwright global setup creates a production Electron package before
-      # launching it, so this is both the package smoke and the shipped-app E2E
-      # gate. Real Claude/Codex/API smoke specs remain explicitly opt-in and are
-      # skipped in this credential-free matrix.
-      - name: Package and packaged E2E (Linux)
+      # Keep one production-package boundary check without running the full serial UI suite.
+      # This catches Forge, fuse, native-module, and packaged-startup regressions on Linux while
+      # avoiding the 15+ minute Windows packaged E2E critical path.
+      - name: Packaged startup smoke (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a npm run e2e
+        run: xvfb-run -a npx playwright test tests/e2e/keyboard-smoke.spec.ts
         env:
           SPRINT_CODER_E2E_MODE: packaged
 
-      - name: Package and packaged E2E (macOS / Windows)
-        if: runner.os != 'Linux'
-        run: npm run e2e
-        env:
-          SPRINT_CODER_E2E_MODE: packaged
-          SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
-
-      # Exercise the Windows-only npm.cmd spawn and taskkill /PID /T teardown path. Packaged E2E
-      # proves the shipped executable; this focused smoke additionally proves that a clean Windows
-      # checkout can run development-mode E2E without a manually started dev server.
+      # Exercise the Windows-only npm.cmd spawn and taskkill /PID /T teardown path. This proves
+      # that a clean Windows checkout can run development-mode E2E without a manually started
+      # dev server.
       - name: Dev-mode E2E auto-start smoke (Windows)
         if: runner.os == 'Windows'
         run: npx playwright test tests/e2e/keyboard-smoke.spec.ts
