@@ -40,6 +40,10 @@ export function FileEditorDialog({
 
   async function pick(): Promise<void> {
     if (!filesApi) return;
+    if (dirty) {
+      setMessage('未保存の変更があります。保存するか破棄してから別のファイルを開いてください。');
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
@@ -161,7 +165,7 @@ export function FileEditorDialog({
         type="button"
         className="ctx-chip chip-btn"
         data-testid="open-file-button"
-        disabled={!supported || !hasWorkspace || busy}
+        disabled={!supported || !hasWorkspace || busy || opened?.editable === true}
         title={
           hasWorkspace ? 'Workspace内のファイルを開いて編集' : '先にWorkspaceを選択してください'
         }

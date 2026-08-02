@@ -20,7 +20,7 @@ export function appendCommandOutput(
   output: CommandOutputRecord,
 ): CommandTailProjection {
   if (output.seq <= current.lastOutputSeq) return current;
-  const displayText = output.text.replaceAll('\r\n', '\n');
+  const displayText = normalizeCommandChunk(output.text);
   const extracted = trailingSegments(displayText, COLLAPSED_LINE_LIMIT + 1);
   const lines = extracted.truncated ? [] : [...current.lines];
   const segments = extracted.segments;
@@ -58,6 +58,10 @@ function trailingSegments(text: string, limit: number): { segments: string[]; tr
   const segments: string[] = [];
   let end = text.length;
   while (segments.length < limit) {
+    if (end === 0) {
+      segments.unshift('');
+      return { segments, truncated: false };
+    }
     const newline = text.lastIndexOf('\n', end - 1);
     if (newline < 0) {
       segments.unshift(text.slice(0, end));
@@ -91,7 +95,7 @@ export function projectCommandLines(
   for (const output of outputs) {
     if (output.seq <= lastSeq) continue;
     lastSeq = output.seq;
-    const display = output.text.replaceAll('\r\n', '\n').replaceAll('\n', '↵ ');
+    const display = normalizeCommandChunk(output.text).replaceAll('\n', '↵ ');
     for (let offset = 0; offset < display.length; offset += COMMAND_VISUAL_ROW_CHAR_LIMIT)
       rows.push({
         stream: output.stream,
@@ -101,6 +105,13 @@ export function projectCommandLines(
       });
   }
   return Object.freeze(rows);
+}
+
+function normalizeCommandChunk(text: string): string {
+  // A CRLF pair can be split across adjacent stream records. Dropping only a trailing CR lets the
+  // next record's leading LF represent that logical line break exactly once without changing the
+  // persisted audit bytes.
+  return text.replaceAll('\r\n', '\n').replace(/\r$/, '');
 }
 
 export function projectCommandTail(outputs: readonly CommandOutputRecord[]): CommandTailProjection {
