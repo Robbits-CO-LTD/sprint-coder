@@ -93,6 +93,25 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     });
   });
 
+  it('adopts a clean deterministic worktree left by a preparing execution', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const created = await manager.create({
+      agentId: 'agent-prepare',
+      worktreeId: 'execution-prepare-1',
+      repoPath,
+      baseRef: head,
+    });
+
+    await expect(
+      manager.ensureCreated({
+        agentId: 'agent-prepare',
+        worktreeId: 'execution-prepare-1',
+        repoPath,
+        baseRef: head,
+      }),
+    ).resolves.toEqual(created);
+  });
+
   it('rejects an agentId that does not match the allowed character set', async () => {
     const { repoPath, manager } = await fixture();
 
@@ -198,6 +217,32 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       integratedHead: first.integratedHead,
       outcome: 'already_integrated',
     });
+  });
+
+  it('revalidates a no-change repository before reporting it integrated', async () => {
+    const { repoPath, head, manager } = await fixture();
+
+    await writeFile(join(repoPath, 'outside.txt'), 'unsealed\n');
+    await expect(
+      manager.integrate({ repoPath, baseHead: head, workerHead: head }),
+    ).rejects.toMatchObject({ code: 'base_changed' });
+
+    await git(['-C', repoPath, 'add', 'outside.txt']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'external change',
+    ]);
+    await expect(
+      manager.integrate({ repoPath, baseHead: head, workerHead: head }),
+    ).rejects.toMatchObject({ code: 'base_changed' });
   });
 
   it('refuses integration when the primary workspace changed and preserves both sides', async () => {

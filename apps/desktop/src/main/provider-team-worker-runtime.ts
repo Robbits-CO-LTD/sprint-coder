@@ -19,6 +19,7 @@ import type {
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
 import type { PreparedContext } from './context-ledger';
+import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { projectContextProviderMessages } from './project-context-delivery';
 import { applyWorkerContextInheritance, reserveTeamWorkerContext } from './team-worker-runtime';
 
@@ -91,6 +92,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     content: string;
     executionId?: string;
     workspacePath?: string | null;
+    workspaceSet?: RuntimeWorkspaceSet;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
     signal?: AbortSignal;

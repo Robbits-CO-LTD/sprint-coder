@@ -100,6 +100,139 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('persists multi-repository isolation and leases every mutation key atomically', () => {
+      const { persistence, path } = createPersistence();
+      const { team, leader } = createExecutionFixture(persistence);
+      const writer = persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'writer',
+        objective: 'write both repositories',
+        parentCapabilityCeiling: emptyCeiling,
+        contextInheritancePolicy: 'summary',
+        writeCapable: true,
+      });
+      const first = persistence.createTeamExecution({
+        teamId: team.id,
+        assigneeAgentId: writer.id,
+        createdByAgentId: leader.id,
+        instruction: 'first write',
+        accessMode: 'workspace-write',
+        now: '2026-08-02T00:00:00.000Z',
+      });
+      const second = persistence.createTeamExecution({
+        teamId: team.id,
+        assigneeAgentId: writer.id,
+        createdByAgentId: leader.id,
+        instruction: 'second write',
+        accessMode: 'workspace-write',
+        now: '2026-08-02T00:00:00.100Z',
+      });
+      const repositories = [
+        {
+          ordinal: 1,
+          repoPath: '/repo/one',
+          worktreePath: '/isolated/one',
+          baseHead: 'a'.repeat(40),
+          workerHead: null,
+          integratedHead: null,
+          state: 'active' as const,
+          changedFiles: [],
+        },
+        {
+          ordinal: 2,
+          repoPath: '/repo/two',
+          worktreePath: '/isolated/two',
+          baseHead: 'b'.repeat(40),
+          workerHead: null,
+          integratedHead: null,
+          state: 'active' as const,
+          changedFiles: [],
+        },
+      ];
+      const roots = [
+        {
+          rootId: '10000000-0000-4000-8000-000000000001',
+          rootLabel: 'one',
+          role: 'primary' as const,
+          repositoryOrdinal: 1,
+          sourcePath: '/repo/one',
+          isolatedPath: '/isolated/one',
+          identity: '1'.repeat(64),
+          mutationKey: '3'.repeat(64),
+        },
+        {
+          rootId: '10000000-0000-4000-8000-000000000002',
+          rootLabel: 'two',
+          role: 'secondary' as const,
+          repositoryOrdinal: 2,
+          sourcePath: '/repo/two',
+          isolatedPath: '/isolated/two',
+          identity: '2'.repeat(64),
+          mutationKey: '4'.repeat(64),
+        },
+      ];
+      const isolation = persistence.createTeamExecutionIsolation({
+        executionId: first.id,
+        repositories,
+        roots,
+        now: '2026-08-02T00:00:01.000Z',
+      });
+      expect(isolation).toMatchObject({ phase: 'preparing', revision: 1, repositories, roots });
+      expect(
+        persistence.updateTeamExecutionIsolation({
+          executionId: first.id,
+          phase: 'running',
+          now: '2026-08-02T00:00:02.000Z',
+        }),
+      ).toMatchObject({ phase: 'running', revision: 2 });
+
+      persistence.acquireTeamIntegrationRootLeases({
+        executionId: first.id,
+        roots,
+        now: '2026-08-02T00:00:03.000Z',
+      });
+      expect(() =>
+        persistence.acquireTeamIntegrationRootLeases({
+          executionId: second.id,
+          roots: [{ ...roots[0]!, rootId: 'different-project-root' }],
+          now: '2026-08-02T00:00:03.100Z',
+        }),
+      ).toThrow('already leased');
+      persistence.releaseTeamIntegrationRootLeases(first.id);
+      expect(() =>
+        persistence.acquireTeamIntegrationRootLeases({
+          executionId: second.id,
+          roots,
+          now: '2026-08-02T00:00:04.000Z',
+        }),
+      ).not.toThrow();
+      persistence.releaseTeamIntegrationRootLeases(second.id);
+      persistence.acquireTeamIntegrationRootLeases({
+        executionId: first.id,
+        roots,
+        now: '2026-08-02T00:00:05.000Z',
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('replacement-instance', '2026-08-02T00:01:00.000Z');
+      expect(reopened.getTeamExecutionIsolation(first.id)).toMatchObject({
+        phase: 'running',
+        revision: 2,
+        repositories,
+        roots,
+      });
+      expect(() =>
+        reopened.acquireTeamIntegrationRootLeases({
+          executionId: second.id,
+          roots,
+          now: '2026-08-02T00:01:01.000Z',
+        }),
+      ).not.toThrow();
+      reopened.releaseTeamIntegrationRootLeases(second.id);
+      reopened.close();
+    });
+
     it('backfills v61 Mission access while leaving standalone executions read-only', () => {
       const { persistence, path } = createPersistence();
       const { team, leader, execution } = createExecutionFixture(persistence);

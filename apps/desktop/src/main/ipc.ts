@@ -131,6 +131,7 @@ import {
   teamHireWorkerInputSchema,
   teamMissionSummarySchema,
   teamResumeMissionInputSchema,
+  teamResumeExecutionIntegrationInputSchema,
   teamMessageSummarySchema,
   teamPolicyUpdateInputSchema,
   teamPolicySchema,
@@ -625,6 +626,13 @@ export class IpcRouter {
       new WorkerWorktreeManager({
         worktreesRoot: join(app.getPath('userData'), 'team-worker-worktrees'),
       }),
+      async (taskId) => {
+        const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
+        await verifyTurnWorkspaceIdentities(
+          workspace,
+          this.persistence.getEffectiveWorkspaceRootIdentities(taskId),
+        );
+      },
     );
     // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than
@@ -1859,6 +1867,12 @@ export class IpcRouter {
       teamResumeMissionInputSchema,
       teamMissionSummarySchema,
       (input) => this.teamCoordinator.resumeMission(input.taskId, input.missionId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsResumeExecutionIntegration,
+      teamResumeExecutionIntegrationInputSchema,
+      teamDetailSchema,
+      (input) => this.teamCoordinator.resumeExecutionIntegration(input.taskId, input.executionId),
     );
     this.handleMutation(
       IPC_CHANNELS.teamsSend,

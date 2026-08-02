@@ -13,6 +13,7 @@ describe('Team execution domain', () => {
   it('moves an execution through queue and running to a terminal state', () => {
     expect(transitionTeamExecution('assigned', 'queued')).toBe('queued');
     expect(transitionTeamExecution('queued', 'running')).toBe('running');
+    expect(transitionTeamExecution('queued', 'failed')).toBe('failed');
     expect(transitionTeamExecution('running', 'completed')).toBe('completed');
     expect(() => transitionTeamExecution('completed', 'running')).toThrow(
       'Invalid Team execution transition',
@@ -24,6 +25,7 @@ describe('Team execution domain', () => {
     expect(transitionTeamExecution('queued', 'waiting_rate_limit')).toBe('waiting_rate_limit');
     expect(transitionTeamExecution('running', 'waiting_rate_limit')).toBe('waiting_rate_limit');
     expect(transitionTeamExecution('running', 'queued')).toBe('queued');
+    expect(transitionTeamExecution('waiting_resume', 'completed')).toBe('completed');
   });
 
   it('reuses the same attempt across a rate-limit wait', () => {

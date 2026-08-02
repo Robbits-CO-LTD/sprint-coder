@@ -14,6 +14,7 @@ import {
   taskSummarySchema,
   teamModelRestrictionSchema,
   teamBlueprintSchema,
+  teamExecutionIsolationSchema,
   turnSkillSelectionsSchema,
   turnSkillSelectionSchema,
   turnEventSchema,
@@ -57,6 +58,8 @@ import {
   type TeamMissionCheckpoint,
   type TeamMissionState,
   type TeamMissionWorktreeState,
+  type TeamExecutionIsolation,
+  type WorkerReport,
   type TeamModelRestriction,
   type TeamUsageTotals,
   type TurnEvent,
@@ -501,6 +504,26 @@ type TeamMissionWorktreeRow = {
   reason: string | null;
   created_at: string;
   updated_at: string;
+};
+type TeamExecutionIsolationRow = {
+  execution_id: string;
+  phase: TeamExecutionIsolation['phase'];
+  resume_kind: TeamExecutionIsolation['resumeKind'];
+  repositories_json: string;
+  roots_json: string;
+  reason: string | null;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+type TeamExecutionIsolationCompletionRow = {
+  execution_id: string;
+  attempt_id: string;
+  team_task_id: string;
+  agent_id: string;
+  report_json: string;
+  done_evidence_json: string;
+  created_at: string;
 };
 type TeamMessageRow = {
   id: string;
@@ -2881,6 +2904,48 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 63,
+    checksum: 'team-multi-repository-isolation-v63',
+    sql: `
+      CREATE TABLE team_execution_isolations (
+        execution_id TEXT PRIMARY KEY REFERENCES team_executions(id) ON DELETE CASCADE,
+        phase TEXT NOT NULL CHECK (phase IN (
+          'preparing', 'running', 'finalizing', 'integrating',
+          'waiting_resume', 'completed', 'quarantined'
+        )),
+        resume_kind TEXT CHECK (resume_kind IS NULL OR resume_kind IN ('worker', 'integration')),
+        repositories_json TEXT NOT NULL,
+        roots_json TEXT NOT NULL,
+        reason TEXT CHECK (reason IS NULL OR length(reason) <= 2000),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX team_execution_isolations_phase_idx
+        ON team_execution_isolations(phase, updated_at, execution_id);
+
+      CREATE TABLE team_integration_root_leases (
+        mutation_key TEXT PRIMARY KEY CHECK (length(mutation_key) = 64),
+        root_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL REFERENCES team_executions(id) ON DELETE CASCADE,
+        root_identity TEXT NOT NULL CHECK (length(root_identity) = 64),
+        acquired_at TEXT NOT NULL
+      );
+      CREATE INDEX team_integration_root_leases_execution_idx
+        ON team_integration_root_leases(execution_id, root_id);
+
+      CREATE TABLE team_execution_isolation_completions (
+        execution_id TEXT PRIMARY KEY REFERENCES team_execution_isolations(execution_id) ON DELETE CASCADE,
+        attempt_id TEXT NOT NULL REFERENCES team_attempts(id),
+        team_task_id TEXT NOT NULL REFERENCES team_tasks(id),
+        agent_id TEXT NOT NULL REFERENCES agents(id),
+        report_json TEXT NOT NULL,
+        done_evidence_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3300,6 +3365,23 @@ export type TeamMissionWorktreeRecord = Readonly<{
   createdAt: string;
   updatedAt: string;
 }>;
+export type TeamExecutionIsolationRecord = Readonly<
+  TeamExecutionIsolation & {
+    executionId: string;
+    revision: number;
+    createdAt: string;
+    updatedAt: string;
+  }
+>;
+export type TeamExecutionIsolationCompletionRecord = Readonly<{
+  executionId: string;
+  attemptId: string;
+  teamTaskId: string;
+  agentId: string;
+  report: WorkerReport;
+  doneEvidence: readonly { criterion: string; evidence: string }[];
+  createdAt: string;
+}>;
 export type TeamMissionRecord = Readonly<{
   id: string;
   teamId: string;
@@ -3377,6 +3459,9 @@ export interface PersistenceClient {
   listProjectFolders(projectId: string): ProjectFolder[];
   getProjectFolderRootIdentities(projectId: string): ReadonlyMap<string, string>;
   getEffectiveWorkspaceRootIdentities(taskId: string): ReadonlyMap<string, string>;
+  getEffectiveWorkspaceMutationBindings(
+    taskId: string,
+  ): ReadonlyMap<string, Readonly<{ workspaceKey: string; rootIdentityDigest: string }>>;
   getTurnWorkspaceRootIdentities(turnId: string): ReadonlyMap<string, string>;
   getTurnWorkspaceMutationBindings(
     turnId: string,
@@ -3555,6 +3640,44 @@ export interface PersistenceClient {
     now: string;
   }): TeamMissionWorktreeRecord;
   getTeamMissionWorktree(executionId: string): TeamMissionWorktreeRecord | null;
+  createTeamExecutionIsolation(input: {
+    executionId: string;
+    repositories: TeamExecutionIsolation['repositories'];
+    roots: TeamExecutionIsolation['roots'];
+    now: string;
+  }): TeamExecutionIsolationRecord;
+  updateTeamExecutionIsolation(input: {
+    executionId: string;
+    phase: TeamExecutionIsolation['phase'];
+    repositories?: TeamExecutionIsolation['repositories'];
+    roots?: TeamExecutionIsolation['roots'];
+    resumeKind?: TeamExecutionIsolation['resumeKind'];
+    reason?: string | null;
+    now: string;
+  }): TeamExecutionIsolationRecord;
+  getTeamExecutionIsolation(executionId: string): TeamExecutionIsolationRecord | null;
+  saveTeamExecutionIsolationCompletion(input: {
+    executionId: string;
+    attemptId: string;
+    teamTaskId: string;
+    agentId: string;
+    report: WorkerReport;
+    doneEvidence: readonly { criterion: string; evidence: string }[];
+    now: string;
+  }): TeamExecutionIsolationCompletionRecord;
+  getTeamExecutionIsolationCompletion(
+    executionId: string,
+  ): TeamExecutionIsolationCompletionRecord | null;
+  deleteTeamExecutionIsolationCompletion(executionId: string): void;
+  acquireTeamIntegrationRootLeases(input: {
+    executionId: string;
+    roots: readonly Pick<
+      TeamExecutionIsolation['roots'][number],
+      'rootId' | 'mutationKey' | 'identity'
+    >[];
+    now: string;
+  }): void;
+  releaseTeamIntegrationRootLeases(executionId: string): void;
   transitionTeamMission(missionId: string, to: TeamMissionState, now: string): TeamMissionRecord;
   prepareTeamMissionResume(input: {
     missionId: string;
@@ -4820,6 +4943,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
         rootId,
         rootIdentityDigest,
       ]),
+    );
+  }
+
+  getEffectiveWorkspaceMutationBindings(
+    taskId: string,
+  ): ReadonlyMap<string, Readonly<{ workspaceKey: string; rootIdentityDigest: string }>> {
+    const task = this.getTaskRow(taskId);
+    const roots = task.project_id === null ? [] : this.getProjectRootRows(task.project_id);
+    return new Map(
+      effectiveWorkspaceBindings(task, roots).map(
+        ({ rootId, workspaceKey, rootIdentityDigest }) => [
+          rootId,
+          Object.freeze({ workspaceKey, rootIdentityDigest }),
+        ],
+      ),
     );
   }
 
@@ -6722,6 +6860,225 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return row === undefined ? null : toTeamMissionWorktree(row);
   }
 
+  createTeamExecutionIsolation(input: {
+    executionId: string;
+    repositories: TeamExecutionIsolation['repositories'];
+    roots: TeamExecutionIsolation['roots'];
+    now: string;
+  }): TeamExecutionIsolationRecord {
+    const parsed = teamExecutionIsolationSchema.parse({
+      phase: 'preparing',
+      resumeKind: null,
+      repositories: input.repositories,
+      roots: input.roots,
+      reason: null,
+    });
+    if (this.getTeamExecution(input.executionId).accessMode !== 'workspace-write')
+      throw new Error('Team execution isolation requires workspace-write access');
+    this.db
+      .prepare(
+        `INSERT INTO team_execution_isolations(
+           execution_id, phase, resume_kind, repositories_json, roots_json,
+           reason, revision, created_at, updated_at
+         ) VALUES (?, ?, NULL, ?, ?, NULL, 1, ?, ?)`,
+      )
+      .run(
+        input.executionId,
+        parsed.phase,
+        JSON.stringify(parsed.repositories),
+        JSON.stringify(parsed.roots),
+        input.now,
+        input.now,
+      );
+    return this.requireTeamExecutionIsolation(input.executionId);
+  }
+
+  updateTeamExecutionIsolation(input: {
+    executionId: string;
+    phase: TeamExecutionIsolation['phase'];
+    repositories?: TeamExecutionIsolation['repositories'];
+    roots?: TeamExecutionIsolation['roots'];
+    resumeKind?: TeamExecutionIsolation['resumeKind'];
+    reason?: string | null;
+    now: string;
+  }): TeamExecutionIsolationRecord {
+    const allowed: Readonly<
+      Record<TeamExecutionIsolation['phase'], readonly TeamExecutionIsolation['phase'][]>
+    > = {
+      preparing: ['running', 'quarantined'],
+      running: ['finalizing', 'quarantined'],
+      finalizing: ['integrating', 'waiting_resume', 'quarantined'],
+      integrating: ['waiting_resume', 'completed', 'quarantined'],
+      waiting_resume: ['finalizing', 'integrating', 'quarantined'],
+      completed: ['waiting_resume', 'quarantined'],
+      quarantined: [],
+    };
+    return this.db.transaction(() => {
+      const current = this.requireTeamExecutionIsolation(input.executionId);
+      if (current.phase !== input.phase && !allowed[current.phase].includes(input.phase))
+        throw new Error(`Invalid Team isolation transition: ${current.phase} -> ${input.phase}`);
+      const parsed = teamExecutionIsolationSchema.parse({
+        phase: input.phase,
+        resumeKind: input.resumeKind === undefined ? current.resumeKind : input.resumeKind,
+        repositories: input.repositories ?? current.repositories,
+        roots: input.roots ?? current.roots,
+        reason: input.reason === undefined ? current.reason : input.reason,
+      });
+      const result = this.db
+        .prepare(
+          `UPDATE team_execution_isolations
+           SET phase = ?, resume_kind = ?, repositories_json = ?, roots_json = ?, reason = ?,
+               revision = revision + 1, updated_at = ?
+           WHERE execution_id = ? AND revision = ?`,
+        )
+        .run(
+          parsed.phase,
+          parsed.resumeKind,
+          JSON.stringify(parsed.repositories),
+          JSON.stringify(parsed.roots),
+          parsed.reason,
+          input.now,
+          current.executionId,
+          current.revision,
+        );
+      if (result.changes !== 1) throw new TeamConflictError();
+      return this.requireTeamExecutionIsolation(input.executionId);
+    })();
+  }
+
+  getTeamExecutionIsolation(executionId: string): TeamExecutionIsolationRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM team_execution_isolations WHERE execution_id = ?')
+      .get(executionId) as TeamExecutionIsolationRow | undefined;
+    return row === undefined ? null : toTeamExecutionIsolation(row);
+  }
+
+  saveTeamExecutionIsolationCompletion(input: {
+    executionId: string;
+    attemptId: string;
+    teamTaskId: string;
+    agentId: string;
+    report: WorkerReport;
+    doneEvidence: readonly { criterion: string; evidence: string }[];
+    now: string;
+  }): TeamExecutionIsolationCompletionRecord {
+    const report = workerReportSchema.parse(input.report);
+    const attempt = this.getTeamAttempt(input.attemptId);
+    const dispatch = this.getTeamExecutionDispatch(input.executionId);
+    if (attempt.executionId !== input.executionId || dispatch.teamTaskId !== input.teamTaskId)
+      throw new Error('Team isolation completion does not match its execution');
+    if (this.getTeamTask(input.teamTaskId).assigneeAgentId !== input.agentId)
+      throw new Error('Team isolation completion does not match its Worker');
+    const existing = this.getTeamExecutionIsolationCompletion(input.executionId);
+    if (
+      existing !== null &&
+      (existing.attemptId !== input.attemptId ||
+        existing.teamTaskId !== input.teamTaskId ||
+        existing.agentId !== input.agentId)
+    )
+      throw new Error('Team isolation completion is already sealed to another dispatch');
+    if (existing !== null) {
+      this.db
+        .prepare(
+          `UPDATE team_execution_isolation_completions
+           SET report_json = ?, done_evidence_json = ?
+           WHERE execution_id = ?`,
+        )
+        .run(JSON.stringify(report), JSON.stringify(input.doneEvidence), input.executionId);
+      return this.requireTeamExecutionIsolationCompletion(input.executionId);
+    }
+    this.db
+      .prepare(
+        `INSERT INTO team_execution_isolation_completions(
+           execution_id, attempt_id, team_task_id, agent_id, report_json,
+           done_evidence_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.executionId,
+        input.attemptId,
+        input.teamTaskId,
+        input.agentId,
+        JSON.stringify(report),
+        JSON.stringify(input.doneEvidence),
+        input.now,
+      );
+    return this.requireTeamExecutionIsolationCompletion(input.executionId);
+  }
+
+  getTeamExecutionIsolationCompletion(
+    executionId: string,
+  ): TeamExecutionIsolationCompletionRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM team_execution_isolation_completions WHERE execution_id = ?')
+      .get(executionId) as TeamExecutionIsolationCompletionRow | undefined;
+    return row === undefined ? null : toTeamExecutionIsolationCompletion(row);
+  }
+
+  deleteTeamExecutionIsolationCompletion(executionId: string): void {
+    this.db
+      .prepare('DELETE FROM team_execution_isolation_completions WHERE execution_id = ?')
+      .run(executionId);
+  }
+
+  acquireTeamIntegrationRootLeases(input: {
+    executionId: string;
+    roots: readonly Pick<
+      TeamExecutionIsolation['roots'][number],
+      'rootId' | 'mutationKey' | 'identity'
+    >[];
+    now: string;
+  }): void {
+    this.db.transaction(() => {
+      this.getTeamExecution(input.executionId);
+      if (input.roots.length === 0) throw new Error('Team integration requires root leases');
+      const insert = this.db.prepare(
+        `INSERT INTO team_integration_root_leases(
+           mutation_key, root_id, execution_id, root_identity, acquired_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      );
+      for (const root of [...input.roots].sort((a, b) =>
+        a.mutationKey.localeCompare(b.mutationKey),
+      )) {
+        const mutationState = this.db
+          .prepare(
+            `SELECT state, root_identity_digest
+             FROM workspace_mutation_state WHERE workspace_key = ?`,
+          )
+          .get(root.mutationKey) as
+          { state: 'idle' | 'held' | 'quarantined'; root_identity_digest: string } | undefined;
+        if (
+          mutationState !== undefined &&
+          (mutationState.state !== 'idle' || mutationState.root_identity_digest !== root.identity)
+        )
+          throw new TeamConflictError('A workspace root is leased or quarantined');
+        const existing = this.db
+          .prepare(
+            `SELECT execution_id, mutation_key, root_identity
+             FROM team_integration_root_leases WHERE mutation_key = ?`,
+          )
+          .get(root.mutationKey) as
+          { execution_id: string; mutation_key: string; root_identity: string } | undefined;
+        if (existing !== undefined) {
+          if (
+            existing.execution_id === input.executionId &&
+            existing.mutation_key === root.mutationKey &&
+            existing.root_identity === root.identity
+          )
+            continue;
+          throw new TeamConflictError('A workspace root is already leased for integration');
+        }
+        insert.run(root.mutationKey, root.rootId, input.executionId, root.identity, input.now);
+      }
+    })();
+  }
+
+  releaseTeamIntegrationRootLeases(executionId: string): void {
+    this.db
+      .prepare('DELETE FROM team_integration_root_leases WHERE execution_id = ?')
+      .run(executionId);
+  }
+
   transitionTeamMission(missionId: string, to: TeamMissionState, now: string): TeamMissionRecord {
     const allowed: Readonly<Record<TeamMissionState, readonly TeamMissionState[]>> = {
       queued: ['running', 'canceled', 'failed'],
@@ -6919,6 +7276,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   recoverInterruptedTeamExecutions(now: string): number {
     return this.db.transaction(() => {
+      this.db.prepare('DELETE FROM team_integration_root_leases').run();
+      this.db
+        .prepare(
+          `UPDATE team_execution_isolations
+           SET phase = 'waiting_resume', resume_kind = 'integration',
+               reason = COALESCE(reason, 'Application restarted before repository integration completed'),
+               revision = revision + 1, updated_at = ?
+           WHERE phase IN ('finalizing', 'integrating')
+              OR (
+                phase = 'running'
+                AND EXISTS (
+                  SELECT 1 FROM team_execution_isolation_completions c
+                  WHERE c.execution_id = team_execution_isolations.execution_id
+                )
+              )`,
+        )
+        .run(now);
       const running = this.db
         .prepare("SELECT id, execution_id, start_reason FROM team_attempts WHERE state = 'running'")
         .all() as {
@@ -9823,6 +10197,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
         return { error: clockFailure ? 'clock' : 'quarantined' } as const;
       }
       if (row.state === 'held') return { error: 'busy' } as const;
+      if (
+        this.db
+          .prepare('SELECT 1 FROM team_integration_root_leases WHERE mutation_key = ? LIMIT 1')
+          .get(input.workspaceKey) !== undefined
+      )
+        return { error: 'busy' } as const;
       const activeQuarantine = this.db
         .prepare(
           `SELECT 1 FROM task_mutation_quarantines
@@ -13259,6 +13639,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return worktree;
   }
 
+  private requireTeamExecutionIsolation(executionId: string): TeamExecutionIsolationRecord {
+    const isolation = this.getTeamExecutionIsolation(executionId);
+    if (isolation === null) throw new NotFoundError('Team execution isolation not found');
+    return isolation;
+  }
+
+  private requireTeamExecutionIsolationCompletion(
+    executionId: string,
+  ): TeamExecutionIsolationCompletionRecord {
+    const completion = this.getTeamExecutionIsolationCompletion(executionId);
+    if (completion === null)
+      throw new NotFoundError('Team execution isolation completion not found');
+    return completion;
+  }
+
   private getGlobalLimits(): Partial<Record<BudgetKind, number>> {
     const row = this.db.prepare('SELECT limits_json FROM team_global_limits WHERE id = 1').get() as
       { limits_json: string } | undefined;
@@ -13900,6 +14295,49 @@ function toTeamMissionWorktree(row: TeamMissionWorktreeRow): TeamMissionWorktree
     reason: row.reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toTeamExecutionIsolation(row: TeamExecutionIsolationRow): TeamExecutionIsolationRecord {
+  const parsed = teamExecutionIsolationSchema.parse({
+    phase: row.phase,
+    resumeKind: row.resume_kind,
+    repositories: JSON.parse(row.repositories_json),
+    roots: JSON.parse(row.roots_json),
+    reason: row.reason,
+  });
+  return {
+    executionId: row.execution_id,
+    ...parsed,
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toTeamExecutionIsolationCompletion(
+  row: TeamExecutionIsolationCompletionRow,
+): TeamExecutionIsolationCompletionRecord {
+  const doneEvidence = JSON.parse(row.done_evidence_json) as unknown;
+  if (
+    !Array.isArray(doneEvidence) ||
+    doneEvidence.some(
+      (item) =>
+        typeof item !== 'object' ||
+        item === null ||
+        typeof (item as { criterion?: unknown }).criterion !== 'string' ||
+        typeof (item as { evidence?: unknown }).evidence !== 'string',
+    )
+  )
+    throw new Error('Invalid Team isolation completion evidence');
+  return {
+    executionId: row.execution_id,
+    attemptId: row.attempt_id,
+    teamTaskId: row.team_task_id,
+    agentId: row.agent_id,
+    report: workerReportSchema.parse(JSON.parse(row.report_json)),
+    doneEvidence: doneEvidence as { criterion: string; evidence: string }[],
+    createdAt: row.created_at,
   };
 }
 
