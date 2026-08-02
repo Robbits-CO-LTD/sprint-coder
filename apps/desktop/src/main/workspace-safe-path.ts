@@ -18,7 +18,7 @@ export function resolveSafeWorkspaceFile(
   workspacePath: string,
   relativePath: string,
 ): SafeWorkspaceFileResult {
-  if (relativePath.length === 0 || relativePath.length > 1024 || isAbsolute(relativePath))
+  if (relativePath.length === 0 || relativePath.length > 1024)
     return { path: null, reason: 'outside_workspace' };
   let root: string;
   try {

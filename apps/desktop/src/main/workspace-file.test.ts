@@ -16,6 +16,22 @@ describe('readWorkspaceTextFile (issue #39)', () => {
     expect(readWorkspaceTextFile(root, 'src/a.ts')).toBe('const a = 1;\n');
   });
 
+  it('reads an absolute path when it still resolves inside the Workspace', () => {
+    const root = workspace();
+    const file = join(root, 'absolute.txt');
+    writeFileSync(file, 'inside\n');
+
+    expect(readWorkspaceTextFile(root, file)).toBe('inside\n');
+  });
+
+  it('rejects an absolute path outside the Workspace', () => {
+    const root = workspace();
+    const outside = join(workspace(), 'outside.txt');
+    writeFileSync(outside, 'outside\n');
+
+    expect(readWorkspaceTextFile(root, outside)).toBeNull();
+  });
+
   it('does not follow a parent junction out of the Workspace', () => {
     // The exact shape issue #11's generated-image collector was fixed for: the *link* is inside the
     // Workspace, so the upstream path check sees nothing wrong, and only refusing to follow it stops

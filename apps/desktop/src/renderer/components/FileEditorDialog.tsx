@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { FileOpenResult } from '../types/sprint-coder';
 
@@ -22,7 +22,9 @@ export function FileEditorDialog({
 }) {
   const [opened, setOpened] = useState<FileOpenResult | null>(null);
   const [draft, setDraft] = useState('');
+  const [savedDraft, setSavedDraft] = useState('');
   const [lineEnding, setLineEnding] = useState<LineEnding>('lf');
+  const [savedLineEnding, setSavedLineEnding] = useState<LineEnding>('lf');
   const [originalLineEndings, setOriginalLineEndings] = useState<LineEnding[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -30,11 +32,8 @@ export function FileEditorDialog({
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const filesApi = typeof window !== 'undefined' ? window.sprintCoder?.files : undefined;
   const supported = typeof filesApi?.pick === 'function';
-  const dirty = useMemo(
-    () =>
-      opened?.editable === true && diskText(draft, originalLineEndings, lineEnding) !== opened.text,
-    [draft, lineEnding, opened, originalLineEndings],
-  );
+  const dirty =
+    opened?.editable === true && (draft !== savedDraft || lineEnding !== savedLineEnding);
 
   useEffect(() => {
     if (opened?.editable) editorRef.current?.focus();
@@ -62,10 +61,14 @@ export function FileEditorDialog({
 
   function loadResult(result: FileOpenResult): void {
     const endings = extractLineEndings(result.text);
+    const normalized = result.text.replaceAll('\r\n', '\n');
+    const dominant = dominantLineEnding(endings);
     setOpened(result);
     setOriginalLineEndings(endings);
-    setLineEnding(dominantLineEnding(endings));
-    setDraft(result.text.replaceAll('\r\n', '\n'));
+    setLineEnding(dominant);
+    setSavedLineEnding(dominant);
+    setDraft(normalized);
+    setSavedDraft(normalized);
     setMessage('読み込みました');
     setPendingDiscard(null);
   }
@@ -123,6 +126,8 @@ export function FileEditorDialog({
       if (result.outcome === 'saved' && result.digest) {
         setOpened({ ...opened, text, digest: result.digest });
         setOriginalLineEndings(extractLineEndings(text));
+        setSavedDraft(draft);
+        setSavedLineEnding(lineEnding);
         setMessage('保存しました');
       } else if (result.outcome === 'conflict') {
         setMessage('他の処理で変更されました。上書きせず、再読み込みできます。');
@@ -148,6 +153,7 @@ export function FileEditorDialog({
   function close(): void {
     setOpened(null);
     setDraft('');
+    setSavedDraft('');
     setOriginalLineEndings([]);
     setPendingDiscard(null);
     setMessage('');

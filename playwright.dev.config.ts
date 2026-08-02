@@ -1,5 +1,5 @@
-import base from './playwright.config';
+import { createPlaywrightConfig } from './playwright.base';
 
 process.env['SPRINT_CODER_E2E_MODE'] = 'dev';
 
-export default base;
+export default createPlaywrightConfig();

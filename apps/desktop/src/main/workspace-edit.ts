@@ -242,10 +242,7 @@ function syncParentDirectory(absolute: string): void {
   }
 }
 
-const WINDOWS_POWERSHELL =
-  process.env['SystemRoot'] === undefined
-    ? 'powershell.exe'
-    : `${process.env['SystemRoot']}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+const WINDOWS_POWERSHELL = `${process.env['SystemRoot'] ?? 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
 const WINDOWS_ATOMIC_REPLACE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [System.IO.File]::Replace(
