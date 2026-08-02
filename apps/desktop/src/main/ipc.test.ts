@@ -373,6 +373,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.filesList]: taskIdPayloadSchema,
   [IPC_CHANNELS.filesPick]: taskIdPayloadSchema,
   [IPC_CHANNELS.filesOpen]: filePathPayloadSchema,
+  [IPC_CHANNELS.filesRecover]: filePathPayloadSchema,
   [IPC_CHANNELS.filesSave]: fileSaveInputSchema,
   [IPC_CHANNELS.imagesList]: taskIdPayloadSchema,
   [IPC_CHANNELS.imagesRead]: generatedImageRefSchema,

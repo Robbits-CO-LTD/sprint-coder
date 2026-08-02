@@ -488,6 +488,12 @@ const api: SprintCoderApi = {
         rootId,
         path,
       }),
+    recover: (taskId, rootId, path) =>
+      invoke(IPC_CHANNELS.filesRecover, filePathPayloadSchema, fileOpenResultSchema, {
+        taskId,
+        rootId,
+        path,
+      }),
     // `invoke` already mints an operationId per call, which is what makes the save idempotent on the
     // Main side if the same request is retried.
     save: (input) =>

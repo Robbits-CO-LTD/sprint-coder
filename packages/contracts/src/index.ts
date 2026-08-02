@@ -1287,7 +1287,9 @@ export const fileOpenResultSchema = z
     digest: digestSchema,
     editable: z.boolean(),
     /** Why not, when `editable` is false. Shown to the user rather than a generic failure. */
-    reason: z.enum(['too_large', 'binary', 'not_a_file', 'outside_workspace']).nullable(),
+    reason: z
+      .enum(['too_large', 'binary', 'not_a_file', 'outside_workspace', 'recovery_required'])
+      .nullable(),
   })
   .strict();
 export type FileOpenResult = z.infer<typeof fileOpenResultSchema>;
@@ -2991,6 +2993,8 @@ export interface SprintCoderApi {
     pick(taskId: string): Promise<FileOpenResult | null>;
     /** Reads a file in full so it can be edited, or refuses with a reason. */
     open(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
+    /** Restores verified pre-save bytes after the user confirms an ambiguous interrupted save. */
+    recover(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
     /** Writes the user's own edit. Refuses rather than overwriting when the file changed underneath. */
     save(input: {
       taskId: string;
@@ -3182,6 +3186,7 @@ export const IPC_CHANNELS = {
   filesList: 'sprint-coder:files:list',
   filesPick: 'sprint-coder:files:pick',
   filesOpen: 'sprint-coder:files:open',
+  filesRecover: 'sprint-coder:files:recover',
   filesSave: 'sprint-coder:files:save',
   imagesRead: 'sprint-coder:images:read',
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',

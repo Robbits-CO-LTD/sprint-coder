@@ -299,7 +299,7 @@ export type FileOpenResult = {
   text: string;
   digest: string;
   editable: boolean;
-  reason: 'too_large' | 'binary' | 'not_a_file' | 'outside_workspace' | null;
+  reason: 'too_large' | 'binary' | 'not_a_file' | 'outside_workspace' | 'recovery_required' | null;
 };
 export type FileSaveResult = {
   outcome: 'saved' | 'conflict' | 'refused';
@@ -915,6 +915,7 @@ export interface SprintCoderApi {
     list(taskId: string): Promise<FileChangeRecord[]>;
     pick(taskId: string): Promise<FileOpenResult | null>;
     open(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
+    recover(taskId: string, rootId: string, path: string): Promise<FileOpenResult>;
     save(input: {
       taskId: string;
       rootId: string;

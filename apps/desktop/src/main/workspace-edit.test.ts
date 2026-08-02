@@ -14,7 +14,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_EDITABLE_BYTES, openWorkspaceFileForEdit, saveWorkspaceFile } from './workspace-edit';
+import {
+  MAX_EDITABLE_BYTES,
+  openWorkspaceFileForEdit,
+  recoverWorkspaceFileForEdit,
+  saveWorkspaceFile,
+} from './workspace-edit';
 
 const fileSystemFault = vi.hoisted(() => ({
   failWrite: false,
@@ -114,10 +119,15 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
     );
     const opened = openWorkspaceFileForEdit(root, 'important.txt');
 
-    expect(opened).toMatchObject({ editable: false, reason: 'not_a_file' });
+    expect(opened).toMatchObject({ editable: false, reason: 'recovery_required' });
     expect(readFileSync(file)).toEqual(replacement.subarray(0, 4));
     expect(readFileSync(`${file}.sprint-coder-recovery.tmp`)).toEqual(original);
     expect(readdirSync(root)).toHaveLength(4);
+
+    const recovered = recoverWorkspaceFileForEdit(root, 'important.txt');
+    expect(recovered).toMatchObject({ editable: true, text: 'original 日本語\r\n' });
+    expect(readFileSync(file)).toEqual(original);
+    expect(readdirSync(root)).toEqual(['important.txt']);
   });
 
   it('keeps a fully flushed replacement when a crash only interrupted transaction cleanup', () => {
@@ -166,7 +176,7 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
 
     const opened = openWorkspaceFileForEdit(root, 'important.txt');
 
-    expect(opened).toMatchObject({ editable: false, reason: 'not_a_file' });
+    expect(opened).toMatchObject({ editable: false, reason: 'recovery_required' });
     expect(readFileSync(file)).toEqual(external);
     expect(readdirSync(root)).toHaveLength(4);
   });
@@ -280,7 +290,7 @@ describe('saveWorkspaceFile (issue #43)', () => {
     expect(readdirSync(root).some((name) => name.endsWith('.sprint-coder-save.json'))).toBe(true);
 
     const recovered = openWorkspaceFileForEdit(root, 'important.txt');
-    expect(recovered).toMatchObject({ editable: false, reason: 'not_a_file' });
+    expect(recovered).toMatchObject({ editable: false, reason: 'recovery_required' });
     expect(readFileSync(join(root, recovery!))).toEqual(original);
     expect(readdirSync(root)).toHaveLength(4);
   });

@@ -204,7 +204,11 @@ import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinato
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
 import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
-import { openWorkspaceFileForEdit, saveWorkspaceFile } from './workspace-edit';
+import {
+  openWorkspaceFileForEdit,
+  recoverWorkspaceFileForEdit,
+  saveWorkspaceFile,
+} from './workspace-edit';
 import {
   SkillSettingsError,
   SkillSettingsService,
@@ -1295,6 +1299,22 @@ export class IpcRouter {
           reason: 'outside_workspace' as const,
         };
       return { ...openWorkspaceFileForEdit(root.path, input.path), rootId: root.rootId };
+    });
+    this.handle(IPC_CHANNELS.filesRecover, filePathPayloadSchema, fileOpenResultSchema, (input) => {
+      const root = resolveEffectiveWorkspaceRoot(
+        this.persistence.getEffectiveWorkspaceSet(input.taskId),
+        input.rootId,
+      );
+      if (root === null)
+        return {
+          rootId: input.rootId,
+          path: input.path,
+          text: '',
+          digest: EMPTY_FILE_DIGEST,
+          editable: false,
+          reason: 'outside_workspace' as const,
+        };
+      return { ...recoverWorkspaceFileForEdit(root.path, input.path), rootId: root.rootId };
     });
     this.handleMutation(
       IPC_CHANNELS.filesSave,

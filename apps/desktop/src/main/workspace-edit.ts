@@ -40,7 +40,8 @@ import { resolveSafeWorkspaceFile } from './workspace-safe-path';
 /** Files above this are not opened for editing. Refusing beats truncating. */
 export const MAX_EDITABLE_BYTES = 2_097_152;
 
-export type OpenRefusal = 'too_large' | 'binary' | 'not_a_file' | 'outside_workspace';
+export type OpenRefusal =
+  'too_large' | 'binary' | 'not_a_file' | 'outside_workspace' | 'recovery_required';
 
 export type OpenedFile =
   | { editable: true; path: string; text: string; digest: string; reason: null }
@@ -58,8 +59,8 @@ export function openWorkspaceFileForEdit(workspacePath: string, relativePath: st
   if (safe.path === null) return refuse(safe.reason);
   try {
     recoverInterruptedSave(safe.path);
-  } catch {
-    return refuse('not_a_file');
+  } catch (error) {
+    return refuse(error instanceof RecoveryRequiredError ? 'recovery_required' : 'not_a_file');
   }
   // Recovery writes through the existing descriptor, but re-resolve anyway so this boundary never
   // relies on identity information captured before filesystem repair.
@@ -100,6 +101,34 @@ export function openWorkspaceFileForEdit(workspacePath: string, relativePath: st
   } finally {
     if (descriptor !== null) closeSync(descriptor);
   }
+}
+
+/** Explicit user choice to restore the verified pre-save bytes from an ambiguous transaction. */
+export function recoverWorkspaceFileForEdit(
+  workspacePath: string,
+  relativePath: string,
+): OpenedFile {
+  const safe = resolveSafeWorkspaceFile(workspacePath, relativePath);
+  if (safe.path === null)
+    return {
+      editable: false,
+      path: relativePath,
+      text: '',
+      digest: EMPTY_DIGEST,
+      reason: safe.reason,
+    };
+  try {
+    recoverInterruptedSave(safe.path, true);
+  } catch {
+    return {
+      editable: false,
+      path: relativePath,
+      text: '',
+      digest: EMPTY_DIGEST,
+      reason: 'not_a_file',
+    };
+  }
+  return openWorkspaceFileForEdit(workspacePath, relativePath);
 }
 
 export type SaveOutcome = {
@@ -320,7 +349,9 @@ function transactionPaths(absolute: string): Readonly<{
 }
 
 /** Repairs an interrupted in-place publication before callers can observe or overwrite it. */
-function recoverInterruptedSave(absolute: string): void {
+class RecoveryRequiredError extends Error {}
+
+function recoverInterruptedSave(absolute: string, explicitlyRestore = false): void {
   const transaction = transactionPaths(absolute);
   const hasRecovery = existsSync(transaction.recovery);
   const hasStage = existsSync(transaction.staging);
@@ -380,8 +411,9 @@ function recoverInterruptedSave(absolute: string): void {
         throw new Error('Save recovery digest mismatch');
       // A partial write and a legitimate post-crash external edit can have identical bytes (empty
       // is a prefix of every value). There is no safe automatic choice. Keep the verified original
-      // recovery copy and fail closed so Sprint Coder never overwrites a newer external edit.
-      throw new Error('Interrupted save requires explicit recovery');
+      // recovery copy until the person explicitly chooses to restore it in the UI.
+      if (!explicitlyRestore) throw new RecoveryRequiredError('Explicit recovery is required');
+      replaceDescriptorContents(targetDescriptor, original);
     }
   } finally {
     if (journalDescriptor !== null) closeSync(journalDescriptor);

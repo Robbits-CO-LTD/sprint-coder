@@ -9,6 +9,8 @@ const REFUSAL_MESSAGE: Record<NonNullable<FileOpenResult['reason']>, string> = {
   binary: 'バイナリファイルは編集できません。',
   not_a_file: '通常のファイルではないか、ファイルが見つかりません。',
   outside_workspace: 'Workspace外または安全でないリンク先のファイルは開けません。',
+  recovery_required:
+    '前回の保存が途中で終了しました。別のアプリによる変更か判別できないため、確認して元データを復元してください。',
 };
 
 export function FileEditorDialog({
@@ -46,6 +48,7 @@ export function FileEditorDialog({
       const result = await filesApi.pick(taskId);
       if (result === null) return;
       if (!result.editable) {
+        setOpened(result.reason === 'recovery_required' ? result : null);
         setMessage(REFUSAL_MESSAGE[result.reason ?? 'not_a_file']);
         return;
       }
@@ -73,9 +76,28 @@ export function FileEditorDialog({
     try {
       const result = await filesApi.open(taskId, opened.rootId, opened.path);
       if (result.editable) loadResult(result);
-      else setMessage(REFUSAL_MESSAGE[result.reason ?? 'not_a_file']);
+      else {
+        setOpened(result.reason === 'recovery_required' ? result : null);
+        setMessage(REFUSAL_MESSAGE[result.reason ?? 'not_a_file']);
+      }
     } catch {
       setMessage('再読み込みに失敗しました。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recover(): Promise<void> {
+    if (!opened || opened.reason !== 'recovery_required' || !filesApi) return;
+    setBusy(true);
+    try {
+      const result = await filesApi.recover(taskId, opened.rootId, opened.path);
+      if (result.editable) {
+        loadResult(result);
+        setMessage('保存前の元データを復元しました');
+      } else setMessage(REFUSAL_MESSAGE[result.reason ?? 'not_a_file']);
+    } catch {
+      setMessage('元データを復元できませんでした。回復用ファイルは保持されています。');
     } finally {
       setBusy(false);
     }
@@ -145,10 +167,20 @@ export function FileEditorDialog({
       >
         ファイルを開く
       </button>
-      {message && !opened && (
+      {message && opened?.editable !== true && (
         <span className="file-editor-inline-status" role="status">
           {message}
         </span>
+      )}
+      {opened?.reason === 'recovery_required' && (
+        <button
+          type="button"
+          className="ctx-chip chip-btn danger"
+          disabled={busy}
+          onClick={() => void recover()}
+        >
+          元データを復元
+        </button>
       )}
       {opened?.editable &&
         createPortal(
