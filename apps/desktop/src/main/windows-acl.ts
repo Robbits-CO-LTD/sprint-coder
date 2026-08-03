@@ -3,7 +3,9 @@ import { applyWindowsAcl } from './native-file-publication';
 export type WindowsAclPath = Readonly<{ path: string; kind: 'directory' | 'file' }>;
 type AclOperation = 'secure' | 'verify';
 
-const NATIVE_BATCH_SIZE = 32;
+// Native security calls are synchronous. Yield after every path so a slow filesystem cannot make
+// a large ACL request monopolize Electron's main event loop.
+const NATIVE_BATCH_SIZE = 1;
 let aclQueue: Promise<void> = Promise.resolve();
 
 export async function secureWindowsPath(path: string, kind: 'directory' | 'file'): Promise<void> {

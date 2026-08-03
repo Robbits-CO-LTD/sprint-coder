@@ -185,6 +185,8 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
       !GetSecurityDescriptorControl(target_descriptor, &control, &revision)) {
     error = GetLastError();
   }
+  // A NULL DACL grants full access to everyone. Never copy that fail-open state onto staged data.
+  if (error == ERROR_SUCCESS && target_dacl == nullptr) error = ERROR_INVALID_ACL;
   if (error == ERROR_SUCCESS) {
     SECURITY_INFORMATION information =
         DACL_SECURITY_INFORMATION |
