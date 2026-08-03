@@ -172,6 +172,33 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
     napi_throw_type_error(env, nullptr, "Invalid replaceFileWithBackup path");
     return nullptr;
   }
+  PACL target_dacl = nullptr;
+  PSECURITY_DESCRIPTOR target_descriptor = nullptr;
+  DWORD error = GetNamedSecurityInfoW(target.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                      nullptr, nullptr, &target_dacl, nullptr,
+                                      &target_descriptor);
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  if (error == ERROR_SUCCESS &&
+      !GetSecurityDescriptorControl(target_descriptor, &control, &revision)) {
+    error = GetLastError();
+  }
+  if (error == ERROR_SUCCESS) {
+    const SECURITY_INFORMATION protection =
+        (control & SE_DACL_PROTECTED) != 0 ? PROTECTED_DACL_SECURITY_INFORMATION
+                                          : UNPROTECTED_DACL_SECURITY_INFORMATION;
+    // ReplaceFileW merges security information. Seed the replacement with the destination DACL
+    // first so that the merge preserves arbitrary private or shared ACLs without adding inherited
+    // entries from the staging file's parent directory.
+    error = SetNamedSecurityInfoW(replacement.data(), SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION | protection, nullptr, nullptr,
+                                  target_dacl, nullptr);
+  }
+  if (target_descriptor != nullptr) LocalFree(target_descriptor);
+  if (error != ERROR_SUCCESS) {
+    SetLastError(error);
+    return ThrowWindowsError(env, "PreserveReplaceFileDacl");
+  }
   if (!ReplaceFileW(target.c_str(), replacement.c_str(), backup.c_str(),
                     REPLACEFILE_WRITE_THROUGH, nullptr, nullptr))
     return ThrowWindowsError(env, "ReplaceFileW");
