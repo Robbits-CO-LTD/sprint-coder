@@ -3274,6 +3274,7 @@ export class IpcRouter {
     kind: 'codex' | 'claude',
     model: string,
   ): Promise<string | null> {
+    if (this.disposed) return null;
     const executionId = randomUUID();
     const context = createTaskTitleContext(request.taskId, request.text);
     const catalog = createEmptyToolCatalogSnapshot(kind, null);
@@ -3303,6 +3304,15 @@ export class IpcRouter {
     });
     if (!egress.allowed) return null;
 
+    let effort: string | undefined;
+    if (kind === 'claude') effort = this.persistence.getEffort();
+    else {
+      const capability = await this.codexRuntime.probe();
+      if (this.disposed) return null;
+      effort =
+        clampCodexEffort(this.persistence.getCodexEffort(), capability.models, model) || undefined;
+    }
+
     return await new Promise<string | null>((resolve) => {
       const timer = setTimeout(() => {
         const job = this.cliTaskTitleJobs.get(executionId);
@@ -3329,9 +3339,7 @@ export class IpcRouter {
         catalog,
         context,
         undefined,
-        kind === 'claude'
-          ? this.persistence.getEffort()
-          : this.persistence.getCodexEffort() || undefined,
+        effort,
         'read-only',
         [],
         serializedPayload,
