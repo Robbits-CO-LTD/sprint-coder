@@ -172,10 +172,12 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
     napi_throw_type_error(env, nullptr, "Invalid replaceFileWithBackup path");
     return nullptr;
   }
+  PSID target_owner = nullptr;
   PACL target_dacl = nullptr;
   PSECURITY_DESCRIPTOR target_descriptor = nullptr;
-  DWORD error = GetNamedSecurityInfoW(target.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
-                                      nullptr, nullptr, &target_dacl, nullptr,
+  DWORD error = GetNamedSecurityInfoW(target.data(), SE_FILE_OBJECT,
+                                      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                      &target_owner, nullptr, &target_dacl, nullptr,
                                       &target_descriptor);
   SECURITY_DESCRIPTOR_CONTROL control = 0;
   DWORD revision = 0;
@@ -184,15 +186,26 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
     error = GetLastError();
   }
   if (error == ERROR_SUCCESS) {
-    const SECURITY_INFORMATION protection =
-        (control & SE_DACL_PROTECTED) != 0 ? PROTECTED_DACL_SECURITY_INFORMATION
-                                          : UNPROTECTED_DACL_SECURITY_INFORMATION;
+    SECURITY_INFORMATION information =
+        DACL_SECURITY_INFORMATION |
+        ((control & SE_DACL_PROTECTED) != 0 ? PROTECTED_DACL_SECURITY_INFORMATION
+                                            : UNPROTECTED_DACL_SECURITY_INFORMATION);
+    std::vector<unsigned char> sid_storage;
+    PSID current_sid = nullptr;
+    if (!CurrentUserSid(&sid_storage, &current_sid)) {
+      error = GetLastError();
+    } else if (target_owner != nullptr && EqualSid(target_owner, current_sid)) {
+      information |= OWNER_SECURITY_INFORMATION;
+    } else {
+      target_owner = nullptr;
+    }
     // ReplaceFileW merges security information. Seed the replacement with the destination DACL
     // first so that the merge preserves arbitrary private or shared ACLs without adding inherited
-    // entries from the staging file's parent directory.
-    error = SetNamedSecurityInfoW(replacement.data(), SE_FILE_OBJECT,
-                                  DACL_SECURITY_INFORMATION | protection, nullptr, nullptr,
-                                  target_dacl, nullptr);
+    // entries from the staging file's parent directory. Also preserve a current-user owner because
+    // elevated Windows tokens can otherwise give staging files an Administrators default owner.
+    if (error == ERROR_SUCCESS)
+      error = SetNamedSecurityInfoW(replacement.data(), SE_FILE_OBJECT, information, target_owner,
+                                    nullptr, target_dacl, nullptr);
   }
   if (target_descriptor != nullptr) LocalFree(target_descriptor);
   if (error != ERROR_SUCCESS) {
