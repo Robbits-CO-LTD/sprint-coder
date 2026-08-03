@@ -8,7 +8,7 @@ const REFUSAL_MESSAGE: Record<NonNullable<FileOpenResult['reason']>, string> = {
   too_large: 'このファイルは大きすぎるため編集できません（上限2 MiB）。',
   binary: 'バイナリファイルは編集できません。',
   not_a_file: '通常のファイルではないか、ファイルが見つかりません。',
-  outside_workspace: 'Workspace外または安全でないリンク先のファイルは開けません。',
+  outside_workspace: 'Projectのフォルダ外または安全でないリンク先のファイルは開けません。',
   recovery_required:
     '前回の保存が途中で終了しました。別のアプリによる変更か判別できないため、確認して元データを復元してください。',
 };
@@ -172,7 +172,7 @@ export function FileEditorDialog({
             ? `保存処理を完了できませんでした。退避した版を保持しました: ${result.conflictPath}`
             : result.reason === 'too_large'
               ? REFUSAL_MESSAGE.too_large
-              : '保存できませんでした。ファイルとWorkspaceの状態を確認してください。',
+              : '保存できませんでした。ファイルとProjectの状態を確認してください。',
         );
       }
     } catch {
@@ -206,7 +206,9 @@ export function FileEditorDialog({
         data-testid="open-file-button"
         disabled={!supported || !hasWorkspace || busy || opened?.editable === true}
         title={
-          hasWorkspace ? 'Workspace内のファイルを開いて編集' : '先にWorkspaceを選択してください'
+          hasWorkspace
+            ? 'Project内のファイルを開いて編集'
+            : '先にフォルダを含むProjectを選択してください'
         }
         onClick={() => void pick()}
       >

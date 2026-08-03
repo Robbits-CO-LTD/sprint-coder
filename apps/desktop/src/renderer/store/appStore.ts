@@ -260,7 +260,6 @@ type AppState = {
   setPinned(taskId: string, pinned: boolean): Promise<void>;
   setArchived(taskId: string, archived: boolean): Promise<void>;
   setGoal(taskId: string, goal: string): Promise<void>;
-  selectWorkspace(taskId: string): Promise<void>;
   toggleTeamView(taskId: string): Promise<void>;
   // No hireTeamWorker/sendTeamMessage actions here: the Leader hires and dispatches Workers on
   // its own during its Turn (FR-TEAM-06/13, main/team-tools.ts) — the user only ever converses
@@ -1643,16 +1642,6 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const updated = await window.sprintCoder.tasks.setGoal(taskId, goal);
         set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
-      } catch (err) {
-        set({ error: describeError(err) });
-      }
-    },
-
-    async selectWorkspace(taskId: string) {
-      if (!window.sprintCoder || typeof window.sprintCoder.workspace?.select !== 'function') return;
-      try {
-        const workspace = await window.sprintCoder.workspace.select(taskId);
-        set((state) => ({ workspaceByTask: { ...state.workspaceByTask, [taskId]: workspace } }));
       } catch (err) {
         set({ error: describeError(err) });
       }

@@ -42,4 +42,9 @@ describe('slash commands', () => {
     expect(filterSlashCommands(SLASH_COMMANDS, '')).toHaveLength(SLASH_COMMANDS.length);
     expect(filterSlashCommands(SLASH_COMMANDS, 'missing')).toEqual([]);
   });
+
+  it('does not expose the removed Workspace selector', () => {
+    expect(SLASH_COMMANDS.map(({ id }) => id)).not.toContain('workspace');
+    expect(SLASH_COMMANDS.map(({ command }) => command)).not.toContain('/workspace');
+  });
 });
