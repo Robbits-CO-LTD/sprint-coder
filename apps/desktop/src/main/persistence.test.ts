@@ -1013,6 +1013,29 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('replaces the local fallback with a generated title while the title is still automatic', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.startTurn(task.id, 'この長い依頼から仮タイトルが作られる');
+
+      const renamed = persistence.applyGeneratedTaskTitle(task.id, 'モデル生成タイトル');
+
+      expect(renamed?.title).toBe('モデル生成タイトル');
+      expect(persistence.getTask(task.id).title).toBe('モデル生成タイトル');
+      persistence.close();
+    });
+
+    it('discards a generated title when the user renamed the Task while generation was running', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      persistence.startTurn(task.id, 'この依頼から仮タイトルが作られる');
+      persistence.renameTask(task.id, 'ユーザーが決めた名前');
+
+      expect(persistence.applyGeneratedTaskTitle(task.id, '遅れて届いたモデル名')).toBeNull();
+      expect(persistence.getTask(task.id).title).toBe('ユーザーが決めた名前');
+      persistence.close();
+    });
+
     it('respects a manual rename that happens to match the placeholder', () => {
       // Guarded by title_source rather than by comparing against the placeholder string: a user who
       // renames a Task to literally "新しいタスク" still owns that name.

@@ -797,6 +797,7 @@ export interface SprintCoderApi {
   };
   tasks: {
     list(): Promise<TaskSummary[]>;
+    subscribe(listener: (task: TaskSummary) => void): () => void;
     create(input?: {
       title?: string;
       localOnly?: boolean;

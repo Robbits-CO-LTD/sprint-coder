@@ -302,6 +302,7 @@ type AppState = {
 // twice. Caught by looking at the rendered panel: every paragraph was duplicated.
 let reasoningUnsubscribe: (() => void) | null = null;
 let fileEditUnsubscribe: (() => void) | null = null;
+let taskUpdateUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
 let projectRefreshToken = 0;
@@ -852,6 +853,18 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ sprintCoderAvailable: true, loadingTasks: true, error: null });
       void get().refreshProjects();
       void get().loadRuntime();
+      // Model-generated titles finish after the first response. Keep one window-wide subscription
+      // so the sidebar updates without waiting for a Task switch or a full list reload.
+      if (taskUpdateUnsubscribe !== null) {
+        taskUpdateUnsubscribe();
+        taskUpdateUnsubscribe = null;
+      }
+      if (typeof window.sprintCoder.tasks.subscribe === 'function')
+        taskUpdateUnsubscribe = window.sprintCoder.tasks.subscribe((updatedTask) => {
+          set((state) => ({
+            tasks: state.tasks.map((task) => (task.id === updatedTask.id ? updatedTask : task)),
+          }));
+        });
       // Reasoning is a transient push stream, subscribed once for the window's lifetime (issue #17).
       // The batch carries its own turnId, so there is nothing per-task to re-subscribe.
       if (reasoningUnsubscribe !== null) {
