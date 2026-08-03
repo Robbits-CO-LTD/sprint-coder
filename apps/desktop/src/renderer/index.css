@@ -1,5 +1,6 @@
 /* Sprint Coder renderer
-   Visual direction: dense graphite workbench, restrained blue state accent and quiet hairlines. */
+   Visual direction: an obsidian AI atelier, with quiet cinematic imagery, optical blue state
+   light and precision-machined surfaces. */
 
 :root {
   /* Beautiful UI-inspired graphite system. The reference uses restrained neutral surfaces,
@@ -7,17 +8,17 @@
      foregrounds enough for the renderer's WCAG 2.2 AA audit. */
 
   /* Surfaces */
-  --bg-app: #151617;
-  --bg-sidebar: #191a1c;
-  --bg-panel: #1b1c1e;
-  --bg-elevated: #232427;
-  --bg-hover: #292b2f;
-  --bg-selected: #252d39;
+  --bg-app: #0c0f13;
+  --bg-sidebar: #101318;
+  --bg-panel: #14181e;
+  --bg-elevated: #1b2028;
+  --bg-hover: #222832;
+  --bg-selected: #1b2a3a;
 
   /* Text */
-  --text-primary: #f2f3f4;
-  --text-secondary: #b8bbc2;
-  --text-muted: #c9cbd0;
+  --text-primary: #f5f5f7;
+  --text-secondary: #b8bec8;
+  --text-muted: #d0d3d8;
   /* Disabled text is exempt from WCAG 1.4.3, so this one keeps the specified value. Its use is
      confined to genuinely inactive controls; anything a user is expected to read uses
      --text-muted or above. */
@@ -26,16 +27,16 @@
   /* Borders. --border-subtle is decorative separation only (1.01-1.33, nowhere near 3:1) and must
      never be the sole indicator of a control's bounds; --border-strong is the one to reach for when
      the boundary carries meaning. */
-  --border-subtle: #303236;
-  --border-strong: #858991;
+  --border-subtle: #29303a;
+  --border-strong: #7f8997;
 
   /* Brand / interaction */
-  --accent: #7ec0ff;
-  --accent-hover: #a4d3ff;
+  --accent: #75c7ff;
+  --accent-hover: #a2dbff;
   /* An accent-tinted *fill*, not a foreground. Use --text-primary for copy placed on this surface;
      --accent remains an interaction/state colour rather than body text on its own tint. */
-  --accent-muted: #263b50;
-  --focus-ring: #8fc8ff;
+  --accent-muted: #203b52;
+  --focus-ring: #8dd2ff;
 
   /* State */
   --success: #7bd89c;
@@ -91,8 +92,12 @@
   --t-cinematic: 560ms;
 
   --font-ui:
-    Inter, -apple-system, BlinkMacSystemFont, 'system-ui', 'Segoe UI', Helvetica,
-    'Apple Color Emoji', Arial, sans-serif;
+    'SF Pro JP', 'SF Pro Text', 'SF Pro Icons', 'Hiragino Kaku Gothic Pro', 'ヒラギノ角ゴ Pro W3',
+    メイリオ, Meiryo, 'ＭＳ Ｐゴシック', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-display:
+    'SF Pro JP', 'SF Pro Display', 'SF Pro Icons', 'Hiragino Kaku Gothic Pro',
+    'ヒラギノ角ゴ Pro W3', メイリオ, Meiryo, 'ＭＳ Ｐゴシック', 'Helvetica Neue', Helvetica, Arial,
+    sans-serif;
   --font-mono: SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
@@ -122,11 +127,11 @@ body {
   font-family: var(--font-ui);
   font-size: 14px;
   line-height: 1.5;
-  font-feature-settings:
-    'lnum',
-    'locl' 0;
+  letter-spacing: -0.012em;
+  font-feature-settings: normal;
   -webkit-font-smoothing: antialiased;
   overflow-wrap: break-word;
+  line-break: strict;
 }
 
 button,
@@ -201,7 +206,8 @@ button {
   height: 40px;
   padding: 0 16px;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-sidebar);
+  background: color-mix(in srgb, var(--bg-sidebar) 86%, transparent);
+  backdrop-filter: saturate(150%) blur(18px);
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 650;
@@ -970,7 +976,8 @@ button {
   align-items: center;
   gap: 10px;
   padding: 0 16px;
-  background: color-mix(in srgb, var(--bg-panel) 92%, var(--bg-app));
+  background: color-mix(in srgb, var(--bg-panel) 84%, transparent);
+  backdrop-filter: saturate(145%) blur(18px);
   border-bottom: 1px solid var(--border-subtle);
   transition:
     transform var(--t-standard) var(--ease-ui),
@@ -1056,23 +1063,86 @@ button {
   border-color: var(--accent-line);
 }
 .team-btn {
+  position: relative;
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 13px;
-  font-weight: 600;
-  padding: 6px 13px;
+  gap: 8px;
+  height: 38px;
+  padding: 3px 12px 3px 4px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
+  border-radius: var(--r-md);
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--accent) 11%, transparent), transparent 58%),
+    var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.08),
+    0 5px 18px rgba(0, 0, 0, 0.28);
+  transition:
+    transform var(--t-quick) var(--ease-ui),
+    border-color var(--t-quick) var(--ease-ui),
+    background var(--t-quick) var(--ease-ui),
+    box-shadow var(--t-quick) var(--ease-ui);
+}
+.team-btn-art {
+  position: relative;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
   border-radius: var(--r-sm);
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
+  background: #05070a;
+  place-items: center;
+  box-shadow: inset 0 0 12px color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.team-btn-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.13);
+  transition: transform var(--t-standard) var(--ease-spatial);
+}
+.team-btn-art .icon {
+  position: relative;
+  z-index: 1;
+  color: rgba(245, 245, 247, 0.84);
+  filter: drop-shadow(0 1px 3px #000);
+}
+.team-btn-copy {
+  display: flex;
+  min-width: 48px;
+  flex-direction: column;
+  align-items: flex-start;
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1.05;
+}
+.team-btn-copy small {
+  margin-top: 3px;
   color: var(--text-secondary);
-  transition: all var(--t-quick) var(--ease-ui);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
 }
 .team-btn:hover:not(:disabled) {
-  color: var(--text-primary);
-  border-color: var(--info-line);
-  background: var(--info-wash);
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 68%, var(--border-subtle));
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--accent) 18%, transparent), transparent 62%),
+    var(--bg-elevated);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.1),
+    0 8px 24px rgba(0, 0, 0, 0.34),
+    0 0 18px color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.team-btn:hover:not(:disabled) .team-btn-art img {
+  transform: scale(1.26);
 }
 .team-btn:disabled {
   opacity: 0.5;
@@ -1080,9 +1150,9 @@ button {
 }
 /* Team mode is a whole-window mode switch, so the button that entered it stays lit while it is on. */
 .team-btn[aria-pressed='true'] {
-  color: var(--info);
-  border-color: var(--info-line);
-  background: var(--info-wash);
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: var(--accent-wash-strong);
 }
 /* Post-first-turn nudge toward Team mode (demo/index.html lines 91-100). Not currently wired to
    a trigger in the real app; ported so a future "hint after first turn" affordance is a
@@ -1231,6 +1301,7 @@ button {
   overflow-y: auto;
   overscroll-behavior: contain;
   min-height: 0;
+  container-type: inline-size;
 }
 .timeline {
   max-width: 800px;
@@ -1352,31 +1423,68 @@ button {
   background: var(--accent-wash);
 }
 
-/* Empty conversation: an editorial, left-aligned start surface instead of a floating card stack.
-   The real product icon is the one visual anchor; everything else is typography, spacing and two
-   lightweight prompt rows that point directly at the composer. */
+/* Empty conversation: a full working-surface visual rather than a decorative card. The generated
+   studio image carries the story; copy stays on its calm side and the prompt rows remain direct
+   composer actions. */
+.timeline:has(.timeline-welcome) {
+  width: 100%;
+  max-width: none;
+  min-height: 100%;
+  padding: 0;
+}
 .timeline-welcome {
-  width: min(100%, 620px);
-  margin: clamp(50px, 10vh, 96px) auto 0;
-  padding: 0 0 38px;
-  align-items: flex-start;
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: clamp(54px, 8vh, 92px) clamp(28px, 7cqw, 100px) 48px;
+  align-items: stretch;
+  overflow: hidden;
   gap: 0;
   text-align: left;
 }
+.timeline-welcome::before {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(90deg, rgba(7, 10, 14, 0.96) 0%, rgba(7, 10, 14, 0.76) 47%, transparent 78%),
+    linear-gradient(0deg, rgba(7, 10, 14, 0.92), transparent 38%);
+  content: '';
+  pointer-events: none;
+}
+.timeline-welcome-art {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  opacity: 0.8;
+  filter: saturate(0.78) contrast(1.06);
+  animation: welcomeArtIn 1100ms var(--ease-spatial) both;
+  user-select: none;
+}
+.timeline-welcome-content {
+  width: min(100%, 580px);
+  margin: auto 0;
+}
 .timeline-welcome-mark {
   position: relative;
-  width: 68px;
-  height: 68px;
-  margin-bottom: 24px;
+  width: 64px;
+  height: 64px;
+  margin-bottom: 28px;
   animation: welcomeIn var(--t-cinematic) var(--ease-spatial) both;
 }
 .timeline-welcome-mark::after {
   position: absolute;
-  inset: 14px -18px -14px 18px;
+  inset: 8px -20px -12px 14px;
   z-index: -1;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  filter: blur(24px);
+  border-radius: var(--r-xl);
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  filter: blur(28px);
   content: '';
   pointer-events: none;
 }
@@ -1394,38 +1502,47 @@ button {
 .timeline-welcome-copy {
   animation: welcomeIn var(--t-cinematic) 70ms var(--ease-spatial) both;
 }
+.timeline-welcome-kicker {
+  margin: 0 0 10px !important;
+  color: var(--accent) !important;
+  font-size: 10px !important;
+  font-weight: 650;
+  line-height: 1 !important;
+  letter-spacing: 0.12em !important;
+}
 .timeline-welcome h2 {
+  font-family: var(--font-display);
   margin: 0;
-  font-size: clamp(25px, 3.4vw, 31px);
-  font-weight: 680;
-  line-height: 1.28;
-  letter-spacing: -0.035em;
-  font-feature-settings: 'palt', 'kern';
+  font-size: clamp(28px, 5cqw, 46px);
+  font-weight: 620;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+  font-feature-settings: normal;
 }
 .timeline-welcome p {
-  max-width: 520px;
-  margin: 11px 0 0;
-  color: var(--text-secondary);
-  font-size: 14.5px;
-  line-height: 1.78;
-  letter-spacing: 0.005em;
+  max-width: 500px;
+  margin: 16px 0 0;
+  color: color-mix(in srgb, var(--text-primary) 72%, transparent);
+  font-size: 14px;
+  line-height: 1.72;
+  letter-spacing: -0.012em;
   line-break: strict;
 }
 .timeline-welcome-actions {
   width: 100%;
-  margin-top: 34px;
+  margin-top: 38px;
   animation: welcomeIn var(--t-cinematic) 140ms var(--ease-spatial) both;
 }
 .timeline-welcome-actions-label {
   display: block;
   margin-bottom: 8px;
-  color: var(--text-secondary);
+  color: color-mix(in srgb, var(--text-primary) 58%, transparent);
   font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.08em;
 }
 .timeline-welcome-suggestions {
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid color-mix(in srgb, var(--text-primary) 15%, transparent);
 }
 .timeline-welcome-suggestion {
   display: flex;
@@ -1435,8 +1552,8 @@ button {
   justify-content: space-between;
   gap: 18px;
   padding: 0 4px;
-  border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
+  border-bottom: 1px solid color-mix(in srgb, var(--text-primary) 15%, transparent);
+  color: color-mix(in srgb, var(--text-primary) 72%, transparent);
   font-size: 13.5px;
   line-height: 1.5;
   text-align: left;
@@ -1471,20 +1588,39 @@ button {
     transform: none;
   }
 }
+@keyframes welcomeArtIn {
+  from {
+    opacity: 0;
+    transform: scale(1.035);
+  }
+  to {
+    opacity: 0.8;
+    transform: none;
+  }
+}
 @media (max-width: 620px) {
   .timeline-welcome {
-    margin-top: 38px;
+    padding: 38px 24px 34px;
+  }
+  .timeline-welcome::before {
+    background:
+      linear-gradient(90deg, rgba(7, 10, 14, 0.96), rgba(7, 10, 14, 0.78)),
+      linear-gradient(0deg, rgba(7, 10, 14, 0.92), transparent 38%);
+  }
+  .timeline-welcome-art {
+    object-position: 66% center;
+    opacity: 0.5;
   }
   .timeline-welcome-mark {
-    width: 60px;
-    height: 60px;
+    width: 56px;
+    height: 56px;
     margin-bottom: 20px;
   }
   .timeline-welcome-mark img {
     border-radius: 15px;
   }
   .timeline-welcome h2 {
-    font-size: 24px;
+    font-size: 30px;
   }
   .timeline-welcome p {
     font-size: 14px;
@@ -3517,20 +3653,53 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-canvas {
   position: absolute;
   inset: 0;
+  isolation: isolate;
   /* `clip` (not `hidden`): focusing an offscreen descendant (e.g. tabbing/focusing a Worker's
      依頼 textarea, or Playwright's focus-before-fill) makes the browser programmatically scroll
      the nearest scrollable ancestor into view. `hidden` is still scrollable via scrollTop/Left,
      which would shift the whole world AND the header/controls overlays; `clip` forbids
      programmatic scrolling entirely while still clipping overflow the same way. */
   overflow: clip;
-  background: radial-gradient(var(--neutral-wash-strong) 1px, transparent 1.4px);
-  background-size: 26px 26px;
-  background-color: var(--bg-app);
+  background: #070a0e;
   /* Entry fade (demo/index.html line 107: `#canvasLayer` transitions opacity 220ms on
      `.team-mode`). This component only ever mounts when entering Team mode (App.tsx renders it
      conditionally, never toggles a class on an already-mounted instance), so an unconditional
      mount animation is equivalent to — and simpler than — a class-toggle transition. */
   animation: teamCanvasIn 220ms var(--ease-ui);
+}
+.team-canvas::before,
+.team-canvas::after {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  content: '';
+  pointer-events: none;
+}
+.team-canvas::before {
+  background: radial-gradient(
+    color-mix(in srgb, var(--accent) 13%, transparent) 1px,
+    transparent 1.4px
+  );
+  background-size: 28px 28px;
+  opacity: 0.34;
+  mask-image: radial-gradient(circle at center, black, transparent 76%);
+}
+.team-canvas::after {
+  background:
+    radial-gradient(circle at center, transparent 42%, rgba(3, 5, 8, 0.58) 100%),
+    linear-gradient(180deg, rgba(3, 5, 8, 0.52), transparent 18%);
+}
+.team-canvas-art {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.48;
+  filter: saturate(0.76) contrast(1.08);
+  pointer-events: none;
+  user-select: none;
 }
 @keyframes teamCanvasIn {
   from {
@@ -3559,6 +3728,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-canvas-notice {
   position: absolute;
   inset: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3567,14 +3737,66 @@ button.composer-permission-chip[aria-expanded='true'] {
    Worker exists yet — non-interactive, matches `.sys-notice`'s pill styling. */
 .team-empty-hint {
   position: absolute;
-  display: flex;
-  justify-content: center;
+  right: auto;
+  bottom: 18px;
+  left: 18px;
+  z-index: 5;
+  display: grid;
+  width: 400px;
+  max-width: calc(100% - 438px);
+  height: 108px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border-subtle));
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-2);
   pointer-events: none;
+}
+.team-empty-hint::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(10, 13, 17, 0.98) 0%,
+    rgba(10, 13, 17, 0.78) 56%,
+    transparent 84%
+  );
+  content: '';
+}
+.team-empty-hint > img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 58%;
+  opacity: 0.76;
+}
+.team-empty-hint-copy {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  width: 276px;
+  flex-direction: column;
+  align-self: center;
+  gap: 6px;
+  padding: 0 18px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.team-empty-hint-copy strong {
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
 }
 .team-world {
   position: absolute;
   left: 0;
   top: 0;
+  z-index: 2;
   transform-origin: 0 0;
   will-change: transform;
 }
@@ -4894,6 +5116,45 @@ button.composer-permission-chip[aria-expanded='true'] {
   border-right: 1px solid var(--border-subtle);
   background: var(--bg-sidebar);
 }
+.settings-nav-art {
+  position: relative;
+  flex: none;
+  height: 98px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: #080b0f;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.05);
+}
+.settings-nav-art::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(0deg, rgba(6, 9, 13, 0.95), transparent 68%);
+  content: '';
+}
+.settings-nav-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.78;
+  filter: saturate(0.8);
+  transition: transform var(--t-standard) var(--ease-spatial);
+}
+.settings-nav-art span {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  left: 10px;
+  z-index: 1;
+  color: color-mix(in srgb, var(--text-primary) 68%, transparent);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.11em;
+}
+.settings-nav:hover .settings-nav-art img {
+  transform: scale(1.035);
+}
 .settings-nav button {
   position: relative;
   display: flex;
@@ -5231,6 +5492,9 @@ button.composer-permission-chip[aria-expanded='true'] {
     border-right: none;
     border-bottom: 1px solid var(--border-subtle);
   }
+  .settings-nav-art {
+    display: none;
+  }
   .settings-nav button {
     flex: none;
     width: auto;
@@ -5266,6 +5530,9 @@ button.composer-permission-chip[aria-expanded='true'] {
   }
   .settings-page {
     animation: none;
+  }
+  .settings-nav-art img {
+    transition: none;
   }
   .team-provider-expand > span {
     transition: none;

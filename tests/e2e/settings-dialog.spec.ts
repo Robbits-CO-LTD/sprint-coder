@@ -101,7 +101,7 @@ test.describe('settings dialog', () => {
       const row = page.getByTestId(`settings-cli-${kind}`);
       await expect(row).toBeVisible();
       // Either detected or a stated reason — never blank, which is the failure mode a tooltip has.
-      await expect(row).toHaveText(/検出済み|見つかりません|未検出/);
+      await expect(row).toHaveText(/検出済み|利用可能|見つかりません|未検出/);
     }
 
     await page.keyboard.press('Escape');
