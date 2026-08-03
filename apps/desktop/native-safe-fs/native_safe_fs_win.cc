@@ -50,6 +50,26 @@ bool Utf8ToWide(const std::string& input, std::wstring* output) {
                              static_cast<int>(input.size()), output->data(), length) == length;
 }
 
+bool SameParentPath(const std::wstring& first, const std::wstring& second) {
+  const size_t first_separator = first.find_last_of(L"\\/");
+  const size_t second_separator = second.find_last_of(L"\\/");
+  if (first_separator == std::wstring::npos || second_separator == std::wstring::npos ||
+      first_separator != second_separator)
+    return false;
+  return CompareStringOrdinal(first.data(), static_cast<int>(first_separator), second.data(),
+                              static_cast<int>(second_separator), TRUE) == CSTR_EQUAL;
+}
+
+bool VolumeSupportsPersistentAcls(const std::wstring& path, bool* supported) {
+  std::vector<wchar_t> root(path.size() + 2, L'\0');
+  if (!GetVolumePathNameW(path.c_str(), root.data(), static_cast<DWORD>(root.size()))) return false;
+  DWORD flags = 0;
+  if (!GetVolumeInformationW(root.data(), nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
+    return false;
+  *supported = (flags & FILE_PERSISTENT_ACLS) != 0;
+  return true;
+}
+
 bool CurrentUserSid(std::vector<unsigned char>* storage, PSID* sid) {
   HANDLE token = nullptr;
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
@@ -172,6 +192,10 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
     napi_throw_type_error(env, nullptr, "Invalid replaceFileWithBackup path");
     return nullptr;
   }
+  if (!SameParentPath(replacement, target)) {
+    napi_throw_type_error(env, nullptr, "Replacement and target must share a parent directory");
+    return nullptr;
+  }
   PSID target_owner = nullptr;
   PACL target_dacl = nullptr;
   PSECURITY_DESCRIPTOR target_descriptor = nullptr;
@@ -179,9 +203,19 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
                                       OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                                       &target_owner, nullptr, &target_dacl, nullptr,
                                       &target_descriptor);
-  const bool security_unsupported =
-      error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_FUNCTION;
-  if (security_unsupported) error = ERROR_SUCCESS;
+  bool security_unsupported = false;
+  if (error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_FUNCTION) {
+    const DWORD security_error = error;
+    bool persistent_acls = true;
+    if (!VolumeSupportsPersistentAcls(target, &persistent_acls)) {
+      error = GetLastError();
+    } else if (!persistent_acls) {
+      security_unsupported = true;
+      error = ERROR_SUCCESS;
+    } else {
+      error = security_error;
+    }
+  }
   SECURITY_DESCRIPTOR_CONTROL control = 0;
   DWORD revision = 0;
   if (!security_unsupported && error == ERROR_SUCCESS &&
