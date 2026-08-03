@@ -24,7 +24,7 @@ DefaultDirName={localappdata}\SprintCoder
 CreateAppDir=no
 Uninstallable=no
 PrivilegesRequired=lowest
-ArchitecturesAllowed=x64compatible
+ArchitecturesAllowed=x64
 OutputDir={#OutputDir}
 OutputBaseFilename=Sprint-Coder-Installer
 SetupIconFile={#SetupIcon}
@@ -66,7 +66,7 @@ var
 begin
   WizardForm.StatusLabel.Caption := ExpandConstant('{cm:InstallingSprintCoder}');
   Bootstrapper := ExpandConstant('{tmp}\Sprint-Coder-Setup.exe');
-  if not Exec(Bootstrapper, '--silent', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  if not Exec(Bootstrapper, '--silent', ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     RaiseException(Format(ExpandConstant('{cm:SquirrelInstallStartFailed}'), [ResultCode, SysErrorMessage(ResultCode)]));
   if ResultCode <> 0 then
     RaiseException(Format(ExpandConstant('{cm:SquirrelInstallFailed}'), [ResultCode]));
