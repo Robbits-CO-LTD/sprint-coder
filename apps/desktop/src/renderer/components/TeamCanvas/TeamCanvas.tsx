@@ -11,6 +11,8 @@ import type { KeyboardEvent as ReactKeyboardEvent, Ref, RefObject } from 'react'
 import { useAppStore } from '../../store/appStore';
 import { WorkerNode } from './WorkerNode';
 import { useCamera } from './useCamera';
+import teamCanvasNetwork from '../../../../assets/generated/team-canvas-network.webp';
+import teamEmptyDocks from '../../../../assets/generated/team-empty-docks.webp';
 import type { CamState, Rect } from './useCamera';
 import { sendCable } from './cables';
 import {
@@ -971,6 +973,13 @@ export function TeamCanvas({
       tabIndex={0}
       onKeyDown={handleCanvasKeyDown}
     >
+      <img
+        className="team-canvas-art"
+        src={teamCanvasNetwork}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+      />
       {!detail ? (
         <div className="team-canvas-notice">
           <div className="sys-notice">Teamを準備しています</div>
@@ -1046,19 +1055,6 @@ export function TeamCanvas({
                   />
                 );
               })}
-              {/* Empty-team guidance (FR-TEAM-03/06): there is no hire form anymore — the Leader
-                  hires on its own once it decides the Task needs help, so this is the only thing
-                  to say while there is nothing yet to look at. */}
-              {showEmptyTeamHint && (
-                <div
-                  className="team-empty-hint"
-                  style={{ left: 0, top: LEADER_RECT.h + 24, width: LEADER_RECT.w }}
-                >
-                  <span className="sys-notice">
-                    Leaderに依頼すると、必要に応じてWorkerを雇用します
-                  </span>
-                </div>
-              )}
             </div>
           </div>
 
@@ -1083,6 +1079,19 @@ export function TeamCanvas({
               void animateCamTo(camToFocus(LEADER_RECT, 0.75), isReduced() ? 0 : 500);
             }}
           />
+          {/* Empty-team guidance (FR-TEAM-03/06): there is no hire form anymore — the Leader
+              hires on its own once it decides the Task needs help. Keep this screen-fixed rather
+              than inside `.team-world`: the initial camera fits the Leader node, so a world-space
+              banner below it would begin outside the first viewport and hide the only guidance. */}
+          {showEmptyTeamHint && (
+            <div className="team-empty-hint">
+              <img src={teamEmptyDocks} alt="" aria-hidden="true" draggable={false} />
+              <span className="team-empty-hint-copy">
+                <strong>Teamは待機中</strong>
+                Leaderに依頼すると、必要に応じてWorkerを雇用します
+              </span>
+            </div>
+          )}
         </>
       )}
       {/* Transient textual event overlay — bottom-center, auto-dismissed after ~3s by
