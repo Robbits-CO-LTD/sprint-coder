@@ -261,7 +261,9 @@ const config: ForgeConfig = {
       noMsi: true,
       ...(windowsSign === undefined ? {} : { windowsSign }),
     }),
-    new MakerZIP({}, ['win32']),
+    // The Windows ZIP remains the portable build. The macOS ZIP is the signed payload consumed by
+    // Squirrel.Mac; the DMG stays the user-facing installer.
+    new MakerZIP({}, ['darwin', 'win32']),
     new MakerDMG({
       name: 'Sprint Coder',
       format: 'ULFO',

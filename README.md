@@ -117,8 +117,10 @@ tasks/              実装計画と設計レビュー記録
 ## 現在の配布状態
 
 - desktop packageのversionはbeta SemVerで管理しています。
-- GitHub ActionsはmacOS / WindowsのZIPとWindowsインストーラーをbeta prereleaseとして作成できます。
+- GitHub ActionsはmacOSのDMG / 更新用ZIPと、Windowsのインストーラー / portable ZIP / Squirrel更新artifactをbeta prereleaseとして作成できます。
+- インストール済みアプリは起動時と6時間ごとにGitHub Releasesを確認し、更新を取得すると再起動の確認を表示します。Windowsのportable ZIP版は自動更新の対象外です。
 - macOSのbeta artifactは現時点ではad-hoc署名で、Apple notarizationは未対応です。
+- macOSで自動更新を実運用するには、配布元と更新先を同じ正式なAppleコード署名IDで署名する必要があります。
 - 配布物が公開されている場合は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases)から取得できます。
 
 ## 設計資料

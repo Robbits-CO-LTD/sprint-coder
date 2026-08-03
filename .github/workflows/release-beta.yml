@@ -151,6 +151,8 @@ jobs:
           path: |
             apps/desktop/out/make/**/*.dmg
             apps/desktop/out/make/squirrel.windows/**/*.exe
+            apps/desktop/out/make/squirrel.windows/**/*.nupkg
+            apps/desktop/out/make/squirrel.windows/**/RELEASES
             apps/desktop/out/make/**/*.zip
           if-no-files-found: error
           retention-days: 7
@@ -180,24 +182,42 @@ jobs:
           assets=()
           dmg_count=0
           exe_count=0
-          zip_count=0
+          mac_zip_count=0
+          windows_zip_count=0
+          nupkg_count=0
+          releases_count=0
+          mac_zip=''
           while IFS= read -r -d '' asset; do
             assets+=("${asset}")
             case "${asset}" in
               *.dmg) ((dmg_count += 1)) ;;
               *.exe) ((exe_count += 1)) ;;
-              *.zip) ((zip_count += 1)) ;;
+              *-darwin-*.zip) mac_zip="${asset}"; ((mac_zip_count += 1)) ;;
+              *-win32-*.zip) ((windows_zip_count += 1)) ;;
+              *-full.nupkg) ((nupkg_count += 1)) ;;
+              */RELEASES) ((releases_count += 1)) ;;
             esac
           done < <(
-            find release-assets -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.zip' \) -print0
+            find release-assets -type f \( \
+              -name '*.dmg' -o -name '*.exe' -o -name '*.zip' -o \
+              -name '*-full.nupkg' -o -name 'RELEASES' \
+            \) -print0
           )
 
           printf 'Release asset: %s\n' "${assets[@]}"
-          if (( ${#assets[@]} != 3 || dmg_count != 1 || exe_count != 1 || zip_count != 1 )); then
-            echo "::error::Expected one macOS DMG, one Windows installer, and one Windows ZIP; found ${dmg_count} DMG(s), ${exe_count} installer(s), and ${zip_count} ZIP(s)."
+          if (( ${#assets[@]} != 6 || dmg_count != 1 || exe_count != 1 || mac_zip_count != 1 || windows_zip_count != 1 || nupkg_count != 1 || releases_count != 1 )); then
+            echo "::error::Expected one DMG, installer, macOS ZIP, Windows ZIP, full nupkg, and RELEASES manifest; found ${dmg_count}/${exe_count}/${mac_zip_count}/${windows_zip_count}/${nupkg_count}/${releases_count}."
             find release-assets -type f -print
             exit 1
           fi
+
+          node apps/desktop/scripts/create-macos-update-manifest.mjs \
+            --version "${RELEASE_VERSION}" \
+            --tag "${RELEASE_TAG}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --zip "${mac_zip}" \
+            --output release-assets/RELEASES.json
+          assets+=(release-assets/RELEASES.json)
 
           if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release edit "${RELEASE_TAG}" \
