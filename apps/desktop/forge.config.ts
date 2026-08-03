@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createWindowsWizardInstaller } from './windows-wizard-installer';
 
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
@@ -252,6 +253,12 @@ const config: ForgeConfig = {
         );
       }
     },
+    postMake: async (_forgeConfig, makeResults) =>
+      createWindowsWizardInstaller(makeResults, {
+        scriptPath: resolve(__dirname, 'installer', 'windows-wizard.iss'),
+        iconPath: `${appIconPath}.ico`,
+        ...(windowsSign === undefined ? {} : { signOptions: windowsSign }),
+      }),
   },
   makers: [
     new MakerSquirrel({

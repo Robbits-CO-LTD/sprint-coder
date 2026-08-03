@@ -5,6 +5,11 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import config, { assertNativePackagingHost, verifyBundledNodeResources } from './forge.config';
 import { macAutoUpdateEligibleForIdentity } from './vite.main.config';
+import {
+  planWindowsWizardInstaller,
+  SQUIRREL_SETUP_EXE,
+  WINDOWS_WIZARD_INSTALLER_EXE,
+} from './windows-wizard-installer';
 
 describe('desktop package icon', () => {
   it('points Electron Packager at real macOS and Windows icon files', () => {
@@ -60,6 +65,32 @@ describe('beta release artifacts', () => {
     expect(workflow).toContain('release-assets/RELEASES.json');
     expect(workflow).toContain('${#assets[@]} != 6');
     expect(workflow).toMatch(/release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@v7/);
+  });
+
+  it('wraps the Squirrel bootstrapper in a localized Windows setup wizard', () => {
+    const script = readFileSync(resolve(__dirname, 'installer/windows-wizard.iss'), 'utf8');
+    const sourceSetupPath = resolve('out/make/squirrel.windows/x64', SQUIRREL_SETUP_EXE);
+    const plan = planWindowsWizardInstaller([
+      {
+        platform: 'win32',
+        arch: 'x64',
+        packageJSON: { version: '0.0.1-beta.5' },
+        artifacts: [sourceSetupPath, resolve('out/make/squirrel.windows/x64/RELEASES')],
+      },
+    ]);
+
+    expect(plan).toMatchObject({
+      sourceSetupPath,
+      outputPath: resolve('out/make/squirrel.windows/x64', WINDOWS_WIZARD_INSTALLER_EXE),
+      version: '0.0.1-beta.5',
+    });
+    expect(script).toContain('WizardStyle=modern');
+    expect(script).toContain('DisableWelcomePage=no');
+    expect(script).toContain('DisableReadyPage=no');
+    expect(script).toContain('DisableFinishedPage=no');
+    expect(script).toContain('compiler:Languages\\Japanese.isl');
+    expect(script).toContain('Parameters: "--silent"');
+    expect(script).toContain('Flags: nowait postinstall skipifsilent skipifdoesntexist');
   });
 
   it('generates a Squirrel.Mac manifest that targets the release ZIP', () => {

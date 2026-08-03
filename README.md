@@ -99,7 +99,7 @@ node node_modules/electron/install.js
 npm run make:windows
 ```
 
-インストーラーは`apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Setup.exe`、展開して起動できるZIP版は`apps/desktop/out/make/zip/win32/x64/`に出力されます。
+ウィザード付きインストーラーは`apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer.exe`、展開して起動できるZIP版は`apps/desktop/out/make/zip/win32/x64/`に出力されます。インストーラーは日本語・英語の標準ウィザードで案内し、内部のSquirrel bootstrapperがユーザー領域へセットアップするため、既存の自動更新との互換性を維持します。
 
 手元で作るインストーラーは未署名のため、Windowsから警告が表示されることがあります。正式配布ではコード署名証明書（`.pfx`）を用意し、`SPRINT_CODER_RELEASE=1`、`SPRINT_CODER_WINDOWS_CERTIFICATE_FILE`、`SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD`を設定してください。検証用betaのworkflowのみ、`SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1`を明示して未署名artifactを作成します。
 
@@ -117,7 +117,7 @@ tasks/              実装計画と設計レビュー記録
 ## 現在の配布状態
 
 - desktop packageのversionはbeta SemVerで管理しています。
-- GitHub ActionsはmacOSのDMG / 更新用ZIPと、Windowsのインストーラー / portable ZIP / Squirrel更新artifactをbeta prereleaseとして作成できます。
+- GitHub ActionsはmacOSのDMG / 更新用ZIPと、Windowsのウィザード付きインストーラー / portable ZIP / Squirrel更新artifactをbeta prereleaseとして作成できます。
 - Windowsインストーラー版は起動時と6時間ごとにGitHub Releasesを確認し、更新を取得すると再起動の確認を表示します。portable ZIP版は自動更新の対象外です。
 - macOS ARM64版も、配布元と更新先を同じ正式なAppleコード署名IDでビルドした場合に自動更新が有効になります。
 - macOSのbeta artifactは現時点ではad-hoc署名でApple notarizationも未対応のため、自動更新は安全側に無効化されます。
