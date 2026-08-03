@@ -179,15 +179,19 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
                                       OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                                       &target_owner, nullptr, &target_dacl, nullptr,
                                       &target_descriptor);
+  const bool security_unsupported =
+      error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_FUNCTION;
+  if (security_unsupported) error = ERROR_SUCCESS;
   SECURITY_DESCRIPTOR_CONTROL control = 0;
   DWORD revision = 0;
-  if (error == ERROR_SUCCESS &&
+  if (!security_unsupported && error == ERROR_SUCCESS &&
       !GetSecurityDescriptorControl(target_descriptor, &control, &revision)) {
     error = GetLastError();
   }
   // A NULL DACL grants full access to everyone. Never copy that fail-open state onto staged data.
-  if (error == ERROR_SUCCESS && target_dacl == nullptr) error = ERROR_INVALID_ACL;
-  if (error == ERROR_SUCCESS) {
+  if (!security_unsupported && error == ERROR_SUCCESS && target_dacl == nullptr)
+    error = ERROR_INVALID_ACL;
+  if (!security_unsupported && error == ERROR_SUCCESS) {
     SECURITY_INFORMATION information =
         DACL_SECURITY_INFORMATION |
         ((control & SE_DACL_PROTECTED) != 0 ? PROTECTED_DACL_SECURITY_INFORMATION
