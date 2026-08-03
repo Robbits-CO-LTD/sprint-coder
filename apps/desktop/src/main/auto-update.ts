@@ -60,6 +60,27 @@ export type AutoUpdateController = Readonly<{
   stop(): void;
 }>;
 
+export type UpdateInstallOptions = Readonly<{
+  quitAndInstall(): void;
+  exit(code: number): void;
+  reportFailure(error: unknown): void;
+  fallbackDelayMs?: number;
+}>;
+
+export function installUpdateWithFallback(options: UpdateInstallOptions): void {
+  try {
+    options.quitAndInstall();
+  } catch (error) {
+    options.reportFailure(error);
+    options.exit(1);
+    return;
+  }
+  // Squirrel.Mac can report an asynchronous install error without quitting. The caller has
+  // already disposed persistence and IPC, so leaving that process alive would be unrecoverable.
+  const fallback = setTimeout(() => options.exit(0), options.fallbackDelayMs ?? 10_000);
+  (fallback as { unref?: () => void }).unref?.();
+}
+
 export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateController {
   if (!supportsAutoUpdate(options)) {
     options.logger.info('Automatic updates are disabled for this runtime', {

@@ -1,7 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AutoUpdateOptions } from './auto-update';
-import { selectUpdateRelease, startAutoUpdate, supportsAutoUpdate } from './auto-update';
+import {
+  installUpdateWithFallback,
+  selectUpdateRelease,
+  startAutoUpdate,
+  supportsAutoUpdate,
+} from './auto-update';
 
 const windowsAssets = [
   { name: 'RELEASES' },
@@ -91,6 +96,48 @@ describe('supportsAutoUpdate', () => {
         executablePath: 'C:\\Downloads\\Sprint Coder.exe',
       }),
     ).toBe(false);
+  });
+});
+
+describe('installUpdateWithFallback', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('terminates a disposed app if Squirrel does not quit after starting the install', () => {
+    vi.useFakeTimers();
+    const quitAndInstall = vi.fn();
+    const exit = vi.fn();
+
+    installUpdateWithFallback({
+      quitAndInstall,
+      exit,
+      reportFailure: vi.fn(),
+      fallbackDelayMs: 10_000,
+    });
+
+    expect(quitAndInstall).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(9_999);
+    expect(exit).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('reports a synchronous installer failure and exits immediately', () => {
+    vi.useFakeTimers();
+    const failure = new Error('installer failed');
+    const reportFailure = vi.fn();
+    const exit = vi.fn();
+
+    installUpdateWithFallback({
+      quitAndInstall: () => {
+        throw failure;
+      },
+      exit,
+      reportFailure,
+    });
+
+    expect(reportFailure).toHaveBeenCalledWith(failure);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

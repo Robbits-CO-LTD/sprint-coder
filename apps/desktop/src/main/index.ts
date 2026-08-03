@@ -27,7 +27,11 @@ import {
   type NativeMutationPackagedLoadEvidence,
 } from './native-mutation-platform-gate';
 import { secureLogger } from './secure-logger';
-import { startAutoUpdate, type AutoUpdateController } from './auto-update';
+import {
+  installUpdateWithFallback,
+  startAutoUpdate,
+  type AutoUpdateController,
+} from './auto-update';
 import {
   applyWindowControl,
   isWindowControlAction,
@@ -160,7 +164,17 @@ async function restartToInstallUpdate(): Promise<void> {
     // quitAndInstall must own the final quit event. `shutdownCommitted` keeps our normal
     // before-quit handler from canceling the updater's relaunch/install sequence.
     shutdownCommitted = true;
-    autoUpdater.quitAndInstall();
+    installUpdateWithFallback({
+      quitAndInstall: () => autoUpdater.quitAndInstall(),
+      exit: (code) => app.exit(code),
+      reportFailure: (error) => {
+        secureLogger.error('Automatic update installer failed to start', error);
+        dialog.showErrorBox(
+          'Sprint Coder の更新に失敗しました',
+          'アプリを終了します。次回の起動時に更新をもう一度確認します。',
+        );
+      },
+    });
   }
 }
 
