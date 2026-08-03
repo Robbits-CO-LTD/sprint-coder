@@ -347,6 +347,15 @@ type CliTaskTitleJob = {
   resolve: (title: string | null) => void;
 };
 
+export function classifyCliRuntimeExecution(
+  hasTitleJob: boolean,
+  activeRuntime: ActiveRuntimeKind | undefined,
+  kind: 'codex' | 'claude',
+): 'title' | 'turn' | 'stale' {
+  if (hasTitleJob) return 'title';
+  return activeRuntime === kind ? 'turn' : 'stale';
+}
+
 export class IpcRouter {
   private readonly ports = new Set<PortBinding>();
   private readonly mailbox = new TaskMailbox();
@@ -752,15 +761,19 @@ export class IpcRouter {
       (taskId, turnId, error) => this.routeCliRuntimeFailure('codex', taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
-        this.cliTaskTitleJobs.has(turnId)
-          ? undefined
-          : this.acknowledgeRuntimeContext(
+        classifyCliRuntimeExecution(
+          this.cliTaskTitleJobs.has(turnId),
+          this.turnRuntimes.get(turnId),
+          'codex',
+        ) === 'turn'
+          ? this.acknowledgeRuntimeContext(
               taskId,
               turnId,
               fragmentIds,
               projectItemIds,
               snapshotDigest,
-            ),
+            )
+          : undefined,
       'codex',
     );
     this.claudeRuntime = new RuntimeHostClient(
@@ -769,15 +782,19 @@ export class IpcRouter {
       (taskId, turnId, error) => this.routeCliRuntimeFailure('claude', taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
-        this.cliTaskTitleJobs.has(turnId)
-          ? undefined
-          : this.acknowledgeRuntimeContext(
+        classifyCliRuntimeExecution(
+          this.cliTaskTitleJobs.has(turnId),
+          this.turnRuntimes.get(turnId),
+          'claude',
+        ) === 'turn'
+          ? this.acknowledgeRuntimeContext(
               taskId,
               turnId,
               fragmentIds,
               projectItemIds,
               snapshotDigest,
-            ),
+            )
+          : undefined,
       'claude',
     );
   }
@@ -3412,10 +3429,17 @@ export class IpcRouter {
     event: RuntimeCanonicalEvent,
   ): void {
     const job = this.cliTaskTitleJobs.get(turnId);
-    if (job === undefined) {
+    const route = classifyCliRuntimeExecution(
+      job !== undefined,
+      this.turnRuntimes.get(turnId),
+      kind,
+    );
+    if (route === 'stale') return;
+    if (route === 'turn') {
       this.handleRuntimeEvent(kind, taskId, turnId, event);
       return;
     }
+    if (job === undefined) return;
     if (event.type === 'delta' && job.output.length < 8_192)
       job.output += event.delta.slice(0, 8_192 - job.output.length);
     if (event.type !== 'completed') return;
@@ -3433,10 +3457,17 @@ export class IpcRouter {
     error: PublicError,
   ): void {
     const job = this.cliTaskTitleJobs.get(turnId);
-    if (job === undefined) {
+    const route = classifyCliRuntimeExecution(
+      job !== undefined,
+      this.turnRuntimes.get(turnId),
+      kind,
+    );
+    if (route === 'stale') return;
+    if (route === 'turn') {
       this.handleRuntimeFailure(kind, taskId, turnId, error);
       return;
     }
+    if (job === undefined) return;
     clearTimeout(job.timer);
     this.cliTaskTitleJobs.delete(turnId);
     job.resolve(null);

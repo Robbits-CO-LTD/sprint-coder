@@ -80,6 +80,7 @@ import {
   type EffectiveWorkspaceSet,
 } from '@sprint-coder/contracts';
 import {
+  classifyCliRuntimeExecution,
   clampCodexEffort,
   invalidModelUserMessage,
   isTrustedIpcSender,
@@ -89,6 +90,19 @@ import {
   resolveEffectiveWorkspaceRoot,
   verifyTurnWorkspaceIdentities,
 } from './ipc';
+
+describe('CLI Runtime execution routing', () => {
+  it('drops delayed title events after their synthetic job has timed out', () => {
+    expect(classifyCliRuntimeExecution(false, undefined, 'codex')).toBe('stale');
+    expect(classifyCliRuntimeExecution(false, undefined, 'claude')).toBe('stale');
+  });
+
+  it('keeps active title jobs and real Turns on separate paths', () => {
+    expect(classifyCliRuntimeExecution(true, undefined, 'codex')).toBe('title');
+    expect(classifyCliRuntimeExecution(false, 'codex', 'codex')).toBe('turn');
+    expect(classifyCliRuntimeExecution(false, 'claude', 'codex')).toBe('stale');
+  });
+});
 
 describe('Project home-directory confirmation', () => {
   const home = join(dirname(process.cwd()), 'home-owner');
