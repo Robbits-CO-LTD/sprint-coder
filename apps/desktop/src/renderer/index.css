@@ -3733,8 +3733,9 @@ button.composer-permission-chip[aria-expanded='true'] {
   align-items: center;
   justify-content: center;
 }
-/* Empty-team guidance (FR-TEAM-03/06): sits just below the Leader node in world space while no
-   Worker exists yet — non-interactive, matches `.sys-notice`'s pill styling. */
+/* Empty-team guidance (FR-TEAM-03/06): a screen-fixed, non-interactive status panel. At wide
+   widths it occupies the clear lower-left rail; the narrow layout below stacks it above the
+   Canvas controls so neither the guidance nor its copy has to collapse. */
 .team-empty-hint {
   position: absolute;
   right: auto;
@@ -3791,6 +3792,18 @@ button.composer-permission-chip[aria-expanded='true'] {
   font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.02em;
+}
+@media (max-width: 820px) {
+  .team-empty-hint {
+    right: 18px;
+    bottom: 112px;
+    width: auto;
+    max-width: none;
+    height: 96px;
+  }
+  .team-empty-hint-copy {
+    width: min(276px, calc(100% - 36px));
+  }
 }
 .team-world {
   position: absolute;
