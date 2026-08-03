@@ -26,3 +26,18 @@ export class TaskTitleRuntimePool<T extends { dispose(): void }> {
     this.claude = null;
   }
 }
+
+/** Tracks provider requests so app teardown can stop background billing/work immediately. */
+export class TaskTitleAbortRegistry {
+  private readonly controllers = new Set<AbortController>();
+
+  track(controller: AbortController): () => void {
+    this.controllers.add(controller);
+    return () => this.controllers.delete(controller);
+  }
+
+  abortAll(): void {
+    for (const controller of this.controllers) controller.abort();
+    this.controllers.clear();
+  }
+}

@@ -320,7 +320,7 @@ import {
   createTaskTitleContext,
   sanitizeGeneratedTaskTitle,
 } from './model-task-title';
-import { TaskTitleRuntimePool } from './task-title-runtime-pool';
+import { TaskTitleAbortRegistry, TaskTitleRuntimePool } from './task-title-runtime-pool';
 
 const MODEL_RESEARCH_GUIDANCE = `
 このTeamでは「Worker採用前にモデルをWeb調査」が有効です。各Workerを雇う前に必ず次の順序を守ってください。
@@ -356,6 +356,8 @@ export class IpcRouter {
   private readonly teamWorkerRuntime: ProviderAwareTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
   private readonly taskTitleRuntimes: TaskTitleRuntimePool<RuntimeHostClient>;
+  private readonly taskTitleProviderAborts = new TaskTitleAbortRegistry();
+  private disposed = false;
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
   /** First-Turn requests awaiting successful completion before title generation begins. */
   private readonly pendingTaskTitles = new Map<string, TaskTitleRequest>();
@@ -2351,6 +2353,8 @@ export class IpcRouter {
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
+    this.taskTitleProviderAborts.abortAll();
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
     this.teamSubscriptions.clear();
@@ -3255,7 +3259,7 @@ export class IpcRouter {
       else if (request.runtimeKind === 'codex' || request.runtimeKind === 'claude')
         generated = await this.generateCliTaskTitle(request, request.runtimeKind, request.model);
       else generated = null;
-      if (generated === null) return;
+      if (generated === null || this.disposed) return;
 
       const updated = this.persistence.applyGeneratedTaskTitle(request.taskId, generated);
       if (updated !== null) this.pushTaskUpdated(updated);
@@ -3339,7 +3343,9 @@ export class IpcRouter {
     request: TaskTitleRequest,
     connectionId: string,
   ): Promise<string | null> {
+    if (this.disposed) return null;
     const controller = new AbortController();
+    const releaseController = this.taskTitleProviderAborts.track(controller);
     const timer = setTimeout(() => controller.abort(), MODEL_TASK_TITLE_TIMEOUT_MS);
     const executionId = randomUUID();
     try {
@@ -3395,6 +3401,7 @@ export class IpcRouter {
       return null;
     } finally {
       clearTimeout(timer);
+      releaseController();
       if (controller.signal.aborted) {
         try {
           const connection = this.persistence.getProviderConnection(connectionId);

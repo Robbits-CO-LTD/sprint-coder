@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TaskTitleRuntimePool } from './task-title-runtime-pool';
+import { TaskTitleAbortRegistry, TaskTitleRuntimePool } from './task-title-runtime-pool';
 
 describe('TaskTitleRuntimePool', () => {
   it('creates isolated, reusable hosts for each CLI kind', () => {
@@ -26,5 +26,21 @@ describe('TaskTitleRuntimePool', () => {
     expect(first.dispose).toHaveBeenCalledOnce();
     expect(pool.get('codex')).not.toBe(first);
     expect(runtimes).toHaveLength(2);
+  });
+});
+
+describe('TaskTitleAbortRegistry', () => {
+  it('aborts tracked provider requests while leaving completed requests alone', () => {
+    const registry = new TaskTitleAbortRegistry();
+    const active = new AbortController();
+    const completed = new AbortController();
+    registry.track(active);
+    const releaseCompleted = registry.track(completed);
+    releaseCompleted();
+
+    registry.abortAll();
+
+    expect(active.signal.aborted).toBe(true);
+    expect(completed.signal.aborted).toBe(false);
   });
 });
