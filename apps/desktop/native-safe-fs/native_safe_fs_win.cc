@@ -133,14 +133,11 @@ napi_value ApplyWindowsAcl(napi_env env, napi_callback_info info) {
   if (valid) valid = GetAce(acl, 0, &raw_ace) != FALSE;
   if (valid) {
     const auto* ace = static_cast<ACCESS_ALLOWED_ACE*>(raw_ace);
-    const BYTE expected_flags = kind == "directory"
-                                    ? static_cast<BYTE>(CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE)
-                                    : 0;
-    const BYTE relevant_flags = ace->Header.AceFlags &
-                                (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE | INHERITED_ACE);
     PSID ace_sid = const_cast<DWORD*>(&ace->SidStart);
-    valid = ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && relevant_flags == expected_flags &&
-            EqualSid(ace_sid, current_sid) &&
+    // Match the previous .NET verifier: the DACL must be protected and contain exactly one
+    // effective allow rule for the current user. Windows may normalize ACE inheritance flags
+    // when ReplaceFileW carries the destination security descriptor onto the replacement.
+    valid = ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && EqualSid(ace_sid, current_sid) &&
             (ace->Mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS;
   }
   if (descriptor != nullptr) LocalFree(descriptor);
