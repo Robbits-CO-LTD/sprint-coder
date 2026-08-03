@@ -53,4 +53,4 @@ Source: "{#SourceSetup}"; DestDir: "{tmp}"; DestName: "Sprint-Coder-Setup.exe"; 
 
 [Run]
 Filename: "{tmp}\Sprint-Coder-Setup.exe"; Parameters: "--silent"; StatusMsg: "{cm:InstallingSprintCoder}"; Flags: runhidden waituntilterminated
-Filename: "{localappdata}\SprintCoder\Sprint Coder.exe"; Description: "{cm:LaunchProgram,Sprint Coder}"; Flags: nowait postinstall skipifsilent skipifdoesntexist
+Filename: "{localappdata}\SprintCoder\Update.exe"; Parameters: "--processStart ""Sprint Coder.exe"""; Description: "{cm:LaunchProgram,Sprint Coder}"; Flags: nowait postinstall skipifsilent skipifdoesntexist

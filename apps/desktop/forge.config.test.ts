@@ -56,6 +56,8 @@ describe('beta release artifacts', () => {
       resolve(__dirname, '../../.github/workflows/release-beta.yml'),
       'utf8',
     );
+    const ciWorkflow = readFileSync(resolve(__dirname, '../../.github/workflows/ci.yml'), 'utf8');
+    const provisioner = readFileSync(resolve(__dirname, 'scripts/ensure-inno-setup.ps1'), 'utf8');
 
     expect(workflow).toContain('apps/desktop/out/make/**/*.zip');
     expect(workflow).toContain('apps/desktop/out/make/squirrel.windows/**/*.nupkg');
@@ -65,6 +67,11 @@ describe('beta release artifacts', () => {
     expect(workflow).toContain('release-assets/RELEASES.json');
     expect(workflow).toContain('${#assets[@]} != 6');
     expect(workflow).toMatch(/release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@v7/);
+    expect(workflow).toContain('run: ./apps/desktop/scripts/ensure-inno-setup.ps1');
+    expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
+    expect(ciWorkflow).toContain("'Sprint-Coder-Installer.exe'");
+    expect(ciWorkflow).toContain("'Sprint-Coder-Setup.exe'");
+    expect(provisioner).toContain('choco install innosetup --version=6.7.1');
   });
 
   it('wraps the Squirrel bootstrapper in a localized Windows setup wizard', () => {
@@ -90,6 +97,7 @@ describe('beta release artifacts', () => {
     expect(script).toContain('DisableFinishedPage=no');
     expect(script).toContain('compiler:Languages\\Japanese.isl');
     expect(script).toContain('Parameters: "--silent"');
+    expect(script).toContain('Parameters: "--processStart ""Sprint Coder.exe"""; Description:');
     expect(script).toContain('Flags: nowait postinstall skipifsilent skipifdoesntexist');
   });
 

@@ -135,6 +135,11 @@ jobs:
       - name: Build NativeSafeFs for Electron ABI
         run: npm run build:native-safe-fs
 
+      - name: Provision Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./apps/desktop/scripts/ensure-inno-setup.ps1
+
       - name: Make release installer
         working-directory: apps/desktop
         run: npx electron-forge make

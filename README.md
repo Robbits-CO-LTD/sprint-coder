@@ -91,11 +91,12 @@ E2Eはpackage作成とnative moduleの検証を含むため、通常の変更確
 
 ### Windowsインストーラーの作成
 
-Node.js 22、Python 3、Visual Studio 2022 Build Tools（「C++によるデスクトップ開発」）を用意し、PowerShellで次を実行します。
+Node.js 22、Python 3、Visual Studio 2022 Build Tools（「C++によるデスクトップ開発」）、Inno Setup 6を用意し、PowerShellで次を実行します。Chocolateyが利用できる環境では、同梱スクリプトがInno Setup 6.7.1を不足時に導入します。
 
 ```powershell
 npm ci
 node node_modules/electron/install.js
+powershell -ExecutionPolicy Bypass -File apps/desktop/scripts/ensure-inno-setup.ps1
 npm run make:windows
 ```
 

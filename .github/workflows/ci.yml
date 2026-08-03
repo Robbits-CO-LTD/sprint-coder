@@ -71,6 +71,31 @@ jobs:
       - name: Test
         run: npm run test
 
+      - name: Provision Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./apps/desktop/scripts/ensure-inno-setup.ps1
+
+      - name: Make Windows wizard installer
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        run: npx electron-forge make --platform=win32 --arch=x64
+
+      - name: Verify Windows wizard artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $directory = 'apps/desktop/out/make/squirrel.windows/x64'
+          $wizard = Join-Path $directory 'Sprint-Coder-Installer.exe'
+          $rawSetup = Join-Path $directory 'Sprint-Coder-Setup.exe'
+          if (-not (Test-Path -LiteralPath $wizard -PathType Leaf)) {
+            throw "Wizard installer was not created: $wizard"
+          }
+          if (Test-Path -LiteralPath $rawSetup) {
+            throw "Raw Squirrel setup must not remain user-facing: $rawSetup"
+          }
+          Get-Item -LiteralPath $wizard | Format-List FullName,Length,VersionInfo
+
       # Keep one production-package boundary check without running the full serial UI suite.
       # This catches Forge, fuse, native-module, and packaged-startup regressions on Linux while
       # avoiding the 15+ minute Windows packaged E2E critical path.
