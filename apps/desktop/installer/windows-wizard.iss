@@ -24,7 +24,11 @@ DefaultDirName={localappdata}\SprintCoder
 CreateAppDir=no
 Uninstallable=no
 PrivilegesRequired=lowest
+#if VER >= EncodeVer(6,3,0)
+ArchitecturesAllowed=x64compatible
+#else
 ArchitecturesAllowed=x64
+#endif
 OutputDir={#OutputDir}
 OutputBaseFilename=Sprint-Coder-Installer
 SetupIconFile={#SetupIcon}

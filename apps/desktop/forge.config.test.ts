@@ -98,8 +98,9 @@ describe('beta release artifacts', () => {
     expect(script).toContain('DisableReadyPage=no');
     expect(script).toContain('DisableFinishedPage=no');
     expect(script).toContain('compiler:Languages\\Japanese.isl');
-    expect(script).toContain('ArchitecturesAllowed=x64');
-    expect(script).not.toContain('ArchitecturesAllowed=x64compatible');
+    expect(script).toContain('#if VER >= EncodeVer(6,3,0)');
+    expect(script).toContain('ArchitecturesAllowed=x64compatible');
+    expect(script).toContain('#else\nArchitecturesAllowed=x64');
     expect(script).toContain('AfterInstall: InstallSprintCoder');
     expect(script).toContain(
       "Exec(Bootstrapper, '--silent', ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ResultCode)",
