@@ -1,9 +1,11 @@
 #include <node_api.h>
 #include <windows.h>
+#include <aclapi.h>
 
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -46,6 +48,110 @@ bool Utf8ToWide(const std::string& input, std::wstring* output) {
   output->resize(static_cast<size_t>(length));
   return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(),
                              static_cast<int>(input.size()), output->data(), length) == length;
+}
+
+bool CurrentUserSid(std::vector<unsigned char>* storage, PSID* sid) {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+  DWORD size = 0;
+  GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    CloseHandle(token);
+    return false;
+  }
+  storage->resize(size);
+  const BOOL ok = GetTokenInformation(token, TokenUser, storage->data(), size, &size);
+  const DWORD error = GetLastError();
+  CloseHandle(token);
+  if (!ok) {
+    SetLastError(error);
+    return false;
+  }
+  *sid = reinterpret_cast<TOKEN_USER*>(storage->data())->User.Sid;
+  return true;
+}
+
+napi_value ApplyWindowsAcl(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 3) {
+    napi_throw_type_error(env, nullptr, "applyWindowsAcl requires path, kind, and operation");
+    return nullptr;
+  }
+  std::string path_utf8;
+  std::string kind;
+  std::string operation;
+  std::wstring path;
+  if (!ReadString(env, argv[0], &path_utf8) || !ReadString(env, argv[1], &kind) ||
+      !ReadString(env, argv[2], &operation) || !Utf8ToWide(path_utf8, &path) ||
+      (kind != "file" && kind != "directory") ||
+      (operation != "secure" && operation != "verify")) {
+    napi_throw_type_error(env, nullptr, "Invalid Windows ACL input");
+    return nullptr;
+  }
+
+  std::vector<unsigned char> sid_storage;
+  PSID current_sid = nullptr;
+  if (!CurrentUserSid(&sid_storage, &current_sid)) return ThrowWindowsError(env, "GetTokenInformation");
+
+  if (operation == "secure") {
+    EXPLICIT_ACCESSW access{};
+    access.grfAccessPermissions = FILE_ALL_ACCESS;
+    access.grfAccessMode = SET_ACCESS;
+    access.grfInheritance = kind == "directory" ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
+    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+    access.Trustee.ptstrName = static_cast<LPWSTR>(current_sid);
+    PACL acl = nullptr;
+    DWORD error = SetEntriesInAclW(1, &access, nullptr, &acl);
+    if (error == ERROR_SUCCESS) {
+      error = SetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT,
+                                    OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                                        PROTECTED_DACL_SECURITY_INFORMATION,
+                                    current_sid, nullptr, acl, nullptr);
+    }
+    if (acl != nullptr) LocalFree(acl);
+    if (error != ERROR_SUCCESS) {
+      SetLastError(error);
+      return ThrowWindowsError(env, "SetNamedSecurityInfoW");
+    }
+  }
+
+  PSID owner = nullptr;
+  PACL acl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  DWORD error = GetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT,
+                                      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                      &owner, nullptr, &acl, nullptr, &descriptor);
+  bool valid = error == ERROR_SUCCESS && owner != nullptr && EqualSid(owner, current_sid) &&
+               acl != nullptr && acl->AceCount == 1;
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  if (valid) valid = GetSecurityDescriptorControl(descriptor, &control, &revision) &&
+                     (control & SE_DACL_PROTECTED) != 0;
+  void* raw_ace = nullptr;
+  if (valid) valid = GetAce(acl, 0, &raw_ace) != FALSE;
+  if (valid) {
+    const auto* ace = static_cast<ACCESS_ALLOWED_ACE*>(raw_ace);
+    const BYTE expected_flags = kind == "directory"
+                                    ? static_cast<BYTE>(CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE)
+                                    : 0;
+    const BYTE relevant_flags = ace->Header.AceFlags &
+                                (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE | INHERITED_ACE);
+    PSID ace_sid = const_cast<DWORD*>(&ace->SidStart);
+    valid = ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && relevant_flags == expected_flags &&
+            EqualSid(ace_sid, current_sid) &&
+            (ace->Mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS;
+  }
+  if (descriptor != nullptr) LocalFree(descriptor);
+  if (!valid) {
+    if (error != ERROR_SUCCESS) SetLastError(error);
+    else SetLastError(ERROR_INVALID_ACL);
+    return ThrowWindowsError(env, "VerifyWindowsAcl");
+  }
+  napi_value result;
+  napi_get_boolean(env, true, &result);
+  return result;
 }
 
 napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
@@ -225,6 +331,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"closeOwnedJob", nullptr, CloseOwnedJob, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"replaceFileWithBackup", nullptr, ReplaceFileWithBackup, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"applyWindowsAcl", nullptr, ApplyWindowsAcl, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   return exports;

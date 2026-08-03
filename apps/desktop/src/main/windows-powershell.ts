@@ -10,16 +10,3 @@ export function windowsPowerShellCommand(script: string): string[] {
     throw new Error('Windows PowerShell script is invalid');
   return ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script];
 }
-
-/**
- * Uses PowerShell's standard-input command mode for a trusted script that may be large.
- * Keeping the process command line fixed avoids repeatedly scanning a long command line while
- * still bypassing shell parsing; callers must write only source-controlled text to stdin.
- */
-export function windowsPowerShellStdinCommand(): string[] {
-  const command =
-    "$ErrorActionPreference='Stop'; try { " +
-    '[ScriptBlock]::Create([Console]::In.ReadToEnd()).Invoke(); exit 0 ' +
-    '} catch { [Console]::Error.WriteLine($_); exit 1 }';
-  return ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command];
-}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { windowsPowerShellCommand, windowsPowerShellStdinCommand } from './windows-powershell';
+import { windowsPowerShellCommand } from './windows-powershell';
 
 describe('windowsPowerShellCommand', () => {
   it('passes a fixed script as one ordinary argument without EncodedCommand', () => {
@@ -15,12 +15,5 @@ describe('windowsPowerShellCommand', () => {
     expect(() => windowsPowerShellCommand("Write-Output 'ok'\0ignored")).toThrow(
       'script is invalid',
     );
-  });
-
-  it('uses a fixed stdin command for large trusted scripts', () => {
-    const args = windowsPowerShellStdinCommand();
-    expect(args.slice(0, 4)).toEqual(['-NoLogo', '-NoProfile', '-NonInteractive', '-Command']);
-    expect(args[4]).toContain('[Console]::In.ReadToEnd()');
-    expect(args[4]).toContain('exit 1');
   });
 });
