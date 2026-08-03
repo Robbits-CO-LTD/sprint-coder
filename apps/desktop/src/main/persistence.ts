@@ -3809,6 +3809,8 @@ export interface PersistenceClient {
   };
   checkTeamIntegrity(): TeamIntegrityReport;
   renameTask(taskId: string, title: string): TaskSummary;
+  /** Replaces an automatic fallback title, but never a user-owned manual title. */
+  applyGeneratedTaskTitle(taskId: string, title: string): TaskSummary | null;
   setPinned(taskId: string, pinned: boolean): TaskSummary;
   setArchived(taskId: string, archived: boolean): TaskSummary;
   setGoal(taskId: string, goal: string): TaskSummary;
@@ -8230,6 +8232,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
     // derivation can never overwrite it (issue #4's "手動でリネームした Task は…名前が勝手に変わらない").
     this.db.prepare("UPDATE tasks SET title_source = 'manual' WHERE id = ?").run(taskId);
     return this.updateTask(taskId, 'title', title);
+  }
+  applyGeneratedTaskTitle(taskId: string, title: string): TaskSummary | null {
+    const parsedTitle = taskSummarySchema.shape.title.parse(title.trim());
+    const result = this.db
+      .prepare(
+        `UPDATE tasks SET title = ?, updated_at = ?
+         WHERE id = ? AND title_source = 'auto' AND title <> ?`,
+      )
+      .run(parsedTitle, new Date().toISOString(), taskId, parsedTitle);
+    // A zero-row update is the important race outcome: the user may have renamed the Task while
+    // the model was working. In that case the generated title is discarded, not retried.
+    if (result.changes !== 1) return null;
+    return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
   }
   setPinned(taskId: string, pinned: boolean): TaskSummary {
     return this.updateTask(taskId, 'pinned', pinned ? 1 : 0);

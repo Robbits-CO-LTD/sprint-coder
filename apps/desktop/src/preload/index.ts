@@ -207,6 +207,14 @@ const api: SprintCoderApi = {
   },
   tasks: {
     list: () => invoke(IPC_CHANNELS.tasksList, emptyPayloadSchema, z.array(taskSummarySchema), {}),
+    subscribe: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown): void => {
+        const parsed = taskSummarySchema.safeParse(raw);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.tasksUpdated, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.tasksUpdated, handler);
+    },
     create: (input = {}) =>
       invoke(IPC_CHANNELS.tasksCreate, taskCreateInputSchema, taskSummarySchema, input),
     messages: (taskId) =>

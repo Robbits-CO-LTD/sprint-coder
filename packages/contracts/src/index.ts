@@ -2878,6 +2878,8 @@ export interface SprintCoderApi {
   };
   tasks: {
     list(): Promise<TaskSummary[]>;
+    /** Receives non-persisted Task summary updates such as a completed generated title. */
+    subscribe(listener: (task: TaskSummary) => void): () => void;
     create(input?: {
       title?: string;
       localOnly?: boolean;
@@ -3117,6 +3119,8 @@ export interface SprintCoderApi {
 export const IPC_CHANNELS = {
   appGetInfo: 'sprint-coder:app:get-info',
   tasksList: 'sprint-coder:tasks:list',
+  /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */
+  tasksUpdated: 'sprint-coder:tasks:updated',
   tasksCreate: 'sprint-coder:tasks:create',
   tasksMessages: 'sprint-coder:tasks:messages',
   tasksRename: 'sprint-coder:tasks:rename',

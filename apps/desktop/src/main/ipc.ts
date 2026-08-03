@@ -314,6 +314,13 @@ import {
 } from './provider-profile';
 import { BUNDLED_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { OpenAICompatibleProviderClient } from './openai-compatible-provider-client';
+import {
+  MODEL_TASK_TITLE_TIMEOUT_MS,
+  TASK_TITLE_PROMPT,
+  createTaskTitleContext,
+  sanitizeGeneratedTaskTitle,
+} from './model-task-title';
+import { TaskTitleAbortRegistry, TaskTitleRuntimePool } from './task-title-runtime-pool';
 
 const MODEL_RESEARCH_GUIDANCE = `
 このTeamでは「Worker採用前にモデルをWeb調査」が有効です。各Workerを雇う前に必ず次の順序を守ってください。
@@ -330,6 +337,16 @@ function teamGuidance(base: string, requireModelResearch: boolean): string {
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
 type ActiveRuntimeKind = RuntimeKind | 'provider';
+type TaskTitleRequest = Pick<StartedTurn, 'text' | 'runtimeKind' | 'model' | 'modelSelection'> & {
+  taskId: string;
+};
+type CliTaskTitleJob = {
+  taskId: string;
+  kind: 'codex' | 'claude';
+  output: string;
+  timer: NodeJS.Timeout;
+  resolve: (title: string | null) => void;
+};
 
 export class IpcRouter {
   private readonly ports = new Set<PortBinding>();
@@ -338,7 +355,14 @@ export class IpcRouter {
   private readonly codexRuntime: RuntimeHostClient;
   private readonly teamWorkerRuntime: ProviderAwareTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
+  private readonly taskTitleRuntimes: TaskTitleRuntimePool<RuntimeHostClient>;
+  private readonly taskTitleProviderAborts = new TaskTitleAbortRegistry();
+  private disposed = false;
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
+  /** First-Turn requests awaiting successful completion before title generation begins. */
+  private readonly pendingTaskTitles = new Map<string, TaskTitleRequest>();
+  /** Synthetic CLI executions use isolated Runtime Hosts and never enter Turn persistence. */
+  private readonly cliTaskTitleJobs = new Map<string, CliTaskTitleJob>();
   private readonly runtimeCancelActions = new RetryableActionRegistry();
   private readonly pendingStopAndSendByOperation = new Map<
     string,
@@ -743,6 +767,16 @@ export class IpcRouter {
       (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
         this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       'claude',
+    );
+    this.taskTitleRuntimes = new TaskTitleRuntimePool(
+      (kind) =>
+        new RuntimeHostClient(
+          (taskId, turnId, event) => this.routeCliTaskTitleEvent(kind, taskId, turnId, event),
+          (taskId, turnId, error) => this.routeCliTaskTitleFailure(kind, taskId, turnId, error),
+          undefined,
+          undefined,
+          kind,
+        ),
     );
   }
 
@@ -2319,6 +2353,8 @@ export class IpcRouter {
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
+    this.taskTitleProviderAborts.abortAll();
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
     this.teamSubscriptions.clear();
@@ -2329,6 +2365,16 @@ export class IpcRouter {
       for (const watcher of watchers) watcher.stop();
     this.workspaceWatchByTurn.clear();
     await this.mockRuntime.dispose();
+    for (const [executionId, job] of this.cliTaskTitleJobs) {
+      clearTimeout(job.timer);
+      job.resolve(null);
+      void this.taskTitleRuntimeFor(job.kind)
+        .cancel(job.taskId, executionId)
+        .catch(() => undefined);
+    }
+    this.cliTaskTitleJobs.clear();
+    this.pendingTaskTitles.clear();
+    this.taskTitleRuntimes.dispose();
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
     this.claudeRuntime.dispose();
@@ -2415,6 +2461,8 @@ export class IpcRouter {
     state: 'completed' | 'failed',
     finalText?: string,
   ): void {
+    const pendingTaskTitle = this.pendingTaskTitles.get(turnId);
+    this.pendingTaskTitles.delete(turnId);
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
     // Flush the tail and stop the timer before the turn is finalised, so the last thought is not
@@ -2466,6 +2514,8 @@ export class IpcRouter {
     );
     this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
     this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
+    if (state === 'completed' && pendingTaskTitle !== undefined)
+      void this.generateAndApplyTaskTitle(pendingTaskTitle);
   }
 
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
@@ -2624,6 +2674,7 @@ export class IpcRouter {
   }
 
   private dispatchStarted(started: StartedTurn): void {
+    this.rememberTaskTitleRequest(started);
     this.publish(started.event);
     for (const event of started.contextUsageEvents) this.publish(event);
     void this.startSelectedRuntime(started);
@@ -2631,6 +2682,7 @@ export class IpcRouter {
 
   private dispatchQueueTransition(transition: QueueTransition): void {
     if (transition === null) return;
+    this.rememberTaskTitleRequest(transition.started);
     this.publish(transition.started.event);
     for (const event of transition.started.contextUsageEvents) this.publish(event);
     this.publish(transition.queueEvent);
@@ -3173,8 +3225,241 @@ export class IpcRouter {
     return kind === 'claude' ? this.claudeRuntime : this.codexRuntime;
   }
 
+  private taskTitleRuntimeFor(kind: 'codex' | 'claude'): RuntimeHostClient {
+    return this.taskTitleRuntimes.get(kind);
+  }
+
+  private rememberTaskTitleRequest(started: StartedTurn): void {
+    if (started.renamedTask === undefined) return;
+    this.pendingTaskTitles.set(started.turnId, {
+      taskId: started.event.taskId,
+      text: started.text,
+      runtimeKind: started.runtimeKind,
+      model: started.model,
+      modelSelection: started.modelSelection,
+    });
+  }
+
+  /**
+   * Generates a better title only after the first response completed. The local title produced in
+   * persistence remains visible throughout this work and is also the permanent fallback if any
+   * policy, Runtime, provider, timeout, or parsing step fails.
+   */
+  private async generateAndApplyTaskTitle(request: TaskTitleRequest): Promise<void> {
+    try {
+      const builtin = builtinRuntimeForModelSelection(request.modelSelection);
+      let generated: string | null;
+      if (builtin !== null)
+        generated = await this.generateCliTaskTitle(request, builtin.runtimeKind, builtin.model);
+      else if (request.modelSelection.connectionId !== null)
+        generated = await this.generateProviderTaskTitle(
+          request,
+          request.modelSelection.connectionId,
+        );
+      else if (request.runtimeKind === 'codex' || request.runtimeKind === 'claude')
+        generated = await this.generateCliTaskTitle(request, request.runtimeKind, request.model);
+      else generated = null;
+      if (generated === null || this.disposed) return;
+
+      const updated = this.persistence.applyGeneratedTaskTitle(request.taskId, generated);
+      if (updated !== null) this.pushTaskUpdated(updated);
+    } catch {
+      // Title quality is never allowed to change chat reliability. The immediate local fallback
+      // remains readable and no failure is projected into the completed Turn.
+    }
+  }
+
+  private async generateCliTaskTitle(
+    request: TaskTitleRequest,
+    kind: 'codex' | 'claude',
+    model: string,
+  ): Promise<string | null> {
+    if (this.disposed) return null;
+    const executionId = randomUUID();
+    const context = createTaskTitleContext(request.taskId, request.text);
+    const catalog = createEmptyToolCatalogSnapshot(kind, null);
+    const serializedPayload = serializeCliExecutionPayload({
+      kind,
+      request: TASK_TITLE_PROMPT,
+      contextFragments: context.fragments.map(toRuntimeContextFragment),
+      projectItems: context.projectItems,
+      skills: [],
+    });
+    const authorize =
+      kind === 'claude' ? authorizeClaudeProviderEgress : authorizeCodexProviderEgress;
+    const egress = authorize({
+      broker: this.permissionBroker,
+      task: this.persistence.getTask(request.taskId),
+      turnId: executionId,
+      prompt: Buffer.from(serializedPayload.bytes).toString('utf8'),
+      context,
+      now: new Date().toISOString(),
+      payloadDigest: serializedPayload.digest,
+      adapterVersion: 'runtime-protocol-v7:title-v1',
+      connectionId: kind === 'claude' ? 'builtin:claude-cli' : 'builtin:codex-cli',
+      modelId: model,
+      endpointTrust: 'trusted-remote',
+      round: 1,
+      toolCatalogDigest: catalog.digest,
+    });
+    if (!egress.allowed) return null;
+
+    let effort: string | undefined;
+    if (kind === 'claude') effort = this.persistence.getEffort();
+    else {
+      const capability = await this.codexRuntime.probe();
+      if (this.disposed) return null;
+      effort =
+        clampCodexEffort(this.persistence.getCodexEffort(), capability.models, model) || undefined;
+    }
+
+    return await new Promise<string | null>((resolve) => {
+      const timer = setTimeout(() => {
+        const job = this.cliTaskTitleJobs.get(executionId);
+        if (job === undefined) return;
+        this.cliTaskTitleJobs.delete(executionId);
+        job.resolve(null);
+        void this.taskTitleRuntimeFor(kind)
+          .cancel(request.taskId, executionId)
+          .catch(() => undefined);
+      }, MODEL_TASK_TITLE_TIMEOUT_MS);
+      this.cliTaskTitleJobs.set(executionId, {
+        taskId: request.taskId,
+        kind,
+        output: '',
+        timer,
+        resolve,
+      });
+      this.taskTitleRuntimeFor(kind).start(
+        request.taskId,
+        executionId,
+        TASK_TITLE_PROMPT,
+        null,
+        model,
+        catalog,
+        context,
+        undefined,
+        effort,
+        'read-only',
+        [],
+        serializedPayload,
+      );
+    });
+  }
+
+  private async generateProviderTaskTitle(
+    request: TaskTitleRequest,
+    connectionId: string,
+  ): Promise<string | null> {
+    if (this.disposed) return null;
+    const controller = new AbortController();
+    const releaseController = this.taskTitleProviderAborts.track(controller);
+    const timer = setTimeout(() => controller.abort(), MODEL_TASK_TITLE_TIMEOUT_MS);
+    const executionId = randomUUID();
+    try {
+      const connection = await this.providerVerification.requireVerifiedForExecution(
+        connectionId,
+        controller.signal,
+      );
+      const modelId = request.modelSelection.requestedModel;
+      if (modelId === null || connection.providerId !== request.modelSelection.requestedProvider)
+        return null;
+      const context = createTaskTitleContext(request.taskId, request.text);
+      const messages: ProviderExecutionRequest['messages'] = [
+        { role: 'system', content: TASK_TITLE_PROMPT },
+        { role: 'user', content: request.text },
+      ];
+      const payload = JSON.stringify({ messages });
+      const trust = this.providerEgressTrustForConnection(connection);
+      const egress = authorizeOfficialApiProviderEgress(
+        {
+          broker: this.permissionBroker,
+          task: this.persistence.getTask(request.taskId),
+          turnId: executionId,
+          prompt: payload,
+          context,
+          now: new Date().toISOString(),
+          payloadDigest: digestCanonical(payload),
+          adapterVersion: 'provider-registry-v1:title-v1',
+          connectionId,
+          modelId,
+          endpointTrust: trust,
+          round: 1,
+          toolCatalogDigest: digestCanonical([]),
+        },
+        connection.providerId,
+        trust,
+      );
+      if (!egress.allowed) return null;
+
+      const runtime = this.providerRegistry.resolve(connection);
+      let output = '';
+      for await (const event of runtime.execute(
+        connection,
+        { executionId, connectionId, modelId, messages },
+        controller.signal,
+      )) {
+        if (event.type === 'output_delta' && output.length < 8_192)
+          output += event.text.slice(0, 8_192 - output.length);
+        else if (event.type === 'error' || event.type === 'tool_call') return null;
+        else if (event.type === 'completed') break;
+      }
+      return sanitizeGeneratedTaskTitle(output);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+      releaseController();
+      if (controller.signal.aborted) {
+        try {
+          const connection = this.persistence.getProviderConnection(connectionId);
+          await this.providerRegistry.resolve(connection).cancel(executionId);
+        } catch {
+          // The fallback title remains; cancellation is best-effort during timeout/teardown.
+        }
+      }
+    }
+  }
+
+  private routeCliTaskTitleEvent(
+    kind: 'codex' | 'claude',
+    _taskId: string,
+    turnId: string,
+    event: RuntimeCanonicalEvent,
+  ): void {
+    const job = this.cliTaskTitleJobs.get(turnId);
+    if (job === undefined || job.kind !== kind) return;
+    if (event.type === 'delta' && job.output.length < 8_192)
+      job.output += event.delta.slice(0, 8_192 - job.output.length);
+    if (event.type !== 'completed') return;
+    clearTimeout(job.timer);
+    this.cliTaskTitleJobs.delete(turnId);
+    const finalOutput =
+      event.finalText?.trim() === '' ? job.output : (event.finalText ?? job.output);
+    job.resolve(sanitizeGeneratedTaskTitle(finalOutput));
+  }
+
+  private routeCliTaskTitleFailure(
+    kind: 'codex' | 'claude',
+    _taskId: string,
+    turnId: string,
+    _error: PublicError,
+  ): void {
+    const job = this.cliTaskTitleJobs.get(turnId);
+    if (job === undefined || job.kind !== kind) return;
+    clearTimeout(job.timer);
+    this.cliTaskTitleJobs.delete(turnId);
+    job.resolve(null);
+  }
+
+  private pushTaskUpdated(task: ReturnType<PersistenceClient['getTask']>): void {
+    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
+    this.window.webContents.send(IPC_CHANNELS.tasksUpdated, taskSummarySchema.parse(task));
+  }
+
   private async cancelRuntime(taskId: string, turnId: string): Promise<void> {
     await this.runtimeCancelActions.run(turnId, () => {
+      this.pendingTaskTitles.delete(turnId);
       const kind = this.turnRuntimes.get(turnId);
       let cancelAction: () => Promise<void>;
       if (kind === 'codex' || kind === 'claude')

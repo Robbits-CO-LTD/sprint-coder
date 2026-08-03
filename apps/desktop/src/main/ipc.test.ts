@@ -345,7 +345,7 @@ describe('isTrustedIpcSender', () => {
 
 // Mirrors ipc.ts `register()`'s `this.handle(IPC_CHANNELS.x, xInputSchema, ...)` /
 // `this.handleMutation(IPC_CHANNELS.x, xInputSchema, ...)` calls exactly. teamsEvent, turnsPort and
-// reasoningEvent, fileEditEvent and runtimeStatusEvent are push-only (webContents.send / MessagePort transfer) — they
+// tasksUpdated, reasoningEvent, fileEditEvent and runtimeStatusEvent are push-only (webContents.send / MessagePort transfer) — they
 // are never bound to an ipcMain.handle input schema, so they are deliberately excluded and
 // asserted absent below.
 const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
@@ -459,6 +459,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.turnsSubscribe]: turnSubscriptionInputSchema,
 };
 const PUSH_ONLY_CHANNELS = new Set<string>([
+  IPC_CHANNELS.tasksUpdated,
   IPC_CHANNELS.teamsEvent,
   IPC_CHANNELS.turnsPort,
   IPC_CHANNELS.reasoningEvent,
