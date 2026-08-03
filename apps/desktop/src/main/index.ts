@@ -1,5 +1,6 @@
 import {
   app,
+  autoUpdater,
   BrowserWindow,
   dialog,
   ipcMain,
@@ -27,6 +28,11 @@ import {
 } from './native-mutation-platform-gate';
 import { secureLogger } from './secure-logger';
 import {
+  installUpdateWithFallback,
+  startAutoUpdate,
+  type AutoUpdateController,
+} from './auto-update';
+import {
   applyWindowControl,
   isWindowControlAction,
   WINDOW_CONTROL_CHANNELS,
@@ -39,8 +45,11 @@ let mainWindow: BrowserWindow | null = null;
 let persistence: SqlitePersistenceClient | null = null;
 let nativeSafeFs: NativeSafeFs | null = null;
 let router: IpcRouter | null = null;
+let autoUpdateController: AutoUpdateController | null = null;
 let shutdownCommitted = false;
 let shutdownInFlight = false;
+
+if (process.platform === 'win32') app.setAppUserModelId('com.squirrel.SprintCoder.SprintCoder');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -102,6 +111,19 @@ if (squirrelStartup || !hasLock) {
       await router.initialize();
       router.register();
       await loadRenderer(mainWindow);
+      autoUpdateController = startAutoUpdate({
+        updater: autoUpdater,
+        dialog,
+        fetch: (url, init) => net.fetch(url, init),
+        logger: secureLogger,
+        restartToInstall: restartToInstallUpdate,
+        currentVersion: app.getVersion(),
+        isPackaged: app.isPackaged,
+        platform: process.platform,
+        architecture: process.arch,
+        executablePath: process.execPath,
+        macAutoUpdateEligible: __SPRINT_CODER_MAC_AUTO_UPDATE_ELIGIBLE__,
+      });
     })
     .catch((error: unknown) => {
       // Fatal initialization failure must be visible, never silently swallowed (Slice 1.1).
@@ -123,22 +145,53 @@ app.on('before-quit', (event) => {
   shutdownInFlight = true;
   void (async () => {
     try {
-      await router?.dispose();
-    } catch (error) {
-      secureLogger.error('CommandRunner shutdown did not fully drain', error);
+      await disposeApplicationResources();
     } finally {
-      try {
-        persistence?.close();
-      } finally {
-        shutdownCommitted = true;
-        // The original quit event was canceled while async Runtime/MCP cleanup drained. Calling
-        // app.quit() again from that canceled lifecycle can leave a headless Electron main process
-        // alive on macOS. Cleanup is complete here, so exit deterministically.
-        app.exit(0);
-      }
+      shutdownCommitted = true;
+      // The original quit event was canceled while async Runtime/MCP cleanup drained. Calling
+      // app.quit() again from that canceled lifecycle can leave a headless Electron main process
+      // alive on macOS. Cleanup is complete here, so exit deterministically.
+      app.exit(0);
     }
   })();
 });
+
+async function restartToInstallUpdate(): Promise<void> {
+  if (shutdownCommitted || shutdownInFlight) return;
+  shutdownInFlight = true;
+  try {
+    await disposeApplicationResources();
+  } finally {
+    // quitAndInstall must own the final quit event. `shutdownCommitted` keeps our normal
+    // before-quit handler from canceling the updater's relaunch/install sequence.
+    shutdownCommitted = true;
+    installUpdateWithFallback({
+      quitAndInstall: () => autoUpdater.quitAndInstall(),
+      exit: (code) => app.exit(code),
+      reportFailure: (error) => {
+        secureLogger.error('Automatic update installer failed to start', error);
+        dialog.showErrorBox(
+          'Sprint Coder の更新に失敗しました',
+          'アプリを終了します。次回の起動時に更新をもう一度確認します。',
+        );
+      },
+    });
+  }
+}
+
+async function disposeApplicationResources(): Promise<void> {
+  autoUpdateController?.stop();
+  try {
+    await router?.dispose();
+  } catch (error) {
+    secureLogger.error('CommandRunner shutdown did not fully drain', error);
+  }
+  try {
+    persistence?.close();
+  } catch (error) {
+    secureLogger.error('Persistence shutdown did not complete cleanly', error);
+  }
+}
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
