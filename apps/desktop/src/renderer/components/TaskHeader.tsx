@@ -127,7 +127,11 @@ export function TaskHeader({
         </span>
         <span className="team-btn-copy">
           <span>Team</span>
-          <small>{teamWorkerCount > 0 ? `${teamWorkerCount} Workers` : 'Canvas'}</small>
+          <small>
+            {teamWorkerCount > 0
+              ? `${teamWorkerCount} ${teamWorkerCount === 1 ? 'Worker' : 'Workers'}`
+              : 'Canvas'}
+          </small>
         </span>
       </button>
       <button
