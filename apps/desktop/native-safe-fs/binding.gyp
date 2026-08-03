@@ -11,7 +11,8 @@
       "conditions": [
         ["OS=='win'", {
           "sources!": ["native_safe_fs.cc"],
-          "sources": ["native_safe_fs_win.cc"]
+          "sources": ["native_safe_fs_win.cc"],
+          "libraries": ["Advapi32.lib"]
         }]
       ],
       "xcode_settings": {

@@ -1,32 +1,22 @@
-import { execFile, spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { promisify } from 'node:util';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   secureWindowsPath,
   secureWindowsPaths,
   verifyWindowsPathAcl,
   verifyWindowsPaths,
-  WINDOWS_ACL_TIMEOUT_MS,
   type WindowsAclPath,
 } from './windows-acl';
 
 const cleanup: string[] = [];
-const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
 describe('Windows ACL runner', () => {
-  it('keeps its subprocess deadline below the integration-test timeout', () => {
-    expect(WINDOWS_ACL_TIMEOUT_MS).toBeGreaterThan(10_000);
-    expect(WINDOWS_ACL_TIMEOUT_MS).toBeLessThan(20_000);
-  });
-
   it.runIf(process.platform === 'win32')(
     'secures an ACL list larger than the Windows process-environment limit',
     async () => {
@@ -51,7 +41,7 @@ describe('Windows ACL runner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
-    'coalesces parallel ACL callers without starting competing PowerShell hosts',
+    'handles parallel ACL callers through the native Windows implementation',
     async () => {
       const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-parallel-'));
       cleanup.push(root);
@@ -66,61 +56,6 @@ describe('Windows ACL runner', () => {
       await Promise.all(paths.map((path) => secureWindowsPath(path, 'file')));
       await Promise.all(paths.map((path) => verifyWindowsPathAcl(path, 'file')));
     },
-  );
-
-  it.runIf(process.platform === 'win32')(
-    'serializes ACL PowerShell hosts across independent Node processes',
-    async () => {
-      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-processes-'));
-      cleanup.push(root);
-      const paths = await Promise.all(
-        Array.from({ length: 4 }, async (_, index) => {
-          const path = join(root, `${index}.txt`);
-          await writeFile(path, 'private');
-          return path;
-        }),
-      );
-      const viteNode = resolve(process.cwd(), '../../node_modules/vite-node/vite-node.mjs');
-      const fixture = resolve(process.cwd(), 'src/main/windows-acl-process-fixture.ts');
-
-      await Promise.all(
-        paths.map((path) =>
-          execFileAsync(process.execPath, [viteNode, fixture, path], {
-            cwd: process.cwd(),
-            timeout: WINDOWS_ACL_TIMEOUT_MS + 5_000,
-          }),
-        ),
-      );
-      await verifyWindowsPaths(paths.map((path) => ({ path, kind: 'file' })));
-    },
-    WINDOWS_ACL_TIMEOUT_MS + 10_000,
-  );
-
-  it.runIf(process.platform === 'win32')(
-    'releases the interprocess ACL lock when its Node owner is terminated',
-    async () => {
-      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-owner-exit-'));
-      cleanup.push(root);
-      const path = join(root, 'private.txt');
-      await writeFile(path, 'private');
-      const viteNode = resolve(process.cwd(), '../../node_modules/vite-node/vite-node.mjs');
-      const fixture = resolve(process.cwd(), 'src/main/windows-acl-process-fixture.ts');
-      const child = spawn(process.execPath, [viteNode, fixture, '--hold-lock'], {
-        cwd: process.cwd(),
-        stdio: ['ignore', 'pipe', 'inherit'],
-      });
-
-      try {
-        await waitForLockReady(child.stdout);
-        child.kill('SIGKILL');
-        await once(child, 'exit');
-        await secureWindowsPath(path, 'file');
-        await verifyWindowsPathAcl(path, 'file');
-      } finally {
-        if (child.exitCode === null) child.kill('SIGKILL');
-      }
-    },
-    WINDOWS_ACL_TIMEOUT_MS + 10_000,
   );
 
   it.runIf(process.platform === 'win32')(
@@ -142,21 +77,3 @@ describe('Windows ACL runner', () => {
     },
   );
 });
-
-async function waitForLockReady(stdout: NodeJS.ReadableStream): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('ACL lock fixture did not become ready')),
-      WINDOWS_ACL_TIMEOUT_MS,
-    );
-    stdout.on('data', (chunk: Buffer) => {
-      if (!chunk.toString('utf8').includes('locked')) return;
-      clearTimeout(timer);
-      resolve();
-    });
-    stdout.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
-}

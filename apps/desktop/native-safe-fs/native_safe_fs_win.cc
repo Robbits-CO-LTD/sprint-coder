@@ -1,9 +1,11 @@
 #include <node_api.h>
 #include <windows.h>
+#include <aclapi.h>
 
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -48,6 +50,127 @@ bool Utf8ToWide(const std::string& input, std::wstring* output) {
                              static_cast<int>(input.size()), output->data(), length) == length;
 }
 
+bool SameParentPath(const std::wstring& first, const std::wstring& second) {
+  const size_t first_separator = first.find_last_of(L"\\/");
+  const size_t second_separator = second.find_last_of(L"\\/");
+  if (first_separator == std::wstring::npos || second_separator == std::wstring::npos ||
+      first_separator != second_separator)
+    return false;
+  return CompareStringOrdinal(first.data(), static_cast<int>(first_separator), second.data(),
+                              static_cast<int>(second_separator), TRUE) == CSTR_EQUAL;
+}
+
+bool VolumeSupportsPersistentAcls(const std::wstring& path, bool* supported) {
+  std::vector<wchar_t> root(path.size() + 2, L'\0');
+  if (!GetVolumePathNameW(path.c_str(), root.data(), static_cast<DWORD>(root.size()))) return false;
+  DWORD flags = 0;
+  if (!GetVolumeInformationW(root.data(), nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
+    return false;
+  *supported = (flags & FILE_PERSISTENT_ACLS) != 0;
+  return true;
+}
+
+bool CurrentUserSid(std::vector<unsigned char>* storage, PSID* sid) {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+  DWORD size = 0;
+  GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    CloseHandle(token);
+    return false;
+  }
+  storage->resize(size);
+  const BOOL ok = GetTokenInformation(token, TokenUser, storage->data(), size, &size);
+  const DWORD error = GetLastError();
+  CloseHandle(token);
+  if (!ok) {
+    SetLastError(error);
+    return false;
+  }
+  *sid = reinterpret_cast<TOKEN_USER*>(storage->data())->User.Sid;
+  return true;
+}
+
+napi_value ApplyWindowsAcl(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 3) {
+    napi_throw_type_error(env, nullptr, "applyWindowsAcl requires path, kind, and operation");
+    return nullptr;
+  }
+  std::string path_utf8;
+  std::string kind;
+  std::string operation;
+  std::wstring path;
+  if (!ReadString(env, argv[0], &path_utf8) || !ReadString(env, argv[1], &kind) ||
+      !ReadString(env, argv[2], &operation) || !Utf8ToWide(path_utf8, &path) ||
+      (kind != "file" && kind != "directory") ||
+      (operation != "secure" && operation != "verify")) {
+    napi_throw_type_error(env, nullptr, "Invalid Windows ACL input");
+    return nullptr;
+  }
+
+  std::vector<unsigned char> sid_storage;
+  PSID current_sid = nullptr;
+  if (!CurrentUserSid(&sid_storage, &current_sid)) return ThrowWindowsError(env, "GetTokenInformation");
+
+  if (operation == "secure") {
+    EXPLICIT_ACCESSW access{};
+    access.grfAccessPermissions = FILE_ALL_ACCESS;
+    access.grfAccessMode = SET_ACCESS;
+    access.grfInheritance = kind == "directory" ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
+    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+    access.Trustee.ptstrName = static_cast<LPWSTR>(current_sid);
+    PACL acl = nullptr;
+    DWORD error = SetEntriesInAclW(1, &access, nullptr, &acl);
+    if (error == ERROR_SUCCESS) {
+      error = SetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT,
+                                    OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                                        PROTECTED_DACL_SECURITY_INFORMATION,
+                                    current_sid, nullptr, acl, nullptr);
+    }
+    if (acl != nullptr) LocalFree(acl);
+    if (error != ERROR_SUCCESS) {
+      SetLastError(error);
+      return ThrowWindowsError(env, "SetNamedSecurityInfoW");
+    }
+  }
+
+  PSID owner = nullptr;
+  PACL acl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  DWORD error = GetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT,
+                                      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                      &owner, nullptr, &acl, nullptr, &descriptor);
+  bool valid = error == ERROR_SUCCESS && owner != nullptr && EqualSid(owner, current_sid) &&
+               acl != nullptr && acl->AceCount == 1;
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  if (valid) valid = GetSecurityDescriptorControl(descriptor, &control, &revision) &&
+                     (control & SE_DACL_PROTECTED) != 0;
+  void* raw_ace = nullptr;
+  if (valid) valid = GetAce(acl, 0, &raw_ace) != FALSE;
+  if (valid) {
+    const auto* ace = static_cast<ACCESS_ALLOWED_ACE*>(raw_ace);
+    PSID ace_sid = const_cast<DWORD*>(&ace->SidStart);
+    // Match the previous .NET verifier: the DACL must be protected and contain exactly one
+    // effective allow rule for the current user. Windows may normalize ACE inheritance flags
+    // when ReplaceFileW carries the destination security descriptor onto the replacement.
+    valid = ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && EqualSid(ace_sid, current_sid) &&
+            (ace->Mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS;
+  }
+  if (descriptor != nullptr) LocalFree(descriptor);
+  if (!valid) {
+    if (error != ERROR_SUCCESS) SetLastError(error);
+    else SetLastError(ERROR_INVALID_ACL);
+    return ThrowWindowsError(env, "VerifyWindowsAcl");
+  }
+  napi_value result;
+  napi_get_boolean(env, true, &result);
+  return result;
+}
+
 napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3];
@@ -68,6 +191,66 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
       !Utf8ToWide(backup_utf8, &backup)) {
     napi_throw_type_error(env, nullptr, "Invalid replaceFileWithBackup path");
     return nullptr;
+  }
+  if (!SameParentPath(replacement, target)) {
+    napi_throw_type_error(env, nullptr, "Replacement and target must share a parent directory");
+    return nullptr;
+  }
+  PSID target_owner = nullptr;
+  PACL target_dacl = nullptr;
+  PSECURITY_DESCRIPTOR target_descriptor = nullptr;
+  DWORD error = GetNamedSecurityInfoW(target.data(), SE_FILE_OBJECT,
+                                      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                      &target_owner, nullptr, &target_dacl, nullptr,
+                                      &target_descriptor);
+  bool security_unsupported = false;
+  if (error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_FUNCTION) {
+    const DWORD security_error = error;
+    bool persistent_acls = true;
+    if (!VolumeSupportsPersistentAcls(target, &persistent_acls)) {
+      error = GetLastError();
+    } else if (!persistent_acls) {
+      security_unsupported = true;
+      error = ERROR_SUCCESS;
+    } else {
+      error = security_error;
+    }
+  }
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  if (!security_unsupported && error == ERROR_SUCCESS &&
+      !GetSecurityDescriptorControl(target_descriptor, &control, &revision)) {
+    error = GetLastError();
+  }
+  // A NULL DACL grants full access to everyone. Never copy that fail-open state onto staged data.
+  if (!security_unsupported && error == ERROR_SUCCESS && target_dacl == nullptr)
+    error = ERROR_INVALID_ACL;
+  if (!security_unsupported && error == ERROR_SUCCESS) {
+    SECURITY_INFORMATION information =
+        DACL_SECURITY_INFORMATION |
+        ((control & SE_DACL_PROTECTED) != 0 ? PROTECTED_DACL_SECURITY_INFORMATION
+                                            : UNPROTECTED_DACL_SECURITY_INFORMATION);
+    std::vector<unsigned char> sid_storage;
+    PSID current_sid = nullptr;
+    if (!CurrentUserSid(&sid_storage, &current_sid)) {
+      error = GetLastError();
+    } else if (target_owner != nullptr && EqualSid(target_owner, current_sid)) {
+      information |= OWNER_SECURITY_INFORMATION;
+    } else {
+      target_owner = nullptr;
+    }
+    // ReplaceFileW merges security information. Seed the replacement with the destination DACL
+    // first so that the merge preserves arbitrary private or shared ACLs without adding inherited
+    // entries from the staging file's parent directory. Also preserve a current-user owner because
+    // elevated Windows tokens can otherwise give staging files an Administrators default owner.
+    if (error == ERROR_SUCCESS)
+      error = SetNamedSecurityInfoW(replacement.data(), SE_FILE_OBJECT, information, target_owner,
+                                    nullptr, target_dacl, nullptr);
+  }
+  if (target_descriptor != nullptr) LocalFree(target_descriptor);
+  if (error != ERROR_SUCCESS) {
+    SetLastError(error);
+    return ThrowWindowsError(env, "PreserveReplaceFileDacl");
   }
   if (!ReplaceFileW(target.c_str(), replacement.c_str(), backup.c_str(),
                     REPLACEFILE_WRITE_THROUGH, nullptr, nullptr))
@@ -225,6 +408,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"closeOwnedJob", nullptr, CloseOwnedJob, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"replaceFileWithBackup", nullptr, ReplaceFileWithBackup, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"applyWindowsAcl", nullptr, ApplyWindowsAcl, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   return exports;
