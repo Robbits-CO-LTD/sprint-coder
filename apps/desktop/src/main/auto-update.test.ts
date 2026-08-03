@@ -62,6 +62,14 @@ describe('selectUpdateRelease', () => {
       )?.version,
     ).toBe('1.0.0');
   });
+
+  it('never moves a stable installation onto the lower-trust beta channel', () => {
+    expect(
+      selectUpdateRelease([release('v1.1.0-beta.1'), release('v1.0.1')], '1.0.0', 'win32', 'x64')
+        ?.version,
+    ).toBe('1.0.1');
+    expect(selectUpdateRelease([release('v1.1.0-beta.1')], '1.0.0', 'win32', 'x64')).toBeNull();
+  });
 });
 
 describe('supportsAutoUpdate', () => {
@@ -130,6 +138,41 @@ describe('startAutoUpdate', () => {
     expect(showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Sprint Coder 0.0.1-beta.5 を適用できます。' }),
     );
+    controller.stop();
+  });
+
+  it('marks the macOS manifest as a Squirrel JSON feed', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter();
+    const setFeedURL = vi.fn();
+    const checkForUpdates = vi.fn(async () => null);
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL,
+        checkForUpdates,
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: { showMessageBox: vi.fn() } as unknown as AutoUpdateOptions['dialog'],
+      fetch: vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [release('v0.0.1-beta.5', macAssets)],
+      })),
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      restartToInstall: vi.fn(),
+      currentVersion: '0.0.1-beta.4',
+      isPackaged: true,
+      platform: 'darwin',
+      architecture: 'arm64',
+      executablePath: '/Applications/Sprint Coder.app/Contents/MacOS/Sprint Coder',
+    });
+
+    await vi.waitFor(() => expect(checkForUpdates).toHaveBeenCalledOnce());
+    expect(setFeedURL).toHaveBeenCalledWith({
+      url: 'https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.0.1-beta.5/RELEASES.json',
+      serverType: 'json',
+    });
     controller.stop();
   });
 

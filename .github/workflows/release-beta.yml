@@ -165,6 +165,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
       - name: Download release artifacts
         uses: actions/download-artifact@v8
         with:

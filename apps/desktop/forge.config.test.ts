@@ -49,6 +49,7 @@ describe('beta release artifacts', () => {
     expect(workflow).toContain('windows_zip_count != 1');
     expect(workflow).toContain('release-assets/RELEASES.json');
     expect(workflow).toContain('${#assets[@]} != 6');
+    expect(workflow).toMatch(/release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@v7/);
   });
 
   it('generates a Squirrel.Mac manifest that targets the release ZIP', () => {

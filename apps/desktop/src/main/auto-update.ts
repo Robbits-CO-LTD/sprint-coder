@@ -87,7 +87,11 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
         return;
       }
       targetVersion = release.version;
-      options.updater.setFeedURL({ url: release.feedUrl });
+      options.updater.setFeedURL(
+        options.platform === 'darwin'
+          ? { url: release.feedUrl, serverType: 'json' }
+          : { url: release.feedUrl },
+      );
       await options.updater.checkForUpdates();
       options.logger.info('Automatic update download started', { version: release.version });
     } catch (error) {
@@ -180,7 +184,12 @@ export function selectUpdateRelease(
   let selected: { release: GithubRelease; version: ParsedVersion } | null = null;
   for (const candidate of value) {
     const release = parseRelease(candidate);
-    if (release === null || release.draft || !hasUpdateAssets(release, platform, architecture))
+    if (
+      release === null ||
+      release.draft ||
+      (release.prerelease && current.beta === null) ||
+      !hasUpdateAssets(release, platform, architecture)
+    )
       continue;
     const version = parseVersion(release.tag_name);
     if (version === null || compareVersions(version, current) <= 0) continue;
