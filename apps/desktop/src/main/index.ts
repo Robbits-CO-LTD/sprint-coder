@@ -122,6 +122,7 @@ if (squirrelStartup || !hasLock) {
         platform: process.platform,
         architecture: process.arch,
         executablePath: process.execPath,
+        macAutoUpdateEligible: __SPRINT_CODER_MAC_AUTO_UPDATE_ELIGIBLE__,
       });
     })
     .catch((error: unknown) => {

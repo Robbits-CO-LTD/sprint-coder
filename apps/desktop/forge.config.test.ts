@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import config, { assertNativePackagingHost, verifyBundledNodeResources } from './forge.config';
+import { macAutoUpdateEligibleForIdentity } from './vite.main.config';
 
 describe('desktop package icon', () => {
   it('points Electron Packager at real macOS and Windows icon files', () => {
@@ -33,6 +34,15 @@ describe('native package target', () => {
       expect(() => verifyBundledNodeResources()).not.toThrow();
     },
   );
+});
+
+describe('macOS auto-update signing gate', () => {
+  it('enables the compiled updater only for a real signing identity', () => {
+    expect(macAutoUpdateEligibleForIdentity(undefined)).toBe(false);
+    expect(macAutoUpdateEligibleForIdentity('')).toBe(false);
+    expect(macAutoUpdateEligibleForIdentity('-')).toBe(false);
+    expect(macAutoUpdateEligibleForIdentity('Developer ID Application: Sprint Coder')).toBe(true);
+  });
 });
 
 describe('beta release artifacts', () => {

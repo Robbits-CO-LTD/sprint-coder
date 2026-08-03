@@ -86,6 +86,7 @@ describe('supportsAutoUpdate', () => {
         architecture: 'x64',
         executablePath:
           'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
+        macAutoUpdateEligible: false,
       }),
     ).toBe(true);
     expect(
@@ -94,8 +95,26 @@ describe('supportsAutoUpdate', () => {
         platform: 'win32',
         architecture: 'x64',
         executablePath: 'C:\\Downloads\\Sprint Coder.exe',
+        macAutoUpdateEligible: false,
       }),
     ).toBe(false);
+  });
+
+  it('only enables the released ARM64 macOS build when compiled with a real signing identity', () => {
+    const base = {
+      isPackaged: true,
+      platform: 'darwin',
+      executablePath: '/Applications/Sprint Coder.app/Contents/MacOS/Sprint Coder',
+    };
+    expect(
+      supportsAutoUpdate({ ...base, architecture: 'arm64', macAutoUpdateEligible: true }),
+    ).toBe(true);
+    expect(
+      supportsAutoUpdate({ ...base, architecture: 'arm64', macAutoUpdateEligible: false }),
+    ).toBe(false);
+    expect(supportsAutoUpdate({ ...base, architecture: 'x64', macAutoUpdateEligible: true })).toBe(
+      false,
+    );
   });
 });
 
@@ -172,6 +191,7 @@ describe('startAutoUpdate', () => {
       architecture: 'x64',
       executablePath:
         'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
     } as unknown as AutoUpdateOptions;
 
     const controller = startAutoUpdate(options);
@@ -186,6 +206,13 @@ describe('startAutoUpdate', () => {
       expect.objectContaining({ message: 'Sprint Coder 0.0.1-beta.5 を適用できます。' }),
     );
     controller.stop();
+    expect(events.listenerCount('update-downloaded')).toBe(0);
+    expect(events.listenerCount('error')).toBe(1);
+    expect(() => events.emit('error', new Error('late Squirrel error'))).not.toThrow();
+    expect(options.logger.warn).toHaveBeenCalledWith(
+      'Automatic updater reported an error',
+      expect.any(Error),
+    );
   });
 
   it('marks the macOS manifest as a Squirrel JSON feed', async () => {
@@ -213,6 +240,7 @@ describe('startAutoUpdate', () => {
       platform: 'darwin',
       architecture: 'arm64',
       executablePath: '/Applications/Sprint Coder.app/Contents/MacOS/Sprint Coder',
+      macAutoUpdateEligible: true,
     });
 
     await vi.waitFor(() => expect(checkForUpdates).toHaveBeenCalledOnce());
@@ -236,9 +264,62 @@ describe('startAutoUpdate', () => {
       platform: 'darwin',
       architecture: 'arm64',
       executablePath: '/tmp/Sprint Coder',
+      macAutoUpdateEligible: false,
     });
 
     await controller.checkNow();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not enter Electron autoUpdater after stop wins a release-discovery race', async () => {
+    const events = new EventEmitter();
+    const setFeedURL = vi.fn();
+    const checkForUpdates = vi.fn(async () => null);
+    const responseJson = vi.fn(async () => [release('v0.0.1-beta.5')]);
+    let resolveFetch!: (response: {
+      ok: boolean;
+      status: number;
+      json(): Promise<unknown>;
+    }) => void;
+    const fetch = vi.fn(
+      () =>
+        new Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL,
+        checkForUpdates,
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: { showMessageBox: vi.fn() } as unknown as AutoUpdateOptions['dialog'],
+      fetch,
+      logger,
+      restartToInstall: vi.fn(),
+      currentVersion: '0.0.1-beta.4',
+      isPackaged: true,
+      platform: 'win32',
+      architecture: 'x64',
+      executablePath:
+        'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
+    });
+
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    controller.stop();
+    resolveFetch({ ok: true, status: 200, json: responseJson });
+    await vi.waitFor(() => expect(responseJson).toHaveBeenCalledOnce());
+    await Promise.resolve();
+
+    expect(setFeedURL).not.toHaveBeenCalled();
+    expect(checkForUpdates).not.toHaveBeenCalled();
+    expect(() => events.emit('error', new Error('late error'))).not.toThrow();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Automatic updater reported an error',
+      expect.any(Error),
+    );
   });
 });

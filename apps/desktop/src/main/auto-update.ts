@@ -52,6 +52,7 @@ export type AutoUpdateOptions = Readonly<{
   platform: Platform;
   architecture: Architecture;
   executablePath: string;
+  macAutoUpdateEligible: boolean;
   checkIntervalMs?: number;
 }>;
 
@@ -101,6 +102,7 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
     checking = true;
     try {
       const release = await discoverUpdate(options);
+      if (stopped) return;
       if (release === null) {
         options.logger.debug('No automatic update is available', {
           currentVersion: options.currentVersion,
@@ -167,7 +169,8 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
-      options.updater.removeListener('error', onUpdaterError);
+      // Squirrel can still emit an asynchronous `error` after quitAndInstall. Keep this listener
+      // until process exit so EventEmitter never turns that expected failure into an uncaught throw.
       options.updater.removeListener('update-downloaded', onUpdateDownloaded);
     },
   };
@@ -229,11 +232,17 @@ export function selectUpdateRelease(
 }
 
 export function supportsAutoUpdate(
-  options: Pick<AutoUpdateOptions, 'isPackaged' | 'platform' | 'architecture' | 'executablePath'>,
+  options: Pick<
+    AutoUpdateOptions,
+    'isPackaged' | 'platform' | 'architecture' | 'executablePath' | 'macAutoUpdateEligible'
+  >,
 ): boolean {
   if (!options.isPackaged) return false;
+  // The release workflow currently publishes one native macOS artifact: ARM64. Squirrel.Mac also
+  // requires source and update bundles signed by the same real identity, so ad-hoc beta builds are
+  // deliberately compiled with eligibility=false (see vite.main.config.ts).
   if (options.platform === 'darwin')
-    return options.architecture === 'arm64' || options.architecture === 'x64';
+    return options.architecture === 'arm64' && options.macAutoUpdateEligible;
   if (options.platform !== 'win32' || options.architecture !== 'x64') return false;
   return /(?:^|[\\/])app-[^\\/]+[\\/][^\\/]+\.exe$/i.test(options.executablePath);
 }
