@@ -320,6 +320,7 @@ import {
   createTaskTitleContext,
   sanitizeGeneratedTaskTitle,
 } from './model-task-title';
+import { TaskTitleRuntimePool } from './task-title-runtime-pool';
 
 const MODEL_RESEARCH_GUIDANCE = `
 このTeamでは「Worker採用前にモデルをWeb調査」が有効です。各Workerを雇う前に必ず次の順序を守ってください。
@@ -347,15 +348,6 @@ type CliTaskTitleJob = {
   resolve: (title: string | null) => void;
 };
 
-export function classifyCliRuntimeExecution(
-  hasTitleJob: boolean,
-  activeRuntime: ActiveRuntimeKind | undefined,
-  kind: 'codex' | 'claude',
-): 'title' | 'turn' | 'stale' {
-  if (hasTitleJob) return 'title';
-  return activeRuntime === kind ? 'turn' : 'stale';
-}
-
 export class IpcRouter {
   private readonly ports = new Set<PortBinding>();
   private readonly mailbox = new TaskMailbox();
@@ -363,10 +355,11 @@ export class IpcRouter {
   private readonly codexRuntime: RuntimeHostClient;
   private readonly teamWorkerRuntime: ProviderAwareTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
+  private readonly taskTitleRuntimes: TaskTitleRuntimePool<RuntimeHostClient>;
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
   /** First-Turn requests awaiting successful completion before title generation begins. */
   private readonly pendingTaskTitles = new Map<string, TaskTitleRequest>();
-  /** Synthetic CLI executions share the normal Runtime Host but never enter Turn persistence. */
+  /** Synthetic CLI executions use isolated Runtime Hosts and never enter Turn persistence. */
   private readonly cliTaskTitleJobs = new Map<string, CliTaskTitleJob>();
   private readonly runtimeCancelActions = new RetryableActionRegistry();
   private readonly pendingStopAndSendByOperation = new Map<
@@ -757,45 +750,31 @@ export class IpcRouter {
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
-        this.routeCliRuntimeEvent('codex', taskId, turnId, runtimeEvent),
-      (taskId, turnId, error) => this.routeCliRuntimeFailure('codex', taskId, turnId, error),
+        this.handleRuntimeEvent('codex', taskId, turnId, runtimeEvent),
+      (taskId, turnId, error) => this.handleRuntimeFailure('codex', taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
-        classifyCliRuntimeExecution(
-          this.cliTaskTitleJobs.has(turnId),
-          this.turnRuntimes.get(turnId),
-          'codex',
-        ) === 'turn'
-          ? this.acknowledgeRuntimeContext(
-              taskId,
-              turnId,
-              fragmentIds,
-              projectItemIds,
-              snapshotDigest,
-            )
-          : undefined,
+        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       'codex',
     );
     this.claudeRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
-        this.routeCliRuntimeEvent('claude', taskId, turnId, runtimeEvent),
-      (taskId, turnId, error) => this.routeCliRuntimeFailure('claude', taskId, turnId, error),
+        this.handleRuntimeEvent('claude', taskId, turnId, runtimeEvent),
+      (taskId, turnId, error) => this.handleRuntimeFailure('claude', taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
-        classifyCliRuntimeExecution(
-          this.cliTaskTitleJobs.has(turnId),
-          this.turnRuntimes.get(turnId),
-          'claude',
-        ) === 'turn'
-          ? this.acknowledgeRuntimeContext(
-              taskId,
-              turnId,
-              fragmentIds,
-              projectItemIds,
-              snapshotDigest,
-            )
-          : undefined,
+        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       'claude',
+    );
+    this.taskTitleRuntimes = new TaskTitleRuntimePool(
+      (kind) =>
+        new RuntimeHostClient(
+          (taskId, turnId, event) => this.routeCliTaskTitleEvent(kind, taskId, turnId, event),
+          (taskId, turnId, error) => this.routeCliTaskTitleFailure(kind, taskId, turnId, error),
+          undefined,
+          undefined,
+          kind,
+        ),
     );
   }
 
@@ -2385,12 +2364,13 @@ export class IpcRouter {
     for (const [executionId, job] of this.cliTaskTitleJobs) {
       clearTimeout(job.timer);
       job.resolve(null);
-      void this.runtimeFor(job.kind)
+      void this.taskTitleRuntimeFor(job.kind)
         .cancel(job.taskId, executionId)
         .catch(() => undefined);
     }
     this.cliTaskTitleJobs.clear();
     this.pendingTaskTitles.clear();
+    this.taskTitleRuntimes.dispose();
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
     this.claudeRuntime.dispose();
@@ -3241,6 +3221,10 @@ export class IpcRouter {
     return kind === 'claude' ? this.claudeRuntime : this.codexRuntime;
   }
 
+  private taskTitleRuntimeFor(kind: 'codex' | 'claude'): RuntimeHostClient {
+    return this.taskTitleRuntimes.get(kind);
+  }
+
   private rememberTaskTitleRequest(started: StartedTurn): void {
     if (started.renamedTask === undefined) return;
     this.pendingTaskTitles.set(started.turnId, {
@@ -3321,7 +3305,7 @@ export class IpcRouter {
         if (job === undefined) return;
         this.cliTaskTitleJobs.delete(executionId);
         job.resolve(null);
-        void this.runtimeFor(kind)
+        void this.taskTitleRuntimeFor(kind)
           .cancel(request.taskId, executionId)
           .catch(() => undefined);
       }, MODEL_TASK_TITLE_TIMEOUT_MS);
@@ -3332,7 +3316,7 @@ export class IpcRouter {
         timer,
         resolve,
       });
-      this.runtimeFor(kind).start(
+      this.taskTitleRuntimeFor(kind).start(
         request.taskId,
         executionId,
         TASK_TITLE_PROMPT,
@@ -3422,24 +3406,14 @@ export class IpcRouter {
     }
   }
 
-  private routeCliRuntimeEvent(
+  private routeCliTaskTitleEvent(
     kind: 'codex' | 'claude',
-    taskId: string,
+    _taskId: string,
     turnId: string,
     event: RuntimeCanonicalEvent,
   ): void {
     const job = this.cliTaskTitleJobs.get(turnId);
-    const route = classifyCliRuntimeExecution(
-      job !== undefined,
-      this.turnRuntimes.get(turnId),
-      kind,
-    );
-    if (route === 'stale') return;
-    if (route === 'turn') {
-      this.handleRuntimeEvent(kind, taskId, turnId, event);
-      return;
-    }
-    if (job === undefined) return;
+    if (job === undefined || job.kind !== kind) return;
     if (event.type === 'delta' && job.output.length < 8_192)
       job.output += event.delta.slice(0, 8_192 - job.output.length);
     if (event.type !== 'completed') return;
@@ -3450,24 +3424,14 @@ export class IpcRouter {
     job.resolve(sanitizeGeneratedTaskTitle(finalOutput));
   }
 
-  private routeCliRuntimeFailure(
+  private routeCliTaskTitleFailure(
     kind: 'codex' | 'claude',
-    taskId: string,
+    _taskId: string,
     turnId: string,
-    error: PublicError,
+    _error: PublicError,
   ): void {
     const job = this.cliTaskTitleJobs.get(turnId);
-    const route = classifyCliRuntimeExecution(
-      job !== undefined,
-      this.turnRuntimes.get(turnId),
-      kind,
-    );
-    if (route === 'stale') return;
-    if (route === 'turn') {
-      this.handleRuntimeFailure(kind, taskId, turnId, error);
-      return;
-    }
-    if (job === undefined) return;
+    if (job === undefined || job.kind !== kind) return;
     clearTimeout(job.timer);
     this.cliTaskTitleJobs.delete(turnId);
     job.resolve(null);
