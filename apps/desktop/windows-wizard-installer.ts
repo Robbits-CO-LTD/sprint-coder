@@ -68,19 +68,6 @@ export function resolveInnoSetupCompiler(explicitPath?: string): string {
   ];
   for (const candidate of candidates)
     if (candidate !== undefined && existsSync(candidate)) return resolve(candidate);
-
-  try {
-    const located = execFileSync('where.exe', ['ISCC.exe'], {
-      encoding: 'utf8',
-      windowsHide: true,
-    })
-      .split(/\r?\n/u)
-      .map((line) => line.trim())
-      .find((line) => line.length > 0 && existsSync(line));
-    if (located !== undefined) return resolve(located);
-  } catch {
-    // Report one actionable error below after every supported discovery path has been checked.
-  }
   throw new Error(
     'Inno Setup 6 compiler was not found. Install Inno Setup or set SPRINT_CODER_ISCC_PATH.',
   );

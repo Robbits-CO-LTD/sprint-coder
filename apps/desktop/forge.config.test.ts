@@ -96,7 +96,10 @@ describe('beta release artifacts', () => {
     expect(script).toContain('DisableReadyPage=no');
     expect(script).toContain('DisableFinishedPage=no');
     expect(script).toContain('compiler:Languages\\Japanese.isl');
-    expect(script).toContain('Parameters: "--silent"');
+    expect(script).toContain('AfterInstall: InstallSprintCoder');
+    expect(script).toContain("Exec(Bootstrapper, '--silent'");
+    expect(script).toContain('if ResultCode <> 0 then');
+    expect(script).toContain('RaiseException');
     expect(script).toContain('Parameters: "--processStart ""Sprint Coder.exe"""; Description:');
     expect(script).toContain('Flags: nowait postinstall skipifsilent skipifdoesntexist');
   });
