@@ -67,9 +67,7 @@ begin
   WizardForm.StatusLabel.Caption := ExpandConstant('{cm:InstallingSprintCoder}');
   Bootstrapper := ExpandConstant('{tmp}\Sprint-Coder-Setup.exe');
   if not Exec(Bootstrapper, '--silent', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    RaiseException(Format(
-      ExpandConstant('{cm:SquirrelInstallStartFailed}'),
-      [ResultCode, SysErrorMessage(ResultCode)]));
+    RaiseException(Format(ExpandConstant('{cm:SquirrelInstallStartFailed}'), [ResultCode, SysErrorMessage(ResultCode)]));
   if ResultCode <> 0 then
     RaiseException(Format(ExpandConstant('{cm:SquirrelInstallFailed}'), [ResultCode]));
 end;
