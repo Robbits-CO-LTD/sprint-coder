@@ -74,6 +74,9 @@ describe('beta release artifacts', () => {
     expect(provisioner).toContain('choco install innosetup --version=6.7.1');
     expect(provisioner).toContain('Get-AuthenticodeSignature -LiteralPath $compiler');
     expect(provisioner).toContain("$publisher -ne 'Pyrsys B.V.'");
+    expect(provisioner).toContain(
+      '4EFD84E6F1091B19321231743B9AA86482EFFD6D0BEA9F7A44DB6211154616F3',
+    );
   });
 
   it('wraps the Squirrel bootstrapper in a localized Windows setup wizard', () => {

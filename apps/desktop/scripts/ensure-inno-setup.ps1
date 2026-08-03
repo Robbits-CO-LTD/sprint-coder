@@ -20,15 +20,26 @@ $publisher = if ($signature.SignerCertificate) {
 } else {
   ''
 }
+$expectedCertificateSha256 = '4EFD84E6F1091B19321231743B9AA86482EFFD6D0BEA9F7A44DB6211154616F3'
+$certificateSha256 = if ($signature.SignerCertificate) {
+  [System.BitConverter]::ToString(
+    $signature.SignerCertificate.GetCertHash(
+      [System.Security.Cryptography.HashAlgorithmName]::SHA256
+    )
+  ).Replace('-', '')
+} else {
+  ''
+}
 if (
   $signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
-  $publisher -ne 'Pyrsys B.V.'
+  $publisher -ne 'Pyrsys B.V.' -or
+  $certificateSha256 -ne $expectedCertificateSha256
 ) {
-  throw "Inno Setup compiler signature is not valid for the expected publisher Pyrsys B.V. (status: $($signature.Status), publisher: $publisher)."
+  throw "Inno Setup compiler signature does not match the trusted Pyrsys B.V. certificate (status: $($signature.Status), publisher: $publisher, certificate SHA-256: $certificateSha256)."
 }
 
 $version = (Get-Item -LiteralPath $compiler).VersionInfo.ProductVersion
-Write-Host "Using Inno Setup $version signed by $publisher at $compiler"
+Write-Host "Using Inno Setup $version signed by trusted publisher $publisher at $compiler"
 if ($env:GITHUB_ENV) {
   "SPRINT_CODER_ISCC_PATH=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 }
