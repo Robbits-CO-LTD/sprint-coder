@@ -141,7 +141,7 @@ export class XAIProviderClient implements ProviderRuntime {
       const response = await this.authenticatedFetch(connection, '/responses', controller.signal, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(openAICompatibleResponseRequest(parsed)),
+        body: JSON.stringify(xAIResponseRequest(parsed)),
       });
       if (!response.ok) {
         const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
@@ -252,6 +252,15 @@ export class XAIProviderClient implements ProviderRuntime {
       signal,
     });
   }
+}
+
+function xAIResponseRequest(request: ProviderExecutionRequest): Record<string, unknown> {
+  const base = openAICompatibleResponseRequest(request);
+  if (request.webSearch !== true) return base;
+  return {
+    ...base,
+    tools: [...(Array.isArray(base.tools) ? base.tools : []), { type: 'web_search' }],
+  };
 }
 
 class XAIHttpError extends Error {

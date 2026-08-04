@@ -118,4 +118,49 @@ describe('OpenRouterCatalogClient', () => {
     expect(events.at(0)).toEqual({ type: 'output_delta', text: 'hi' });
     expect(events.at(-1)).toEqual({ type: 'completed', stopReason: 'completed' });
   });
+
+  it('adds the OpenRouter Web Search server tool without dropping Team function tools', async () => {
+    const client = new OpenRouterCatalogClient(
+      () => ({ apiKey: 'openrouter-key' }),
+      async (_input, init) => {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          model: 'x-ai/grok-4.3',
+          tools: [
+            {
+              type: 'function',
+              name: 'team_send_message',
+              description: 'Send an audited Team message.',
+              parameters: { type: 'object' },
+              strict: true,
+            },
+            { type: 'openrouter:web_search' },
+          ],
+        });
+        return new Response(
+          'data: {"type":"response.done","response":{"status":"completed","model":"x-ai/grok-4.3","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+        );
+      },
+    );
+
+    for await (const _event of client.execute(
+      connection,
+      {
+        executionId: 'execution-web-search',
+        connectionId: connection.id,
+        modelId: 'x-ai/grok-4.3',
+        messages: [{ role: 'user', content: '最新情報をWeb調査してください' }],
+        tools: [
+          {
+            name: 'team_send_message',
+            description: 'Send an audited Team message.',
+            inputSchema: { type: 'object' },
+          },
+        ],
+        webSearch: true,
+      },
+      new AbortController().signal,
+    )) {
+      // Request assertion is the regression proof.
+    }
+  });
 });
