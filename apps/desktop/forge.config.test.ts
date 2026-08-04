@@ -51,7 +51,7 @@ describe('macOS auto-update signing gate', () => {
 });
 
 describe('beta release artifacts', () => {
-  it('publishes every Windows and macOS auto-update artifact', () => {
+  it('builds macOS and Ubuntu artifacts in Actions and leaves Windows for local signing', () => {
     const workflow = readFileSync(
       resolve(__dirname, '../../.github/workflows/release-beta.yml'),
       'utf8',
@@ -60,14 +60,19 @@ describe('beta release artifacts', () => {
     const provisioner = readFileSync(resolve(__dirname, 'scripts/ensure-inno-setup.ps1'), 'utf8');
 
     expect(workflow).toContain('apps/desktop/out/make/**/*.zip');
-    expect(workflow).toContain('apps/desktop/out/make/squirrel.windows/**/*.nupkg');
-    expect(workflow).toContain('apps/desktop/out/make/squirrel.windows/**/RELEASES');
+    expect(workflow).toContain('os: macos-latest');
+    expect(workflow).toContain('os: ubuntu-latest');
+    expect(workflow).not.toContain('os: windows-2022');
     expect(workflow).toContain('mac_zip_count != 1');
-    expect(workflow).toContain('windows_zip_count != 1');
+    expect(workflow).toContain('linux_zip_count != 1');
     expect(workflow).toContain('release-assets/RELEASES.json');
-    expect(workflow).toContain('${#assets[@]} != 6');
+    expect(workflow).toContain('${#assets[@]} != 3');
+    expect(workflow).toContain('--prerelease');
+    expect(workflow).toContain('--draft');
+    expect(readFileSync(resolve(__dirname, 'forge.config.ts'), 'utf8')).toContain(
+      "new MakerZIP({}, ['darwin', 'linux', 'win32'])",
+    );
     expect(workflow).toMatch(/release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@v7/);
-    expect(workflow).toContain('run: ./apps/desktop/scripts/ensure-inno-setup.ps1');
     expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
     expect(ciWorkflow).toContain("'Sprint-Coder-Installer.exe'");
     expect(ciWorkflow).toContain("'Sprint-Coder-Setup.exe'");

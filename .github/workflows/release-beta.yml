@@ -102,9 +102,9 @@ jobs:
           - os: macos-latest
             label: macOS
             artifact: macos
-          - os: windows-2022
-            label: Windows
-            artifact: windows
+          - os: ubuntu-latest
+            label: Ubuntu
+            artifact: ubuntu
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -135,19 +135,13 @@ jobs:
       - name: Build NativeSafeFs for Electron ABI
         run: npm run build:native-safe-fs
 
-      - name: Provision Inno Setup
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./apps/desktop/scripts/ensure-inno-setup.ps1
-
-      - name: Make release installer
+      - name: Make release artifacts
         working-directory: apps/desktop
         run: npx electron-forge make
         env:
           CI: 'true'
           SPRINT_CODER_RELEASE: '1'
           SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
-          SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS: '1'
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v7
@@ -155,15 +149,12 @@ jobs:
           name: sprint-coder-${{ matrix.artifact }}-${{ runner.arch }}
           path: |
             apps/desktop/out/make/**/*.dmg
-            apps/desktop/out/make/squirrel.windows/**/*.exe
-            apps/desktop/out/make/squirrel.windows/**/*.nupkg
-            apps/desktop/out/make/squirrel.windows/**/RELEASES
             apps/desktop/out/make/**/*.zip
           if-no-files-found: error
           retention-days: 7
 
   release:
-    name: Publish prerelease
+    name: Prepare draft prerelease
     needs: [validate, make]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -180,7 +171,7 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Publish GitHub prerelease
+      - name: Prepare GitHub draft prerelease
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -189,32 +180,23 @@ jobs:
         run: |
           assets=()
           dmg_count=0
-          exe_count=0
           mac_zip_count=0
-          windows_zip_count=0
-          nupkg_count=0
-          releases_count=0
+          linux_zip_count=0
           mac_zip=''
           while IFS= read -r -d '' asset; do
             assets+=("${asset}")
             case "${asset}" in
               *.dmg) ((dmg_count += 1)) ;;
-              *.exe) ((exe_count += 1)) ;;
               *-darwin-*.zip) mac_zip="${asset}"; ((mac_zip_count += 1)) ;;
-              *-win32-*.zip) ((windows_zip_count += 1)) ;;
-              *-full.nupkg) ((nupkg_count += 1)) ;;
-              */RELEASES) ((releases_count += 1)) ;;
+              *-linux-*.zip) ((linux_zip_count += 1)) ;;
             esac
           done < <(
-            find release-assets -type f \( \
-              -name '*.dmg' -o -name '*.exe' -o -name '*.zip' -o \
-              -name '*-full.nupkg' -o -name 'RELEASES' \
-            \) -print0
+            find release-assets -type f \( -name '*.dmg' -o -name '*.zip' \) -print0
           )
 
           printf 'Release asset: %s\n' "${assets[@]}"
-          if (( ${#assets[@]} != 6 || dmg_count != 1 || exe_count != 1 || mac_zip_count != 1 || windows_zip_count != 1 || nupkg_count != 1 || releases_count != 1 )); then
-            echo "::error::Expected one DMG, installer, macOS ZIP, Windows ZIP, full nupkg, and RELEASES manifest; found ${dmg_count}/${exe_count}/${mac_zip_count}/${windows_zip_count}/${nupkg_count}/${releases_count}."
+          if (( ${#assets[@]} != 3 || dmg_count != 1 || mac_zip_count != 1 || linux_zip_count != 1 )); then
+            echo "::error::Expected one DMG, macOS ZIP, and Linux ZIP; found ${dmg_count}/${mac_zip_count}/${linux_zip_count}."
             find release-assets -type f -print
             exit 1
           fi
@@ -231,7 +213,8 @@ jobs:
             gh release edit "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Sprint Coder ${RELEASE_VERSION}" \
-              --prerelease
+              --prerelease \
+              --draft
           else
             create_args=(
               "${RELEASE_TAG}"
@@ -239,6 +222,7 @@ jobs:
               --title "Sprint Coder ${RELEASE_VERSION}"
               --generate-notes
               --prerelease
+              --draft
             )
             create_args+=(--verify-tag)
             gh release create "${create_args[@]}"
