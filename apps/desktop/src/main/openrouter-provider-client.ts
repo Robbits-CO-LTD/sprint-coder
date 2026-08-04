@@ -250,6 +250,16 @@ function assertOpenRouterConnection(connection: ProviderConnection): void {
 }
 
 function responseRequest(request: ProviderExecutionRequest): Record<string, unknown> {
+  const tools = [
+    ...(request.tools ?? []).map((tool) => ({
+      type: 'function',
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema,
+      strict: true,
+    })),
+    ...(request.webSearch === true ? [{ type: 'openrouter:web_search' }] : []),
+  ];
   return {
     model: request.modelId,
     stream: true,
@@ -275,17 +285,7 @@ function responseRequest(request: ProviderExecutionRequest): Record<string, unkn
                   ],
           },
     ),
-    ...(request.tools === undefined
-      ? {}
-      : {
-          tools: request.tools.map((tool) => ({
-            type: 'function',
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.inputSchema,
-            strict: true,
-          })),
-        }),
+    ...(tools.length === 0 ? {} : { tools }),
     ...(request.structuredOutput === undefined
       ? {}
       : {

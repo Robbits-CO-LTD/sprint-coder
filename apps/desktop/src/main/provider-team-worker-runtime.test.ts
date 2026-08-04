@@ -210,6 +210,65 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     ).toContain('この内容を取得し直すためにTeamツールを呼ぶ必要はありません。');
   });
 
+  it('enables provider-hosted Web Search for an OpenRouter Team Worker', async () => {
+    const openRouterConnection: ProviderConnection = {
+      ...connection,
+      id: 'openrouter:primary',
+      providerId: 'openrouter',
+      displayName: 'OpenRouter',
+    };
+    const execute = vi.fn(async function* (_connection, request) {
+      expect(request).toMatchObject({
+        connectionId: openRouterConnection.id,
+        modelId: 'x-ai/grok-4.3',
+        webSearch: true,
+      });
+      yield { type: 'output_delta' as const, text: 'Web調査完了 https://example.com' };
+      yield { type: 'completed' as const, stopReason: 'completed' };
+    });
+    const registry = new MainProviderRegistry();
+    registry.register({
+      runtimeKind: 'official_api',
+      providerId: 'openrouter',
+      runtime: {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        execute,
+        cancel: vi.fn(),
+      },
+    });
+    const adapter = new ProviderAwareTeamWorkerRuntime({
+      fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },
+      verification: {
+        requireVerifiedForExecution: async () => openRouterConnection,
+      } as unknown as ProviderVerificationService,
+      registry,
+      getConnection: () => openRouterConnection,
+      authorizeEgress: () => true,
+      managerGuidance: 'manager',
+      managerTools: [],
+      workerGuidance: 'worker',
+      workerTools: [],
+      executeManagerTool: vi.fn(),
+    });
+    const worker: AgentRecord = {
+      ...providerWorker(),
+      modelSelection: {
+        connectionId: openRouterConnection.id,
+        requestedProvider: 'openrouter',
+        requestedModel: 'x-ai/grok-4.3',
+      },
+    };
+
+    await adapter.execute({
+      worker,
+      envelope,
+      content: '最新情報をWeb調査してください',
+    });
+
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
   it('fails closed instead of pretending an external API Worker can write', async () => {
     const adapter = new ProviderAwareTeamWorkerRuntime({
       fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },

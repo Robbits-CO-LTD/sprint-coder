@@ -91,6 +91,7 @@ describe('XAIProviderClient', () => {
           model: 'grok-4.5',
           stream: true,
           input: [{ role: 'user', content: 'hello' }],
+          tools: [{ type: 'web_search' }],
         });
         return new Response(
           [
@@ -109,6 +110,7 @@ describe('XAIProviderClient', () => {
         connectionId: connection.id,
         modelId: 'grok-4.5',
         messages: [{ role: 'user', content: 'hello' }],
+        webSearch: true,
       },
       new AbortController().signal,
     ))

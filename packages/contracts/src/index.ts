@@ -2154,6 +2154,7 @@ export const providerExecutionRequestSchema = z
       )
       .min(1),
     tools: z.array(providerToolSchema).max(128).optional(),
+    webSearch: z.boolean().optional(),
     structuredOutput: providerStructuredOutputSchema.optional(),
   })
   .strict();
