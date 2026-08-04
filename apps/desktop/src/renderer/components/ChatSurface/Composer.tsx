@@ -14,8 +14,8 @@ import { SlashCommandMenu, type SlashMenuItem } from './SlashCommandMenu';
 import {
   filterSlashCommands,
   inheritedProjectForNewTask,
-  isStandaloneTeamCommand,
   removeSlashToken,
+  shouldOpenTeamCanvas,
   SLASH_COMMANDS,
   slashTokenAtCursor,
   type SlashCommand,
@@ -218,7 +218,7 @@ export function Composer({ taskId }: { taskId: string }) {
     // send button and `/team ` (with a trailing space) consistent: a standalone command opens the
     // Canvas, while `/team <request>` remains a message and Main routes it through Sprint Coder
     // Team. The explicit prefix stays in history as an auditable statement of Team intent.
-    if (isStandaloneTeamCommand(raw)) {
+    if (shouldOpenTeamCanvas(raw, { goalRequested, imageRequested })) {
       setDraft(taskId, '');
       void toggleTeamView(taskId);
       return;

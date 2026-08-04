@@ -5,6 +5,7 @@ import {
   isStandaloneTeamCommand,
   removeSlashToken,
   SLASH_COMMANDS,
+  shouldOpenTeamCanvas,
   slashCommandQuery,
   slashTokenAtCursor,
 } from './slash-commands';
@@ -23,6 +24,18 @@ describe('slash commands', () => {
     expect(isStandaloneTeamCommand('  /TEAM  ')).toBe(true);
     expect(isStandaloneTeamCommand('/team 調査して')).toBe(false);
     expect(isStandaloneTeamCommand('/teamwork')).toBe(false);
+  });
+
+  it('does not steal /team text from an armed one-shot Composer mode', () => {
+    expect(shouldOpenTeamCanvas('/team', { goalRequested: false, imageRequested: false })).toBe(
+      true,
+    );
+    expect(shouldOpenTeamCanvas('/team', { goalRequested: true, imageRequested: false })).toBe(
+      false,
+    );
+    expect(shouldOpenTeamCanvas('/team', { goalRequested: false, imageRequested: true })).toBe(
+      false,
+    );
   });
 
   it('preserves the legacy whole-draft query while cursor matching supports inline tokens', () => {

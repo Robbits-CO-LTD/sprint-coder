@@ -49,6 +49,13 @@ export function isStandaloneTeamCommand(input: string): boolean {
   return input.trim().toLocaleLowerCase() === '/team';
 }
 
+export function shouldOpenTeamCanvas(
+  input: string,
+  modes: Readonly<{ goalRequested: boolean; imageRequested: boolean }>,
+): boolean {
+  return !modes.goalRequested && !modes.imageRequested && isStandaloneTeamCommand(input);
+}
+
 export type SlashTokenMatch = Readonly<{
   start: number;
   end: number;
