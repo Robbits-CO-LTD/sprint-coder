@@ -46,7 +46,6 @@ export function Composer({ taskId }: { taskId: string }) {
   const currentProjectId = useAppStore(
     (state) => state.tasks.find(({ id }) => id === taskId)?.projectId ?? null,
   );
-  const selectWorkspace = useAppStore((s) => s.selectWorkspace);
   const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const sending = useAppStore((s) => s.sendingByTask[taskId]) ?? false;
   const projectSwitching = useAppStore((s) => s.projectSwitchingByTask[taskId]) ?? false;
@@ -110,13 +109,10 @@ export function Composer({ taskId }: { taskId: string }) {
   );
   const goalSupported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
-  const workspaceSupported =
-    typeof window !== 'undefined' && window.sprintCoder?.workspace !== undefined;
   const teamSupported = typeof window !== 'undefined' && window.sprintCoder?.teams !== undefined;
   const slashUnavailable = useMemo<Partial<Record<SlashCommandId, string>>>(
     () => ({
       ...(!goalSupported ? { goal: 'Goal設定に対応していません' } : {}),
-      ...(!workspaceSupported ? { workspace: 'Workspace選択に対応していません' } : {}),
       ...(!teamSupported ? { team: 'Teamビューに対応していません' } : {}),
       ...(runtime.kind === 'codex' && runtime.codexReadiness === 'ready'
         ? {}
@@ -127,7 +123,7 @@ export function Composer({ taskId }: { taskId: string }) {
                 : 'Codex Runtime選択時に画像生成を使えます',
           }),
     }),
-    [goalSupported, runtime.codexReadiness, runtime.kind, teamSupported, workspaceSupported],
+    [goalSupported, runtime.codexReadiness, runtime.kind, teamSupported],
   );
   const slashItems = useMemo<SlashMenuItem[]>(
     () => [
@@ -262,9 +258,6 @@ export function Composer({ taskId }: { taskId: string }) {
         break;
       case 'team':
         void toggleTeamView(taskId);
-        break;
-      case 'workspace':
-        void selectWorkspace(taskId);
         break;
       case 'image':
         setGoalRequested(false);

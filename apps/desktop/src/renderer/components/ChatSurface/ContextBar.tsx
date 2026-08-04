@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { WorkspaceChip } from '../WorkspaceChip';
 import { ShieldAlert } from '../icons';
 import { useAppStore } from '../../store/appStore';
 import { accessDescription, accessEnforcement } from '../../lib/access-labels';
@@ -20,11 +19,9 @@ const SOURCE_LABEL: Record<ContextUsage['fragments'][number]['source'], string> 
 
 const WARNING_THRESHOLD_PCT = 80;
 
-// ContextBar: workspace / usage (§4.2). Access mode lives beside the Composer's plus button because
-// it configures the next send; keeping it in this row made that action look like workspace metadata.
+// ContextBar: Project / usage (§4.2). Access mode lives beside the Composer's plus button because
+// it configures the next send; keeping it in this row made that action look like Project metadata.
 export function ContextBar({ taskId }: { taskId: string }) {
-  const projectMultiFolderUx = useAppStore((state) => state.projectMultiFolderUx);
-  const task = useAppStore((state) => state.tasks.find(({ id }) => id === taskId));
   const hasWorkspace = useAppStore((state) => {
     const currentTask = state.tasks.find(({ id }) => id === taskId);
     const project = state.projects.find(({ id }) => id === currentTask?.projectId);
@@ -36,10 +33,7 @@ export function ContextBar({ taskId }: { taskId: string }) {
   });
   return (
     <div className="context-bar">
-      {projectMultiFolderUx && <ProjectPicker taskId={taskId} />}
-      {(!projectMultiFolderUx || task?.projectId === null) && (
-        <WorkspaceChip taskId={taskId} variant="context" />
-      )}
+      <ProjectPicker taskId={taskId} />
       <FileEditorDialog key={taskId} taskId={taskId} hasWorkspace={hasWorkspace} />
       <span className="ctx-spacer" />
       <ContextUsageChip taskId={taskId} />

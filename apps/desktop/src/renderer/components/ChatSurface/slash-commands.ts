@@ -1,4 +1,4 @@
-export type SlashCommandId = 'new' | 'goal' | 'team' | 'workspace' | 'image';
+export type SlashCommandId = 'new' | 'goal' | 'team' | 'image';
 
 export type SlashCommand = Readonly<{
   id: SlashCommandId;
@@ -29,13 +29,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     label: 'Teamを開く',
     description: '現在のTaskのTeamビューを切り替えます',
     keywords: ['agents', 'チーム', 'エージェント'],
-  },
-  {
-    id: 'workspace',
-    command: '/workspace',
-    label: 'Workspaceを選択',
-    description: '現在のTaskで使うフォルダを選びます',
-    keywords: ['folder', 'project', 'フォルダ', 'プロジェクト'],
   },
   {
     id: 'image',
