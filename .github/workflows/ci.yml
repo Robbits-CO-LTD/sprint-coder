@@ -15,14 +15,28 @@ permissions:
 
 jobs:
   build:
+    name: build (${{ matrix.label }})
     timeout-minutes: 45
     strategy:
-      fail-fast: false
+      # Stop the remaining platforms when one has already proved the commit bad.
+      fail-fast: true
       matrix:
-        # The Electron node-gyp revision in the lockfile supports Visual Studio
-        # through 2022. GitHub moved windows-latest to Visual Studio 2026, so
-        # keep this job on the supported image until that dependency is updated.
-        os: [macos-latest, windows-2022, ubuntu-latest]
+        include:
+          - os: ubuntu-latest
+            label: ubuntu-latest
+          - os: macos-latest
+            label: macos-latest
+          # The Electron node-gyp revision in the lockfile supports Visual Studio
+          # through 2022. GitHub moved windows-latest to Visual Studio 2026, so
+          # keep these jobs on the supported image until that dependency is updated.
+          # Windows intentionally uses one Vitest worker for process stability; split
+          # the files across independent runners instead of weakening that guardrail.
+          - os: windows-2022
+            label: windows-2022, shard 1/2
+            windows_shard: 1/2
+          - os: windows-2022
+            label: windows-2022, shard 2/2
+            windows_shard: 2/2
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -51,12 +65,15 @@ jobs:
           ELECTRON_RUN_AS_NODE: '1'
 
       - name: Typecheck
+        if: runner.os == 'Linux'
         run: npm run typecheck
 
       - name: Lint
+        if: runner.os == 'Linux'
         run: npm run lint
 
       - name: Format check
+        if: runner.os == 'Linux'
         run: npm run format:check
 
       # Rebuilds better-sqlite3 against this project's Electron ABI. Ordered
@@ -69,20 +86,26 @@ jobs:
         run: npm run build:native-safe-fs
 
       - name: Test
+        if: runner.os != 'Windows'
         run: npm run test
 
-      - name: Provision Inno Setup
+      - name: Test Windows shard ${{ matrix.windows_shard }}
         if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        run: npx vitest run --shard=${{ matrix.windows_shard }}
+
+      - name: Provision Inno Setup
+        if: github.event_name == 'push' && runner.os == 'Windows' && matrix.windows_shard == '1/2'
         shell: pwsh
         run: ./apps/desktop/scripts/ensure-inno-setup.ps1
 
       - name: Make Windows wizard installer
-        if: runner.os == 'Windows'
+        if: github.event_name == 'push' && runner.os == 'Windows' && matrix.windows_shard == '1/2'
         working-directory: apps/desktop
         run: npx electron-forge make --platform=win32 --arch=x64
 
       - name: Verify Windows wizard artifact
-        if: runner.os == 'Windows'
+        if: github.event_name == 'push' && runner.os == 'Windows' && matrix.windows_shard == '1/2'
         shell: pwsh
         run: |
           $directory = 'apps/desktop/out/make/squirrel.windows/x64'
@@ -109,7 +132,7 @@ jobs:
       # that a clean Windows checkout can run development-mode E2E without a manually started
       # dev server.
       - name: Dev-mode E2E auto-start smoke (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.windows_shard == '1/2'
         run: npx playwright test tests/e2e/keyboard-smoke.spec.ts
         env:
           SPRINT_CODER_E2E_MODE: dev
