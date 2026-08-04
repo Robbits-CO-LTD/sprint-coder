@@ -1,8 +1,10 @@
 import type { CanonicalProviderEvent, NormalizedProviderUsage } from '@sprint-coder/contracts';
+import { createHash } from 'node:crypto';
 
 export async function* normalizeGeminiContentStream(
   body: ReadableStream<Uint8Array>,
   requestedModel: string,
+  executionId = requestedModel,
 ): AsyncIterable<CanonicalProviderEvent> {
   let resolvedModel = requestedModel;
   let stopReason: string | null = null;
@@ -64,9 +66,15 @@ export async function* normalizeGeminiContentStream(
             callId:
               typeof functionCall.id === 'string'
                 ? functionCall.id.slice(0, 256)
-                : `gemini-call-${toolOrdinal}`,
+                : `gemini-call-${createHash('sha256').update(executionId).digest('hex').slice(0, 16)}-${toolOrdinal}`,
             name: functionCall.name.slice(0, 256),
             input: jsonValue(functionCall.args),
+            providerMetadata: {
+              geminiCallIdPresent: typeof functionCall.id === 'string',
+              ...(typeof part?.thoughtSignature === 'string' && part.thoughtSignature.length > 0
+                ? { geminiThoughtSignature: part.thoughtSignature.slice(0, 65_536) }
+                : {}),
+            },
           };
         }
       }

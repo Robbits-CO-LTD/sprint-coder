@@ -84,6 +84,9 @@ import {
   invalidModelUserMessage,
   isTrustedIpcSender,
   shouldBlockProviderLeaderCompletion,
+  providerWorkspaceToolsEligible,
+  requireExplicitProviderCommandApproval,
+  shouldRetryProviderWithoutTools,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
   resolveEffectiveWorkspaceRoot,
@@ -218,6 +221,51 @@ describe('Provider Team completion and model errors', () => {
     expect(shouldFailRequiredTeamTurn(true, 0)).toBe(true);
     expect(shouldFailRequiredTeamTurn(true, 1)).toBe(false);
     expect(shouldFailRequiredTeamTurn(false, 0)).toBe(false);
+  });
+});
+
+describe('Provider workspace tool capability fallback', () => {
+  it('publishes tools for supported or unknown protocols, but never explicit unsupported models', () => {
+    expect(providerWorkspaceToolsEligible(false, 1, true)).toBe(true);
+    expect(providerWorkspaceToolsEligible(false, 1, null)).toBe(true);
+    expect(providerWorkspaceToolsEligible(false, 1, undefined)).toBe(true);
+    expect(providerWorkspaceToolsEligible(false, 1, false)).toBe(false);
+    expect(providerWorkspaceToolsEligible(true, 1, true)).toBe(false);
+    expect(providerWorkspaceToolsEligible(false, 0, true)).toBe(false);
+  });
+
+  it('retries unknown capability exactly once without tools only on a side-effect-free invalid request', () => {
+    const base = {
+      ordinal: 1,
+      workspaceToolsBound: true,
+      toolCalling: null,
+      errorCategory: 'invalid_request' as const,
+      toolCallCount: 0,
+      outputLength: 0,
+    };
+    expect(shouldRetryProviderWithoutTools(base)).toBe(true);
+    expect(shouldRetryProviderWithoutTools({ ...base, ordinal: 2 })).toBe(false);
+    expect(shouldRetryProviderWithoutTools({ ...base, toolCalling: true })).toBe(false);
+    expect(shouldRetryProviderWithoutTools({ ...base, toolCallCount: 1 })).toBe(false);
+    expect(shouldRetryProviderWithoutTools({ ...base, outputLength: 1 })).toBe(false);
+    expect(shouldRetryProviderWithoutTools({ ...base, errorCategory: 'rate_limited' })).toBe(false);
+  });
+
+  it('preserves policy denial and upgrades only command allows to explicit approval', () => {
+    expect(
+      requireExplicitProviderCommandApproval({ decision: 'deny', reason: 'immutable_deny' }, true),
+    ).toEqual({ decision: 'deny', reason: 'immutable_deny' });
+    const beforeExecute = () => true;
+    expect(
+      requireExplicitProviderCommandApproval(
+        { decision: 'allow', reason: 'preset_full', beforeExecute },
+        true,
+      ),
+    ).toEqual({
+      decision: 'approval_required',
+      reason: 'provider_command_requires_explicit_approval',
+      beforeExecute,
+    });
   });
 });
 

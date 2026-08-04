@@ -10,6 +10,8 @@ import type {
 import { executionSpecDigest, validateExecutionSpec } from '@sprint-coder/domain';
 import type { ToolAuthorizationDecision, ToolAuthorizationRequest } from './tool-broker';
 import type { ApprovalRequestInput, ApprovalResolutionInput } from './persistence';
+import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
+import { workspaceToolAuthorizationGuard } from './provider-workspace-tools';
 
 type ApprovalLike = {
   id: string;
@@ -121,6 +123,8 @@ export class ApprovalCoordinator {
         revalidators.push(evaluation.decision.beforeExecute ?? (() => false));
         continue;
       }
+      if (evaluation.decision.beforeExecute !== undefined)
+        revalidators.push(evaluation.decision.beforeExecute);
       const decision = await this.requestCapabilityApproval(request, evaluation.capability);
       if (decision.decision !== 'allow') return decision;
       revalidators.push(decision.beforeExecute ?? (() => false));
@@ -198,7 +202,7 @@ export class ApprovalCoordinator {
       display: {
         target: displayTarget(request.input),
         impact: request.entry.sideEffect,
-        execution: stableStringify(request.input),
+        execution: safeApprovalExecution(request),
       },
       challenge,
       challengeHash: digest(challenge),
@@ -384,6 +388,13 @@ export function approvalFactsForTool(
   resource: PermissionResource;
   operation: PermissionOperation;
 } {
+  const operation = operationFor(capability);
+  const workspaceGuard = workspaceToolAuthorizationGuard(
+    request.input,
+    operation === 'read' || operation === 'write' ? operation : undefined,
+  );
+  const workspaceResource =
+    workspaceGuard === undefined ? undefined : workspacePermissionResourceFromGuard(workspaceGuard);
   const commandSpec =
     request.entry.implementationKind === 'command-runner' && validateExecutionSpec(request.input)
       ? (request.input as ExecutionSpec)
@@ -393,10 +404,17 @@ export function approvalFactsForTool(
       ? undefined
       : { kind: 'external' as const, target: `command:${executionSpecDigest(commandSpec)}` };
   const resourceSet: ResourceSet =
-    commandResource === undefined
-      ? resourceFor(request)
-      : { kind: 'external-exact', target: commandResource.target };
+    workspaceResource !== undefined
+      ? {
+          kind: 'path-exact',
+          workspaceId: workspaceResource.workspaceId,
+          canonicalPath: workspaceResource.canonicalPath,
+        }
+      : commandResource === undefined
+        ? resourceFor(request)
+        : { kind: 'external-exact', target: commandResource.target };
   const resource: PermissionResource =
+    workspaceResource ??
     commandResource ??
     (resourceSet.kind === 'network-origin'
       ? { kind: 'network', origin: resourceSet.origin }
@@ -408,20 +426,64 @@ export function approvalFactsForTool(
     specDigest:
       request.entry.implementationKind === 'command-runner' && validateExecutionSpec(request.input)
         ? executionSpecDigest(request.input as ExecutionSpec)
-        : digest({ toolId: request.entry.toolId, input: request.input }),
+        : workspaceGuard === undefined
+          ? digest({ toolId: request.entry.toolId, input: request.input })
+          : digest({
+              toolId: request.entry.toolId,
+              pathGuardDigest: pathGuardIdentityDigest(workspaceGuard),
+              operation,
+            }),
     resourceSet,
     resource,
-    operation: operationFor(capability),
+    operation,
   };
 }
 
 function displayTarget(input: unknown): string {
+  const workspaceGuard = workspaceToolAuthorizationGuard(input);
+  if (workspaceGuard !== undefined) return workspaceGuard.originalTargetPath;
   if (typeof input === 'object' && input !== null) {
     const record = input as Record<string, unknown>;
     for (const key of ['origin', 'target', 'path', 'absoluteExecutable', 'executable'])
       if (typeof record[key] === 'string') return record[key];
   }
   return 'requested resource';
+}
+
+function safeApprovalExecution(request: ToolAuthorizationRequest): string {
+  const workspaceGuard = workspaceToolAuthorizationGuard(request.input);
+  if (workspaceGuard !== undefined) {
+    const prepared = request.input as { raw?: unknown };
+    const raw =
+      typeof prepared.raw === 'object' && prepared.raw !== null
+        ? (prepared.raw as Record<string, unknown>)
+        : {};
+    const content = typeof raw['content'] === 'string' ? raw['content'] : undefined;
+    const edits = Array.isArray(raw['edits']) ? raw['edits'] : undefined;
+    return stableStringify({
+      tool: request.entry.providerName,
+      rootId: workspaceGuard.rootId,
+      path: workspaceGuard.originalTargetPath,
+      ...(content === undefined
+        ? {}
+        : { contentBytes: Buffer.byteLength(content, 'utf8'), contentDigest: digest(content) }),
+      ...(edits === undefined ? {} : { editCount: edits.length, editsDigest: digest(edits) }),
+    });
+  }
+  if (
+    request.entry.implementationKind === 'command-runner' &&
+    validateExecutionSpec(request.input)
+  ) {
+    const spec = request.input as ExecutionSpec;
+    return stableStringify({
+      executable: spec.absoluteExecutable,
+      argv: spec.argv,
+      cwd: spec.cwdIdentity.canonicalPath,
+      shell: spec.shell,
+      stdinMode: spec.stdinMode,
+    });
+  }
+  return stableStringify(request.input);
 }
 
 function digest(value: unknown): string {

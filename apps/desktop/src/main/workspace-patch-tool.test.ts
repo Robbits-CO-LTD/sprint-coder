@@ -5,12 +5,13 @@ import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
 import {
   executeWorkspacePatch,
+  executeWorkspaceCreateFile,
   WorkspacePatchRejection,
   WORKSPACE_PATCH_TOOL,
   type WorkspacePatchDeps,
 } from './workspace-patch-tool';
 import type { EditSagaApplyRequest, EditSagaSnapshot } from './edit-saga';
-import { workspaceMutationBinding } from './path-guard';
+import { createPathGuard, workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
 const context = { taskId: 'task-1', turnId: 'turn-1' } as const;
@@ -27,6 +28,27 @@ async function harness(content = SOURCE) {
   await mkdir(join(workspace, 'src'));
   await writeFile(join(workspace, 'src', 'a.txt'), content);
   const identity = await workspaceMutationBinding(workspace);
+  const patchWriteGuard = await createPathGuard({
+    rootId: 'root-a',
+    workspacePath: workspace,
+    expectedRootIdentityDigest: identity.rootIdentityDigest,
+    targetPath: 'src/a.txt',
+    operation: 'write',
+  });
+  const patchReadGuard = await createPathGuard({
+    rootId: 'root-a',
+    workspacePath: workspace,
+    expectedRootIdentityDigest: identity.rootIdentityDigest,
+    targetPath: 'src/a.txt',
+    operation: 'read',
+  });
+  const createGuard = await createPathGuard({
+    rootId: 'root-a',
+    workspacePath: workspace,
+    expectedRootIdentityDigest: identity.rootIdentityDigest,
+    targetPath: 'src/new.txt',
+    operation: 'write',
+  });
   const applied: EditSagaApplyRequest[] = [];
   const deps: WorkspacePatchDeps = {
     turnWorkspaceSetFor: () => ({
@@ -52,7 +74,7 @@ async function harness(content = SOURCE) {
       return { id: request.id, state: 'committed' } as unknown as EditSagaSnapshot;
     },
   };
-  return { workspace, identity, deps, applied };
+  return { workspace, identity, deps, applied, patchWriteGuard, patchReadGuard, createGuard };
 }
 
 describe('the agent edit tool', () => {
@@ -75,11 +97,13 @@ describe('the agent edit tool', () => {
   });
 
   it('hands a validated plan to the Saga rather than writing anything itself', async () => {
-    const { workspace, identity, deps, applied } = await harness();
+    const { workspace, identity, deps, applied, patchWriteGuard, patchReadGuard } = await harness();
     const result = await executeWorkspacePatch(
       { path: 'src/a.txt', edits: [{ oldText: '  return input + 1;', newText: '  return 42;' }] },
       context,
       deps,
+      patchWriteGuard,
+      patchReadGuard,
     );
     expect(result).toMatchObject({ path: 'src/a.txt', state: 'committed', edits: 1 });
     expect(applied).toHaveLength(1);
@@ -97,6 +121,26 @@ describe('the agent edit tool', () => {
     expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe(SOURCE);
   });
 
+  it('plans an exclusive add through the same Saga boundary', async () => {
+    const { workspace, deps, applied, createGuard } = await harness();
+    const result = await executeWorkspaceCreateFile(
+      { path: 'src/new.txt', content: 'new file\n' },
+      context,
+      deps,
+      createGuard,
+    );
+
+    expect(result).toMatchObject({ path: 'src/new.txt', state: 'committed', kind: 'add' });
+    expect(applied[0]?.plan.operations[0]).toMatchObject({
+      kind: 'add',
+      path: 'src/new.txt',
+      postImage: 'new file\n',
+    });
+    await expect(readFile(join(workspace, 'src', 'new.txt'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('selects a Secondary by rootId and never falls through to the Primary', async () => {
     const { workspace: primary, deps, applied } = await harness('primary only\n');
     const primaryIdentity = await workspaceMutationBinding(primary);
@@ -105,6 +149,20 @@ describe('the agent edit tool', () => {
     await mkdir(join(secondary, 'src'));
     await writeFile(join(secondary, 'src', 'a.txt'), SOURCE);
     const secondaryIdentity = await workspaceMutationBinding(secondary);
+    const secondaryWriteGuard = await createPathGuard({
+      rootId: 'root-b',
+      workspacePath: secondary,
+      expectedRootIdentityDigest: secondaryIdentity.rootIdentityDigest,
+      targetPath: 'src/a.txt',
+      operation: 'write',
+    });
+    const secondaryReadGuard = await createPathGuard({
+      rootId: 'root-b',
+      workspacePath: secondary,
+      expectedRootIdentityDigest: secondaryIdentity.rootIdentityDigest,
+      targetPath: 'src/a.txt',
+      operation: 'read',
+    });
     const result = await executeWorkspacePatch(
       {
         rootId: 'root-b',
@@ -142,6 +200,8 @@ describe('the agent edit tool', () => {
             ['root-b', secondaryIdentity],
           ]),
       },
+      secondaryWriteGuard,
+      secondaryReadGuard,
     );
     expect(result.rootId).toBe('root-b');
     expect(applied[0]?.plan.operations[0]?.canonicalPath).toBe(
@@ -151,7 +211,7 @@ describe('the agent edit tool', () => {
   });
 
   it('rejects an unknown rootId before reading a same-relative-path file', async () => {
-    const { deps } = await harness();
+    const { deps, patchWriteGuard, patchReadGuard } = await harness();
     await expect(
       executeWorkspacePatch(
         {
@@ -161,12 +221,14 @@ describe('the agent edit tool', () => {
         },
         context,
         deps,
+        patchWriteGuard,
+        patchReadGuard,
       ),
     ).rejects.toThrow('valid Workspace rootId');
   });
 
   it('rejects a replacement directory at the sealed root path', async () => {
-    const { workspace, deps } = await harness();
+    const { workspace, deps, patchWriteGuard, patchReadGuard } = await harness();
     const original = `${workspace}-original`;
     await rename(workspace, original);
     roots.push(original);
@@ -181,28 +243,48 @@ describe('the agent edit tool', () => {
         },
         context,
         deps,
+        patchWriteGuard,
+        patchReadGuard,
       ),
     ).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
   });
 
   it('reports the Saga state instead of claiming success for a patch that did not commit', async () => {
-    const { deps } = await harness();
+    const { deps, patchWriteGuard, patchReadGuard } = await harness();
     const result = await executeWorkspacePatch(
       { path: 'src/a.txt', edits: [{ oldText: '}', newText: '};' }] },
       context,
       { ...deps, apply: async (request) => ({ id: request.id, state: 'restored' }) as never },
+      patchWriteGuard,
+      patchReadGuard,
     );
     expect(result.state).toBe('restored');
+  });
+
+  it('fails closed when a caller omits the issued write guard', async () => {
+    const { deps, applied, patchReadGuard } = await harness();
+    await expect(
+      executeWorkspacePatch(
+        { path: 'src/a.txt', edits: [{ oldText: '}', newText: '};' }] },
+        context,
+        deps,
+        undefined as never,
+        patchReadGuard,
+      ),
+    ).rejects.toThrow('Workspace mutation target changed after authorization');
+    expect(applied).toEqual([]);
   });
 });
 
 describe('what the model is told when a patch is rejected', () => {
   it('returns the anchor diagnosis, not a bare validation message', async () => {
-    const { deps } = await harness();
+    const { deps, patchWriteGuard, patchReadGuard } = await harness();
     const failure = await executeWorkspacePatch(
       { path: 'src/a.txt', edits: [{ oldText: '    return input + 1;', newText: 'x' }] },
       context,
       deps,
+      patchWriteGuard,
+      patchReadGuard,
     ).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(WorkspacePatchRejection);
     expect((failure as Error).message).toContain('indentation');
@@ -210,7 +292,7 @@ describe('what the model is told when a patch is rejected', () => {
   });
 
   it('hands back the current text when the region drifted', async () => {
-    const { deps } = await harness();
+    const { deps, patchWriteGuard, patchReadGuard } = await harness();
     const failure = await executeWorkspacePatch(
       {
         path: 'src/a.txt',
@@ -221,17 +303,21 @@ describe('what the model is told when a patch is rejected', () => {
       },
       context,
       deps,
+      patchWriteGuard,
+      patchReadGuard,
     ).catch((error: unknown) => error);
     expect((failure as Error).message).toContain('return input + 1;');
     expect((failure as Error).message).toContain('verbatim');
   });
 
   it('does not run the Saga for a patch that failed validation', async () => {
-    const { deps, applied } = await harness();
+    const { deps, applied, patchWriteGuard, patchReadGuard } = await harness();
     await executeWorkspacePatch(
       { path: 'src/a.txt', edits: [{ oldText: 'nowhere at all', newText: 'x' }] },
       context,
       deps,
+      patchWriteGuard,
+      patchReadGuard,
     ).catch(() => undefined);
     expect(applied).toEqual([]);
   });
@@ -239,7 +325,7 @@ describe('what the model is told when a patch is rejected', () => {
 
 describe('refusing malformed or unsupported requests', () => {
   it('requires a selected Workspace', async () => {
-    const { deps } = await harness();
+    const { deps, patchWriteGuard, patchReadGuard } = await harness();
     await expect(
       executeWorkspacePatch(
         { path: 'src/a.txt', edits: [{ oldText: 'a', newText: 'b' }] },
@@ -254,6 +340,8 @@ describe('refusing malformed or unsupported requests', () => {
             digest: '0'.repeat(64),
           }),
         },
+        patchWriteGuard,
+        patchReadGuard,
       ),
     ).rejects.toThrow('requires a selected Workspace');
   });
@@ -264,17 +352,21 @@ describe('refusing malformed or unsupported requests', () => {
     ['an empty edit list', { path: 'src/a.txt', edits: [] }],
     ['an edit missing newText', { path: 'src/a.txt', edits: [{ oldText: 'a' }] }],
   ])('rejects %s', async (_label, input) => {
-    const { deps } = await harness();
-    await expect(executeWorkspacePatch(input, context, deps)).rejects.toBeInstanceOf(Error);
+    const { deps, patchWriteGuard, patchReadGuard } = await harness();
+    await expect(
+      executeWorkspacePatch(input, context, deps, patchWriteGuard, patchReadGuard),
+    ).rejects.toBeInstanceOf(Error);
   });
 
   it('refuses a path outside the Workspace', async () => {
-    const { deps } = await harness();
+    const { deps, patchWriteGuard, patchReadGuard } = await harness();
     await expect(
       executeWorkspacePatch(
         { path: '../escape.txt', edits: [{ oldText: 'a', newText: 'b' }] },
         context,
         deps,
+        patchWriteGuard,
+        patchReadGuard,
       ),
     ).rejects.toBeInstanceOf(Error);
   });

@@ -3,6 +3,7 @@ import type { BigIntStats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import {
   createPathGuard,
+  isIssuedPathGuard,
   openGuardedExistingFile,
   type FileIdentity,
   type PathGuard,
@@ -15,6 +16,7 @@ export type FileRevisionErrorCode =
   | 'INVALID_REQUEST'
   | 'FILE_TOO_LARGE'
   | 'NON_TEXT_FILE'
+  | 'HARDLINK_READ_DENIED'
   | 'READ_RACE'
   | 'FORGED_TOKEN'
   | 'TOKEN_SCOPE_MISMATCH'
@@ -89,6 +91,28 @@ export class FileRevisionRegistry {
     });
   }
 
+  async readGuarded(input: {
+    owner: FileRevisionOwner;
+    guard: PathGuard;
+    policyEpoch: number;
+    maxBytes?: number;
+  }): Promise<Readonly<{ content: string; reference: FileRevisionReference }>> {
+    validateOwner(input.owner);
+    const read = await readRevisionBoundFileFromGuard(input);
+    this.records.set(
+      read.token.id,
+      Object.freeze({
+        owner: Object.freeze({ ...input.owner }),
+        content: read.content,
+        token: read.token,
+      }),
+    );
+    return Object.freeze({
+      content: read.content,
+      reference: Object.freeze({ version: 1 as const, tokenId: read.token.id }),
+    });
+  }
+
   async resolve(input: {
     owner: FileRevisionOwner;
     reference: FileRevisionReference;
@@ -147,6 +171,23 @@ export async function readRevisionBoundFile(input: {
     targetPath: input.targetPath,
     operation: 'read',
   });
+  return readRevisionBoundFileFromGuard({
+    guard,
+    policyEpoch,
+    maxBytes,
+  });
+}
+
+async function readRevisionBoundFileFromGuard(input: {
+  guard: PathGuard;
+  policyEpoch: number;
+  maxBytes?: number;
+}): Promise<RevisionBoundFile> {
+  const policyEpoch = validateNonNegativeInteger(input.policyEpoch, 'policyEpoch');
+  const maxBytes = validatePositiveInteger(input.maxBytes ?? DEFAULT_MAX_BYTES, 'maxBytes');
+  const guard = input.guard;
+  if (!isIssuedPathGuard(guard) || guard.operation !== 'read')
+    throw new FileRevisionError('INVALID_REQUEST', 'File read requires an issued read guard');
   let handle: FileHandle | undefined;
   try {
     handle = await openGuardedExistingFile(guard, 'read');
@@ -244,6 +285,14 @@ export async function revalidateFileRevisionToken(input: {
 
 function assertRegularAndBounded(stats: BigIntStats, maxBytes: number): void {
   if (!stats.isFile()) throw new FileRevisionError('NON_TEXT_FILE', 'Target is not a regular file');
+  // A second hardlink can alias bytes whose other name is outside the Workspace. Reading it would
+  // cross the same ownership boundary that mutation already rejects, so fail closed before a byte
+  // is returned to a Provider.
+  if (stats.nlink !== 1n)
+    throw new FileRevisionError(
+      'HARDLINK_READ_DENIED',
+      'Reading multiply-linked files is not allowed',
+    );
   if (stats.size > BigInt(maxBytes))
     throw new FileRevisionError('FILE_TOO_LARGE', 'File exceeds the configured read limit');
 }

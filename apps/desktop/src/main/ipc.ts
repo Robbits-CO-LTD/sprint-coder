@@ -53,6 +53,7 @@ import {
   modelSelectionSchema,
   type ModelSelection,
   type NormalizedProviderUsage,
+  type NormalizedProviderError,
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
@@ -219,12 +220,19 @@ import {
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
-import type { ToolAuthorizationRequest } from './tool-broker';
+import {
+  ToolAuthorizationDeniedError,
+  type ToolAuthorizationDecision,
+  type ToolAuthorizationRequest,
+} from './tool-broker';
 import type { RuntimeCanonicalEvent, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
-import { permissionRequestFingerprint, type Capability } from '@sprint-coder/domain';
-import type { ExecutionSpec } from '@sprint-coder/domain';
-import { executionSpecPathGuard } from './command-runner';
+import {
+  permissionRequestFingerprint,
+  toolValueMatchesSchema,
+  type Capability,
+  type ToolCatalogSnapshot,
+} from '@sprint-coder/domain';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
 import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lease';
 import {
@@ -237,7 +245,7 @@ import {
 import { ReasoningBatcher } from './reasoning-batcher';
 import { projectContextProviderMessages } from './project-context-delivery';
 import { RetryableActionRegistry } from './retryable-action';
-import { createStreamingSecretRedactor } from './secret-redactor';
+import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor';
 import { secureLogger } from './secure-logger';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
@@ -282,6 +290,15 @@ import {
 } from './project-memory-guidance';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { ModelCatalogService, teamModelIdentityKey } from './model-catalog-service';
+import {
+  PROVIDER_NO_TOOL_GUIDANCE,
+  PROVIDER_WORKSPACE_GUIDANCE,
+  ProviderWorkspaceTools,
+  WorkspaceToolRejection,
+  providerToolsFromSnapshot,
+  workspaceToolAuthorizationGuard,
+} from './provider-workspace-tools';
+import type { WorkspacePatchDeps } from './workspace-patch-tool';
 import {
   BUILTIN_CODEX_CONNECTION_ID,
   builtinRuntimeForModelSelection,
@@ -406,6 +423,7 @@ export class IpcRouter {
   private readonly codexThreadByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
+  private readonly providerWorkspaceTools: ProviderWorkspaceTools;
   private readonly autoReviewer = AutoReviewer.createProduction();
   private readonly teamCoordinator: TeamCoordinator;
   private readonly teamSubscriptions = new Set<string>();
@@ -433,6 +451,7 @@ export class IpcRouter {
     private readonly window: BrowserWindow,
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
+    workspaceEdit?: WorkspacePatchDeps,
   ) {
     const providerSecrets = new ProviderSecretStorage(
       join(app.getPath('userData'), 'provider-secrets'),
@@ -714,6 +733,19 @@ export class IpcRouter {
           new Date().toISOString(),
         );
       },
+    });
+    this.providerWorkspaceTools = new ProviderWorkspaceTools({
+      workspaceFor: (taskId, turnId) =>
+        this.persistence.readTurnWorkspaceSetForTask(taskId, turnId),
+      rootIdentityFor: (turnId, rootId) =>
+        this.persistence.getTurnWorkspaceRootIdentities(turnId).get(rootId),
+      policyEpochFor: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
+      authorizer: this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
+      command: {
+        persistence: this.persistence,
+        publish: (event) => this.publish(event),
+      },
+      ...(workspaceEdit === undefined ? {} : { workspaceEdit }),
     });
     this.mockRuntime = new MockRuntimeAdapter(
       persistence,
@@ -2359,6 +2391,7 @@ export class IpcRouter {
     this.closeAllPorts();
     this.teamSubscriptions.clear();
     this.approvalCoordinator.dispose();
+    await this.providerWorkspaceTools.dispose();
     // A watch outlives its Turn only if the app is torn down mid-write; close them here so the
     // process can actually exit (issue #39).
     for (const watchers of this.workspaceWatchByTurn.values())
@@ -2521,7 +2554,10 @@ export class IpcRouter {
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     const facts = approvalFactsForTool(request, capability);
     const commandRunner = request.entry.implementationKind === 'command-runner';
-    const sandboxProfile = commandRunner ? ('full' as const) : ('read-only' as const);
+    const sandboxProfile =
+      capability === 'workspace.write' || capability === 'filesystem.external.write'
+        ? ('workspace-write' as const)
+        : ('read-only' as const);
     const expiresAt = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
     const ceilingEntry = {
       capability,
@@ -2567,10 +2603,10 @@ export class IpcRouter {
       },
       now: new Date().toISOString(),
     };
-    const pathGuard =
-      request.entry.implementationKind === 'command-runner'
-        ? executionSpecPathGuard(request.input as ExecutionSpec)
-        : undefined;
+    const pathGuard = workspaceToolAuthorizationGuard(
+      request.input,
+      facts.operation === 'read' || facts.operation === 'write' ? facts.operation : undefined,
+    );
     const evaluate = (reviewerDecision?: Awaited<ReturnType<AutoReviewer['review']>>) => {
       const input = {
         ...evaluationInput,
@@ -2648,29 +2684,34 @@ export class IpcRouter {
       evaluation.permit !== undefined
     ) {
       const permit = evaluation.permit;
-      return {
-        decision: 'allow' as const,
-        reason: evaluation.reason,
-        beforeExecute: () =>
-          this.permissionBroker.revalidate({
-            ...evaluationInput,
-            basePolicy: {
-              ...evaluationInput.basePolicy,
-              ...(reviewerDecision === undefined ? {} : { reviewerDecision }),
-            },
-            permit,
-            now: new Date().toISOString(),
-            ...(pathGuard === undefined ? {} : { pathGuard }),
-          }).valid,
-      };
+      const beforeExecute = () =>
+        this.permissionBroker.revalidate({
+          ...evaluationInput,
+          basePolicy: {
+            ...evaluationInput.basePolicy,
+            ...(reviewerDecision === undefined ? {} : { reviewerDecision }),
+          },
+          permit,
+          now: new Date().toISOString(),
+          ...(pathGuard === undefined ? {} : { pathGuard }),
+        }).valid;
+      // Provider-issued processes are never covered by a preset-wide silent grant. A policy deny
+      // still wins above; only an evaluated allow is upgraded to an explicit user approval.
+      return requireExplicitProviderCommandApproval(
+        { decision: 'allow' as const, reason: evaluation.reason, beforeExecute },
+        commandRunner,
+      );
     }
-    return {
-      decision: evaluation.decision === 'allow_once' ? ('deny' as const) : evaluation.decision,
-      reason:
-        evaluation.decision === 'allow_once'
-          ? 'permission_allow_once_missing_permit'
-          : evaluation.reason,
-    };
+    return requireExplicitProviderCommandApproval(
+      {
+        decision: evaluation.decision === 'allow_once' ? ('deny' as const) : evaluation.decision,
+        reason:
+          evaluation.decision === 'allow_once'
+            ? 'permission_allow_once_missing_permit'
+            : evaluation.reason,
+      },
+      commandRunner,
+    );
   }
 
   private dispatchStarted(started: StartedTurn): void {
@@ -3540,6 +3581,7 @@ export class IpcRouter {
         modelCatalogQueried = true;
       },
     };
+    let workspaceToolSnapshot: ToolCatalogSnapshot | undefined;
     try {
       const connection = await this.providerVerification.requireVerifiedForExecution(
         connectionId,
@@ -3570,13 +3612,39 @@ export class IpcRouter {
       }));
       messages.unshift(...projectContextProviderMessages(context.projectItems));
       if (memoryTurn) messages.unshift({ role: 'system', content: PROJECT_MEMORY_MCP_GUIDANCE });
+      const selectedModel = this.modelCatalog.find(connectionId, modelId);
+      const workspaceToolsEligible = providerWorkspaceToolsEligible(
+        teamTurn,
+        started.workspaceSet.roots.length,
+        selectedModel?.toolCalling.value,
+      );
+      workspaceToolSnapshot = workspaceToolsEligible
+        ? this.providerWorkspaceTools.startTurn(
+            {
+              taskId,
+              turnId: started.turnId,
+              workspaceId: started.workspaceSet.digest,
+              policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
+            },
+            connection.providerId,
+          )
+        : undefined;
+      if (!teamTurn)
+        messages.unshift({
+          role: 'system',
+          content: workspaceToolsEligible ? PROVIDER_WORKSPACE_GUIDANCE : PROVIDER_NO_TOOL_GUIDANCE,
+        });
+      let roundTools = assertUniqueProviderTools([
+        ...(teamTurn ? LEADER_PROVIDER_TOOLS : []),
+        ...(memoryTurn ? [PROJECT_MEMORY_PROVIDER_TOOL] : []),
+        ...(workspaceToolSnapshot === undefined
+          ? []
+          : providerToolsFromSnapshot(workspaceToolSnapshot)),
+      ]);
+      const seenProviderToolCallIds = new Set<string>();
       let aggregateUsage: NormalizedProviderUsage | undefined;
       let finished = false;
       for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
-        const roundTools = [
-          ...(teamTurn ? LEADER_PROVIDER_TOOLS : []),
-          ...(memoryTurn ? [PROJECT_MEMORY_PROVIDER_TOOL] : []),
-        ];
         const roundPayloadBytes = Buffer.from(
           JSON.stringify({ messages, tools: roundTools }),
           'utf8',
@@ -3608,6 +3676,7 @@ export class IpcRouter {
         if (!egress.allowed) throw new Error('Provider egress was denied by policy');
         const roundToolCalls: ProviderMessageToolCall[] = [];
         const roundOutput: string[] = [];
+        let roundError: Extract<CanonicalProviderEvent, { type: 'error' }>['error'] | undefined;
         let roundCompleted = false;
         for await (const providerEvent of runtime.execute(
           connection,
@@ -3624,25 +3693,34 @@ export class IpcRouter {
         )) {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
           if (providerEvent.type === 'tool_call') {
-            if (!teamTurn && !memoryTurn)
-              throw new Error('Provider requested a tool that is not available for this Turn');
             const knownTeamTool =
               teamTurn && LEADER_PROVIDER_TOOLS.some((tool) => tool.name === providerEvent.name);
             const knownMemoryTool =
               memoryTurn && providerEvent.name === PROJECT_MEMORY_PROVIDER_TOOL.name;
-            if (!knownTeamTool && !knownMemoryTool)
+            const knownWorkspaceTool = workspaceToolSnapshot?.entries.some(
+              (tool) => tool.providerName === providerEvent.name,
+            );
+            if (!knownTeamTool && !knownMemoryTool && !knownWorkspaceTool)
               throw new Error(`Provider Leader requested unknown tool: ${providerEvent.name}`);
-            if (roundToolCalls.some((toolCall) => toolCall.callId === providerEvent.callId))
+            if (seenProviderToolCallIds.has(providerEvent.callId))
               throw new Error(`Provider Leader repeated tool call ID: ${providerEvent.callId}`);
+            seenProviderToolCallIds.add(providerEvent.callId);
             roundToolCalls.push({
               callId: providerEvent.callId,
               name: providerEvent.name,
               input: providerEvent.input,
+              ...(providerEvent.providerMetadata === undefined
+                ? {}
+                : { providerMetadata: providerEvent.providerMetadata }),
             });
             continue;
           }
           if (providerEvent.type === 'usage')
             aggregateUsage = mergeProviderTurnUsage(aggregateUsage, providerEvent.usage);
+          if (providerEvent.type === 'error') {
+            roundError = providerEvent.error;
+            continue;
+          }
           await this.mailbox.run(taskId, () => {
             if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
             if (providerEvent.type === 'reasoning_delta') {
@@ -3664,6 +3742,30 @@ export class IpcRouter {
               this.applyProviderTurnEvent(taskId, started.turnId, providerEvent);
             if (providerEvent.type === 'completed') roundCompleted = true;
           });
+        }
+        if (roundError !== undefined) {
+          const canRetryWithoutWorkspaceTools = shouldRetryProviderWithoutTools({
+            ordinal,
+            workspaceToolsBound: workspaceToolSnapshot !== undefined,
+            toolCalling: selectedModel?.toolCalling.value,
+            errorCategory: roundError.category,
+            toolCallCount: roundToolCalls.length,
+            outputLength: roundOutput.join('').length,
+          });
+          if (canRetryWithoutWorkspaceTools) {
+            roundTools = Object.freeze([]);
+            const guidanceIndex = messages.findIndex(
+              ({ role, content }) => role === 'system' && content === PROVIDER_WORKSPACE_GUIDANCE,
+            );
+            if (guidanceIndex >= 0)
+              messages[guidanceIndex] = { role: 'system', content: PROVIDER_NO_TOOL_GUIDANCE };
+            else messages.unshift({ role: 'system', content: PROVIDER_NO_TOOL_GUIDANCE });
+            for (let index = messages.length - 1; index >= 0; index -= 1)
+              if (messages[index]?.content === PROJECT_MEMORY_MCP_GUIDANCE)
+                messages.splice(index, 1);
+            continue;
+          }
+          throw new Error('Provider execution failed');
         }
         if (!roundCompleted) throw new Error('Provider stream ended without a completion event');
         if (
@@ -3690,24 +3792,82 @@ export class IpcRouter {
           content: roundOutput.join(''),
           toolCalls: roundToolCalls,
         });
+        const invalidToolCall = roundToolCalls.find((toolCall) => {
+          const definition = roundTools.find(({ name }) => name === toolCall.name);
+          return (
+            definition === undefined ||
+            !toolValueMatchesSchema(definition.inputSchema as never, toolCall.input)
+          );
+        });
+        if (invalidToolCall !== undefined) {
+          for (const toolCall of roundToolCalls)
+            messages.push({
+              role: 'tool',
+              content: providerToolErrorContent(
+                'INVALID_TOOL_INPUT',
+                `Tool input validation failed for ${invalidToolCall.name}`,
+              ),
+              toolCallId: toolCall.callId,
+              toolName: toolCall.name,
+            });
+          continue;
+        }
         for (const toolCall of roundToolCalls) {
-          const result =
-            toolCall.name === PROJECT_MEMORY_PROVIDER_TOOL.name
-              ? await this.queueProjectMemoryCandidate(toolCall.input, {
-                  taskId,
-                  turnId: started.turnId,
-                })
-              : await executeTeamTool(this.teamCoordinator, taskId, toolCall.name, toolCall.input, {
-                  contextOwner: { type: 'turn', id: started.turnId },
-                  longPoll:
-                    toolCall.name === 'team_wait_reports' || toolCall.name === 'team_wait_events',
-                  waitReportsCursor: reportCursor,
-                  listModelCandidates: (query) => this.listTeamModelCandidates(query),
-                  modelCatalogAudit,
-                });
+          const workspaceTool = workspaceToolSnapshot?.entries.some(
+            ({ providerName }) => providerName === toolCall.name,
+          );
+          let content: string;
+          if (workspaceTool) {
+            try {
+              const result = await this.providerWorkspaceTools.broker.dispatch({
+                taskId,
+                turnId: started.turnId,
+                callId: toolCall.callId,
+                providerName: toolCall.name,
+                input: toolCall.input,
+                signal: controller.signal,
+              });
+              if (isCommittedProviderWorkspaceMutation(result)) {
+                const root = started.workspaceSet.roots.find(
+                  ({ rootId }) => rootId === result.rootId,
+                );
+                if (root !== undefined)
+                  this.recordFileChanges(taskId, started.turnId, [
+                    { path: resolvePath(root.path, result.path), kind: result.kind },
+                  ]);
+              }
+              content = redactSecrets(JSON.stringify({ ok: true, result }));
+            } catch (error) {
+              if (controller.signal.aborted) throw error;
+              content = providerWorkspaceToolFailure(error);
+            }
+          } else {
+            const result =
+              toolCall.name === PROJECT_MEMORY_PROVIDER_TOOL.name
+                ? await this.queueProjectMemoryCandidate(toolCall.input, {
+                    taskId,
+                    turnId: started.turnId,
+                  })
+                : await executeTeamTool(
+                    this.teamCoordinator,
+                    taskId,
+                    toolCall.name,
+                    toolCall.input,
+                    {
+                      contextOwner: { type: 'turn', id: started.turnId },
+                      longPoll:
+                        toolCall.name === 'team_wait_reports' ||
+                        toolCall.name === 'team_wait_events',
+                      waitReportsCursor: reportCursor,
+                      listModelCandidates: (query) => this.listTeamModelCandidates(query),
+                      modelCatalogAudit,
+                    },
+                  );
+            content = redactSecrets(JSON.stringify(result ?? null));
+          }
           messages.push({
             role: 'tool',
-            content: JSON.stringify(result ?? null),
+            content,
             toolCallId: toolCall.callId,
             toolName: toolCall.name,
           });
@@ -3728,6 +3888,8 @@ export class IpcRouter {
         this.finishAndAdvance(taskId, started.turnId, 'failed');
       });
     } finally {
+      if (workspaceToolSnapshot !== undefined)
+        this.providerWorkspaceTools.finishTurn(taskId, started.turnId);
       if (this.providerAbortByTurn.get(started.turnId) === controller)
         this.providerAbortByTurn.delete(started.turnId);
     }
@@ -4343,6 +4505,82 @@ function providerModelsForBuiltin(
     multimodalInput: unknown,
     reasoning: unknown,
   }));
+}
+
+function assertUniqueProviderTools<T extends { name: string }>(tools: readonly T[]): readonly T[] {
+  const names = new Set<string>();
+  for (const tool of tools) {
+    if (names.has(tool.name)) throw new Error(`Provider tool name collision: ${tool.name}`);
+    names.add(tool.name);
+  }
+  return Object.freeze([...tools]);
+}
+
+export function providerWorkspaceToolsEligible(
+  teamTurn: boolean,
+  workspaceRootCount: number,
+  toolCalling: boolean | null | undefined,
+): boolean {
+  return !teamTurn && workspaceRootCount > 0 && toolCalling !== false;
+}
+
+export function requireExplicitProviderCommandApproval(
+  decision: ToolAuthorizationDecision,
+  commandRunner: boolean,
+): ToolAuthorizationDecision {
+  if (!commandRunner || decision.decision !== 'allow') return decision;
+  return {
+    decision: 'approval_required',
+    reason: 'provider_command_requires_explicit_approval',
+    ...(decision.beforeExecute === undefined ? {} : { beforeExecute: decision.beforeExecute }),
+  };
+}
+
+export function shouldRetryProviderWithoutTools(input: {
+  ordinal: number;
+  workspaceToolsBound: boolean;
+  toolCalling: boolean | null | undefined;
+  errorCategory: NormalizedProviderError['category'];
+  toolCallCount: number;
+  outputLength: number;
+}): boolean {
+  return (
+    input.ordinal === 1 &&
+    input.workspaceToolsBound &&
+    input.toolCalling == null &&
+    input.errorCategory === 'invalid_request' &&
+    input.toolCallCount === 0 &&
+    input.outputLength === 0
+  );
+}
+
+function providerWorkspaceToolFailure(error: unknown): string {
+  if (error instanceof ToolAuthorizationDeniedError)
+    return providerToolErrorContent('PERMISSION_DENIED', error.authorization.reason);
+  if (error instanceof WorkspaceToolRejection)
+    return providerToolErrorContent(error.code, error.message);
+  secureLogger.error('Provider workspace tool execution failed', { error });
+  return providerToolErrorContent('TOOL_EXECUTION_FAILED', 'Workspace tool execution failed');
+}
+
+function providerToolErrorContent(code: string, message: string): string {
+  return redactSecrets(JSON.stringify({ ok: false, error: { code, message } }));
+}
+
+function isCommittedProviderWorkspaceMutation(result: unknown): result is Readonly<{
+  rootId: string;
+  path: string;
+  kind: 'add' | 'update';
+  state: 'committed';
+}> {
+  if (typeof result !== 'object' || result === null || Array.isArray(result)) return false;
+  const record = result as Record<string, unknown>;
+  return (
+    record['state'] === 'committed' &&
+    (record['kind'] === 'add' || record['kind'] === 'update') &&
+    typeof record['rootId'] === 'string' &&
+    typeof record['path'] === 'string'
+  );
 }
 
 function getRequestId(raw: unknown): string {

@@ -181,6 +181,12 @@ export class ToolBroker {
         reason: 'execution_revalidation_failed',
       });
     }
+    if (request.signal?.aborted) {
+      await implementation.authorizationDenied?.(pinnedInput, bound.context);
+      throw request.signal.reason instanceof Error
+        ? request.signal.reason
+        : new Error('Tool dispatch was canceled before execution');
+    }
     const output = await implementation.execute(pinnedInput, bound.context, {
       callId: request.callId,
       ...(request.signal === undefined ? {} : { signal: request.signal }),

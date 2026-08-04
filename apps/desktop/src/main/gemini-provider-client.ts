@@ -166,7 +166,7 @@ export class GeminiProviderClient implements ProviderRuntime {
         };
         return;
       }
-      yield* normalizeGeminiContentStream(response.body, parsed.modelId);
+      yield* normalizeGeminiContentStream(response.body, parsed.modelId, parsed.executionId);
     } catch {
       yield {
         type: 'error',
@@ -253,6 +253,13 @@ function geminiGenerateRequest(request: ProviderExecutionRequest): Record<string
     .filter((message) => message.role === 'system')
     .map((message) => message.content)
     .join('\n\n');
+  const toolCallMetadata = new Map(
+    request.messages.flatMap((message) =>
+      (message.toolCalls ?? []).map(
+        (toolCall) => [toolCall.callId, toolCall.providerMetadata] as const,
+      ),
+    ),
+  );
   return {
     ...(system === '' ? {} : { systemInstruction: { parts: [{ text: system }] } }),
     contents: request.messages
@@ -264,7 +271,10 @@ function geminiGenerateRequest(request: ProviderExecutionRequest): Record<string
               parts: [
                 {
                   functionResponse: {
-                    id: message.toolCallId,
+                    ...(toolCallMetadata.get(message.toolCallId ?? '')?.geminiCallIdPresent ===
+                    false
+                      ? {}
+                      : { id: message.toolCallId }),
                     name: message.toolName ?? message.toolCallId,
                     response: { output: message.content },
                   },
@@ -277,10 +287,17 @@ function geminiGenerateRequest(request: ProviderExecutionRequest): Record<string
                 ...(message.content === '' ? [] : [{ text: message.content }]),
                 ...(message.toolCalls ?? []).map((toolCall) => ({
                   functionCall: {
-                    id: toolCall.callId,
+                    ...(toolCall.providerMetadata?.geminiCallIdPresent === false
+                      ? {}
+                      : { id: toolCall.callId }),
                     name: toolCall.name,
                     args: toolCall.input,
                   },
+                  ...(toolCall.providerMetadata?.geminiThoughtSignature === undefined
+                    ? {}
+                    : {
+                        thoughtSignature: toolCall.providerMetadata.geminiThoughtSignature,
+                      }),
                 })),
                 ...(message.inlineImages ?? []).map((image) => ({
                   inlineData: {

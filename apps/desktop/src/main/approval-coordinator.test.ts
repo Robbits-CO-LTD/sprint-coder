@@ -12,7 +12,13 @@ import {
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
-import { ToolBroker, type ToolAuthorizationRequest } from './tool-broker';
+import {
+  ToolBroker,
+  type ToolAuthorizationDecision,
+  type ToolAuthorizationRequest,
+} from './tool-broker';
+import { ProviderWorkspaceTools } from './provider-workspace-tools';
+import { FileRevisionRegistry } from './file-revision';
 
 const NOW = '2026-07-22T12:00:00.000Z';
 const EXPIRES_AT = '2026-07-22T13:00:00.000Z';
@@ -34,6 +40,7 @@ type StoredApproval = {
   state: ApprovalState;
   decision: Decision | null;
   expiresAt: string;
+  display?: { target: string; impact: string; execution: string };
 };
 
 type StoredGrant = {
@@ -167,7 +174,7 @@ function createHarness(input?: {
   evaluatePermission?: (input: {
     capability: Capability;
     request: ToolAuthorizationRequest;
-  }) => 'allow' | 'deny' | 'approval_required';
+  }) => ToolAuthorizationDecision | 'allow' | 'deny' | 'approval_required';
 }) {
   const persistence = new InMemoryApprovalPersistence();
   const published: StoredApproval[] = [];
@@ -276,6 +283,58 @@ function resolveCommand(approval: StoredApproval, decision: Decision) {
 }
 
 describe('ApprovalCoordinator', () => {
+  it('never persists file content or patch text in an approval display', async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-approval-redaction-'));
+    try {
+      const harness = createHarness();
+      const workspace = {
+        source: 'task' as const,
+        projectId: null,
+        primaryRootId: 'root-a',
+        roots: [
+          {
+            rootId: 'root-a',
+            path: workspacePath,
+            label: 'Workspace',
+            role: 'primary' as const,
+            status: 'available' as const,
+          },
+        ],
+        digest: 'd'.repeat(64),
+      };
+      const tools = new ProviderWorkspaceTools({
+        workspaceFor: () => workspace,
+        rootIdentityFor: () => undefined,
+        policyEpochFor: () => 7,
+        authorizer: harness.coordinator.authorizeTool.bind(harness.coordinator),
+        workspaceEdit: {
+          turnWorkspaceSetFor: () => workspace,
+          turnRootMutationBindingsFor: () => new Map(),
+          revisions: new FileRevisionRegistry(),
+          apply: async () => {
+            throw new Error('not executed');
+          },
+          policyEpochFor: () => 7,
+        },
+      });
+      tools.startTurn(toolContext, 'ollama');
+      const pending = tools.broker.dispatch({
+        ...toolContext,
+        callId: 'content-call',
+        providerName: 'create_file',
+        input: { path: 'bot.py', content: 'SUPER_SECRET_SOURCE' },
+      });
+      const approval = await waitForPublished(harness);
+      expect(approval.display?.target).toBe('bot.py');
+      expect(approval.display?.execution).toContain('contentDigest');
+      expect(approval.display?.execution).not.toContain('SUPER_SECRET_SOURCE');
+      harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+      await expect(pending).rejects.toThrow();
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
   it('binds command approval facts to the sealed ExecutionSpec digest and Workspace cwd', async () => {
     const registry = new ToolRegistry();
     const definition = createToolDefinition({
@@ -576,6 +635,34 @@ describe('ApprovalCoordinator', () => {
 
     expect(evaluated).toEqual(['network.fetch', 'provider.egress']);
     expect(harness.published).toHaveLength(0);
+    expect(executions()).toBe(0);
+  });
+
+  it('revalidates a policy allow that was upgraded to explicit approval', async () => {
+    let policyValid = true;
+    const harness = createHarness({
+      evaluatePermission: () => ({
+        decision: 'approval_required',
+        reason: 'provider_command_requires_explicit_approval',
+        beforeExecute: () => policyValid,
+      }),
+    });
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const dispatch = broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-policy-revalidation',
+      providerName: 'approval_fetch',
+      input: { origin: 'https://example.test' },
+    });
+    await viWaitFor(() => harness.published.length === 1);
+    policyValid = false;
+    harness.coordinator.resolve(resolveCommand(harness.published[0]!, 'allow_once'));
+
+    await expect(dispatch).rejects.toThrow('Tool authorization deny');
     expect(executions()).toBe(0);
   });
 

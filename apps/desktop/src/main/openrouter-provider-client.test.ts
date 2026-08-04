@@ -163,4 +163,55 @@ describe('OpenRouterCatalogClient', () => {
       // Request assertion is the regression proof.
     }
   });
+
+  it('preserves function calls and correlated results across Provider rounds', async () => {
+    const client = new OpenRouterCatalogClient(
+      () => ({ apiKey: 'openrouter-key' }),
+      async (_input, init) => {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          input: [
+            {
+              type: 'function_call',
+              call_id: 'call-1',
+              name: 'read_file',
+              arguments: '{"path":"README.md"}',
+            },
+            {
+              type: 'function_call_output',
+              call_id: 'call-1',
+              output: '{"ok":true}',
+            },
+          ],
+        });
+        return new Response(
+          'data: {"type":"response.done","response":{"status":"completed","model":"openai/gpt-5.2","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+        );
+      },
+    );
+
+    for await (const _event of client.execute(
+      connection,
+      {
+        executionId: 'execution-tool-history',
+        connectionId: connection.id,
+        modelId: 'openai/gpt-5.2',
+        messages: [
+          {
+            role: 'assistant',
+            content: '',
+            toolCalls: [{ callId: 'call-1', name: 'read_file', input: { path: 'README.md' } }],
+          },
+          {
+            role: 'tool',
+            content: '{"ok":true}',
+            toolCallId: 'call-1',
+            toolName: 'read_file',
+          },
+        ],
+      },
+      new AbortController().signal,
+    )) {
+      // Request assertion is the regression proof.
+    }
+  });
 });

@@ -26,6 +26,12 @@ export class ModelCatalogService {
     return this.indexBuildCountValue;
   }
 
+  find(connectionId: string, modelId: string): ProviderModel | undefined {
+    return this.indexed.find(
+      ({ model }) => model.connectionId === connectionId && model.modelId === modelId,
+    )?.model;
+  }
+
   replaceCatalog(
     models: readonly ProviderModel[],
     subscriptionConnectionIds: ReadonlySet<string> = new Set(),

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   CanonicalProviderEvent,
   ProviderConnection,
+  ProviderMessageToolCall,
   ProviderRuntimeKind,
 } from '@sprint-coder/contracts';
 import { AnthropicProviderClient } from './anthropic-provider-client';
@@ -15,6 +16,7 @@ import type { ProviderRuntime } from './provider-runtime';
 import { XAIProviderClient } from './xai-provider-client';
 
 const SMOKE_ENABLED = process.env.SPRINT_CODER_PROVIDER_SMOKE === '1';
+const TOOL_SMOKE_ENABLED = process.env.SPRINT_CODER_PROVIDER_TOOL_SMOKE === '1';
 const REQUIRED_PROVIDERS = new Set(
   (process.env.SPRINT_CODER_PROVIDER_SMOKE_REQUIRED ?? '')
     .split(',')
@@ -231,6 +233,101 @@ describe.skipIf(!SMOKE_ENABLED)('Provider release smoke', () => {
               status: 'green',
             })}\n`,
           );
+        } finally {
+          clearTimeout(timeout);
+          controller.abort();
+        }
+      },
+      TIMEOUT_MS + 5_000,
+    );
+
+    it.skipIf(!selected || !TOOL_SMOKE_ENABLED)(
+      `${smokeCase.displayName}: tool call, tool result, final response`,
+      async () => {
+        if (!runnable)
+          throw new Error(
+            `${smokeCase.providerId} is required but ${smokeCase.keyEnvironment} is not configured`,
+          );
+        const modelId = optionalEnvironment(smokeCase.modelEnvironment) ?? smokeCase.defaultModel;
+        if (modelId === undefined)
+          throw new Error(`${smokeCase.providerId} requires ${smokeCase.modelEnvironment}`);
+        const runtime = smokeCase.createRuntime();
+        const connection = connectionFor(smokeCase);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+        try {
+          const firstEvents: CanonicalProviderEvent[] = [];
+          for await (const event of runtime.execute(
+            connection,
+            {
+              executionId: `release-tool-smoke-${smokeCase.providerId}-1`,
+              connectionId: connection.id,
+              modelId,
+              messages: [
+                {
+                  role: 'user',
+                  content:
+                    'Call create_directory exactly once with path discord-mcp. Do not answer before calling it.',
+                },
+              ],
+              tools: [
+                {
+                  name: 'create_directory',
+                  description: 'Create one directory',
+                  inputSchema: {
+                    type: 'object',
+                    properties: { path: { type: 'string' } },
+                    required: ['path'],
+                    additionalProperties: false,
+                  },
+                },
+              ],
+            },
+            controller.signal,
+          ))
+            firstEvents.push(event);
+          const call = firstEvents.find(
+            (event): event is Extract<CanonicalProviderEvent, { type: 'tool_call' }> =>
+              event.type === 'tool_call',
+          );
+          expect(call).toMatchObject({ name: 'create_directory', input: { path: 'discord-mcp' } });
+          const toolCall: ProviderMessageToolCall = {
+            callId: call!.callId,
+            name: call!.name,
+            input: call!.input,
+            ...(call!.providerMetadata === undefined
+              ? {}
+              : { providerMetadata: call!.providerMetadata }),
+          };
+          const secondEvents: CanonicalProviderEvent[] = [];
+          for await (const event of runtime.execute(
+            connection,
+            {
+              executionId: `release-tool-smoke-${smokeCase.providerId}-2`,
+              connectionId: connection.id,
+              modelId,
+              messages: [
+                { role: 'assistant', content: '', toolCalls: [toolCall] },
+                {
+                  role: 'tool',
+                  content: '{"ok":true,"result":{"path":"discord-mcp"}}',
+                  toolCallId: toolCall.callId,
+                  toolName: toolCall.name,
+                },
+              ],
+              tools: [
+                {
+                  name: 'create_directory',
+                  description: 'Create one directory',
+                  inputSchema: { type: 'object' },
+                },
+              ],
+            },
+            controller.signal,
+          ))
+            secondEvents.push(event);
+          expect(secondEvents.some((event) => event.type === 'output_delta')).toBe(true);
+          expect(secondEvents.at(-1)?.type).toBe('completed');
         } finally {
           clearTimeout(timeout);
           controller.abort();
