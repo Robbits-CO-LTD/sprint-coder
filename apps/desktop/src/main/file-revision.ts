@@ -101,7 +101,11 @@ export class FileRevisionRegistry {
     const read = await readRevisionBoundFileFromGuard(input);
     this.records.set(
       read.token.id,
-      Object.freeze({ owner: Object.freeze({ ...input.owner }), content: read.content, token: read.token }),
+      Object.freeze({
+        owner: Object.freeze({ ...input.owner }),
+        content: read.content,
+        token: read.token,
+      }),
     );
     return Object.freeze({
       content: read.content,

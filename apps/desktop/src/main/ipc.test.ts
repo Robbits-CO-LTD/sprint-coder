@@ -247,9 +247,7 @@ describe('Provider workspace tool capability fallback', () => {
     expect(shouldRetryProviderWithoutTools({ ...base, toolCalling: true })).toBe(false);
     expect(shouldRetryProviderWithoutTools({ ...base, toolCallCount: 1 })).toBe(false);
     expect(shouldRetryProviderWithoutTools({ ...base, outputLength: 1 })).toBe(false);
-    expect(
-      shouldRetryProviderWithoutTools({ ...base, errorCategory: 'rate_limited' }),
-    ).toBe(false);
+    expect(shouldRetryProviderWithoutTools({ ...base, errorCategory: 'rate_limited' })).toBe(false);
   });
 });
 

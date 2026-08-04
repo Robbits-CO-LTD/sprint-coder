@@ -255,7 +255,9 @@ function geminiGenerateRequest(request: ProviderExecutionRequest): Record<string
     .join('\n\n');
   const toolCallMetadata = new Map(
     request.messages.flatMap((message) =>
-      (message.toolCalls ?? []).map((toolCall) => [toolCall.callId, toolCall.providerMetadata] as const),
+      (message.toolCalls ?? []).map(
+        (toolCall) => [toolCall.callId, toolCall.providerMetadata] as const,
+      ),
     ),
   );
   return {
@@ -269,7 +271,8 @@ function geminiGenerateRequest(request: ProviderExecutionRequest): Record<string
               parts: [
                 {
                   functionResponse: {
-                    ...(toolCallMetadata.get(message.toolCallId ?? '')?.geminiCallIdPresent === false
+                    ...(toolCallMetadata.get(message.toolCallId ?? '')?.geminiCallIdPresent ===
+                    false
                       ? {}
                       : { id: message.toolCallId }),
                     name: message.toolName ?? message.toolCallId,
@@ -293,8 +296,7 @@ function geminiGenerateRequest(request: ProviderExecutionRequest): Record<string
                   ...(toolCall.providerMetadata?.geminiThoughtSignature === undefined
                     ? {}
                     : {
-                        thoughtSignature:
-                          toolCall.providerMetadata.geminiThoughtSignature,
+                        thoughtSignature: toolCall.providerMetadata.geminiThoughtSignature,
                       }),
                 })),
                 ...(message.inlineImages ?? []).map((image) => ({

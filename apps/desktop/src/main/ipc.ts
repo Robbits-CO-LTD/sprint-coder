@@ -220,10 +220,7 @@ import {
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
-import {
-  ToolAuthorizationDeniedError,
-  type ToolAuthorizationRequest,
-} from './tool-broker';
+import { ToolAuthorizationDeniedError, type ToolAuthorizationRequest } from './tool-broker';
 import type { RuntimeCanonicalEvent, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import {
@@ -3634,9 +3631,7 @@ export class IpcRouter {
       if (!teamTurn)
         messages.unshift({
           role: 'system',
-          content: workspaceToolsEligible
-            ? PROVIDER_WORKSPACE_GUIDANCE
-            : PROVIDER_NO_TOOL_GUIDANCE,
+          content: workspaceToolsEligible ? PROVIDER_WORKSPACE_GUIDANCE : PROVIDER_NO_TOOL_GUIDANCE,
         });
       let roundTools = assertUniqueProviderTools([
         ...(teamTurn ? LEADER_PROVIDER_TOOLS : []),
@@ -4559,9 +4554,7 @@ function providerToolErrorContent(code: string, message: string): string {
   return redactSecrets(JSON.stringify({ ok: false, error: { code, message } }));
 }
 
-function isCommittedProviderWorkspaceMutation(
-  result: unknown,
-): result is Readonly<{
+function isCommittedProviderWorkspaceMutation(result: unknown): result is Readonly<{
   rootId: string;
   path: string;
   kind: 'add' | 'update';

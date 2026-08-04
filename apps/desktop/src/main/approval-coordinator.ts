@@ -10,10 +10,7 @@ import type {
 import { executionSpecDigest, validateExecutionSpec } from '@sprint-coder/domain';
 import type { ToolAuthorizationDecision, ToolAuthorizationRequest } from './tool-broker';
 import type { ApprovalRequestInput, ApprovalResolutionInput } from './persistence';
-import {
-  pathGuardIdentityDigest,
-  workspacePermissionResourceFromGuard,
-} from './path-guard';
+import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
 import { workspaceToolAuthorizationGuard } from './provider-workspace-tools';
 
 type ApprovalLike = {
@@ -471,7 +468,10 @@ function safeApprovalExecution(request: ToolAuthorizationRequest): string {
       ...(edits === undefined ? {} : { editCount: edits.length, editsDigest: digest(edits) }),
     });
   }
-  if (request.entry.implementationKind === 'command-runner' && validateExecutionSpec(request.input)) {
+  if (
+    request.entry.implementationKind === 'command-runner' &&
+    validateExecutionSpec(request.input)
+  ) {
     const spec = request.input as ExecutionSpec;
     return stableStringify({
       executable: spec.absoluteExecutable,

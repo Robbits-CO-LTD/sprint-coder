@@ -4,7 +4,9 @@ import { normalizeGeminiContentStream } from './gemini-content-stream';
 describe('normalizeGeminiContentStream', () => {
   it('generates round-unique local IDs without claiming Gemini supplied them', async () => {
     const eventBody = () =>
-      sse([{ candidates: [{ content: { parts: [{ functionCall: { name: 'lookup', args: {} } }] } }] }]);
+      sse([
+        { candidates: [{ content: { parts: [{ functionCall: { name: 'lookup', args: {} } }] } }] },
+      ]);
     const collect = async (executionId: string) => {
       const events = [];
       for await (const event of normalizeGeminiContentStream(

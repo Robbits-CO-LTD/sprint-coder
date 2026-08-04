@@ -374,12 +374,15 @@ async function wireEditSagaRecovery(
     return {
       turnWorkspaceSetFor: (taskId, turnId) =>
         persistence.readTurnWorkspaceSetForTask(taskId, turnId),
-      turnRootMutationBindingsFor: (turnId) =>
-        persistence.getTurnWorkspaceMutationBindings(turnId),
+      turnRootMutationBindingsFor: (turnId) => persistence.getTurnWorkspaceMutationBindings(turnId),
       revisions: new FileRevisionRegistry(),
       apply: (request) => executor.apply(request),
       createDirectory: async ({ taskId, turnId, rootId, path, guard }) => {
-        if (!isIssuedPathGuard(guard) || guard.operation !== 'write' || guard.targetIdentity !== null)
+        if (
+          !isIssuedPathGuard(guard) ||
+          guard.operation !== 'write' ||
+          guard.targetIdentity !== null
+        )
           throw new Error('create_directory requires an issued missing-target write guard');
         await revalidatePathGuard(guard);
         const binding = persistence.getTurnWorkspaceMutationBindings(turnId).get(rootId);

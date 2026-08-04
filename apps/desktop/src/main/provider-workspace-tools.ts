@@ -395,10 +395,13 @@ export function workspaceToolAuthorizationGuard(
   input: unknown,
   operation?: 'read' | 'write',
 ): PathGuard | undefined {
-  if (typeof input !== 'object' || input === null || !issuedPreparedInputs.has(input)) return undefined;
+  if (typeof input !== 'object' || input === null || !issuedPreparedInputs.has(input))
+    return undefined;
   const prepared = input as PreparedWorkspaceInput;
   if (operation === 'read' && prepared.readGuard !== undefined) return prepared.readGuard;
-  return prepared.guard.operation === operation || operation === undefined ? prepared.guard : undefined;
+  return prepared.guard.operation === operation || operation === undefined
+    ? prepared.guard
+    : undefined;
 }
 
 async function listWorkspace(input: PreparedWorkspaceInput): Promise<{
@@ -448,8 +451,7 @@ function parseWorkspaceInput(
     (typeof record['rootId'] !== 'string' || record['rootId'].length === 0)
   )
     throw new Error('rootId must be a non-empty string');
-  if (requirePath && typeof record['path'] !== 'string')
-    throw new Error('path must be a string');
+  if (requirePath && typeof record['path'] !== 'string') throw new Error('path must be a string');
   if (record['path'] !== undefined && typeof record['path'] !== 'string')
     throw new Error('path must be a string');
   return {

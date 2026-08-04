@@ -307,7 +307,13 @@ export async function executeWorkspaceCreateFile(
         }),
     createdAt: (deps.now ?? (() => new Date().toISOString()))(),
   });
-  return { rootId: root.rootId, path: request.path, sagaId: saga.id, state: saga.state, kind: 'add' };
+  return {
+    rootId: root.rootId,
+    path: request.path,
+    sagaId: saga.id,
+    state: saga.state,
+    kind: 'add',
+  };
 }
 
 function assertApprovedPatchTarget(
