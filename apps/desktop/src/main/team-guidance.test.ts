@@ -54,9 +54,18 @@ describe('builtin Team skill', () => {
       '１０人で実装して',
       '合計10名構成で検証して',
       '合計10名（深度0×1・1×3・2×6）を作成して',
+      '/team リポジトリを並列調査して',
+      '/TEAM\n設計と実装を分担して',
     ])
       expect(isTeamScenarioInput(input), input).toBe(true);
-    for (const input of ['簡単に説明して', '一人称を直して', 'teamworkについて説明して'])
+    for (const input of [
+      '簡単に説明して',
+      '一人称を直して',
+      'teamworkについて説明して',
+      '/team',
+      '/teamworkについて説明して',
+      'READMEに /team 調査して と書いて',
+    ])
       expect(isTeamScenarioInput(input), input).toBe(false);
   });
 

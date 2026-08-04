@@ -15,6 +15,7 @@ import {
   filterSlashCommands,
   inheritedProjectForNewTask,
   removeSlashToken,
+  shouldOpenTeamCanvas,
   SLASH_COMMANDS,
   slashTokenAtCursor,
   type SlashCommand,
@@ -213,6 +214,15 @@ export function Composer({ taskId }: { taskId: string }) {
   function handleSend() {
     const raw = draft.trim();
     if (!raw || sendDisabled) return;
+    // Enter while the slash picker is open already runs `/team` through runSlashCommand. Keep the
+    // send button and `/team ` (with a trailing space) consistent: a standalone command opens the
+    // Canvas, while `/team <request>` remains a message and Main routes it through Sprint Coder
+    // Team. The explicit prefix stays in history as an auditable statement of Team intent.
+    if (shouldOpenTeamCanvas(raw, { goalRequested, imageRequested })) {
+      setDraft(taskId, '');
+      void toggleTeamView(taskId);
+      return;
+    }
     if (goalRequested) {
       setGoalRequested(false);
       setDraft(taskId, '');

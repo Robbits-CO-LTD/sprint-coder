@@ -26,8 +26,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
     id: 'team',
     command: '/team',
-    label: 'Teamを開く',
-    description: '現在のTaskのTeamビューを切り替えます',
+    label: 'Teamを使う',
+    description: '単体でTeamを開き、本文付きでSprint Coder Teamを実行します',
     keywords: ['agents', 'チーム', 'エージェント'],
   },
   {
@@ -43,6 +43,17 @@ export function inheritedProjectForNewTask(
   projectId: string | null | undefined,
 ): string | undefined {
   return projectId ?? undefined;
+}
+
+export function isStandaloneTeamCommand(input: string): boolean {
+  return input.trim().toLocaleLowerCase() === '/team';
+}
+
+export function shouldOpenTeamCanvas(
+  input: string,
+  modes: Readonly<{ goalRequested: boolean; imageRequested: boolean }>,
+): boolean {
+  return !modes.goalRequested && !modes.imageRequested && isStandaloneTeamCommand(input);
 }
 
 export type SlashTokenMatch = Readonly<{
