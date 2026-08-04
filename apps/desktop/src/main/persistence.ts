@@ -223,6 +223,7 @@ export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
     private readonly holderInstanceId: string,
     private readonly now: () => Date = () => new Date(),
     private readonly ttlMs = 60_000,
+    private readonly onReleased?: (lease: MutationLeaseToken) => Promise<void>,
   ) {
     validateMutationIdentifier(holderInstanceId, 'holder instance id');
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000)
@@ -261,8 +262,12 @@ export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
 
   async release(lease: unknown, saga: EditSagaSnapshot): Promise<void> {
     const token = this.requireIssued(lease, saga.id);
-    this.persistence.releaseMutationLease(token, this.now().toISOString());
-    this.issued.delete(saga.id);
+    try {
+      await this.onReleased?.(token);
+    } finally {
+      this.persistence.releaseMutationLease(token, this.now().toISOString());
+      this.issued.delete(saga.id);
+    }
   }
 
   private requireIssued(lease: unknown, sagaId: string): MutationLeaseToken {

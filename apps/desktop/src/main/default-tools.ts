@@ -71,8 +71,24 @@ export const COMMAND_RUNNER_TOOL = createToolDefinition({
   implementationKind: 'command-runner',
   priority: 10,
   workspaceBinding: { kind: 'any' },
-  providerCompatibility: ['mock', 'codex'],
+  providerCompatibility: ['*'],
 });
+
+export type CommandToolBoundary = Readonly<{
+  persistence: Pick<
+    PersistenceClient,
+    | 'readTurnWorkspaceSet'
+    | 'getTurnWorkspaceRootIdentities'
+    | 'prepareCommand'
+    | 'beginCommand'
+    | 'startCommand'
+    | 'appendCommandOutput'
+    | 'appendCommandOutputBatch'
+    | 'completeCommand'
+    | 'getCommand'
+  >;
+  publish(event: TurnEvent): void;
+}>;
 
 export const APPROVAL_PROBE_TOOL = createToolDefinition({
   toolId: createToolId({ provider: 'builtin', namespace: 'approval', name: 'probe', version: '1' }),
@@ -99,21 +115,7 @@ export const APPROVAL_PROBE_TOOL = createToolDefinition({
 export function createDefaultToolBroker(
   getCurrentPolicyEpoch: (taskId: string) => number,
   authorizer?: ToolAuthorizer,
-  command?: {
-    persistence: Pick<
-      PersistenceClient,
-      | 'readTurnWorkspaceSet'
-      | 'getTurnWorkspaceRootIdentities'
-      | 'prepareCommand'
-      | 'beginCommand'
-      | 'startCommand'
-      | 'appendCommandOutput'
-      | 'appendCommandOutputBatch'
-      | 'completeCommand'
-      | 'getCommand'
-    >;
-    publish(event: TurnEvent): void;
-  },
+  command?: CommandToolBoundary,
   // Leader team tools (Slice 5.2 / FR-TEAM-06): only registered when a TeamCoordinator is
   // supplied, i.e. only on the mock/intelligence-loop broker — real Codex/Claude adapters never
   // pass this bundle, so they stay no-tools per the current production boundary.
@@ -126,7 +128,6 @@ export function createDefaultToolBroker(
   workspaceEdit?: WorkspacePatchDeps,
 ): ToolBroker {
   const commandRunner = new CommandRunner();
-  const commandIds = new WeakMap<object, string>();
   const registry = new ToolRegistry();
   registry.register(MOCK_ECHO_TOOL);
   registry.register(COMMAND_RUNNER_TOOL);
@@ -169,6 +170,17 @@ export function createDefaultToolBroker(
       return (input as { text: string }).text;
     },
   });
+  registerCommandRunnerTool(broker, commandRunner, command);
+  if (team !== undefined) registerTeamTools(broker, team.coordinator);
+  return broker;
+}
+
+export function registerCommandRunnerTool(
+  broker: ToolBroker,
+  commandRunner: CommandRunner,
+  command?: CommandToolBoundary,
+): void {
+  const commandIds = new WeakMap<object, string>();
   broker.registerImplementation({
     toolId: COMMAND_RUNNER_TOOL.toolId,
     implementationKind: 'command-runner',
@@ -239,6 +251,7 @@ export function createDefaultToolBroker(
       const spec = input as ExecutionSpec;
       const commandId = commandIds.get(spec);
       if (commandId === undefined) throw new Error('Command ExecutionSpec has no durable identity');
+      const toolOutput = { stdout: '', stderr: '', truncated: false };
       try {
         const result = await commandRunner.run(spec, {
           ...(control.signal === undefined ? {} : { signal: control.signal }),
@@ -255,6 +268,7 @@ export function createDefaultToolBroker(
             command.publish(persisted.event);
           },
           onBatch: (chunks: readonly CommandOutputChunk[]) => {
+            for (const chunk of chunks) appendCommandToolOutput(toolOutput, chunk);
             const events = command.persistence.appendCommandOutputBatch({
               commandId,
               chunks,
@@ -265,7 +279,7 @@ export function createDefaultToolBroker(
         });
         const persisted = completePersistedCommand(command.persistence, commandId, result);
         command.publish(persisted.event);
-        return result;
+        return { ...result, ...toolOutput };
       } catch (error) {
         const current = command.persistence.getCommand(commandId);
         if (
@@ -288,8 +302,24 @@ export function createDefaultToolBroker(
       }
     },
   });
-  if (team !== undefined) registerTeamTools(broker, team.coordinator);
-  return broker;
+}
+
+const MAX_COMMAND_TOOL_OUTPUT_BYTES = 64 * 1024;
+
+function appendCommandToolOutput(
+  output: { stdout: string; stderr: string; truncated: boolean },
+  chunk: CommandOutputChunk,
+): void {
+  const used = Buffer.byteLength(output.stdout, 'utf8') + Buffer.byteLength(output.stderr, 'utf8');
+  const remaining = MAX_COMMAND_TOOL_OUTPUT_BYTES - used;
+  if (remaining <= 0) {
+    output.truncated = true;
+    return;
+  }
+  const bytes = Buffer.from(chunk.text, 'utf8');
+  const text = bytes.subarray(0, remaining).toString('utf8');
+  output[chunk.stream] += text;
+  if (bytes.byteLength > remaining) output.truncated = true;
 }
 
 function completePersistedCommand(

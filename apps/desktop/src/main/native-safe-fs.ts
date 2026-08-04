@@ -38,7 +38,7 @@ export type NativeSafeFsProbe = Readonly<{
     workspaceLock: boolean;
     durableFence: boolean;
     synchronousInvalidation: boolean;
-    mutation: false;
+    mutation: boolean;
   }>;
   unavailableReason: string | null;
 }>;
@@ -86,6 +86,7 @@ export interface NativeSafeFs {
     session: NativeSafeFsSession,
     intent: NativeMutationIntentSnapshot,
   ): Promise<Readonly<{ state: 'absent' }>>;
+  createDirectory(session: NativeSafeFsSession, pathSegments: readonly string[]): Promise<void>;
   closeSession(session: NativeSafeFsSession): Promise<void>;
 }
 
@@ -138,6 +139,7 @@ type RawAddon = Readonly<{
   stageIntentArtifact(input: RawStageInput, bytes: Buffer): Promise<unknown>;
   applyIntentEffect(input: RawEffectInput): Promise<unknown>;
   cleanupIntentAuxiliary(input: RawCleanupInput): Promise<unknown>;
+  createDirectory(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
   closeSession(id: string): Promise<unknown>;
 }>;
 
@@ -397,6 +399,35 @@ export function loadNativeSafeFs(
       }
     },
 
+    async createDirectory(
+      session: NativeSafeFsSession,
+      pathSegments: readonly string[],
+    ): Promise<void> {
+      assertIssuedSession(issuedSessions, session);
+      if (
+        pathSegments.length === 0 ||
+        pathSegments.length > 128 ||
+        pathSegments.some(
+          (segment) =>
+            typeof segment !== 'string' ||
+            segment.length === 0 ||
+            segment === '.' ||
+            segment === '..' ||
+            segment.length > 255 ||
+            /[\\/:\0]/.test(segment),
+        )
+      )
+        throw new NativeSafeFsError('INVALID_INPUT', 'Invalid NativeSafeFs directory path');
+      try {
+        await addon!.createDirectory(
+          Object.freeze({ sessionId: session.id, pathSegments: Object.freeze([...pathSegments]) }),
+        );
+        assertIssuedSession(issuedSessions, session);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
     async closeSession(session: NativeSafeFsSession): Promise<void> {
       if (addon === null)
         throw new NativeSafeFsError('ADDON_UNAVAILABLE', 'NativeSafeFs addon is unavailable');
@@ -423,6 +454,7 @@ function validateRawAddon(value: unknown): RawAddon {
     typeof (value as Partial<RawAddon>).stageIntentArtifact !== 'function' ||
     typeof (value as Partial<RawAddon>).applyIntentEffect !== 'function' ||
     typeof (value as Partial<RawAddon>).cleanupIntentAuxiliary !== 'function' ||
+    typeof (value as Partial<RawAddon>).createDirectory !== 'function' ||
     typeof (value as Partial<RawAddon>).closeSession !== 'function'
   )
     throw new Error('NativeSafeFs addon contract mismatch');
@@ -552,7 +584,7 @@ function parseProbe(value: unknown): NativeSafeFsProbe {
     (capabilities as Record<string, unknown>)['workspaceLock'] !== true ||
     (capabilities as Record<string, unknown>)['durableFence'] !== true ||
     (capabilities as Record<string, unknown>)['synchronousInvalidation'] !== true ||
-    (capabilities as Record<string, unknown>)['mutation'] !== false
+    (capabilities as Record<string, unknown>)['mutation'] !== true
   )
     throw new Error('Invalid native probe');
   return Object.freeze({
@@ -564,7 +596,7 @@ function parseProbe(value: unknown): NativeSafeFsProbe {
       workspaceLock: true,
       durableFence: true,
       synchronousInvalidation: true,
-      mutation: false,
+      mutation: true,
     }),
     unavailableReason: null,
   });

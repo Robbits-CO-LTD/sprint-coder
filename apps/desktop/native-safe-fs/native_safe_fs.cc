@@ -2287,6 +2287,72 @@ napi_value CleanupIntentAuxiliary(napi_env env, napi_callback_info info) {
   return promise;
 }
 
+napi_value CreateDirectory(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object)
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs create directory input must be an object");
+  std::string session_id;
+  std::vector<std::string> segments;
+  if (!ReadString(env, argv[0], "sessionId", &session_id) ||
+      !IsLowerHex(session_id, 32) ||
+      !ReadSegments(env, argv[0], "pathSegments", false, false, &segments))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs directory input");
+
+  NativeFailure failure;
+  int root_fd = -1;
+  int parent_fd = -1;
+  std::string workspace_key;
+  std::string workspace_path;
+  uint64_t invalidation_version = 0;
+  if (!CaptureSessionRoot(session_id, &root_fd, &workspace_key, &workspace_path,
+                          &invalidation_version, &failure))
+    return ThrowFailure(env, failure.code, failure.message);
+  parent_fd = OpenRelativeParent(root_fd, segments, &failure);
+  if (parent_fd < 0) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+
+  int result = -1;
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(session_id);
+    if (session == state.sessions.end() || session->second.workspace_key != workspace_key ||
+        state.invalidation_versions[workspace_key] != invalidation_version) {
+      failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before mkdir"};
+    } else if (!VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure)) {
+      // VerifyRelativeParentNamespace provides the failure.
+    } else {
+      struct stat existing {};
+      if (fstatat(parent_fd, segments.back().c_str(), &existing, AT_SYMLINK_NOFOLLOW) == 0 ||
+          errno != ENOENT) {
+        failure = {"UNSAFE_PATH", "NativeSafeFs directory destination already exists"};
+      } else {
+        result = mkdirat(parent_fd, segments.back().c_str(), 0755);
+        if (result != 0) {
+          failure = {"NATIVE_FAILURE", ErrnoMessage("mkdir workspace directory")};
+        } else if (fsync(parent_fd) != 0) {
+          const int saved_errno = errno;
+          unlinkat(parent_fd, segments.back().c_str(), AT_REMOVEDIR);
+          errno = saved_errno;
+          failure = {"NATIVE_FAILURE", ErrnoMessage("fsync mkdir parent")};
+        }
+      }
+    }
+  }
+  CloseFd(&parent_fd);
+  CloseFd(&root_fd);
+  if (result != 0 || !failure.code.empty())
+    return ThrowFailure(env, failure.code.empty() ? "NATIVE_FAILURE" : failure.code,
+                        failure.message.empty() ? "NativeSafeFs mkdir failed" : failure.message);
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
+
 napi_value Probe(napi_env env, napi_callback_info) {
   napi_value result;
   napi_create_object(env, &result);
@@ -2309,9 +2375,7 @@ napi_value Probe(napi_env env, napi_callback_info) {
                            "synchronousInvalidation"}) {
     napi_set_named_property(env, capabilities, name, boolean);
   }
-  napi_value false_value;
-  napi_get_boolean(env, false, &false_value);
-  napi_set_named_property(env, capabilities, "mutation", false_value);
+  napi_set_named_property(env, capabilities, "mutation", boolean);
   napi_set_named_property(env, result, "capabilities", capabilities);
   napi_value null_value;
   napi_get_null(env, &null_value);
@@ -2352,6 +2416,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr},
       {"cleanupIntentAuxiliary", nullptr, CleanupIntentAuxiliary, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"createDirectory", nullptr, CreateDirectory, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
       {"closeSession", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"exchangeFiles", nullptr, ExchangeFiles, nullptr, nullptr, nullptr, napi_default, nullptr},
   };

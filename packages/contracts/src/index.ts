@@ -2039,6 +2039,13 @@ export const canonicalProviderEventSchema = z.discriminatedUnion('type', [
       callId: z.string().min(1).max(256),
       name: z.string().min(1).max(256),
       input: z.json(),
+      providerMetadata: z
+        .object({
+          geminiThoughtSignature: z.string().min(1).max(65_536).optional(),
+          geminiCallIdPresent: z.boolean().optional(),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
   z.object({ type: z.literal('usage'), usage: normalizedProviderUsageSchema }).strict(),
@@ -2091,6 +2098,13 @@ export const providerMessageToolCallSchema = z
     callId: z.string().min(1).max(256),
     name: z.string().min(1).max(256),
     input: z.json(),
+    providerMetadata: z
+      .object({
+        geminiThoughtSignature: z.string().min(1).max(65_536).optional(),
+        geminiCallIdPresent: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ProviderMessageToolCall = z.infer<typeof providerMessageToolCallSchema>;

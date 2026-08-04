@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
 import {
   executeWorkspacePatch,
+  executeWorkspaceCreateFile,
   WorkspacePatchRejection,
   WORKSPACE_PATCH_TOOL,
   type WorkspacePatchDeps,
@@ -95,6 +96,25 @@ describe('the agent edit tool', () => {
     });
     // The tool is not an effect boundary: the file is untouched until the Saga applies the plan.
     expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe(SOURCE);
+  });
+
+  it('plans an exclusive add through the same Saga boundary', async () => {
+    const { workspace, deps, applied } = await harness();
+    const result = await executeWorkspaceCreateFile(
+      { path: 'src/new.txt', content: 'new file\n' },
+      context,
+      deps,
+    );
+
+    expect(result).toMatchObject({ path: 'src/new.txt', state: 'committed', kind: 'add' });
+    expect(applied[0]?.plan.operations[0]).toMatchObject({
+      kind: 'add',
+      path: 'src/new.txt',
+      postImage: 'new file\n',
+    });
+    await expect(readFile(join(workspace, 'src', 'new.txt'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('selects a Secondary by rootId and never falls through to the Primary', async () => {

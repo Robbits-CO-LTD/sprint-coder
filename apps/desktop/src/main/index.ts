@@ -12,8 +12,9 @@ import {
 } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
 import { readdirSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
-import { extname, join, resolve } from 'node:path';
+import { lstat } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { extname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
 import { loadNativeSafeFs, nativeSafeFsAddonLocation, type NativeSafeFs } from './native-safe-fs';
@@ -22,6 +23,11 @@ import { EditSagaExecutor, PersistenceEditSagaStore } from './edit-saga';
 import { EditArtifactStore } from './edit-artifact-store';
 import { NativeSafeFsEditEffectBoundary } from './native-safe-fs-edit-boundary';
 import { MutationLeaseStaleError } from './mutation-lease';
+import type { MutationLeaseToken } from './mutation-lease';
+import { FileRevisionRegistry } from './file-revision';
+import type { WorkspacePatchDeps } from './workspace-patch-tool';
+import type { NativeSafeFsSession } from './native-safe-fs';
+import { isIssuedPathGuard, revalidatePathGuard } from './path-guard';
 import {
   evaluateNativeMutationPlatformGate,
   type NativeMutationPackagedLoadEvidence,
@@ -101,13 +107,13 @@ if (squirrelStartup || !hasLock) {
           nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
       );
       persistence.initializeMutationRecovery(randomUUID(), new Date().toISOString());
-      await wireEditSagaRecovery(persistence, nativeSafeFs);
+      const workspaceEdit = await wireEditSagaRecovery(persistence, nativeSafeFs);
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined
           ? 'app://bundle'
           : new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL).origin;
-      router = new IpcRouter(mainWindow, persistence, trustedOrigin);
+      router = new IpcRouter(mainWindow, persistence, trustedOrigin, workspaceEdit);
       await router.initialize();
       router.register();
       await loadRenderer(mainWindow);
@@ -273,7 +279,7 @@ async function loadRenderer(window: BrowserWindow): Promise<void> {
 async function wireEditSagaRecovery(
   persistence: SqlitePersistenceClient,
   nativeSafeFs: NativeSafeFs,
-): Promise<void> {
+): Promise<WorkspacePatchDeps | undefined> {
   // Slice 4.7d/4.7e: connect the NativeSafeFs edit boundary to the Edit Saga executor and
   // its restart recovery. The workspace mutation path stays fail-closed — no write
   // ToolDefinition is published and the session resolver refuses to open a native
@@ -286,20 +292,6 @@ async function wireEditSagaRecovery(
       rootPath: join(app.getPath('userData'), 'edit-artifacts'),
       quotaBytes: 256 * 1024 * 1024,
     });
-    const executor = new EditSagaExecutor(
-      new PersistenceEditSagaStore(persistence),
-      new NativeSafeFsEditEffectBoundary({
-        native: nativeSafeFs,
-        journal: persistence,
-        artifacts,
-        resolveSession: async () => {
-          throw new MutationLeaseStaleError();
-        },
-      }),
-      artifacts,
-      undefined,
-      new SqliteEditSagaLeaseGuard(persistence, randomUUID()),
-    );
     const probe = await nativeSafeFs.probe();
     const location = nativeSafeFsAddonLocation();
     // Evidence only exists once the app is actually packaged AND the addon was actually
@@ -319,17 +311,117 @@ async function wireEditSagaRecovery(
       },
       persistenceAuthorityAvailable: persistence.isNativeMutationAuthorityAvailable(),
     });
-    if (gate.allowed) {
-      await executor.reconcileAll();
-    } else {
+    if (!gate.allowed) {
       secureLogger.info('Native mutation platform gate denied reconciliation', {
         reasons: gate.reasons,
       });
+      return undefined;
     }
+    const lockDirectoryPath = join(app.getPath('userData'), 'native-safe-fs-locks');
+    const sessions = new Map<string, NativeSafeFsSession>();
+    const resolveSession = async (lease: MutationLeaseToken): Promise<NativeSafeFsSession> => {
+      const existing = sessions.get(lease.leaseId);
+      if (existing !== undefined) return existing;
+      const workspacePath = persistence.getMutationWorkspacePath(
+        lease.taskId,
+        lease.turnId,
+        lease.rootId,
+      );
+      if (workspacePath === null) throw new MutationLeaseStaleError();
+      const root = await lstat(workspacePath, { bigint: true });
+      if (!root.isDirectory()) throw new MutationLeaseStaleError();
+      const session = await nativeSafeFs.openSession({
+        rootId: lease.rootId ?? 'legacy-primary',
+        workspacePath,
+        rootDev: root.dev.toString(),
+        rootIno: root.ino.toString(),
+        workspaceKey: lease.workspaceKey,
+        lockDirectoryPath,
+        fence: String(lease.fence),
+      });
+      sessions.set(lease.leaseId, session);
+      return session;
+    };
+    const closeLeaseSession = async (lease: MutationLeaseToken): Promise<void> => {
+      const active = sessions.get(lease.leaseId);
+      if (active === undefined) return;
+      try {
+        await nativeSafeFs.closeSession(active);
+      } finally {
+        sessions.delete(lease.leaseId);
+      }
+    };
+    const leaseGuard = new SqliteEditSagaLeaseGuard(
+      persistence,
+      randomUUID(),
+      undefined,
+      undefined,
+      closeLeaseSession,
+    );
+    const executor = new EditSagaExecutor(
+      new PersistenceEditSagaStore(persistence),
+      new NativeSafeFsEditEffectBoundary({
+        native: nativeSafeFs,
+        journal: persistence,
+        artifacts,
+        resolveSession,
+      }),
+      artifacts,
+      undefined,
+      leaseGuard,
+    );
+    await executor.reconcileAll();
+    return {
+      turnWorkspaceSetFor: (taskId, turnId) =>
+        persistence.readTurnWorkspaceSetForTask(taskId, turnId),
+      turnRootMutationBindingsFor: (turnId) =>
+        persistence.getTurnWorkspaceMutationBindings(turnId),
+      revisions: new FileRevisionRegistry(),
+      apply: (request) => executor.apply(request),
+      createDirectory: async ({ taskId, turnId, rootId, path, guard }) => {
+        if (!isIssuedPathGuard(guard) || guard.operation !== 'write' || guard.targetIdentity !== null)
+          throw new Error('create_directory requires an issued missing-target write guard');
+        await revalidatePathGuard(guard);
+        const binding = persistence.getTurnWorkspaceMutationBindings(turnId).get(rootId);
+        if (binding === undefined) throw new MutationLeaseStaleError();
+        const sagaId = randomUUID();
+        const now = new Date();
+        const token = persistence.acquireMutationLease({
+          rootId,
+          workspaceKey: binding.workspaceKey,
+          rootIdentityDigest: binding.rootIdentityDigest,
+          holderInstanceId: 'provider-mkdir',
+          taskId,
+          turnId,
+          sagaId,
+          purpose: 'forward',
+          policyEpoch: persistence.getPermissionPolicy(taskId).policyEpoch,
+          intentDigest: createHash('sha256')
+            .update(JSON.stringify(['provider-mkdir-v1', rootId, path]))
+            .digest('hex'),
+          now: now.toISOString(),
+          expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+        });
+        try {
+          const session = await resolveSession(token);
+          const relativePath = relative(guard.workspacePath, guard.resolvedPath);
+          const segments = relativePath.split(sep).filter(Boolean);
+          await nativeSafeFs.createDirectory(session, segments);
+        } finally {
+          try {
+            await closeLeaseSession(token);
+          } finally {
+            persistence.releaseMutationLease(token, new Date().toISOString());
+          }
+        }
+      },
+      policyEpochFor: (taskId) => persistence.getPermissionPolicy(taskId).policyEpoch,
+    };
   } catch (error) {
     // Fail-closed dormant wiring: a recovery-wiring failure must neither enable
     // mutation nor block the read-only application from starting.
     secureLogger.error('Edit Saga recovery wiring did not initialize', error);
+    return undefined;
   }
 }
 

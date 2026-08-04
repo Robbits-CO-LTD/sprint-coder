@@ -264,27 +264,39 @@ function responseRequest(request: ProviderExecutionRequest): Record<string, unkn
     model: request.modelId,
     stream: true,
     store: false,
-    input: request.messages.map((message) =>
-      message.role === 'tool'
-        ? {
+    input: request.messages.flatMap((message) => {
+      if (message.role === 'tool')
+        return [
+          {
             type: 'function_call_output',
             call_id: message.toolCallId,
             output: message.content,
-          }
-        : {
-            role: message.role,
-            content:
-              message.inlineImages === undefined || message.inlineImages.length === 0
-                ? message.content
-                : [
-                    { type: 'input_text', text: message.content },
-                    ...message.inlineImages.map((image) => ({
-                      type: 'input_image',
-                      image_url: `data:${image.mimeType};base64,${image.base64}`,
-                    })),
-                  ],
           },
-    ),
+        ];
+      const items: Record<string, unknown>[] = [];
+      if (message.content !== '' || (message.toolCalls?.length ?? 0) === 0)
+        items.push({
+          role: message.role,
+          content:
+            message.inlineImages === undefined || message.inlineImages.length === 0
+              ? message.content
+              : [
+                  { type: 'input_text', text: message.content },
+                  ...message.inlineImages.map((image) => ({
+                    type: 'input_image',
+                    image_url: `data:${image.mimeType};base64,${image.base64}`,
+                  })),
+                ],
+        });
+      for (const toolCall of message.toolCalls ?? [])
+        items.push({
+          type: 'function_call',
+          call_id: toolCall.callId,
+          name: toolCall.name,
+          arguments: JSON.stringify(toolCall.input),
+        });
+      return items;
+    }),
     ...(tools.length === 0 ? {} : { tools }),
     ...(request.structuredOutput === undefined
       ? {}

@@ -324,7 +324,9 @@ export function openAICompatibleChatCompletionRequest(
       role: message.role,
       content:
         message.inlineImages === undefined || message.inlineImages.length === 0
-          ? message.content
+          ? message.role === 'assistant' && (message.toolCalls?.length ?? 0) > 0 && message.content === ''
+            ? null
+            : message.content
           : [
               { type: 'text', text: message.content },
               ...message.inlineImages.map((image) => ({

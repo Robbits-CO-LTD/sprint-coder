@@ -99,8 +99,8 @@ describe('GeminiProviderClient', () => {
               role: 'model',
               parts: [
                 {
+                  thoughtSignature: 'signed-thought-1',
                   functionCall: {
-                    id: 'call-1',
                     name: 'lookup',
                     args: { q: 'value' },
                   },
@@ -112,7 +112,6 @@ describe('GeminiProviderClient', () => {
               parts: [
                 {
                   functionResponse: {
-                    id: 'call-1',
                     name: 'lookup',
                     response: { output: '{"ok":true}' },
                   },
@@ -159,7 +158,17 @@ describe('GeminiProviderClient', () => {
           {
             role: 'assistant',
             content: '',
-            toolCalls: [{ callId: 'call-1', name: 'lookup', input: { q: 'value' } }],
+            toolCalls: [
+              {
+                callId: 'call-1',
+                name: 'lookup',
+                input: { q: 'value' },
+                providerMetadata: {
+                  geminiThoughtSignature: 'signed-thought-1',
+                  geminiCallIdPresent: false,
+                },
+              },
+            ],
           },
           {
             role: 'tool',

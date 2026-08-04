@@ -309,7 +309,7 @@ describe('NativeSafeFs authority boundary', () => {
   });
 
   describe.skipIf(process.platform === 'win32')('POSIX backend', () => {
-    it('loads a N-API capability probe without exposing mutation primitives', async () => {
+    it('loads a N-API capability probe with the journaled mutation primitives enabled', async () => {
       const boundary = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
       await expect(boundary.probe()).resolves.toMatchObject({
         available: true,
@@ -320,7 +320,7 @@ describe('NativeSafeFs authority boundary', () => {
           workspaceLock: true,
           durableFence: true,
           synchronousInvalidation: true,
-          mutation: false,
+          mutation: true,
         },
       });
     });
@@ -510,6 +510,29 @@ describe('NativeSafeFs authority boundary', () => {
         'STALE_FENCE',
       );
       await expect(childOpenOutcome(addonPath, { ...input, fence: '31' })).resolves.toBe('OPENED');
+    });
+
+    it('creates one directory relative to the pinned root without following symlinks', async () => {
+      const input = await fixture();
+      await mkdir(join(input.workspace, 'parent'));
+      const outside = join(input.root, 'outside');
+      await mkdir(outside);
+      await symlink(outside, join(input.workspace, 'escape'));
+      const boundary = fixtureBoundary(input);
+      const session = await boundary.openSession({ ...input, fence: '32' });
+
+      await expect(boundary.createDirectory(session, ['parent', 'child'])).resolves.toBeUndefined();
+      expect((await lstat(join(input.workspace, 'parent', 'child'))).isDirectory()).toBe(true);
+      await expect(boundary.createDirectory(session, ['parent', 'child'])).rejects.toMatchObject({
+        code: 'UNSAFE_PATH',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(boundary.createDirectory(session, ['escape', 'child'])).rejects.toMatchObject({
+        code: 'UNSAFE_PATH',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(boundary.createDirectory(session, ['..', 'child'])).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      } satisfies Partial<NativeSafeFsError>);
+      await boundary.closeSession(session);
     });
 
     it('recovers the last checksummed fence after a partial append', async () => {
