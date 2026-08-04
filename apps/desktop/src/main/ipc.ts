@@ -220,7 +220,11 @@ import {
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
-import { ToolAuthorizationDeniedError, type ToolAuthorizationRequest } from './tool-broker';
+import {
+  ToolAuthorizationDeniedError,
+  type ToolAuthorizationDecision,
+  type ToolAuthorizationRequest,
+} from './tool-broker';
 import type { RuntimeCanonicalEvent, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import {
@@ -2550,14 +2554,6 @@ export class IpcRouter {
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     const facts = approvalFactsForTool(request, capability);
     const commandRunner = request.entry.implementationKind === 'command-runner';
-    // Provider-issued processes are never covered by a preset-wide silent grant. Even Full must
-    // show the exact sealed executable + argv for an explicit allow-once/task decision: an argv can
-    // encode deletion, network access, or an interpreter program that a name allowlist cannot see.
-    if (commandRunner)
-      return {
-        decision: 'approval_required' as const,
-        reason: 'provider_command_requires_explicit_approval',
-      };
     const sandboxProfile =
       capability === 'workspace.write' || capability === 'filesystem.external.write'
         ? ('workspace-write' as const)
@@ -2688,29 +2684,34 @@ export class IpcRouter {
       evaluation.permit !== undefined
     ) {
       const permit = evaluation.permit;
-      return {
-        decision: 'allow' as const,
-        reason: evaluation.reason,
-        beforeExecute: () =>
-          this.permissionBroker.revalidate({
-            ...evaluationInput,
-            basePolicy: {
-              ...evaluationInput.basePolicy,
-              ...(reviewerDecision === undefined ? {} : { reviewerDecision }),
-            },
-            permit,
-            now: new Date().toISOString(),
-            ...(pathGuard === undefined ? {} : { pathGuard }),
-          }).valid,
-      };
+      const beforeExecute = () =>
+        this.permissionBroker.revalidate({
+          ...evaluationInput,
+          basePolicy: {
+            ...evaluationInput.basePolicy,
+            ...(reviewerDecision === undefined ? {} : { reviewerDecision }),
+          },
+          permit,
+          now: new Date().toISOString(),
+          ...(pathGuard === undefined ? {} : { pathGuard }),
+        }).valid;
+      // Provider-issued processes are never covered by a preset-wide silent grant. A policy deny
+      // still wins above; only an evaluated allow is upgraded to an explicit user approval.
+      return requireExplicitProviderCommandApproval(
+        { decision: 'allow' as const, reason: evaluation.reason, beforeExecute },
+        commandRunner,
+      );
     }
-    return {
-      decision: evaluation.decision === 'allow_once' ? ('deny' as const) : evaluation.decision,
-      reason:
-        evaluation.decision === 'allow_once'
-          ? 'permission_allow_once_missing_permit'
-          : evaluation.reason,
-    };
+    return requireExplicitProviderCommandApproval(
+      {
+        decision: evaluation.decision === 'allow_once' ? ('deny' as const) : evaluation.decision,
+        reason:
+          evaluation.decision === 'allow_once'
+            ? 'permission_allow_once_missing_permit'
+            : evaluation.reason,
+      },
+      commandRunner,
+    );
   }
 
   private dispatchStarted(started: StartedTurn): void {
@@ -4521,6 +4522,18 @@ export function providerWorkspaceToolsEligible(
   toolCalling: boolean | null | undefined,
 ): boolean {
   return !teamTurn && workspaceRootCount > 0 && toolCalling !== false;
+}
+
+export function requireExplicitProviderCommandApproval(
+  decision: ToolAuthorizationDecision,
+  commandRunner: boolean,
+): ToolAuthorizationDecision {
+  if (!commandRunner || decision.decision !== 'allow') return decision;
+  return {
+    decision: 'approval_required',
+    reason: 'provider_command_requires_explicit_approval',
+    ...(decision.beforeExecute === undefined ? {} : { beforeExecute: decision.beforeExecute }),
+  };
 }
 
 export function shouldRetryProviderWithoutTools(input: {

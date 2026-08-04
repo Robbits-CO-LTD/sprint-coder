@@ -158,8 +158,8 @@ export async function executeWorkspacePatch(
   input: unknown,
   context: WorkspacePatchContext,
   deps: WorkspacePatchDeps,
-  approvedGuard?: PathGuard,
-  approvedReadGuard?: PathGuard,
+  approvedGuard: PathGuard,
+  approvedReadGuard: PathGuard,
 ): Promise<{
   rootId: string;
   path: string;
@@ -187,17 +187,11 @@ export async function executeWorkspacePatch(
   const policyEpoch = deps.policyEpochFor(context.taskId);
   // Read pins the revision the patch is validated against, so a file that changes between this
   // read and the write is a rejected patch rather than a silently clobbered edit.
-  const revision =
-    approvedReadGuard === undefined
-      ? await deps.revisions.read({
-          owner,
-          rootId: root.rootId,
-          workspacePath: root.path,
-          ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
-          targetPath: request.path,
-          policyEpoch,
-        })
-      : await deps.revisions.readGuarded({ owner, guard: approvedReadGuard, policyEpoch });
+  const revision = await deps.revisions.readGuarded({
+    owner,
+    guard: approvedReadGuard,
+    policyEpoch,
+  });
 
   let plan;
   try {
@@ -262,7 +256,7 @@ export async function executeWorkspaceCreateFile(
   input: unknown,
   context: WorkspacePatchContext,
   deps: WorkspacePatchDeps,
-  approvedGuard?: PathGuard,
+  approvedGuard: PathGuard,
 ): Promise<{ rootId: string; path: string; sagaId: string; state: string; kind: 'add' }> {
   const request = parseCreateFileInput(input);
   const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
@@ -318,10 +312,9 @@ export async function executeWorkspaceCreateFile(
 
 function assertApprovedPatchTarget(
   plan: Awaited<ReturnType<typeof prepareStructuredPatch>>,
-  guard: PathGuard | undefined,
+  guard: PathGuard,
   kind: 'add' | 'update',
 ): void {
-  if (guard === undefined) return;
   const operation = plan.operations[0];
   if (
     !isIssuedPathGuard(guard) ||

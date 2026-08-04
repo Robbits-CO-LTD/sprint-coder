@@ -85,6 +85,7 @@ import {
   isTrustedIpcSender,
   shouldBlockProviderLeaderCompletion,
   providerWorkspaceToolsEligible,
+  requireExplicitProviderCommandApproval,
   shouldRetryProviderWithoutTools,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
@@ -248,6 +249,23 @@ describe('Provider workspace tool capability fallback', () => {
     expect(shouldRetryProviderWithoutTools({ ...base, toolCallCount: 1 })).toBe(false);
     expect(shouldRetryProviderWithoutTools({ ...base, outputLength: 1 })).toBe(false);
     expect(shouldRetryProviderWithoutTools({ ...base, errorCategory: 'rate_limited' })).toBe(false);
+  });
+
+  it('preserves policy denial and upgrades only command allows to explicit approval', () => {
+    expect(
+      requireExplicitProviderCommandApproval({ decision: 'deny', reason: 'immutable_deny' }, true),
+    ).toEqual({ decision: 'deny', reason: 'immutable_deny' });
+    const beforeExecute = () => true;
+    expect(
+      requireExplicitProviderCommandApproval(
+        { decision: 'allow', reason: 'preset_full', beforeExecute },
+        true,
+      ),
+    ).toEqual({
+      decision: 'approval_required',
+      reason: 'provider_command_requires_explicit_approval',
+      beforeExecute,
+    });
   });
 });
 

@@ -10,8 +10,17 @@ import {
   workspaceToolAuthorizationGuard,
 } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
+import { commandToolTruncated } from './default-tools';
 
 const roots: string[] = [];
+
+describe('provider command output', () => {
+  it('reports truncation when either output boundary truncated', () => {
+    expect(commandToolTruncated(true, false)).toBe(true);
+    expect(commandToolTruncated(false, true)).toBe(true);
+    expect(commandToolTruncated(false, false)).toBe(false);
+  });
+});
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));

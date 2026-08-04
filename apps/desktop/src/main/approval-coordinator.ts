@@ -123,6 +123,8 @@ export class ApprovalCoordinator {
         revalidators.push(evaluation.decision.beforeExecute ?? (() => false));
         continue;
       }
+      if (evaluation.decision.beforeExecute !== undefined)
+        revalidators.push(evaluation.decision.beforeExecute);
       const decision = await this.requestCapabilityApproval(request, evaluation.capability);
       if (decision.decision !== 'allow') return decision;
       revalidators.push(decision.beforeExecute ?? (() => false));

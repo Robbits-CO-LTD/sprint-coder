@@ -199,14 +199,18 @@ export class ProviderWorkspaceTools {
         toolId: WORKSPACE_PATCH_TOOL.toolId,
         implementationKind: 'built-in',
         prepare: (input, context) => this.prepareMutation('patch', input, context),
-        execute: (input, context) =>
-          executeWorkspacePatch(
-            (input as PreparedWorkspaceInput).raw,
+        execute: (input, context) => {
+          const prepared = input as PreparedWorkspaceInput;
+          if (prepared.readGuard === undefined)
+            throw new Error('apply_patch requires an issued read guard');
+          return executeWorkspacePatch(
+            prepared.raw,
             context,
             deps.workspaceEdit!,
-            (input as PreparedWorkspaceInput).guard,
-            (input as PreparedWorkspaceInput).readGuard,
-          ),
+            prepared.guard,
+            prepared.readGuard,
+          );
+        },
       });
       if (deps.workspaceEdit.createDirectory !== undefined)
         this.broker.registerImplementation({

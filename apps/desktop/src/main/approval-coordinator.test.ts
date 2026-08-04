@@ -12,7 +12,11 @@ import {
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
-import { ToolBroker, type ToolAuthorizationRequest } from './tool-broker';
+import {
+  ToolBroker,
+  type ToolAuthorizationDecision,
+  type ToolAuthorizationRequest,
+} from './tool-broker';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
 
@@ -170,7 +174,7 @@ function createHarness(input?: {
   evaluatePermission?: (input: {
     capability: Capability;
     request: ToolAuthorizationRequest;
-  }) => 'allow' | 'deny' | 'approval_required';
+  }) => ToolAuthorizationDecision | 'allow' | 'deny' | 'approval_required';
 }) {
   const persistence = new InMemoryApprovalPersistence();
   const published: StoredApproval[] = [];
@@ -631,6 +635,34 @@ describe('ApprovalCoordinator', () => {
 
     expect(evaluated).toEqual(['network.fetch', 'provider.egress']);
     expect(harness.published).toHaveLength(0);
+    expect(executions()).toBe(0);
+  });
+
+  it('revalidates a policy allow that was upgraded to explicit approval', async () => {
+    let policyValid = true;
+    const harness = createHarness({
+      evaluatePermission: () => ({
+        decision: 'approval_required',
+        reason: 'provider_command_requires_explicit_approval',
+        beforeExecute: () => policyValid,
+      }),
+    });
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const dispatch = broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-policy-revalidation',
+      providerName: 'approval_fetch',
+      input: { origin: 'https://example.test' },
+    });
+    await viWaitFor(() => harness.published.length === 1);
+    policyValid = false;
+    harness.coordinator.resolve(resolveCommand(harness.published[0]!, 'allow_once'));
+
+    await expect(dispatch).rejects.toThrow('Tool authorization deny');
     expect(executions()).toBe(0);
   });
 
