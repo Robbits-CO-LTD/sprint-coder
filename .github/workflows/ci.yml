@@ -136,3 +136,16 @@ jobs:
         run: npx playwright test tests/e2e/keyboard-smoke.spec.ts
         env:
           SPRINT_CODER_E2E_MODE: dev
+
+  # Preserve the pre-sharding Windows check name for existing branch-protection rules.
+  windows-result:
+    name: build (windows-2022)
+    if: always()
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verify matrix result
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "${BUILD_RESULT}" = 'success'
