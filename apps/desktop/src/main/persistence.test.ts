@@ -758,6 +758,23 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('routes /team with a request through Sprint Coder Team without treating /team alone as a Turn intent', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('slash team');
+      const started = persistence.startTurn(task.id, '/team リポジトリを並列調査して');
+
+      expect(started.teamTurn).toBe(true);
+      expect(
+        persistence
+          .prepareContext(task.id, started.turnId)
+          .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
+
+      persistence.completeTurn(task.id, started.turnId, 'failed');
+      expect(persistence.startTurn(task.id, '/team').teamTurn).toBe(false);
+      persistence.close();
+    });
+
     it('keeps Team guidance on a short continuation after a failed Team turn', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('team retry');

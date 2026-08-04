@@ -1106,7 +1106,7 @@ const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 // Natural team intent (「チームで進めて」「teamでお願い」…) auto-routes the turn into the team
 // orchestration path — the user should not need to know the fixture keyword or press ⬡ Team.
 const TEAM_INTENT =
-  /チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
+  /^\s*\/team(?=\s+\S)|チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
 
 // A failed/canceled Team turn is commonly resumed with a short instruction that no longer repeats
 // the word "Team". Keep this deliberately narrow: ordinary follow-up questions must not silently

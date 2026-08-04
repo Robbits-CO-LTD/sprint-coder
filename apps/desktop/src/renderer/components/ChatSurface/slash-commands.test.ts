@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   filterSlashCommands,
   inheritedProjectForNewTask,
+  isStandaloneTeamCommand,
   removeSlashToken,
   SLASH_COMMANDS,
   slashCommandQuery,
@@ -17,6 +18,13 @@ describe('/new Project inheritance', () => {
 });
 
 describe('slash commands', () => {
+  it('treats only a standalone /team token as the Canvas command', () => {
+    expect(isStandaloneTeamCommand('/team')).toBe(true);
+    expect(isStandaloneTeamCommand('  /TEAM  ')).toBe(true);
+    expect(isStandaloneTeamCommand('/team 調査して')).toBe(false);
+    expect(isStandaloneTeamCommand('/teamwork')).toBe(false);
+  });
+
   it('preserves the legacy whole-draft query while cursor matching supports inline tokens', () => {
     expect(slashCommandQuery('/')).toBe('');
     expect(slashCommandQuery('/GO')).toBe('go');
