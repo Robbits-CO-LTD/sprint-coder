@@ -117,8 +117,9 @@ tasks/              実装計画と設計レビュー記録
 
 ## 現在の配布状態
 
-- desktop packageのversionはbeta SemVerで管理しています。
-- GitHub ActionsはmacOSのDMG / 更新用ZIPと、Windowsのウィザード付きインストーラー / portable ZIP / Squirrel更新artifactをbeta prereleaseとして作成できます。
+- desktop packageの正式版versionはSemVerで管理しています。beta版には`-beta.N`を付けます。
+- beta版のGitHub ActionsはmacOSのDMG / 更新用ZIPと、Ubuntuのportable ZIPを作成し、GitHub prereleaseをDraftとして用意します。
+- Windowsのウィザード付きインストーラー / portable ZIP / Squirrel更新artifactは、ローカルでコード署名して同じDraft Releaseへ添付します。
 - Windowsインストーラー版は起動時と6時間ごとにGitHub Releasesを確認し、更新を取得すると再起動の確認を表示します。portable ZIP版は自動更新の対象外です。
 - macOS ARM64版も、配布元と更新先を同じ正式なAppleコード署名IDでビルドした場合に自動更新が有効になります。
 - macOSのbeta artifactは現時点ではad-hoc署名でApple notarizationも未対応のため、自動更新は安全側に無効化されます。
