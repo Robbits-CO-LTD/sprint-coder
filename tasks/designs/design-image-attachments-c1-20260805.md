@@ -377,3 +377,7 @@ required before C1a-1; implementation-safety and requirement rechecks are requir
   A second Main-boundary regression drives canonical accepted bytes through the production custody
   and Runtime preparation methods and verifies exact receipt facts and release. Scope, security,
   and implementation/lifecycle re-reviews are all GO with no remaining concrete findings.
+- The first PR CI run exposed a Linux-only package failure: Sharp's versioned
+  `libvips-cpp.so.8.18.3` did not match the prior exact `.so` asar-unpack suffix. The native unpack
+  glob now includes `.so.*`, with a Forge regression that pins versioned Linux shared-library
+  handling; macOS had already passed because its `.dylib` matched the existing rule.

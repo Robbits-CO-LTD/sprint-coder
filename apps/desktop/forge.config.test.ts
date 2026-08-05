@@ -3,7 +3,11 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import config, { assertNativePackagingHost, verifyBundledNodeResources } from './forge.config';
+import config, {
+  assertNativePackagingHost,
+  NATIVE_ASAR_UNPACK_GLOB,
+  verifyBundledNodeResources,
+} from './forge.config';
 import { macAutoUpdateEligibleForIdentity } from './vite.main.config';
 import {
   planWindowsWizardInstaller,
@@ -24,6 +28,11 @@ describe('desktop package icon', () => {
 });
 
 describe('native package target', () => {
+  it('unpacks versioned Linux shared libraries required by Sharp', () => {
+    expect(NATIVE_ASAR_UNPACK_GLOB).toContain('so.*');
+    expect(config.packagerConfig?.asar).toEqual({ unpack: NATIVE_ASAR_UNPACK_GLOB });
+  });
+
   it('rejects cross-platform packages before Forge can emit an incomplete artifact', () => {
     const otherPlatform = process.platform === 'win32' ? 'linux' : 'win32';
 
