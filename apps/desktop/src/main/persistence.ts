@@ -15418,13 +15418,24 @@ function parseResourceSet(json: string): ResourceSet {
         key === 'allowedResidencies' ||
         key === 'allowedProvenance' ||
         key === 'requireSecretScanClean' ||
-        key === 'allowLocalOnlyTaskRemote',
+        key === 'allowLocalOnlyTaskRemote' ||
+        key === 'attachmentManifestDigest' ||
+        key === 'attachmentByteCount',
     ) &&
     typeof record['maxBytes'] === 'number' &&
     Number.isSafeInteger(record['maxBytes']) &&
     record['maxBytes'] >= 0 &&
     typeof record['requireSecretScanClean'] === 'boolean' &&
-    typeof record['allowLocalOnlyTaskRemote'] === 'boolean'
+    typeof record['allowLocalOnlyTaskRemote'] === 'boolean' &&
+    ((record['attachmentManifestDigest'] === undefined ||
+      record['attachmentManifestDigest'] === null) &&
+    (record['attachmentByteCount'] === undefined || record['attachmentByteCount'] === 0)
+      ? true
+      : typeof record['attachmentManifestDigest'] === 'string' &&
+        /^[a-f0-9]{64}$/.test(record['attachmentManifestDigest']) &&
+        typeof record['attachmentByteCount'] === 'number' &&
+        Number.isSafeInteger(record['attachmentByteCount']) &&
+        record['attachmentByteCount'] > 0)
   )
     return {
       kind: 'provider-egress',
@@ -15440,6 +15451,12 @@ function parseResourceSet(json: string): ResourceSet {
       )[],
       requireSecretScanClean: record['requireSecretScanClean'],
       allowLocalOnlyTaskRemote: record['allowLocalOnlyTaskRemote'],
+      attachmentManifestDigest:
+        record['attachmentManifestDigest'] === undefined
+          ? null
+          : (record['attachmentManifestDigest'] as string | null),
+      attachmentByteCount:
+        record['attachmentByteCount'] === undefined ? 0 : (record['attachmentByteCount'] as number),
     };
   throw new Error('Invalid stored resource set');
 }

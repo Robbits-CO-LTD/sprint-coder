@@ -123,8 +123,29 @@ describe('public contracts', () => {
         taskId: 'task-1',
         text: 'この画像を説明して',
         attachmentIds: ['attachment-1'],
+        attachmentSelectionIdentity: 'selection-1',
       }),
-    ).toMatchObject({ attachmentIds: ['attachment-1'], skills: [] });
+    ).toMatchObject({
+      attachmentIds: ['attachment-1'],
+      attachmentSelectionIdentity: 'selection-1',
+      skills: [],
+    });
+    expect(() =>
+      contracts.turnStartInputSchema.parse({
+        taskId: 'task-1',
+        text: 'missing identity',
+        attachmentIds: ['attachment-1'],
+        attachmentSelectionIdentity: null,
+      }),
+    ).toThrow();
+    expect(
+      contracts.turnStartInputSchema.parse({
+        taskId: 'task-1',
+        text: 'text only',
+        attachmentIds: [],
+        attachmentSelectionIdentity: null,
+      }),
+    ).toMatchObject({ attachmentIds: [], attachmentSelectionIdentity: null });
     expect(() =>
       contracts.turnStartInputSchema.parse({ taskId: 'task-1', text: 'missing IDs' }),
     ).toThrow();

@@ -180,6 +180,12 @@ import {
   ImageAttachmentDraftStore,
   ImageAttachmentValidationError,
 } from './image-attachment-store';
+import { AttachmentCustodyStore, type AttachmentCustodyLease } from './attachment-custody-store';
+import {
+  toPublicImageAttachmentCapability,
+  validateImageAttachmentCapabilitySnapshot,
+  type ImageAttachmentRuntimeSnapshot,
+} from './image-attachment-capability';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
 import type {
@@ -235,7 +241,11 @@ import {
   type ToolAuthorizationDecision,
   type ToolAuthorizationRequest,
 } from './tool-broker';
-import type { RuntimeCanonicalEvent, RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import type {
+  RuntimeCanonicalEvent,
+  RuntimePreparedImageAttachments,
+  RuntimeWorkspaceSet,
+} from '../runtime-host/protocol';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import {
   permissionRequestFingerprint,
@@ -449,6 +459,13 @@ export class IpcRouter {
   private readonly providerVerification: ProviderVerificationService;
   private readonly providerConnections: ProviderConnectionService;
   private readonly attachmentDraftStore: ImageAttachmentDraftStore;
+  private readonly attachmentCustodyStore: AttachmentCustodyStore;
+  private readonly attachmentCapabilityByTurn = new Map<
+    string,
+    Readonly<{ snapshot: ImageAttachmentRuntimeSnapshot; selectionIdentity: string }>
+  >();
+  private readonly attachmentCustodyByTurn = new Map<string, AttachmentCustodyLease>();
+  private attachmentCustodyReady = false;
   private teamSkillReady = false;
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
@@ -465,6 +482,9 @@ export class IpcRouter {
     workspaceEdit?: WorkspacePatchDeps,
   ) {
     this.attachmentDraftStore = new ImageAttachmentDraftStore(this.persistence);
+    this.attachmentCustodyStore = new AttachmentCustodyStore(
+      join(app.getPath('userData'), 'attachment-custody'),
+    );
     const providerSecrets = new ProviderSecretStorage(
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),
@@ -799,8 +819,10 @@ export class IpcRouter {
         this.handleRuntimeEvent('codex', taskId, turnId, runtimeEvent),
       (taskId, turnId, error) => this.handleRuntimeFailure('codex', taskId, turnId, error),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
-      (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
-        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
+      (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) => {
+        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest);
+        void this.releaseTurnAttachmentCustody(turnId);
+      },
       'codex',
     );
     this.claudeRuntime = new RuntimeHostClient(
@@ -838,16 +860,28 @@ export class IpcRouter {
       IPC_CHANNELS.attachmentsCapability,
       taskIdPayloadSchema,
       imageAttachmentCapabilitySchema,
-      (input) => {
+      async (input) => {
         this.persistence.listDraftImageAttachments(input.taskId);
-        return {
-          status: 'unsupported' as const,
-          reason:
-            process.platform === 'win32'
-              ? 'このWindows版では画像添付を安全に読み込めません'
-              : '画像添付は送信機能の準備完了後に利用できます',
-          selectionIdentity: null,
-        };
+        if (process.platform === 'win32')
+          return {
+            status: 'unsupported' as const,
+            reason: 'このWindows版では画像添付を安全に読み込めません',
+            selectionIdentity: null,
+          };
+        if (!this.attachmentCustodyReady)
+          return {
+            status: 'unsupported' as const,
+            reason: '画像添付の安全な一時領域を準備できません',
+            selectionIdentity: null,
+          };
+        const selection = this.persistence.getImageAttachmentAcceptanceSelection(input.taskId);
+        const snapshot = await this.codexRuntime.captureImageAttachmentCapability();
+        return toPublicImageAttachmentCapability(
+          selection,
+          snapshot,
+          this.codexRuntime.currentImageAttachmentCapability(),
+          Date.now(),
+        );
       },
     );
     this.handle(
@@ -2184,6 +2218,36 @@ export class IpcRouter {
         const skills = await this.skillSettings
           .resolveSelections(input.skills)
           .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        let attachmentCapability:
+          | Readonly<{
+              snapshot: ImageAttachmentRuntimeSnapshot;
+              selectionIdentity: string;
+            }>
+          | undefined;
+        if (input.attachmentIds.length > 0) {
+          if (
+            process.platform === 'win32' ||
+            !this.attachmentCustodyReady ||
+            input.attachmentSelectionIdentity === null
+          )
+            throw new ImageAttachmentAcceptanceError('unsupported');
+          const selection = this.persistence.getImageAttachmentAcceptanceSelection(input.taskId);
+          const snapshot = await this.codexRuntime.captureImageAttachmentCapability();
+          if (
+            !validateImageAttachmentCapabilitySnapshot({
+              selection,
+              snapshot,
+              current: this.codexRuntime.currentImageAttachmentCapability(),
+              expectedSelectionIdentity: input.attachmentSelectionIdentity,
+              nowMs: Date.now(),
+            })
+          )
+            throw new ImageAttachmentAcceptanceError('stale');
+          attachmentCapability = Object.freeze({
+            snapshot,
+            selectionIdentity: input.attachmentSelectionIdentity,
+          });
+        }
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -2197,7 +2261,15 @@ export class IpcRouter {
               skills,
               shouldSealBuiltinTeamSkill(input.text, skills),
               input.attachmentIds,
-              () => false,
+              (selection) =>
+                attachmentCapability !== undefined &&
+                validateImageAttachmentCapabilitySnapshot({
+                  selection,
+                  snapshot: attachmentCapability.snapshot,
+                  current: this.codexRuntime.currentImageAttachmentCapability(),
+                  expectedSelectionIdentity: attachmentCapability.selectionIdentity,
+                  nowMs: Date.now(),
+                }),
             );
             return {
               turnId: started.turnId,
@@ -2205,7 +2277,11 @@ export class IpcRouter {
             };
           },
         );
-        if (result.executed && started !== undefined) this.dispatchStarted(started);
+        if (result.executed && started !== undefined) {
+          if (attachmentCapability !== undefined)
+            this.attachmentCapabilityByTurn.set(started.turnId, attachmentCapability);
+          this.dispatchStarted(started);
+        }
         return result.value;
       },
     );
@@ -2382,6 +2458,12 @@ export class IpcRouter {
 
   async initialize(): Promise<void> {
     this.teamCoordinator.recoverOnStartup();
+    try {
+      await this.attachmentCustodyStore.initialize();
+      this.attachmentCustodyReady = true;
+    } catch {
+      this.attachmentCustodyReady = false;
+    }
     await this.permissionBroker.drainPolicyEpochOutbox();
     await this.teamMcpBridge.ensureStarted();
     try {
@@ -2470,6 +2552,9 @@ export class IpcRouter {
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
     this.claudeRuntime.dispose();
+    await this.attachmentCustodyStore.dispose();
+    this.attachmentCustodyByTurn.clear();
+    this.attachmentCapabilityByTurn.clear();
     await this.teamMcpBridge.dispose();
   }
 
@@ -2557,6 +2642,7 @@ export class IpcRouter {
     this.pendingTaskTitles.delete(turnId);
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
+    void this.releaseTurnAttachmentCustody(turnId);
     // Flush the tail and stop the timer before the turn is finalised, so the last thought is not
     // lost to the 120ms window and no timer outlives the turn.
     this.reasoningByTurn.get(turnId)?.dispose();
@@ -2824,6 +2910,7 @@ export class IpcRouter {
       userMessage: null,
     });
     let kind = started.runtimeKind;
+    this.turnRuntimes.set(started.turnId, kind);
     // Leader MCP is enabled by default: a real Codex/Claude Leader drives team_* tools itself
     // over the MCP bridge instead of the deterministic mock scenario. Team tools are offered on
     // every real-runtime turn so the model itself senses
@@ -2869,6 +2956,14 @@ export class IpcRouter {
       // (hire→dispatch→reports→synthesis): the production adapters are no-tools by default, so a
       // real-runtime leader cannot drive a team — the deterministic leader orchestrates while
       // Workers execute on the real runtime.
+      if (this.attachmentCapabilityByTurn.has(started.turnId)) {
+        this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage: '画像添付を含むTurnではTeam Runtimeを無効化できません。',
+          retryable: true,
+        });
+        return;
+      }
       kind = 'mock';
     }
     this.turnRuntimes.set(started.turnId, kind);
@@ -2935,45 +3030,89 @@ export class IpcRouter {
       bytes: Buffer.from(serializedPayload.bytes),
       digest: serializedPayload.digest,
     });
-    const egress = dispatchEgress(
-      {
-        broker: this.permissionBroker,
-        task: this.persistence.getTask(taskId),
-        turnId: started.turnId,
-        prompt: gatePayload.toString('utf8'),
-        context,
-        now: new Date().toISOString(),
-        payloadDigest: serializedPayload.digest,
-        adapterVersion: 'runtime-protocol-v7',
-        connectionId: kind === 'claude' ? 'builtin:claude-cli' : 'builtin:codex-cli',
-        modelId: started.model,
-        endpointTrust: 'trusted-remote',
-        round: 1,
-        toolCatalogDigest: createEmptyToolCatalogSnapshot(kind, workspaceId).digest,
-      },
-      () =>
-        this.runtimeFor(kind).start(
-          taskId,
-          started.turnId,
-          started.text,
-          toRuntimeWorkspaceSet(started.workspaceSet),
-          started.model,
-          createEmptyToolCatalogSnapshot(kind, workspaceId),
+    let imageDispatch:
+      | Readonly<{
+          receipt: RuntimePreparedImageAttachments;
+          manifestDigest: string;
+          byteCount: number;
+        }>
+      | undefined;
+    try {
+      imageDispatch = await this.prepareTurnImageAttachments(started, kind);
+    } catch {
+      if (kind === 'codex') await this.cancelImageRuntimeBeforeRelease(taskId, started.turnId);
+      else await this.releaseTurnAttachmentCustody(started.turnId);
+      this.teamMcpBridge.unregister(started.turnId);
+      this.handleRuntimeFailure(kind, taskId, started.turnId, {
+        code: 'RUNTIME_FAILED',
+        userMessage: '画像添付の安全な送信準備に失敗しました。もう一度お試しください。',
+        retryable: true,
+      });
+      return;
+    }
+    let egress: ReturnType<typeof dispatchAfterCodexProviderEgress>;
+    try {
+      egress = dispatchEgress(
+        {
+          broker: this.permissionBroker,
+          task: this.persistence.getTask(taskId),
+          turnId: started.turnId,
+          prompt: gatePayload.toString('utf8'),
           context,
-          teamMcp,
-          // Reasoning effort: read live (not captured on StartedTurn) since it isn't persisted
-          // per-turn, unlike model — see persistence.ts's getEffort doc comment. The Codex value
-          // needs no probe here because setModel/setCodexEffort keep the stored level clamped to
-          // the selected model's advertised set; '' means "no override".
-          kind === 'claude'
-            ? this.persistence.getEffort()
-            : this.persistence.getCodexEffort() || undefined,
-          writeScope,
-          runtimeSkills,
-          dispatchPayload,
-        ),
-    );
+          now: new Date().toISOString(),
+          payloadDigest: serializedPayload.digest,
+          adapterVersion: 'runtime-protocol-v8',
+          connectionId: kind === 'claude' ? 'builtin:claude-cli' : 'builtin:codex-cli',
+          modelId: started.model,
+          endpointTrust: 'trusted-remote',
+          round: 1,
+          toolCatalogDigest: createEmptyToolCatalogSnapshot(kind, workspaceId).digest,
+          ...(imageDispatch === undefined
+            ? {}
+            : {
+                attachmentManifestDigest: imageDispatch.manifestDigest,
+                attachmentByteCount: imageDispatch.byteCount,
+              }),
+        },
+        () =>
+          this.runtimeFor(kind).start(
+            taskId,
+            started.turnId,
+            started.text,
+            toRuntimeWorkspaceSet(started.workspaceSet),
+            started.model,
+            createEmptyToolCatalogSnapshot(kind, workspaceId),
+            context,
+            teamMcp,
+            // Reasoning effort: read live (not captured on StartedTurn) since it isn't persisted
+            // per-turn, unlike model — see persistence.ts's getEffort doc comment. The Codex value
+            // needs no probe here because setModel/setCodexEffort keep the stored level clamped to
+            // the selected model's advertised set; '' means "no override".
+            kind === 'claude'
+              ? this.persistence.getEffort()
+              : this.persistence.getCodexEffort() || undefined,
+            writeScope,
+            runtimeSkills,
+            dispatchPayload,
+            imageDispatch?.receipt,
+          ),
+      );
+    } catch {
+      if (imageDispatch !== undefined && kind === 'codex')
+        await this.cancelImageRuntimeBeforeRelease(taskId, started.turnId);
+      else await this.releaseTurnAttachmentCustody(started.turnId);
+      this.teamMcpBridge.unregister(started.turnId);
+      this.handleRuntimeFailure(kind, taskId, started.turnId, {
+        code: 'RUNTIME_FAILED',
+        userMessage: 'Providerへの送信準備に失敗しました。',
+        retryable: true,
+      });
+      return;
+    }
     if (!egress.allowed) {
+      if (imageDispatch !== undefined && kind === 'codex')
+        await this.cancelImageRuntimeBeforeRelease(taskId, started.turnId);
+      else await this.releaseTurnAttachmentCustody(started.turnId);
       this.teamMcpBridge.unregister(started.turnId);
       this.handleRuntimeFailure(kind, taskId, started.turnId, {
         code: 'RUNTIME_FAILED',
@@ -2982,6 +3121,101 @@ export class IpcRouter {
       });
       return;
     }
+  }
+
+  private async prepareTurnImageAttachments(
+    started: StartedTurn,
+    kind: 'codex' | 'claude',
+  ): Promise<
+    | Readonly<{
+        receipt: RuntimePreparedImageAttachments;
+        manifestDigest: string;
+        byteCount: number;
+      }>
+    | undefined
+  > {
+    const attachments = this.persistence.getAcceptedImageAttachments(
+      started.event.taskId,
+      started.turnId,
+    );
+    if (attachments.length === 0) {
+      this.attachmentCapabilityByTurn.delete(started.turnId);
+      return undefined;
+    }
+    const binding = this.attachmentCapabilityByTurn.get(started.turnId);
+    if (
+      kind !== 'codex' ||
+      binding === undefined ||
+      !(await this.attachmentSelectionStillValid(started, binding))
+    )
+      throw new Error('Image attachment selection is stale');
+    const lease = await this.attachmentCustodyStore.prepare({
+      turnId: started.turnId,
+      attachments: attachments.map(({ id, mimeType, byteLength, sha256, bytes }) => ({
+        id,
+        mimeType,
+        byteLength,
+        sha256,
+        bytes,
+      })),
+    });
+    this.attachmentCustodyByTurn.set(started.turnId, lease);
+    if (
+      this.turnRuntimes.get(started.turnId) !== 'codex' ||
+      !(await this.attachmentSelectionStillValid(started, binding))
+    )
+      throw new Error('Image attachment Turn is no longer active');
+    const receipt = await this.codexRuntime.prepareImageAttachments({
+      taskId: started.event.taskId,
+      turnId: started.turnId,
+      selectionIdentity: binding.selectionIdentity,
+      manifest: lease.manifest,
+      paths: lease.paths,
+      manifestDigest: lease.manifestDigest,
+    });
+    if (
+      this.turnRuntimes.get(started.turnId) !== 'codex' ||
+      receipt.manifestDigest !== lease.manifestDigest ||
+      receipt.decodedByteLength !== attachments.reduce((sum, item) => sum + item.byteLength, 0) ||
+      !(await this.attachmentSelectionStillValid(started, binding))
+    )
+      throw new Error('Image attachment Runtime receipt is stale');
+    return Object.freeze({
+      receipt,
+      manifestDigest: lease.manifestDigest,
+      byteCount: receipt.decodedByteLength,
+    });
+  }
+
+  private async attachmentSelectionStillValid(
+    started: StartedTurn,
+    binding: Readonly<{
+      snapshot: ImageAttachmentRuntimeSnapshot;
+      selectionIdentity: string;
+    }>,
+  ): Promise<boolean> {
+    const snapshot = await this.codexRuntime.captureImageAttachmentCapability();
+    return validateImageAttachmentCapabilitySnapshot({
+      selection: this.persistence.getImageAttachmentAcceptanceSelection(started.event.taskId),
+      snapshot,
+      current: this.codexRuntime.currentImageAttachmentCapability(),
+      expectedSelectionIdentity: binding.selectionIdentity,
+      nowMs: Date.now(),
+    });
+  }
+
+  private async releaseTurnAttachmentCustody(turnId: string): Promise<void> {
+    this.attachmentCapabilityByTurn.delete(turnId);
+    const lease = this.attachmentCustodyByTurn.get(turnId);
+    if (lease === undefined) return;
+    const released = await this.attachmentCustodyStore.release(lease).catch(() => false);
+    if (released && this.attachmentCustodyByTurn.get(turnId) === lease)
+      this.attachmentCustodyByTurn.delete(turnId);
+  }
+
+  private async cancelImageRuntimeBeforeRelease(taskId: string, turnId: string): Promise<void> {
+    await this.codexRuntime.cancel(taskId, turnId).catch(() => undefined);
+    await this.releaseTurnAttachmentCustody(turnId);
   }
 
   private async assertTurnWorkspaceHealthy(started: StartedTurn): Promise<void> {
@@ -3590,7 +3824,10 @@ export class IpcRouter {
       this.teamSkillResolutionByTurn.delete(turnId);
       this.pendingProjectMemoriesByTurn.delete(turnId);
       this.providerAbortByTurn.delete(turnId);
-      return cancelAction;
+      return () =>
+        cancelRuntimeWithFinalCleanup(cancelAction, () =>
+          this.releaseTurnAttachmentCustody(turnId),
+        );
     });
   }
 
@@ -4287,8 +4524,14 @@ export class IpcRouter {
     turnId: string,
     error: PublicError,
   ): void {
-    void this.mailbox.run(taskId, () => {
+    void this.mailbox.run(taskId, async () => {
       if (this.turnRuntimes.get(turnId) !== kind) return;
+      if (this.attachmentCustodyByTurn.has(turnId)) {
+        await this.runtimeFor(kind)
+          .cancel(taskId, turnId)
+          .catch(() => undefined);
+        await this.releaseTurnAttachmentCustody(turnId);
+      }
       // The reason used to be dropped here, so the renderer saw a Turn end in `failed` with no way
       // to tell "the model refused" from "the CLI is gone" (issue #9). Pushed on the transient
       // status channel rather than folded into the persisted Turn event.
@@ -4411,6 +4654,17 @@ export class TaskMailbox {
       release();
       if (this.tails.get(taskId) === tail) this.tails.delete(taskId);
     }
+  }
+}
+
+export async function cancelRuntimeWithFinalCleanup(
+  cancelRuntime: () => Promise<void>,
+  releaseCustody: () => Promise<void>,
+): Promise<void> {
+  try {
+    await cancelRuntime();
+  } finally {
+    await releaseCustody();
   }
 }
 

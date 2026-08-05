@@ -943,6 +943,7 @@ export interface SprintCoderApi {
       text: string;
       skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
       attachmentIds: string[];
+      attachmentSelectionIdentity: string | null;
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
     queue(input: {

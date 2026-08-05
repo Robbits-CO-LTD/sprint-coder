@@ -2022,6 +2022,10 @@ export const useAppStore = create<AppState>((set, get) => {
           text: trimmed,
           skills: selectedSkills,
           attachmentIds: selectedAttachmentIds,
+          attachmentSelectionIdentity:
+            selectedAttachmentIds.length === 0
+              ? null
+              : (get().attachmentCapabilityByTask[taskId]?.selectionIdentity ?? null),
         });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
         // A DB Task exists before this point so per-Task settings have a stable id, but it becomes

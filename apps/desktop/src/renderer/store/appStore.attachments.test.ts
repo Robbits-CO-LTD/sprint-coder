@@ -43,6 +43,9 @@ describe('attachment draft store state', () => {
     useAppStore.setState({
       messagesByTask: { [taskId]: [] },
       draftAttachmentsByTask: { [taskId]: [first, second] },
+      attachmentCapabilityByTask: {
+        [taskId]: { status: 'supported', reason: null, selectionIdentity: 'selection-1' },
+      },
       sendingByTask: {},
       pendingOptimisticIdByTask: {},
       lastSeqByTask: { [taskId]: 0 },
@@ -55,6 +58,7 @@ describe('attachment draft store state', () => {
       text: '画像を確認して',
       skills: [],
       attachmentIds: [second.id],
+      attachmentSelectionIdentity: 'selection-1',
     });
     expect(useAppStore.getState().messagesByTask[taskId]?.[0]?.attachments).toEqual([second]);
 

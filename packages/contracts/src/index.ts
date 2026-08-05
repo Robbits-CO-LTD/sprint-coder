@@ -2814,8 +2814,16 @@ export const turnStartInputSchema = z
   .object({
     ...turnTextAndSkillsInputShape,
     attachmentIds: imageAttachmentIdsSchema,
+    attachmentSelectionIdentity: z.string().min(1).max(512).nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((input, context) => {
+    if (input.attachmentIds.length > 0 !== (input.attachmentSelectionIdentity !== null))
+      context.addIssue({
+        code: 'custom',
+        message: 'Attachment selection identity must match attachment presence',
+      });
+  });
 export const turnQueueInputSchema = z.object(turnTextAndSkillsInputShape).strict();
 export const turnQueueResultSchema = z.object({ ordinal: z.number().int().positive() }).strict();
 export const turnSteerInputSchema = z

@@ -1,6 +1,6 @@
 # Image attachments design and C1a Codex slice
 
-- Status: C1a-1 through C1a-3c complete and independently re-reviewed; C1a-3d pending
+- Status: C1a-1 through C1a-3d complete and independently re-reviewed; final release gate pending
 - Date: 2026-08-05
 - Scope: FR-CHAT-04 / FR-CHAT-10, split into C1a-C1d
 
@@ -348,3 +348,32 @@ required before C1a-1; implementation-safety and requirement rechecks are requir
 - Scope invariant preserved: Main production wiring still rejects attachment acceptance. Provider
   egress permit binding, final capability enablement, and custody release integration remain
   C1a-3d; no real Codex/provider execution was performed.
+
+## 13. C1a-3d production integration checkpoint evidence (2026-08-05)
+
+- Renderer submits the exact capability selection digest with an image Turn. Main refreshes Codex
+  readiness, validates the digest before the transaction and again inside attachment acceptance,
+  then retains the accepted capability binding by Turn until dispatch or cleanup.
+- Main loads only the canonical accepted Task/Turn attachments, materializes one exact custody
+  lease, refreshes selection/readiness before and after Runtime preparation, and commits only the
+  matching in-memory Runtime receipt.
+- Provider permission resources, ResourceSets, resource identity, request fingerprint, reviewer
+  digest, persisted audit digest, execution-spec digest, and broker revalidation now bind the exact
+  attachment manifest and byte count. Text-only permission facts are explicitly `null` / zero and
+  cannot authorize an image commit; total egress byte arithmetic is overflow checked.
+- Custody cleanup is wired to started acknowledgement, preparation/dispatch failure, egress denial,
+  confirmed or forced cancellation, Turn completion, Runtime failure, Router disposal, and startup
+  scavenging. Prepared Runtime state is canceled before custody removal on pre-commit teardown, and
+  failed lease removal stays retryable.
+- Capability remains fail closed on Windows, a non-Codex or stale model selection, non-ready Codex,
+  and unavailable custody initialization. Mock, Claude, external Provider, and disabled Team routes
+  cannot consume accepted image attachments.
+- Focused checkpoint before independent review: contracts/domain/desktop typechecks are green;
+  contracts, permission, renderer attachment, IPC fuzz, capability, custody, provider-egress, and
+  Runtime Host suites passed. No real Codex/provider execution was performed.
+- The first checkpoint review found that a rejecting forced/unconfirmed Runtime cancellation could
+  skip custody release. Cancellation now releases in `finally` while preserving the cancellation
+  error; a focused Main regression injects that rejection and proves cancel-before-release order.
+  A second Main-boundary regression drives canonical accepted bytes through the production custody
+  and Runtime preparation methods and verifies exact receipt facts and release. Scope, security,
+  and implementation/lifecycle re-reviews are all GO with no remaining concrete findings.
