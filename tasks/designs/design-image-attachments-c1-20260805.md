@@ -1,7 +1,6 @@
 # Image attachments design and C1a Codex slice
 
-- Status: C1a-1, C1a-2, and C1a-3a/3b foundations complete and independently re-reviewed;
-  C1a-3c/3d pending
+- Status: C1a-1 through C1a-3c complete and independently re-reviewed; C1a-3d pending
 - Date: 2026-08-05
 - Scope: FR-CHAT-04 / FR-CHAT-10, split into C1a-C1d
 
@@ -327,3 +326,25 @@ required before C1a-1; implementation-safety and requirement rechecks are requir
 - Scope invariant preserved: Runtime protocol remains v7 start/cancel behavior, no custody path is
   sent yet, Codex `localImage`, two-phase v8 prepare/commit, provider egress permission, and public
   capability enablement remain C1a-3c/3d. Production image dispatch is still disabled.
+
+## 12. C1a-3c Runtime v8 checkpoint evidence (2026-08-05)
+
+- Three independent checkpoint reviews are GO after lifecycle, cancellation, timeout, decode,
+  collision, and event-buffer findings were fixed with regressions.
+- Protocol v8 adds exact `prepare_images` / `images_prepared` / `commit_images` identities without
+  weakening text-only start validation. Main accepts one exact in-memory receipt, binds it to the
+  current Runtime instance, and coalesces bound pre-commit cancellation.
+- Runtime Host validates the ordered manifest and custody paths, reads no-follow through retained
+  handles, performs a full bounded pixel decode, and re-fstats/re-hashes immediately before Codex
+  `turn/start`. Only then does the adapter construct ordered app-server `localImage` inputs.
+- Duplicate/in-flight prepare, ordinary-start collision, mismatched/late commit, whole-prepare
+  timeout, cancellation, Host exit/restart, stalled RPC, child error, and adapter timeout all
+  invalidate state and release exactly once. Abort closes retained handles even while native decode
+  remains pending; late completion cannot resurrect terminal state.
+- Image commits buffer provider events until `started`, capped at 256 events and 1 MiB; overflow
+  fails closed and releases custody. Existing text-only acknowledgement timing remains unchanged.
+- Runtime subsystem checkpoint: 17 test files passed, 158 tests passed, 17 opt-in real-provider
+  smoke tests skipped. Desktop typecheck, touched-file lint/format, and diff check are green.
+- Scope invariant preserved: Main production wiring still rejects attachment acceptance. Provider
+  egress permit binding, final capability enablement, and custody release integration remain
+  C1a-3d; no real Codex/provider execution was performed.

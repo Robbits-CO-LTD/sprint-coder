@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ToolRegistry } from '@sprint-coder/domain';
 
 const electronMock = vi.hoisted(() => {
   type Handler = (...args: unknown[]) => void;
@@ -50,7 +51,11 @@ const electronMock = vi.hoisted(() => {
 
 vi.mock('electron', () => ({ utilityProcess: { fork: electronMock.fork } }));
 
-import { RUNTIME_PROTOCOL_VERSION } from '../runtime-host/protocol';
+import {
+  RUNTIME_PROTOCOL_VERSION,
+  runtimeImageManifestDigest,
+  type RuntimeImageAttachmentManifestEntry,
+} from '../runtime-host/protocol';
 import { RuntimeHostClient } from './runtime-host';
 
 function emitReadyHello(index: number, emitSpawn = true, operationId = 'hello'): void {
@@ -82,6 +87,201 @@ afterEach(() => {
 });
 
 describe('RuntimeHostClient image attachment capability state', () => {
+  it('accepts one exact prepared receipt and emits a bound commit envelope', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    const failures: unknown[] = [];
+    const client = new RuntimeHostClient(
+      () => undefined,
+      (_taskId, _turnId, error) => failures.push(error),
+    );
+    emitReadyHello(0);
+    const manifest: RuntimeImageAttachmentManifestEntry[] = [
+      {
+        id: 'attachment-1',
+        mimeType: 'image/png',
+        byteLength: 128,
+        sha256: 'a'.repeat(64),
+      },
+    ];
+    const manifestDigest = runtimeImageManifestDigest(manifest);
+    const receiptPromise = client.prepareImageAttachments({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      selectionIdentity: 'b'.repeat(64),
+      manifest,
+      paths: ['/custody/turn/001.png'],
+      manifestDigest,
+    });
+    await Promise.resolve();
+    const prepare = electronMock.children[0]!.messages.find(
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        message.type === 'prepare_images',
+    ) as { operationId: string } | undefined;
+    expect(prepare).toBeDefined();
+    electronMock.children[0]!.emit('message', {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: electronMock.instances[0],
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: prepare!.operationId,
+      type: 'images_prepared',
+      selectionIdentity: 'b'.repeat(64),
+      manifestDigest,
+      decodedByteLength: 128,
+    });
+    const receipt = await receiptPromise;
+    client.start(
+      'task-1',
+      'turn-1',
+      'inspect',
+      null,
+      'gpt-5.6-sol',
+      new ToolRegistry().createSnapshot({ providerId: 'codex', workspaceId: null }),
+      undefined,
+      undefined,
+      undefined,
+      'read-only',
+      [],
+      undefined,
+      receipt,
+    );
+    await Promise.resolve();
+    expect(
+      electronMock.children[0]!.messages.some(
+        (message) =>
+          typeof message === 'object' &&
+          message !== null &&
+          'type' in message &&
+          message.type === 'commit_images' &&
+          'operationId' in message &&
+          message.operationId === prepare!.operationId &&
+          'selectionIdentity' in message &&
+          message.selectionIdentity === 'b'.repeat(64) &&
+          'manifestDigest' in message &&
+          message.manifestDigest === manifestDigest,
+      ),
+    ).toBe(true);
+    client.start(
+      'task-1',
+      'turn-1',
+      'duplicate',
+      null,
+      'gpt-5.6-sol',
+      new ToolRegistry().createSnapshot({ providerId: 'codex', workspaceId: null }),
+      undefined,
+      undefined,
+      undefined,
+      'read-only',
+      [],
+      undefined,
+      receipt,
+    );
+    expect(failures).toHaveLength(1);
+    client.dispose();
+  });
+
+  it('cancels a prepared pre-commit phase and invalidates its receipt', async () => {
+    const failures: unknown[] = [];
+    const client = new RuntimeHostClient(
+      () => undefined,
+      (_taskId, _turnId, error) => failures.push(error),
+    );
+    emitReadyHello(0);
+    const manifest: RuntimeImageAttachmentManifestEntry[] = [
+      {
+        id: 'attachment-1',
+        mimeType: 'image/png',
+        byteLength: 128,
+        sha256: 'a'.repeat(64),
+      },
+    ];
+    const manifestDigest = runtimeImageManifestDigest(manifest);
+    const receiptPromise = client.prepareImageAttachments({
+      taskId: 'task-cancel',
+      turnId: 'turn-cancel',
+      selectionIdentity: 'b'.repeat(64),
+      manifest,
+      paths: ['/custody/turn/001.png'],
+      manifestDigest,
+    });
+    await Promise.resolve();
+    const prepare = electronMock.children[0]!.messages.find(
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        message.type === 'prepare_images',
+    ) as { operationId: string } | undefined;
+    electronMock.children[0]!.emit('message', {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: electronMock.instances[0],
+      taskId: 'task-cancel',
+      turnId: 'turn-cancel',
+      seq: 1,
+      operationId: prepare!.operationId,
+      type: 'images_prepared',
+      selectionIdentity: 'b'.repeat(64),
+      manifestDigest,
+      decodedByteLength: 128,
+    });
+    const receipt = await receiptPromise;
+    client.start(
+      'task-cancel',
+      'turn-cancel',
+      'plain start must fail',
+      null,
+      'gpt-5.6-sol',
+      new ToolRegistry().createSnapshot({ providerId: 'codex', workspaceId: null }),
+    );
+    expect(failures).toHaveLength(1);
+    let settledCancels = 0;
+    const firstCancel = client.cancel('task-cancel', 'turn-cancel').then((receipt) => {
+      settledCancels += 1;
+      return receipt;
+    });
+    const secondCancel = client.cancel('task-cancel', 'turn-cancel').then((receipt) => {
+      settledCancels += 1;
+      return receipt;
+    });
+    await Promise.resolve();
+    expect(settledCancels).toBe(0);
+    electronMock.children[0]!.emit('message', {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: electronMock.instances[0],
+      taskId: 'task-cancel',
+      turnId: 'turn-cancel',
+      seq: 2,
+      operationId: prepare!.operationId,
+      type: 'stopped',
+      forced: false,
+    });
+    await expect(Promise.all([firstCancel, secondCancel])).resolves.toEqual([
+      expect.objectContaining({ turnId: 'turn-cancel', forced: false }),
+      expect.objectContaining({ turnId: 'turn-cancel', forced: false }),
+    ]);
+    client.start(
+      'task-cancel',
+      'turn-cancel',
+      'inspect',
+      null,
+      'gpt-5.6-sol',
+      new ToolRegistry().createSnapshot({ providerId: 'codex', workspaceId: null }),
+      undefined,
+      undefined,
+      undefined,
+      'read-only',
+      [],
+      undefined,
+      receipt,
+    );
+    expect(failures).toHaveLength(2);
+    client.dispose();
+  });
+
   it('ignores duplicate hello and asynchronously refreshes an expired observation', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000);
     const client = new RuntimeHostClient(

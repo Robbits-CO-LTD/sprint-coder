@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AttachmentCustodyError, AttachmentCustodyStore } from './attachment-custody-store';
+import { runtimeImageManifestDigest } from '../runtime-host/protocol';
 
 const cleanup: string[] = [];
 
@@ -61,6 +62,7 @@ describe.skipIf(process.platform === 'win32')('AttachmentCustodyStore', () => {
     expect((await stat(lease.paths[0]!)).mode & 0o777).toBe(0o400);
     expect((await stat(dirname(lease.paths[0]!))).mode & 0o777).toBe(0o500);
     expect(lease.manifestDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(runtimeImageManifestDigest(lease.manifest)).toBe(lease.manifestDigest);
     expect(
       await store.release({ ...lease, paths: [...lease.paths], manifest: [...lease.manifest] }),
     ).toBe(false);
