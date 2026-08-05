@@ -92,6 +92,14 @@ function ProjectEditorDialogOpen({
   );
   const validName = name.trim().length > 0 && name.trim().length <= 120;
 
+  function finishSave(saved: ProjectSummary): void {
+    // Close the native dialog before the parent schedules focus for the saved Project. Otherwise
+    // the browser restores focus to the opener after `onSaved`, which cancels Sidebar's guarded
+    // focus transfer and strands keyboard users on the create/edit button.
+    dialogRef.current?.close();
+    onSaved(saved);
+  }
+
   async function chooseFolders(): Promise<void> {
     const picked = await pickProjectFolders();
     if (picked.canceled) return;
@@ -128,7 +136,7 @@ function ProjectEditorDialogOpen({
       if (project === null) {
         const created = await createProject(name.trim(), folderInputs(folders));
         if (created === null) throw new Error('Projectを作成できませんでした。');
-        onSaved(created);
+        finishSave(created);
         return;
       }
       let current = project;
@@ -146,7 +154,7 @@ function ProjectEditorDialogOpen({
         if (renamed === null) throw new Error('Project名を保存できませんでした。');
         current = renamed;
       }
-      onSaved(current);
+      finishSave(current);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {

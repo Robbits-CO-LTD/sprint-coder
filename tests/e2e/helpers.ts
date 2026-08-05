@@ -441,6 +441,36 @@ export async function firstWindow(app: ElectronApplication): Promise<Page> {
   return page;
 }
 
+/** Gives the current Task a real Project root without exercising Project-picker UI in specs whose
+ * subject is file editing or command execution. Reloading lets the renderer rebuild its canonical
+ * Project-derived workspace state through the same startup path used after an app restart. */
+export async function assignCurrentTaskToProjectFolder(
+  page: Page,
+  projectName: string,
+  folderPath: string,
+): Promise<void> {
+  await page.evaluate(
+    async ({ name, path }) => {
+      if (!window.sprintCoder) throw new Error('Sprint Coder API unavailable');
+      const task = (await window.sprintCoder.tasks.list()).find((candidate) => !candidate.archived);
+      if (!task) throw new Error('current Task unavailable');
+      const project = await window.sprintCoder.projects.create({
+        name,
+        folders: [{ path, role: 'primary' }],
+      });
+      await window.sprintCoder.projects.assignTask({
+        projectId: project.id,
+        taskId: task.id,
+        expectedProjectId: task.projectId,
+      });
+    },
+    { name: projectName, path: folderPath },
+  );
+  await page.reload();
+  await page.waitForLoadState('domcontentloaded');
+  await page.getByRole('button', { name: projectName }).first().waitFor();
+}
+
 /** Always call in a `finally` block: closes the Electron process (ignoring errors from an
  * already-crashed/closed app) — never touches a developer's separately-running instance since
  * each test owns its own isolated userData dir/process. */

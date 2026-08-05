@@ -1,23 +1,20 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
+import {
+  assignCurrentTaskToProjectFolder,
+  closeApp,
+  createUserDataDir,
+  firstWindow,
+  launchApp,
+  removeUserDataDir,
+} from './helpers';
 
 // Issue #37. Under SPRINT_CODER_E2E_MODE=dev the mock is the only runtime, and it now reports file
-// changes through exactly the two gates a real Runtime is held to (a Workspace exists, and the
+// changes through exactly the two gates a real Runtime is held to (a Project root exists, and the
 // Access preset is not `ask`) — so what these specs exercise is the real path, not a shortcut.
-
-async function selectWorkspace(app: ElectronApplication, page: Page, path: string): Promise<void> {
-  await app.evaluate(({ dialog }, workspacePath) => {
-    Object.defineProperty(dialog, 'showOpenDialog', {
-      configurable: true,
-      value: async () => ({ canceled: false, filePaths: [workspacePath] }),
-    });
-  }, path);
-  await page.getByRole('button', { name: 'Workspace未選択' }).first().click();
-}
 
 async function grantAuto(page: Page): Promise<void> {
   await page.getByTestId('access-selector').click();
@@ -48,7 +45,7 @@ test.describe('file edits', () => {
     await expect(page.getByRole('button', { name: 'Inspector' })).toHaveCount(0);
     await expect(page.locator('[data-testid="inspector-panel"]')).toHaveCount(0);
 
-    await selectWorkspace(app, page, workspaceDir);
+    await assignCurrentTaskToProjectFolder(page, 'File edits', workspaceDir);
     // The Access control lives in the ContextBar; the header's read-only copy was removed as a
     // duplicate (issue #47), and the sandbox disclosure moved with the control rather than being
     // dropped.
@@ -69,7 +66,7 @@ test.describe('file edits', () => {
     app = await launchApp(userDataDir);
     const page = await firstWindow(app);
     await page.getByTestId('sidebar-new-task-button').click();
-    await selectWorkspace(app, page, workspaceDir);
+    await assignCurrentTaskToProjectFolder(page, 'File edits', workspaceDir);
     await grantAuto(page);
 
     const textarea = page.getByTestId('composer-textarea');
@@ -107,13 +104,13 @@ test.describe('file edits', () => {
     app = await launchApp(userDataDir);
     const page = await firstWindow(app);
     await page.getByTestId('sidebar-new-task-button').click();
-    await selectWorkspace(app, page, workspaceDir);
+    await assignCurrentTaskToProjectFolder(page, 'File edits', workspaceDir);
     await app.evaluate(({ dialog }, selectedFile) => {
       Object.defineProperty(dialog, 'showOpenDialog', {
         configurable: true,
         value: async () => ({ canceled: false, filePaths: [selectedFile] }),
       });
-    }, filePath);
+    }, realpathSync(filePath));
 
     await page.getByTestId('open-file-button').click();
     const editor = page.getByRole('dialog', { name: 'ファイルを編集' });

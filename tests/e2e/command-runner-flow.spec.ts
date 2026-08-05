@@ -1,7 +1,7 @@
-import { basename } from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import {
+  assignCurrentTaskToProjectFolder,
   closeApp,
   createUserDataDir,
   firstWindow,
@@ -65,14 +65,8 @@ test.describe('command runner flow', () => {
     app = await launchApp(userDataDir);
     const page: Page = await firstWindow(app);
     await page.getByTestId('sidebar-new-task-button').click();
-    await app.evaluate(({ dialog }, workspacePath) => {
-      Object.defineProperty(dialog, 'showOpenDialog', {
-        configurable: true,
-        value: async () => ({ canceled: false, filePaths: [workspacePath] }),
-      });
-    }, REPO_ROOT);
-    await page.getByRole('button', { name: 'Workspace未選択' }).first().click();
-    await expect(page.getByRole('button', { name: basename(REPO_ROOT) }).first()).toBeVisible();
+    await assignCurrentTaskToProjectFolder(page, 'Command runner', REPO_ROOT);
+    await expect(page.getByRole('button', { name: 'Command runner' }).first()).toBeVisible();
 
     const textarea = page.getByTestId('composer-textarea');
     const card = page.getByTestId('approval-card');
