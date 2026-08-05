@@ -45,13 +45,13 @@ test.describe('composer slash commands', () => {
     );
     await expect(page.getByTestId('composer-goal-input')).toHaveCount(0);
 
-    await textarea.fill('/wor');
-    await expect(page.getByTestId('slash-command-workspace')).toBeVisible();
-    await expect(page.getByTestId('slash-command-team')).toHaveCount(0);
+    await textarea.fill('/tea');
+    await expect(page.getByTestId('slash-command-team')).toBeVisible();
+    await expect(page.getByTestId('slash-command-goal')).toHaveCount(0);
 
     await textarea.press('Escape');
     await expect(page.getByTestId('slash-command-menu')).toHaveCount(0);
-    await expect(textarea).toHaveValue('/wor');
+    await expect(textarea).toHaveValue('/tea');
 
     await textarea.fill('/team');
     await textarea.press('Tab');
