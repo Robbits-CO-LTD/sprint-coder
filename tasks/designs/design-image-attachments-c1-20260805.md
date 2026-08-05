@@ -392,3 +392,6 @@ required before C1a-1; implementation-safety and requirement rechecks are requir
   initialization failure while preserving the original error. The exact migration refusal test and
   the complete 122-test Electron-ABI persistence suite pass locally; Windows CI remains the
   same-observation-point proof for lock release.
+- The review bot found one public type-contract omission: `turnStartInputSchema` and the renderer
+  declaration required `attachmentSelectionIdentity`, but `SprintCoderApi.turns.start` did not
+  expose it. The contracts interface now matches the validated IPC input exactly.
