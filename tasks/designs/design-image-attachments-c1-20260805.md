@@ -1,6 +1,7 @@
 # Image attachments design and C1a Codex slice
 
-- Status: C1a-1 and C1a-2 complete and independently re-reviewed; C1a-3 pending
+- Status: C1a-1, C1a-2, and C1a-3a/3b foundations complete and independently re-reviewed;
+  C1a-3c/3d pending
 - Date: 2026-08-05
 - Scope: FR-CHAT-04 / FR-CHAT-10, split into C1a-C1d
 
@@ -304,3 +305,25 @@ required before C1a-1; implementation-safety and requirement rechecks are requir
 - Scope invariant preserved: queue, steer, stop-and-send, provider egress, Runtime protocol, and
   Codex adapter are unchanged. Main still supplies a false production capability validator until
   C1a-3 adds the expiring Runtime/readiness identity and two-phase egress boundary.
+
+## 11. C1a-3a/3b foundation checkpoint evidence (2026-08-05)
+
+- Three independent checkpoint reviews are GO after capability-generation, lifecycle, custody,
+  crash-recovery, and accepted-row completeness findings were fixed with regressions.
+- Runtime capability captures bind Task selection, Codex host kind and instance, readiness/catalog
+  revisions, and selected-model membership. Observations expire after five seconds and refresh
+  asynchronously with unique echoed operation IDs; late, duplicate, disposed, timed-out, exited,
+  or force-restarted generations cannot restore or strand readiness.
+- Accepted canonical bytes are loaded only through the exact Task/Turn/user-message relation,
+  rehashed, copied, and compared in order with immutable `turn.accepted` metadata. Missing,
+  reordered, or byte-corrupted accepted rows fail closed before custody.
+- Main custody uses an installation marker, private per-Turn directories, ordered manifests,
+  exclusive/no-follow bounded I/O, retained handles, identity rechecks, exact-object leases,
+  retryable idempotent release, and candidate-aware startup scavenging. Empty private roots left by
+  an initialization crash recover safely; foreign or substituted paths are never deleted.
+- Focused checkpoint: capability/custody/Runtime protocol plus Electron-ABI persistence bridge,
+  35 parent-process tests passed; desktop typecheck, touched-file lint/format, and diff check are
+  green. The Electron bridge also exercised the complete persistence integration suite.
+- Scope invariant preserved: Runtime protocol remains v7 start/cancel behavior, no custody path is
+  sent yet, Codex `localImage`, two-phase v8 prepare/commit, provider egress permission, and public
+  capability enablement remain C1a-3c/3d. Production image dispatch is still disabled.

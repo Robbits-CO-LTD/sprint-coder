@@ -21,6 +21,12 @@ import {
   runtimeWorkspaceSetFromLegacyPath,
 } from '../runtime-host/protocol';
 import { RUNTIME_HOST_HELLO_TIMEOUT_MS } from '../runtime-host/probe-budget';
+import {
+  IMAGE_ATTACHMENT_CAPABILITY_MAX_AGE_MS,
+  runtimeCapabilityCatalogRevision,
+  type ImageAttachmentRuntimeCurrent,
+  type ImageAttachmentRuntimeSnapshot,
+} from './image-attachment-capability';
 
 type ActiveTurn = {
   taskId: string;
@@ -55,14 +61,22 @@ type ContextAccepted = (
 export type RuntimeCapabilityReport = {
   available: boolean;
   readiness: 'ready' | 'authentication_required' | 'unavailable';
-  models: CodexModelOption[];
+  models: readonly CodexModelOption[];
 };
+type RuntimeCapabilityState = Readonly<{
+  report: RuntimeCapabilityReport;
+  runtimeInstanceId: string;
+  readinessRevision: number;
+  catalogRevision: string;
+  observedAtMs: number;
+}>;
 
 export class RuntimeHostClient {
   private process: UtilityProcess | null = null;
   private runtimeInstanceId = '';
   private spawnReady: Promise<void> = Promise.resolve();
   private resolveProbe: ((report: RuntimeCapabilityReport) => void) | null = null;
+  private expectedProbeOperationId: string | null = null;
   private probeResult: Promise<RuntimeCapabilityReport> = Promise.resolve({
     available: false,
     readiness: 'unavailable',
@@ -70,6 +84,13 @@ export class RuntimeHostClient {
   });
   private readonly active = new Map<string, ActiveTurn>();
   private readonly cancelWaiters = new Map<string, CancelWaiter>();
+  private capabilityState: RuntimeCapabilityState = {
+    report: { available: false, readiness: 'unavailable', models: [] },
+    runtimeInstanceId: '',
+    readinessRevision: 0,
+    catalogRevision: runtimeCapabilityCatalogRevision([]),
+    observedAtMs: 0,
+  };
   private disposed = false;
 
   constructor(
@@ -85,6 +106,36 @@ export class RuntimeHostClient {
   async probe(): Promise<RuntimeCapabilityReport> {
     if (this.process === null && !this.disposed) this.launch();
     return this.probeResult;
+  }
+
+  async captureImageAttachmentCapability(): Promise<ImageAttachmentRuntimeSnapshot> {
+    await this.probe();
+    if (
+      this.capabilityState.observedAtMs > 0 &&
+      Date.now() - this.capabilityState.observedAtMs > IMAGE_ATTACHMENT_CAPABILITY_MAX_AGE_MS
+    )
+      await this.refreshCapabilityProbe();
+    const state = this.capabilityState;
+    return Object.freeze({
+      runtimeKind: this.kind,
+      available: state.report.available,
+      readiness: state.report.readiness,
+      runtimeInstanceId: state.runtimeInstanceId,
+      readinessRevision: state.readinessRevision,
+      catalogRevision: state.catalogRevision,
+      modelIds: Object.freeze(state.report.models.map(({ id }) => id)),
+      capturedAtMs: state.observedAtMs,
+    });
+  }
+
+  currentImageAttachmentCapability(): ImageAttachmentRuntimeCurrent {
+    const state = this.capabilityState;
+    return Object.freeze({
+      runtimeKind: this.kind,
+      runtimeInstanceId: state.runtimeInstanceId,
+      readinessRevision: state.readinessRevision,
+      catalogRevision: state.catalogRevision,
+    });
   }
 
   start(
@@ -200,6 +251,11 @@ export class RuntimeHostClient {
 
   dispose(): void {
     this.disposed = true;
+    this.invalidateCapabilityState();
+    const unavailable = { available: false, readiness: 'unavailable' as const, models: [] };
+    this.resolveProbe?.(unavailable);
+    this.resolveProbe = null;
+    this.expectedProbeOperationId = null;
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
       clearTimeout(waiter.timer);
@@ -213,12 +269,17 @@ export class RuntimeHostClient {
   private launch(): void {
     this.runtimeInstanceId = randomUUID();
     const instanceId = this.runtimeInstanceId;
+    this.invalidateCapabilityState(instanceId);
     this.probeResult = new Promise<RuntimeCapabilityReport>((resolve) => {
       this.resolveProbe = resolve;
+      this.expectedProbeOperationId = 'hello';
       setTimeout(() => {
         if (this.resolveProbe === resolve) {
           this.resolveProbe = null;
-          resolve({ available: false, readiness: 'unavailable', models: [] });
+          this.expectedProbeOperationId = null;
+          const report = { available: false, readiness: 'unavailable' as const, models: [] };
+          this.recordCapabilityState(instanceId, report);
+          resolve(report);
         }
       }, RUNTIME_HOST_HELLO_TIMEOUT_MS);
     });
@@ -236,8 +297,11 @@ export class RuntimeHostClient {
         },
       );
     } catch {
-      this.resolveProbe?.({ available: false, readiness: 'unavailable', models: [] });
+      const report = { available: false, readiness: 'unavailable' as const, models: [] };
+      this.recordCapabilityState(instanceId, report);
+      this.resolveProbe?.(report);
       this.resolveProbe = null;
+      this.expectedProbeOperationId = null;
       this.process = null;
       return;
     }
@@ -254,13 +318,15 @@ export class RuntimeHostClient {
 
   private receive(instanceId: string, raw: unknown): void {
     if (
+      this.disposed ||
       instanceId !== this.runtimeInstanceId ||
       !isRuntimeToMainEnvelope(raw) ||
       raw.runtimeInstanceId !== this.runtimeInstanceId
     )
       return;
     if (raw.type === 'hello') {
-      this.resolveProbe?.(
+      if (this.resolveProbe === null || raw.operationId !== this.expectedProbeOperationId) return;
+      const report =
         this.kind === 'claude'
           ? {
               available: raw.claudeAvailable,
@@ -271,9 +337,11 @@ export class RuntimeHostClient {
               available: raw.codexAvailable,
               readiness: raw.codexReadiness,
               models: raw.codexModels,
-            },
-      );
+            };
+      this.recordCapabilityState(instanceId, report);
+      this.resolveProbe?.(report);
       this.resolveProbe = null;
+      this.expectedProbeOperationId = null;
       return;
     }
     const active = this.active.get(raw.turnId);
@@ -359,8 +427,11 @@ export class RuntimeHostClient {
 
   private handleExit(instanceId: string): void {
     if (instanceId !== this.runtimeInstanceId) return;
-    this.resolveProbe?.({ available: false, readiness: 'unavailable', models: [] });
+    const report = { available: false, readiness: 'unavailable' as const, models: [] };
+    this.recordCapabilityState(instanceId, report);
+    this.resolveProbe?.(report);
     this.resolveProbe = null;
+    this.expectedProbeOperationId = null;
     this.process = null;
     const failures = [...this.active.entries()];
     this.active.clear();
@@ -377,9 +448,57 @@ export class RuntimeHostClient {
       });
   }
 
+  private recordCapabilityState(runtimeInstanceId: string, report: RuntimeCapabilityReport): void {
+    this.capabilityState = Object.freeze({
+      report: Object.freeze({ ...report, models: Object.freeze([...report.models]) }),
+      runtimeInstanceId,
+      readinessRevision: this.capabilityState.readinessRevision + 1,
+      catalogRevision: runtimeCapabilityCatalogRevision(report.models),
+      observedAtMs: Date.now(),
+    });
+  }
+
+  private invalidateCapabilityState(runtimeInstanceId = this.runtimeInstanceId): void {
+    this.recordCapabilityState(runtimeInstanceId, {
+      available: false,
+      readiness: 'unavailable',
+      models: [],
+    });
+  }
+
+  private refreshCapabilityProbe(): Promise<RuntimeCapabilityReport> {
+    if (this.disposed)
+      return Promise.resolve({ available: false, readiness: 'unavailable', models: [] });
+    if (this.process === null) return this.probe();
+    if (this.resolveProbe !== null) return this.probeResult;
+    const instanceId = this.runtimeInstanceId;
+    const operationId = `capability-refresh:${randomUUID()}`;
+    this.probeResult = new Promise<RuntimeCapabilityReport>((resolve) => {
+      this.resolveProbe = resolve;
+      this.expectedProbeOperationId = operationId;
+      setTimeout(() => {
+        if (this.resolveProbe !== resolve) return;
+        this.resolveProbe = null;
+        this.expectedProbeOperationId = null;
+        const report = { available: false, readiness: 'unavailable' as const, models: [] };
+        this.recordCapabilityState(instanceId, report);
+        resolve(report);
+      }, RUNTIME_HOST_HELLO_TIMEOUT_MS);
+    });
+    this.post({ ...this.base('', '', operationId, 1), type: 'hello' });
+    return this.probeResult;
+  }
+
   private restartHostAfterUnconfirmedStop(error: Error): void {
     const child = this.process;
     this.process = null;
+    if (this.resolveProbe !== null) {
+      const report = { available: false, readiness: 'unavailable' as const, models: [] };
+      this.recordCapabilityState(this.runtimeInstanceId, report);
+      this.resolveProbe(report);
+      this.resolveProbe = null;
+      this.expectedProbeOperationId = null;
+    }
     const failures = [...this.active.entries()];
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {

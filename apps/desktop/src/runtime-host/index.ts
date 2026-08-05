@@ -28,7 +28,9 @@ heartbeat.unref();
 
 parentPort.on('message', ({ data }: Electron.MessageEvent) => {
   if (!isMainToRuntimeEnvelope(data) || data.runtimeInstanceId !== runtimeInstanceId) return;
-  if (data.type === 'start') {
+  if (data.type === 'hello') {
+    void probeAndSendCapability(data.operationId);
+  } else if (data.type === 'start') {
     activeTurns.set(data.turnId, {
       taskId: data.taskId,
       operationId: data.operationId,
@@ -68,8 +70,9 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
   }
 });
 
-void (runtimeKind === 'claude' ? probeClaude() : probeCodex()).then((probe) =>
-  send('', '', 'probe', {
+async function probeAndSendCapability(operationId: string): Promise<void> {
+  const probe = await (runtimeKind === 'claude' ? probeClaude() : probeCodex());
+  send('', '', operationId, {
     type: 'hello',
     ...(runtimeKind === 'claude'
       ? {
@@ -90,8 +93,8 @@ void (runtimeKind === 'claude' ? probeClaude() : probeCodex()).then((probe) =>
           claudeReadiness: 'unavailable',
           claudeModels: [],
         }),
-  }),
-);
+  });
+}
 
 process.once('exit', () => {
   clearInterval(heartbeat);

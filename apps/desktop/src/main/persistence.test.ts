@@ -372,6 +372,18 @@ if (runsWithElectronAbi)
         type: 'turn.accepted',
         userMessage: { attachments: [{ id: second.id }, { id: first.id }] },
       });
+      expect(persistence.getAcceptedImageAttachments(task.id, started.turnId)).toEqual([
+        expect.objectContaining({
+          id: second.id,
+          sha256: createHash('sha256').update('canonical-second').digest('hex'),
+          bytes: Buffer.from('canonical-second'),
+        }),
+        expect.objectContaining({
+          id: first.id,
+          sha256: createHash('sha256').update('canonical-first').digest('hex'),
+          bytes: Buffer.from('canonical-first'),
+        }),
+      ]);
       persistence.close();
 
       const reopened = new SqlitePersistenceClient(path);
@@ -382,6 +394,24 @@ if (runsWithElectronAbi)
       expect(
         reopened.listEventsAfter(task.id, 0).find(({ type }) => type === 'turn.accepted'),
       ).toMatchObject({ userMessage: { attachments: [{ id: second.id }, { id: first.id }] } });
+      expect(
+        reopened.getAcceptedImageAttachments(task.id, started.turnId).map(({ id }) => id),
+      ).toEqual([second.id, first.id]);
+      const tamper = new Database(path);
+      tamper
+        .prepare('UPDATE image_attachments SET bytes = ? WHERE id = ?')
+        .run(Buffer.from('corrupted-second'), second.id);
+      expect(() => reopened.getAcceptedImageAttachments(task.id, started.turnId)).toThrow(
+        ImageAttachmentAcceptanceError,
+      );
+      tamper
+        .prepare('UPDATE image_attachments SET bytes = ? WHERE id = ?')
+        .run(Buffer.from('canonical-second'), second.id);
+      tamper.prepare('DELETE FROM image_attachments WHERE id = ?').run(first.id);
+      tamper.close();
+      expect(() => reopened.getAcceptedImageAttachments(task.id, started.turnId)).toThrow(
+        ImageAttachmentAcceptanceError,
+      );
       reopened.close();
     });
 

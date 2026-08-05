@@ -3648,6 +3648,7 @@ export interface PersistenceClient {
   }): TaskSummary;
   unassignTaskFromProject(input: { taskId: string; expectedProjectId: string | null }): TaskSummary;
   getTaskModelSelection(taskId: string): ModelSelection | null;
+  getImageAttachmentAcceptanceSelection(taskId: string): ImageAttachmentAcceptanceSelection;
   setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null;
   getTaskLeader(taskId: string): AgentRecord;
   setAgentModelSelection(agentId: string, selection: ModelSelection): AgentRecord;
@@ -3935,6 +3936,7 @@ export interface PersistenceClient {
   setDraft(taskId: string, draft: string): void;
   createDraftImageAttachment(input: DraftImageAttachmentInput): ImageAttachmentMetadata;
   listDraftImageAttachments(taskId: string): ImageAttachmentMetadata[];
+  getAcceptedImageAttachments(taskId: string, turnId: string): AcceptedImageAttachment[];
   removeDraftImageAttachment(taskId: string, attachmentId: string): void;
   getDraftSkillSelections(taskId: string): TurnSkillSelection[];
   setDraftSkillSelections(taskId: string, skills: readonly TurnSkillSelection[]): void;
@@ -5886,6 +5888,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
       requestedProvider: row.requested_provider,
       requestedModel: row.requested_model,
     });
+  }
+
+  getImageAttachmentAcceptanceSelection(taskId: string): ImageAttachmentAcceptanceSelection {
+    const taskSelection = this.getTaskModelSelection(taskId);
+    const explicitRuntime =
+      taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+    const runtimeKind = explicitRuntime?.runtimeKind ?? this.getRuntime();
+    const model = explicitRuntime?.model ?? this.getModel();
+    return {
+      taskId,
+      modelSelection: taskSelection ?? modelSelectionForRuntime(runtimeKind, model),
+      runtimeKind,
+      model,
+    };
   }
 
   setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null {
@@ -8465,6 +8481,65 @@ export class SqlitePersistenceClient implements PersistenceClient {
       )
       .all(taskId) as ImageAttachmentRow[];
     return imageAttachmentMetadataListSchema.parse(rows.map(toImageAttachmentMetadata));
+  }
+
+  getAcceptedImageAttachments(taskId: string, turnId: string): AcceptedImageAttachment[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT attachment.*
+         FROM image_attachments attachment
+         JOIN messages message
+           ON message.id = attachment.message_id AND message.task_id = attachment.task_id
+         JOIN turns turn
+           ON turn.id = message.turn_id AND turn.task_id = message.task_id
+          AND turn.user_message_id = message.id
+         WHERE attachment.task_id = ? AND turn.id = ? AND message.author = 'user'
+           AND attachment.state = 'message' AND attachment.message_ordinal IS NOT NULL
+         ORDER BY attachment.message_ordinal`,
+      )
+      .all(taskId, turnId) as ImageAttachmentRow[];
+    const metadata = imageAttachmentMetadataListSchema.parse(rows.map(toImageAttachmentMetadata));
+    let expectedMetadata: readonly ImageAttachmentMetadata[];
+    try {
+      const eventRow = this.db
+        .prepare(
+          `SELECT payload_json FROM turn_events
+           WHERE task_id = ? AND turn_id = ? AND type = 'turn.accepted'
+           ORDER BY seq LIMIT 1`,
+        )
+        .get(taskId, turnId) as { payload_json: string } | undefined;
+      if (eventRow === undefined) throw new Error('missing acceptance event');
+      const event = turnEventSchema.parse(JSON.parse(eventRow.payload_json));
+      if (event.type !== 'turn.accepted' || event.turnId !== turnId)
+        throw new Error('mismatched acceptance event');
+      expectedMetadata = event.userMessage.attachments;
+    } catch {
+      throw new ImageAttachmentAcceptanceError('stale');
+    }
+    if (
+      expectedMetadata.length !== metadata.length ||
+      expectedMetadata.some((expected, index) =>
+        ['id', 'fileName', 'mimeType', 'byteLength', 'createdAt'].some(
+          (key) =>
+            expected[key as keyof ImageAttachmentMetadata] !==
+            metadata[index]![key as keyof ImageAttachmentMetadata],
+        ),
+      )
+    )
+      throw new ImageAttachmentAcceptanceError('stale');
+    return rows.map((row, index) => {
+      if (
+        row.bytes.byteLength !== row.byte_length ||
+        createHash('sha256').update(row.bytes).digest('hex') !== row.sha256
+      )
+        throw new ImageAttachmentAcceptanceError('stale');
+      return Object.freeze({
+        ...metadata[index]!,
+        sha256: row.sha256,
+        bytes: Buffer.from(row.bytes),
+      });
+    });
   }
 
   removeDraftImageAttachment(taskId: string, attachmentId: string): void {
@@ -12936,17 +13011,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
-    const taskSelection = this.getTaskModelSelection(taskId);
-    const explicitRuntime =
-      taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
-    const runtimeKind = explicitRuntime?.runtimeKind ?? this.getRuntime();
-    const model = explicitRuntime?.model ?? this.getModel();
-    const modelSelection = taskSelection ?? modelSelectionForRuntime(runtimeKind, model);
+    const selection = this.getImageAttachmentAcceptanceSelection(taskId);
+    const { runtimeKind, model, modelSelection } = selection;
     const acceptedAttachments = this.prepareAcceptedImageAttachments(
       taskId,
       attachmentIds,
       attachmentCapability,
-      { taskId, modelSelection, runtimeKind, model },
+      selection,
     );
     const shouldSealBuiltinTeamSkill =
       includeBuiltinTeamSkill ||
@@ -14063,6 +14134,9 @@ export type ImageAttachmentAcceptanceSelection = Readonly<{
   runtimeKind: RuntimeKind;
   model: string;
 }>;
+export type AcceptedImageAttachment = Readonly<
+  ImageAttachmentMetadata & { sha256: string; bytes: Buffer }
+>;
 export type ImageAttachmentCapabilityValidator = (
   selection: ImageAttachmentAcceptanceSelection,
 ) => boolean;
