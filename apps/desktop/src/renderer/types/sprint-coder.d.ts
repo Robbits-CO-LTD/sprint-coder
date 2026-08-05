@@ -111,6 +111,20 @@ export type ChatMessage = {
   createdAt: string;
 };
 
+export type ImageAttachmentMetadata = {
+  id: string;
+  fileName: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+  byteLength: number;
+  createdAt: string;
+};
+
+export type ImageAttachmentCapability = {
+  status: 'pending' | 'supported' | 'unsupported';
+  reason: string | null;
+  selectionIdentity: string | null;
+};
+
 export type TurnStage =
   'understanding' | 'planning' | 'executing' | 'waiting_approval' | 'synthesizing';
 
@@ -810,6 +824,12 @@ export interface SprintCoderApi {
     setGoal(taskId: string, goal: string): Promise<TaskSummary>;
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
+  };
+  attachments: {
+    capability(taskId: string): Promise<ImageAttachmentCapability>;
+    pick(taskId: string): Promise<ImageAttachmentMetadata | null>;
+    listDraft(taskId: string): Promise<ImageAttachmentMetadata[]>;
+    remove(input: { taskId: string; attachmentId: string }): Promise<void>;
   };
   projects: {
     list(): Promise<ProjectSummary[]>;

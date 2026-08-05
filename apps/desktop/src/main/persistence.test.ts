@@ -29,6 +29,7 @@ import {
   AcceptanceEvidenceMissingError,
   CanvasViewConflictError,
   InvalidCanvasViewError,
+  ImageAttachmentLimitError,
   NotFoundError,
   OperationConflictError,
   SqliteEditSagaLeaseGuard,
@@ -129,6 +130,124 @@ function bindMutationWorkspace(
 
 if (runsWithElectronAbi)
   describe('provider connections', () => {
+    it('migrates and owns image attachment drafts by Task', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('attachment owner');
+      const otherTask = persistence.createTask('other task');
+      const bytes = Buffer.from('canonical-image-bytes');
+
+      const created = persistence.createDraftImageAttachment({
+        taskId: task.id,
+        fileName: 'diagram.png',
+        mimeType: 'image/png',
+        bytes,
+        createdAt: '2026-08-05T00:00:00.000Z',
+      });
+      expect(persistence.listDraftImageAttachments(task.id)).toEqual([created]);
+      expect(persistence.listDraftImageAttachments(otherTask.id)).toEqual([]);
+      expect(() => persistence.removeDraftImageAttachment(otherTask.id, created.id)).toThrow(
+        NotFoundError,
+      );
+
+      for (let index = 1; index < 4; index += 1)
+        persistence.createDraftImageAttachment({
+          taskId: task.id,
+          fileName: `diagram-${index}.png`,
+          mimeType: 'image/png',
+          bytes,
+        });
+      expect(() =>
+        persistence.createDraftImageAttachment({
+          taskId: task.id,
+          fileName: 'fifth.png',
+          mimeType: 'image/png',
+          bytes,
+        }),
+      ).toThrow(ImageAttachmentLimitError);
+
+      const aggregateTask = persistence.createTask('aggregate limit');
+      for (let index = 0; index < 3; index += 1)
+        persistence.createDraftImageAttachment({
+          taskId: aggregateTask.id,
+          fileName: `large-${index}.png`,
+          mimeType: 'image/png',
+          bytes: Buffer.alloc(5 * 1024 * 1024, index),
+        });
+      expect(() =>
+        persistence.createDraftImageAttachment({
+          taskId: aggregateTask.id,
+          fileName: 'overflow.png',
+          mimeType: 'image/png',
+          bytes: Buffer.alloc(2 * 1024 * 1024),
+        }),
+      ).toThrow(ImageAttachmentLimitError);
+
+      persistence.removeDraftImageAttachment(task.id, created.id);
+      expect(persistence.listDraftImageAttachments(task.id)).toHaveLength(3);
+      persistence.close();
+
+      const db = new Database(path);
+      db.pragma('foreign_keys = ON');
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+      expect(db.pragma('foreign_key_list(image_attachments)')).toHaveLength(3);
+      expect(
+        db.prepare('SELECT sha256 FROM image_attachments WHERE task_id = ? LIMIT 1').get(task.id),
+      ).toEqual({ sha256: createHash('sha256').update(bytes).digest('hex') });
+      db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+      expect(
+        db
+          .prepare('SELECT COUNT(*) AS count FROM image_attachments WHERE task_id = ?')
+          .get(task.id),
+      ).toEqual({ count: 0 });
+      db.close();
+    });
+
+    it('rejects malformed attachment hashes at the v64 database boundary', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('hash constraint');
+      persistence.close();
+      const db = new Database(path);
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO image_attachments(
+               id, task_id, message_id, state, file_name, mime_type,
+               byte_length, sha256, bytes, created_at
+             ) VALUES (?, ?, NULL, 'draft', ?, 'image/png', 1, ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            task.id,
+            'bad.png',
+            'z'.repeat(64),
+            Buffer.from('x'),
+            '2026-08-05T00:00:00.000Z',
+          ),
+      ).toThrow(/CHECK constraint failed/);
+      db.close();
+    });
+
+    it('applies the image attachment migration from v63 and reopens idempotently', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('v63 attachment migration');
+      persistence.close();
+      const downgraded = new Database(path);
+      downgraded.pragma('foreign_keys = OFF');
+      downgraded.exec(`
+        DROP TABLE image_attachments;
+        DROP INDEX messages_id_task_unique;
+        DELETE FROM schema_migrations WHERE version = 64;
+      `);
+      downgraded.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.listDraftImageAttachments(task.id)).toEqual([]);
+      migrated.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listDraftImageAttachments(task.id)).toEqual([]);
+      reopened.close();
+    });
+
     it('seeds stable built-in CLI connections and restores them from SQLite', () => {
       const { persistence, path } = createPersistence();
 
@@ -5257,6 +5376,7 @@ if (runsWithElectronAbi)
         { version: 61 },
         { version: 62 },
         { version: 63 },
+        { version: 64 },
       ]);
       for (const [table, columns] of [
         [

@@ -13,6 +13,7 @@ import {
   emptyPayloadSchema,
   geminiConnectionCreateInputSchema,
   generatedImageRefSchema,
+  imageAttachmentRemoveInputSchema,
   modelCatalogQueryInputSchema,
   modelCatalogSelectionSetInputSchema,
   openAIConnectionCreateInputSchema,
@@ -91,7 +92,10 @@ import {
   requiresHomeDirectoryConfirmation,
   resolveEffectiveWorkspaceRoot,
   verifyTurnWorkspaceIdentities,
+  toPublicError,
 } from './ipc';
+import { ImageAttachmentValidationError } from './image-attachment-store';
+import { ImageAttachmentLimitError } from './persistence';
 
 describe('Project home-directory confirmation', () => {
   const home = join(dirname(process.cwd()), 'home-owner');
@@ -104,6 +108,28 @@ describe('Project home-directory confirmation', () => {
   it('does not warn for a child or path-component sibling of home', () => {
     expect(requiresHomeDirectoryConfirmation(join(home, 'project'), home)).toBe(false);
     expect(requiresHomeDirectoryConfirmation(`${home}-other`, home)).toBe(false);
+  });
+});
+
+describe('image attachment public errors', () => {
+  it('keeps validation errors actionable without leaking selected paths', () => {
+    const error = new ImageAttachmentValidationError('invalid_image');
+    Object.assign(error, { selectedPath: '/Users/private/secret.png' });
+    const result = toPublicError(error);
+    expect(result).toEqual({
+      code: 'INVALID_REQUEST',
+      userMessage: 'PNG・JPEG・WebPの静止画像を選んでください。',
+      retryable: false,
+    });
+    expect(JSON.stringify(result)).not.toContain('/Users/private');
+  });
+
+  it('maps count and aggregate limits to a fixed non-retryable message', () => {
+    expect(toPublicError(new ImageAttachmentLimitError('internal aggregate details'))).toEqual({
+      code: 'INVALID_REQUEST',
+      userMessage: '画像は4枚まで、合計16MB以下にしてください。',
+      retryable: false,
+    });
   });
 });
 
@@ -425,6 +451,10 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.filesSave]: fileSaveInputSchema,
   [IPC_CHANNELS.imagesList]: taskIdPayloadSchema,
   [IPC_CHANNELS.imagesRead]: generatedImageRefSchema,
+  [IPC_CHANNELS.attachmentsCapability]: taskIdPayloadSchema,
+  [IPC_CHANNELS.attachmentsPick]: taskIdPayloadSchema,
+  [IPC_CHANNELS.attachmentsListDraft]: taskIdPayloadSchema,
+  [IPC_CHANNELS.attachmentsRemove]: imageAttachmentRemoveInputSchema,
   [IPC_CHANNELS.settingsSetCodexEffort]: runtimeCodexEffortSetInputSchema,
   [IPC_CHANNELS.modelsCatalogQuery]: modelCatalogQueryInputSchema,
   [IPC_CHANNELS.modelsSetSelection]: modelCatalogSelectionSetInputSchema,

@@ -118,6 +118,10 @@ import {
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
+  imageAttachmentCapabilitySchema,
+  imageAttachmentMetadataListSchema,
+  imageAttachmentMetadataSchema,
+  imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -172,6 +176,10 @@ import {
   type TurnEvent,
 } from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
+import {
+  ImageAttachmentDraftStore,
+  ImageAttachmentValidationError,
+} from './image-attachment-store';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
 import type {
@@ -186,6 +194,7 @@ import { toApprovalAuditSummary, toApprovalSummary } from './persistence';
 import {
   CanvasViewConflictError,
   InvalidCanvasViewError,
+  ImageAttachmentLimitError,
   NotFoundError,
   OperationConflictError,
   OperationInProgressError,
@@ -438,6 +447,7 @@ export class IpcRouter {
   ) => 'trusted-local' | 'trusted-remote';
   private readonly providerVerification: ProviderVerificationService;
   private readonly providerConnections: ProviderConnectionService;
+  private readonly attachmentDraftStore: ImageAttachmentDraftStore;
   private teamSkillReady = false;
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
@@ -453,6 +463,7 @@ export class IpcRouter {
     private readonly trustedRendererOrigin: string,
     workspaceEdit?: WorkspacePatchDeps,
   ) {
+    this.attachmentDraftStore = new ImageAttachmentDraftStore(this.persistence);
     const providerSecrets = new ProviderSecretStorage(
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),
@@ -822,6 +833,51 @@ export class IpcRouter {
       // just the first path that ever carried it to the renderer.
       recovery: this.persistence.getStartupRecovery(),
     }));
+    this.handle(
+      IPC_CHANNELS.attachmentsCapability,
+      taskIdPayloadSchema,
+      imageAttachmentCapabilitySchema,
+      (input) => {
+        this.persistence.listDraftImageAttachments(input.taskId);
+        return {
+          status: 'unsupported' as const,
+          reason:
+            process.platform === 'win32'
+              ? 'このWindows版では画像添付を安全に読み込めません'
+              : '画像添付は送信機能の準備完了後に利用できます',
+          selectionIdentity: null,
+        };
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.attachmentsPick,
+      taskIdPayloadSchema,
+      imageAttachmentMetadataSchema.nullable(),
+      async (input) => {
+        this.persistence.listDraftImageAttachments(input.taskId);
+        if (process.platform === 'win32')
+          throw new ImageAttachmentValidationError('unsupported_platform');
+        const selected = await dialog.showOpenDialog(this.window, {
+          title: '画像を添付',
+          properties: ['openFile', 'dontAddToRecent'],
+          filters: [{ name: '画像', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+        });
+        if (selected.canceled || selected.filePaths.length !== 1) return null;
+        return this.attachmentDraftStore.addFromPath(input.taskId, selected.filePaths[0]!);
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.attachmentsListDraft,
+      taskIdPayloadSchema,
+      imageAttachmentMetadataListSchema,
+      (input) => this.attachmentDraftStore.list(input.taskId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.attachmentsRemove,
+      imageAttachmentRemoveInputSchema,
+      z.undefined(),
+      (input) => this.attachmentDraftStore.remove(input.taskId, input.attachmentId),
+    );
     this.handle(
       IPC_CHANNELS.settingsGetRuntime,
       runtimeSettingsGetInputSchema,
@@ -4736,7 +4792,15 @@ async function projectFolderHealth(
   }
 }
 
-function toPublicError(error: unknown): PublicError {
+export function toPublicError(error: unknown): PublicError {
+  if (error instanceof ImageAttachmentValidationError)
+    return { code: 'INVALID_REQUEST', userMessage: error.message, retryable: false };
+  if (error instanceof ImageAttachmentLimitError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: '画像は4枚まで、合計16MB以下にしてください。',
+      retryable: false,
+    };
   if (error instanceof NotFoundError)
     return { code: 'NOT_FOUND', userMessage: '対象が見つかりません。', retryable: false };
   if (error instanceof TurnActiveError)

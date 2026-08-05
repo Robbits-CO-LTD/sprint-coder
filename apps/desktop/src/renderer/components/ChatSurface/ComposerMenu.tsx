@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, RefObject } from 'react';
 
 // Accessible menu for the Composer's plus button (issue #13).
 //
@@ -31,18 +31,26 @@ export type ComposerMenuItem = {
   onSelect?: (() => void) | undefined;
 };
 
+export function focusComposerMenuTrigger(trigger: Pick<HTMLButtonElement, 'focus'> | null): void {
+  trigger?.focus({ preventScroll: true });
+}
+
 export function ComposerMenu({
   items,
   triggerLabel,
   menuLabel,
   triggerIcon,
   triggerTestId,
+  externalTriggerRef,
+  triggerAriaDescribedBy,
 }: {
   items: readonly ComposerMenuItem[];
   triggerLabel: string;
   menuLabel: string;
   triggerIcon: ReactNode;
   triggerTestId: string;
+  externalTriggerRef?: RefObject<HTMLButtonElement | null>;
+  triggerAriaDescribedBy?: string | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -55,7 +63,7 @@ export function ComposerMenu({
   const close = useCallback((returnFocus: boolean) => {
     setOpen(false);
     setPendingFocus(null);
-    if (returnFocus) triggerRef.current?.focus({ preventScroll: true });
+    if (returnFocus) focusComposerMenuTrigger(triggerRef.current);
   }, []);
 
   useEffect(() => {
@@ -124,13 +132,17 @@ export function ComposerMenu({
       }}
     >
       <button
-        ref={triggerRef}
+        ref={(node) => {
+          triggerRef.current = node;
+          if (externalTriggerRef) externalTriggerRef.current = node;
+        }}
         data-testid={triggerTestId}
         type="button"
         className="cmp-chip composer-plus"
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={triggerLabel}
+        aria-describedby={triggerAriaDescribedBy}
         title={triggerLabel}
         onClick={() => {
           setOpen((value) => !value);

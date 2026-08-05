@@ -90,6 +90,10 @@ import {
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
+  imageAttachmentCapabilitySchema,
+  imageAttachmentMetadataListSchema,
+  imageAttachmentMetadataSchema,
+  imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -239,6 +243,36 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.tasksGetDraft, taskIdPayloadSchema, z.string(), { taskId }),
     setDraft: (taskId, draft) =>
       invoke(IPC_CHANNELS.tasksSetDraft, taskDraftInputSchema, z.undefined(), { taskId, draft }),
+  },
+  attachments: {
+    capability: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsCapability,
+        taskIdPayloadSchema,
+        imageAttachmentCapabilitySchema,
+        { taskId },
+      ),
+    pick: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsPick,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataSchema.nullable(),
+        { taskId },
+      ),
+    listDraft: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsListDraft,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataListSchema,
+        { taskId },
+      ),
+    remove: (input) =>
+      invoke(
+        IPC_CHANNELS.attachmentsRemove,
+        imageAttachmentRemoveInputSchema,
+        z.undefined(),
+        input,
+      ),
   },
   projects: {
     list: () =>

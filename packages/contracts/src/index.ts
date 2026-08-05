@@ -1010,6 +1010,43 @@ export const chatMessageSchema = z
   .strict();
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
 
+export const IMAGE_ATTACHMENT_MAX_COUNT = 4;
+export const IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+export const IMAGE_ATTACHMENT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+export const imageAttachmentMimeTypeSchema = z.enum(['image/png', 'image/jpeg', 'image/webp']);
+export type ImageAttachmentMimeType = z.infer<typeof imageAttachmentMimeTypeSchema>;
+export const imageAttachmentMetadataSchema = z
+  .object({
+    id: idSchema,
+    fileName: z.string().min(1).max(255),
+    mimeType: imageAttachmentMimeTypeSchema,
+    byteLength: z.number().int().min(1).max(IMAGE_ATTACHMENT_MAX_BYTES),
+    createdAt: timestampSchema,
+  })
+  .strict();
+export type ImageAttachmentMetadata = z.infer<typeof imageAttachmentMetadataSchema>;
+export const imageAttachmentMetadataListSchema = z
+  .array(imageAttachmentMetadataSchema)
+  .max(IMAGE_ATTACHMENT_MAX_COUNT)
+  .superRefine((attachments, context) => {
+    if (new Set(attachments.map(({ id }) => id)).size !== attachments.length)
+      context.addIssue({ code: 'custom', message: 'Attachment IDs must be unique' });
+    const total = attachments.reduce((sum, attachment) => sum + attachment.byteLength, 0);
+    if (total > IMAGE_ATTACHMENT_MAX_TOTAL_BYTES)
+      context.addIssue({ code: 'custom', message: 'Attachment bytes exceed the aggregate limit' });
+  });
+export const imageAttachmentCapabilitySchema = z
+  .object({
+    status: z.enum(['pending', 'supported', 'unsupported']),
+    reason: z.string().min(1).max(500).nullable(),
+    selectionIdentity: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type ImageAttachmentCapability = z.infer<typeof imageAttachmentCapabilitySchema>;
+export const imageAttachmentRemoveInputSchema = z
+  .object({ taskId: idSchema, attachmentId: idSchema })
+  .strict();
+
 export const turnStageSchema = z.enum(['understanding', 'planning', 'executing', 'synthesizing']);
 export type TurnStage = z.infer<typeof turnStageSchema>;
 
@@ -2908,6 +2945,12 @@ export interface SprintCoderApi {
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
   };
+  attachments: {
+    capability(taskId: string): Promise<ImageAttachmentCapability>;
+    pick(taskId: string): Promise<ImageAttachmentMetadata | null>;
+    listDraft(taskId: string): Promise<ImageAttachmentMetadata[]>;
+    remove(input: { taskId: string; attachmentId: string }): Promise<void>;
+  };
   projects: {
     list(): Promise<ProjectSummary[]>;
     pickFolders(): Promise<ProjectFolderPickerResult>;
@@ -3144,6 +3187,10 @@ export const IPC_CHANNELS = {
   tasksSetGoal: 'sprint-coder:tasks:set-goal',
   tasksGetDraft: 'sprint-coder:tasks:get-draft',
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
+  attachmentsCapability: 'sprint-coder:attachments:capability',
+  attachmentsPick: 'sprint-coder:attachments:pick',
+  attachmentsListDraft: 'sprint-coder:attachments:list-draft',
+  attachmentsRemove: 'sprint-coder:attachments:remove',
   projectsList: 'sprint-coder:projects:list',
   projectsPickFolders: 'sprint-coder:projects:pick-folders',
   projectsFoldersList: 'sprint-coder:projects:folders:list',

@@ -1,0 +1,279 @@
+# Image attachments design and C1a Codex slice
+
+- Status: C1a-1 implemented and independently re-reviewed; C1a-2 pending
+- Date: 2026-08-05
+- Scope: FR-CHAT-04 / FR-CHAT-10, split into C1a-C1d
+
+## 1. Outcome and slice ledger
+
+The finished C1 series lets the Composer attach up to four PNG, JPEG, or WebP images. Before
+sending, the user can verify file name, media type, size, and reference scope, remove an image, and
+keep the draft across a Task switch or app restart. Accepted user messages retain the same public
+metadata in history.
+
+The implementation is split at coherent runtime boundaries:
+
+- **C1a (this implementation):** draft custody, direct Turn acceptance, history, and Codex
+  app-server `localImage` dispatch. Text remains required. Picking and sending attachments are
+  unavailable while a Turn is active.
+- **C1b:** queued and stop-and-send attachments. Queue ownership uses `(task_id, ordinal)`, includes
+  visible blocked/retry recovery after a model change, and is not approximated in C1a.
+- **C1c:** official API Provider inline images. This adds current-message exactly-once delivery that
+  cannot be removed by context compaction, plus verified catalog capability enforcement.
+- **C1d:** Claude CLI image input if a stable local capability is proven, then general document
+  attachments under a separate format/security design.
+
+C1a itself has three reviewable checkpoints. The user-facing capability remains disabled until
+C1a-3 is green:
+
+- **C1a-1 draft custody:** public/internal contracts, v64 draft persistence, safe picker/decoder,
+  list/remove, preload API, and draft Composer UI. Proof: contract, migration, custody, IPC, and
+  component tests. No Turn or Runtime behavior changes.
+- **C1a-2 atomic acceptance/history:** direct-start ID binding, exact same-Task ownership,
+  accepted-message metadata, reload, rollback, and Renderer reconciliation. Proof: focused
+  persistence/Main/store/history tests. Outbound image dispatch remains disabled.
+- **C1a-3 Codex dispatch:** custody materialization, provider-egress identity, Runtime v8
+  prepare/commit, Codex `localImage`, cleanup, and capability enablement. Proof: focused
+  Main/Runtime integration tests followed by the separately approved external smoke.
+
+C1a non-goals are queue/steer/stop-and-send images, API Provider images, Claude images, documents,
+drag/drop, paste, OCR, thumbnails, editing, and generated-image reuse. Windows image attachment is
+also fail-closed in C1a until a native no-reparse read primitive exists; it is a release prerequisite,
+not an unsafe fallback hidden in this slice.
+
+Cheapest coherent proof follows the checkpoints. Deterministic E2E patches Electron's native dialog
+and covers selection/removal/focus, Task isolation, and restart hydration only. Direct acceptance and
+dispatch use Main/Runtime integration tests with a fake Runtime boundary. The existing E2E CLI
+fixture proves availability only and must never execute a Turn.
+
+## 2. Existing-path matrix
+
+| Path | Current source | C1a treatment |
+| --- | --- | --- |
+| Composer send | `renderer/components/ChatSurface/Composer.tsx:211` | Pass IDs only on direct start; block every send form when a Turn becomes active with draft images. |
+| Optimistic state | `renderer/store/appStore.ts:1829` | Keep drafts until acceptance; remove only IDs confirmed by `turn.accepted`. |
+| Direct start | `contracts/index.ts:2763`, `main/ipc.ts:2119` | Split aliased schemas; capability, ID bind, message, Turn, event, and seal commit together. |
+| Queue / stop-and-send | `contracts/index.ts:2770,2779`, `persistence.ts:11484,11576` | Unchanged in C1a; C1b owns the state machine. |
+| Message reload | `persistence.ts:11463`, `renderer/store/appStore.ts:1210` | Join public metadata into `ChatMessage`; bytes stay Main-owned. |
+| Codex dispatch | `runtime-host/codex-adapter.ts:335` | Use verified app-owned numbered paths as `localImage` input after v8 commit. |
+| Claude / Mock / Provider | adapter and provider paths | Refuse attachment acceptance before mutation. Provider waits for C1c. |
+| Initial/live state | list/snapshot and MessagePort events | Parse the same metadata default; old fixtures remain readable. |
+
+There is no SSE or REST route in this Electron application.
+
+## 3. Contracts, capability identity, and persistence
+
+Public `imageAttachmentMetadataSchema` contains only Main-generated opaque `id`, normalized
+display-only `fileName`, `mimeType`, `byteLength`, and `createdAt`. Internal records additionally
+carry `taskId`, nullable `messageId`, SHA-256, and canonical bytes. The public schema enforces up to
+four distinct IDs, 5 MiB per image, and a 16 MiB aggregate. Output/event arrays default to `[]` for
+old strict payloads; mutation arrays do not default. Non-empty text remains required.
+
+The asynchronous readiness result is frozen into this canonical identity:
+
+`{taskId,connectionId,providerId,modelId,runtimeKind,runtimeInstanceId,readinessRevision,catalogRevision}`
+
+Immediately before the synchronous persistence transaction, Main supplies an immutable `ready`
+Codex snapshot no older than five seconds. The transaction resolves Task selection itself and
+requires exact identity/revision equality before any write. Changed or expired state returns a
+retryable capability error after an asynchronous refresh; it never falls back to text-only. The
+identity is checked again before Runtime prepare and before commit. C1b must check it before
+cancelling an old Turn.
+
+Migration v64 uses this DDL:
+
+```sql
+CREATE UNIQUE INDEX messages_id_task_unique ON messages(id, task_id);
+CREATE TABLE image_attachments (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  message_id TEXT,
+  state TEXT NOT NULL CHECK (state IN ('draft', 'message')),
+  file_name TEXT NOT NULL CHECK (length(file_name) BETWEEN 1 AND 255),
+  mime_type TEXT NOT NULL CHECK (mime_type IN ('image/png', 'image/jpeg', 'image/webp')),
+  byte_length INTEGER NOT NULL CHECK (byte_length BETWEEN 1 AND 5242880),
+  sha256 TEXT NOT NULL CHECK (
+    length(sha256) = 64
+    AND sha256 = lower(sha256)
+    AND sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
+  bytes BLOB NOT NULL CHECK (length(bytes) = byte_length),
+  created_at TEXT NOT NULL,
+  CHECK (
+    (state = 'draft' AND message_id IS NULL) OR
+    (state = 'message' AND message_id IS NOT NULL)
+  ),
+  FOREIGN KEY (message_id, task_id) REFERENCES messages(id, task_id) ON DELETE CASCADE
+);
+CREATE INDEX image_attachments_task_draft_idx
+  ON image_attachments(task_id, created_at, id) WHERE state = 'draft';
+CREATE INDEX image_attachments_message_idx ON image_attachments(message_id, created_at, id);
+```
+
+The deliberate dual cascade through Task and Message is accepted and tested. Migration tests
+inspect `foreign_key_list(image_attachments)`, run `foreign_key_check`, cover v63-to-v64 and
+idempotent reopen, and inject migration/acceptance failures. All selection, binding, and message
+event assembly uses the one Persistence-owned `better-sqlite3` connection. Decoder/file I/O finishes
+before the synchronous transaction; it rechecks immutable IDs, BLOB lengths, hashes, ownership, and
+exact affected-row counts.
+
+Draft removal constrains attachment ID, Task, and draft state and changes exactly one row. Acceptance
+rejects duplicate IDs, selects exactly all requested same-Task drafts, rechecks count/aggregate, then
+conditionally updates exactly N rows while creating message, Turn, event, context seal, and ownership
+in one transaction. C1b later adds `(task_id, queue_ordinal)` ownership; operation ID is not identity.
+
+## 4. Safe input and canonical decoding
+
+`attachments.pick(taskId)` opens Electron's native dialog in Main. On macOS/Linux, Main opens the
+selected path once with `O_RDONLY | O_NOFOLLOW`, uses only that descriptor, requires a regular file
+with link count one, and compares handle `fstat` device/inode/size/mtime/ctime before and after the
+bounded read. `ELOOP`, `EMLINK`, identity change, non-regular input, or mutation becomes one generic
+unsafe-file UI error plus a structured internal reason. Tests cover symlink, hard link, non-regular,
+symlink replacement before the single open, and mutation-during-read. A regular-file replacement
+before the first open is the input that gets opened and is part of the excluded same-UID race
+boundary because there is no trusted pre-open inode identity. Windows capability is `unsupported` because the
+existing native-safe-fs addon cannot provide safe no-reparse reading there. Main never uses
+`lstat(path)` followed by an ordinary reopen.
+
+C1a adds `sharp` as an exact direct desktop dependency and runs its native rebuild/package gate.
+Input is capped at 5 MiB before decode. `sharp` uses `limitInputPixels: 16777216`, `animated: false`,
+`unlimited: false`, and `failOn: 'warning'`; metadata must satisfy `(pages ?? 1) === 1`, report
+PNG/JPEG/WebP, dimensions `1..8192`, and at most 16,777,216 pixels. Orientation is applied,
+ICC/EXIF/XMP are stripped, and Main re-encodes to a fresh non-animated image in the same format.
+The returned output `info.format`, width, height, and size are verified again. Only canonical output
+is checked against 5 MiB, hashed, stored, materialized, and sent; trailing data/polyglots cannot
+become outbound content. Tests include truncation, trailing/polyglot input, declared-dimension
+bombs, APNG, animated WebP, malformed 64-character nonhex hashes, and over-limit canonical output.
+
+Display basenames are NFC-normalized and reject NUL, C0/C1 controls, separators, bidi
+embedding/override/isolate characters, and empty/dot basenames. Original paths and original bytes
+are never persisted, logged, returned to Renderer, or sent externally.
+
+## 5. Custody, egress identity, and Runtime v8
+
+One Main-owned `AttachmentCustodyStore` uses
+`app.getPath('userData')/attachment-custody`. Installation initialization creates a root marker with
+`O_CREAT|O_EXCL|O_NOFOLLOW`, mode `0600`, and a random installation nonce; an existing root is used
+only after no-follow directory/marker validation. Each random per-Turn directory has an exclusive
+marker bound to `{installationNonce,turnId,operationId,manifestDigest}`. Canonical files are fsynced,
+created exclusively, then chmod `0400`; the directory becomes `0500`. Main retains open handles until
+Runtime commit completes. Cleanup accepts only an exact in-memory registry entry, never a
+protocol-derived path.
+
+Cleanup is idempotent after completion/error, egress denial, workspace-health failure, protocol
+mismatch, confirmed/forced cancel, RuntimeHost exit/restart, dispatch exception, `IpcRouter.dispose`,
+and app shutdown. A running Runtime stops before custody removal. Startup scavenging enumerates
+direct children only, rejects symlinks, opens markers no-follow, validates installation nonce and a
+bounded schema, and removes only validated entries. DB BLOBs remain after temporary cleanup.
+
+Hostile same-UID processes are outside C1a's threat boundary because Codex accepts only a pathname;
+`0400`/`0500`, retained handles, and immediate reverification reduce accidental mutation but cannot
+make the API cryptographically immutable.
+
+The ordered manifest is `{id,mimeType,byteLength,sha256}[]` over canonical bytes.
+`ProviderEgressInput` and provider `PermissionResource` add `attachmentManifestDigest` and
+`attachmentByteCount`. ResourceSet containment, resource identity/fingerprint, reviewer digest,
+persisted audit, and broker revalidation require exact equality. `byteCount` is an overflow-checked
+sum of UTF-8 text and attachment bytes under the existing resource ceiling. The manifest digest is
+also in `executionSpecDigest`. A permit is minted only for the prepared manifest and revalidated at
+commit; a text-only permit cannot authorize images.
+
+Runtime protocol bumps 7 to 8 and is explicitly two phase:
+
+1. Main sends `prepare` bound to runtime instance, Task, Turn, operation, selection identity,
+   ordered manifest, and numbered custody paths.
+2. Host opens paths no-follow, decodes, hashes, compares, then replies `prepared` with manifest digest
+   and decoded byte count **without** invoking Codex `turn/start`. This is not `started`.
+3. Main compares it, rechecks current selection/readiness/policy, constructs and revalidates the exact
+   permit, then sends a one-shot `commit` bound to the same IDs, instance, and digest.
+4. Host rejects duplicate/stale/mismatched commits, re-fstats and re-hashes immediately before
+   constructing `localImage`, and only then invokes Codex `turn/start`. Its existing `started`
+   acknowledgement remains the actual Turn-start acknowledgement.
+
+No commit, a bounded prepare timeout, mismatch, Host restart, or duplicate terminates prepared state
+and triggers cleanup. `RuntimeHostClient.active` stores expected manifest and phase. C1c Provider
+delivery later fetches the accepted current message by ID and delivers exactly once independently of
+compactable history.
+
+## 6. IPC and UI state machine
+
+The `attachments` namespace has `capability(taskId)`, `pick(taskId)`, `listDraft(taskId)`, and
+`remove({taskId,attachmentId})`. The canonical Task/selection identity binds capability, pick, and
+acceptance. Missing/stale/Mock/Claude/non-ready/Windows states are unsupported with a reason.
+Contracts, `IPC_CHANNELS`, Main schema map, preload, ambient `SprintCoderApi`, and tests change
+together.
+
+The plus menu says `画像を添付`. Draft rows show name, formatted size/type, and a remove button whose
+accessible name contains the file name. A visible label says `参照範囲: この送信のみ`: bytes are sent
+only with this direct Turn, history retains metadata only, later Turns do not automatically resend
+them, and reuse is outside C1a.
+
+Renderer owns `draftAttachmentsByTask`, per-Task request revisions, and pick/remove in-flight IDs.
+Hydrate/rejection refresh applies only if Task/revision still matches. Accepted IDs clear only after
+a matching `turn.accepted`; a stale response cannot overwrite newer pick/remove. The interface
+`startTurn(taskId,text,skills,attachmentIds)` stays consistent across contracts, preload, ambient
+types, and store. Optimistic messages may show public metadata, then reconcile to the accepted
+message identity. Post-accept Runtime failure keeps metadata in auditable history.
+
+If a Turn is active while a draft exists—including the race after pick but before click—the Composer
+disables send, queue, and stop-and-send and displays
+`画像添付は実行中のTurnにはキュー追加できません。完了後に送信してください`. It never queues
+text alone or discards the image. Attach is unavailable during active Turn or Goal mode; Goal cannot
+arm while drafts exist. Goal/image-generation one-shot state becomes Task-keyed.
+
+After removal, focus moves to next remove, previous remove, plus trigger, or textarea. `ComposerMenu`
+exposes the trigger focus boundary. Failure retains the button. Controls are at least 24x24 CSS px;
+status/errors use `aria-live`/`role=alert` without focus theft and persistent actionable text uses
+`aria-describedby`. Chips wrap without horizontal scrolling at 200% zoom. IME/multiline/long-text
+behavior remains unchanged.
+
+## 7. State matrix
+
+| State/event | Result |
+| --- | --- |
+| Picker cancel | No row/UI change; focus returns to plus trigger. |
+| Unsafe/oversized/malformed image | No row; persistent actionable error; text unchanged. |
+| Task switch/restart | Reload only owning Task's drafts. |
+| Direct start accepted | Capability, bind, message, Turn, event, and seal commit atomically. |
+| Pre-commit rejection | Drafts remain; guarded refresh from Main. |
+| Runtime failure after acceptance | Message and metadata remain in history. |
+| Active Turn with draft | Pick/send/queue/stop-and-send disabled with reason; no text fallback. |
+| Selection leaves ready Codex | Draft remains; pick/send block until remove or supported selection. |
+| BLOB/custody/manifest mismatch | Fail closed before Codex `turn/start`. |
+
+## 8. Verification and rollout
+
+1. **C1a-1:** contracts; v1/v63-to-v64 and reopen; FK inspection/check; draft CRUD/cascade;
+   decoder/file races; IPC/preload/ambient parity; Composer list/remove/focus/scope; packaged `sharp`.
+2. **C1a-2:** duplicate/partial/stale/cross-Task IDs; atomic rollback injection; accepted history and
+   reload; guarded Renderer reconciliation; active-Turn race; Goal/image mode Task isolation.
+3. **C1a-3:** provider ResourceSet/identity/fingerprint/audit/overflow tests; v8 prepare/commit
+   ordering, timeout, duplicate, mismatch, restart and cleanup; Codex localImage; Claude/Mock refusal.
+4. **Deterministic E2E:** patch `dialog.showOpenDialog` like existing Project/file-edit specs; use
+   production Main validation/storage; cover cancel focus, restart, Task isolation, scope label, 200%
+   zoom, keyboard removal, active-Turn reason. Never execute fixture CLI.
+5. **External gate after explicit approval:** one real Codex question about a synthetic image; assert
+   original name/path never appears in outbound audit or output.
+
+The implementation file map includes contracts/tests; persistence/tests; a new Main attachment
+store/tests; Main IPC/provider-egress/domain permission/tests; preload and ambient API; Runtime Host
+client/protocol/index/Codex adapter/tests; store/Composer/ComposerMenu/Timeline/MessageBubble/tests;
+CSS/E2E; and packaging when `sharp` is introduced. Each checkpoint updates only its relevant subset.
+
+The change crosses shared contracts and more than six files. Independent design re-review is
+required before C1a-1; implementation-safety and requirement rechecks are required before PR.
+
+## 9. C1a-1 checkpoint evidence (2026-08-05)
+
+- Three independent design reviews: GO after Runtime/DDL/security/scope corrections.
+- Focused post-fix checks: contracts, bounded decoder/read, IPC public-error mapping, v64 migration,
+  Renderer revision/live-announcement/policy/focus tests, typecheck, and touched-file lint: green.
+- Desktop subsystem: 155 test files passed, 2,316 tests passed, 76 skipped; contracts: 42 passed.
+- macOS arm64 production package: built successfully; Sharp 0.35.3 addon and libvips were unpacked,
+  signed, and `codesign --verify --deep --strict` passed.
+- Post-review findings fixed with regressions: fixed-length positional read plus overflow probe,
+  non-leaking `INVALID_REQUEST` mapping, focus-preserving remove state, Task-local live/error state,
+  and direct Task cascade proof.
+- Scope invariant preserved: Turn start/queue/stop schemas, message history ownership, provider
+  egress, Runtime protocol, and Codex adapter behavior are unchanged; production attachment
+  capability remains unsupported until C1a-3.

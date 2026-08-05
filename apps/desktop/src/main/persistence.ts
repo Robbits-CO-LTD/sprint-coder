@@ -51,7 +51,13 @@ import {
   type FileChangeRecord,
   type GeneratedImage,
   generatedImageSchema,
+  imageAttachmentMetadataSchema,
+  imageAttachmentMetadataListSchema,
+  IMAGE_ATTACHMENT_MAX_COUNT,
+  IMAGE_ATTACHMENT_MAX_TOTAL_BYTES,
   type TaskSummary,
+  type ImageAttachmentMetadata,
+  type ImageAttachmentMimeType,
   type TeamBudgetStatus,
   type TeamBlueprint,
   type TeamMissionAccess,
@@ -2951,6 +2957,38 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 64,
+    checksum: 'image-attachment-drafts-v64',
+    sql: `
+      CREATE UNIQUE INDEX messages_id_task_unique ON messages(id, task_id);
+      CREATE TABLE image_attachments (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        message_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('draft', 'message')),
+        file_name TEXT NOT NULL CHECK (length(file_name) BETWEEN 1 AND 255),
+        mime_type TEXT NOT NULL CHECK (mime_type IN ('image/png', 'image/jpeg', 'image/webp')),
+        byte_length INTEGER NOT NULL CHECK (byte_length BETWEEN 1 AND 5242880),
+        sha256 TEXT NOT NULL CHECK (
+          length(sha256) = 64
+          AND sha256 = lower(sha256)
+          AND sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        bytes BLOB NOT NULL CHECK (length(bytes) = byte_length),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (state = 'draft' AND message_id IS NULL) OR
+          (state = 'message' AND message_id IS NOT NULL)
+        ),
+        FOREIGN KEY (message_id, task_id) REFERENCES messages(id, task_id) ON DELETE CASCADE
+      );
+      CREATE INDEX image_attachments_task_draft_idx
+        ON image_attachments(task_id, created_at, id) WHERE state = 'draft';
+      CREATE INDEX image_attachments_message_idx
+        ON image_attachments(message_id, created_at, id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2977,6 +3015,37 @@ export type CanvasViewRecord = {
   revision: number;
   updatedAt: string;
 };
+
+export type DraftImageAttachmentInput = Readonly<{
+  taskId: string;
+  fileName: string;
+  mimeType: ImageAttachmentMimeType;
+  bytes: Buffer;
+  createdAt?: string;
+}>;
+
+type ImageAttachmentRow = Readonly<{
+  id: string;
+  task_id: string;
+  message_id: string | null;
+  state: 'draft' | 'message';
+  file_name: string;
+  mime_type: ImageAttachmentMimeType;
+  byte_length: number;
+  sha256: string;
+  bytes: Buffer;
+  created_at: string;
+}>;
+
+function toImageAttachmentMetadata(row: ImageAttachmentRow): ImageAttachmentMetadata {
+  return imageAttachmentMetadataSchema.parse({
+    id: row.id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    byteLength: row.byte_length,
+    createdAt: row.created_at,
+  });
+}
 
 function assertCanvasCoordinate(value: number, label: string): void {
   if (!Number.isFinite(value) || Math.abs(value) > CANVAS_WORLD_BOUND)
@@ -3821,6 +3890,9 @@ export interface PersistenceClient {
   setGoal(taskId: string, goal: string): TaskSummary;
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
+  createDraftImageAttachment(input: DraftImageAttachmentInput): ImageAttachmentMetadata;
+  listDraftImageAttachments(taskId: string): ImageAttachmentMetadata[];
+  removeDraftImageAttachment(taskId: string, attachmentId: string): void;
   getDraftSkillSelections(taskId: string): TurnSkillSelection[];
   setDraftSkillSelections(taskId: string, skills: readonly TurnSkillSelection[]): void;
   getCanvasView(taskId: string): CanvasViewRecord | null;
@@ -8292,6 +8364,73 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('UPDATE tasks SET draft = ?, updated_at = ? WHERE id = ?')
       .run(draft, new Date().toISOString(), taskId);
     if (result.changes !== 1) throw new NotFoundError('Task not found');
+  }
+
+  createDraftImageAttachment(input: DraftImageAttachmentInput): ImageAttachmentMetadata {
+    return this.db.transaction(() => {
+      this.assertTask(input.taskId);
+      const aggregate = this.db
+        .prepare(
+          `SELECT COUNT(*) AS count, COALESCE(SUM(byte_length), 0) AS byte_length
+           FROM image_attachments WHERE task_id = ? AND state = 'draft'`,
+        )
+        .get(input.taskId) as { count: number; byte_length: number };
+      if (aggregate.count >= IMAGE_ATTACHMENT_MAX_COUNT)
+        throw new ImageAttachmentLimitError('A draft cannot contain more than four images');
+      const id = randomUUID();
+      const createdAt = input.createdAt ?? new Date().toISOString();
+      const metadata = imageAttachmentMetadataSchema.parse({
+        id,
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        byteLength: input.bytes.byteLength,
+        createdAt,
+      });
+      if (aggregate.byte_length + metadata.byteLength > IMAGE_ATTACHMENT_MAX_TOTAL_BYTES)
+        throw new ImageAttachmentLimitError('Draft image bytes exceed the aggregate limit');
+      const sha256 = createHash('sha256').update(input.bytes).digest('hex');
+      this.db
+        .prepare(
+          `INSERT INTO image_attachments(
+             id, task_id, message_id, state, file_name, mime_type,
+             byte_length, sha256, bytes, created_at
+           ) VALUES (?, ?, NULL, 'draft', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.taskId,
+          metadata.fileName,
+          metadata.mimeType,
+          metadata.byteLength,
+          sha256,
+          input.bytes,
+          metadata.createdAt,
+        );
+      return metadata;
+    })();
+  }
+
+  listDraftImageAttachments(taskId: string): ImageAttachmentMetadata[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM image_attachments
+         WHERE task_id = ? AND state = 'draft'
+         ORDER BY created_at, rowid`,
+      )
+      .all(taskId) as ImageAttachmentRow[];
+    return imageAttachmentMetadataListSchema.parse(rows.map(toImageAttachmentMetadata));
+  }
+
+  removeDraftImageAttachment(taskId: string, attachmentId: string): void {
+    this.assertTask(taskId);
+    const result = this.db
+      .prepare(
+        `DELETE FROM image_attachments
+         WHERE id = ? AND task_id = ? AND state = 'draft' AND message_id IS NULL`,
+      )
+      .run(attachmentId, taskId);
+    if (result.changes !== 1) throw new NotFoundError('Draft image attachment not found');
   }
 
   getDraftSkillSelections(taskId: string): TurnSkillSelection[] {
@@ -13793,6 +13932,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
 }
 
 export class NotFoundError extends Error {}
+export class ImageAttachmentLimitError extends Error {}
 export class TurnActiveError extends Error {}
 export class SteerStaleError extends Error {}
 export class OperationConflictError extends Error {}

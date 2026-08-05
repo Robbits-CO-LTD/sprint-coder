@@ -44,6 +44,10 @@ const runtimeModuleFiles = [
   ['bindings', 'bindings.js'],
   ['file-uri-to-path', 'package.json'],
   ['file-uri-to-path', 'index.js'],
+  ['sharp'],
+  ['detect-libc'],
+  ['semver'],
+  ['@img'],
 ] as const;
 const appIconPath = resolve(__dirname, 'assets', 'sprint-coder-icon');
 const macCodeSignIdentity = process.env['SPRINT_CODER_CODESIGN_IDENTITY'] ?? '-';
@@ -196,8 +200,8 @@ const config: ForgeConfig = {
     // Electron Packager appends the platform-specific extension (.icns/.ico).
     icon: appIconPath,
     // @electron/asar matches `unpack` against the full source filename with matchBase enabled.
-    // Native addons cannot be loaded from inside app.asar, so unpack only `.node` binaries.
-    asar: { unpack: '*.node' },
+    // Native addons and sharp's platform libvips/wasm payload cannot be loaded from app.asar.
+    asar: { unpack: '*.{node,dylib,so,dll,wasm}' },
     extraResource: bundledNodeResources(),
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep

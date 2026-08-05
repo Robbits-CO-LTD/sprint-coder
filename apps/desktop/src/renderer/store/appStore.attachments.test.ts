@@ -1,0 +1,155 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ImageAttachmentMetadata } from '../types/sprint-coder';
+import { useAppStore } from './appStore';
+
+const taskId = 'task-attachments';
+const first: ImageAttachmentMetadata = {
+  id: 'attachment-1',
+  fileName: 'one.png',
+  mimeType: 'image/png',
+  byteLength: 100,
+  createdAt: '2026-08-05T00:00:00.000Z',
+};
+const second: ImageAttachmentMetadata = {
+  ...first,
+  id: 'attachment-2',
+  fileName: 'two.webp',
+  mimeType: 'image/webp',
+};
+
+beforeEach(() => {
+  useAppStore.setState({
+    error: null,
+    draftAttachmentsByTask: {},
+    attachmentCapabilityByTask: {},
+    attachmentRequestRevisionByTask: {},
+    attachmentBusyByTask: {},
+    attachmentErrorByTask: {},
+    attachmentAnnouncementByTask: {},
+  });
+});
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe('attachment draft store state', () => {
+  it('discards an older hydrate answer after a newer request wins', async () => {
+    let resolveOld!: (value: ImageAttachmentMetadata[]) => void;
+    const oldList = new Promise<ImageAttachmentMetadata[]>((resolve) => {
+      resolveOld = resolve;
+    });
+    const listDraft = vi.fn().mockReturnValueOnce(oldList).mockResolvedValueOnce([second]);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        attachments: {
+          capability: vi.fn().mockResolvedValue({
+            status: 'unsupported',
+            reason: '準備中',
+            selectionIdentity: null,
+          }),
+          listDraft,
+        },
+      },
+    });
+
+    const older = useAppStore.getState().refreshDraftAttachments(taskId);
+    const newer = useAppStore.getState().refreshDraftAttachments(taskId);
+    await newer;
+    resolveOld([first]);
+    await older;
+
+    expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([second]);
+  });
+
+  it('refreshes from Main after pick and remove instead of clearing optimistically', async () => {
+    const pick = vi.fn().mockResolvedValue(first);
+    const remove = vi.fn().mockResolvedValue(undefined);
+    const listDraft = vi.fn().mockResolvedValueOnce([first]).mockResolvedValueOnce([]);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        attachments: {
+          capability: vi.fn().mockResolvedValue({
+            status: 'supported',
+            reason: null,
+            selectionIdentity: 'selection-1',
+          }),
+          pick,
+          listDraft,
+          remove,
+        },
+      },
+    });
+
+    await useAppStore.getState().pickDraftAttachment(taskId);
+    expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([first]);
+    expect(useAppStore.getState().attachmentAnnouncementByTask[taskId]).toBe(
+      'one.pngを追加しました',
+    );
+    expect(await useAppStore.getState().removeDraftAttachment(taskId, first.id)).toBe(true);
+    expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([]);
+    expect(useAppStore.getState().attachmentAnnouncementByTask[taskId]).toBe(
+      'one.pngを削除しました',
+    );
+    expect(remove).toHaveBeenCalledWith({ taskId, attachmentId: first.id });
+  });
+
+  it('keeps Task drafts isolated and announces picker cancellation', async () => {
+    const otherTaskId = 'task-other';
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        attachments: {
+          capability: vi.fn().mockResolvedValue({
+            status: 'supported',
+            reason: null,
+            selectionIdentity: 'selection-1',
+          }),
+          pick: vi.fn().mockResolvedValue(null),
+          listDraft: vi.fn((requestedTaskId: string) =>
+            Promise.resolve(requestedTaskId === taskId ? [first] : [second]),
+          ),
+          remove: vi.fn(),
+        },
+      },
+    });
+
+    await Promise.all([
+      useAppStore.getState().refreshDraftAttachments(taskId),
+      useAppStore.getState().refreshDraftAttachments(otherTaskId),
+    ]);
+    await useAppStore.getState().pickDraftAttachment(taskId);
+
+    expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([first]);
+    expect(useAppStore.getState().draftAttachmentsByTask[otherTaskId]).toEqual([second]);
+    expect(useAppStore.getState().attachmentAnnouncementByTask[taskId]).toBe(
+      '画像の選択をキャンセルしました',
+    );
+  });
+
+  it('keeps hydrate failures adjacent to attachment controls', async () => {
+    const capability = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('画像draftを読み込めませんでした'))
+      .mockResolvedValueOnce({
+        status: 'unsupported',
+        reason: '準備中',
+        selectionIdentity: null,
+      });
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        attachments: {
+          capability,
+          listDraft: vi.fn().mockResolvedValue([]),
+        },
+      },
+    });
+
+    await useAppStore.getState().refreshDraftAttachments(taskId);
+
+    expect(useAppStore.getState().attachmentErrorByTask[taskId]).toBe(
+      '画像draftを読み込めませんでした',
+    );
+    expect(useAppStore.getState().error).toBeNull();
+
+    await useAppStore.getState().refreshDraftAttachments(taskId);
+    expect(useAppStore.getState().attachmentErrorByTask[taskId]).toBeUndefined();
+  });
+});

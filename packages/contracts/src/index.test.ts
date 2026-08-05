@@ -88,6 +88,35 @@ describe('public contracts', () => {
     budgetMode: 'bounded',
   } as const;
 
+  it('bounds public image attachment draft metadata', () => {
+    const attachment = {
+      id: 'attachment-1',
+      fileName: 'diagram.png',
+      mimeType: 'image/png',
+      byteLength: 4 * 1024 * 1024,
+      createdAt: '2026-08-05T00:00:00.000Z',
+    } as const;
+    expect(contracts.imageAttachmentMetadataListSchema.parse([attachment])).toEqual([attachment]);
+    expect(() =>
+      contracts.imageAttachmentMetadataListSchema.parse([attachment, attachment]),
+    ).toThrow(/unique/i);
+    expect(() =>
+      contracts.imageAttachmentMetadataListSchema.parse(
+        Array.from({ length: 4 }, (_, index) => ({
+          ...attachment,
+          id: `attachment-${index}`,
+          byteLength: 5 * 1024 * 1024,
+        })),
+      ),
+    ).toThrow(/aggregate/i);
+    expect(() =>
+      contracts.imageAttachmentMetadataSchema.parse({
+        ...attachment,
+        mimeType: 'image/gif',
+      }),
+    ).toThrow();
+  });
+
   it('validates Project summaries and mutation CAS inputs', () => {
     expect(projectCreateInputSchema.parse({ name: '  Project A  ' })).toEqual({
       name: 'Project A',
