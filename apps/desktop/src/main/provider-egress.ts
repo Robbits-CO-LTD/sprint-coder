@@ -25,6 +25,8 @@ export type ProviderEgressInput = {
   endpointTrust?: 'trusted-local' | 'trusted-remote' | 'untrusted';
   round?: number;
   toolCatalogDigest?: string;
+  attachmentManifestDigest?: string;
+  attachmentByteCount?: number;
 };
 
 export function dispatchAfterCodexProviderEgress(
@@ -95,7 +97,18 @@ function authorizeProviderEgress(
     ...input.context.projectItems.map((item) => item.content),
   ].join('\n');
   const secretScan = redactSecrets(content) === content ? ('clean' as const) : ('blocked' as const);
-  const byteCount = Buffer.byteLength(content, 'utf8');
+  const textByteCount = Buffer.byteLength(content, 'utf8');
+  const attachmentManifestDigest = input.attachmentManifestDigest ?? null;
+  const attachmentByteCount = input.attachmentByteCount ?? 0;
+  if (
+    !Number.isSafeInteger(attachmentByteCount) ||
+    attachmentByteCount < 0 ||
+    (attachmentManifestDigest === null) !== (attachmentByteCount === 0) ||
+    (attachmentManifestDigest !== null && !/^[a-f0-9]{64}$/.test(attachmentManifestDigest))
+  )
+    throw new Error('Invalid provider attachment egress facts');
+  const byteCount = textByteCount + attachmentByteCount;
+  if (!Number.isSafeInteger(byteCount)) throw new Error('Provider egress byte count overflow');
   const provenanceTrust =
     input.context.fragments.some((fragment) => fragment.trust === 'assistant') ||
     input.context.projectItems.some((item) => item.authority === 'none')
@@ -122,6 +135,8 @@ function authorizeProviderEgress(
     secretScan,
     localOnlyTask:
       input.task.localOnly || input.context.projectItems.some((item) => item.localOnly),
+    attachmentManifestDigest,
+    attachmentByteCount,
   };
   const executionSpecDigest = digestCanonical({
     providerId,
@@ -147,6 +162,8 @@ function authorizeProviderEgress(
       endpointTrust: input.endpointTrust ?? providerTrust,
       round: input.round ?? 1,
       toolCatalogDigest: input.toolCatalogDigest ?? digestCanonical([]),
+      attachmentManifestDigest,
+      attachmentByteCount,
     },
   });
   const requestBase = {
@@ -174,6 +191,8 @@ function authorizeProviderEgress(
     allowedProvenance: [provenanceTrust],
     requireSecretScanClean: true,
     allowLocalOnlyTaskRemote: false,
+    attachmentManifestDigest,
+    attachmentByteCount,
   };
   const ceiling = {
     entries: [

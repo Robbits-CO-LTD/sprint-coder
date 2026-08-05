@@ -5,9 +5,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CodexAgentMessageBoundary,
+  CodexRuntimeAdapter,
   advanceCodexAppServerStage,
   buildCodexArgs,
   buildCodexPrompt,
+  buildCodexTurnInput,
   codexOperationForItem,
   parseCodexModels,
   probeCodex,
@@ -27,6 +29,21 @@ afterEach(async () => {
 });
 
 describe('Codex runtime probe', () => {
+  it('constructs ordered app-server localImage inputs without embedding paths in text', () => {
+    expect(
+      buildCodexTurnInput(
+        'inspect these images',
+        [{ name: 'reviewer', path: '/skills/reviewer' }],
+        ['/custody/001.png', '/custody/002.webp'],
+      ),
+    ).toEqual([
+      { type: 'text', text: 'inspect these images' },
+      { type: 'localImage', path: '/custody/001.png' },
+      { type: 'localImage', path: '/custody/002.webp' },
+      { type: 'skill', name: 'reviewer', path: '/skills/reviewer' },
+    ]);
+  });
+
   it('distinguishes an unsupported experimental multi-root protocol from ordinary failures', () => {
     expect(isUnsupportedMultiRootError(new Error('unknown field `runtimeWorkspaceRoots`'))).toBe(
       true,
@@ -148,6 +165,187 @@ describe('Codex runtime probe', () => {
     await expect(terminateCodexProcessTree(parent)).resolves.toBe(true);
     await waitForProcessesToExit([parent.pid!, descendants.child, descendants.grandchild]);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'releases transferred local images exactly once when startup is canceled or times out',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-stalled-'));
+      temporaryRoots.push(root);
+      const executable = join(root, 'codex-stalled');
+      await writeFile(
+        executable,
+        '#!/usr/bin/env node\nprocess.stdin.resume(); setInterval(() => {}, 1000);\n',
+      );
+      await chmod(executable, 0o700);
+
+      for (const mode of ['cancel', 'timeout'] as const) {
+        const adapter = new CodexRuntimeAdapter(mode === 'timeout' ? 25 : 5_000, executable);
+        let releases = 0;
+        const failures: unknown[] = [];
+        const exited = new Promise<void>((resolve) => {
+          adapter.start(
+            `turn-${mode}`,
+            'inspect',
+            [],
+            () => undefined,
+            null,
+            'auto',
+            () => undefined,
+            (error) => failures.push(error),
+            () => resolve(),
+            undefined,
+            undefined,
+            'read-only',
+            [],
+            [],
+            undefined,
+            {
+              paths: ['/custody/001.png'],
+              beforeTurnStart: async () => undefined,
+              release: async () => {
+                releases += 1;
+              },
+            },
+          );
+        });
+        if (mode === 'cancel')
+          setTimeout(() => {
+            void adapter.cancel(`turn-${mode}`);
+          }, 25);
+        await exited;
+        expect(releases).toBe(1);
+        expect(failures).toHaveLength(mode === 'timeout' ? 1 : 0);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'acknowledges an image commit before flushing buffered app-server events',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-ordering-'));
+      temporaryRoots.push(root);
+      const executable = join(root, 'codex-ordering');
+      await writeFile(
+        executable,
+        [
+          '#!/usr/bin/env node',
+          "const readline = require('node:readline');",
+          'const rl = readline.createInterface({ input: process.stdin });',
+          "const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+          "rl.on('line', (line) => {",
+          '  const message = JSON.parse(line);',
+          "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
+          "  if (message.method === 'turn/start') {",
+          "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+          "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
+          '  }',
+          '});',
+        ].join('\n'),
+      );
+      await chmod(executable, 0o700);
+      const adapter = new CodexRuntimeAdapter(5_000, executable);
+      const order: string[] = [];
+      const failures: unknown[] = [];
+      let releases = 0;
+      await new Promise<void>((resolve) => {
+        adapter.start(
+          'turn-ordering',
+          'inspect',
+          [],
+          () => order.push('started'),
+          null,
+          'auto',
+          (event) => order.push(`event:${event.type}`),
+          (error) => failures.push(error),
+          () => resolve(),
+          undefined,
+          undefined,
+          'read-only',
+          [],
+          [],
+          undefined,
+          {
+            paths: ['/custody/001.png'],
+            beforeTurnStart: async () => {
+              order.push('reverify');
+            },
+            release: async () => {
+              releases += 1;
+            },
+          },
+        );
+      });
+      expect(failures).toEqual([]);
+      expect(order[0]).toBe('reverify');
+      expect(order[1]).toBe('started');
+      expect(order[2]).toBe('event:thread');
+      expect(order.slice(3, -1).every((entry) => entry === 'event:stage')).toBe(true);
+      expect(order.at(-1)).toBe('event:completed');
+      expect(releases).toBe(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed and releases images when pre-accept events exceed the buffer cap',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-overflow-'));
+      temporaryRoots.push(root);
+      const executable = join(root, 'codex-overflow');
+      await writeFile(
+        executable,
+        [
+          '#!/usr/bin/env node',
+          "const readline = require('node:readline');",
+          'const rl = readline.createInterface({ input: process.stdin });',
+          "const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+          "rl.on('line', (line) => {",
+          '  const message = JSON.parse(line);',
+          "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
+          "  if (message.method === 'turn/start') for (let index = 0; index < 300; index += 1) send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { itemId: 'message-1', delta: 'x' } });",
+          '});',
+        ].join('\n'),
+      );
+      await chmod(executable, 0o700);
+      const adapter = new CodexRuntimeAdapter(5_000, executable);
+      let accepted = false;
+      let releases = 0;
+      const failures: unknown[] = [];
+      await new Promise<void>((resolve) => {
+        adapter.start(
+          'turn-overflow',
+          'inspect',
+          [],
+          () => {
+            accepted = true;
+          },
+          null,
+          'auto',
+          () => undefined,
+          (error) => failures.push(error),
+          () => resolve(),
+          undefined,
+          undefined,
+          'read-only',
+          [],
+          [],
+          undefined,
+          {
+            paths: ['/custody/001.png'],
+            beforeTurnStart: async () => undefined,
+            release: async () => {
+              releases += 1;
+            },
+          },
+        );
+      });
+      expect(accepted).toBe(false);
+      expect(failures).toHaveLength(1);
+      expect(releases).toBe(1);
+    },
+  );
 
   it('resolves the native Codex executable behind the Windows npm shim', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-command-'));

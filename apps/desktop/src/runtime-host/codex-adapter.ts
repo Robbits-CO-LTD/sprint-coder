@@ -41,9 +41,16 @@ type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
   canceled: boolean;
   cleanup: () => void;
+  rejectPending: (error: Error) => void;
+  releaseLocalImages: () => void;
 };
 type EmitEvent = (event: RuntimeCanonicalEvent) => void;
 type EmitError = (error: PublicError) => void;
+export type CodexLocalImagePreparation = Readonly<{
+  paths: readonly string[];
+  beforeTurnStart: () => Promise<void>;
+  release: () => Promise<void>;
+}>;
 
 export type CodexProbe = {
   available: boolean;
@@ -134,7 +141,10 @@ export async function probeCodex(
 export class CodexRuntimeAdapter {
   private readonly active = new Map<string, ActiveProcess>();
 
-  constructor(private readonly timeoutMs = 10 * 60_000) {}
+  constructor(
+    private readonly timeoutMs = 10 * 60_000,
+    private readonly command = 'codex',
+  ) {}
 
   start(
     turnId: string,
@@ -155,8 +165,18 @@ export class CodexRuntimeAdapter {
     skills: readonly RuntimeSkillInput[] = [],
     projectItems: readonly RuntimeProjectContextItem[] = [],
     serializedPayload?: string,
+    localImages?: CodexLocalImagePreparation,
   ): void {
+    let localImageReleasePromise: Promise<void> | null = null;
+    const releaseLocalImages = (): Promise<void> => {
+      if (localImageReleasePromise === null)
+        localImageReleasePromise = (localImages?.release() ?? Promise.resolve()).catch(
+          () => undefined,
+        );
+      return localImageReleasePromise;
+    };
     if (this.active.has(turnId)) {
+      void releaseLocalImages();
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
       return;
     }
@@ -178,6 +198,7 @@ export class CodexRuntimeAdapter {
       try {
         nodeCommand = teamMcpNodeCommand();
       } catch {
+        void releaseLocalImages();
         if (temporaryDirectory !== null)
           rmSync(temporaryDirectory, { recursive: true, force: true });
         fail(
@@ -204,7 +225,7 @@ export class CodexRuntimeAdapter {
     // together for a write to escape.
     const effectiveScope: RuntimeWriteScope = primaryRoot === undefined ? 'read-only' : writeScope;
     const child = spawn(
-      resolveCodexCommand('codex'),
+      resolveCodexCommand(this.command),
       buildCodexArgs(model, effort, effectiveScope, teamMcpProfile),
       {
         cwd,
@@ -221,19 +242,6 @@ export class CodexRuntimeAdapter {
         stdio: ['pipe', 'pipe', 'pipe'],
       },
     );
-    const cleanup = (): void => {
-      if (temporaryDirectory !== null) rmSync(temporaryDirectory, { recursive: true, force: true });
-      if (teamMcpDirectory !== null) rmSync(teamMcpDirectory, { recursive: true, force: true });
-    };
-    const control: ActiveProcess = { child, canceled: false, cleanup };
-    this.active.set(turnId, control);
-    accepted();
-
-    let failed = false;
-    let sawCompletion = false;
-    let stageIndex = -1;
-    const assistantMessageId = randomUUID();
-    const agentMessageBoundary = new CodexAgentMessageBoundary();
     let nextRequestId = 1;
     const pending = new Map<
       number,
@@ -242,6 +250,47 @@ export class CodexRuntimeAdapter {
         reject: (error: Error) => void;
       }
     >();
+    const rejectPending = (error: Error): void => {
+      for (const request of pending.values()) request.reject(error);
+      pending.clear();
+    };
+    const cleanup = (): void => {
+      void releaseLocalImages();
+      if (temporaryDirectory !== null) rmSync(temporaryDirectory, { recursive: true, force: true });
+      if (teamMcpDirectory !== null) rmSync(teamMcpDirectory, { recursive: true, force: true });
+    };
+    const control: ActiveProcess = {
+      child,
+      canceled: false,
+      cleanup,
+      rejectPending,
+      releaseLocalImages: () => void releaseLocalImages(),
+    };
+    this.active.set(turnId, control);
+
+    const bufferedEvents: RuntimeCanonicalEvent[] = [];
+    let bufferedEventBytes = 0;
+    let imagesAccepted = false;
+    const emitRuntime: EmitEvent =
+      localImages === undefined
+        ? emit
+        : (event) => {
+            if (imagesAccepted) emit(event);
+            else {
+              const byteLength = Buffer.byteLength(JSON.stringify(event), 'utf8');
+              if (bufferedEvents.length >= 256 || bufferedEventBytes + byteLength > 1024 * 1024)
+                throw new Error('Codex pre-accept event buffer overflow');
+              bufferedEvents.push(event);
+              bufferedEventBytes += byteLength;
+            }
+          };
+    if (localImages === undefined) accepted();
+
+    let failed = false;
+    let sawCompletion = false;
+    let stageIndex = -1;
+    const assistantMessageId = randomUUID();
+    const agentMessageBoundary = new CodexAgentMessageBoundary();
     const send = (method: string, params: unknown): Promise<unknown> =>
       new Promise((resolve, reject) => {
         const id = nextRequestId++;
@@ -257,6 +306,8 @@ export class CodexRuntimeAdapter {
         failed = true;
         fail(publicError('RUNTIME_TIMEOUT', 'Codex runtimeがタイムアウトしました。', true));
       }
+      rejectPending(new Error('Codex runtime timed out'));
+      void releaseLocalImages();
       void terminateCodexProcessTree(child);
     }, effectiveTimeoutMs);
 
@@ -283,11 +334,11 @@ export class CodexRuntimeAdapter {
         }
         handleCodexNotification(
           message,
-          emit,
+          emitRuntime,
           assistantMessageId,
           agentMessageBoundary,
           (stage) => {
-            stageIndex = advanceCodexAppServerStage(stageIndex, stage, emit);
+            stageIndex = advanceCodexAppServerStage(stageIndex, stage, emitRuntime);
           },
           () => {
             sawCompletion = true;
@@ -296,6 +347,8 @@ export class CodexRuntimeAdapter {
         );
       } catch {
         failed = true;
+        rejectPending(new Error('Codex app-server protocol failed'));
+        void releaseLocalImages();
         fail(
           publicError(
             'RUNTIME_PROTOCOL_ERROR',
@@ -331,21 +384,26 @@ export class CodexRuntimeAdapter {
         );
         const thread = asRecord(threadResult['thread']);
         const threadId = requiredString(thread['id'], 'thread id');
-        emit({ type: 'thread', threadId });
+        emitRuntime({ type: 'thread', threadId });
+        await localImages?.beforeTurnStart();
         await send('turn/start', {
           threadId,
-          input: [
-            {
-              type: 'text',
-              text:
-                serializedPayload ??
-                buildCodexPrompt(input, contextFragments, teamMcp?.guidance, skills, projectItems),
-            },
-            ...skills.map((skill) => ({ type: 'skill', name: skill.name, path: skill.path })),
-          ],
+          input: buildCodexTurnInput(
+            serializedPayload ??
+              buildCodexPrompt(input, contextFragments, teamMcp?.guidance, skills, projectItems),
+            skills,
+            localImages?.paths ?? [],
+          ),
           ...(multiRoot ? { cwd, runtimeWorkspaceRoots } : {}),
           ...(effort === undefined || effort === '' ? {} : { effort }),
         });
+        if (localImages !== undefined) {
+          accepted();
+          imagesAccepted = true;
+          for (const event of bufferedEvents) emit(event);
+          bufferedEvents.length = 0;
+          bufferedEventBytes = 0;
+        }
       } catch (error) {
         if (failed || control.canceled) return;
         failed = true;
@@ -359,11 +417,15 @@ export class CodexRuntimeAdapter {
             : publicError('RUNTIME_FAILED', 'Codex app-serverを開始できませんでした。', true),
         );
         void terminateCodexProcessTree(child);
+      } finally {
+        await releaseLocalImages();
       }
     })();
     // Drain diagnostics so the child cannot block, but never forward or retain provider output.
     child.stderr.resume();
     child.once('error', (error) => {
+      rejectPending(error);
+      void releaseLocalImages();
       if (failed || control.canceled) return;
       failed = true;
       fail(
@@ -380,6 +442,8 @@ export class CodexRuntimeAdapter {
     });
     child.once('exit', (code) => {
       clearTimeout(timeout);
+      rejectPending(new Error('Codex runtime exited'));
+      void releaseLocalImages();
       this.active.delete(turnId);
       cleanup();
       const exitCode = code ?? -1;
@@ -395,12 +459,30 @@ export class CodexRuntimeAdapter {
     const control = this.active.get(turnId);
     if (control === undefined) return false;
     control.canceled = true;
+    control.rejectPending(new Error('Codex runtime canceled'));
+    control.releaseLocalImages();
     return !(await terminateCodexProcessTree(control.child));
   }
 
   dispose(): void {
     for (const [turnId] of this.active) void this.cancel(turnId);
   }
+}
+
+export function buildCodexTurnInput(
+  text: string,
+  skills: readonly RuntimeSkillInput[],
+  localImagePaths: readonly string[],
+): Array<
+  | { type: 'text'; text: string }
+  | { type: 'localImage'; path: string }
+  | { type: 'skill'; name: string; path: string }
+> {
+  return [
+    { type: 'text', text },
+    ...localImagePaths.map((path) => ({ type: 'localImage' as const, path })),
+    ...skills.map((skill) => ({ type: 'skill' as const, name: skill.name, path: skill.path })),
+  ];
 }
 
 export function isUnsupportedMultiRootError(error: unknown): boolean {

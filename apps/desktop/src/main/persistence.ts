@@ -51,7 +51,14 @@ import {
   type FileChangeRecord,
   type GeneratedImage,
   generatedImageSchema,
+  imageAttachmentMetadataSchema,
+  imageAttachmentMetadataListSchema,
+  imageAttachmentIdsSchema,
+  IMAGE_ATTACHMENT_MAX_COUNT,
+  IMAGE_ATTACHMENT_MAX_TOTAL_BYTES,
   type TaskSummary,
+  type ImageAttachmentMetadata,
+  type ImageAttachmentMimeType,
   type TeamBudgetStatus,
   type TeamBlueprint,
   type TeamMissionAccess,
@@ -2951,6 +2958,74 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 64,
+    checksum: 'image-attachment-drafts-v64',
+    sql: `
+      CREATE UNIQUE INDEX messages_id_task_unique ON messages(id, task_id);
+      CREATE TABLE image_attachments (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        message_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('draft', 'message')),
+        file_name TEXT NOT NULL CHECK (length(file_name) BETWEEN 1 AND 255),
+        mime_type TEXT NOT NULL CHECK (mime_type IN ('image/png', 'image/jpeg', 'image/webp')),
+        byte_length INTEGER NOT NULL CHECK (byte_length BETWEEN 1 AND 5242880),
+        sha256 TEXT NOT NULL CHECK (
+          length(sha256) = 64
+          AND sha256 = lower(sha256)
+          AND sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        bytes BLOB NOT NULL CHECK (length(bytes) = byte_length),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (state = 'draft' AND message_id IS NULL) OR
+          (state = 'message' AND message_id IS NOT NULL)
+        ),
+        FOREIGN KEY (message_id, task_id) REFERENCES messages(id, task_id) ON DELETE CASCADE
+      );
+      CREATE INDEX image_attachments_task_draft_idx
+        ON image_attachments(task_id, created_at, id) WHERE state = 'draft';
+      CREATE INDEX image_attachments_message_idx
+        ON image_attachments(message_id, created_at, id);
+    `,
+  },
+  {
+    version: 65,
+    checksum: 'image-attachment-message-order-v65',
+    sql: `
+      CREATE TABLE image_attachment_v65_migration_guard (
+        valid INTEGER NOT NULL CHECK (valid = 1)
+      );
+      INSERT INTO image_attachment_v65_migration_guard(valid)
+        SELECT 0 FROM image_attachments WHERE state = 'message' LIMIT 1;
+      DROP TABLE image_attachment_v65_migration_guard;
+      ALTER TABLE image_attachments ADD COLUMN message_ordinal INTEGER
+        CHECK (message_ordinal IS NULL OR message_ordinal BETWEEN 0 AND 3);
+      CREATE UNIQUE INDEX image_attachments_message_ordinal_idx
+        ON image_attachments(message_id, message_ordinal) WHERE state = 'message';
+      CREATE TRIGGER image_attachments_state_insert_guard
+      BEFORE INSERT ON image_attachments
+      WHEN NOT (
+        (NEW.state = 'draft' AND NEW.message_id IS NULL AND NEW.message_ordinal IS NULL) OR
+        (NEW.state = 'message' AND NEW.message_id IS NOT NULL
+          AND NEW.message_ordinal BETWEEN 0 AND 3)
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid image attachment ownership state');
+      END;
+      CREATE TRIGGER image_attachments_state_update_guard
+      BEFORE UPDATE OF state, message_id, message_ordinal ON image_attachments
+      WHEN NOT (
+        (NEW.state = 'draft' AND NEW.message_id IS NULL AND NEW.message_ordinal IS NULL) OR
+        (NEW.state = 'message' AND NEW.message_id IS NOT NULL
+          AND NEW.message_ordinal BETWEEN 0 AND 3)
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid image attachment ownership state');
+      END;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -2977,6 +3052,43 @@ export type CanvasViewRecord = {
   revision: number;
   updatedAt: string;
 };
+
+export type DraftImageAttachmentInput = Readonly<{
+  taskId: string;
+  fileName: string;
+  mimeType: ImageAttachmentMimeType;
+  bytes: Buffer;
+  createdAt?: string;
+}>;
+
+type ImageAttachmentRow = Readonly<{
+  id: string;
+  task_id: string;
+  message_id: string | null;
+  state: 'draft' | 'message';
+  file_name: string;
+  mime_type: ImageAttachmentMimeType;
+  byte_length: number;
+  sha256: string;
+  bytes: Buffer;
+  created_at: string;
+  message_ordinal: number | null;
+}>;
+
+type ImageAttachmentMetadataRow = Pick<
+  ImageAttachmentRow,
+  'id' | 'message_id' | 'file_name' | 'mime_type' | 'byte_length' | 'created_at'
+>;
+
+function toImageAttachmentMetadata(row: ImageAttachmentMetadataRow): ImageAttachmentMetadata {
+  return imageAttachmentMetadataSchema.parse({
+    id: row.id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    byteLength: row.byte_length,
+    createdAt: row.created_at,
+  });
+}
 
 function assertCanvasCoordinate(value: number, label: string): void {
   if (!Number.isFinite(value) || Math.abs(value) > CANVAS_WORLD_BOUND)
@@ -3536,6 +3648,7 @@ export interface PersistenceClient {
   }): TaskSummary;
   unassignTaskFromProject(input: { taskId: string; expectedProjectId: string | null }): TaskSummary;
   getTaskModelSelection(taskId: string): ModelSelection | null;
+  getImageAttachmentAcceptanceSelection(taskId: string): ImageAttachmentAcceptanceSelection;
   setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null;
   getTaskLeader(taskId: string): AgentRecord;
   setAgentModelSelection(agentId: string, selection: ModelSelection): AgentRecord;
@@ -3821,6 +3934,10 @@ export interface PersistenceClient {
   setGoal(taskId: string, goal: string): TaskSummary;
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
+  createDraftImageAttachment(input: DraftImageAttachmentInput): ImageAttachmentMetadata;
+  listDraftImageAttachments(taskId: string): ImageAttachmentMetadata[];
+  getAcceptedImageAttachments(taskId: string, turnId: string): AcceptedImageAttachment[];
+  removeDraftImageAttachment(taskId: string, attachmentId: string): void;
   getDraftSkillSelections(taskId: string): TurnSkillSelection[];
   setDraftSkillSelections(taskId: string, skills: readonly TurnSkillSelection[]): void;
   getCanvasView(taskId: string): CanvasViewRecord | null;
@@ -4092,6 +4209,8 @@ export interface PersistenceClient {
     text: string,
     skills?: readonly PersistedTurnSkill[],
     includeBuiltinTeamSkill?: boolean,
+    attachmentIds?: readonly string[],
+    attachmentCapability?: ImageAttachmentCapabilityValidator | undefined,
   ): StartedTurn;
   replaceActiveTurn(
     taskId: string,
@@ -4311,19 +4430,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
     mkdirSync(dirname(databasePath), { recursive: true });
     this.recoveryReport = recoverDatabaseIfCorrupt(databasePath);
     this.db = new Database(databasePath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.db.pragma('busy_timeout = 5000');
-    this.runMigrations(databasePath);
-    this.backfillLegacyMutationScopes();
-    this.backfillLegacyEditSagaBindings();
-    this.backfillLegacyNativeEditSagaRevisions();
-    this.backfillLegacyEditSagaRootBindings();
-    this.backfillAcceptanceContracts();
-    this.interruptActiveCommands();
-    this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
-      this.liveStateForReminder(taskId, turnId),
-    );
+    try {
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma('busy_timeout = 5000');
+      this.runMigrations(databasePath);
+      this.backfillLegacyMutationScopes();
+      this.backfillLegacyEditSagaBindings();
+      this.backfillLegacyNativeEditSagaRevisions();
+      this.backfillLegacyEditSagaRootBindings();
+      this.backfillAcceptanceContracts();
+      this.interruptActiveCommands();
+      this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
+        this.liveStateForReminder(taskId, turnId),
+      );
+    } catch (error) {
+      try {
+        this.db.close();
+      } catch {
+        // Preserve the initialization failure that explains why the client could not be created.
+      }
+      throw error;
+    }
   }
 
   /**
@@ -5769,6 +5897,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
       requestedProvider: row.requested_provider,
       requestedModel: row.requested_model,
     });
+  }
+
+  getImageAttachmentAcceptanceSelection(taskId: string): ImageAttachmentAcceptanceSelection {
+    const taskSelection = this.getTaskModelSelection(taskId);
+    const explicitRuntime =
+      taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+    const runtimeKind = explicitRuntime?.runtimeKind ?? this.getRuntime();
+    const model = explicitRuntime?.model ?? this.getModel();
+    return {
+      taskId,
+      modelSelection: taskSelection ?? modelSelectionForRuntime(runtimeKind, model),
+      runtimeKind,
+      model,
+    };
   }
 
   setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null {
@@ -8292,6 +8434,132 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('UPDATE tasks SET draft = ?, updated_at = ? WHERE id = ?')
       .run(draft, new Date().toISOString(), taskId);
     if (result.changes !== 1) throw new NotFoundError('Task not found');
+  }
+
+  createDraftImageAttachment(input: DraftImageAttachmentInput): ImageAttachmentMetadata {
+    return this.db.transaction(() => {
+      this.assertTask(input.taskId);
+      const aggregate = this.db
+        .prepare(
+          `SELECT COUNT(*) AS count, COALESCE(SUM(byte_length), 0) AS byte_length
+           FROM image_attachments WHERE task_id = ? AND state = 'draft'`,
+        )
+        .get(input.taskId) as { count: number; byte_length: number };
+      if (aggregate.count >= IMAGE_ATTACHMENT_MAX_COUNT)
+        throw new ImageAttachmentLimitError('A draft cannot contain more than four images');
+      const id = randomUUID();
+      const createdAt = input.createdAt ?? new Date().toISOString();
+      const metadata = imageAttachmentMetadataSchema.parse({
+        id,
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        byteLength: input.bytes.byteLength,
+        createdAt,
+      });
+      if (aggregate.byte_length + metadata.byteLength > IMAGE_ATTACHMENT_MAX_TOTAL_BYTES)
+        throw new ImageAttachmentLimitError('Draft image bytes exceed the aggregate limit');
+      const sha256 = createHash('sha256').update(input.bytes).digest('hex');
+      this.db
+        .prepare(
+          `INSERT INTO image_attachments(
+             id, task_id, message_id, state, file_name, mime_type,
+             byte_length, sha256, bytes, created_at
+           ) VALUES (?, ?, NULL, 'draft', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.taskId,
+          metadata.fileName,
+          metadata.mimeType,
+          metadata.byteLength,
+          sha256,
+          input.bytes,
+          metadata.createdAt,
+        );
+      return metadata;
+    })();
+  }
+
+  listDraftImageAttachments(taskId: string): ImageAttachmentMetadata[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM image_attachments
+         WHERE task_id = ? AND state = 'draft'
+         ORDER BY created_at, rowid`,
+      )
+      .all(taskId) as ImageAttachmentRow[];
+    return imageAttachmentMetadataListSchema.parse(rows.map(toImageAttachmentMetadata));
+  }
+
+  getAcceptedImageAttachments(taskId: string, turnId: string): AcceptedImageAttachment[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT attachment.*
+         FROM image_attachments attachment
+         JOIN messages message
+           ON message.id = attachment.message_id AND message.task_id = attachment.task_id
+         JOIN turns turn
+           ON turn.id = message.turn_id AND turn.task_id = message.task_id
+          AND turn.user_message_id = message.id
+         WHERE attachment.task_id = ? AND turn.id = ? AND message.author = 'user'
+           AND attachment.state = 'message' AND attachment.message_ordinal IS NOT NULL
+         ORDER BY attachment.message_ordinal`,
+      )
+      .all(taskId, turnId) as ImageAttachmentRow[];
+    const metadata = imageAttachmentMetadataListSchema.parse(rows.map(toImageAttachmentMetadata));
+    let expectedMetadata: readonly ImageAttachmentMetadata[];
+    try {
+      const eventRow = this.db
+        .prepare(
+          `SELECT payload_json FROM turn_events
+           WHERE task_id = ? AND turn_id = ? AND type = 'turn.accepted'
+           ORDER BY seq LIMIT 1`,
+        )
+        .get(taskId, turnId) as { payload_json: string } | undefined;
+      if (eventRow === undefined) throw new Error('missing acceptance event');
+      const event = turnEventSchema.parse(JSON.parse(eventRow.payload_json));
+      if (event.type !== 'turn.accepted' || event.turnId !== turnId)
+        throw new Error('mismatched acceptance event');
+      expectedMetadata = event.userMessage.attachments;
+    } catch {
+      throw new ImageAttachmentAcceptanceError('stale');
+    }
+    if (
+      expectedMetadata.length !== metadata.length ||
+      expectedMetadata.some((expected, index) =>
+        ['id', 'fileName', 'mimeType', 'byteLength', 'createdAt'].some(
+          (key) =>
+            expected[key as keyof ImageAttachmentMetadata] !==
+            metadata[index]![key as keyof ImageAttachmentMetadata],
+        ),
+      )
+    )
+      throw new ImageAttachmentAcceptanceError('stale');
+    return rows.map((row, index) => {
+      if (
+        row.bytes.byteLength !== row.byte_length ||
+        createHash('sha256').update(row.bytes).digest('hex') !== row.sha256
+      )
+        throw new ImageAttachmentAcceptanceError('stale');
+      return Object.freeze({
+        ...metadata[index]!,
+        sha256: row.sha256,
+        bytes: Buffer.from(row.bytes),
+      });
+    });
+  }
+
+  removeDraftImageAttachment(taskId: string, attachmentId: string): void {
+    this.assertTask(taskId);
+    const result = this.db
+      .prepare(
+        `DELETE FROM image_attachments
+         WHERE id = ? AND task_id = ? AND state = 'draft' AND message_id IS NULL`,
+      )
+      .run(attachmentId, taskId);
+    if (result.changes !== 1) throw new NotFoundError('Draft image attachment not found');
   }
 
   getDraftSkillSelections(taskId: string): TurnSkillSelection[] {
@@ -11458,11 +11726,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   listMessages(taskId: string): ChatMessage[] {
     this.assertTask(taskId);
-    return (
-      this.db
-        .prepare('SELECT * FROM messages WHERE task_id = ? ORDER BY created_at, rowid')
-        .all(taskId) as MessageRow[]
-    ).map(toMessage);
+    const messages = this.db
+      .prepare('SELECT * FROM messages WHERE task_id = ? ORDER BY created_at, rowid')
+      .all(taskId) as MessageRow[];
+    const attachmentRows = this.db
+      .prepare(
+        `SELECT id, message_id, file_name, mime_type, byte_length, created_at
+         FROM image_attachments
+         WHERE task_id = ? AND message_id IS NOT NULL AND state = 'message'
+         ORDER BY message_id, message_ordinal`,
+      )
+      .all(taskId) as ImageAttachmentMetadataRow[];
+    const attachmentsByMessage = new Map<string, ImageAttachmentMetadata[]>();
+    for (const row of attachmentRows) {
+      if (row.message_id === null) continue;
+      const attachments = attachmentsByMessage.get(row.message_id) ?? [];
+      attachments.push(toImageAttachmentMetadata(row));
+      attachmentsByMessage.set(row.message_id, attachments);
+    }
+    return messages.map((row) =>
+      toMessage(
+        row,
+        imageAttachmentMetadataListSchema.parse(attachmentsByMessage.get(row.id) ?? []),
+      ),
+    );
   }
 
   startTurn(
@@ -11470,12 +11757,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     text: string,
     skills: readonly PersistedTurnSkill[] = [],
     includeBuiltinTeamSkill = false,
+    attachmentIds: readonly string[] = [],
+    attachmentCapability?: ImageAttachmentCapabilityValidator | undefined,
   ): StartedTurn {
     return this.db.transaction(() => {
       this.assertTask(taskId);
       this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
-      return this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
+      return this.startTurnInTransaction(
+        taskId,
+        text,
+        skills,
+        includeBuiltinTeamSkill,
+        attachmentIds,
+        attachmentCapability,
+      );
     })();
   }
 
@@ -12718,27 +13014,32 @@ export class SqlitePersistenceClient implements PersistenceClient {
     text: string,
     skills: readonly PersistedTurnSkill[] = [],
     includeBuiltinTeamSkill = false,
+    attachmentIds: readonly string[] = [],
+    attachmentCapability?: ImageAttachmentCapabilityValidator | undefined,
   ): StartedTurn {
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
+    const selection = this.getImageAttachmentAcceptanceSelection(taskId);
+    const { runtimeKind, model, modelSelection } = selection;
+    const acceptedAttachments = this.prepareAcceptedImageAttachments(
+      taskId,
+      attachmentIds,
+      attachmentCapability,
+      selection,
+    );
     const shouldSealBuiltinTeamSkill =
       includeBuiltinTeamSkill ||
       isTeamScenarioInput(text) ||
       parsedSkills.some(({ selection }) => selection.kind === 'team') ||
       (isTeamContinuationInput(text) && this.latestTurnIncludedBuiltinTeamSkill(taskId));
-    const taskSelection = this.getTaskModelSelection(taskId);
-    const explicitRuntime =
-      taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
-    const runtimeKind = explicitRuntime?.runtimeKind ?? this.getRuntime();
-    const model = explicitRuntime?.model ?? this.getModel();
-    const modelSelection = taskSelection ?? modelSelectionForRuntime(runtimeKind, model);
     const userMessage = chatMessageSchema.parse({
       id: randomUUID(),
       taskId,
       turnId,
       author: 'user',
       content: text,
+      attachments: acceptedAttachments.map(toImageAttachmentMetadata),
       createdAt: now,
     });
     this.db
@@ -12746,6 +13047,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
         'INSERT INTO messages(id, task_id, turn_id, author, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       )
       .run(userMessage.id, taskId, turnId, userMessage.author, userMessage.content, now);
+    const bindAttachment = this.db.prepare(
+      `UPDATE image_attachments
+       SET state = 'message', message_id = ?, message_ordinal = ?
+       WHERE id = ? AND task_id = ? AND state = 'draft'
+         AND message_id IS NULL AND message_ordinal IS NULL`,
+    );
+    acceptedAttachments.forEach((attachment, ordinal) => {
+      if (bindAttachment.run(userMessage.id, ordinal, attachment.id, taskId).changes !== 1)
+        throw new ImageAttachmentAcceptanceError('stale');
+    });
     this.db
       .prepare(
         `INSERT INTO turns(
@@ -12815,6 +13126,38 @@ export class SqlitePersistenceClient implements PersistenceClient {
       workspaceSet,
       ...(renamedTask === null ? {} : { renamedTask }),
     };
+  }
+
+  private prepareAcceptedImageAttachments(
+    taskId: string,
+    attachmentIds: readonly string[],
+    attachmentCapability: ImageAttachmentCapabilityValidator | undefined,
+    selection: ImageAttachmentAcceptanceSelection,
+  ): ImageAttachmentRow[] {
+    const parsedIds = imageAttachmentIdsSchema.parse(attachmentIds);
+    if (parsedIds.length === 0) return [];
+    if (attachmentCapability?.(selection) !== true)
+      throw new ImageAttachmentAcceptanceError('unsupported');
+    const placeholders = parsedIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM image_attachments
+         WHERE task_id = ? AND state = 'draft' AND message_id IS NULL
+           AND id IN (${placeholders})`,
+      )
+      .all(taskId, ...parsedIds) as ImageAttachmentRow[];
+    if (rows.length !== parsedIds.length) throw new ImageAttachmentAcceptanceError('stale');
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const ordered = parsedIds.map((id) => byId.get(id)!);
+    for (const row of ordered) {
+      if (
+        row.bytes.byteLength !== row.byte_length ||
+        createHash('sha256').update(row.bytes).digest('hex') !== row.sha256
+      )
+        throw new ImageAttachmentAcceptanceError('stale');
+    }
+    imageAttachmentMetadataListSchema.parse(ordered.map(toImageAttachmentMetadata));
+    return ordered;
   }
 
   private latestTurnIncludedBuiltinTeamSkill(taskId: string): boolean {
@@ -13793,6 +14136,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
 }
 
 export class NotFoundError extends Error {}
+export class ImageAttachmentLimitError extends Error {}
+export type ImageAttachmentAcceptanceSelection = Readonly<{
+  taskId: string;
+  modelSelection: ModelSelection;
+  runtimeKind: RuntimeKind;
+  model: string;
+}>;
+export type AcceptedImageAttachment = Readonly<
+  ImageAttachmentMetadata & { sha256: string; bytes: Buffer }
+>;
+export type ImageAttachmentCapabilityValidator = (
+  selection: ImageAttachmentAcceptanceSelection,
+) => boolean;
+export class ImageAttachmentAcceptanceError extends Error {
+  constructor(readonly reason: 'unsupported' | 'stale') {
+    super(reason);
+  }
+}
 export class TurnActiveError extends Error {}
 export class SteerStaleError extends Error {}
 export class OperationConflictError extends Error {}
@@ -14478,7 +14839,10 @@ function toTeamV2Activity(row: TeamV2ActivityRow): TeamV2ActivityRecord {
   };
 }
 
-function toMessage(row: MessageRow): ChatMessage {
+function toMessage(
+  row: MessageRow,
+  attachments: readonly ImageAttachmentMetadata[] = [],
+): ChatMessage {
   return chatMessageSchema.parse({
     id: row.id,
     taskId: row.task_id,
@@ -14486,6 +14850,7 @@ function toMessage(row: MessageRow): ChatMessage {
     author: row.author,
     content: row.content,
     workContent: row.work_content,
+    attachments,
     createdAt: row.created_at,
   });
 }
@@ -15062,13 +15427,24 @@ function parseResourceSet(json: string): ResourceSet {
         key === 'allowedResidencies' ||
         key === 'allowedProvenance' ||
         key === 'requireSecretScanClean' ||
-        key === 'allowLocalOnlyTaskRemote',
+        key === 'allowLocalOnlyTaskRemote' ||
+        key === 'attachmentManifestDigest' ||
+        key === 'attachmentByteCount',
     ) &&
     typeof record['maxBytes'] === 'number' &&
     Number.isSafeInteger(record['maxBytes']) &&
     record['maxBytes'] >= 0 &&
     typeof record['requireSecretScanClean'] === 'boolean' &&
-    typeof record['allowLocalOnlyTaskRemote'] === 'boolean'
+    typeof record['allowLocalOnlyTaskRemote'] === 'boolean' &&
+    ((record['attachmentManifestDigest'] === undefined ||
+      record['attachmentManifestDigest'] === null) &&
+    (record['attachmentByteCount'] === undefined || record['attachmentByteCount'] === 0)
+      ? true
+      : typeof record['attachmentManifestDigest'] === 'string' &&
+        /^[a-f0-9]{64}$/.test(record['attachmentManifestDigest']) &&
+        typeof record['attachmentByteCount'] === 'number' &&
+        Number.isSafeInteger(record['attachmentByteCount']) &&
+        record['attachmentByteCount'] > 0)
   )
     return {
       kind: 'provider-egress',
@@ -15084,6 +15460,12 @@ function parseResourceSet(json: string): ResourceSet {
       )[],
       requireSecretScanClean: record['requireSecretScanClean'],
       allowLocalOnlyTaskRemote: record['allowLocalOnlyTaskRemote'],
+      attachmentManifestDigest:
+        record['attachmentManifestDigest'] === undefined
+          ? null
+          : (record['attachmentManifestDigest'] as string | null),
+      attachmentByteCount:
+        record['attachmentByteCount'] === undefined ? 0 : (record['attachmentByteCount'] as number),
     };
   throw new Error('Invalid stored resource set');
 }

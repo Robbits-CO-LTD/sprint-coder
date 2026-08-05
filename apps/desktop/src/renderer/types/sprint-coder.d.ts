@@ -108,7 +108,22 @@ export type ChatMessage = {
   author: 'user' | 'assistant' | 'system';
   content: string;
   workContent?: string | null;
+  attachments: ImageAttachmentMetadata[];
   createdAt: string;
+};
+
+export type ImageAttachmentMetadata = {
+  id: string;
+  fileName: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+  byteLength: number;
+  createdAt: string;
+};
+
+export type ImageAttachmentCapability = {
+  status: 'pending' | 'supported' | 'unsupported';
+  reason: string | null;
+  selectionIdentity: string | null;
 };
 
 export type TurnStage =
@@ -811,6 +826,12 @@ export interface SprintCoderApi {
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
   };
+  attachments: {
+    capability(taskId: string): Promise<ImageAttachmentCapability>;
+    pick(taskId: string): Promise<ImageAttachmentMetadata | null>;
+    listDraft(taskId: string): Promise<ImageAttachmentMetadata[]>;
+    remove(input: { taskId: string; attachmentId: string }): Promise<void>;
+  };
   projects: {
     list(): Promise<ProjectSummary[]>;
     pickFolders(): Promise<
@@ -921,6 +942,8 @@ export interface SprintCoderApi {
       taskId: string;
       text: string;
       skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
+      attachmentIds: string[];
+      attachmentSelectionIdentity: string | null;
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
     queue(input: {

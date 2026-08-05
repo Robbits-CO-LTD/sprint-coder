@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { KeyboardEvent } from 'react';
+import type { KeyboardEvent, RefObject } from 'react';
 import type { SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
 import { useAppStore } from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
@@ -33,7 +33,12 @@ import {
   RUNTIME_LABEL,
   runtimeReadinessHint,
 } from '../../lib/runtime-labels';
-import type { ClaudeEffort, QueuedInput, RuntimeKind } from '../../types/sprint-coder';
+import type {
+  ClaudeEffort,
+  ImageAttachmentMetadata,
+  QueuedInput,
+  RuntimeKind,
+} from '../../types/sprint-coder';
 
 const EMPTY_SKILL_SELECTION: readonly TurnSkillSelection[] = [];
 
@@ -52,6 +57,13 @@ export function Composer({ taskId }: { taskId: string }) {
   const projectSwitching = useAppStore((s) => s.projectSwitchingByTask[taskId]) ?? false;
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const queued = useAppStore((s) => s.queuedByTask[taskId]) ?? [];
+  const draftAttachments = useAppStore((s) => s.draftAttachmentsByTask[taskId]) ?? [];
+  const attachmentCapability = useAppStore((s) => s.attachmentCapabilityByTask[taskId]);
+  const attachmentBusy = useAppStore((s) => s.attachmentBusyByTask[taskId]) ?? false;
+  const attachmentError = useAppStore((s) => s.attachmentErrorByTask[taskId]);
+  const attachmentAnnouncement = useAppStore((s) => s.attachmentAnnouncementByTask[taskId]);
+  const pickDraftAttachment = useAppStore((s) => s.pickDraftAttachment);
+  const removeDraftAttachment = useAppStore((s) => s.removeDraftAttachment);
   const toast = useAppStore((s) => s.toast);
   const dismissToast = useAppStore((s) => s.dismissToast);
   const runtime = useAppStore((s) => s.runtime);
@@ -68,6 +80,8 @@ export function Composer({ taskId }: { taskId: string }) {
   // being off — or the query never arriving — is indistinguishable from today's UI.
   const modelPickerV2 = useAppStore((s) => isModelPickerV2Active(s.modelPicker, taskId));
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const plusTriggerRef = useRef<HTMLButtonElement>(null);
+  const attachmentRemoveRefs = useRef(new Map<string, HTMLButtonElement>());
   // `/goal` changes the meaning of this same Composer for one send. It deliberately does not open
   // a second input: the armed chip and placeholder are the only extra UI needed to make the mode
   // visible and cancelable.
@@ -80,6 +94,15 @@ export function Composer({ taskId }: { taskId: string }) {
   const [composerCursor, setComposerCursor] = useState(draft.length);
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
+
+  const attachmentPolicy = attachmentInteractionPolicy({
+    draftCount: draftAttachments.length,
+    turnActive,
+    goalRequested,
+    capabilityStatus: attachmentCapability?.status ?? 'pending',
+    capabilityReason: attachmentCapability?.reason ?? '画像添付の準備状況を確認中です',
+  });
+  const attachmentErrorId = attachmentError ? `composer-attachment-error-${taskId}` : undefined;
 
   const canQueue = typeof window.sprintCoder?.turns?.queue === 'function';
   const slashMatch = slashTokenAtCursor(draft, composerCursor);
@@ -113,7 +136,11 @@ export function Composer({ taskId }: { taskId: string }) {
   const teamSupported = typeof window !== 'undefined' && window.sprintCoder?.teams !== undefined;
   const slashUnavailable = useMemo<Partial<Record<SlashCommandId, string>>>(
     () => ({
-      ...(!goalSupported ? { goal: 'Goal設定に対応していません' } : {}),
+      ...(!goalSupported
+        ? { goal: 'Goal設定に対応していません' }
+        : attachmentPolicy.goalBlocked
+          ? { goal: '画像を削除してからGoalを設定してください' }
+          : {}),
       ...(!teamSupported ? { team: 'Teamビューに対応していません' } : {}),
       ...(runtime.kind === 'codex' && runtime.codexReadiness === 'ready'
         ? {}
@@ -124,7 +151,13 @@ export function Composer({ taskId }: { taskId: string }) {
                 : 'Codex Runtime選択時に画像生成を使えます',
           }),
     }),
-    [goalSupported, runtime.codexReadiness, runtime.kind, teamSupported],
+    [
+      attachmentPolicy.goalBlocked,
+      goalSupported,
+      runtime.codexReadiness,
+      runtime.kind,
+      teamSupported,
+    ],
   );
   const slashItems = useMemo<SlashMenuItem[]>(
     () => [
@@ -209,7 +242,27 @@ export function Composer({ taskId }: { taskId: string }) {
   }, [sending]);
 
   const sendDisabled =
-    !draft.trim() || sending || projectSwitching || (turnActive && !goalRequested && !canQueue);
+    !draft.trim() ||
+    sending ||
+    projectSwitching ||
+    attachmentPolicy.sendBlocked ||
+    (turnActive && !goalRequested && !canQueue);
+
+  async function handleRemoveAttachment(attachmentId: string): Promise<void> {
+    const index = draftAttachments.findIndex(({ id }) => id === attachmentId);
+    const nextId = draftAttachments[index + 1]?.id;
+    const previousId = draftAttachments[index - 1]?.id;
+    if (!(await removeDraftAttachment(taskId, attachmentId))) return;
+    requestAnimationFrame(() => {
+      focusAfterAttachmentRemoval({
+        nextId,
+        previousId,
+        removeRefs: attachmentRemoveRefs.current,
+        plusTrigger: plusTriggerRef.current,
+        textarea: textareaRef.current,
+      });
+    });
+  }
 
   function handleSend() {
     const raw = draft.trim();
@@ -236,7 +289,7 @@ export function Composer({ taskId }: { taskId: string }) {
     const text = imageRequested ? `${IMAGEGEN_PREFIX} ${raw}` : raw;
     setImageRequested(false);
     if (!turnActive) {
-      void startTurn(taskId, text);
+      void startTurn(taskId, text, undefined, directTurnAttachmentIds(draftAttachments));
       return;
     }
     if (canQueue) void queueMessage(taskId, text);
@@ -263,6 +316,7 @@ export function Composer({ taskId }: { taskId: string }) {
         void createTask(inheritedProjectForNewTask(currentProjectId));
         break;
       case 'goal':
+        if (attachmentPolicy.goalBlocked) break;
         setImageRequested(false);
         setGoalRequested(true);
         break;
@@ -376,6 +430,28 @@ export function Composer({ taskId }: { taskId: string }) {
               })}
             </div>
           )}
+          {draftAttachments.length > 0 && (
+            <AttachmentDraftList
+              attachments={draftAttachments}
+              busy={attachmentBusy}
+              removeRefs={attachmentRemoveRefs}
+              onRemove={(attachmentId) => void handleRemoveAttachment(attachmentId)}
+              errorId={attachmentErrorId}
+              status={
+                turnActive
+                  ? '画像添付は実行中のTurnにはキュー追加できません。完了後に送信してください'
+                  : '画像添付の送信は準備中です。画像を削除すると通常のメッセージを送信できます。'
+              }
+            />
+          )}
+          <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {attachmentAnnouncement ?? ''}
+          </div>
+          {attachmentError && (
+            <div id={attachmentErrorId} className="composer-attachment-error" role="alert">
+              {attachmentError}
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             className="composer-input"
@@ -402,6 +478,7 @@ export function Composer({ taskId }: { taskId: string }) {
             onKeyUp={(event) => setComposerCursor(event.currentTarget.selectionStart)}
             onKeyDown={handleKeyDown}
             aria-label="メッセージ入力"
+            aria-describedby={attachmentErrorId}
             aria-autocomplete="list"
             aria-controls={slashOpen ? 'composer-slash-commands' : undefined}
             aria-activedescendant={
@@ -412,6 +489,11 @@ export function Composer({ taskId }: { taskId: string }) {
           />
           <div className="composer-row">
             <PlusMenu
+              capabilityReason={attachmentPolicy.attachUnavailableReason ?? ''}
+              attachmentSupported={attachmentPolicy.attachSupported}
+              errorId={attachmentErrorId}
+              triggerRef={plusTriggerRef}
+              onRequestAttachment={() => void pickDraftAttachment(taskId)}
               onRequestImage={() => {
                 setGoalRequested(false);
                 setImageRequested(true);
@@ -838,18 +920,32 @@ function EffortChip() {
 // Items the app cannot honour yet are shown and announced unavailable with the reason, matching how
 // the Runtime/Effort chips already treat an unusable option — hiding them would leave the user
 // wondering whether the feature exists at all.
-function PlusMenu({ onRequestImage }: { onRequestImage: () => void }) {
+function PlusMenu({
+  attachmentSupported,
+  capabilityReason,
+  errorId,
+  triggerRef,
+  onRequestAttachment,
+  onRequestImage,
+}: {
+  attachmentSupported: boolean;
+  capabilityReason: string;
+  errorId?: string | undefined;
+  triggerRef: RefObject<HTMLButtonElement | null>;
+  onRequestAttachment: () => void;
+  onRequestImage: () => void;
+}) {
   const runtime = useAppStore((s) => s.runtime);
 
   const items: ComposerMenuItem[] = [
     {
       id: 'attach',
-      label: 'ファイルを添付',
-      description: '会話にファイルを添える',
+      label: '画像を添付',
+      description: 'この送信にPNG・JPEG・WebP画像を添える',
       icon: <Paperclip size={14} />,
-      // Genuinely unimplemented end to end: there is no attachment type in the contracts, so IPC,
-      // persistence and rendering are all still missing.
-      unavailableReason: '添付は未実装です',
+      ...(attachmentSupported
+        ? { onSelect: onRequestAttachment }
+        : { unavailableReason: capabilityReason }),
     },
     {
       id: 'imagegen',
@@ -875,7 +971,118 @@ function PlusMenu({ onRequestImage }: { onRequestImage: () => void }) {
       triggerLabel="操作を追加"
       menuLabel="Composerの操作"
       triggerIcon={<Plus size={15} />}
+      externalTriggerRef={triggerRef}
+      triggerAriaDescribedBy={errorId}
     />
+  );
+}
+
+function formatAttachmentBytes(byteLength: number): string {
+  if (byteLength < 1024) return `${byteLength} B`;
+  if (byteLength < 1024 * 1024) return `${Math.ceil(byteLength / 1024)} KB`;
+  return `${(byteLength / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function directTurnAttachmentIds(attachments: readonly ImageAttachmentMetadata[]): string[] {
+  return attachments.map(({ id }) => id);
+}
+
+export function attachmentInteractionPolicy(input: {
+  draftCount: number;
+  turnActive: boolean;
+  goalRequested: boolean;
+  capabilityStatus: 'pending' | 'supported' | 'unsupported';
+  capabilityReason: string;
+}): {
+  sendBlocked: boolean;
+  goalBlocked: boolean;
+  attachSupported: boolean;
+  attachUnavailableReason: string | null;
+} {
+  const attachUnavailableReason = input.turnActive
+    ? 'Turn実行中は画像を追加できません'
+    : input.goalRequested
+      ? 'Goal入力中は画像を追加できません'
+      : input.capabilityStatus !== 'supported'
+        ? input.capabilityReason
+        : null;
+  return {
+    sendBlocked:
+      input.draftCount > 0 &&
+      (input.turnActive || input.goalRequested || input.capabilityStatus !== 'supported'),
+    goalBlocked: input.draftCount > 0,
+    attachSupported: attachUnavailableReason === null,
+    attachUnavailableReason,
+  };
+}
+
+type FocusTarget = Pick<HTMLElement, 'focus'>;
+
+export function focusAfterAttachmentRemoval(input: {
+  nextId: string | undefined;
+  previousId: string | undefined;
+  removeRefs: ReadonlyMap<string, FocusTarget>;
+  plusTrigger: FocusTarget | null;
+  textarea: FocusTarget | null;
+}): void {
+  const target =
+    (input.nextId ? input.removeRefs.get(input.nextId) : undefined) ??
+    (input.previousId ? input.removeRefs.get(input.previousId) : undefined) ??
+    input.plusTrigger ??
+    input.textarea;
+  target?.focus({ preventScroll: true });
+}
+
+export function AttachmentDraftList({
+  attachments,
+  busy,
+  removeRefs,
+  onRemove,
+  status,
+  errorId,
+}: {
+  attachments: readonly ImageAttachmentMetadata[];
+  busy: boolean;
+  removeRefs: RefObject<Map<string, HTMLButtonElement>>;
+  onRemove: (attachmentId: string) => void;
+  status: string;
+  errorId?: string | undefined;
+}) {
+  return (
+    <div className="composer-attachments" aria-label="この送信に添付する画像">
+      <div className="composer-attachment-scope">参照範囲: この送信のみ</div>
+      <div className="composer-attachment-list">
+        {attachments.map((attachment) => (
+          <div className="composer-attachment-chip" key={attachment.id}>
+            <Paperclip size={14} />
+            <span className="composer-attachment-name">{attachment.fileName}</span>
+            <span className="composer-attachment-meta">
+              {attachment.mimeType.replace('image/', '').toUpperCase()} ·{' '}
+              {formatAttachmentBytes(attachment.byteLength)}
+            </span>
+            <button
+              ref={(node) => {
+                if (node) removeRefs.current.set(attachment.id, node);
+                else removeRefs.current.delete(attachment.id);
+              }}
+              type="button"
+              className="composer-attachment-remove"
+              aria-label={`${attachment.fileName}を削除`}
+              aria-describedby={errorId}
+              aria-disabled={busy || undefined}
+              onClick={() => {
+                if (!busy) onRemove(attachment.id);
+              }}
+            >
+              <X size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="composer-attachment-status" role="status">
+        {status}
+      </div>
+    </div>
   );
 }
 
