@@ -40,7 +40,7 @@ function persistenceMock() {
   } as unknown as PersistenceClient;
 }
 
-describe('ImageAttachmentDraftStore', () => {
+describe.skipIf(process.platform === 'win32')('ImageAttachmentDraftStore POSIX reads', () => {
   it('opens a regular image once and stores canonical bytes without its original path', async () => {
     const directory = tempDirectory();
     const path = join(directory, 'profile.png');
@@ -116,16 +116,13 @@ describe('ImageAttachmentDraftStore', () => {
     expect(requested.reduce((sum, byteLength) => sum + byteLength, 0)).toBe(6);
   });
 
-  it('rejects malformed images and unsafe display names', async () => {
+  it('rejects malformed images', async () => {
     const directory = tempDirectory();
     const malformed = join(directory, 'broken.png');
     writeFileSync(malformed, Buffer.from('not an image'));
     await expect(
       new ImageAttachmentDraftStore(persistenceMock()).addFromPath('task-1', malformed),
     ).rejects.toMatchObject({ reason: 'invalid_image' });
-    expect(() => normalizeAttachmentFileName(`/tmp/bad\u202ename.png`)).toThrow(
-      ImageAttachmentValidationError,
-    );
   });
 
   it('rejects animated WebP and APNG input', async () => {
@@ -168,6 +165,27 @@ describe('ImageAttachmentDraftStore', () => {
     ).rejects.toMatchObject({ reason: 'invalid_image' });
   });
 });
+
+it('rejects unsafe image attachment display names on every platform', () => {
+  expect(() => normalizeAttachmentFileName(`/tmp/bad\u202ename.png`)).toThrow(
+    ImageAttachmentValidationError,
+  );
+});
+
+it.runIf(process.platform === 'win32')(
+  'fails closed on Windows before reading a selected path',
+  async () => {
+    const persistence = persistenceMock();
+
+    await expect(
+      new ImageAttachmentDraftStore(persistence).addFromPath(
+        'task-1',
+        'C:\\path-that-must-not-be-read\\image.png',
+      ),
+    ).rejects.toMatchObject({ reason: 'unsupported_platform' });
+    expect(persistence.createDraftImageAttachment).not.toHaveBeenCalled();
+  },
+);
 
 function createApng(): Buffer {
   const uint32 = (value: number) => {

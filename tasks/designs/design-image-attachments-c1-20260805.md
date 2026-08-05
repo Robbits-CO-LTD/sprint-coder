@@ -381,3 +381,8 @@ required before C1a-1; implementation-safety and requirement rechecks are requir
   `libvips-cpp.so.8.18.3` did not match the prior exact `.so` asar-unpack suffix. The native unpack
   glob now includes `.so.*`, with a Forge regression that pins versioned Linux shared-library
   handling; macOS had already passed because its `.dylib` matched the existing rule.
+- The second PR CI run confirmed that production correctly fails closed on Windows, but exposed six
+  POSIX file-safety/image-decoder tests that had not been platform-gated. Those tests now run only
+  where the POSIX no-follow contract exists; filename validation remains cross-platform, and a
+  Windows-specific regression proves rejection occurs before the selected path or persistence is
+  touched.
