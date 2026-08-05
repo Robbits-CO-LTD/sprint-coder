@@ -386,3 +386,9 @@ required before C1a-1; implementation-safety and requirement rechecks are requir
   where the POSIX no-follow contract exists; filename validation remains cross-platform, and a
   Windows-specific regression proves rejection occurs before the selected path or persistence is
   touched.
+- The next Windows shard exposed an initialization-failure resource leak: a deliberately rejected
+  v65 migration left the opened SQLite handle alive, so Windows correctly refused to remove the
+  locked test directory. `SqlitePersistenceClient` now closes the database on any post-open
+  initialization failure while preserving the original error. The exact migration refusal test and
+  the complete 122-test Electron-ABI persistence suite pass locally; Windows CI remains the
+  same-observation-point proof for lock release.
