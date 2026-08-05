@@ -289,7 +289,7 @@ export function Composer({ taskId }: { taskId: string }) {
     const text = imageRequested ? `${IMAGEGEN_PREFIX} ${raw}` : raw;
     setImageRequested(false);
     if (!turnActive) {
-      void startTurn(taskId, text);
+      void startTurn(taskId, text, undefined, directTurnAttachmentIds(draftAttachments));
       return;
     }
     if (canQueue) void queueMessage(taskId, text);
@@ -983,6 +983,10 @@ function formatAttachmentBytes(byteLength: number): string {
   return `${(byteLength / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+export function directTurnAttachmentIds(attachments: readonly ImageAttachmentMetadata[]): string[] {
+  return attachments.map(({ id }) => id);
+}
+
 export function attachmentInteractionPolicy(input: {
   draftCount: number;
   turnActive: boolean;
@@ -1003,7 +1007,9 @@ export function attachmentInteractionPolicy(input: {
         ? input.capabilityReason
         : null;
   return {
-    sendBlocked: input.draftCount > 0,
+    sendBlocked:
+      input.draftCount > 0 &&
+      (input.turnActive || input.goalRequested || input.capabilityStatus !== 'supported'),
     goalBlocked: input.draftCount > 0,
     attachSupported: attachUnavailableReason === null,
     attachUnavailableReason,

@@ -297,7 +297,12 @@ type AppState = {
   setSkillSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
   installSkillDraft(taskId: string, draft: SkillDraft): Promise<void>;
   discardSkillDraft(taskId: string, draftId: string): Promise<void>;
-  startTurn(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
+  startTurn(
+    taskId: string,
+    text: string,
+    skills?: readonly TurnSkillSelection[],
+    attachmentIds?: readonly string[],
+  ): Promise<void>;
   queueMessage(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
   steerMessage(taskId: string, text: string, expectedTurnId: string): Promise<void>;
   stopAndSend(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
@@ -501,6 +506,15 @@ function mergeRestoredCommands(
   );
 }
 
+export function removeAcceptedAttachmentDrafts(
+  drafts: readonly ImageAttachmentMetadata[],
+  accepted: readonly ImageAttachmentMetadata[],
+): ImageAttachmentMetadata[] {
+  if (accepted.length === 0) return [...drafts];
+  const acceptedIds = new Set(accepted.map(({ id }) => id));
+  return drafts.filter(({ id }) => !acceptedIds.has(id));
+}
+
 function upsertApprovalHistory(
   approvals: readonly ApprovalSummary[],
   approval: ApprovalSummary,
@@ -519,7 +533,7 @@ function upsertAutoDecision(
   );
 }
 
-function handleTurnEvent(
+export function handleTurnEvent(
   taskId: string,
   ev: TurnEvent,
   apply: (fn: (state: AppState) => Partial<AppState>) => void,
@@ -544,6 +558,13 @@ function handleTurnEvent(
           },
           pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: undefined },
           sendingByTask: { ...state.sendingByTask, [taskId]: false },
+          draftAttachmentsByTask: {
+            ...state.draftAttachmentsByTask,
+            [taskId]: removeAcceptedAttachmentDrafts(
+              state.draftAttachmentsByTask[taskId] ?? [],
+              ev.userMessage.attachments,
+            ),
+          },
           turnByTask: {
             ...state.turnByTask,
             [taskId]: {
@@ -715,6 +736,7 @@ function handleTurnEvent(
             turnId: ev.turnId,
             author: 'assistant',
             content: turn.streamingContent,
+            attachments: [],
             createdAt: new Date().toISOString(),
           };
           nextMessages = [...existing.filter((m) => m.id !== partial.id), partial];
@@ -1953,10 +1975,21 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async startTurn(taskId: string, text: string, skills) {
+    async startTurn(taskId: string, text: string, skills, attachmentIds = []) {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder) return;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
+      const selectedAttachmentIds = [...attachmentIds];
+      const draftsById = new Map(
+        (get().draftAttachmentsByTask[taskId] ?? []).map((attachment) => [
+          attachment.id,
+          attachment,
+        ]),
+      );
+      const selectedAttachments = selectedAttachmentIds.flatMap((id) => {
+        const attachment = draftsById.get(id);
+        return attachment === undefined ? [] : [attachment];
+      });
       const turn = get().turnByTask[taskId];
       if (turn && (turn.status === 'running' || turn.status === 'canceling')) return;
 
@@ -1967,6 +2000,7 @@ export const useAppStore = create<AppState>((set, get) => {
         turnId: null,
         author: 'user',
         content: trimmed,
+        attachments: selectedAttachments,
         createdAt: new Date().toISOString(),
       };
       set((state) => ({
@@ -1987,6 +2021,7 @@ export const useAppStore = create<AppState>((set, get) => {
           taskId,
           text: trimmed,
           skills: selectedSkills,
+          attachmentIds: selectedAttachmentIds,
         });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
         // A DB Task exists before this point so per-Task settings have a stable id, but it becomes
@@ -2020,6 +2055,7 @@ export const useAppStore = create<AppState>((set, get) => {
           error: code === 'TURN_ACTIVE' ? null : describeError(err),
         }));
         persistSkillDraftSelection(taskId, selectedSkills);
+        if (selectedAttachmentIds.length > 0) void get().refreshDraftAttachments(taskId);
         if (code === 'TURN_ACTIVE') {
           get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
         }

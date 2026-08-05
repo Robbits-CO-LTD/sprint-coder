@@ -997,19 +997,6 @@ export const canvasViewSaveResultSchema = z
   .strict();
 export type CanvasViewSaveResult = z.infer<typeof canvasViewSaveResultSchema>;
 
-export const chatMessageSchema = z
-  .object({
-    id: idSchema,
-    taskId: idSchema,
-    turnId: idSchema.nullable(),
-    author: z.enum(['user', 'assistant', 'system']),
-    content: z.string().max(1_000_000),
-    workContent: z.string().max(1_000_000).nullable().optional(),
-    createdAt: timestampSchema,
-  })
-  .strict();
-export type ChatMessage = z.infer<typeof chatMessageSchema>;
-
 export const IMAGE_ATTACHMENT_MAX_COUNT = 4;
 export const IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
 export const IMAGE_ATTACHMENT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
@@ -1046,6 +1033,27 @@ export type ImageAttachmentCapability = z.infer<typeof imageAttachmentCapability
 export const imageAttachmentRemoveInputSchema = z
   .object({ taskId: idSchema, attachmentId: idSchema })
   .strict();
+export const imageAttachmentIdsSchema = z
+  .array(idSchema)
+  .max(IMAGE_ATTACHMENT_MAX_COUNT)
+  .superRefine((ids, context) => {
+    if (new Set(ids).size !== ids.length)
+      context.addIssue({ code: 'custom', message: 'Attachment IDs must be unique' });
+  });
+
+export const chatMessageSchema = z
+  .object({
+    id: idSchema,
+    taskId: idSchema,
+    turnId: idSchema.nullable(),
+    author: z.enum(['user', 'assistant', 'system']),
+    content: z.string().max(1_000_000),
+    workContent: z.string().max(1_000_000).nullable().optional(),
+    attachments: imageAttachmentMetadataListSchema.default([]),
+    createdAt: timestampSchema,
+  })
+  .strict();
+export type ChatMessage = z.infer<typeof chatMessageSchema>;
 
 export const turnStageSchema = z.enum(['understanding', 'planning', 'executing', 'synthesizing']);
 export type TurnStage = z.infer<typeof turnStageSchema>;
@@ -2797,14 +2805,18 @@ export const taskArchivedInputSchema = z
   .strict();
 export const taskGoalInputSchema = z.object({ taskId: idSchema, goal: taskTextSchema }).strict();
 export const taskDraftInputSchema = z.object({ taskId: idSchema, draft: taskTextSchema }).strict();
+const turnTextAndSkillsInputShape = {
+  taskId: idSchema,
+  text: z.string().trim().min(1).max(100_000),
+  skills: turnSkillSelectionsSchema.default([]),
+} as const;
 export const turnStartInputSchema = z
   .object({
-    taskId: idSchema,
-    text: z.string().trim().min(1).max(100_000),
-    skills: turnSkillSelectionsSchema.default([]),
+    ...turnTextAndSkillsInputShape,
+    attachmentIds: imageAttachmentIdsSchema,
   })
   .strict();
-export const turnQueueInputSchema = turnStartInputSchema;
+export const turnQueueInputSchema = z.object(turnTextAndSkillsInputShape).strict();
 export const turnQueueResultSchema = z.object({ ordinal: z.number().int().positive() }).strict();
 export const turnSteerInputSchema = z
   .object({
@@ -2813,7 +2825,7 @@ export const turnSteerInputSchema = z
     expectedTurnId: idSchema,
   })
   .strict();
-export const turnStopAndSendInputSchema = turnStartInputSchema;
+export const turnStopAndSendInputSchema = z.object(turnTextAndSkillsInputShape).strict();
 export const turnCancelInputSchema = z.object({ taskId: idSchema, turnId: idSchema }).strict();
 export const turnSubscriptionInputSchema = z
   .object({
@@ -3152,6 +3164,7 @@ export interface SprintCoderApi {
       taskId: string;
       text: string;
       skills?: TurnSkillSelection[];
+      attachmentIds: string[];
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     queue(input: {
       taskId: string;

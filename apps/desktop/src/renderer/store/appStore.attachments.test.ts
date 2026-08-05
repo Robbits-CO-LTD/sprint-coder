@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImageAttachmentMetadata } from '../types/sprint-coder';
-import { useAppStore } from './appStore';
+import { handleTurnEvent, removeAcceptedAttachmentDrafts, useAppStore } from './appStore';
 
 const taskId = 'task-attachments';
 const first: ImageAttachmentMetadata = {
@@ -32,6 +32,65 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('attachment draft store state', () => {
+  it('removes only drafts named by the accepted user message', () => {
+    expect(removeAcceptedAttachmentDrafts([first, second], [second])).toEqual([first]);
+    expect(removeAcceptedAttachmentDrafts([first], [])).toEqual([first]);
+  });
+
+  it('passes ordered IDs and metadata optimistically, then preserves a concurrent draft on acceptance', async () => {
+    const start = vi.fn().mockResolvedValue({ turnId: 'turn-1' });
+    vi.stubGlobal('window', { sprintCoder: { tasks: {}, turns: { start } } });
+    useAppStore.setState({
+      messagesByTask: { [taskId]: [] },
+      draftAttachmentsByTask: { [taskId]: [first, second] },
+      sendingByTask: {},
+      pendingOptimisticIdByTask: {},
+      lastSeqByTask: { [taskId]: 0 },
+      turnByTask: {},
+    });
+
+    await useAppStore.getState().startTurn(taskId, '  画像を確認して  ', undefined, [second.id]);
+    expect(start).toHaveBeenCalledWith({
+      taskId,
+      text: '画像を確認して',
+      skills: [],
+      attachmentIds: [second.id],
+    });
+    expect(useAppStore.getState().messagesByTask[taskId]?.[0]?.attachments).toEqual([second]);
+
+    const concurrent = { ...first, id: 'attachment-3', fileName: 'three.png' };
+    useAppStore.setState((state) => ({
+      draftAttachmentsByTask: {
+        ...state.draftAttachmentsByTask,
+        [taskId]: [first, second, concurrent],
+      },
+    }));
+    handleTurnEvent(
+      taskId,
+      {
+        type: 'turn.accepted',
+        taskId,
+        turnId: 'turn-1',
+        seq: 1,
+        userMessage: {
+          id: 'message-1',
+          taskId,
+          turnId: 'turn-1',
+          author: 'user',
+          content: '画像を確認して',
+          attachments: [second],
+          createdAt: '2026-08-05T00:00:02.000Z',
+        },
+      },
+      (update) => useAppStore.setState((state) => update(state)),
+    );
+
+    expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([first, concurrent]);
+    expect(useAppStore.getState().messagesByTask[taskId]).toEqual([
+      expect.objectContaining({ id: 'message-1', attachments: [second] }),
+    ]);
+  });
+
   it('discards an older hydrate answer after a newer request wins', async () => {
     let resolveOld!: (value: ImageAttachmentMetadata[]) => void;
     const oldList = new Promise<ImageAttachmentMetadata[]>((resolve) => {

@@ -1,6 +1,6 @@
 # Image attachments design and C1a Codex slice
 
-- Status: C1a-1 implemented and independently re-reviewed; C1a-2 pending
+- Status: C1a-1 and C1a-2 complete and independently re-reviewed; C1a-3 pending
 - Date: 2026-08-05
 - Scope: FR-CHAT-04 / FR-CHAT-10, split into C1a-C1d
 
@@ -48,16 +48,16 @@ fixture proves availability only and must never execute a Turn.
 
 ## 2. Existing-path matrix
 
-| Path | Current source | C1a treatment |
-| --- | --- | --- |
-| Composer send | `renderer/components/ChatSurface/Composer.tsx:211` | Pass IDs only on direct start; block every send form when a Turn becomes active with draft images. |
-| Optimistic state | `renderer/store/appStore.ts:1829` | Keep drafts until acceptance; remove only IDs confirmed by `turn.accepted`. |
-| Direct start | `contracts/index.ts:2763`, `main/ipc.ts:2119` | Split aliased schemas; capability, ID bind, message, Turn, event, and seal commit together. |
-| Queue / stop-and-send | `contracts/index.ts:2770,2779`, `persistence.ts:11484,11576` | Unchanged in C1a; C1b owns the state machine. |
-| Message reload | `persistence.ts:11463`, `renderer/store/appStore.ts:1210` | Join public metadata into `ChatMessage`; bytes stay Main-owned. |
-| Codex dispatch | `runtime-host/codex-adapter.ts:335` | Use verified app-owned numbered paths as `localImage` input after v8 commit. |
-| Claude / Mock / Provider | adapter and provider paths | Refuse attachment acceptance before mutation. Provider waits for C1c. |
-| Initial/live state | list/snapshot and MessagePort events | Parse the same metadata default; old fixtures remain readable. |
+| Path                     | Current source                                               | C1a treatment                                                                                      |
+| ------------------------ | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| Composer send            | `renderer/components/ChatSurface/Composer.tsx:211`           | Pass IDs only on direct start; block every send form when a Turn becomes active with draft images. |
+| Optimistic state         | `renderer/store/appStore.ts:1829`                            | Keep drafts until acceptance; remove only IDs confirmed by `turn.accepted`.                        |
+| Direct start             | `contracts/index.ts:2763`, `main/ipc.ts:2119`                | Split aliased schemas; capability, ID bind, message, Turn, event, and seal commit together.        |
+| Queue / stop-and-send    | `contracts/index.ts:2770,2779`, `persistence.ts:11484,11576` | Unchanged in C1a; C1b owns the state machine.                                                      |
+| Message reload           | `persistence.ts:11463`, `renderer/store/appStore.ts:1210`    | Join public metadata into `ChatMessage`; bytes stay Main-owned.                                    |
+| Codex dispatch           | `runtime-host/codex-adapter.ts:335`                          | Use verified app-owned numbered paths as `localImage` input after v8 commit.                       |
+| Claude / Mock / Provider | adapter and provider paths                                   | Refuse attachment acceptance before mutation. Provider waits for C1c.                              |
+| Initial/live state       | list/snapshot and MessagePort events                         | Parse the same metadata default; old fixtures remain readable.                                     |
 
 There is no SSE or REST route in this Electron application.
 
@@ -110,9 +110,15 @@ CREATE INDEX image_attachments_task_draft_idx
 CREATE INDEX image_attachments_message_idx ON image_attachments(message_id, created_at, id);
 ```
 
+C1a-2 adds migration v65 instead of changing the already shipped v64 checksum. It adds nullable
+`message_ordinal`, a partial unique `(message_id, message_ordinal)` index for accepted rows, and
+insert/update guards requiring drafts to have neither owner nor ordinal and accepted rows to have
+both. This preserves existing v64 drafts while making the requested attachment order durable and
+unambiguous across restart.
+
 The deliberate dual cascade through Task and Message is accepted and tested. Migration tests
-inspect `foreign_key_list(image_attachments)`, run `foreign_key_check`, cover v63-to-v64 and
-idempotent reopen, and inject migration/acceptance failures. All selection, binding, and message
+inspect `foreign_key_list(image_attachments)`, run `foreign_key_check`, cover v63-to-v65,
+v64-to-v65, and idempotent reopen, and inject migration/acceptance failures. All selection, binding, and message
 event assembly uses the one Persistence-owned `better-sqlite3` connection. Decoder/file I/O finishes
 before the synchronous transaction; it rechecks immutable IDs, BLOB lengths, hashes, ownership, and
 exact affected-row counts.
@@ -229,17 +235,17 @@ behavior remains unchanged.
 
 ## 7. State matrix
 
-| State/event | Result |
-| --- | --- |
-| Picker cancel | No row/UI change; focus returns to plus trigger. |
-| Unsafe/oversized/malformed image | No row; persistent actionable error; text unchanged. |
-| Task switch/restart | Reload only owning Task's drafts. |
-| Direct start accepted | Capability, bind, message, Turn, event, and seal commit atomically. |
-| Pre-commit rejection | Drafts remain; guarded refresh from Main. |
-| Runtime failure after acceptance | Message and metadata remain in history. |
-| Active Turn with draft | Pick/send/queue/stop-and-send disabled with reason; no text fallback. |
-| Selection leaves ready Codex | Draft remains; pick/send block until remove or supported selection. |
-| BLOB/custody/manifest mismatch | Fail closed before Codex `turn/start`. |
+| State/event                      | Result                                                                |
+| -------------------------------- | --------------------------------------------------------------------- |
+| Picker cancel                    | No row/UI change; focus returns to plus trigger.                      |
+| Unsafe/oversized/malformed image | No row; persistent actionable error; text unchanged.                  |
+| Task switch/restart              | Reload only owning Task's drafts.                                     |
+| Direct start accepted            | Capability, bind, message, Turn, event, and seal commit atomically.   |
+| Pre-commit rejection             | Drafts remain; guarded refresh from Main.                             |
+| Runtime failure after acceptance | Message and metadata remain in history.                               |
+| Active Turn with draft           | Pick/send/queue/stop-and-send disabled with reason; no text fallback. |
+| Selection leaves ready Codex     | Draft remains; pick/send block until remove or supported selection.   |
+| BLOB/custody/manifest mismatch   | Fail closed before Codex `turn/start`.                                |
 
 ## 8. Verification and rollout
 
@@ -277,3 +283,24 @@ required before C1a-1; implementation-safety and requirement rechecks are requir
 - Scope invariant preserved: Turn start/queue/stop schemas, message history ownership, provider
   egress, Runtime protocol, and Codex adapter behavior are unchanged; production attachment
   capability remains unsupported until C1a-3.
+
+## 10. C1a-2 checkpoint evidence (2026-08-05)
+
+- Three independent checkpoint reviews: scope GO; implementation and security GO after four
+  concrete blockers were fixed with regressions.
+- Contracts: 43 passed. Focused Renderer/Main: 832 passed. Electron-ABI persistence bridge: 122
+  collected, 121 executed and passed, one Windows-only test skipped. Contracts and desktop
+  typechecks, formatting, and `git diff --check`: green.
+- v65 preserves existing drafts and requested history order. Because v64 never exposed acceptance
+  and has no trustworthy ordinal, any pre-existing message-owned v64 row makes migration fail
+  closed and rollback; tests prove row/schema preservation and `foreign_key_check` cleanliness.
+- Direct acceptance validates the transaction-resolved Task/model/runtime selection, exact
+  same-Task ownership, count/aggregate, BLOB length/hash, and exact affected-row counts before one
+  transaction commits message, ordered ownership, Turn, event, and context seal.
+- Composer now reaches the supported direct-send path with IDs in visible order. Optimistic public
+  metadata reconciles to `turn.accepted`, while a concurrently added draft remains. Reload and
+  history render metadata only; canonical bytes are neither queried for history nor exposed to
+  Renderer.
+- Scope invariant preserved: queue, steer, stop-and-send, provider egress, Runtime protocol, and
+  Codex adapter are unchanged. Main still supplies a false production capability validator until
+  C1a-3 adds the expiring Runtime/readiness identity and two-phase egress boundary.

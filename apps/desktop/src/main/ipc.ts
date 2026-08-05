@@ -195,6 +195,7 @@ import {
   CanvasViewConflictError,
   InvalidCanvasViewError,
   ImageAttachmentLimitError,
+  ImageAttachmentAcceptanceError,
   NotFoundError,
   OperationConflictError,
   OperationInProgressError,
@@ -2195,6 +2196,8 @@ export class IpcRouter {
               input.text,
               skills,
               shouldSealBuiltinTeamSkill(input.text, skills),
+              input.attachmentIds,
+              () => false,
             );
             return {
               turnId: started.turnId,
@@ -4799,6 +4802,15 @@ export function toPublicError(error: unknown): PublicError {
     return {
       code: 'INVALID_REQUEST',
       userMessage: '画像は4枚まで、合計16MB以下にしてください。',
+      retryable: false,
+    };
+  if (error instanceof ImageAttachmentAcceptanceError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage:
+        error.reason === 'unsupported'
+          ? '選択中のRuntimeでは画像添付を送信できません。'
+          : '画像添付の状態が変わりました。最新の一覧を確認してください。',
       retryable: false,
     };
   if (error instanceof NotFoundError)

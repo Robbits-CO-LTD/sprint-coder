@@ -95,7 +95,7 @@ import {
   toPublicError,
 } from './ipc';
 import { ImageAttachmentValidationError } from './image-attachment-store';
-import { ImageAttachmentLimitError } from './persistence';
+import { ImageAttachmentAcceptanceError, ImageAttachmentLimitError } from './persistence';
 
 describe('Project home-directory confirmation', () => {
   const home = join(dirname(process.cwd()), 'home-owner');
@@ -128,6 +128,19 @@ describe('image attachment public errors', () => {
     expect(toPublicError(new ImageAttachmentLimitError('internal aggregate details'))).toEqual({
       code: 'INVALID_REQUEST',
       userMessage: '画像は4枚まで、合計16MB以下にしてください。',
+      retryable: false,
+    });
+  });
+
+  it('maps acceptance races and unsupported runtimes without leaking custody details', () => {
+    expect(toPublicError(new ImageAttachmentAcceptanceError('unsupported'))).toEqual({
+      code: 'INVALID_REQUEST',
+      userMessage: '選択中のRuntimeでは画像添付を送信できません。',
+      retryable: false,
+    });
+    expect(toPublicError(new ImageAttachmentAcceptanceError('stale'))).toEqual({
+      code: 'INVALID_REQUEST',
+      userMessage: '画像添付の状態が変わりました。最新の一覧を確認してください。',
       retryable: false,
     });
   });

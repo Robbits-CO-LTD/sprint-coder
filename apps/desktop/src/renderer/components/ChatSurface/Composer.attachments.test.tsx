@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AttachmentDraftList,
   attachmentInteractionPolicy,
+  directTurnAttachmentIds,
   focusAfterAttachmentRemoval,
 } from './Composer';
 import { ComposerMenu, focusComposerMenuTrigger } from './ComposerMenu';
@@ -36,7 +37,16 @@ describe('Composer attachment drafts', () => {
     expect(html).toContain('画像添付の送信は準備中です');
   });
 
-  it('blocks send and Goal for drafts and explains active-Turn and rollout states', () => {
+  it('allows supported idle direct send but blocks active-Turn attachment queueing', () => {
+    expect(
+      attachmentInteractionPolicy({
+        draftCount: 2,
+        turnActive: false,
+        goalRequested: false,
+        capabilityStatus: 'supported',
+        capabilityReason: '',
+      }).sendBlocked,
+    ).toBe(false);
     expect(
       attachmentInteractionPolicy({
         draftCount: 1,
@@ -60,6 +70,27 @@ describe('Composer attachment drafts', () => {
         capabilityReason: '画像添付は送信機能の準備完了後に利用できます',
       }).attachUnavailableReason,
     ).toBe('画像添付は送信機能の準備完了後に利用できます');
+  });
+
+  it('passes every draft ID to direct start in visible order', () => {
+    expect(
+      directTurnAttachmentIds([
+        {
+          id: 'second',
+          fileName: 'second.webp',
+          mimeType: 'image/webp',
+          byteLength: 200,
+          createdAt: '2026-08-05T00:00:01.000Z',
+        },
+        {
+          id: 'first',
+          fileName: 'first.png',
+          mimeType: 'image/png',
+          byteLength: 100,
+          createdAt: '2026-08-05T00:00:00.000Z',
+        },
+      ]),
+    ).toEqual(['second', 'first']);
   });
 
   it('keeps a focused remove control focusable while its request is busy', () => {

@@ -108,6 +108,7 @@ export type ChatMessage = {
   author: 'user' | 'assistant' | 'system';
   content: string;
   workContent?: string | null;
+  attachments: ImageAttachmentMetadata[];
   createdAt: string;
 };
 
@@ -941,6 +942,7 @@ export interface SprintCoderApi {
       taskId: string;
       text: string;
       skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
+      attachmentIds: string[];
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
     queue(input: {
