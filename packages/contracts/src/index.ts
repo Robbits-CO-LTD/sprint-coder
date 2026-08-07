@@ -2782,6 +2782,7 @@ export const goalStartInputSchema = z
   })
   .strict();
 export const goalControlInputSchema = z.object({ taskId: idSchema }).strict();
+export const goalRunResultSchema = z.object({ task: taskSummarySchema, turnId: idSchema }).strict();
 export const taskDraftInputSchema = z.object({ taskId: idSchema, draft: taskTextSchema }).strict();
 export const turnStartInputSchema = z
   .object({
@@ -2936,9 +2937,9 @@ export interface SprintCoderApi {
       taskId: string;
       objective: string;
       tokenBudget?: number | null;
-    }): Promise<TaskSummary>;
+    }): Promise<{ task: TaskSummary; turnId: string }>;
     pause(taskId: string): Promise<TaskSummary>;
-    resume(taskId: string): Promise<TaskSummary>;
+    resume(taskId: string): Promise<{ task: TaskSummary; turnId: string }>;
     clear(taskId: string): Promise<TaskSummary>;
   };
   projects: {

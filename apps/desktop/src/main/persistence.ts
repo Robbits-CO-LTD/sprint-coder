@@ -3123,6 +3123,7 @@ export type StartedTurn = {
    * can push the new title to the renderer without a dedicated event. */
   renamedTask?: TaskSummary;
 };
+export type StartedGoalTurn = { task: TaskSummary; started: StartedTurn };
 export type QueueTransition = { started: StartedTurn; queueEvent: TurnEvent } | null;
 export type StopAndSendTransition = {
   canceledEvent: TurnEvent | null;
@@ -3848,6 +3849,28 @@ export interface PersistenceClient {
   pauseGoal(taskId: string): TaskSummary;
   resumeGoal(taskId: string): TaskSummary;
   clearGoal(taskId: string): TaskSummary;
+  startGoalTurn(taskId: string, objective: string, tokenBudget?: number | null): StartedGoalTurn;
+  resumeGoalTurn(taskId: string): StartedGoalTurn;
+  pauseGoalAndCancelTurn(
+    taskId: string,
+    turnId: string | null,
+  ): {
+    task: TaskSummary;
+    canceledEvent: TurnEvent | null;
+  };
+  clearGoalAndCancelTurn(
+    taskId: string,
+    turnId: string | null,
+  ): {
+    task: TaskSummary;
+    canceledEvent: TurnEvent | null;
+  };
+  completeTurnAndFinishGoal(
+    taskId: string,
+    turnId: string,
+    state: 'completed' | 'canceled' | 'failed' | 'interrupted',
+    finalText?: string,
+  ): { event: TurnEvent; task: TaskSummary | null };
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
   getDraftSkillSelections(taskId: string): TurnSkillSelection[];
@@ -8302,7 +8325,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
   setGoal(taskId: string, goal: string): TaskSummary {
     if (goal.trim() === '') return this.clearGoal(taskId);
-    return this.startGoal(taskId, goal, null);
+    this.startGoal(taskId, goal, null);
+    return this.pauseGoal(taskId);
   }
 
   startGoal(taskId: string, objective: string, tokenBudget: number | null = null): TaskSummary {
@@ -8374,6 +8398,90 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (result.changes !== 1) throw new NotFoundError('Task not found');
       this.quarantineStaleBackgroundInTransaction(taskId);
       return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
+    })();
+  }
+
+  startGoalTurn(
+    taskId: string,
+    objective: string,
+    tokenBudget: number | null = null,
+  ): StartedGoalTurn {
+    return this.db.transaction(() => {
+      this.startGoal(taskId, objective, tokenBudget);
+      const started = this.startTurnInTransaction(taskId, objective);
+      return { task: this.getTask(taskId), started };
+    })();
+  }
+
+  resumeGoalTurn(taskId: string): StartedGoalTurn {
+    return this.db.transaction(() => {
+      const current = this.getTaskRow(taskId);
+      if (current.goal === null || current.goal_status === null)
+        throw new Error('Task does not have a Goal');
+      this.transitionGoal(taskId, 'active');
+      const started = this.startTurnInTransaction(taskId, `Goalを続けてください: ${current.goal}`);
+      return { task: this.getTask(taskId), started };
+    })();
+  }
+
+  pauseGoalAndCancelTurn(
+    taskId: string,
+    turnId: string | null,
+  ): { task: TaskSummary; canceledEvent: TurnEvent | null } {
+    return this.db.transaction(() => ({
+      canceledEvent: turnId === null ? null : this.cancelTurn(taskId, turnId),
+      task: this.pauseGoal(taskId),
+    }))();
+  }
+
+  clearGoalAndCancelTurn(
+    taskId: string,
+    turnId: string | null,
+  ): { task: TaskSummary; canceledEvent: TurnEvent | null } {
+    return this.db.transaction(() => ({
+      canceledEvent: turnId === null ? null : this.cancelTurn(taskId, turnId),
+      task: this.clearGoal(taskId),
+    }))();
+  }
+
+  completeTurnAndFinishGoal(
+    taskId: string,
+    turnId: string,
+    state: 'completed' | 'canceled' | 'failed' | 'interrupted',
+    finalText?: string,
+  ): { event: TurnEvent; task: TaskSummary | null } {
+    return this.db.transaction(() => {
+      const event = this.completeTurnInTransaction(taskId, turnId, state, finalText);
+      const current = this.getTaskRow(taskId);
+      if (current.goal === null || current.goal_status !== 'active') return { event, task: null };
+      const now = new Date();
+      const activeSeconds =
+        current.goal_updated_at === null
+          ? 0
+          : Math.max(
+              0,
+              Math.floor((now.getTime() - new Date(current.goal_updated_at).getTime()) / 1000),
+            );
+      const goalStatus =
+        state === 'completed' ? 'completed' : state === 'failed' ? 'blocked' : 'paused';
+      const usage = this.getTurnProviderUsage(taskId, turnId);
+      const turnTokens = (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0);
+      this.db
+        .prepare(
+          `UPDATE tasks
+              SET goal_status = ?, goal_tokens_used = ?, goal_time_used_seconds = ?,
+                  goal_updated_at = ?, updated_at = ?
+            WHERE id = ?`,
+        )
+        .run(
+          goalStatus,
+          current.goal_tokens_used + turnTokens,
+          current.goal_time_used_seconds + activeSeconds,
+          now.toISOString(),
+          now.toISOString(),
+          taskId,
+        );
+      return { event, task: this.getTask(taskId) };
     })();
   }
 
@@ -12360,7 +12468,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .all() as TurnRow[];
       for (const turn of turns)
-        this.completeTurnInTransaction(turn.task_id, turn.id, 'interrupted');
+        this.completeTurnAndFinishGoal(turn.task_id, turn.id, 'interrupted');
       return turns.length;
     })();
   }

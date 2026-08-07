@@ -550,7 +550,7 @@ if (runsWithElectronAbi)
       expect(reopened.listTasks()[0]).toMatchObject({
         pinned: true,
         goal: 'goal',
-        goalState: { objective: 'goal', status: 'active' },
+        goalState: { objective: 'goal', status: 'paused' },
         workspacePath: '/tmp/workspace',
       });
       expect(reopened.getDraft(task.id)).toBe('draft');
@@ -562,32 +562,62 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
-    it('persists the Goal lifecycle and resets usage when the objective changes', () => {
+    it('binds Goal lifecycle controls to its Turn and records terminal usage', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('goal lifecycle');
 
-      const started = persistence.startGoal(task.id, '検索UIを完成させる', 20_000);
-      expect(started.goalState).toMatchObject({
+      const first = persistence.startGoalTurn(task.id, '検索UIを完成させる', 20_000);
+      expect(first.task.goalState).toMatchObject({
         objective: '検索UIを完成させる',
         status: 'active',
         tokenBudget: 20_000,
         tokensUsed: 0,
         timeUsedSeconds: 0,
       });
-      const startedAt = started.goalState?.startedAt;
-      expect(persistence.pauseGoal(task.id).goalState?.status).toBe('paused');
-      expect(persistence.resumeGoal(task.id).goalState).toMatchObject({
+      const startedAt = first.task.goalState?.startedAt;
+      expect(persistence.pauseGoalAndCancelTurn(task.id, first.started.turnId)).toMatchObject({
+        task: { goalState: { status: 'paused' } },
+        canceledEvent: { type: 'turn.completed', state: 'canceled' },
+      });
+      const resumed = persistence.resumeGoalTurn(task.id);
+      expect(resumed.task.goalState).toMatchObject({
         status: 'active',
         startedAt,
       });
+      persistence.recordTurnProviderUsage(task.id, resumed.started.turnId, {
+        inputTokens: 12,
+        outputTokens: 8,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+        providerCost: null,
+        source: 'provider_api',
+      });
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, resumed.started.turnId, stage);
+      const completed = persistence.completeTurnAndFinishGoal(
+        task.id,
+        resumed.started.turnId,
+        'completed',
+      );
+      expect(completed.task?.goalState).toMatchObject({
+        status: 'completed',
+        tokensUsed: 20,
+      });
+      const interruptedTask = persistence.createTask('interrupted goal');
+      persistence.startGoalTurn(interruptedTask.id, '再起動後も状態を正しく保つ');
       persistence.close();
 
       const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('goal-recovery-instance', new Date().toISOString());
       expect(reopened.getTask(task.id).goalState).toMatchObject({
         objective: '検索UIを完成させる',
-        status: 'active',
+        status: 'completed',
         tokenBudget: 20_000,
+        tokensUsed: 20,
       });
+      expect(reopened.getTask(interruptedTask.id).goalState).toMatchObject({ status: 'paused' });
+      expect(reopened.snapshot(interruptedTask.id).activeTurn).toBeNull();
       expect(reopened.clearGoal(task.id)).toMatchObject({ goal: null, goalState: null });
       reopened.close();
     });

@@ -212,7 +212,7 @@ export function Composer({ taskId }: { taskId: string }) {
   }, [sending]);
 
   const sendDisabled =
-    !draft.trim() || sending || projectSwitching || (turnActive && !goalRequested && !canQueue);
+    !draft.trim() || sending || projectSwitching || (turnActive && (goalRequested || !canQueue));
 
   function handleSend() {
     const raw = draft.trim();
@@ -235,8 +235,6 @@ export function Composer({ taskId }: { taskId: string }) {
           setDraft(taskId, raw);
           return;
         }
-        if (turnActive && canQueue) await queueMessage(taskId, raw);
-        else if (!turnActive) await startTurn(taskId, raw);
       })();
       return;
     }
@@ -571,6 +569,12 @@ function GoalProgress({
             {statusLabel}
           </span>
           <span className="goal-progress-time">{formatGoalDuration(elapsed)}</span>
+          {(goal.tokenBudget !== null || goal.tokensUsed > 0) && (
+            <span className="goal-progress-usage">
+              {goal.tokensUsed.toLocaleString()}
+              {goal.tokenBudget === null ? '' : ` / ${goal.tokenBudget.toLocaleString()}`} tokens
+            </span>
+          )}
         </div>
         <p title={goal.objective}>{goal.objective}</p>
       </div>

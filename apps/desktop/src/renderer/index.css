@@ -2328,6 +2328,12 @@ button {
 .goal-progress-time {
   font-variant-numeric: tabular-nums;
 }
+.goal-progress-usage {
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .goal-progress-copy p {
   margin: 2px 0 0;
   overflow: hidden;

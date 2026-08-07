@@ -1654,13 +1654,13 @@ export const useAppStore = create<AppState>((set, get) => {
     async startGoal(taskId: string, objective: string) {
       if (!window.sprintCoder?.goals) return false;
       try {
-        const updated = await window.sprintCoder.goals.start({
+        const result = await window.sprintCoder.goals.start({
           taskId,
           objective,
           tokenBudget: null,
         });
         set((state) => ({
-          tasks: state.tasks.map((task) => (task.id === taskId ? updated : task)),
+          tasks: state.tasks.map((task) => (task.id === taskId ? result.task : task)),
         }));
         return true;
       } catch (err) {
@@ -1684,9 +1684,9 @@ export const useAppStore = create<AppState>((set, get) => {
     async resumeGoal(taskId: string) {
       if (!window.sprintCoder?.goals) return;
       try {
-        const updated = await window.sprintCoder.goals.resume(taskId);
+        const result = await window.sprintCoder.goals.resume(taskId);
         set((state) => ({
-          tasks: state.tasks.map((task) => (task.id === taskId ? updated : task)),
+          tasks: state.tasks.map((task) => (task.id === taskId ? result.task : task)),
         }));
       } catch (err) {
         set({ error: describeError(err) });
