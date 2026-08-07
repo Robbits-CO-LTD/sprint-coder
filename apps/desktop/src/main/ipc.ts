@@ -3830,7 +3830,7 @@ export class IpcRouter {
                 input: toolCall.input,
                 signal: controller.signal,
               });
-              if (isCommittedProviderWorkspaceMutation(result)) {
+              if (isCommittedProviderWorkspaceChange(result)) {
                 const root = started.workspaceSet.roots.find(
                   ({ rootId }) => rootId === result.rootId,
                 );
@@ -3838,6 +3838,8 @@ export class IpcRouter {
                   this.recordFileChanges(taskId, started.turnId, [
                     { path: resolvePath(root.path, result.path), kind: result.kind },
                   ]);
+              }
+              if (isCommittedProviderWorkspaceMutation(result)) {
                 // The native Edit Saga re-observes the sealed post-image immediately before it
                 // commits. For provider workspace tools that deterministic, Main-owned check is
                 // the assurance verification boundary; persist it before the provider can finish
@@ -4599,10 +4601,9 @@ function providerToolErrorContent(code: string, message: string): string {
   return redactSecrets(JSON.stringify({ ok: false, error: { code, message } }));
 }
 
-function isCommittedProviderWorkspaceMutation(result: unknown): result is Readonly<{
+export function isCommittedProviderWorkspaceChange(result: unknown): result is Readonly<{
   rootId: string;
   path: string;
-  sagaId: string;
   kind: 'add' | 'update';
   state: 'committed';
 }> {
@@ -4612,8 +4613,20 @@ function isCommittedProviderWorkspaceMutation(result: unknown): result is Readon
     record['state'] === 'committed' &&
     (record['kind'] === 'add' || record['kind'] === 'update') &&
     typeof record['rootId'] === 'string' &&
-    typeof record['path'] === 'string' &&
-    typeof record['sagaId'] === 'string'
+    typeof record['path'] === 'string'
+  );
+}
+
+export function isCommittedProviderWorkspaceMutation(result: unknown): result is Readonly<{
+  rootId: string;
+  path: string;
+  sagaId: string;
+  kind: 'add' | 'update';
+  state: 'committed';
+}> {
+  return (
+    isCommittedProviderWorkspaceChange(result) &&
+    typeof (result as Record<string, unknown>)['sagaId'] === 'string'
   );
 }
 
