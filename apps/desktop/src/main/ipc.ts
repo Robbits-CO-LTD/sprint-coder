@@ -172,6 +172,7 @@ import {
   type ProjectFolder,
   type ProjectReference,
   type RuntimeKind,
+  type TaskSummary,
   type TurnEvent,
 } from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
@@ -1723,20 +1724,26 @@ export class IpcRouter {
         goalControlInputSchema,
         taskSummarySchema,
         async (input, event, envelope) => {
-          let controlledTurnId: string | null = null;
+          const cached = this.persistence.getOperationResult<TaskSummary>(
+            principalFor(event),
+            input.taskId,
+            channel,
+            envelope.operationId,
+            requestHash(envelope.payload),
+          );
+          if (cached.found) return cached.value as TaskSummary;
+          const goal = this.persistence.getTask(input.taskId).goalState;
+          const controlledTurnId =
+            goal?.status === 'active' ? this.persistence.getActiveTurnId(input.taskId) : null;
+          if (controlledTurnId !== null) await this.cancelRuntime(input.taskId, controlledTurnId);
           let canceledEvent: TurnEvent | null = null;
           const result = this.runMutation(event, envelope, input.taskId, channel, () => {
-            const goal = this.persistence.getTask(input.taskId).goalState;
-            controlledTurnId =
-              goal?.status === 'active' ? this.persistence.getActiveTurnId(input.taskId) : null;
             const controlled = action(input.taskId, controlledTurnId);
             canceledEvent = controlled.canceledEvent;
             return controlled.task;
           });
-          if (result.executed && controlledTurnId !== null) {
+          if (result.executed && controlledTurnId !== null)
             this.approvalCoordinator.turnEnded(input.taskId, controlledTurnId, 'canceled');
-            await this.cancelRuntime(input.taskId, controlledTurnId);
-          }
           if (result.executed && canceledEvent !== null) this.publish(canceledEvent);
           return result.value;
         },
