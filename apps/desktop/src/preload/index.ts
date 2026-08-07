@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
@@ -424,7 +423,7 @@ const api: SprintCoderApi = {
     stopAll: (taskId) =>
       invoke(IPC_CHANNELS.teamsStopAll, taskIdPayloadSchema, teamDetailSchema, { taskId }),
     subscribe: (taskId, listener) => {
-      const subscriptionId = randomUUID();
+      const subscriptionId = globalThis.crypto.randomUUID();
       const input = { taskId, subscriptionId };
       const buffer = createTeamSubscriptionBuffer(listener);
       let disposed = false;
