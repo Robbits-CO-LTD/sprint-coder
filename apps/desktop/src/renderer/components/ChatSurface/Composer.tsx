@@ -75,6 +75,7 @@ export function Composer({ taskId }: { taskId: string }) {
   // a second input: the armed chip and placeholder are the only extra UI needed to make the mode
   // visible and cancelable.
   const [goalRequested, setGoalRequested] = useState(false);
+  const [goalControlPending, setGoalControlPending] = useState(false);
   // Armed by the plus menu, consumed by the next send. One-shot rather than a mode, so a user who
   // opens the menu and changes their mind is not stuck generating images.
   const [imageRequested, setImageRequested] = useState(false);
@@ -212,7 +213,11 @@ export function Composer({ taskId }: { taskId: string }) {
   }, [sending]);
 
   const sendDisabled =
-    !draft.trim() || sending || projectSwitching || (turnActive && (goalRequested || !canQueue));
+    !draft.trim() ||
+    sending ||
+    goalControlPending ||
+    projectSwitching ||
+    (turnActive && (goalRequested || !canQueue));
 
   function handleSend() {
     const raw = draft.trim();
@@ -229,11 +234,15 @@ export function Composer({ taskId }: { taskId: string }) {
     if (goalRequested) {
       setGoalRequested(false);
       setDraft(taskId, '');
+      setGoalControlPending(true);
       void (async () => {
-        if (!(await startGoal(taskId, raw))) {
-          setGoalRequested(true);
-          setDraft(taskId, raw);
-          return;
+        try {
+          if (!(await startGoal(taskId, raw))) {
+            setGoalRequested(true);
+            setDraft(taskId, raw);
+          }
+        } finally {
+          setGoalControlPending(false);
         }
       })();
       return;
@@ -249,6 +258,12 @@ export function Composer({ taskId }: { taskId: string }) {
       return;
     }
     if (canQueue) void queueMessage(taskId, text);
+  }
+
+  function runGoalControl(action: () => Promise<void>): void {
+    if (goalControlPending) return;
+    setGoalControlPending(true);
+    void action().finally(() => setGoalControlPending(false));
   }
 
   function removeActiveSlashToken(restoreTextareaFocus = true): void {
@@ -357,10 +372,11 @@ export function Composer({ taskId }: { taskId: string }) {
         {goal !== null && (
           <GoalProgress
             goal={goal}
-            onPause={() => void pauseGoal(taskId)}
-            onResume={() => void resumeGoal(taskId)}
+            controlsPending={goalControlPending}
+            onPause={() => runGoalControl(() => pauseGoal(taskId))}
+            onResume={() => runGoalControl(() => resumeGoal(taskId))}
             onEdit={editGoal}
-            onClear={() => void clearGoal(taskId)}
+            onClear={() => runGoalControl(() => clearGoal(taskId))}
           />
         )}
         <ContextBar taskId={taskId} />
@@ -521,12 +537,14 @@ export function Composer({ taskId }: { taskId: string }) {
 
 function GoalProgress({
   goal,
+  controlsPending,
   onPause,
   onResume,
   onEdit,
   onClear,
 }: {
   goal: GoalSummary;
+  controlsPending: boolean;
   onPause: () => void;
   onResume: () => void;
   onEdit: () => void;
@@ -557,6 +575,7 @@ function GoalProgress({
       className="goal-progress"
       data-status={goal.status}
       aria-label={`Goal: ${statusLabel}`}
+      aria-busy={controlsPending}
     >
       <div className="goal-progress-mark" aria-hidden="true">
         <Target size={15} />
@@ -580,18 +599,42 @@ function GoalProgress({
       </div>
       <div className="goal-progress-actions">
         {goal.status === 'active' ? (
-          <button type="button" onClick={onPause} aria-label="Goalを一時停止" title="一時停止">
+          <button
+            type="button"
+            onClick={onPause}
+            disabled={controlsPending}
+            aria-label="Goalを一時停止"
+            title="一時停止"
+          >
             <Pause size={14} />
           </button>
         ) : (
-          <button type="button" onClick={onResume} aria-label="Goalを再開" title="再開">
+          <button
+            type="button"
+            onClick={onResume}
+            disabled={controlsPending}
+            aria-label="Goalを再開"
+            title="再開"
+          >
             <Play size={14} />
           </button>
         )}
-        <button type="button" onClick={onEdit} aria-label="Goalを編集" title="編集">
+        <button
+          type="button"
+          onClick={onEdit}
+          disabled={controlsPending}
+          aria-label="Goalを編集"
+          title="編集"
+        >
           <Pencil size={14} />
         </button>
-        <button type="button" onClick={onClear} aria-label="Goalを解除" title="解除">
+        <button
+          type="button"
+          onClick={onClear}
+          disabled={controlsPending}
+          aria-label="Goalを解除"
+          title="解除"
+        >
           <Trash size={14} />
         </button>
       </div>

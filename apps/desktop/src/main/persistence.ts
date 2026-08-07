@@ -8407,6 +8407,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     tokenBudget: number | null = null,
   ): StartedGoalTurn {
     return this.db.transaction(() => {
+      this.assertTask(taskId);
+      this.assertTaskNotMutationQuarantined(taskId);
+      if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
       this.startGoal(taskId, objective, tokenBudget);
       const started = this.startTurnInTransaction(taskId, objective);
       return { task: this.getTask(taskId), started };
@@ -8415,6 +8418,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   resumeGoalTurn(taskId: string): StartedGoalTurn {
     return this.db.transaction(() => {
+      this.assertTask(taskId);
+      this.assertTaskNotMutationQuarantined(taskId);
+      if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
       const current = this.getTaskRow(taskId);
       if (current.goal === null || current.goal_status === null)
         throw new Error('Task does not have a Goal');

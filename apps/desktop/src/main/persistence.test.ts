@@ -574,6 +574,7 @@ if (runsWithElectronAbi)
         tokensUsed: 0,
         timeUsedSeconds: 0,
       });
+      expect(() => persistence.startGoalTurn(task.id, '二重開始')).toThrow(TurnActiveError);
       const startedAt = first.task.goalState?.startedAt;
       expect(persistence.pauseGoalAndCancelTurn(task.id, first.started.turnId)).toMatchObject({
         task: { goalState: { status: 'paused' } },
@@ -584,6 +585,7 @@ if (runsWithElectronAbi)
         status: 'active',
         startedAt,
       });
+      expect(() => persistence.resumeGoalTurn(task.id)).toThrow(TurnActiveError);
       persistence.recordTurnProviderUsage(task.id, resumed.started.turnId, {
         inputTokens: 12,
         outputTokens: 8,

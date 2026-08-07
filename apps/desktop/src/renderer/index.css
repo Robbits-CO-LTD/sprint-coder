@@ -2355,13 +2355,17 @@ button {
   border-radius: var(--r-xs);
   color: var(--text-secondary);
 }
-.goal-progress-actions button:hover {
+.goal-progress-actions button:hover:not(:disabled) {
   color: var(--text-primary);
   background: var(--bg-hover);
 }
-.goal-progress-actions button:last-child:hover {
+.goal-progress-actions button:last-child:hover:not(:disabled) {
   color: var(--danger);
   background: var(--danger-wash);
+}
+.goal-progress-actions button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 .context-bar {
   position: relative;
