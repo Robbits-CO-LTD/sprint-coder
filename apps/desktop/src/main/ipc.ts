@@ -1737,14 +1737,17 @@ export class IpcRouter {
             goal?.status === 'active' ? this.persistence.getActiveTurnId(input.taskId) : null;
           if (controlledTurnId !== null) await this.cancelRuntime(input.taskId, controlledTurnId);
           let canceledEvent: TurnEvent | null = null;
+          let next: QueueTransition = null;
           const result = this.runMutation(event, envelope, input.taskId, channel, () => {
             const controlled = action(input.taskId, controlledTurnId);
             canceledEvent = controlled.canceledEvent;
+            next = controlled.next;
             return controlled.task;
           });
           if (result.executed && controlledTurnId !== null)
             this.approvalCoordinator.turnEnded(input.taskId, controlledTurnId, 'canceled');
           if (result.executed && canceledEvent !== null) this.publish(canceledEvent);
+          if (result.executed) this.dispatchQueueTransition(next);
           return result.value;
         },
       );

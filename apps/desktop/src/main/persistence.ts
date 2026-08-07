@@ -3857,6 +3857,7 @@ export interface PersistenceClient {
   ): {
     task: TaskSummary;
     canceledEvent: TurnEvent | null;
+    next: QueueTransition;
   };
   clearGoalAndCancelTurn(
     taskId: string,
@@ -3864,6 +3865,7 @@ export interface PersistenceClient {
   ): {
     task: TaskSummary;
     canceledEvent: TurnEvent | null;
+    next: QueueTransition;
   };
   completeTurnAndFinishGoal(
     taskId: string,
@@ -8433,21 +8435,25 @@ export class SqlitePersistenceClient implements PersistenceClient {
   pauseGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
-  ): { task: TaskSummary; canceledEvent: TurnEvent | null } {
-    return this.db.transaction(() => ({
-      canceledEvent: turnId === null ? null : this.cancelTurn(taskId, turnId),
-      task: this.pauseGoal(taskId),
-    }))();
+  ): { task: TaskSummary; canceledEvent: TurnEvent | null; next: QueueTransition } {
+    return this.db.transaction(() => {
+      const canceledEvent = turnId === null ? null : this.cancelTurn(taskId, turnId);
+      this.pauseGoal(taskId);
+      const next = canceledEvent === null ? null : this.startNextQueued(taskId);
+      return { canceledEvent, next, task: this.getTask(taskId) };
+    })();
   }
 
   clearGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
-  ): { task: TaskSummary; canceledEvent: TurnEvent | null } {
-    return this.db.transaction(() => ({
-      canceledEvent: turnId === null ? null : this.cancelTurn(taskId, turnId),
-      task: this.clearGoal(taskId),
-    }))();
+  ): { task: TaskSummary; canceledEvent: TurnEvent | null; next: QueueTransition } {
+    return this.db.transaction(() => {
+      const canceledEvent = turnId === null ? null : this.cancelTurn(taskId, turnId);
+      this.clearGoal(taskId);
+      const next = canceledEvent === null ? null : this.startNextQueued(taskId);
+      return { canceledEvent, next, task: this.getTask(taskId) };
+    })();
   }
 
   completeTurnAndFinishGoal(

@@ -606,6 +606,19 @@ if (runsWithElectronAbi)
         status: 'completed',
         tokensUsed: 20,
       });
+      const queuedTask = persistence.createTask('goal queue handoff');
+      const queuedGoal = persistence.startGoalTurn(queuedTask.id, 'Goal実行中のキューを引き継ぐ');
+      persistence.queueInput(queuedTask.id, 'Goal停止後に続ける', 'goal-queue-1');
+      const pausedWithQueue = persistence.pauseGoalAndCancelTurn(
+        queuedTask.id,
+        queuedGoal.started.turnId,
+      );
+      expect(pausedWithQueue.next?.started.text).toBe('Goal停止後に続ける');
+      expect(persistence.snapshot(queuedTask.id).activeTurn?.turnId).toBe(
+        pausedWithQueue.next?.started.turnId,
+      );
+      if (pausedWithQueue.next !== null)
+        finishTurn(persistence, queuedTask.id, pausedWithQueue.next.started.turnId);
       const interruptedTask = persistence.createTask('interrupted goal');
       persistence.startGoalTurn(interruptedTask.id, '再起動後も状態を正しく保つ');
       persistence.close();
