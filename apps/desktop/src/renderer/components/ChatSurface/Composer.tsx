@@ -75,6 +75,7 @@ export function Composer({ taskId }: { taskId: string }) {
   // a second input: the armed chip and placeholder are the only extra UI needed to make the mode
   // visible and cancelable.
   const [goalRequested, setGoalRequested] = useState(false);
+  const [goalEditDraftBackup, setGoalEditDraftBackup] = useState<string | null>(null);
   const [goalControlPending, setGoalControlPending] = useState(false);
   // Armed by the plus menu, consumed by the next send. One-shot rather than a mode, so a user who
   // opens the menu and changes their mind is not stuck generating images.
@@ -240,6 +241,8 @@ export function Composer({ taskId }: { taskId: string }) {
           if (!(await startGoal(taskId, raw))) {
             setGoalRequested(true);
             setDraft(taskId, raw);
+          } else {
+            setGoalEditDraftBackup(null);
           }
         } finally {
           setGoalControlPending(false);
@@ -266,6 +269,12 @@ export function Composer({ taskId }: { taskId: string }) {
     void action().finally(() => setGoalControlPending(false));
   }
 
+  function cancelGoalRequest(): void {
+    if (goalEditDraftBackup !== null) setDraft(taskId, goalEditDraftBackup);
+    setGoalEditDraftBackup(null);
+    setGoalRequested(false);
+  }
+
   function removeActiveSlashToken(restoreTextareaFocus = true): void {
     if (slashMatch === null) return;
     const nextDraft = removeSlashToken(draft, slashMatch);
@@ -288,21 +297,23 @@ export function Composer({ taskId }: { taskId: string }) {
         break;
       case 'goal':
         setImageRequested(false);
+        setGoalEditDraftBackup(null);
         setGoalRequested(true);
         break;
       case 'team':
         void toggleTeamView(taskId);
         break;
       case 'image':
-        setGoalRequested(false);
+        cancelGoalRequest();
         setImageRequested(true);
         break;
     }
   }
 
   function editGoal() {
-    if (goal === null) return;
+    if (goal === null || goal.status === 'active') return;
     setImageRequested(false);
+    setGoalEditDraftBackup(draft);
     setGoalRequested(true);
     setDraft(taskId, goal.objective);
     requestAnimationFrame(() => {
@@ -361,7 +372,7 @@ export function Composer({ taskId }: { taskId: string }) {
       handleSend();
     } else if (e.key === 'Escape' && goalRequested) {
       e.preventDefault();
-      setGoalRequested(false);
+      cancelGoalRequest();
     }
   }
 
@@ -459,7 +470,7 @@ export function Composer({ taskId }: { taskId: string }) {
           <div className="composer-row">
             <PlusMenu
               onRequestImage={() => {
-                setGoalRequested(false);
+                cancelGoalRequest();
                 setImageRequested(true);
               }}
             />
@@ -470,7 +481,7 @@ export function Composer({ taskId }: { taskId: string }) {
                 className="cmp-chip goal-armed"
                 data-testid="composer-goal-armed"
                 title="次の送信内容でGoalを開始します。クリックで取り消し"
-                onClick={() => setGoalRequested(false)}
+                onClick={cancelGoalRequest}
               >
                 <Target size={13} /> Goal <X size={12} />
               </button>
@@ -622,9 +633,9 @@ function GoalProgress({
         <button
           type="button"
           onClick={onEdit}
-          disabled={controlsPending}
+          disabled={controlsPending || goal.status === 'active'}
           aria-label="Goalを編集"
-          title="編集"
+          title={goal.status === 'active' ? '一時停止してから編集できます' : '編集'}
         >
           <Pencil size={14} />
         </button>
