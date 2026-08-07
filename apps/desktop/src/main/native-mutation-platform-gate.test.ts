@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { evaluateNativeMutationPlatformGate } from './native-mutation-platform-gate';
 import type {
+  NativeMutationDevelopmentLoadEvidence,
   NativeMutationPackagedLoadEvidence,
   NativeMutationPlatformGateInput,
 } from './native-mutation-platform-gate';
@@ -10,6 +11,15 @@ const validEvidence: NativeMutationPackagedLoadEvidence = Object.freeze({
   addonPath:
     '/Applications/Sprint Coder.app/Contents/Resources/app.asar.unpacked/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
   loadedFromUnpacked: true,
+});
+
+const validDevelopmentEvidence: NativeMutationDevelopmentLoadEvidence = Object.freeze({
+  source: 'vite-dev-server',
+  addonPath:
+    '/Users/developer/sprint-coder/apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node',
+  loadedFromUnpacked: false,
+  appPackaged: false,
+  rendererUrl: 'http://127.0.0.1:5173/',
 });
 
 function validInput(): NativeMutationPlatformGateInput {
@@ -44,7 +54,43 @@ describe('evaluateNativeMutationPlatformGate', () => {
       packagedLoadEvidence: null,
     });
     expect(result.allowed).toBe(false);
-    expect(result.reasons).toContain('PACKAGED_LOAD_EVIDENCE_MISSING');
+    expect(result.reasons).toContain('TRUSTED_LOAD_EVIDENCE_MISSING');
+  });
+
+  it('allows an unpackaged localhost Vite app with real native capability evidence', () => {
+    expect(
+      evaluateNativeMutationPlatformGate({
+        ...validInput(),
+        packagedLoadEvidence: null,
+        developmentLoadEvidence: validDevelopmentEvidence,
+      }),
+    ).toEqual({ allowed: true, reasons: [] });
+  });
+
+  it('denies development evidence served from a remote renderer origin', () => {
+    const result = evaluateNativeMutationPlatformGate({
+      ...validInput(),
+      packagedLoadEvidence: null,
+      developmentLoadEvidence: {
+        ...validDevelopmentEvidence,
+        rendererUrl: 'https://example.com/',
+      },
+    });
+    expect(result.allowed).toBe(false);
+    expect(result.reasons).toContain('TRUSTED_LOAD_EVIDENCE_MISSING');
+  });
+
+  it('denies development evidence that claims to be packaged', () => {
+    const result = evaluateNativeMutationPlatformGate({
+      ...validInput(),
+      packagedLoadEvidence: null,
+      developmentLoadEvidence: {
+        ...validDevelopmentEvidence,
+        appPackaged: true,
+      },
+    });
+    expect(result.allowed).toBe(false);
+    expect(result.reasons).toContain('TRUSTED_LOAD_EVIDENCE_MISSING');
   });
 
   it('denies when packaged load evidence has the wrong source tag', () => {
@@ -53,7 +99,7 @@ describe('evaluateNativeMutationPlatformGate', () => {
       packagedLoadEvidence: { ...validEvidence, source: 'dev-relative' },
     });
     expect(result.allowed).toBe(false);
-    expect(result.reasons).toContain('PACKAGED_LOAD_EVIDENCE_MISSING');
+    expect(result.reasons).toContain('TRUSTED_LOAD_EVIDENCE_MISSING');
   });
 
   it('denies when packaged load evidence addonPath is empty', () => {
@@ -62,7 +108,7 @@ describe('evaluateNativeMutationPlatformGate', () => {
       packagedLoadEvidence: { ...validEvidence, addonPath: '' },
     });
     expect(result.allowed).toBe(false);
-    expect(result.reasons).toContain('PACKAGED_LOAD_EVIDENCE_MISSING');
+    expect(result.reasons).toContain('TRUSTED_LOAD_EVIDENCE_MISSING');
   });
 
   it('denies when packaged load evidence claims it was not loaded from unpacked', () => {
@@ -71,7 +117,7 @@ describe('evaluateNativeMutationPlatformGate', () => {
       packagedLoadEvidence: { ...validEvidence, loadedFromUnpacked: false },
     });
     expect(result.allowed).toBe(false);
-    expect(result.reasons).toContain('PACKAGED_LOAD_EVIDENCE_MISSING');
+    expect(result.reasons).toContain('TRUSTED_LOAD_EVIDENCE_MISSING');
   });
 
   it('denies when the probe reports unavailable', () => {
@@ -111,7 +157,7 @@ describe('evaluateNativeMutationPlatformGate', () => {
     expect(result.allowed).toBe(false);
     expect(result.reasons).toEqual([
       'PLATFORM_NOT_DARWIN',
-      'PACKAGED_LOAD_EVIDENCE_MISSING',
+      'TRUSTED_LOAD_EVIDENCE_MISSING',
       'PROBE_UNAVAILABLE',
       'PROBE_MUTATION_NOT_TRUE',
       'PERSISTENCE_AUTHORITY_UNAVAILABLE',

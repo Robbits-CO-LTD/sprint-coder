@@ -19,6 +19,7 @@ import {
   sep,
 } from 'node:path';
 import { workspaceMutationBinding } from './path-guard';
+import { CommandRunnerError } from './command-runner';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
@@ -298,7 +299,7 @@ import {
   providerToolsFromSnapshot,
   workspaceToolAuthorizationGuard,
 } from './provider-workspace-tools';
-import type { WorkspacePatchDeps } from './workspace-patch-tool';
+import { WorkspacePatchRejection, type WorkspacePatchDeps } from './workspace-patch-tool';
 import {
   BUILTIN_CODEX_CONNECTION_ID,
   builtinRuntimeForModelSelection,
@@ -3837,6 +3838,19 @@ export class IpcRouter {
                   this.recordFileChanges(taskId, started.turnId, [
                     { path: resolvePath(root.path, result.path), kind: result.kind },
                   ]);
+                // The native Edit Saga re-observes the sealed post-image immediately before it
+                // commits. For provider workspace tools that deterministic, Main-owned check is
+                // the assurance verification boundary; persist it before the provider can finish
+                // the Turn so the evidence-gated completion contract cannot strand the Turn in
+                // `synthesizing`.
+                this.persistence.recordAssuranceVerification({
+                  taskId,
+                  turnId: started.turnId,
+                  sagaId: result.sagaId,
+                  outcome: 'passed',
+                  failureClass: null,
+                  createdAt: new Date().toISOString(),
+                });
               }
               content = redactSecrets(JSON.stringify({ ok: true, result }));
             } catch (error) {
@@ -4573,6 +4587,10 @@ function providerWorkspaceToolFailure(error: unknown): string {
     return providerToolErrorContent('PERMISSION_DENIED', error.authorization.reason);
   if (error instanceof WorkspaceToolRejection)
     return providerToolErrorContent(error.code, error.message);
+  if (error instanceof WorkspacePatchRejection)
+    return providerToolErrorContent('PATCH_REJECTED', error.message);
+  if (error instanceof CommandRunnerError)
+    return providerToolErrorContent(error.code, error.message);
   secureLogger.error('Provider workspace tool execution failed', { error });
   return providerToolErrorContent('TOOL_EXECUTION_FAILED', 'Workspace tool execution failed');
 }
@@ -4584,6 +4602,7 @@ function providerToolErrorContent(code: string, message: string): string {
 function isCommittedProviderWorkspaceMutation(result: unknown): result is Readonly<{
   rootId: string;
   path: string;
+  sagaId: string;
   kind: 'add' | 'update';
   state: 'committed';
 }> {
@@ -4593,7 +4612,8 @@ function isCommittedProviderWorkspaceMutation(result: unknown): result is Readon
     record['state'] === 'committed' &&
     (record['kind'] === 'add' || record['kind'] === 'update') &&
     typeof record['rootId'] === 'string' &&
-    typeof record['path'] === 'string'
+    typeof record['path'] === 'string' &&
+    typeof record['sagaId'] === 'string'
   );
 }
 

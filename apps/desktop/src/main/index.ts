@@ -12,7 +12,7 @@ import {
 } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
 import { readdirSync } from 'node:fs';
-import { lstat } from 'node:fs/promises';
+import { lstat, mkdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -294,17 +294,31 @@ async function wireEditSagaRecovery(
     });
     const probe = await nativeSafeFs.probe();
     const location = nativeSafeFsAddonLocation();
-    // Evidence only exists once the app is actually packaged AND the addon was actually
-    // loaded from the app.asar.unpacked sibling AND the probe confirms it is available.
-    // In every environment this codebase currently runs in (dev, CI, unit tests), at
-    // least one of these is false, so packagedLoadEvidence is null and the gate denies.
+    // Packaged evidence remains bound to app.asar.unpacked. Development evidence is narrower:
+    // it exists only for an unpackaged app served from the Vite URL, and the pure gate below
+    // additionally accepts only loopback HTTP origins. This keeps remote renderer URLs and
+    // packaged builds from using the development path while making the real editing boundary
+    // testable in the development app.
     const packagedLoadEvidence: NativeMutationPackagedLoadEvidence | null =
       app.isPackaged && location.loadedFromUnpacked && probe.available
         ? { source: 'packaged-app', addonPath: location.addonPath, loadedFromUnpacked: true }
         : null;
+    const developmentLoadEvidence =
+      !app.isPackaged &&
+      !location.loadedFromUnpacked &&
+      MAIN_WINDOW_VITE_DEV_SERVER_URL !== undefined
+        ? {
+            source: 'vite-dev-server' as const,
+            addonPath: location.addonPath,
+            loadedFromUnpacked: false as const,
+            appPackaged: false as const,
+            rendererUrl: MAIN_WINDOW_VITE_DEV_SERVER_URL,
+          }
+        : null;
     const gate = evaluateNativeMutationPlatformGate({
       platform: process.platform,
       packagedLoadEvidence,
+      developmentLoadEvidence,
       probe: {
         available: probe.available,
         capabilities: { mutation: probe.capabilities.mutation },
@@ -318,6 +332,7 @@ async function wireEditSagaRecovery(
       return undefined;
     }
     const lockDirectoryPath = join(app.getPath('userData'), 'native-safe-fs-locks');
+    await mkdir(lockDirectoryPath, { recursive: true, mode: 0o700 });
     const sessions = new Map<string, NativeSafeFsSession>();
     const resolveSession = async (lease: MutationLeaseToken): Promise<NativeSafeFsSession> => {
       const existing = sessions.get(lease.leaseId);
