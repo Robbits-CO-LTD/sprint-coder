@@ -11371,14 +11371,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
         if (parsedSeed.leaseFence !== String(lease.fence)) throw new MutationLeaseStaleError();
         const saga = this.getEditSaga(parsedSeed.sagaId);
         const step = saga.steps[parsedSeed.ordinal - 1];
-        const task = this.getTaskRow(saga.taskId);
+        const workspacePath = this.getMutationWorkspacePath(saga.taskId, saga.turnId, saga.rootId);
         const expected =
-          step === undefined || task.workspace_path === null
+          step === undefined || workspacePath === null
             ? null
             : expectedNativeMutationBinding(
                 step.operation,
                 parsedSeed.direction,
-                task.workspace_path,
+                workspacePath,
                 step.postObservation,
               );
         if (

@@ -326,7 +326,11 @@ describe('Provider workspace read tools', () => {
         ...context,
         callId: 'call-patch',
         providerName: 'apply_patch',
-        input: { path: 'bot.py', edits: [{ oldText: 'before', newText: 'after' }] },
+        input: {
+          rootId: 'workspace',
+          path: 'bot.py',
+          edits: [{ oldText: 'before', newText: 'after' }],
+        },
       }),
     ).resolves.toMatchObject({ state: 'committed', kind: 'update' });
     expect(applied).toBe(true);

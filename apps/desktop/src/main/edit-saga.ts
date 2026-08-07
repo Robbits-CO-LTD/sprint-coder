@@ -572,6 +572,10 @@ export class EditSagaExecutor {
     const saga = this.store.get(id);
     if (isTerminal(saga.state)) return this.cleanupArtifacts(saga);
     if (saga.state === 'prepared') {
+      if (saga.workspaceKey !== null)
+        return this.runWithLease(saga, 'recovery', () =>
+          this.cleanupArtifacts(this.transitionTerminal(this.store.get(id), 'restored', [])),
+        );
       return this.cleanupArtifacts(this.transitionTerminal(saga, 'restored', []));
     }
     if (saga.state === 'applying')

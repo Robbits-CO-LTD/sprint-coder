@@ -18,6 +18,7 @@ import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
 import type { TeamCoordinator } from './team-coordinator';
 import { registerTeamTools, TEAM_TOOLS } from './team-tools';
+import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
 
 export const MOCK_ECHO_TOOL = createToolDefinition({
   toolId: createToolId({ provider: 'builtin', namespace: 'mock', name: 'echo', version: '1' }),
@@ -180,9 +181,8 @@ export function registerCommandRunnerTool(
       const workspace = command.persistence.readTurnWorkspaceSet(context.turnId);
       if (workspace === null)
         throw new Error('CommandRunner requires a sealed Turn Workspace snapshot');
-      const requestedRootId = request.rootId ?? workspace.primaryRootId;
-      const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
-      if (root === undefined) throw new Error('CommandRunner requires a valid Workspace rootId');
+      const root = resolveWorkspaceToolRoot(workspace, request.rootId);
+      if (root === null) throw new Error('CommandRunner requires a valid Workspace rootId');
       const expectedRootIdentityDigest =
         workspace.source === 'project'
           ? command.persistence.getTurnWorkspaceRootIdentities(context.turnId).get(root.rootId)

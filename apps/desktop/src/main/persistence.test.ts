@@ -1492,6 +1492,13 @@ if (runsWithElectronAbi)
       expect(saga).toMatchObject({ rootId, workspaceKey, rootIdentityDigest });
       expect(token).toMatchObject({ rootId, workspaceKey, rootIdentityDigest });
       expect(persistence.getMutationWorkspacePath(task.id, turn.turnId, rootId)).toBe('/workspace');
+      expect(
+        persistence.prepareNativeMutationIntent(
+          persistedNativeIntentSeed(saga, token),
+          token,
+          '2026-07-23T00:00:01.000Z',
+        ),
+      ).toMatchObject({ sagaId: saga.id, state: 'planned' });
       persistence.releaseMutationLease(token, '2026-07-23T00:00:02.000Z');
       persistence.close();
     });

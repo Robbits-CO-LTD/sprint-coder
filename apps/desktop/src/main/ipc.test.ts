@@ -86,6 +86,8 @@ import {
   clampCodexEffort,
   confirmFullAccessOnce,
   invalidModelUserMessage,
+  isCommittedProviderWorkspaceChange,
+  isCommittedProviderWorkspaceMutation,
   isTrustedIpcSender,
   shouldBlockProviderLeaderCompletion,
   providerWorkspaceToolsEligible,
@@ -260,6 +262,21 @@ describe('Provider Team completion and model errors', () => {
 });
 
 describe('Provider workspace tool capability fallback', () => {
+  it('records directory changes without treating them as Edit Saga assurance subjects', () => {
+    const directory = {
+      rootId: 'root-1',
+      path: 'generated',
+      state: 'committed',
+      kind: 'add',
+    } as const;
+    const file = { ...directory, path: 'generated/file.ts', sagaId: 'saga-1' } as const;
+
+    expect(isCommittedProviderWorkspaceChange(directory)).toBe(true);
+    expect(isCommittedProviderWorkspaceMutation(directory)).toBe(false);
+    expect(isCommittedProviderWorkspaceChange(file)).toBe(true);
+    expect(isCommittedProviderWorkspaceMutation(file)).toBe(true);
+  });
+
   it('publishes tools for supported or unknown protocols, but never explicit unsupported models', () => {
     expect(providerWorkspaceToolsEligible(false, 1, true)).toBe(true);
     expect(providerWorkspaceToolsEligible(false, 1, null)).toBe(true);
