@@ -26,6 +26,7 @@ import {
   executeWorkspacePatch,
   type WorkspacePatchDeps,
 } from './workspace-patch-tool';
+import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
 
 const MAX_LIST_ENTRIES = 500;
 const MAX_READ_BYTES = 1024 * 1024;
@@ -126,7 +127,7 @@ const descriptions = new Map([
   ],
   [
     COMMAND_RUNNER_TOOL.providerName,
-    'Run one executable directly inside the selected workspace. Shell syntax is not accepted and execution requires approval.',
+    'Run one executable by absolute path inside the selected workspace. Shell syntax and command-name lookup are not accepted; execution requires approval.',
   ],
 ]);
 
@@ -259,10 +260,8 @@ export class ProviderWorkspaceTools {
     const request = parseWorkspaceInput(input, kind === 'read');
     const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
     if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
-    const rootId = request.rootId ?? workspace.primaryRootId;
-    if (rootId === null) throw new Error('A selected workspace is required');
-    const root = workspace.roots.find((candidate) => candidate.rootId === rootId);
-    if (root === undefined) throw new Error('Workspace rootId is not present in this Turn');
+    const root = resolveWorkspaceToolRoot(workspace, request.rootId);
+    if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
         ? this.deps.rootIdentityFor(context.turnId, root.rootId)
@@ -327,10 +326,8 @@ export class ProviderWorkspaceTools {
     const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
     if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
     const requestedRootId = typeof record['rootId'] === 'string' ? record['rootId'] : null;
-    const rootId = requestedRootId ?? workspace.primaryRootId;
-    if (rootId === null) throw new Error('A selected workspace is required');
-    const root = workspace.roots.find((candidate) => candidate.rootId === rootId);
-    if (root === undefined) throw new Error('Workspace rootId is not present in this Turn');
+    const root = resolveWorkspaceToolRoot(workspace, requestedRootId);
+    if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
         ? this.deps.rootIdentityFor(context.turnId, root.rootId)
@@ -361,7 +358,7 @@ export class ProviderWorkspaceTools {
       relativePath: record['path'],
       guard: writeGuard,
       ...(readGuard === undefined ? {} : { readGuard }),
-      raw: input,
+      raw: Object.freeze({ ...record, rootId: root.rootId }),
     });
     issuedPreparedInputs.add(prepared);
     return prepared;

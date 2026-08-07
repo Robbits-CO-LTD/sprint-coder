@@ -1,7 +1,8 @@
 // Slice 4.7e: the platform gate is the single decision point for whether the dormant
 // Edit Saga native mutation authority may activate. It is a pure function — no I/O, no
-// Electron import — so it can be exercised deterministically in tests. Production callers
-// must supply real evidence; any missing, malformed, or non-conforming input is denied
+// Electron import — so it can be exercised deterministically in tests. Callers must supply
+// real packaged-app evidence or tightly-scoped localhost Vite development evidence; any
+// missing, malformed, or non-conforming input is denied
 // (fail-closed) rather than throwing, so a defensive caller can never accidentally enable
 // mutation by mishandling an exception.
 
@@ -9,6 +10,14 @@ export type NativeMutationPackagedLoadEvidence = Readonly<{
   source: 'packaged-app';
   addonPath: string;
   loadedFromUnpacked: true;
+}>;
+
+export type NativeMutationDevelopmentLoadEvidence = Readonly<{
+  source: 'vite-dev-server';
+  addonPath: string;
+  loadedFromUnpacked: false;
+  appPackaged: false;
+  rendererUrl: string;
 }>;
 
 export type NativeMutationPlatformGateProbeInput = Readonly<{
@@ -19,6 +28,7 @@ export type NativeMutationPlatformGateProbeInput = Readonly<{
 export type NativeMutationPlatformGateInput = Readonly<{
   platform: string;
   packagedLoadEvidence: NativeMutationPackagedLoadEvidence | null;
+  developmentLoadEvidence?: NativeMutationDevelopmentLoadEvidence | null;
   probe: NativeMutationPlatformGateProbeInput;
   persistenceAuthorityAvailable: boolean;
 }>;
@@ -42,8 +52,11 @@ export function evaluateNativeMutationPlatformGate(
 
   if (input['platform'] !== 'darwin') reasons.push('PLATFORM_NOT_DARWIN');
 
-  if (!isValidPackagedLoadEvidence(input['packagedLoadEvidence']))
-    reasons.push('PACKAGED_LOAD_EVIDENCE_MISSING');
+  if (
+    !isValidPackagedLoadEvidence(input['packagedLoadEvidence']) &&
+    !isValidDevelopmentLoadEvidence(input['developmentLoadEvidence'])
+  )
+    reasons.push('TRUSTED_LOAD_EVIDENCE_MISSING');
 
   const probe = input['probe'];
   if (!isRecord(probe) || probe['available'] !== true) reasons.push('PROBE_UNAVAILABLE');
@@ -58,6 +71,32 @@ export function evaluateNativeMutationPlatformGate(
     reasons.push('PERSISTENCE_AUTHORITY_UNAVAILABLE');
 
   return Object.freeze({ allowed: reasons.length === 0, reasons: Object.freeze(reasons) });
+}
+
+function isValidDevelopmentLoadEvidence(
+  value: unknown,
+): value is NativeMutationDevelopmentLoadEvidence {
+  if (
+    !isRecord(value) ||
+    value['source'] !== 'vite-dev-server' ||
+    typeof value['addonPath'] !== 'string' ||
+    value['addonPath'].length === 0 ||
+    value['loadedFromUnpacked'] !== false ||
+    value['appPackaged'] !== false ||
+    typeof value['rendererUrl'] !== 'string'
+  )
+    return false;
+  try {
+    const url = new URL(value['rendererUrl']);
+    return (
+      url.protocol === 'http:' &&
+      url.username === '' &&
+      url.password === '' &&
+      (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]')
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isValidPackagedLoadEvidence(value: unknown): value is NativeMutationPackagedLoadEvidence {

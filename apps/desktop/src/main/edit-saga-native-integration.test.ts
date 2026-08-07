@@ -409,6 +409,69 @@ if (runsWithElectronAbi) {
       persistence.close();
     });
 
+    it('recovers a workspace-bound prepared Saga under a recovery lease', async () => {
+      const env = await fixture('prepared-crash');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const { plan } = await buildFullPatch(env.workspace);
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const boundary = new NativeSafeFsEditEffectBoundary({
+        native,
+        journal: persistence,
+        artifacts,
+        resolveSession,
+      });
+      const request = buildRequest({
+        id: 'saga-prepared-crash',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-prepared-crash',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+      const crashing = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        boundary,
+        artifacts,
+        {
+          hit(point) {
+            if (point.kind === 'afterJournalPrepared')
+              throw new EditSagaCrashError('simulated crash after journal prepare');
+          },
+        },
+        new SqliteEditSagaLeaseGuard(persistence, 'prepared-crash-instance-1'),
+      );
+
+      await expect(crashing.apply(request)).rejects.toBeInstanceOf(EditSagaCrashError);
+      expect(persistence.getEditSaga('saga-prepared-crash')).toMatchObject({ state: 'prepared' });
+
+      persistence.initializeMutationRecovery('prepared-crash-instance-2', new Date().toISOString());
+      const recovered = await new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        boundary,
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'prepared-crash-instance-2'),
+      ).reconcileAll();
+
+      expect(recovered).toEqual([
+        expect.objectContaining({ id: 'saga-prepared-crash', state: 'restored' }),
+      ]);
+      expect(persistence.getEditSaga('saga-prepared-crash')).toMatchObject({ state: 'restored' });
+
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
+    });
+
     it('reconciles an abandoned Saga to a restored disk state after a simulated crash and restart', async () => {
       const env = await fixture('crash');
       const native1 = loadNativeSafeFs({
