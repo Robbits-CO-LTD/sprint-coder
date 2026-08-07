@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ProjectFolder, ProjectSummary, TaskSummary } from '../types/sprint-coder';
 import { useAppStore } from '../store/appStore';
 import { ProjectEditorDialog } from './ProjectEditorDialog';
-import { Folder, Plus, Search } from './icons';
+import { Check, Folder, Plus, Search, X } from './icons';
 
 export function ProjectPicker({ taskId }: { taskId: string }) {
   const tasks = useAppStore((state) => state.tasks);
@@ -113,36 +113,85 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
         </button>
         {open && (
           <div className="project-picker-popover" role="dialog" aria-label="Projectを選択">
-            <label className="project-picker-search">
-              <Search size={14} />
-              <span className="sr-only">Projectを検索</span>
+            <div className="project-picker-header">
+              <div>
+                <strong>Projectを切り替え</strong>
+                <span>このTaskの作業場所を選択</span>
+              </div>
+              <kbd>Esc</kbd>
+            </div>
+            <div className="project-picker-search">
+              <Search size={17} />
               <input
                 autoFocus
                 type="search"
                 value={query}
                 placeholder="Projectを検索"
+                aria-label="Projectを検索"
                 onChange={(event) => setQuery(event.target.value)}
               />
-            </label>
-            <div className="project-picker-options" role="menu" aria-label="Project一覧">
-              {filtered.map((project) => (
+              {query !== '' && (
                 <button
-                  key={project.id}
                   type="button"
-                  role="menuitemradio"
-                  aria-checked={task?.projectId === project.id}
-                  disabled={pending}
-                  onClick={() => void choose(project)}
+                  className="project-picker-clear"
+                  aria-label="検索をクリア"
+                  onClick={() => setQuery('')}
                 >
-                  <Folder size={16} />
-                  <span>
-                    <strong>{project.name}</strong>
-                    {project.primaryFolder != null && <small>{project.primaryFolder.path}</small>}
-                  </span>
-                  {task?.projectId === project.id && <span aria-label="選択中">✓</span>}
+                  <X size={14} />
                 </button>
-              ))}
-              {filtered.length === 0 && <p role="status">一致するProjectはありません</p>}
+              )}
+            </div>
+            <div className="project-picker-results">
+              <div className="project-picker-section-label" aria-hidden="true">
+                <span>Projects</span>
+                <span>{filtered.length}</span>
+              </div>
+              <div
+                className="project-picker-options"
+                role={filtered.length > 0 ? 'menu' : undefined}
+                aria-label={filtered.length > 0 ? 'Project一覧' : undefined}
+              >
+                {filtered.map((project) => (
+                  <button
+                    key={project.id}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={task?.projectId === project.id}
+                    disabled={pending}
+                    onClick={() => void choose(project)}
+                  >
+                    <span className="project-picker-item-icon">
+                      <Folder size={16} />
+                    </span>
+                    <span className="project-picker-item-copy">
+                      <strong>{project.name}</strong>
+                      {project.primaryFolder != null && <small>{project.primaryFolder.path}</small>}
+                    </span>
+                    {task?.projectId === project.id && (
+                      <span className="project-picker-selection" aria-label="選択中">
+                        <Check size={15} />
+                      </span>
+                    )}
+                  </button>
+                ))}
+                {filtered.length === 0 && (
+                  <div className="project-picker-empty" role="status">
+                    <span className="project-picker-empty-icon">
+                      <Search size={19} />
+                    </span>
+                    <strong>
+                      {query.trim() === ''
+                        ? 'Projectはまだありません'
+                        : '一致するProjectはありません'}
+                    </strong>
+                    <span>
+                      {query.trim() === ''
+                        ? '新しく作成するか、Projectなしで作業を続けられます。'
+                        : '検索語を変えて、もう一度お試しください。'}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
             <div className="project-picker-actions">
               <button
@@ -153,11 +202,21 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
                   setCreating(true);
                 }}
               >
-                <Plus size={15} /> 新しいProject
+                <span className="project-picker-action-icon project-picker-action-icon-accent">
+                  <Plus size={16} />
+                </span>
+                <span>新しいProject</span>
               </button>
               <button type="button" disabled={pending} onClick={() => void choose(null)}>
-                × Projectなしで作業
-                {task?.projectId === null && <span aria-label="選択中">✓</span>}
+                <span className="project-picker-action-icon">
+                  <X size={16} />
+                </span>
+                <span>Projectなしで作業</span>
+                {task?.projectId === null && (
+                  <span className="project-picker-selection" aria-label="選択中">
+                    <Check size={15} />
+                  </span>
+                )}
               </button>
             </div>
             <div className="sr-only" aria-live="polite">
