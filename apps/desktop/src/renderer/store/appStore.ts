@@ -1942,20 +1942,27 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
       } catch (err) {
         const code = errorCode(err);
-        set((state) => ({
-          messagesByTask: {
-            ...state.messagesByTask,
-            [taskId]: (state.messagesByTask[taskId] ?? []).filter((m) => m.id !== optimisticId),
-          },
-          pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: undefined },
-          sendingByTask: { ...state.sendingByTask, [taskId]: false },
-          draftByTask: { ...state.draftByTask, [taskId]: trimmed },
-          skillSelectionByTask: {
-            ...state.skillSelectionByTask,
-            [taskId]: selectedSkills,
-          },
-          error: code === 'TURN_ACTIVE' ? null : describeError(err),
-        }));
+        let restoredDraft = false;
+        set((state) => {
+          restoredDraft = (state.draftByTask[taskId] ?? '') === '';
+          return {
+            messagesByTask: {
+              ...state.messagesByTask,
+              [taskId]: (state.messagesByTask[taskId] ?? []).filter((m) => m.id !== optimisticId),
+            },
+            pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: undefined },
+            sendingByTask: { ...state.sendingByTask, [taskId]: false },
+            draftByTask: restoredDraft
+              ? { ...state.draftByTask, [taskId]: trimmed }
+              : state.draftByTask,
+            skillSelectionByTask: {
+              ...state.skillSelectionByTask,
+              [taskId]: selectedSkills,
+            },
+            error: code === 'TURN_ACTIVE' ? null : describeError(err),
+          };
+        });
+        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
         persistSkillDraftSelection(taskId, selectedSkills);
         if (code === 'TURN_ACTIVE') {
           get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
@@ -1978,14 +1985,21 @@ export const useAppStore = create<AppState>((set, get) => {
         await window.sprintCoder.turns.queue({ taskId, text: trimmed, skills: selectedSkills });
         // queue.changed (delivered via subscription) reconciles the compact queued list.
       } catch (err) {
-        set((state) => ({
-          draftByTask: { ...state.draftByTask, [taskId]: trimmed },
-          skillSelectionByTask: {
-            ...state.skillSelectionByTask,
-            [taskId]: selectedSkills,
-          },
-          error: describeError(err),
-        }));
+        let restoredDraft = false;
+        set((state) => {
+          restoredDraft = (state.draftByTask[taskId] ?? '') === '';
+          return {
+            draftByTask: restoredDraft
+              ? { ...state.draftByTask, [taskId]: trimmed }
+              : state.draftByTask,
+            skillSelectionByTask: {
+              ...state.skillSelectionByTask,
+              [taskId]: selectedSkills,
+            },
+            error: describeError(err),
+          };
+        });
+        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
         persistSkillDraftSelection(taskId, selectedSkills);
       }
     },
@@ -2000,13 +2014,20 @@ export const useAppStore = create<AppState>((set, get) => {
         await window.sprintCoder.turns.steer({ taskId, text: trimmed, expectedTurnId });
       } catch (err) {
         const code = errorCode(err);
-        set((state) => ({
-          draftByTask: { ...state.draftByTask, [taskId]: trimmed },
-          error:
-            code === 'STEER_STALE' || code === 'STEER_UNSUPPORTED'
-              ? state.error
-              : describeError(err),
-        }));
+        let restoredDraft = false;
+        set((state) => {
+          restoredDraft = (state.draftByTask[taskId] ?? '') === '';
+          return {
+            draftByTask: restoredDraft
+              ? { ...state.draftByTask, [taskId]: trimmed }
+              : state.draftByTask,
+            error:
+              code === 'STEER_STALE' || code === 'STEER_UNSUPPORTED'
+                ? state.error
+                : describeError(err),
+          };
+        });
+        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
         if (code === 'STEER_STALE') {
           get().showToast('Turnが切り替わったため送信し直してください');
         } else if (code === 'STEER_UNSUPPORTED') {
@@ -2039,14 +2060,21 @@ export const useAppStore = create<AppState>((set, get) => {
           skills: selectedSkills,
         });
       } catch (err) {
-        set((state) => ({
-          draftByTask: { ...state.draftByTask, [taskId]: trimmed },
-          skillSelectionByTask: {
-            ...state.skillSelectionByTask,
-            [taskId]: selectedSkills,
-          },
-          error: describeError(err),
-        }));
+        let restoredDraft = false;
+        set((state) => {
+          restoredDraft = (state.draftByTask[taskId] ?? '') === '';
+          return {
+            draftByTask: restoredDraft
+              ? { ...state.draftByTask, [taskId]: trimmed }
+              : state.draftByTask,
+            skillSelectionByTask: {
+              ...state.skillSelectionByTask,
+              [taskId]: selectedSkills,
+            },
+            error: describeError(err),
+          };
+        });
+        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
         persistSkillDraftSelection(taskId, selectedSkills);
       }
     },
