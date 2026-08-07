@@ -1723,19 +1723,20 @@ export class IpcRouter {
         goalControlInputSchema,
         taskSummarySchema,
         async (input, event, envelope) => {
-          const goal = this.persistence.getTask(input.taskId).goalState;
-          const turnId =
-            goal?.status === 'active' ? this.persistence.getActiveTurnId(input.taskId) : null;
-          if (turnId !== null) {
-            this.approvalCoordinator.turnEnded(input.taskId, turnId, 'canceled');
-            await this.cancelRuntime(input.taskId, turnId);
-          }
+          let controlledTurnId: string | null = null;
           let canceledEvent: TurnEvent | null = null;
           const result = this.runMutation(event, envelope, input.taskId, channel, () => {
-            const controlled = action(input.taskId, turnId);
+            const goal = this.persistence.getTask(input.taskId).goalState;
+            controlledTurnId =
+              goal?.status === 'active' ? this.persistence.getActiveTurnId(input.taskId) : null;
+            const controlled = action(input.taskId, controlledTurnId);
             canceledEvent = controlled.canceledEvent;
             return controlled.task;
           });
+          if (result.executed && controlledTurnId !== null) {
+            this.approvalCoordinator.turnEnded(input.taskId, controlledTurnId, 'canceled');
+            await this.cancelRuntime(input.taskId, controlledTurnId);
+          }
           if (result.executed && canceledEvent !== null) this.publish(canceledEvent);
           return result.value;
         },
