@@ -123,6 +123,8 @@ if (squirrelStartup || !hasLock) {
         fetch: (url, init) => net.fetch(url, init),
         logger: secureLogger,
         restartToInstall: restartToInstallUpdate,
+        getActiveTurns: async () => router?.getActiveTurnsForUpdate() ?? [],
+        stopActiveTurns: async (turns) => router?.stopActiveTurnsForUpdate(turns),
         currentVersion: app.getVersion(),
         isPackaged: app.isPackaged,
         platform: process.platform,
@@ -162,8 +164,9 @@ app.on('before-quit', (event) => {
   })();
 });
 
-async function restartToInstallUpdate(): Promise<void> {
-  if (shutdownCommitted || shutdownInFlight) return;
+async function restartToInstallUpdate(): Promise<'started' | 'busy' | 'shutdown_in_progress'> {
+  if (shutdownCommitted || shutdownInFlight) return 'shutdown_in_progress';
+  if (router !== null && !(await router.prepareUpdateInstall())) return 'busy';
   shutdownInFlight = true;
   try {
     await disposeApplicationResources();
@@ -183,6 +186,7 @@ async function restartToInstallUpdate(): Promise<void> {
       },
     });
   }
+  return 'started';
 }
 
 async function disposeApplicationResources(): Promise<void> {

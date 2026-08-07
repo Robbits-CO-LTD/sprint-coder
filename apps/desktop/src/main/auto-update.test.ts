@@ -17,6 +17,7 @@ const macAssets = [
   { name: 'RELEASES.json' },
   { name: 'Sprint-Coder-darwin-arm64-0.0.1-beta.5.zip' },
 ];
+const activeTurn = { taskId: 'task-1', turnId: 'turn-1', taskTitle: '長い作業' };
 
 function release(tagName: string, assets = windowsAssets, draft = false) {
   return { draft, prerelease: tagName.includes('-beta.'), tag_name: tagName, assets };
@@ -213,6 +214,235 @@ describe('startAutoUpdate', () => {
       'Automatic updater reported an error',
       expect.any(Error),
     );
+  });
+
+  it('does not restart while a Turn is active and offers all safe choices', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter();
+    const restartToInstall = vi.fn(async () => true);
+    const showMessageBox = vi
+      .fn()
+      .mockResolvedValueOnce({ response: 0, checkboxChecked: false })
+      .mockResolvedValueOnce({ response: 2, checkboxChecked: false });
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL: vi.fn(),
+        checkForUpdates: vi.fn(async () => null),
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: { showMessageBox } as unknown as AutoUpdateOptions['dialog'],
+      fetch: vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [release('v0.0.1-beta.5')],
+      })),
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      restartToInstall,
+      getActiveTurns: vi.fn(async () => [activeTurn]),
+      stopActiveTurns: vi.fn(),
+      currentVersion: '0.0.1-beta.4',
+      isPackaged: true,
+      platform: 'win32',
+      architecture: 'x64',
+      executablePath:
+        'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
+    });
+
+    await vi.waitFor(() => expect(events.listenerCount('update-downloaded')).toBe(1));
+    events.emit('update-downloaded');
+    await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(2));
+
+    expect(showMessageBox).toHaveBeenLastCalledWith(
+      expect.objectContaining({ buttons: ['完了を待つ', 'Turnを停止して更新', 'あとで'] }),
+    );
+    expect(restartToInstall).not.toHaveBeenCalled();
+    controller.stop();
+  });
+
+  it('stops the exact active Turn before installing and revalidates idle state', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter();
+    const restartToInstall = vi.fn(async () => true);
+    const stopActiveTurns = vi.fn(async () => undefined);
+    const getActiveTurns = vi.fn().mockResolvedValueOnce([activeTurn]).mockResolvedValueOnce([]);
+    const showMessageBox = vi
+      .fn()
+      .mockResolvedValueOnce({ response: 0, checkboxChecked: false })
+      .mockResolvedValueOnce({ response: 1, checkboxChecked: false });
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL: vi.fn(),
+        checkForUpdates: vi.fn(async () => null),
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: { showMessageBox } as unknown as AutoUpdateOptions['dialog'],
+      fetch: vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [release('v0.0.1-beta.5')],
+      })),
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      restartToInstall,
+      getActiveTurns,
+      stopActiveTurns,
+      currentVersion: '0.0.1-beta.4',
+      isPackaged: true,
+      platform: 'win32',
+      architecture: 'x64',
+      executablePath:
+        'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
+    });
+
+    await vi.waitFor(() => expect(events.listenerCount('update-downloaded')).toBe(1));
+    events.emit('update-downloaded');
+    await vi.waitFor(() => expect(restartToInstall).toHaveBeenCalledOnce());
+
+    expect(stopActiveTurns).toHaveBeenCalledWith([activeTurn]);
+    expect(getActiveTurns).toHaveBeenCalledTimes(2);
+    controller.stop();
+  });
+
+  it('waits for active Turns to finish before revalidating and installing', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter();
+    const restartToInstall = vi.fn(async () => true);
+    const getActiveTurns = vi
+      .fn()
+      .mockResolvedValueOnce([activeTurn])
+      .mockResolvedValueOnce([activeTurn])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const showMessageBox = vi
+      .fn()
+      .mockResolvedValueOnce({ response: 0, checkboxChecked: false })
+      .mockResolvedValueOnce({ response: 0, checkboxChecked: false });
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL: vi.fn(),
+        checkForUpdates: vi.fn(async () => null),
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: { showMessageBox } as unknown as AutoUpdateOptions['dialog'],
+      fetch: vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [release('v0.0.1-beta.5')],
+      })),
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      restartToInstall,
+      getActiveTurns,
+      stopActiveTurns: vi.fn(),
+      activeTurnPollIntervalMs: 100,
+      currentVersion: '0.0.1-beta.4',
+      isPackaged: true,
+      platform: 'win32',
+      architecture: 'x64',
+      executablePath:
+        'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
+    });
+
+    await vi.waitFor(() => expect(events.listenerCount('update-downloaded')).toBe(1));
+    events.emit('update-downloaded');
+    await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(2));
+    expect(restartToInstall).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.waitFor(() => expect(restartToInstall).toHaveBeenCalledOnce());
+    expect(getActiveTurns).toHaveBeenCalledTimes(4);
+    controller.stop();
+  });
+
+  it('returns to the safety prompt when the final install gate detects a new Turn', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter();
+    const restartToInstall = vi.fn(async () => false);
+    const showMessageBox = vi
+      .fn()
+      .mockResolvedValueOnce({ response: 0, checkboxChecked: false })
+      .mockResolvedValueOnce({ response: 2, checkboxChecked: false });
+    const getActiveTurns = vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([activeTurn]);
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL: vi.fn(),
+        checkForUpdates: vi.fn(async () => null),
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: { showMessageBox } as unknown as AutoUpdateOptions['dialog'],
+      fetch: vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [release('v0.0.1-beta.5')],
+      })),
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      restartToInstall,
+      getActiveTurns,
+      stopActiveTurns: vi.fn(),
+      currentVersion: '0.0.1-beta.4',
+      isPackaged: true,
+      platform: 'win32',
+      architecture: 'x64',
+      executablePath:
+        'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
+    });
+
+    await vi.waitFor(() => expect(events.listenerCount('update-downloaded')).toBe(1));
+    events.emit('update-downloaded');
+    await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(2));
+
+    expect(restartToInstall).toHaveBeenCalledOnce();
+    expect(showMessageBox).toHaveBeenLastCalledWith(
+      expect.objectContaining({ buttons: ['完了を待つ', 'Turnを停止して更新', 'あとで'] }),
+    );
+    controller.stop();
+  });
+
+  it('retries the final gate when transient busy work finishes before the re-query', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter();
+    const restartToInstall = vi.fn().mockResolvedValueOnce('busy').mockResolvedValueOnce('started');
+    const getActiveTurns = vi.fn(async () => []);
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL: vi.fn(),
+        checkForUpdates: vi.fn(async () => null),
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: {
+        showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })),
+      } as unknown as AutoUpdateOptions['dialog'],
+      fetch: vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [release('v0.0.1-beta.5')],
+      })),
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      restartToInstall,
+      getActiveTurns,
+      stopActiveTurns: vi.fn(),
+      currentVersion: '0.0.1-beta.4',
+      isPackaged: true,
+      platform: 'win32',
+      architecture: 'x64',
+      executablePath:
+        'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
+    });
+
+    await vi.waitFor(() => expect(events.listenerCount('update-downloaded')).toBe(1));
+    events.emit('update-downloaded');
+    await vi.waitFor(() => expect(restartToInstall).toHaveBeenCalledTimes(2));
+
+    expect(getActiveTurns).toHaveBeenCalledTimes(2);
+    controller.stop();
   });
 
   it('marks the macOS manifest as a Squirrel JSON feed', async () => {

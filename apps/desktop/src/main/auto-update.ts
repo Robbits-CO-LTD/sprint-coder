@@ -33,6 +33,14 @@ export type UpdateRelease = Readonly<{
   feedUrl: string;
 }>;
 
+export type UpdateActiveTurn = Readonly<{
+  taskId: string;
+  turnId: string | null;
+  taskTitle: string;
+}>;
+
+export type UpdateRestartResult = 'started' | 'busy' | 'shutdown_in_progress';
+
 type ParsedVersion = Readonly<{
   major: number;
   minor: number;
@@ -46,7 +54,11 @@ export type AutoUpdateOptions = Readonly<{
   dialog: Pick<Dialog, 'showMessageBox'>;
   fetch: (url: string, init: RequestInit) => Promise<FetchResponse>;
   logger: Logger;
-  restartToInstall: () => void | Promise<void>;
+  restartToInstall: () =>
+    UpdateRestartResult | boolean | void | Promise<UpdateRestartResult | boolean | void>;
+  getActiveTurns?: () => Promise<readonly UpdateActiveTurn[]>;
+  stopActiveTurns?: (turns: readonly UpdateActiveTurn[]) => Promise<void>;
+  activeTurnPollIntervalMs?: number;
   currentVersion: string;
   isPackaged: boolean;
   platform: Platform;
@@ -97,6 +109,46 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
   let promptShown = false;
   let targetVersion: string | null = null;
 
+  const getActiveTurns = async (): Promise<readonly UpdateActiveTurn[]> =>
+    options.getActiveTurns === undefined ? [] : options.getActiveTurns();
+
+  const waitForActiveTurns = async (): Promise<void> => {
+    while (!stopped && (await getActiveTurns()).length > 0)
+      await delay(options.activeTurnPollIntervalMs ?? 1_000);
+  };
+
+  const requestSafeRestart = async (): Promise<void> => {
+    let activeTurns = await getActiveTurns();
+    while (!stopped) {
+      if (activeTurns.length === 0) {
+        // Main owns the atomic final gate. `busy` (and legacy `false`) means work won the race
+        // between this advisory query and the mutation gate. If it has already finished by the
+        // re-query, loop and retry the gate; `shutdown_in_progress` returns immediately.
+        const restart = await options.restartToInstall();
+        if (restart !== false && restart !== 'busy') return;
+        activeTurns = await getActiveTurns();
+        if (activeTurns.length === 0) continue;
+      }
+      const { response } = await options.dialog.showMessageBox({
+        type: 'warning',
+        buttons: ['完了を待つ', 'Turnを停止して更新', 'あとで'],
+        defaultId: 0,
+        cancelId: 2,
+        title: '実行中の作業があります',
+        message: `${activeTurns.length}件のTurnが実行中です。`,
+        detail:
+          '完了を待つと、すべてのTurnが終了した時点で更新を開始します。停止して更新する場合は、実行中Turnを安全にキャンセルしてから再起動します。',
+      });
+      if (response === 2 || stopped) return;
+      if (response === 0) await waitForActiveTurns();
+      else {
+        if (options.stopActiveTurns === undefined) return;
+        await options.stopActiveTurns(activeTurns);
+      }
+      activeTurns = await getActiveTurns();
+    }
+  };
+
   const checkNow = async (): Promise<void> => {
     if (stopped || checking) return;
     checking = true;
@@ -145,7 +197,7 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
         detail: '更新はダウンロード済みです。再起動すると新しいバージョンに切り替わります。',
       })
       .then(({ response }) => {
-        if (response === 0) return options.restartToInstall();
+        if (response === 0) return requestSafeRestart();
         return undefined;
       })
       .catch((error: unknown) => {
@@ -174,6 +226,13 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
       options.updater.removeListener('update-downloaded', onUpdateDownloaded);
     },
   };
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    (timer as { unref?: () => void }).unref?.();
+  });
 }
 
 export async function discoverUpdate(
