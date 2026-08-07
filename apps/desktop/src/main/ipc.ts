@@ -20,6 +20,7 @@ import {
 } from 'node:path';
 import { workspaceMutationBinding } from './path-guard';
 import { CommandRunnerError } from './command-runner';
+import { TeamSubscriptionRegistry } from './team-subscription-registry';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
@@ -134,6 +135,8 @@ import {
   taskSkillSelectionInputSchema,
   teamDetailSchema,
   teamEventSchema,
+  teamSubscriptionInputSchema,
+  teamSubscriptionSnapshotSchema,
   teamHireWorkerInputSchema,
   teamMissionSummarySchema,
   teamResumeMissionInputSchema,
@@ -432,8 +435,7 @@ export class IpcRouter {
   private readonly providerWorkspaceTools: ProviderWorkspaceTools;
   private readonly autoReviewer = AutoReviewer.createProduction();
   private readonly teamCoordinator: TeamCoordinator;
-  private readonly teamSubscriptions = new Set<string>();
-  private readonly teamEventSeqByTask = new Map<string, number>();
+  private readonly teamSubscriptions = new TeamSubscriptionRegistry();
   private readonly teamMcpBridge: TeamMcpBridge;
   private readonly skillSettings: SkillSettingsService;
   private readonly modelCatalog = new ModelCatalogService();
@@ -651,12 +653,11 @@ export class IpcRouter {
       this.teamWorkerRuntime,
       (taskId, detail) => {
         if (
-          this.teamSubscriptions.has(taskId) &&
+          this.teamSubscriptions.hasSubscribers(taskId) &&
           !this.window.isDestroyed() &&
           !this.window.webContents.isDestroyed()
         ) {
-          const seq = (this.teamEventSeqByTask.get(taskId) ?? 0) + 1;
-          this.teamEventSeqByTask.set(taskId, seq);
+          const seq = this.teamSubscriptions.nextSequence(taskId);
           this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
             taskId,
             event: teamEventSchema.parse({ type: 'updated', seq, detail }),
@@ -2135,14 +2136,25 @@ export class IpcRouter {
     this.handleMutation(IPC_CHANNELS.teamsStopAll, taskIdPayloadSchema, teamDetailSchema, (input) =>
       this.teamCoordinator.stopAll(input.taskId),
     );
-    this.handle(IPC_CHANNELS.teamsSubscribe, taskIdPayloadSchema, z.undefined(), (input) => {
-      this.teamSubscriptions.add(input.taskId);
-      return undefined;
-    });
-    this.handle(IPC_CHANNELS.teamsUnsubscribe, taskIdPayloadSchema, z.undefined(), (input) => {
-      this.teamSubscriptions.delete(input.taskId);
-      return undefined;
-    });
+    this.handle(
+      IPC_CHANNELS.teamsSubscribe,
+      teamSubscriptionInputSchema,
+      teamSubscriptionSnapshotSchema,
+      (input) => ({
+        type: 'snapshot',
+        seq: this.teamSubscriptions.subscribe(input.taskId, input.subscriptionId),
+        detail: this.teamCoordinator.get(input.taskId),
+      }),
+    );
+    this.handle(
+      IPC_CHANNELS.teamsUnsubscribe,
+      teamSubscriptionInputSchema,
+      z.undefined(),
+      (input) => {
+        this.teamSubscriptions.unsubscribe(input.taskId, input.subscriptionId);
+        return undefined;
+      },
+    );
     this.handle(
       IPC_CHANNELS.teamsGetCanvasView,
       taskIdPayloadSchema,

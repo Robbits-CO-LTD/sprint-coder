@@ -951,13 +951,33 @@ export type TeamSendMessageInput = z.infer<typeof teamSendMessageInputSchema>;
 export const teamWorkerRefSchema = z.object({ taskId: idSchema, agentId: idSchema }).strict();
 export type TeamWorkerRef = z.infer<typeof teamWorkerRefSchema>;
 
-export const teamEventSchema = z
+export const teamSubscriptionInputSchema = z
   .object({
-    type: z.literal('updated'),
-    seq: z.number().int().min(1),
-    detail: teamDetailSchema,
+    taskId: idSchema,
+    subscriptionId: idSchema,
   })
   .strict();
+export type TeamSubscriptionInput = z.infer<typeof teamSubscriptionInputSchema>;
+
+export const teamSubscriptionSnapshotSchema = z
+  .object({
+    type: z.literal('snapshot'),
+    seq: z.number().int().min(0),
+    detail: teamDetailSchema.nullable(),
+  })
+  .strict();
+export type TeamSubscriptionSnapshot = z.infer<typeof teamSubscriptionSnapshotSchema>;
+
+export const teamEventSchema = z.discriminatedUnion('type', [
+  teamSubscriptionSnapshotSchema,
+  z
+    .object({
+      type: z.literal('updated'),
+      seq: z.number().int().min(1),
+      detail: teamDetailSchema,
+    })
+    .strict(),
+]);
 export type TeamEvent = z.infer<typeof teamEventSchema>;
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02): per-Task camera + Worker node layout, saved with

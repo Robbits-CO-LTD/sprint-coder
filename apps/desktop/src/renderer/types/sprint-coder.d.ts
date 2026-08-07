@@ -930,7 +930,11 @@ export interface SprintCoderApi {
     stopAll(taskId: string): Promise<TeamDetail>;
     subscribe(
       taskId: string,
-      listener: (event: { type: 'updated'; seq: number; detail: TeamDetail }) => void,
+      listener: (
+        event:
+          | { type: 'snapshot'; seq: number; detail: TeamDetail | null }
+          | { type: 'updated'; seq: number; detail: TeamDetail },
+      ) => void,
     ): () => void;
     getCanvasView(taskId: string): Promise<CanvasView | null>;
     saveCanvasView(input: CanvasViewSaveInput): Promise<CanvasViewSaveResult>;
