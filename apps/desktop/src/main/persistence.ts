@@ -3845,14 +3845,13 @@ export interface PersistenceClient {
   setPinned(taskId: string, pinned: boolean): TaskSummary;
   setArchived(taskId: string, archived: boolean): TaskSummary;
   setGoal(taskId: string, goal: string): TaskSummary;
-  startGoal(taskId: string, objective: string, tokenBudget?: number | null): TaskSummary;
+  startGoal(taskId: string, objective: string): TaskSummary;
   pauseGoal(taskId: string): TaskSummary;
   resumeGoal(taskId: string): TaskSummary;
   clearGoal(taskId: string): TaskSummary;
   startGoalTurn(
     taskId: string,
     objective: string,
-    tokenBudget?: number | null,
     skills?: readonly PersistedTurnSkill[],
     includeBuiltinTeamSkill?: boolean,
   ): StartedGoalTurn;
@@ -8341,18 +8340,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
   setGoal(taskId: string, goal: string): TaskSummary {
     if (goal.trim() === '') return this.clearGoal(taskId);
-    this.startGoal(taskId, goal, null);
+    this.startGoal(taskId, goal);
     return this.pauseGoal(taskId);
   }
 
-  startGoal(taskId: string, objective: string, tokenBudget: number | null = null): TaskSummary {
+  startGoal(taskId: string, objective: string): TaskSummary {
     return this.db.transaction(() => {
       const current = this.getTaskRow(taskId);
       const parsedObjective = objective.trim();
       if (parsedObjective.length === 0 || parsedObjective.length > 4000)
         throw new Error('Goal must be between 1 and 4000 characters');
-      if (tokenBudget !== null && (!Number.isInteger(tokenBudget) || tokenBudget <= 0))
-        throw new Error('Goal token budget must be a positive integer');
       const now = new Date().toISOString();
       const preservingUsage = current.goal === parsedObjective && current.goal_status !== null;
       const activeSeconds =
@@ -8375,7 +8372,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(
           parsedObjective,
-          tokenBudget,
+          null,
           preservingUsage ? current.goal_tokens_used : 0,
           preservingUsage ? current.goal_time_used_seconds + activeSeconds : 0,
           preservingUsage ? current.goal_started_at : now,
@@ -8420,7 +8417,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
   startGoalTurn(
     taskId: string,
     objective: string,
-    tokenBudget: number | null = null,
     skills: readonly PersistedTurnSkill[] = [],
     includeBuiltinTeamSkill = false,
   ): StartedGoalTurn {
@@ -8428,7 +8424,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.assertTask(taskId);
       this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
-      this.startGoal(taskId, objective, tokenBudget);
+      this.startGoal(taskId, objective);
       const started = this.startTurnInTransaction(
         taskId,
         objective,

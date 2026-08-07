@@ -1255,7 +1255,6 @@ describe('public contracts', () => {
       contracts.goalStartInputSchema.parse({
         taskId: 'task-1',
         objective: legacyObjective,
-        tokenBudget: null,
         skills: [],
       }),
     ).toThrow();

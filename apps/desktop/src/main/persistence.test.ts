@@ -566,11 +566,11 @@ if (runsWithElectronAbi)
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('goal lifecycle');
 
-      const first = persistence.startGoalTurn(task.id, '検索UIを完成させる', 20_000);
+      const first = persistence.startGoalTurn(task.id, '検索UIを完成させる');
       expect(first.task.goalState).toMatchObject({
         objective: '検索UIを完成させる',
         status: 'active',
-        tokenBudget: 20_000,
+        tokenBudget: null,
         tokensUsed: 0,
         timeUsedSeconds: 0,
       });
@@ -634,7 +634,7 @@ if (runsWithElectronAbi)
       expect(reopened.getTask(task.id).goalState).toMatchObject({
         objective: '検索UIを完成させる',
         status: 'completed',
-        tokenBudget: 20_000,
+        tokenBudget: null,
         tokensUsed: 20,
       });
       expect(reopened.getTask(interruptedTask.id).goalState).toMatchObject({ status: 'paused' });
@@ -668,7 +668,7 @@ if (runsWithElectronAbi)
       expect(active.skills).toEqual([resolved]);
       expect(persistence.getTurnSkills(task.id, active.turnId)).toEqual([resolved]);
       persistence.cancelTurn(task.id, active.turnId);
-      const goalTurn = persistence.startGoalTurn(task.id, 'review goal', null, [resolved]);
+      const goalTurn = persistence.startGoalTurn(task.id, 'review goal', [resolved]);
       expect(goalTurn.started.skills).toEqual([resolved]);
       expect(persistence.getTurnSkills(task.id, goalTurn.started.turnId)).toEqual([resolved]);
       persistence.cancelTurn(task.id, goalTurn.started.turnId);

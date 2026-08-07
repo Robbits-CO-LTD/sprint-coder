@@ -2780,7 +2780,6 @@ export const goalStartInputSchema = z
   .object({
     taskId: idSchema,
     objective: z.string().trim().min(1).max(4000),
-    tokenBudget: z.number().int().positive().max(100_000_000).nullable().default(null),
     skills: turnSkillSelectionsSchema.default([]),
   })
   .strict();
@@ -2942,7 +2941,6 @@ export interface SprintCoderApi {
     start(input: {
       taskId: string;
       objective: string;
-      tokenBudget?: number | null;
       skills?: readonly TurnSkillSelection[];
     }): Promise<{ task: TaskSummary; turnId: string }>;
     pause(taskId: string): Promise<TaskSummary>;

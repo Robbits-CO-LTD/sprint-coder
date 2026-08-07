@@ -1658,7 +1658,6 @@ export const useAppStore = create<AppState>((set, get) => {
         const result = await window.sprintCoder.goals.start({
           taskId,
           objective,
-          tokenBudget: null,
           skills: selectedSkills,
         });
         set((state) => ({

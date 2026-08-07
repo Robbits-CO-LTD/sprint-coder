@@ -1680,7 +1680,6 @@ export class IpcRouter {
             const goal = this.persistence.startGoalTurn(
               input.taskId,
               input.objective,
-              input.tokenBudget,
               skills,
               shouldSealBuiltinTeamSkill(input.objective, skills),
             );
