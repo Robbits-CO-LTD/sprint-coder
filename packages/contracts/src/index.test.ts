@@ -36,6 +36,8 @@ import {
   teamExecutionIsolationSchema,
   teamResumeExecutionIntegrationInputSchema,
   teamEventSchema,
+  teamSubscriptionInputSchema,
+  teamSubscriptionSnapshotSchema,
   teamHireWorkerInputSchema,
   teamMessageSummarySchema,
   teamAssignMissionInputSchema,
@@ -864,6 +866,15 @@ describe('public contracts', () => {
     };
     const event = { type: 'updated', seq: 1, detail };
     expect(teamEventSchema.parse(event)).toMatchObject({ type: 'updated' });
+    expect(
+      teamSubscriptionSnapshotSchema.parse({ type: 'snapshot', seq: 0, detail: null }),
+    ).toEqual({ type: 'snapshot', seq: 0, detail: null });
+    expect(
+      teamSubscriptionInputSchema.parse({ taskId: 'task-1', subscriptionId: 'subscription-1' }),
+    ).toEqual({ taskId: 'task-1', subscriptionId: 'subscription-1' });
+    expect(() =>
+      teamSubscriptionInputSchema.parse({ taskId: 'task-1', subscriptionId: '' }),
+    ).toThrow();
     expect(() => teamEventSchema.parse({ ...event, type: 'deleted' })).toThrow();
     expect(() => teamEventSchema.parse({ ...event, unknown: true })).toThrow();
   });

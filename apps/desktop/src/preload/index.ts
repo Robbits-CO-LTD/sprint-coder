@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
@@ -105,6 +106,8 @@ import {
   taskSkillSelectionInputSchema,
   teamDetailSchema,
   teamEventSchema,
+  teamSubscriptionInputSchema,
+  teamSubscriptionSnapshotSchema,
   teamHireWorkerInputSchema,
   teamMissionSummarySchema,
   teamResumeMissionInputSchema,
@@ -138,6 +141,7 @@ import {
   type CommandResult,
   type SprintCoderApi,
 } from '@sprint-coder/contracts';
+import { createTeamSubscriptionBuffer } from './team-subscription-buffer';
 import { WINDOW_CONTROL_CHANNELS } from '../window-controls';
 
 async function invoke<TInput, TOutput>(
@@ -420,20 +424,49 @@ const api: SprintCoderApi = {
     stopAll: (taskId) =>
       invoke(IPC_CHANNELS.teamsStopAll, taskIdPayloadSchema, teamDetailSchema, { taskId }),
     subscribe: (taskId, listener) => {
+      const subscriptionId = randomUUID();
+      const input = { taskId, subscriptionId };
+      const buffer = createTeamSubscriptionBuffer(listener);
+      let disposed = false;
       const eventSchema = z.object({ taskId: z.string(), event: teamEventSchema }).strict();
       const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
         const parsed = eventSchema.safeParse(raw);
-        if (parsed.success && parsed.data.taskId === taskId) listener(parsed.data.event);
+        if (parsed.success && parsed.data.taskId === taskId) buffer.push(parsed.data.event);
       };
       ipcRenderer.on(IPC_CHANNELS.teamsEvent, handler);
-      void invoke(IPC_CHANNELS.teamsSubscribe, taskIdPayloadSchema, z.undefined(), {
-        taskId,
-      }).catch(() => ipcRenderer.removeListener(IPC_CHANNELS.teamsEvent, handler));
+      void invoke(
+        IPC_CHANNELS.teamsSubscribe,
+        teamSubscriptionInputSchema,
+        teamSubscriptionSnapshotSchema,
+        input,
+      )
+        .then((snapshot) => {
+          if (disposed) {
+            void invoke(
+              IPC_CHANNELS.teamsUnsubscribe,
+              teamSubscriptionInputSchema,
+              z.undefined(),
+              input,
+            ).catch(() => undefined);
+            return;
+          }
+          buffer.activate(snapshot);
+        })
+        .catch(() => {
+          buffer.dispose();
+          ipcRenderer.removeListener(IPC_CHANNELS.teamsEvent, handler);
+        });
       return () => {
+        if (disposed) return;
+        disposed = true;
+        buffer.dispose();
         ipcRenderer.removeListener(IPC_CHANNELS.teamsEvent, handler);
-        void invoke(IPC_CHANNELS.teamsUnsubscribe, taskIdPayloadSchema, z.undefined(), {
-          taskId,
-        }).catch(() => undefined);
+        void invoke(
+          IPC_CHANNELS.teamsUnsubscribe,
+          teamSubscriptionInputSchema,
+          z.undefined(),
+          input,
+        ).catch(() => undefined);
       };
     },
     getCanvasView: (taskId) =>
