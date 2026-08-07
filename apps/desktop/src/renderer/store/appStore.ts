@@ -260,6 +260,10 @@ type AppState = {
   setPinned(taskId: string, pinned: boolean): Promise<void>;
   setArchived(taskId: string, archived: boolean): Promise<void>;
   setGoal(taskId: string, goal: string): Promise<void>;
+  startGoal(taskId: string, objective: string): Promise<boolean>;
+  pauseGoal(taskId: string): Promise<void>;
+  resumeGoal(taskId: string): Promise<void>;
+  clearGoal(taskId: string): Promise<void>;
   toggleTeamView(taskId: string): Promise<void>;
   // No hireTeamWorker/sendTeamMessage actions here: the Leader hires and dispatches Workers on
   // its own during its Turn (FR-TEAM-06/13, main/team-tools.ts) — the user only ever converses
@@ -1642,6 +1646,60 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const updated = await window.sprintCoder.tasks.setGoal(taskId, goal);
         set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      }
+    },
+
+    async startGoal(taskId: string, objective: string) {
+      if (!window.sprintCoder?.goals) return false;
+      try {
+        const updated = await window.sprintCoder.goals.start({
+          taskId,
+          objective,
+          tokenBudget: null,
+        });
+        set((state) => ({
+          tasks: state.tasks.map((task) => (task.id === taskId ? updated : task)),
+        }));
+        return true;
+      } catch (err) {
+        set({ error: describeError(err) });
+        return false;
+      }
+    },
+
+    async pauseGoal(taskId: string) {
+      if (!window.sprintCoder?.goals) return;
+      try {
+        const updated = await window.sprintCoder.goals.pause(taskId);
+        set((state) => ({
+          tasks: state.tasks.map((task) => (task.id === taskId ? updated : task)),
+        }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      }
+    },
+
+    async resumeGoal(taskId: string) {
+      if (!window.sprintCoder?.goals) return;
+      try {
+        const updated = await window.sprintCoder.goals.resume(taskId);
+        set((state) => ({
+          tasks: state.tasks.map((task) => (task.id === taskId ? updated : task)),
+        }));
+      } catch (err) {
+        set({ error: describeError(err) });
+      }
+    },
+
+    async clearGoal(taskId: string) {
+      if (!window.sprintCoder?.goals) return;
+      try {
+        const updated = await window.sprintCoder.goals.clear(taskId);
+        set((state) => ({
+          tasks: state.tasks.map((task) => (task.id === taskId ? updated : task)),
+        }));
       } catch (err) {
         set({ error: describeError(err) });
       }

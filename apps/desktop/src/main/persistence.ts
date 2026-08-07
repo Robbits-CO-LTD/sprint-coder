@@ -322,6 +322,12 @@ type TaskRow = {
   pinned: number;
   archived: number;
   goal: string | null;
+  goal_status: 'active' | 'paused' | 'completed' | 'blocked' | null;
+  goal_token_budget: number | null;
+  goal_tokens_used: number;
+  goal_time_used_seconds: number;
+  goal_started_at: string | null;
+  goal_updated_at: string | null;
   workspace_path: string | null;
   local_only: number;
   mutation_scope_key: string | null;
@@ -2951,6 +2957,25 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 64,
+    checksum: 'goal-control-v64-lifecycle',
+    sql: `
+      ALTER TABLE tasks ADD COLUMN goal_status TEXT
+        CHECK (goal_status IS NULL OR goal_status IN ('active', 'paused', 'completed', 'blocked'));
+      ALTER TABLE tasks ADD COLUMN goal_token_budget INTEGER
+        CHECK (goal_token_budget IS NULL OR goal_token_budget > 0);
+      ALTER TABLE tasks ADD COLUMN goal_tokens_used INTEGER NOT NULL DEFAULT 0
+        CHECK (goal_tokens_used >= 0);
+      ALTER TABLE tasks ADD COLUMN goal_time_used_seconds INTEGER NOT NULL DEFAULT 0
+        CHECK (goal_time_used_seconds >= 0);
+      ALTER TABLE tasks ADD COLUMN goal_started_at TEXT;
+      ALTER TABLE tasks ADD COLUMN goal_updated_at TEXT;
+      UPDATE tasks
+         SET goal_status = 'paused', goal_started_at = updated_at, goal_updated_at = updated_at
+       WHERE goal IS NOT NULL AND length(trim(goal)) > 0;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3819,6 +3844,10 @@ export interface PersistenceClient {
   setPinned(taskId: string, pinned: boolean): TaskSummary;
   setArchived(taskId: string, archived: boolean): TaskSummary;
   setGoal(taskId: string, goal: string): TaskSummary;
+  startGoal(taskId: string, objective: string, tokenBudget?: number | null): TaskSummary;
+  pauseGoal(taskId: string): TaskSummary;
+  resumeGoal(taskId: string): TaskSummary;
+  clearGoal(taskId: string): TaskSummary;
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
   getDraftSkillSelections(taskId: string): TurnSkillSelection[];
@@ -4811,6 +4840,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       pinned: false,
       archived: false,
       goal: null,
+      goalState: null,
       workspacePath: null,
       localOnly,
       hasConversation: false,
@@ -8271,16 +8301,109 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
   setGoal(taskId: string, goal: string): TaskSummary {
+    if (goal.trim() === '') return this.clearGoal(taskId);
+    return this.startGoal(taskId, goal, null);
+  }
+
+  startGoal(taskId: string, objective: string, tokenBudget: number | null = null): TaskSummary {
+    return this.db.transaction(() => {
+      const current = this.getTaskRow(taskId);
+      const parsedObjective = objective.trim();
+      if (parsedObjective.length === 0 || parsedObjective.length > 4000)
+        throw new Error('Goal must be between 1 and 4000 characters');
+      if (tokenBudget !== null && (!Number.isInteger(tokenBudget) || tokenBudget <= 0))
+        throw new Error('Goal token budget must be a positive integer');
+      const now = new Date().toISOString();
+      const preservingUsage = current.goal === parsedObjective && current.goal_status !== null;
+      const activeSeconds =
+        preservingUsage && current.goal_status === 'active' && current.goal_updated_at !== null
+          ? Math.max(
+              0,
+              Math.floor(
+                (new Date(now).getTime() - new Date(current.goal_updated_at).getTime()) / 1000,
+              ),
+            )
+          : 0;
+      const result = this.db
+        .prepare(
+          `UPDATE tasks
+              SET goal = ?, goal_status = 'active', goal_token_budget = ?,
+                  goal_tokens_used = ?, goal_time_used_seconds = ?,
+                  goal_started_at = ?, goal_updated_at = ?,
+                  context_epoch = context_epoch + ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          parsedObjective,
+          tokenBudget,
+          preservingUsage ? current.goal_tokens_used : 0,
+          preservingUsage ? current.goal_time_used_seconds + activeSeconds : 0,
+          preservingUsage ? current.goal_started_at : now,
+          now,
+          current.goal === parsedObjective ? 0 : 1,
+          now,
+          taskId,
+        );
+      if (result.changes !== 1) throw new NotFoundError('Task not found');
+      this.quarantineStaleBackgroundInTransaction(taskId);
+      return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
+    })();
+  }
+
+  pauseGoal(taskId: string): TaskSummary {
+    return this.transitionGoal(taskId, 'paused');
+  }
+
+  resumeGoal(taskId: string): TaskSummary {
+    return this.transitionGoal(taskId, 'active');
+  }
+
+  clearGoal(taskId: string): TaskSummary {
     return this.db.transaction(() => {
       const current = this.getTaskRow(taskId);
       const result = this.db
         .prepare(
-          `UPDATE tasks SET goal = ?, context_epoch = context_epoch + ?, updated_at = ?
-           WHERE id = ?`,
+          `UPDATE tasks
+              SET goal = NULL, goal_status = NULL, goal_token_budget = NULL,
+                  goal_tokens_used = 0, goal_time_used_seconds = 0,
+                  goal_started_at = NULL, goal_updated_at = NULL,
+                  context_epoch = context_epoch + ?, updated_at = ?
+            WHERE id = ?`,
         )
-        .run(goal, current.goal === goal ? 0 : 1, new Date().toISOString(), taskId);
+        .run(current.goal === null ? 0 : 1, new Date().toISOString(), taskId);
       if (result.changes !== 1) throw new NotFoundError('Task not found');
       this.quarantineStaleBackgroundInTransaction(taskId);
+      return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
+    })();
+  }
+
+  private transitionGoal(taskId: string, status: 'active' | 'paused'): TaskSummary {
+    return this.db.transaction(() => {
+      const current = this.getTaskRow(taskId);
+      if (current.goal === null || current.goal_status === null)
+        throw new Error('Task does not have a Goal');
+      const now = new Date();
+      const activeSeconds =
+        current.goal_status === 'active' && current.goal_updated_at !== null
+          ? Math.max(
+              0,
+              Math.floor((now.getTime() - new Date(current.goal_updated_at).getTime()) / 1000),
+            )
+          : 0;
+      const result = this.db
+        .prepare(
+          `UPDATE tasks
+              SET goal_status = ?, goal_time_used_seconds = ?, goal_updated_at = ?, updated_at = ?
+            WHERE id = ?`,
+        )
+        .run(
+          status,
+          current.goal_time_used_seconds + activeSeconds,
+          now.toISOString(),
+          now.toISOString(),
+          taskId,
+        );
+      if (result.changes !== 1) throw new NotFoundError('Task not found');
       return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
     })();
   }
@@ -13907,6 +14030,21 @@ function toTask(row: TaskRow, hasConversation: boolean): TaskSummary {
     pinned: row.pinned === 1,
     archived: row.archived === 1,
     goal: row.goal,
+    goalState:
+      row.goal === null ||
+      row.goal_status === null ||
+      row.goal_started_at === null ||
+      row.goal_updated_at === null
+        ? null
+        : {
+            objective: row.goal,
+            status: row.goal_status,
+            tokenBudget: row.goal_token_budget,
+            tokensUsed: row.goal_tokens_used,
+            timeUsedSeconds: row.goal_time_used_seconds,
+            startedAt: row.goal_started_at,
+            updatedAt: row.goal_updated_at,
+          },
     workspacePath: row.workspace_path,
     localOnly: row.local_only === 1,
     hasConversation,

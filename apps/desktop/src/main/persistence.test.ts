@@ -550,6 +550,7 @@ if (runsWithElectronAbi)
       expect(reopened.listTasks()[0]).toMatchObject({
         pinned: true,
         goal: 'goal',
+        goalState: { objective: 'goal', status: 'active' },
         workspacePath: '/tmp/workspace',
       });
       expect(reopened.getDraft(task.id)).toBe('draft');
@@ -558,6 +559,36 @@ if (runsWithElectronAbi)
         queued: [{ ordinal: 1, text: 'resume me' }],
       });
       expect(reopened.startNextQueued(task.id)?.started.text).toBe('resume me');
+      reopened.close();
+    });
+
+    it('persists the Goal lifecycle and resets usage when the objective changes', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('goal lifecycle');
+
+      const started = persistence.startGoal(task.id, '検索UIを完成させる', 20_000);
+      expect(started.goalState).toMatchObject({
+        objective: '検索UIを完成させる',
+        status: 'active',
+        tokenBudget: 20_000,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+      });
+      const startedAt = started.goalState?.startedAt;
+      expect(persistence.pauseGoal(task.id).goalState?.status).toBe('paused');
+      expect(persistence.resumeGoal(task.id).goalState).toMatchObject({
+        status: 'active',
+        startedAt,
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTask(task.id).goalState).toMatchObject({
+        objective: '検索UIを完成させる',
+        status: 'active',
+        tokenBudget: 20_000,
+      });
+      expect(reopened.clearGoal(task.id)).toMatchObject({ goal: null, goalState: null });
       reopened.close();
     });
 
@@ -1015,7 +1046,7 @@ if (runsWithElectronAbi)
 
       persistence.startTurn(task.id, '後続メッセージ');
 
-      expect(persistence.getTask(task.id).goal).toBe('');
+      expect(persistence.getTask(task.id).goal).toBeNull();
       persistence.close();
     });
 
@@ -5270,6 +5301,7 @@ if (runsWithElectronAbi)
         { version: 61 },
         { version: 62 },
         { version: 63 },
+        { version: 64 },
       ]);
       for (const [table, columns] of [
         [

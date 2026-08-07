@@ -118,6 +118,8 @@ import {
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
+  goalControlInputSchema,
+  goalStartInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -1657,6 +1659,28 @@ export class IpcRouter {
           this.persistence.setGoal(input.taskId, input.goal),
         ).value,
     );
+    this.handleMutation(
+      IPC_CHANNELS.goalsStart,
+      goalStartInputSchema,
+      taskSummarySchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.goalsStart, () =>
+          this.persistence.startGoal(input.taskId, input.objective, input.tokenBudget),
+        ).value,
+    );
+    for (const [channel, action] of [
+      [IPC_CHANNELS.goalsPause, (taskId: string) => this.persistence.pauseGoal(taskId)],
+      [IPC_CHANNELS.goalsResume, (taskId: string) => this.persistence.resumeGoal(taskId)],
+      [IPC_CHANNELS.goalsClear, (taskId: string) => this.persistence.clearGoal(taskId)],
+    ] as const)
+      this.handleMutation(
+        channel,
+        goalControlInputSchema,
+        taskSummarySchema,
+        (input, event, envelope) =>
+          this.runMutation(event, envelope, input.taskId, channel, () => action(input.taskId))
+            .value,
+      );
     this.handle(IPC_CHANNELS.tasksGetDraft, taskIdPayloadSchema, z.string(), (input) =>
       this.persistence.getDraft(input.taskId),
     );

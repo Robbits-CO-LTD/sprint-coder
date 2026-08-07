@@ -123,6 +123,20 @@ export const toolCatalogSnapshotSchema = z
 export type ToolCatalogEntry = z.infer<typeof toolCatalogEntrySchema>;
 export type ToolCatalogSnapshot = z.infer<typeof toolCatalogSnapshotSchema>;
 
+export const goalStatusSchema = z.enum(['active', 'paused', 'completed', 'blocked']);
+export const goalSummarySchema = z
+  .object({
+    objective: z.string().trim().min(1).max(4000),
+    status: goalStatusSchema,
+    tokenBudget: z.number().int().positive().nullable(),
+    tokensUsed: z.number().int().nonnegative(),
+    timeUsedSeconds: z.number().int().nonnegative(),
+    startedAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type GoalSummary = z.infer<typeof goalSummarySchema>;
+
 export const taskSummarySchema = z
   .object({
     id: idSchema,
@@ -131,6 +145,7 @@ export const taskSummarySchema = z
     pinned: z.boolean(),
     archived: z.boolean(),
     goal: z.string().nullable(),
+    goalState: goalSummarySchema.nullable().default(null),
     workspacePath: z.string().nullable(),
     localOnly: z.boolean(),
     /** Whether the Task has accepted at least one user message. Older backends may omit this;
@@ -2759,6 +2774,14 @@ export const taskArchivedInputSchema = z
   .object({ taskId: idSchema, archived: z.boolean() })
   .strict();
 export const taskGoalInputSchema = z.object({ taskId: idSchema, goal: taskTextSchema }).strict();
+export const goalStartInputSchema = z
+  .object({
+    taskId: idSchema,
+    objective: z.string().trim().min(1).max(4000),
+    tokenBudget: z.number().int().positive().max(100_000_000).nullable().default(null),
+  })
+  .strict();
+export const goalControlInputSchema = z.object({ taskId: idSchema }).strict();
 export const taskDraftInputSchema = z.object({ taskId: idSchema, draft: taskTextSchema }).strict();
 export const turnStartInputSchema = z
   .object({
@@ -2907,6 +2930,16 @@ export interface SprintCoderApi {
     setGoal(taskId: string, goal: string): Promise<TaskSummary>;
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
+  };
+  goals: {
+    start(input: {
+      taskId: string;
+      objective: string;
+      tokenBudget?: number | null;
+    }): Promise<TaskSummary>;
+    pause(taskId: string): Promise<TaskSummary>;
+    resume(taskId: string): Promise<TaskSummary>;
+    clear(taskId: string): Promise<TaskSummary>;
   };
   projects: {
     list(): Promise<ProjectSummary[]>;
@@ -3142,6 +3175,10 @@ export const IPC_CHANNELS = {
   tasksSetPinned: 'sprint-coder:tasks:set-pinned',
   tasksSetArchived: 'sprint-coder:tasks:set-archived',
   tasksSetGoal: 'sprint-coder:tasks:set-goal',
+  goalsStart: 'sprint-coder:goals:start',
+  goalsPause: 'sprint-coder:goals:pause',
+  goalsResume: 'sprint-coder:goals:resume',
+  goalsClear: 'sprint-coder:goals:clear',
   tasksGetDraft: 'sprint-coder:tasks:get-draft',
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
   projectsList: 'sprint-coder:projects:list',

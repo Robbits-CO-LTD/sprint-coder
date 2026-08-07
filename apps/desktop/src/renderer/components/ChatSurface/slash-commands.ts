@@ -19,8 +19,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
     id: 'goal',
     command: '/goal',
-    label: 'Goalを設定',
-    description: '次の送信内容を現在のTaskのGoalとして保存します',
+    label: 'Goalを開始',
+    description: '次の送信内容を目標にして長時間タスクを開始します',
     keywords: ['target', '目標', 'ゴール'],
   },
   {
