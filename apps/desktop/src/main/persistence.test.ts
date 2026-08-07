@@ -619,6 +619,12 @@ if (runsWithElectronAbi)
       );
       if (pausedWithQueue.next !== null)
         finishTurn(persistence, queuedTask.id, pausedWithQueue.next.started.turnId);
+      const canceledTask = persistence.createTask('goal canceled by turn control');
+      const canceledGoal = persistence.startGoalTurn(canceledTask.id, '通常停止でもGoalを止める');
+      expect(
+        persistence.cancelTurnAndFinishGoal(canceledTask.id, canceledGoal.started.turnId).task
+          ?.goalState,
+      ).toMatchObject({ status: 'paused' });
       const interruptedTask = persistence.createTask('interrupted goal');
       persistence.startGoalTurn(interruptedTask.id, '再起動後も状態を正しく保つ');
       persistence.close();

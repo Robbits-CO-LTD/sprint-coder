@@ -2360,6 +2360,7 @@ export class IpcRouter {
         this.approvalCoordinator.turnEnded(input.taskId, input.turnId, 'canceled');
         await this.cancelRuntime(input.taskId, input.turnId);
         let canceledEvent: TurnEvent | null = null;
+        let goalTask: TaskSummary | null = null;
         let next: QueueTransition = null;
         const result = this.runMutation(
           event,
@@ -2367,11 +2368,14 @@ export class IpcRouter {
           input.taskId,
           IPC_CHANNELS.turnsCancel,
           () => {
-            canceledEvent = this.persistence.cancelTurn(input.taskId, input.turnId);
+            const completion = this.persistence.cancelTurnAndFinishGoal(input.taskId, input.turnId);
+            canceledEvent = completion.event;
+            goalTask = completion.task;
             next = canceledEvent === null ? null : this.persistence.startNextQueued(input.taskId);
           },
         );
         if (result.executed) {
+          if (goalTask !== null) this.pushTaskUpdated(goalTask);
           if (canceledEvent !== null) this.publish(canceledEvent);
           this.dispatchQueueTransition(next);
         }

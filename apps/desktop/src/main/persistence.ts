@@ -3873,6 +3873,10 @@ export interface PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
   ): { event: TurnEvent; task: TaskSummary | null };
+  cancelTurnAndFinishGoal(
+    taskId: string,
+    turnId: string,
+  ): { event: TurnEvent | null; task: TaskSummary | null };
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
   getDraftSkillSelections(taskId: string): TurnSkillSelection[];
@@ -8494,6 +8498,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
           taskId,
         );
       return { event, task: this.getTask(taskId) };
+    })();
+  }
+
+  cancelTurnAndFinishGoal(
+    taskId: string,
+    turnId: string,
+  ): { event: TurnEvent | null; task: TaskSummary | null } {
+    return this.db.transaction(() => {
+      const turn = this.getTurn(taskId, turnId);
+      if (isTerminal(turn.state)) return { event: null, task: null };
+      transitionTurn(turn.state, 'canceling');
+      this.updateTurn(turnId, 'canceling');
+      return this.completeTurnAndFinishGoal(taskId, turnId, 'canceled');
     })();
   }
 
