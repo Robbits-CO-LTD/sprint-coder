@@ -1507,17 +1507,19 @@ export class IpcRouter {
         if (current.policyEpoch !== input.expectedPolicyEpoch)
           throw new StalePermissionPolicyError();
         if (input.preset === 'full') {
-          const confirmation = await dialog.showMessageBox(this.window, {
-            type: 'warning',
-            title: 'フルアクセスを有効にしますか？',
-            message: 'フルアクセスはTaskのWorkspace操作を拡張します。',
-            detail: '管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。',
-            buttons: ['キャンセル', 'フルアクセスを有効化'],
-            defaultId: 0,
-            cancelId: 0,
-            noLink: true,
+          await confirmFullAccessOnce(this.persistence, async () => {
+            const confirmation = await dialog.showMessageBox(this.window, {
+              type: 'warning',
+              title: 'フルアクセスを有効にしますか？',
+              message: 'フルアクセスはTaskのWorkspace操作を拡張します。',
+              detail: '管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。',
+              buttons: ['キャンセル', 'フルアクセスを有効化'],
+              defaultId: 0,
+              cancelId: 0,
+              noLink: true,
+            });
+            return confirmation.response === 1;
           });
-          if (confirmation.response !== 1) throw new FullAccessConfirmationDeclinedError();
         }
         if (this.permissionBroker.getPolicy(input.taskId).policyEpoch !== input.expectedPolicyEpoch)
           throw new StalePermissionPolicyError();
@@ -4458,6 +4460,18 @@ class InvalidEffortError extends Error {
 class StalePermissionPolicyError extends Error {}
 class FullAccessConfirmationDeclinedError extends Error {}
 class SteerUnsupportedError extends Error {}
+
+export async function confirmFullAccessOnce(
+  persistence: Pick<
+    PersistenceClient,
+    'hasAcknowledgedFullAccessRisk' | 'acknowledgeFullAccessRisk'
+  >,
+  confirm: () => Promise<boolean>,
+): Promise<void> {
+  if (persistence.hasAcknowledgedFullAccessRisk()) return;
+  if (!(await confirm())) throw new FullAccessConfirmationDeclinedError();
+  persistence.acknowledgeFullAccessRisk();
+}
 
 function principalFor(_event: InvokeEvent): string {
   return 'local-desktop';

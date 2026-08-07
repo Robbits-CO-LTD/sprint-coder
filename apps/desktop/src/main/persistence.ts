@@ -3867,6 +3867,8 @@ export interface PersistenceClient {
   setEffort(effort: ClaudeEffort): void;
   getCodexEffort(): string;
   setCodexEffort(effort: string): void;
+  hasAcknowledgedFullAccessRisk(): boolean;
+  acknowledgeFullAccessRisk(): void;
   getTeamModelResearchBeforeHiring(): boolean;
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
   getTeamModelRestriction(): TeamModelRestriction;
@@ -8756,6 +8758,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(effort, new Date().toISOString());
+  }
+
+  hasAcknowledgedFullAccessRisk(): boolean {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'permissions.full-access-risk-acknowledged'")
+      .get() as { value: string } | undefined;
+    return row?.value === '1';
+  }
+
+  acknowledgeFullAccessRisk(): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at)
+         VALUES ('permissions.full-access-risk-acknowledged', '1', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(new Date().toISOString());
   }
 
   getTeamModelResearchBeforeHiring(): boolean {

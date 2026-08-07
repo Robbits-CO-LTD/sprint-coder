@@ -3770,6 +3770,19 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('persists the Full Access risk acknowledgement across app restarts', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.hasAcknowledgedFullAccessRisk()).toBe(false);
+
+      persistence.acknowledgeFullAccessRisk();
+      expect(persistence.hasAcknowledgedFullAccessRisk()).toBe(true);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.hasAcknowledgedFullAccessRisk()).toBe(true);
+      reopened.close();
+    });
+
     it('fails closed when stored preset rows are syntactically valid but non-canonical', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();

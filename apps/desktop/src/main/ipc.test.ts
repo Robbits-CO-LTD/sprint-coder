@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
@@ -81,6 +81,7 @@ import {
 } from '@sprint-coder/contracts';
 import {
   clampCodexEffort,
+  confirmFullAccessOnce,
   invalidModelUserMessage,
   isTrustedIpcSender,
   shouldBlockProviderLeaderCompletion,
@@ -104,6 +105,37 @@ describe('Project home-directory confirmation', () => {
   it('does not warn for a child or path-component sibling of home', () => {
     expect(requiresHomeDirectoryConfirmation(join(home, 'project'), home)).toBe(false);
     expect(requiresHomeDirectoryConfirmation(`${home}-other`, home)).toBe(false);
+  });
+});
+
+describe('Full Access confirmation', () => {
+  it('asks once and remembers the confirmation for later Tasks', async () => {
+    let acknowledged = false;
+    const persistence = {
+      hasAcknowledgedFullAccessRisk: vi.fn(() => acknowledged),
+      acknowledgeFullAccessRisk: vi.fn(() => {
+        acknowledged = true;
+      }),
+    };
+    const confirm = vi.fn().mockResolvedValue(true);
+
+    await confirmFullAccessOnce(persistence, confirm);
+    await confirmFullAccessOnce(persistence, confirm);
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(persistence.acknowledgeFullAccessRisk).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not remember a declined confirmation', async () => {
+    const persistence = {
+      hasAcknowledgedFullAccessRisk: vi.fn().mockReturnValue(false),
+      acknowledgeFullAccessRisk: vi.fn(),
+    };
+
+    await expect(
+      confirmFullAccessOnce(persistence, vi.fn().mockResolvedValue(false)),
+    ).rejects.toThrow();
+    expect(persistence.acknowledgeFullAccessRisk).not.toHaveBeenCalled();
   });
 });
 
