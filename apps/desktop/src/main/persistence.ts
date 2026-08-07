@@ -8340,8 +8340,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
   setGoal(taskId: string, goal: string): TaskSummary {
     if (goal.trim() === '') return this.clearGoal(taskId);
-    this.startGoal(taskId, goal);
-    return this.pauseGoal(taskId);
+    return this.db.transaction(() => {
+      const current = this.getTaskRow(taskId);
+      const now = new Date().toISOString();
+      const result = this.db
+        .prepare(
+          `UPDATE tasks
+              SET goal = ?, goal_status = 'paused', goal_token_budget = NULL,
+                  goal_tokens_used = 0, goal_time_used_seconds = 0,
+                  goal_started_at = ?, goal_updated_at = ?,
+                  context_epoch = context_epoch + ?, updated_at = ?
+            WHERE id = ?`,
+        )
+        .run(goal, now, now, current.goal === goal ? 0 : 1, now, taskId);
+      if (result.changes !== 1) throw new NotFoundError('Task not found');
+      this.quarantineStaleBackgroundInTransaction(taskId);
+      return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
+    })();
   }
 
   startGoal(taskId: string, objective: string): TaskSummary {

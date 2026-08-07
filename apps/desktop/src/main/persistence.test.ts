@@ -640,6 +640,12 @@ if (runsWithElectronAbi)
       expect(reopened.getTask(interruptedTask.id).goalState).toMatchObject({ status: 'paused' });
       expect(reopened.snapshot(interruptedTask.id).activeTurn).toBeNull();
       expect(reopened.clearGoal(task.id)).toMatchObject({ goal: null, goalState: null });
+      const legacyLongGoal = '旧'.repeat(4_001);
+      const legacyTask = reopened.createTask('legacy long goal setter');
+      expect(reopened.setGoal(legacyTask.id, legacyLongGoal).goalState).toMatchObject({
+        objective: legacyLongGoal,
+        status: 'paused',
+      });
       reopened.close();
     });
 
