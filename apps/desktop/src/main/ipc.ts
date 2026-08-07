@@ -323,7 +323,13 @@ import {
   ProviderSecretStorageUnavailableError,
 } from './provider-secret-storage';
 import { ElectronProviderSecretCipher } from './electron-provider-secret-cipher';
-import { MainProviderRegistry } from './provider-runtime';
+import { MainProviderRegistry, type ProviderRuntime } from './provider-runtime';
+import {
+  PROVIDER_FIRST_EVENT_TIMEOUT_MS,
+  PROVIDER_IDLE_TIMEOUT_MS,
+  ProviderStreamTimeoutError,
+  providerEventsWithDeadline,
+} from './provider-stream-deadline';
 import { ProviderVerificationService } from './provider-verification';
 import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
 import { OpenRouterCatalogClient } from './openrouter-provider-client';
@@ -406,6 +412,8 @@ export class IpcRouter {
   private readonly resolvedModelByTurn = new Map<string, string>();
   private readonly resolvedProviderByTurn = new Map<string, string>();
   private readonly providerAbortByTurn = new Map<string, AbortController>();
+  private readonly providerExecutionIdByTurn = new Map<string, string>();
+  private readonly providerCancellationByExecution = new Map<string, Promise<void>>();
   // One reasoning batcher per active turn (issue #17). Keyed by turnId and disposed in
   // finishAndAdvance, so a turn cannot leave a timer behind.
   private readonly reasoningByTurn = new Map<string, ReasoningBatcher>();
@@ -3640,6 +3648,7 @@ export class IpcRouter {
         };
       else if (kind === 'provider') {
         const controller = this.providerAbortByTurn.get(turnId);
+        const executionId = this.providerExecutionIdByTurn.get(turnId);
         const identity = this.persistence.getTurnModelIdentity(taskId, turnId);
         const provider =
           identity.selection.connectionId === null
@@ -3649,7 +3658,8 @@ export class IpcRouter {
               );
         cancelAction = async () => {
           controller?.abort();
-          if (provider !== null) await provider.cancel(turnId);
+          if (provider !== null && controller !== undefined && executionId !== undefined)
+            await this.cancelProviderExecution(provider, controller, executionId);
         };
       } else
         cancelAction = async () => {
@@ -3662,8 +3672,25 @@ export class IpcRouter {
       this.teamSkillResolutionByTurn.delete(turnId);
       this.pendingProjectMemoriesByTurn.delete(turnId);
       this.providerAbortByTurn.delete(turnId);
+      this.providerExecutionIdByTurn.delete(turnId);
       return cancelAction;
     });
+  }
+
+  private cancelProviderExecution(
+    runtime: ProviderRuntime,
+    controller: AbortController,
+    executionId: string,
+  ): Promise<void> {
+    controller.abort();
+    const existing = this.providerCancellationByExecution.get(executionId);
+    if (existing !== undefined) return existing;
+    const cancellation = runtime.cancel(executionId).finally(() => {
+      if (this.providerCancellationByExecution.get(executionId) === cancellation)
+        this.providerCancellationByExecution.delete(executionId);
+    });
+    this.providerCancellationByExecution.set(executionId, cancellation);
+    return cancellation;
   }
 
   private async finishStopAndSend(
@@ -3700,6 +3727,7 @@ export class IpcRouter {
     const messageId = randomUUID();
     let reportCursorValue = 0;
     let modelCatalogQueried = false;
+    let runtime: ProviderRuntime | undefined;
     const reportCursor = {
       read: () => reportCursorValue,
       advance: (seq: number) => {
@@ -3736,7 +3764,7 @@ export class IpcRouter {
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'planning'));
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'executing'));
       });
-      const runtime = this.providerRegistry.resolve(connection);
+      runtime = this.providerRegistry.resolve(connection);
       const messages: ProviderExecutionRequest['messages'] = context.fragments.map((fragment) => ({
         role: fragment.trust,
         content: fragment.content,
@@ -3776,6 +3804,8 @@ export class IpcRouter {
       let aggregateUsage: NormalizedProviderUsage | undefined;
       let finished = false;
       for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
+        const executionId = providerTurnCallId(started.turnId, ordinal);
+        this.providerExecutionIdByTurn.set(started.turnId, executionId);
         const roundPayloadBytes = Buffer.from(
           JSON.stringify({ messages, tools: roundTools }),
           'utf8',
@@ -3809,18 +3839,25 @@ export class IpcRouter {
         const roundOutput: string[] = [];
         let roundError: Extract<CanonicalProviderEvent, { type: 'error' }>['error'] | undefined;
         let roundCompleted = false;
-        for await (const providerEvent of runtime.execute(
-          connection,
+        for await (const providerEvent of providerEventsWithDeadline(
+          runtime.execute(
+            connection,
+            {
+              executionId,
+              connectionId,
+              modelId,
+              messages: dispatchRound.messages,
+              ...(dispatchRound.tools === undefined || dispatchRound.tools.length === 0
+                ? {}
+                : { tools: dispatchRound.tools }),
+            },
+            controller.signal,
+          ),
           {
-            executionId: providerTurnCallId(started.turnId, ordinal),
-            connectionId,
-            modelId,
-            messages: dispatchRound.messages,
-            ...(dispatchRound.tools === undefined || dispatchRound.tools.length === 0
-              ? {}
-              : { tools: dispatchRound.tools }),
+            executionId,
+            firstEventTimeoutMs: PROVIDER_FIRST_EVENT_TIMEOUT_MS,
+            idleTimeoutMs: PROVIDER_IDLE_TIMEOUT_MS,
           },
-          controller.signal,
         )) {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
           if (providerEvent.type === 'tool_call') {
@@ -4027,7 +4064,27 @@ export class IpcRouter {
         if (this.turnRuntimes.get(started.turnId) === 'provider')
           this.finishAndAdvance(taskId, started.turnId, 'completed');
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof ProviderStreamTimeoutError) {
+        if (runtime !== undefined)
+          void this.cancelProviderExecution(runtime, controller, error.executionId).catch(
+            () => undefined,
+          );
+        else controller.abort();
+        await this.mailbox.run(taskId, () => {
+          if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+          this.publish(
+            this.persistence.appendDelta(
+              taskId,
+              started.turnId,
+              messageId,
+              `${synthesizing ? '\n\n' : ''}${error.userMessage}`,
+            ),
+          );
+          this.finishAndAdvance(taskId, started.turnId, 'failed');
+        });
+        return;
+      }
       if (controller.signal.aborted || this.turnRuntimes.get(started.turnId) !== 'provider') return;
       await this.mailbox.run(taskId, () => {
         if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
@@ -4038,6 +4095,7 @@ export class IpcRouter {
         this.providerWorkspaceTools.finishTurn(taskId, started.turnId);
       if (this.providerAbortByTurn.get(started.turnId) === controller)
         this.providerAbortByTurn.delete(started.turnId);
+      this.providerExecutionIdByTurn.delete(started.turnId);
     }
   }
 
