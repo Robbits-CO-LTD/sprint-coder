@@ -1653,15 +1653,19 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async startGoal(taskId: string, objective: string) {
       if (!window.sprintCoder?.goals) return false;
+      const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
         const result = await window.sprintCoder.goals.start({
           taskId,
           objective,
           tokenBudget: null,
+          skills: selectedSkills,
         });
         set((state) => ({
           tasks: state.tasks.map((task) => (task.id === taskId ? result.task : task)),
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
         }));
+        persistSkillDraftSelection(taskId, []);
         return true;
       } catch (err) {
         set({ error: describeError(err) });
@@ -1683,11 +1687,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async resumeGoal(taskId: string) {
       if (!window.sprintCoder?.goals) return;
+      const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
-        const result = await window.sprintCoder.goals.resume(taskId);
+        const result = await window.sprintCoder.goals.resume(taskId, selectedSkills);
         set((state) => ({
           tasks: state.tasks.map((task) => (task.id === taskId ? result.task : task)),
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
         }));
+        persistSkillDraftSelection(taskId, []);
       } catch (err) {
         set({ error: describeError(err) });
       }

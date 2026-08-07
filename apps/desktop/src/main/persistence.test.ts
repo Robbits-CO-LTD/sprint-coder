@@ -668,6 +668,10 @@ if (runsWithElectronAbi)
       expect(active.skills).toEqual([resolved]);
       expect(persistence.getTurnSkills(task.id, active.turnId)).toEqual([resolved]);
       persistence.cancelTurn(task.id, active.turnId);
+      const goalTurn = persistence.startGoalTurn(task.id, 'review goal', null, [resolved]);
+      expect(goalTurn.started.skills).toEqual([resolved]);
+      expect(persistence.getTurnSkills(task.id, goalTurn.started.turnId)).toEqual([resolved]);
+      persistence.cancelTurn(task.id, goalTurn.started.turnId);
       persistence.queueInput(task.id, 'review later', 'q-skills', [resolved]);
       persistence.close();
 

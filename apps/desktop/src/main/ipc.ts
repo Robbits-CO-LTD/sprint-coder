@@ -119,6 +119,7 @@ import {
   generatedImageBytesSchema,
   generatedImageRefSchema,
   goalControlInputSchema,
+  goalResumeInputSchema,
   goalRunResultSchema,
   goalStartInputSchema,
   taskArchivedInputSchema,
@@ -1665,7 +1666,10 @@ export class IpcRouter {
       IPC_CHANNELS.goalsStart,
       goalStartInputSchema,
       goalRunResultSchema,
-      (input, event, envelope) => {
+      async (input, event, envelope) => {
+        const skills = await this.skillSettings
+          .resolveSelections(input.skills)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -1677,6 +1681,8 @@ export class IpcRouter {
               input.taskId,
               input.objective,
               input.tokenBudget,
+              skills,
+              shouldSealBuiltinTeamSkill(input.objective, skills),
             );
             started = goal.started;
             return { task: goal.task, turnId: goal.started.turnId };
@@ -1688,9 +1694,12 @@ export class IpcRouter {
     );
     this.handleMutation(
       IPC_CHANNELS.goalsResume,
-      goalControlInputSchema,
+      goalResumeInputSchema,
       goalRunResultSchema,
-      (input, event, envelope) => {
+      async (input, event, envelope) => {
+        const skills = await this.skillSettings
+          .resolveSelections(input.skills)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -1698,7 +1707,15 @@ export class IpcRouter {
           input.taskId,
           IPC_CHANNELS.goalsResume,
           () => {
-            const goal = this.persistence.resumeGoalTurn(input.taskId);
+            const goalText = this.persistence.getTask(input.taskId).goal;
+            const goal = this.persistence.resumeGoalTurn(
+              input.taskId,
+              skills,
+              shouldSealBuiltinTeamSkill(
+                goalText === null ? '' : `Goalを続けてください: ${goalText}`,
+                skills,
+              ),
+            );
             started = goal.started;
             return { task: goal.task, turnId: goal.started.turnId };
           },

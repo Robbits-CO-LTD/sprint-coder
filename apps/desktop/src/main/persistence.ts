@@ -3849,8 +3849,18 @@ export interface PersistenceClient {
   pauseGoal(taskId: string): TaskSummary;
   resumeGoal(taskId: string): TaskSummary;
   clearGoal(taskId: string): TaskSummary;
-  startGoalTurn(taskId: string, objective: string, tokenBudget?: number | null): StartedGoalTurn;
-  resumeGoalTurn(taskId: string): StartedGoalTurn;
+  startGoalTurn(
+    taskId: string,
+    objective: string,
+    tokenBudget?: number | null,
+    skills?: readonly PersistedTurnSkill[],
+    includeBuiltinTeamSkill?: boolean,
+  ): StartedGoalTurn;
+  resumeGoalTurn(
+    taskId: string,
+    skills?: readonly PersistedTurnSkill[],
+    includeBuiltinTeamSkill?: boolean,
+  ): StartedGoalTurn;
   pauseGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
@@ -8411,18 +8421,29 @@ export class SqlitePersistenceClient implements PersistenceClient {
     taskId: string,
     objective: string,
     tokenBudget: number | null = null,
+    skills: readonly PersistedTurnSkill[] = [],
+    includeBuiltinTeamSkill = false,
   ): StartedGoalTurn {
     return this.db.transaction(() => {
       this.assertTask(taskId);
       this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
       this.startGoal(taskId, objective, tokenBudget);
-      const started = this.startTurnInTransaction(taskId, objective);
+      const started = this.startTurnInTransaction(
+        taskId,
+        objective,
+        skills,
+        includeBuiltinTeamSkill,
+      );
       return { task: this.getTask(taskId), started };
     })();
   }
 
-  resumeGoalTurn(taskId: string): StartedGoalTurn {
+  resumeGoalTurn(
+    taskId: string,
+    skills: readonly PersistedTurnSkill[] = [],
+    includeBuiltinTeamSkill = false,
+  ): StartedGoalTurn {
     return this.db.transaction(() => {
       this.assertTask(taskId);
       this.assertTaskNotMutationQuarantined(taskId);
@@ -8431,7 +8452,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (current.goal === null || current.goal_status === null)
         throw new Error('Task does not have a Goal');
       this.transitionGoal(taskId, 'active');
-      const started = this.startTurnInTransaction(taskId, `Goalを続けてください: ${current.goal}`);
+      const text = `Goalを続けてください: ${current.goal}`;
+      const started = this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
       return { task: this.getTask(taskId), started };
     })();
   }

@@ -827,9 +827,13 @@ export interface SprintCoderApi {
       taskId: string;
       objective: string;
       tokenBudget?: number | null;
+      skills?: readonly TurnSkillSelection[];
     }): Promise<{ task: TaskSummary; turnId: string }>;
     pause(taskId: string): Promise<TaskSummary>;
-    resume(taskId: string): Promise<{ task: TaskSummary; turnId: string }>;
+    resume(
+      taskId: string,
+      skills?: readonly TurnSkillSelection[],
+    ): Promise<{ task: TaskSummary; turnId: string }>;
     clear(taskId: string): Promise<TaskSummary>;
   };
   projects: {
