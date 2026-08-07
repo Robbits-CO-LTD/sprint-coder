@@ -330,6 +330,7 @@ import {
   ProviderStreamTimeoutError,
   providerEventsWithDeadline,
 } from './provider-stream-deadline';
+import { UpdateInstallMutationGate } from './update-install-mutation-gate';
 import { ProviderVerificationService } from './provider-verification';
 import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
 import { OpenRouterCatalogClient } from './openrouter-provider-client';
@@ -390,6 +391,7 @@ export class IpcRouter {
   private readonly taskTitleRuntimes: TaskTitleRuntimePool<RuntimeHostClient>;
   private readonly taskTitleProviderAborts = new TaskTitleAbortRegistry();
   private disposed = false;
+  private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
   /** First-Turn requests awaiting successful completion before title generation begins. */
   private readonly pendingTaskTitles = new Map<string, TaskTitleRequest>();
@@ -2425,7 +2427,9 @@ export class IpcRouter {
       turnSnapshotSchema,
       async (input) =>
         this.mailbox.run(input.taskId, () => {
-          const next = this.persistence.startNextQueued(input.taskId);
+          const next = this.updateInstallMutationGate.isAccepting()
+            ? this.persistence.startNextQueued(input.taskId)
+            : null;
           this.dispatchQueueTransition(next);
           return this.persistence.snapshot(input.taskId);
         }),
@@ -2551,6 +2555,47 @@ export class IpcRouter {
     await this.teamMcpBridge.dispose();
   }
 
+  getActiveTurnsForUpdate(): readonly {
+    taskId: string;
+    turnId: string | null;
+    taskTitle: string;
+  }[] {
+    return this.persistence.listTasks().flatMap((task) => {
+      const turnId = this.persistence.getActiveTurnId(task.id);
+      const teamBusy = this.teamCoordinator.hasBusyWorkers(task.id);
+      return turnId === null && !teamBusy
+        ? []
+        : [{ taskId: task.id, turnId, taskTitle: task.title }];
+    });
+  }
+
+  async stopActiveTurnsForUpdate(
+    expected: readonly { taskId: string; turnId: string | null }[],
+  ): Promise<void> {
+    for (const turn of expected)
+      await this.mailbox.run(turn.taskId, async () => {
+        if (turn.turnId !== null && this.persistence.getActiveTurnId(turn.taskId) === turn.turnId) {
+          this.approvalCoordinator.turnEnded(turn.taskId, turn.turnId, 'canceled');
+          await this.cancelRuntime(turn.taskId, turn.turnId);
+          const completion = this.persistence.cancelTurnAndFinishGoal(turn.taskId, turn.turnId);
+          if (completion.task !== null) this.pushTaskUpdated(completion.task);
+          if (completion.event !== null) this.publish(completion.event);
+        }
+        if (this.teamCoordinator.hasBusyWorkers(turn.taskId))
+          await this.teamCoordinator.stopAll(turn.taskId);
+        // Do not start the next queued input: the user chose to update, and the queued work remains
+        // durable for the relaunched app.
+      });
+  }
+
+  async prepareUpdateInstall(): Promise<boolean> {
+    // Close the common mutation boundary first, then drain handlers that entered before the gate.
+    // This covers TeamCoordinator calls and dialog-backed mutations that do not use runMutation.
+    return this.updateInstallMutationGate.closeWhenIdle(
+      () => this.getActiveTurnsForUpdate().length === 0,
+    );
+  }
+
   private handle<TInput, TOutput>(
     channel: string,
     inputSchema: z.ZodType<TInput>,
@@ -2591,7 +2636,9 @@ export class IpcRouter {
     ) => TOutput | Promise<TOutput>,
   ): void {
     this.handle(channel, inputSchema, outputSchema, (input, event, envelope) =>
-      this.mailbox.run(envelope.taskId ?? '__global__', () => handler(input, event, envelope)),
+      this.mailbox.run(envelope.taskId ?? '__global__', () =>
+        this.updateInstallMutationGate.run(() => handler(input, event, envelope)),
+      ),
     );
   }
 
@@ -2602,6 +2649,7 @@ export class IpcRouter {
     kind: string,
     action: () => TOutput,
   ): { value: TOutput; executed: boolean } {
+    this.updateInstallMutationGate.assertAccepting();
     const principal = principalFor(event);
     const hash = requestHash(envelope.payload);
     const cached = this.persistence.getOperationResult<TOutput>(
