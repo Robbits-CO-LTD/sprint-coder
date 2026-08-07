@@ -21,6 +21,7 @@ const task = (overrides: Partial<TaskSummary> = {}): TaskSummary => ({
   pinned: false,
   archived: false,
   goal: null,
+  goalState: null,
   workspacePath: null,
   localOnly: false,
   hasConversation: true,

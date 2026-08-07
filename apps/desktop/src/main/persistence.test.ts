@@ -550,6 +550,7 @@ if (runsWithElectronAbi)
       expect(reopened.listTasks()[0]).toMatchObject({
         pinned: true,
         goal: 'goal',
+        goalState: { objective: 'goal', status: 'paused' },
         workspacePath: '/tmp/workspace',
       });
       expect(reopened.getDraft(task.id)).toBe('draft');
@@ -558,6 +559,93 @@ if (runsWithElectronAbi)
         queued: [{ ordinal: 1, text: 'resume me' }],
       });
       expect(reopened.startNextQueued(task.id)?.started.text).toBe('resume me');
+      reopened.close();
+    });
+
+    it('binds Goal lifecycle controls to its Turn and records terminal usage', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('goal lifecycle');
+
+      const first = persistence.startGoalTurn(task.id, '検索UIを完成させる');
+      expect(first.task.goalState).toMatchObject({
+        objective: '検索UIを完成させる',
+        status: 'active',
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+      });
+      expect(() => persistence.startGoalTurn(task.id, '二重開始')).toThrow(TurnActiveError);
+      const startedAt = first.task.goalState?.startedAt;
+      expect(persistence.pauseGoalAndCancelTurn(task.id, first.started.turnId)).toMatchObject({
+        task: { goalState: { status: 'paused' } },
+        canceledEvent: { type: 'turn.completed', state: 'canceled' },
+      });
+      const resumed = persistence.resumeGoalTurn(task.id);
+      expect(resumed.task.goalState).toMatchObject({
+        status: 'active',
+        startedAt,
+      });
+      expect(() => persistence.resumeGoalTurn(task.id)).toThrow(TurnActiveError);
+      persistence.recordTurnProviderUsage(task.id, resumed.started.turnId, {
+        inputTokens: 12,
+        outputTokens: 8,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+        providerCost: null,
+        source: 'provider_api',
+      });
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, resumed.started.turnId, stage);
+      const completed = persistence.completeTurnAndFinishGoal(
+        task.id,
+        resumed.started.turnId,
+        'completed',
+      );
+      expect(completed.task?.goalState).toMatchObject({
+        status: 'completed',
+        tokensUsed: 20,
+      });
+      const queuedTask = persistence.createTask('goal queue handoff');
+      const queuedGoal = persistence.startGoalTurn(queuedTask.id, 'Goal実行中のキューを引き継ぐ');
+      persistence.queueInput(queuedTask.id, 'Goal停止後に続ける', 'goal-queue-1');
+      const pausedWithQueue = persistence.pauseGoalAndCancelTurn(
+        queuedTask.id,
+        queuedGoal.started.turnId,
+      );
+      expect(pausedWithQueue.next?.started.text).toBe('Goal停止後に続ける');
+      expect(persistence.snapshot(queuedTask.id).activeTurn?.turnId).toBe(
+        pausedWithQueue.next?.started.turnId,
+      );
+      if (pausedWithQueue.next !== null)
+        finishTurn(persistence, queuedTask.id, pausedWithQueue.next.started.turnId);
+      const canceledTask = persistence.createTask('goal canceled by turn control');
+      const canceledGoal = persistence.startGoalTurn(canceledTask.id, '通常停止でもGoalを止める');
+      expect(
+        persistence.cancelTurnAndFinishGoal(canceledTask.id, canceledGoal.started.turnId).task
+          ?.goalState,
+      ).toMatchObject({ status: 'paused' });
+      const interruptedTask = persistence.createTask('interrupted goal');
+      persistence.startGoalTurn(interruptedTask.id, '再起動後も状態を正しく保つ');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.initializeMutationRecovery('goal-recovery-instance', new Date().toISOString());
+      expect(reopened.getTask(task.id).goalState).toMatchObject({
+        objective: '検索UIを完成させる',
+        status: 'completed',
+        tokenBudget: null,
+        tokensUsed: 20,
+      });
+      expect(reopened.getTask(interruptedTask.id).goalState).toMatchObject({ status: 'paused' });
+      expect(reopened.snapshot(interruptedTask.id).activeTurn).toBeNull();
+      expect(reopened.clearGoal(task.id)).toMatchObject({ goal: null, goalState: null });
+      const legacyLongGoal = '旧'.repeat(4_001);
+      const legacyTask = reopened.createTask('legacy long goal setter');
+      expect(reopened.setGoal(legacyTask.id, legacyLongGoal).goalState).toMatchObject({
+        objective: legacyLongGoal,
+        status: 'paused',
+      });
       reopened.close();
     });
 
@@ -586,6 +674,10 @@ if (runsWithElectronAbi)
       expect(active.skills).toEqual([resolved]);
       expect(persistence.getTurnSkills(task.id, active.turnId)).toEqual([resolved]);
       persistence.cancelTurn(task.id, active.turnId);
+      const goalTurn = persistence.startGoalTurn(task.id, 'review goal', [resolved]);
+      expect(goalTurn.started.skills).toEqual([resolved]);
+      expect(persistence.getTurnSkills(task.id, goalTurn.started.turnId)).toEqual([resolved]);
+      persistence.cancelTurn(task.id, goalTurn.started.turnId);
       persistence.queueInput(task.id, 'review later', 'q-skills', [resolved]);
       persistence.close();
 
@@ -1015,7 +1107,7 @@ if (runsWithElectronAbi)
 
       persistence.startTurn(task.id, '後続メッセージ');
 
-      expect(persistence.getTask(task.id).goal).toBe('');
+      expect(persistence.getTask(task.id).goal).toBeNull();
       persistence.close();
     });
 
@@ -5277,6 +5369,7 @@ if (runsWithElectronAbi)
         { version: 61 },
         { version: 62 },
         { version: 63 },
+        { version: 64 },
       ]);
       for (const [table, columns] of [
         [

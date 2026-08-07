@@ -1027,21 +1027,6 @@ button {
   padding: 4px 8px;
   min-width: 160px;
 }
-/* Read-only, hence the dashed edge: it displays the Goal, it is not a thing to press. */
-.goal-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  padding: 4px 10px;
-  border-radius: var(--r-sm);
-  border: 1px dashed var(--border-subtle);
-  white-space: nowrap;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 /* A chip that is pressable gets a solid edge and a surface under it. */
 .chip-btn {
   cursor: pointer;
@@ -2277,6 +2262,110 @@ button {
 .composer-inner {
   max-width: 800px;
   margin: 0 auto;
+}
+.goal-progress {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin: 0 10px 7px;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--bg-panel) 92%, var(--accent-wash));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+.goal-progress-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-sm);
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+.goal-progress-copy {
+  min-width: 0;
+}
+.goal-progress-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+.goal-progress-label {
+  color: var(--text-primary);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.goal-progress-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.goal-progress-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+.goal-progress[data-status='paused'] .goal-progress-dot {
+  background: var(--text-secondary);
+  box-shadow: none;
+}
+.goal-progress[data-status='completed'] .goal-progress-dot {
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-wash);
+}
+.goal-progress[data-status='blocked'] .goal-progress-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-wash);
+}
+.goal-progress-time {
+  font-variant-numeric: tabular-nums;
+}
+.goal-progress-usage {
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.goal-progress-copy p {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.goal-progress-actions {
+  display: flex;
+  gap: 2px;
+}
+.goal-progress-actions button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+}
+.goal-progress-actions button:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.goal-progress-actions button:last-child:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-wash);
+}
+.goal-progress-actions button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 .context-bar {
   position: relative;

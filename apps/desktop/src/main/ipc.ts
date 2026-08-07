@@ -119,6 +119,10 @@ import {
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
+  goalControlInputSchema,
+  goalResumeInputSchema,
+  goalRunResultSchema,
+  goalStartInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -170,6 +174,7 @@ import {
   type ProjectFolder,
   type ProjectReference,
   type RuntimeKind,
+  type TaskSummary,
   type TurnEvent,
 } from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
@@ -1658,6 +1663,111 @@ export class IpcRouter {
           this.persistence.setGoal(input.taskId, input.goal),
         ).value,
     );
+    this.handleMutation(
+      IPC_CHANNELS.goalsStart,
+      goalStartInputSchema,
+      goalRunResultSchema,
+      async (input, event, envelope) => {
+        const skills = await this.skillSettings
+          .resolveSelections(input.skills)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        let started: StartedTurn | undefined;
+        const result = this.runMutation(
+          event,
+          envelope,
+          input.taskId,
+          IPC_CHANNELS.goalsStart,
+          () => {
+            const goal = this.persistence.startGoalTurn(
+              input.taskId,
+              input.objective,
+              skills,
+              shouldSealBuiltinTeamSkill(input.objective, skills),
+            );
+            started = goal.started;
+            return { task: goal.task, turnId: goal.started.turnId };
+          },
+        );
+        if (result.executed && started !== undefined) this.dispatchStarted(started);
+        return result.value;
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.goalsResume,
+      goalResumeInputSchema,
+      goalRunResultSchema,
+      async (input, event, envelope) => {
+        const skills = await this.skillSettings
+          .resolveSelections(input.skills)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        let started: StartedTurn | undefined;
+        const result = this.runMutation(
+          event,
+          envelope,
+          input.taskId,
+          IPC_CHANNELS.goalsResume,
+          () => {
+            const goalText = this.persistence.getTask(input.taskId).goal;
+            const goal = this.persistence.resumeGoalTurn(
+              input.taskId,
+              skills,
+              shouldSealBuiltinTeamSkill(
+                goalText === null ? '' : `Goalを続けてください: ${goalText}`,
+                skills,
+              ),
+            );
+            started = goal.started;
+            return { task: goal.task, turnId: goal.started.turnId };
+          },
+        );
+        if (result.executed && started !== undefined) this.dispatchStarted(started);
+        return result.value;
+      },
+    );
+    for (const [channel, action] of [
+      [
+        IPC_CHANNELS.goalsPause,
+        (taskId: string, turnId: string | null) =>
+          this.persistence.pauseGoalAndCancelTurn(taskId, turnId),
+      ],
+      [
+        IPC_CHANNELS.goalsClear,
+        (taskId: string, turnId: string | null) =>
+          this.persistence.clearGoalAndCancelTurn(taskId, turnId),
+      ],
+    ] as const)
+      this.handleMutation(
+        channel,
+        goalControlInputSchema,
+        taskSummarySchema,
+        async (input, event, envelope) => {
+          const cached = this.persistence.getOperationResult<TaskSummary>(
+            principalFor(event),
+            input.taskId,
+            channel,
+            envelope.operationId,
+            requestHash(envelope.payload),
+          );
+          if (cached.found) return cached.value as TaskSummary;
+          const goal = this.persistence.getTask(input.taskId).goalState;
+          const controlledTurnId =
+            goal?.status === 'active' ? this.persistence.getActiveTurnId(input.taskId) : null;
+          if (controlledTurnId !== null) await this.cancelRuntime(input.taskId, controlledTurnId);
+          let canceledEvent: TurnEvent | null = null;
+          let next: QueueTransition = null;
+          const result = this.runMutation(event, envelope, input.taskId, channel, () => {
+            const controlled = action(input.taskId, controlledTurnId);
+            canceledEvent = controlled.canceledEvent;
+            next = controlled.next;
+            return controlled.task;
+          });
+          if (result.executed && controlledTurnId !== null)
+            this.approvalCoordinator.turnEnded(input.taskId, controlledTurnId, 'canceled');
+          if (result.executed && canceledEvent !== null) this.publish(canceledEvent);
+          if (result.executed) this.dispatchQueueTransition(next);
+          return result.value;
+        },
+      );
     this.handle(IPC_CHANNELS.tasksGetDraft, taskIdPayloadSchema, z.string(), (input) =>
       this.persistence.getDraft(input.taskId),
     );
@@ -2267,6 +2377,7 @@ export class IpcRouter {
         this.approvalCoordinator.turnEnded(input.taskId, input.turnId, 'canceled');
         await this.cancelRuntime(input.taskId, input.turnId);
         let canceledEvent: TurnEvent | null = null;
+        let goalTask: TaskSummary | null = null;
         let next: QueueTransition = null;
         const result = this.runMutation(
           event,
@@ -2274,11 +2385,14 @@ export class IpcRouter {
           input.taskId,
           IPC_CHANNELS.turnsCancel,
           () => {
-            canceledEvent = this.persistence.cancelTurn(input.taskId, input.turnId);
+            const completion = this.persistence.cancelTurnAndFinishGoal(input.taskId, input.turnId);
+            canceledEvent = completion.event;
+            goalTask = completion.task;
             next = canceledEvent === null ? null : this.persistence.startNextQueued(input.taskId);
           },
         );
         if (result.executed) {
+          if (goalTask !== null) this.pushTaskUpdated(goalTask);
           if (canceledEvent !== null) this.publish(canceledEvent);
           this.dispatchQueueTransition(next);
         }
@@ -2540,7 +2654,9 @@ export class IpcRouter {
         resolvedProvider: resolvedProvider ?? null,
         resolvedModel,
       });
-    const event = this.persistence.completeTurn(taskId, turnId, state, finalText);
+    const completion = this.persistence.completeTurnAndFinishGoal(taskId, turnId, state, finalText);
+    const event = completion.event;
+    if (completion.task !== null) this.pushTaskUpdated(completion.task);
     if (state === 'completed') this.commitProjectMemoryCandidates(turnId);
     else this.pendingProjectMemoriesByTurn.delete(turnId);
     this.publish(

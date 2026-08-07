@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import type { SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
+import type { GoalSummary, SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
 import { useAppStore } from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
 import { ContextBar, PermissionChip } from './ContextBar';
-import { ArrowUp, Paperclip, Plus, X } from '../icons';
+import { ArrowUp, Paperclip, Pause, Pencil, Play, Plus, Target, Trash, X } from '../icons';
 import { ComposerMenu } from './ComposerMenu';
 import { ModelPickerV2 } from '../ModelPickerV2';
 import { isModelPickerV2Active } from '../../lib/model-picker-parity';
@@ -40,13 +40,16 @@ const EMPTY_SKILL_SELECTION: readonly TurnSkillSelection[] = [];
 export function Composer({ taskId }: { taskId: string }) {
   const draft = useAppStore((s) => s.draftByTask[taskId]) ?? '';
   const setDraft = useAppStore((s) => s.setDraft);
-  const setGoal = useAppStore((s) => s.setGoal);
+  const startGoal = useAppStore((s) => s.startGoal);
+  const pauseGoal = useAppStore((s) => s.pauseGoal);
+  const resumeGoal = useAppStore((s) => s.resumeGoal);
+  const clearGoal = useAppStore((s) => s.clearGoal);
   const startTurn = useAppStore((s) => s.startTurn);
   const queueMessage = useAppStore((s) => s.queueMessage);
   const { createTask } = useTaskBoundary();
-  const currentProjectId = useAppStore(
-    (state) => state.tasks.find(({ id }) => id === taskId)?.projectId ?? null,
-  );
+  const currentTask = useAppStore((state) => state.tasks.find(({ id }) => id === taskId));
+  const currentProjectId = currentTask?.projectId ?? null;
+  const goal = currentTask?.goalState ?? null;
   const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const sending = useAppStore((s) => s.sendingByTask[taskId]) ?? false;
   const projectSwitching = useAppStore((s) => s.projectSwitchingByTask[taskId]) ?? false;
@@ -72,6 +75,8 @@ export function Composer({ taskId }: { taskId: string }) {
   // a second input: the armed chip and placeholder are the only extra UI needed to make the mode
   // visible and cancelable.
   const [goalRequested, setGoalRequested] = useState(false);
+  const [goalEditDraftBackup, setGoalEditDraftBackup] = useState<string | null>(null);
+  const [goalControlPending, setGoalControlPending] = useState(false);
   // Armed by the plus menu, consumed by the next send. One-shot rather than a mode, so a user who
   // opens the menu and changes their mind is not stuck generating images.
   const [imageRequested, setImageRequested] = useState(false);
@@ -109,7 +114,7 @@ export function Composer({ taskId }: { taskId: string }) {
     [selectedSkills],
   );
   const goalSupported =
-    typeof window !== 'undefined' && typeof window.sprintCoder?.tasks?.setGoal === 'function';
+    typeof window !== 'undefined' && typeof window.sprintCoder?.goals?.start === 'function';
   const teamSupported = typeof window !== 'undefined' && window.sprintCoder?.teams !== undefined;
   const slashUnavailable = useMemo<Partial<Record<SlashCommandId, string>>>(
     () => ({
@@ -209,7 +214,11 @@ export function Composer({ taskId }: { taskId: string }) {
   }, [sending]);
 
   const sendDisabled =
-    !draft.trim() || sending || projectSwitching || (turnActive && !goalRequested && !canQueue);
+    !draft.trim() ||
+    sending ||
+    goalControlPending ||
+    projectSwitching ||
+    (turnActive && (goalRequested || !canQueue));
 
   function handleSend() {
     const raw = draft.trim();
@@ -226,7 +235,19 @@ export function Composer({ taskId }: { taskId: string }) {
     if (goalRequested) {
       setGoalRequested(false);
       setDraft(taskId, '');
-      void setGoal(taskId, raw);
+      setGoalControlPending(true);
+      void (async () => {
+        try {
+          if (!(await startGoal(taskId, raw))) {
+            setGoalRequested(true);
+            setDraft(taskId, raw);
+          } else {
+            setGoalEditDraftBackup(null);
+          }
+        } finally {
+          setGoalControlPending(false);
+        }
+      })();
       return;
     }
     // The prefix goes into the stored message rather than being injected invisibly in the adapter.
@@ -240,6 +261,18 @@ export function Composer({ taskId }: { taskId: string }) {
       return;
     }
     if (canQueue) void queueMessage(taskId, text);
+  }
+
+  function runGoalControl(action: () => Promise<void>): void {
+    if (goalControlPending) return;
+    setGoalControlPending(true);
+    void action().finally(() => setGoalControlPending(false));
+  }
+
+  function cancelGoalRequest(): void {
+    if (goalEditDraftBackup !== null) setDraft(taskId, goalEditDraftBackup);
+    setGoalEditDraftBackup(null);
+    setGoalRequested(false);
   }
 
   function removeActiveSlashToken(restoreTextareaFocus = true): void {
@@ -264,16 +297,30 @@ export function Composer({ taskId }: { taskId: string }) {
         break;
       case 'goal':
         setImageRequested(false);
+        setGoalEditDraftBackup(null);
         setGoalRequested(true);
         break;
       case 'team':
         void toggleTeamView(taskId);
         break;
       case 'image':
-        setGoalRequested(false);
+        cancelGoalRequest();
         setImageRequested(true);
         break;
     }
+  }
+
+  function editGoal() {
+    if (goal === null || goal.status === 'active') return;
+    setImageRequested(false);
+    setGoalEditDraftBackup(draft);
+    setGoalRequested(true);
+    setDraft(taskId, goal.objective);
+    requestAnimationFrame(() => {
+      const end = goal.objective.length;
+      textareaRef.current?.setSelectionRange(end, end);
+      textareaRef.current?.focus();
+    });
   }
 
   function selectSkill(skill: SkillCatalogItem): void {
@@ -325,7 +372,7 @@ export function Composer({ taskId }: { taskId: string }) {
       handleSend();
     } else if (e.key === 'Escape' && goalRequested) {
       e.preventDefault();
-      setGoalRequested(false);
+      cancelGoalRequest();
     }
   }
 
@@ -333,6 +380,16 @@ export function Composer({ taskId }: { taskId: string }) {
     <div className="composer-zone">
       <div className="composer-inner">
         <QueuedList items={queued} />
+        {goal !== null && (
+          <GoalProgress
+            goal={goal}
+            controlsPending={goalControlPending}
+            onPause={() => runGoalControl(() => pauseGoal(taskId))}
+            onResume={() => runGoalControl(() => resumeGoal(taskId))}
+            onEdit={editGoal}
+            onClear={() => runGoalControl(() => clearGoal(taskId))}
+          />
+        )}
         <ContextBar taskId={taskId} />
         <div className="composer">
           {slashOpen && (
@@ -383,7 +440,7 @@ export function Composer({ taskId }: { taskId: string }) {
             rows={1}
             placeholder={
               goalRequested
-                ? 'Goalを入力 (Enterで保存 / Escでキャンセル)'
+                ? 'Goalを入力（Enterで開始 / Escでキャンセル）'
                 : turnActive
                   ? 'Turn実行中です。既定ではキューに追加されます (Enter)'
                   : 'メッセージを送信 (Enterで送信 / Shift+Enterで改行)'
@@ -413,7 +470,7 @@ export function Composer({ taskId }: { taskId: string }) {
           <div className="composer-row">
             <PlusMenu
               onRequestImage={() => {
-                setGoalRequested(false);
+                cancelGoalRequest();
                 setImageRequested(true);
               }}
             />
@@ -423,10 +480,10 @@ export function Composer({ taskId }: { taskId: string }) {
                 type="button"
                 className="cmp-chip goal-armed"
                 data-testid="composer-goal-armed"
-                title="次の送信内容をGoalとして保存します。クリックで取り消し"
-                onClick={() => setGoalRequested(false)}
+                title="次の送信内容でGoalを開始します。クリックで取り消し"
+                onClick={cancelGoalRequest}
               >
-                Goal ×
+                <Target size={13} /> Goal <X size={12} />
               </button>
             )}
             {imageRequested && (
@@ -437,7 +494,7 @@ export function Composer({ taskId }: { taskId: string }) {
                 title="この送信で画像生成を呼び出します。クリックで取り消し"
                 onClick={() => setImageRequested(false)}
               >
-                画像生成 ×
+                画像生成 <X size={12} />
               </button>
             )}
             <div className="composer-run-controls" data-testid="composer-run-controls">
@@ -466,10 +523,10 @@ export function Composer({ taskId }: { taskId: string }) {
               data-testid="composer-send-button"
               disabled={sendDisabled}
               onClick={handleSend}
-              aria-label={goalRequested ? 'Goalを保存' : turnActive ? 'キューに追加' : '送信'}
+              aria-label={goalRequested ? 'Goalを開始' : turnActive ? 'キューに追加' : '送信'}
               title={
                 goalRequested
-                  ? 'Goalを保存'
+                  ? 'Goalを開始'
                   : turnActive
                     ? '現在の実行が終わったら送信します'
                     : '送信'
@@ -487,6 +544,122 @@ export function Composer({ taskId }: { taskId: string }) {
       )}
     </div>
   );
+}
+
+function GoalProgress({
+  goal,
+  controlsPending,
+  onPause,
+  onResume,
+  onEdit,
+  onClear,
+}: {
+  goal: GoalSummary;
+  controlsPending: boolean;
+  onPause: () => void;
+  onResume: () => void;
+  onEdit: () => void;
+  onClear: () => void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (goal.status !== 'active') return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [goal.status]);
+  const liveSeconds =
+    goal.status === 'active'
+      ? Math.max(0, Math.floor((now - new Date(goal.updatedAt).getTime()) / 1000))
+      : 0;
+  const elapsed = goal.timeUsedSeconds + liveSeconds;
+  const statusLabel =
+    goal.status === 'active'
+      ? '実行中'
+      : goal.status === 'paused'
+        ? '一時停止中'
+        : goal.status === 'completed'
+          ? '完了'
+          : 'ブロック中';
+
+  return (
+    <section
+      className="goal-progress"
+      data-status={goal.status}
+      aria-label={`Goal: ${statusLabel}`}
+      aria-busy={controlsPending}
+    >
+      <div className="goal-progress-mark" aria-hidden="true">
+        <Target size={15} />
+      </div>
+      <div className="goal-progress-copy">
+        <div className="goal-progress-title-row">
+          <span className="goal-progress-label">Goal</span>
+          <span className="goal-progress-status" aria-live="polite">
+            <span className="goal-progress-dot" aria-hidden="true" />
+            {statusLabel}
+          </span>
+          <span className="goal-progress-time">{formatGoalDuration(elapsed)}</span>
+          {(goal.tokenBudget !== null || goal.tokensUsed > 0) && (
+            <span className="goal-progress-usage">
+              {goal.tokensUsed.toLocaleString()}
+              {goal.tokenBudget === null ? '' : ` / ${goal.tokenBudget.toLocaleString()}`} tokens
+            </span>
+          )}
+        </div>
+        <p title={goal.objective}>{goal.objective}</p>
+      </div>
+      <div className="goal-progress-actions">
+        {goal.status === 'active' ? (
+          <button
+            type="button"
+            onClick={onPause}
+            disabled={controlsPending}
+            aria-label="Goalを一時停止"
+            title="一時停止"
+          >
+            <Pause size={14} />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onResume}
+            disabled={controlsPending}
+            aria-label="Goalを再開"
+            title="再開"
+          >
+            <Play size={14} />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onEdit}
+          disabled={controlsPending || goal.status === 'active'}
+          aria-label="Goalを編集"
+          title={goal.status === 'active' ? '一時停止してから編集できます' : '編集'}
+        >
+          <Pencil size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={onClear}
+          disabled={controlsPending}
+          aria-label="Goalを解除"
+          title="解除"
+        >
+          <Trash size={14} />
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function formatGoalDuration(totalSeconds: number): string {
+  if (totalSeconds < 60) return `${totalSeconds}秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) return `${minutes}分`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours}時間` : `${hours}時間${rest}分`;
 }
 
 // Runtime selector chip (FR-SET-03). Falls back to the legacy dummy "GPT-6.2 mini" chip when

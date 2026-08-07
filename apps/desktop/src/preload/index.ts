@@ -90,6 +90,10 @@ import {
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
+  goalControlInputSchema,
+  goalResumeInputSchema,
+  goalRunResultSchema,
+  goalStartInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -239,6 +243,19 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.tasksGetDraft, taskIdPayloadSchema, z.string(), { taskId }),
     setDraft: (taskId, draft) =>
       invoke(IPC_CHANNELS.tasksSetDraft, taskDraftInputSchema, z.undefined(), { taskId, draft }),
+  },
+  goals: {
+    start: (input) =>
+      invoke(IPC_CHANNELS.goalsStart, goalStartInputSchema, goalRunResultSchema, input),
+    pause: (taskId) =>
+      invoke(IPC_CHANNELS.goalsPause, goalControlInputSchema, taskSummarySchema, { taskId }),
+    resume: (taskId, skills = []) =>
+      invoke(IPC_CHANNELS.goalsResume, goalResumeInputSchema, goalRunResultSchema, {
+        taskId,
+        skills,
+      }),
+    clear: (taskId) =>
+      invoke(IPC_CHANNELS.goalsClear, goalControlInputSchema, taskSummarySchema, { taskId }),
   },
   projects: {
     list: () =>

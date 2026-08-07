@@ -1237,4 +1237,26 @@ describe('public contracts', () => {
       activeTurn: { turnId: 'turn-1', stage: 'waiting_approval' },
     });
   });
+
+  it('keeps legacy long Goals readable while rejecting new Goals above the Codex limit', () => {
+    const legacyObjective = '旧'.repeat(4_001);
+    expect(
+      contracts.goalSummarySchema.parse({
+        objective: legacyObjective,
+        status: 'paused',
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        startedAt: '2026-08-07T00:00:00.000Z',
+        updatedAt: '2026-08-07T00:00:00.000Z',
+      }).objective,
+    ).toBe(legacyObjective);
+    expect(() =>
+      contracts.goalStartInputSchema.parse({
+        taskId: 'task-1',
+        objective: legacyObjective,
+        skills: [],
+      }),
+    ).toThrow();
+  });
 });

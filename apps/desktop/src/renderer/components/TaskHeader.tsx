@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { Hexagon, List, MoreHorizontal, Target } from './icons';
+import { Hexagon, List, MoreHorizontal } from './icons';
 import type { TaskSummary } from '../types/sprint-coder';
 import teamClusterArt from '../../../assets/generated/team-cluster-button.webp';
 
@@ -105,12 +105,6 @@ export function TaskHeader({
           {task.title || '無題のTask'}
         </button>
       )}
-      {/* Workspace and Access used to sit here too (issue #47), as read-only copies of controls that
-          already live in the Composer beside the plus menu — the header was printing the same
-          state a second time. Goal stays, because the Composer does NOT show its saved value and this is
-          the only place to check it at a glance, but only once there is one: a chip that exists to
-          say 「未設定」 spends space to report an absence. */}
-      {(task.goal ?? '') !== '' && <GoalChip task={task} />}
       <button
         type="button"
         className="team-btn"
@@ -145,18 +139,5 @@ export function TaskHeader({
         <MoreHorizontal size={16} />
       </button>
     </header>
-  );
-}
-
-// Goal chip: read-only display of the value explicitly saved through `/goal` (FR-COMP-05).
-//
-// Rendered only when a Goal exists (issue #47). The caller decides that, so this component never has
-// to describe an absence.
-function GoalChip({ task }: { task: TaskSummary }) {
-  const goal = task.goal ?? '';
-  return (
-    <span className="goal-chip" data-testid="task-goal-chip" title={`Goal: ${goal}`}>
-      <Target size={13} /> {goal}
-    </span>
   );
 }

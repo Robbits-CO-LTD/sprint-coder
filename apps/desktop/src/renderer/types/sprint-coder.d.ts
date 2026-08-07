@@ -7,6 +7,16 @@
 // code must runtime-check `typeof window.sprintCoder?.x?.y === 'function'` before calling any v2-only
 // method and degrade gracefully when it is absent (see store/appStore.ts).
 
+export type GoalSummary = {
+  objective: string;
+  status: 'active' | 'paused' | 'completed' | 'blocked';
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  startedAt: string;
+  updatedAt: string;
+};
+
 export type TaskSummary = {
   id: string;
   projectId: string | null;
@@ -14,6 +24,7 @@ export type TaskSummary = {
   pinned: boolean;
   archived: boolean;
   goal: string | null;
+  goalState: GoalSummary | null;
   workspacePath: string | null;
   localOnly: boolean;
   hasConversation?: boolean;
@@ -810,6 +821,19 @@ export interface SprintCoderApi {
     setGoal(taskId: string, goal: string): Promise<TaskSummary>;
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
+  };
+  goals: {
+    start(input: {
+      taskId: string;
+      objective: string;
+      skills?: readonly TurnSkillSelection[];
+    }): Promise<{ task: TaskSummary; turnId: string }>;
+    pause(taskId: string): Promise<TaskSummary>;
+    resume(
+      taskId: string,
+      skills?: readonly TurnSkillSelection[],
+    ): Promise<{ task: TaskSummary; turnId: string }>;
+    clear(taskId: string): Promise<TaskSummary>;
   };
   projects: {
     list(): Promise<ProjectSummary[]>;
