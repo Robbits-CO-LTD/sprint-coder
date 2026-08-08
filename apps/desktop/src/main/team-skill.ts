@@ -16,6 +16,7 @@ Team利用が明示された依頼では、必ずMCPサーバー \`team\` の実
 CodexやClaude自身のsubagent／Agent Teams機能、外部skill、別MCPを代替として使ってはいけない。
 \`team_list_models\`が実際に呼び出せない場合は、代替実行へ進まず「Sprint Coder Team MCPを利用できない」と報告して終了する。
 Teamに関する質問・相談ではSkillとMCPを使って正確に回答するが、Workerを採用する必要はない。「雇って」「編集して」「実行して」などの実行依頼だけ、指定されたWorkerの採用と終端reportを完了条件にする。
+後続Turnの実行依頼で旧Workerへの割り当てが「Team must be active」になった場合は、team_get_statusでTeam状態を確認する。状態がcompletedなら、そこで終了しない。終端済みの旧Workerは再利用できないため、team_list_modelsの後、今回必要な役割の新しいWorkerをteam_hire_workerで必要人数だけ採用して続行する。新しいWorkerの採用によって完了済みTeamは安全に再形成される。採用が失敗した場合は具体的なエラーを報告し、入力・Role順・モデル選択などを修正できるなら同じTeamで再試行する。採用失敗だけを理由に「新しいTeamが必要」と判断してはならない。Team状態がfailedなどcompleted以外なら再形成できると判断せず、実際の状態とエラーを報告する。
 
 1. \`team_list_models\` で利用可能なConnection／modelとsource付き能力を確認する。まず作業に必要な能力でfilterする。0件なら、CLI modelのunknown能力がfilterで除外された可能性があるため、capabilitiesを空にして再検索し、source付きのunknownとして候補を確認する。unknownを0やfalseと解釈せず、model名やProvider名から能力を推測しない。
 2. \`team_hire_worker\` で重複しない役割のAgentを必要人数だけ採用する。workspace-writeを割り当てる予定のAgentは、最初の採用時から\`writeCapable: true\`を必ず指定する。leaf Workerは\`agentKind: "worker"\`を指定し、\`managerPolicy\`を付けない。再委譲するManagerは\`agentKind: "manager"\`を指定し、\`managerPolicy.maxDelegationLevels\`へそのManagerの直下から許す追加段数を指定する。たとえばSubLeaderに直属Workerだけを雇わせる場合は\`{ maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false }\`とする。各作業に選んだconnection ID、provider ID、model IDを\`modelSelection\`へ、その選定根拠を\`modelSelectionReason\`へ必ず明示する。
