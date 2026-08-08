@@ -130,7 +130,7 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 20_000);
 
-    it('uses the sealed Team turn for a member-change continuation before Team creation', async () => {
+    it('fails closed instead of running the fixed scenario for a natural Team continuation', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Team continuation');
       const coordinator = new TeamCoordinator(persistence);
@@ -156,7 +156,13 @@ if (runsWithElectronAbi)
       runtime.start(task.id, continued.turnId, continued.text, continued.teamTurn);
 
       await waitFor(() => published.some((event) => event.type === 'turn.completed'));
-      expect(persistence.getTeamByTask(task.id)).not.toBeNull();
+      expect(persistence.getTeamByTask(task.id)).toBeNull();
+      const finalText = published
+        .filter((event) => event.type === 'message.delta')
+        .map((event) => (event as { delta: string }).delta)
+        .join('');
+      expect(finalText).toContain('組み込みTeam Skillを利用できない');
+      expect(finalText).toContain('架空のメンバーや別のsubagentには置き換えていません');
       persistence.close();
     }, 20_000);
   });

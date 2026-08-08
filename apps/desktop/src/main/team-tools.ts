@@ -1124,6 +1124,10 @@ export function isTeamScenarioInput(input: string): boolean {
   return TEAM_INTENT.test(input) || TEAM_RELATION_INTENT.test(input);
 }
 
+export function isTeamScenarioFixtureInput(input: string): boolean {
+  return input.includes(TEAM_SCENARIO_TRIGGER);
+}
+
 export function isTeamContinuationInput(input: string): boolean {
   const trimmed = input.trim();
   if (TEAM_CONTINUATION.test(trimmed)) return true;

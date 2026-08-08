@@ -16,7 +16,7 @@ import {
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { ToolAuthorizationDeniedError, type ToolAuthorizer } from './tool-broker';
 import type { TeamCoordinator } from './team-coordinator';
-import { createTeamScenarioSampler, isTeamScenarioInput } from './team-tools';
+import { createTeamScenarioSampler, isTeamScenarioFixtureInput } from './team-tools';
 
 type Publish = (event: TurnEvent) => void;
 type Serialize = <T>(taskId: string, action: () => T) => Promise<T>;
@@ -236,14 +236,14 @@ export class MockRuntimeAdapter {
       const toolContext = { taskId, turnId, workspaceId, policyEpoch } as const;
       const toolCatalogSnapshot = startMockTurnCatalog(this.toolBroker, toolContext);
       const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
-      // Team mode is active when a Team already exists for this Task (created via teams.promote
-      // or a prior hire) or the input carries the fixture trigger — only meaningful when a
-      // TeamCoordinator was actually wired in, since otherwise the team_* tools aren't registered.
-      const teamScenarioActive =
-        this.teamCoordinator !== undefined &&
-        (teamTurn ||
-          (this.persistence.getTeamByTask?.(taskId) ?? null) !== null ||
-          isTeamScenarioInput(input));
+      // The fixed three-Worker orchestration is an E2E fixture, never a fallback for a natural
+      // Team request. Mock cannot interpret arbitrary Team operations such as reading a
+      // conversation or changing a member, so those requests fail closed with a truthful reply.
+      const teamFixtureActive =
+        this.teamCoordinator !== undefined && isTeamScenarioFixtureInput(input);
+      const mockReply = teamTurn
+        ? 'この実行環境では組み込みTeam Skillを利用できないため、Team操作を開始できません。架空のメンバーや別のsubagentには置き換えていません。CodexまたはClaude Runtimeで再試行してください。'
+        : buildReply(input);
       const loop = await runIntelligenceLoop({
         taskId,
         turnId,
@@ -255,9 +255,9 @@ export class MockRuntimeAdapter {
         workspaceRevision: workspaceBinding.workspaceRevision,
         contractRevision,
         toolCatalogSnapshot,
-        sample: teamScenarioActive
+        sample: teamFixtureActive
           ? createTeamScenarioSampler(input)
-          : createDeterministicMockSampler(input, buildReply(input)),
+          : createDeterministicMockSampler(input, mockReply),
         executeTool: async (call) => {
           let result: unknown;
           try {
