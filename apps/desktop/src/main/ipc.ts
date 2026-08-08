@@ -3053,6 +3053,14 @@ export class IpcRouter {
         return;
       }
     }
+    // Workspace identity verification yields to IPC handlers. A stop can therefore terminalize
+    // this Turn while the check is in flight; re-check the durable active id before any Runtime
+    // dispatch so a canceled Turn can never start after its cancellation has been accepted.
+    if (
+      this.canceledRuntimeTurns.has(started.turnId) ||
+      this.persistence.getActiveTurnId(taskId) !== started.turnId
+    )
+      return;
     const externalConnectionId =
       builtinRuntimeForModelSelection(started.modelSelection) === null
         ? started.modelSelection.connectionId
