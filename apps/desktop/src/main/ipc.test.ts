@@ -106,11 +106,12 @@ describe('Turn cancellation boundary', () => {
     const onFailure = vi.fn();
     const finalize = vi.fn();
 
-    await runBestEffortCancellation(async () => {
+    const stopped = await runBestEffortCancellation(async () => {
       throw new Error('runtime host exited before stop acknowledgement');
     }, onFailure);
     finalize();
 
+    expect(stopped).toBe(false);
     expect(onFailure).toHaveBeenCalledOnce();
     expect(finalize).toHaveBeenCalledOnce();
   });

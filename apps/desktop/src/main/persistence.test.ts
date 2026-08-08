@@ -5404,6 +5404,29 @@ if (runsWithElectronAbi)
           )
           .get(),
       ).toEqual({ migration_reason: 'missing_source_task' });
+      expect(
+        inspection
+          .prepare(
+            "SELECT content, status, source_task_id, source_turn_id, revision FROM project_memories WHERE id = 'legacy-memory'",
+          )
+          .get(),
+      ).toMatchObject({
+        content: 'legacy content',
+        status: 'disabled',
+        revision: 1,
+      });
+      const migratedMemory = inspection
+        .prepare(
+          "SELECT source_task_id, source_turn_id FROM project_memories WHERE id = 'legacy-memory'",
+        )
+        .get() as { source_task_id: string; source_turn_id: string };
+      expect(migratedMemory.source_task_id).toEqual(expect.any(String));
+      expect(migratedMemory.source_turn_id).toEqual(expect.any(String));
+      expect(
+        inspection
+          .prepare('SELECT 1 FROM turns WHERE id = ? AND task_id = ?')
+          .get(migratedMemory.source_turn_id, migratedMemory.source_task_id),
+      ).toEqual({ 1: 1 });
       inspection.close();
       migrated.close();
     });

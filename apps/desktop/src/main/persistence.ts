@@ -3876,6 +3876,7 @@ export interface PersistenceClient {
   pauseGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
+    startNext?: boolean,
   ): {
     task: TaskSummary;
     canceledEvent: TurnEvent | null;
@@ -3884,6 +3885,7 @@ export interface PersistenceClient {
   clearGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
+    startNext?: boolean,
   ): {
     task: TaskSummary;
     canceledEvent: TurnEvent | null;
@@ -4840,25 +4842,137 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.exec('ALTER TABLE project_memories RENAME TO project_memories_legacy_v1');
     this.db.exec(this.idempotentMigrationSql(migrationSql));
     this.db.exec('ALTER TABLE project_memories_legacy_v1 ADD COLUMN migration_reason TEXT');
-    this.db.exec(`
-      UPDATE project_memories_legacy_v1
-      SET migration_reason = CASE
-        WHEN source_task_id IS NULL THEN 'missing_source_task'
-        WHEN source_turn_id IS NULL THEN 'missing_source_turn'
-        WHEN status = 'draft' THEN 'draft_status_mapped_to_disabled'
-        ELSE 'legacy_row_copied'
-      END;
+    const hasLocalOnly = this.columnExists('project_memories_legacy_v1', 'local_only');
+    const rows = this.db
+      .prepare(
+        `SELECT id, project_id, content, status, source_task_id, source_turn_id,
+                revision, created_at, updated_at, ${hasLocalOnly ? 'local_only' : '0'} AS local_only
+         FROM project_memories_legacy_v1
+         ORDER BY created_at, id`,
+      )
+      .all() as {
+      id: string;
+      project_id: string;
+      content: string;
+      status: 'draft' | 'active' | 'disabled';
+      source_task_id: string | null;
+      source_turn_id: string | null;
+      revision: number;
+      local_only: number;
+      created_at: string;
+      updated_at: string;
+    }[];
+    const fallbackTaskByProject = new Map<string, string>();
+    const updateArchive = this.db.prepare(
+      'UPDATE project_memories_legacy_v1 SET migration_reason = ? WHERE id = ?',
+    );
+    const insertCurrent = this.db.prepare(`
       INSERT INTO project_memories(
         id, project_id, source_task_id, source_turn_id, content, status,
         revision, local_only, created_at, updated_at
-      )
-      SELECT id, project_id, source_task_id, source_turn_id, content,
-        CASE WHEN status = 'active' THEN 'active' ELSE 'disabled' END,
-        CASE WHEN revision < 1 THEN 1 ELSE revision END,
-        0, created_at, updated_at
-      FROM project_memories_legacy_v1
-      WHERE source_task_id IS NOT NULL AND source_turn_id IS NOT NULL;
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    const turnSource = this.db.prepare('SELECT 1 FROM turns WHERE id = ? AND task_id = ? LIMIT 1');
+    for (const row of rows) {
+      const sourceIsValid =
+        row.source_task_id !== null &&
+        row.source_turn_id !== null &&
+        turnSource.get(row.source_turn_id, row.source_task_id) !== undefined;
+      let sourceTaskId = row.source_task_id;
+      let sourceTurnId = row.source_turn_id;
+      let migrationReason: string;
+      if (!sourceIsValid) {
+        const fallback = this.createLegacyProjectMemoryProvenance(
+          row.project_id,
+          row.content,
+          fallbackTaskByProject,
+          row.created_at,
+        );
+        sourceTaskId = fallback.taskId;
+        sourceTurnId = fallback.turnId;
+        migrationReason =
+          row.source_task_id === null
+            ? 'missing_source_task'
+            : row.source_turn_id === null
+              ? 'missing_source_turn'
+              : 'invalid_source_provenance';
+      } else if (row.status === 'draft') migrationReason = 'draft_status_mapped_to_disabled';
+      else migrationReason = 'legacy_row_copied';
+      insertCurrent.run(
+        row.id,
+        row.project_id,
+        sourceTaskId,
+        sourceTurnId,
+        row.content,
+        row.status === 'active' ? 'active' : 'disabled',
+        Math.max(1, row.revision),
+        row.local_only === 1 ? 1 : 0,
+        row.created_at,
+        row.updated_at,
+      );
+      updateArchive.run(migrationReason, row.id);
+    }
+  }
+
+  private createLegacyProjectMemoryProvenance(
+    projectId: string,
+    content: string,
+    fallbackTaskByProject: Map<string, string>,
+    createdAt: string,
+  ): { taskId: string; turnId: string } {
+    let taskId = fallbackTaskByProject.get(projectId);
+    if (taskId === undefined) {
+      taskId = randomUUID();
+      const threadId = randomUUID();
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO tasks(id, title, pinned, archived, created_at, updated_at, project_id)
+           VALUES (?, ?, 0, 1, ?, ?, ?)`,
+        )
+        .run(taskId, 'Imported Project memory provenance', now, now, projectId);
+      if (this.tableExists('agent_threads')) {
+        this.db
+          .prepare(
+            `INSERT INTO agent_threads(
+               id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
+             ) VALUES (?, ?, 'mock', 'completed', NULL, 0, ?, ?)`,
+          )
+          .run(threadId, taskId, now, now);
+        if (this.columnExists('tasks', 'primary_thread_id'))
+          this.db
+            .prepare('UPDATE tasks SET primary_thread_id = ? WHERE id = ?')
+            .run(threadId, taskId);
+      }
+      fallbackTaskByProject.set(projectId, taskId);
+    }
+    const turnId = randomUUID();
+    const userMessageId = randomUUID();
+    const assistantMessageId = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO messages(id, task_id, turn_id, author, content, created_at)
+         VALUES (?, ?, ?, 'user', ?, ?)`,
+      )
+      .run(userMessageId, taskId, turnId, 'Imported legacy Project memory', createdAt);
+    this.db
+      .prepare(
+        `INSERT INTO turns(
+           id, task_id, user_message_id, state, seq, runtime_kind, model, created_at, updated_at
+         ) VALUES (?, ?, ?, 'completed', 0, 'mock', 'auto', ?, ?)`,
+      )
+      .run(turnId, taskId, userMessageId, createdAt, now);
+    this.db
+      .prepare(
+        `INSERT INTO messages(id, task_id, turn_id, author, content, created_at)
+         VALUES (?, ?, ?, 'assistant', ?, ?)`,
+      )
+      .run(assistantMessageId, taskId, turnId, content, createdAt);
+    this.db
+      .prepare('UPDATE turns SET assistant_message_id = ? WHERE id = ?')
+      .run(assistantMessageId, turnId);
+    return { taskId, turnId };
   }
 
   private backfillLegacyMutationScopes(): void {
@@ -8708,11 +8822,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   pauseGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
+    startNext = true,
   ): { task: TaskSummary; canceledEvent: TurnEvent | null; next: QueueTransition } {
     return this.db.transaction(() => {
       const canceledEvent = turnId === null ? null : this.cancelTurn(taskId, turnId);
       this.pauseGoal(taskId);
-      const next = canceledEvent === null ? null : this.startNextQueued(taskId);
+      const next = !startNext || canceledEvent === null ? null : this.startNextQueued(taskId);
       return { canceledEvent, next, task: this.getTask(taskId) };
     })();
   }
@@ -8720,11 +8835,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   clearGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
+    startNext = true,
   ): { task: TaskSummary; canceledEvent: TurnEvent | null; next: QueueTransition } {
     return this.db.transaction(() => {
       const canceledEvent = turnId === null ? null : this.cancelTurn(taskId, turnId);
       this.clearGoal(taskId);
-      const next = canceledEvent === null ? null : this.startNextQueued(taskId);
+      const next = !startNext || canceledEvent === null ? null : this.startNextQueued(taskId);
       return { canceledEvent, next, task: this.getTask(taskId) };
     })();
   }

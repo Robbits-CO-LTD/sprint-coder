@@ -232,16 +232,19 @@ const MAX_PROVIDER_LEADER_ROUNDS = 32;
 /**
  * Cancellation is a durable state transition first and a runtime best-effort cleanup second. A
  * Runtime Host can disappear before it acknowledges stop; that must not strand the Turn in
- * `canceling` and block the composer after the next launch.
+ * `canceling` and block the composer after the next launch. The boolean lets callers keep the
+ * durable transition while refusing to dispatch another runtime against an unconfirmed process.
  */
 export async function runBestEffortCancellation(
   cancellation: () => Promise<void>,
   onFailure: (error: unknown) => void,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await cancellation();
+    return true;
   } catch (error) {
     onFailure(error);
+    return false;
   }
 }
 
@@ -410,6 +413,11 @@ export class IpcRouter {
   private disposed = false;
   private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
+  /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
+  private readonly canceledRuntimeTurns = new Set<string>();
+  /** A failed stop confirmation blocks new work until the app is relaunched. */
+  private readonly quarantinedRuntimeKinds = new Set<'codex' | 'claude'>();
+  private readonly quarantinedRuntimeTasks = new Set<string>();
   /** First-Turn requests awaiting successful completion before title generation begins. */
   private readonly pendingTaskTitles = new Map<string, TaskTitleRequest>();
   /** Synthetic CLI executions use isolated Runtime Hosts and never enter Turn persistence. */
@@ -421,6 +429,7 @@ export class IpcRouter {
       taskId: string;
       canceledTurnId: string | null;
       transition: StopAndSendTransition;
+      runtimeStopped: boolean;
       logicalEndNotified: boolean;
     }
   >();
@@ -1755,13 +1764,13 @@ export class IpcRouter {
     for (const [channel, action] of [
       [
         IPC_CHANNELS.goalsPause,
-        (taskId: string, turnId: string | null) =>
-          this.persistence.pauseGoalAndCancelTurn(taskId, turnId),
+        (taskId: string, turnId: string | null, startNext: boolean) =>
+          this.persistence.pauseGoalAndCancelTurn(taskId, turnId, startNext),
       ],
       [
         IPC_CHANNELS.goalsClear,
-        (taskId: string, turnId: string | null) =>
-          this.persistence.clearGoalAndCancelTurn(taskId, turnId),
+        (taskId: string, turnId: string | null, startNext: boolean) =>
+          this.persistence.clearGoalAndCancelTurn(taskId, turnId, startNext),
       ],
     ] as const)
       this.handleMutation(
@@ -1780,11 +1789,12 @@ export class IpcRouter {
           const goal = this.persistence.getTask(input.taskId).goalState;
           const controlledTurnId =
             goal?.status === 'active' ? this.persistence.getActiveTurnId(input.taskId) : null;
-          if (controlledTurnId !== null) await this.cancelRuntime(input.taskId, controlledTurnId);
+          const runtimeStopped =
+            controlledTurnId === null || (await this.cancelRuntime(input.taskId, controlledTurnId));
           let canceledEvent: TurnEvent | null = null;
           let next: QueueTransition = null;
           const result = this.runMutation(event, envelope, input.taskId, channel, () => {
-            const controlled = action(input.taskId, controlledTurnId);
+            const controlled = action(input.taskId, controlledTurnId, runtimeStopped);
             canceledEvent = controlled.canceledEvent;
             next = controlled.next;
             return controlled.task;
@@ -1792,7 +1802,8 @@ export class IpcRouter {
           if (result.executed && controlledTurnId !== null)
             this.approvalCoordinator.turnEnded(input.taskId, controlledTurnId, 'canceled');
           if (result.executed && canceledEvent !== null) this.publish(canceledEvent);
-          if (result.executed) this.dispatchQueueTransition(next);
+          if (result.executed && runtimeStopped) this.dispatchQueueTransition(next);
+          if (controlledTurnId !== null) this.releaseCanceledRuntime(controlledTurnId);
           return result.value;
         },
       );
@@ -2379,6 +2390,39 @@ export class IpcRouter {
           return cached.value;
         }
         const activeTurnId = this.persistence.getActiveTurnId(input.taskId);
+        let runtimeStopped = true;
+        if (activeTurnId !== null) {
+          runtimeStopped = await this.cancelRuntime(input.taskId, activeTurnId);
+          if (!runtimeStopped) {
+            let canceledEvent: TurnEvent | null = null;
+            let goalTask: TaskSummary | null = null;
+            const cancellation = this.runMutation(
+              event,
+              envelope,
+              input.taskId,
+              IPC_CHANNELS.turnsStopAndSend,
+              () => {
+                const completion = this.persistence.cancelTurnAndFinishGoal(
+                  input.taskId,
+                  activeTurnId,
+                );
+                canceledEvent = completion.event;
+                goalTask = completion.task;
+              },
+            );
+            if (cancellation.executed) {
+              this.approvalCoordinator.turnEnded(input.taskId, activeTurnId, 'canceled');
+              if (goalTask !== null) this.pushTaskUpdated(goalTask);
+              if (canceledEvent !== null) this.publish(canceledEvent);
+            }
+            // Keep the failed-stop quarantine while this Turn's process is unknown, but no longer
+            // treat the terminalized Turn itself as an active runtime once persistence is settled.
+            this.releaseCanceledRuntime(activeTurnId);
+            throw new Error(
+              'Runtime停止を確認できないため、新しいTurnは開始しません。アプリを再起動してから再試行してください。',
+            );
+          }
+        }
         let transition: StopAndSendTransition | undefined;
         const result = this.runMutation(
           event,
@@ -2396,10 +2440,12 @@ export class IpcRouter {
           },
         );
         if (result.executed && transition !== undefined) {
+          if (activeTurnId !== null) this.releaseCanceledRuntime(activeTurnId);
           const pending = {
             taskId: input.taskId,
             canceledTurnId: activeTurnId,
             transition,
+            runtimeStopped,
             logicalEndNotified: false,
           };
           this.pendingStopAndSendByOperation.set(pendingKey, pending);
@@ -2414,7 +2460,7 @@ export class IpcRouter {
       z.undefined(),
       async (input, event, envelope) => {
         this.approvalCoordinator.turnEnded(input.taskId, input.turnId, 'canceled');
-        await this.cancelRuntime(input.taskId, input.turnId);
+        const runtimeStopped = await this.cancelRuntime(input.taskId, input.turnId);
         let canceledEvent: TurnEvent | null = null;
         let goalTask: TaskSummary | null = null;
         let next: QueueTransition = null;
@@ -2427,14 +2473,18 @@ export class IpcRouter {
             const completion = this.persistence.cancelTurnAndFinishGoal(input.taskId, input.turnId);
             canceledEvent = completion.event;
             goalTask = completion.task;
-            next = canceledEvent === null ? null : this.persistence.startNextQueued(input.taskId);
+            next =
+              !runtimeStopped || canceledEvent === null
+                ? null
+                : this.persistence.startNextQueued(input.taskId);
           },
         );
         if (result.executed) {
           if (goalTask !== null) this.pushTaskUpdated(goalTask);
           if (canceledEvent !== null) this.publish(canceledEvent);
-          this.dispatchQueueTransition(next);
+          if (runtimeStopped) this.dispatchQueueTransition(next);
         }
+        this.releaseCanceledRuntime(input.turnId);
         return result.value;
       },
     );
@@ -2597,6 +2647,7 @@ export class IpcRouter {
           const completion = this.persistence.cancelTurnAndFinishGoal(turn.taskId, turn.turnId);
           if (completion.task !== null) this.pushTaskUpdated(completion.task);
           if (completion.event !== null) this.publish(completion.event);
+          this.releaseCanceledRuntime(turn.turnId);
         }
         if (this.teamCoordinator.hasBusyWorkers(turn.taskId))
           await this.teamCoordinator.stopAll(turn.taskId);
@@ -2934,8 +2985,52 @@ export class IpcRouter {
     void this.startSelectedRuntime(transition.started);
   }
 
+  private finishQuarantinedRuntimeStart(started: StartedTurn): void {
+    const taskId = started.event.taskId;
+    const runtimeKind: ActiveRuntimeKind =
+      started.runtimeKind === 'codex' || started.runtimeKind === 'claude'
+        ? started.runtimeKind
+        : started.runtimeKind === 'mock'
+          ? 'mock'
+          : 'provider';
+    this.turnRuntimes.set(started.turnId, runtimeKind);
+    void this.mailbox.run(taskId, () => {
+      if (this.persistence.getActiveTurnId(taskId) !== started.turnId) {
+        this.turnRuntimes.delete(started.turnId);
+        return;
+      }
+      this.pendingTaskTitles.delete(started.turnId);
+      const completion = this.persistence.completeTurnAndFinishGoal(
+        taskId,
+        started.turnId,
+        'failed',
+        '前回のRuntime停止を確認できないため、新しいTurnを開始できません。アプリを再起動してから再試行してください。',
+      );
+      if (completion.task !== null) this.pushTaskUpdated(completion.task);
+      this.publish(completion.event);
+      this.approvalCoordinator.turnEnded(taskId, started.turnId, 'finished');
+      this.turnRuntimes.delete(started.turnId);
+    });
+  }
+
   private async startSelectedRuntime(started: StartedTurn): Promise<void> {
     const taskId = started.event.taskId;
+    // A Turn event can be published before its asynchronous Runtime startup reaches this method.
+    // Cancellation/replacement may have terminalized that Turn in the meantime; never start a
+    // process for a Turn that is no longer the task's active one.
+    if (
+      this.canceledRuntimeTurns.has(started.turnId) ||
+      this.persistence.getActiveTurnId(taskId) !== started.turnId
+    )
+      return;
+    if (
+      this.quarantinedRuntimeTasks.has(taskId) ||
+      ((started.runtimeKind === 'codex' || started.runtimeKind === 'claude') &&
+        this.quarantinedRuntimeKinds.has(started.runtimeKind))
+    ) {
+      this.finishQuarantinedRuntimeStart(started);
+      return;
+    }
     if (started.runtimeKind !== 'mock') {
       try {
         await this.assertTurnWorkspaceHealthy(started);
@@ -3702,12 +3797,13 @@ export class IpcRouter {
     this.window.webContents.send(IPC_CHANNELS.tasksUpdated, taskSummarySchema.parse(task));
   }
 
-  private async cancelRuntime(taskId: string, turnId: string): Promise<void> {
-    await runBestEffortCancellation(
+  private async cancelRuntime(taskId: string, turnId: string): Promise<boolean> {
+    this.canceledRuntimeTurns.add(turnId);
+    const kind = this.turnRuntimes.get(turnId);
+    const stopped = await runBestEffortCancellation(
       () =>
         this.runtimeCancelActions.run(turnId, () => {
           this.pendingTaskTitles.delete(turnId);
-          const kind = this.turnRuntimes.get(turnId);
           let cancelAction: () => Promise<void>;
           if (kind === 'codex' || kind === 'claude')
             cancelAction = async () => {
@@ -3732,26 +3828,50 @@ export class IpcRouter {
             cancelAction = async () => {
               await this.mockRuntime.cancel(turnId);
             };
-          this.turnRuntimes.delete(turnId);
-          this.teamMcpBridge.unregister(turnId);
-          this.teamRequiredTurns.delete(turnId);
-          this.teamSkillExpectedTurns.delete(turnId);
-          this.teamSkillResolutionByTurn.delete(turnId);
-          this.pendingProjectMemoriesByTurn.delete(turnId);
-          this.providerAbortByTurn.delete(turnId);
-          this.providerExecutionIdByTurn.delete(turnId);
-          return cancelAction;
+          this.detachCanceledTurnBookkeeping(turnId);
+          return async () => {
+            await cancelAction();
+          };
         }),
-      (error) =>
+      (error) => {
+        if (kind === 'codex' || kind === 'claude') this.quarantinedRuntimeKinds.add(kind);
+        this.quarantinedRuntimeTasks.add(taskId);
         secureLogger.warn(
-          'Runtime cancellation was not confirmed; persisted Turn cancellation will continue',
+          'Runtime cancellation was not confirmed; persisted Turn cancellation will continue without dispatching another runtime',
           {
             taskId,
             turnId,
             error,
           },
-        ),
+        );
+      },
     );
+    return stopped;
+  }
+
+  private detachCanceledTurnBookkeeping(turnId: string): void {
+    this.pendingTaskTitles.delete(turnId);
+    this.teamMcpBridge.unregister(turnId);
+    this.teamRequiredTurns.delete(turnId);
+    this.teamSkillExpectedTurns.delete(turnId);
+    this.teamSkillResolutionByTurn.delete(turnId);
+    this.pendingProjectMemoriesByTurn.delete(turnId);
+    this.providerAbortByTurn.delete(turnId);
+    this.providerExecutionIdByTurn.delete(turnId);
+    this.reasoningByTurn.get(turnId)?.dispose();
+    this.reasoningByTurn.delete(turnId);
+    this.reasoningRedactorByTurn.delete(turnId);
+    for (const watcher of this.workspaceWatchByTurn.get(turnId) ?? []) watcher.stop();
+    this.workspaceWatchByTurn.delete(turnId);
+    this.turnWorkspaceByTurn.delete(turnId);
+    this.baselinesByTurn.delete(turnId);
+    for (const key of this.fileEditByKey.keys())
+      if (key.startsWith(`${turnId}\u0000`)) this.fileEditByKey.delete(key);
+  }
+
+  private releaseCanceledRuntime(turnId: string): void {
+    this.turnRuntimes.delete(turnId);
+    this.canceledRuntimeTurns.delete(turnId);
   }
 
   private cancelProviderExecution(
@@ -3776,6 +3896,7 @@ export class IpcRouter {
       taskId: string;
       canceledTurnId: string | null;
       transition: StopAndSendTransition;
+      runtimeStopped: boolean;
       logicalEndNotified: boolean;
     },
   ): Promise<void> {
@@ -3784,7 +3905,6 @@ export class IpcRouter {
         this.approvalCoordinator.turnEnded(pending.taskId, pending.canceledTurnId, 'canceled');
         pending.logicalEndNotified = true;
       }
-      await this.cancelRuntime(pending.taskId, pending.canceledTurnId);
     }
     if (pending.transition.canceledEvent !== null) this.publish(pending.transition.canceledEvent);
     this.dispatchStarted(pending.transition.started);
@@ -4205,6 +4325,7 @@ export class IpcRouter {
   ): void {
     void this.mailbox
       .run(taskId, () => {
+        if (this.canceledRuntimeTurns.has(turnId)) return;
         if (this.turnRuntimes.get(turnId) !== kind) return;
         if (runtimeEvent.type === 'heartbeat') return;
         if (runtimeEvent.type === 'stage')
@@ -4510,6 +4631,7 @@ export class IpcRouter {
     error: PublicError,
   ): void {
     void this.mailbox.run(taskId, () => {
+      if (this.canceledRuntimeTurns.has(turnId)) return;
       if (this.turnRuntimes.get(turnId) !== kind) return;
       // The reason used to be dropped here, so the renderer saw a Turn end in `failed` with no way
       // to tell "the model refused" from "the CLI is gone" (issue #9). Pushed on the transient
