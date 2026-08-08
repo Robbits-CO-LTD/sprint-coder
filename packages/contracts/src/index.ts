@@ -528,6 +528,7 @@ export const teamExecutionIsolationSchema = z
       'preparing',
       'running',
       'finalizing',
+      'waiting_integration',
       'integrating',
       'waiting_resume',
       'completed',
@@ -606,7 +607,7 @@ export const teamExecutionIsolationSchema = z
         message: 'Running isolation repositories must be active',
       });
     if (
-      ['integrating', 'completed'].includes(isolation.phase) &&
+      ['waiting_integration', 'integrating', 'completed'].includes(isolation.phase) &&
       isolation.repositories.some(
         ({ state, workerHead }) =>
           !['ready', 'integrated', 'cleaned'].includes(state) || workerHead === null,

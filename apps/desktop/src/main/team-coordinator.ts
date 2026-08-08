@@ -41,6 +41,7 @@ import {
   TeamExecutionScheduler,
   type TeamExecutionJob,
 } from './team-execution-scheduler';
+import { TeamIntegrationScheduler } from './team-integration-scheduler';
 import { ConnectionAdmissionController, type ConnectionWaitReason } from './connection-admission';
 import {
   DEFAULT_RATE_LIMIT_RETRY_COUNT,
@@ -250,6 +251,7 @@ export class TeamCoordinator {
     { liveOutput: string; reasoningActive: boolean }
   >();
   private readonly executionScheduler: TeamExecutionScheduler;
+  private readonly integrationScheduler: TeamIntegrationScheduler;
 
   constructor(
     private readonly persistence: PersistenceClient,
@@ -267,7 +269,9 @@ export class TeamCoordinator {
     ) => Omit<TeamBlueprintBindingRecord, 'teamId' | 'boundAt'> | null,
     private readonly worktreeManager?: WorkerWorktreeManager,
     private readonly verifyWorkspace?: (taskId: string) => Promise<void>,
+    integrationScheduler?: TeamIntegrationScheduler,
   ) {
+    this.integrationScheduler = integrationScheduler ?? new TeamIntegrationScheduler();
     if (executionScheduler !== undefined) {
       this.executionScheduler = executionScheduler;
       return;
@@ -844,29 +848,24 @@ export class TeamCoordinator {
         isolation !== null &&
         completion !== null &&
         (isolation.phase === 'completed' ||
+          isolation.phase === 'waiting_integration' ||
           (isolation.phase === 'waiting_resume' && isolation.resumeKind === 'integration'))
       ) {
         await this.verifyWorkspace?.(taskId);
-        this.persistence.acquireTeamIntegrationRootLeases({
-          executionId: execution.id,
-          roots: isolationLeaseBindings(isolation),
-          now: this.isoNow(),
-        });
         this.persistence.transitionTeamMission(mission.id, 'running', this.isoNow());
         if (this.persistence.getTeamTask(completion.teamTaskId).status === 'blocked')
           this.persistence.transitionTeamTask(completion.teamTaskId, 'running', this.isoNow());
         try {
-          const finalized =
-            isolation.phase === 'completed'
-              ? isolation
-              : (
-                  await this.finalizeIsolation({
-                    isolation,
-                    agentId: completion.agentId,
-                    missionId: mission.id,
-                    stepOrdinal: step.ordinal,
-                  })
-                ).isolation;
+          const finalized = ['completed', 'waiting_integration'].includes(isolation.phase)
+            ? isolation
+            : (
+                await this.finalizeIsolation({
+                  isolation,
+                  agentId: completion.agentId,
+                  missionId: mission.id,
+                  stepOrdinal: step.ordinal,
+                })
+              ).isolation;
           const resumedReport = workerReportSchema.parse({
             ...completion.report,
             changedFiles: this.isolationChangedFiles(finalized),
@@ -879,9 +878,7 @@ export class TeamCoordinator {
           const integrated =
             finalized.phase === 'completed'
               ? await this.revalidateIntegratedIsolation(finalized)
-              : await this.integrateIsolation(finalized);
-          if (finalized.phase === 'completed')
-            this.persistence.releaseTeamIntegrationRootLeases(execution.id);
+              : await this.queueIsolationIntegration(finalized);
           const checkpointResult = this.persistence.completeTeamMissionStep({
             executionId: execution.id,
             attemptId: completion.attemptId,
@@ -908,7 +905,6 @@ export class TeamCoordinator {
           this.emit(taskId, team.id);
           return this.missionSummary(checkpointResult.mission);
         } catch (error) {
-          this.persistence.releaseTeamIntegrationRootLeases(execution.id);
           if (this.persistence.getTeamTask(completion.teamTaskId).status === 'running')
             this.persistence.transitionTeamTask(completion.teamTaskId, 'blocked', this.isoNow());
           if (this.persistence.getTeamMission(mission.id).state === 'running')
@@ -943,29 +939,24 @@ export class TeamCoordinator {
         isolation === null ||
         completion === null ||
         (isolation.phase !== 'completed' &&
+          isolation.phase !== 'waiting_integration' &&
           (isolation.phase !== 'waiting_resume' || isolation.resumeKind !== 'integration'))
       )
         throw new Error('Team execution has no resumable integration');
       await this.verifyWorkspace?.(taskId);
-      this.persistence.acquireTeamIntegrationRootLeases({
-        executionId: execution.id,
-        roots: isolationLeaseBindings(isolation),
-        now: this.isoNow(),
-      });
       if (this.persistence.getTeamTask(completion.teamTaskId).status === 'blocked')
         this.persistence.transitionTeamTask(completion.teamTaskId, 'running', this.isoNow());
       try {
-        const finalized =
-          isolation.phase === 'completed'
-            ? isolation
-            : (
-                await this.finalizeIsolation({
-                  isolation,
-                  agentId: completion.agentId,
-                  missionId: '',
-                  stepOrdinal: 1,
-                })
-              ).isolation;
+        const finalized = ['completed', 'waiting_integration'].includes(isolation.phase)
+          ? isolation
+          : (
+              await this.finalizeIsolation({
+                isolation,
+                agentId: completion.agentId,
+                missionId: '',
+                stepOrdinal: 1,
+              })
+            ).isolation;
         const report = workerReportSchema.parse({
           ...completion.report,
           changedFiles: this.isolationChangedFiles(finalized),
@@ -978,9 +969,7 @@ export class TeamCoordinator {
         const integrated =
           finalized.phase === 'completed'
             ? await this.revalidateIntegratedIsolation(finalized)
-            : await this.integrateIsolation(finalized);
-        if (finalized.phase === 'completed')
-          this.persistence.releaseTeamIntegrationRootLeases(execution.id);
+            : await this.queueIsolationIntegration(finalized);
         this.persistence.completeTeamTaskWithReport({
           teamTaskId: completion.teamTaskId,
           agentId: completion.agentId,
@@ -988,6 +977,12 @@ export class TeamCoordinator {
           doneEvidence: completion.doneEvidence,
           now: this.isoNow(),
         });
+        if (this.persistence.getTeamAttempt(completion.attemptId).state === 'running')
+          this.persistence.transitionTeamAttempt({
+            attemptId: completion.attemptId,
+            to: 'completed',
+            now: this.isoNow(),
+          });
         this.persistence.transitionTeamExecution({
           executionId: execution.id,
           to: 'completed',
@@ -1004,7 +999,6 @@ export class TeamCoordinator {
         this.emit(taskId, team.id);
         return this.detail(team.id);
       } catch (error) {
-        this.persistence.releaseTeamIntegrationRootLeases(execution.id);
         if (this.persistence.getTeamTask(completion.teamTaskId).status === 'running')
           this.persistence.transitionTeamTask(completion.teamTaskId, 'blocked', this.isoNow());
         this.emit(taskId, team.id);
@@ -1600,7 +1594,7 @@ export class TeamCoordinator {
       if (
         executionIsolation !== null &&
         completion.value.status === 'succeeded' &&
-        executionIsolation.phase === 'finalizing'
+        executionIsolation.phase === 'waiting_integration'
       ) {
         this.persistence.saveTeamExecutionIsolationCompletion({
           executionId: input.executionId,
@@ -1611,7 +1605,7 @@ export class TeamCoordinator {
           doneEvidence,
           now: this.isoNow(),
         });
-        executionIsolation = await this.integrateIsolation(executionIsolation);
+        executionIsolation = await this.queueIsolationIntegration(executionIsolation);
       }
       let nextMissionExecutionId: string | null = null;
       let completedMission = false;
@@ -2221,6 +2215,25 @@ export class TeamCoordinator {
           attemptStartReason: 'app_restart',
         });
       }
+      for (const execution of this.persistence
+        .listTeamExecutions(team.id)
+        .filter(({ state }) => state === 'waiting_resume')) {
+        const isolation = this.persistence.getTeamExecutionIsolation(execution.id);
+        const completion = this.persistence.getTeamExecutionIsolationCompletion(execution.id);
+        if (
+          isolation === null ||
+          completion === null ||
+          (isolation.phase !== 'waiting_integration' &&
+            (isolation.phase !== 'waiting_resume' || isolation.resumeKind !== 'integration'))
+        )
+          continue;
+        const mission = this.persistence.getTeamMissionForExecution(execution.id);
+        const resume =
+          mission === null
+            ? this.resumeExecutionIntegration(task.id, execution.id)
+            : this.resumeMission(task.id, mission.id);
+        void resume.catch(() => undefined);
+      }
     }
     return recovered;
   }
@@ -2727,31 +2740,21 @@ export class TeamCoordinator {
     if (existing !== null) {
       if (existing.phase !== 'preparing' && existing.phase !== 'running')
         throw new Error(`Team execution isolation cannot run from ${existing.phase}`);
-      this.persistence.acquireTeamIntegrationRootLeases({
+      if (existing.phase === 'running') return existing;
+      for (const repository of existing.repositories)
+        await this.worktreeManager.ensureCreated({
+          agentId,
+          worktreeId: isolationWorktreeId(executionId, repository.ordinal),
+          repoPath: repository.repoPath,
+          baseRef: repository.baseHead,
+        });
+      return this.persistence.updateTeamExecutionIsolation({
         executionId,
-        roots: isolationLeaseBindings(existing),
+        phase: 'running',
+        resumeKind: null,
+        reason: null,
         now: this.isoNow(),
       });
-      if (existing.phase === 'running') return existing;
-      try {
-        for (const repository of existing.repositories)
-          await this.worktreeManager.ensureCreated({
-            agentId,
-            worktreeId: isolationWorktreeId(executionId, repository.ordinal),
-            repoPath: repository.repoPath,
-            baseRef: repository.baseHead,
-          });
-        return this.persistence.updateTeamExecutionIsolation({
-          executionId,
-          phase: 'running',
-          resumeKind: null,
-          reason: null,
-          now: this.isoNow(),
-        });
-      } catch (error) {
-        this.persistence.releaseTeamIntegrationRootLeases(executionId);
-        throw error;
-      }
     }
     const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
     const repositories = await this.requireWorkspaceWriteEligibility(taskId);
@@ -2806,36 +2809,26 @@ export class TeamCoordinator {
         mutationKey: binding.workspaceKey,
       };
     });
-    try {
-      this.persistence.acquireTeamIntegrationRootLeases({
-        executionId,
-        roots: isolationLeaseBindings({ repositories: repositoryRecords, roots: rootRecords }),
-        now: this.isoNow(),
+    const recorded = this.persistence.createTeamExecutionIsolation({
+      executionId,
+      repositories: repositoryRecords,
+      roots: rootRecords,
+      now: this.isoNow(),
+    });
+    for (const repository of recorded.repositories)
+      await this.worktreeManager.ensureCreated({
+        agentId,
+        worktreeId: isolationWorktreeId(executionId, repository.ordinal),
+        repoPath: repository.repoPath,
+        baseRef: repository.baseHead,
       });
-      const recorded = this.persistence.createTeamExecutionIsolation({
-        executionId,
-        repositories: repositoryRecords,
-        roots: rootRecords,
-        now: this.isoNow(),
-      });
-      for (const repository of recorded.repositories)
-        await this.worktreeManager.ensureCreated({
-          agentId,
-          worktreeId: isolationWorktreeId(executionId, repository.ordinal),
-          repoPath: repository.repoPath,
-          baseRef: repository.baseHead,
-        });
-      return this.persistence.updateTeamExecutionIsolation({
-        executionId: recorded.executionId,
-        phase: 'running',
-        resumeKind: null,
-        reason: null,
-        now: this.isoNow(),
-      });
-    } catch (error) {
-      this.persistence.releaseTeamIntegrationRootLeases(executionId);
-      throw error;
-    }
+    return this.persistence.updateTeamExecutionIsolation({
+      executionId: recorded.executionId,
+      phase: 'running',
+      resumeKind: null,
+      reason: null,
+      now: this.isoNow(),
+    });
   }
 
   private runtimeWorkspaceForIsolation(
@@ -2933,6 +2926,13 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
       }
+      isolation = this.persistence.updateTeamExecutionIsolation({
+        executionId: isolation.executionId,
+        phase: 'waiting_integration',
+        resumeKind: null,
+        reason: null,
+        now: this.isoNow(),
+      });
     } catch (error) {
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
       isolation = this.persistence.updateTeamExecutionIsolation({
@@ -2982,22 +2982,31 @@ export class TeamCoordinator {
       )) {
         if (repository.workerHead === null)
           throw new Error('All repositories must be finalized before integration');
-        const integrated = await this.worktreeManager.integrate({
-          repoPath: repository.repoPath,
-          baseHead: repository.baseHead,
-          workerHead: repository.workerHead,
-        });
-        if (
-          repository.state === 'integrated' &&
-          integrated.integratedHead !== repository.integratedHead
-        )
-          throw new Error(`Integrated repository HEAD changed: ${repository.repoPath}`);
+        if (repository.state === 'integrated' && repository.integratedHead === null)
+          throw new Error('Integrated repository is missing its sealed HEAD');
+        const sealedIntegratedHead = repository.integratedHead;
+        const integrated =
+          repository.state === 'integrated'
+            ? await this.worktreeManager.revalidateIntegration({
+                repoPath: repository.repoPath,
+                baseHead: repository.baseHead,
+                workerHead: repository.workerHead,
+                integratedHead: sealedIntegratedHead as string,
+              })
+            : await this.worktreeManager.integrate({
+                repoPath: repository.repoPath,
+                baseHead: repository.baseHead,
+                workerHead: repository.workerHead,
+              });
         isolation = this.persistence.updateTeamExecutionIsolation({
           executionId: isolation.executionId,
           phase: 'integrating',
           repositories: replaceIsolationRepository(isolation.repositories, repository.ordinal, {
             ...repository,
-            integratedHead: integrated.integratedHead,
+            integratedHead:
+              repository.state === 'integrated'
+                ? repository.integratedHead
+                : integrated.integratedHead,
             state: 'integrated',
           }),
           now: this.isoNow(),
@@ -3026,6 +3035,23 @@ export class TeamCoordinator {
     return isolation;
   }
 
+  private async queueIsolationIntegration(
+    isolation: TeamExecutionIsolationRecord,
+  ): Promise<TeamExecutionIsolationRecord> {
+    let integrated: TeamExecutionIsolationRecord | null = null;
+    await this.integrationScheduler.submit({
+      executionId: isolation.executionId,
+      mutationKeys: isolationLeaseBindings(isolation).map(({ mutationKey }) => mutationKey),
+      run: async () => {
+        const current = this.persistence.getTeamExecutionIsolation(isolation.executionId);
+        if (current === null) throw new Error('Queued Team isolation no longer exists');
+        integrated = await this.integrateIsolation(current);
+      },
+    });
+    if (integrated === null) throw new Error('Integration scheduler completed without a result');
+    return integrated;
+  }
+
   private async revalidateIntegratedIsolation(
     initial: TeamExecutionIsolationRecord,
   ): Promise<TeamExecutionIsolationRecord> {
@@ -3035,10 +3061,11 @@ export class TeamCoordinator {
       for (const repository of initial.repositories) {
         if (repository.workerHead === null || repository.integratedHead === null)
           throw new Error('Completed isolation repository is missing its sealed Git heads');
-        const verified = await this.worktreeManager.integrate({
+        const verified = await this.worktreeManager.revalidateIntegration({
           repoPath: repository.repoPath,
           baseHead: repository.baseHead,
           workerHead: repository.workerHead,
+          integratedHead: repository.integratedHead,
         });
         if (verified.integratedHead !== repository.integratedHead)
           throw new Error(`Integrated repository HEAD changed: ${repository.repoPath}`);
@@ -3555,6 +3582,8 @@ function isolationLeaseBindings(
   mutationKey: string;
   identity: string;
 }[] {
+  // Root keys preserve the existing mutation boundary, while the canonical repository key is
+  // shared by sibling roots so two jobs can never cherry-pick into the same parent checkout.
   const repositories = isolation.repositories.map(({ ordinal, repoPath }) => {
     const canonicalKey = process.platform === 'win32' ? repoPath.toLowerCase() : repoPath;
     const mutationKey = createHash('sha256')

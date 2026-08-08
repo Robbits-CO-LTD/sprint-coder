@@ -26,6 +26,7 @@ import {
 } from './team-coordinator';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
+import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { WorkerWorktreeManager } from './worker-worktree';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
@@ -120,6 +121,7 @@ function coordinatorWithWorktrees(
   persistence: SqlitePersistenceClient,
   runtime: TeamWorkerRuntime,
   manager: WorkerWorktreeManager,
+  integrationScheduler?: TeamIntegrationScheduler,
 ): TeamCoordinator {
   return new TeamCoordinator(
     persistence,
@@ -131,6 +133,8 @@ function coordinatorWithWorktrees(
     undefined,
     undefined,
     manager,
+    undefined,
+    integrationScheduler,
   );
 }
 
@@ -283,6 +287,33 @@ class FailRepositoryOnceManager extends WorkerWorktreeManager {
   }
 }
 
+class TrackingIntegrationManager extends WorkerWorktreeManager {
+  activeIntegrations = 0;
+  maxActiveIntegrations = 0;
+  readonly integratedRepositories: string[] = [];
+
+  override async integrate(input: Parameters<WorkerWorktreeManager['integrate']>[0]) {
+    this.activeIntegrations += 1;
+    this.maxActiveIntegrations = Math.max(this.maxActiveIntegrations, this.activeIntegrations);
+    this.integratedRepositories.push(realpathSync(input.repoPath));
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return await super.integrate(input);
+    } finally {
+      this.activeIntegrations -= 1;
+    }
+  }
+}
+
+class PausedIntegrationScheduler extends TeamIntegrationScheduler {
+  readonly jobs: TeamIntegrationJob[] = [];
+
+  override async submit(job: TeamIntegrationJob): Promise<void> {
+    this.jobs.push(job);
+    await new Promise<void>(() => undefined);
+  }
+}
+
 class CrashAfterFirstWorktreeManager extends WorkerWorktreeManager {
   private crashed = false;
 
@@ -327,6 +358,37 @@ class BlockingWorkerRuntime extends TestWorkerRuntime {
       },
       usage: { costCents: 1, tokens: 2, timeMs: 3, toolCalls: 4 },
     };
+  }
+}
+
+class BlockingDistinctFileRuntime extends BlockingWorkerRuntime {
+  readonly worktreePaths: string[] = [];
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+    workspacePath?: string | null;
+  }): Promise<WorkerRuntimeResult> {
+    if (input.workspacePath === undefined || input.workspacePath === null)
+      throw new Error('write step did not receive an isolated worktree');
+    this.worktreePaths.push(input.workspacePath);
+    writeFileSync(join(input.workspacePath, `${input.content}.txt`), `${input.content}\n`);
+    return super.execute(input);
+  }
+}
+
+class BlockingSameFileRuntime extends BlockingWorkerRuntime {
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+    workspacePath?: string | null;
+  }): Promise<WorkerRuntimeResult> {
+    if (input.workspacePath === undefined || input.workspacePath === null)
+      throw new Error('write step did not receive an isolated worktree');
+    writeFileSync(join(input.workspacePath, 'README.md'), `${input.content}\n`);
+    return super.execute(input);
   }
 }
 
@@ -892,7 +954,231 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('serializes concurrent writers whose distinct roots share one repository', async () => {
+    it('restores a saved waiting integration after restart without rerunning the Worker', async () => {
+      const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-integration-restart-'));
+      cleanup.push(databaseDirectory);
+      const databasePath = join(databaseDirectory, 'test.sqlite3');
+      let persistence = new SqlitePersistenceClient(databasePath);
+      const task = persistence.createTask('Waiting integration restart recovery');
+      const runtime = new WorktreeWritingRuntime();
+      const { workspace, worktreesRoot, manager } = configureGitWorkspace(persistence, task.id);
+      const pausedScheduler = new PausedIntegrationScheduler();
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager, pausedScheduler);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'restart writer',
+        objective: 'finish before restart',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write before restart',
+        doneCriteria: ['saved result is integrated after restart'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(
+        () =>
+          pausedScheduler.jobs.length === 1 &&
+          persistence.getTeamExecutionIsolation(submission.executionId)?.phase ===
+            'waiting_integration',
+        15_000,
+      );
+      expect(
+        persistence.getTeamExecutionIsolationCompletion(submission.executionId),
+      ).not.toBeNull();
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('running');
+      expect(runtime.workspacePaths).toHaveLength(1);
+      persistence.close();
+
+      persistence = new SqlitePersistenceClient(databasePath);
+      persistence.initializeMutationRecovery('integration-restart', '2026-08-08T10:00:00.000Z');
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('waiting_resume');
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)?.phase).toBe(
+        'waiting_integration',
+      );
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'running', ordinal: 1 },
+      ]);
+      const resumedCoordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new WorkerWorktreeManager({ worktreesRoot }),
+      );
+      resumedCoordinator.recoverOnStartup();
+
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+        15_000,
+      );
+      expect(runtime.workspacePaths).toHaveLength(1);
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'completed', ordinal: 1 },
+      ]);
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      expect(spawnSync('git', ['-C', workspace, 'status', '--porcelain']).stdout.toString()).toBe(
+        '',
+      );
+      await waitFor(
+        () => persistence.getTeamExecutionIsolationCompletion(submission.executionId) === null,
+        15_000,
+      );
+      expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      persistence.close();
+    });
+
+    it('runs three same-repository writers concurrently and integrates three FIFO commits', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Three parallel repository writers');
+      const runtime = new BlockingDistinctFileRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const integrate = vi.spyOn(manager, 'integrate');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const workers = await Promise.all(
+        ['alpha', 'bravo', 'charlie'].map((role) =>
+          coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: `write ${role}`,
+            contextInheritancePolicy: 'none',
+            writeCapable: true,
+          }),
+        ),
+      );
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
+      for (const [index, worker] of workers.entries()) {
+        const name = ['alpha', 'bravo', 'charlie'][index]!;
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: name,
+            doneCriteria: [`${name}.txt is integrated`],
+            accessMode: 'workspace-write',
+          }),
+        );
+      }
+
+      await waitFor(() => runtime.activeExecutions === 3 && runtime.releases.length === 3);
+      expect(runtime.maxActiveExecutions).toBe(3);
+      expect(new Set(runtime.worktreePaths).size).toBe(3);
+      expect(
+        submissions.map(
+          ({ executionId }) => persistence.getTeamExecutionIsolation(executionId)?.phase,
+        ),
+      ).toEqual(['running', 'running', 'running']);
+
+      for (let completed = 1; completed <= submissions.length; completed += 1) {
+        runtime.releases.shift()?.();
+        await waitFor(
+          () =>
+            submissions.filter(
+              ({ executionId }) => persistence.getTeamExecution(executionId).state === 'completed',
+            ).length === completed,
+          15_000,
+        );
+      }
+
+      expect(integrate).toHaveBeenCalledTimes(3);
+      expect(
+        spawnSync('git', ['-C', workspace, 'rev-list', '--count', 'HEAD']).stdout.toString(),
+      ).toBe('4\n');
+      for (const name of ['alpha', 'bravo', 'charlie'])
+        expect(readFileSync(join(workspace, `${name}.txt`), 'utf8')).toBe(`${name}\n`);
+      expect(spawnSync('git', ['-C', workspace, 'status', '--porcelain']).stdout.toString()).toBe(
+        '',
+      );
+      await waitFor(
+        () =>
+          submissions.every(
+            ({ executionId }) =>
+              persistence.getTeamExecutionIsolation(executionId)?.repositories[0]?.state ===
+              'cleaned',
+          ),
+        15_000,
+      );
+      expect(
+        submissions.map(
+          ({ executionId }) =>
+            persistence.getTeamExecutionIsolation(executionId)?.repositories[0]?.state,
+        ),
+      ).toEqual(['cleaned', 'cleaned', 'cleaned']);
+      persistence.close();
+    });
+
+    it('preserves a conflicting Worker worktree and pauses only that integration', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Conflicting parallel repository writers');
+      const runtime = new BlockingSameFileRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const workers = await Promise.all(
+        ['first writer', 'second writer'].map((role) =>
+          coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: role,
+            contextInheritancePolicy: 'none',
+            writeCapable: true,
+          }),
+        ),
+      );
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
+      for (const [index, worker] of workers.entries())
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: index === 0 ? 'first version' : 'second version',
+            doneCriteria: ['README.md is integrated'],
+            accessMode: 'workspace-write',
+          }),
+        );
+
+      await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2);
+      runtime.releases.shift()?.();
+      await waitFor(
+        () =>
+          submissions.some(
+            ({ executionId }) => persistence.getTeamExecution(executionId).state === 'completed',
+          ),
+        15_000,
+      );
+      runtime.releases.shift()?.();
+      await waitFor(
+        () =>
+          submissions.every(({ executionId }) =>
+            ['completed', 'waiting_resume'].includes(
+              persistence.getTeamExecution(executionId).state,
+            ),
+          ),
+        15_000,
+      );
+
+      const waiting = submissions.find(
+        ({ executionId }) => persistence.getTeamExecution(executionId).state === 'waiting_resume',
+      );
+      expect(waiting).toBeDefined();
+      const waitingIsolation = persistence.getTeamExecutionIsolation(waiting!.executionId);
+      expect(waitingIsolation).toMatchObject({
+        phase: 'waiting_resume',
+        resumeKind: 'integration',
+        repositories: [{ state: 'ready' }],
+      });
+      expect(existsSync(waitingIsolation!.repositories[0]!.worktreePath)).toBe(true);
+      expect(persistence.getTeamExecutionIsolationCompletion(waiting!.executionId)).not.toBeNull();
+      expect(['first version\n', 'second version\n']).toContain(
+        readFileSync(join(workspace, 'README.md'), 'utf8'),
+      );
+      expect(spawnSync('git', ['-C', workspace, 'status', '--porcelain']).stdout.toString()).toBe(
+        '',
+      );
+      persistence.close();
+    });
+
+    it('runs concurrent writers whose distinct roots share one repository', async () => {
       const persistence = createPersistence();
       const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-concurrent-repo-')));
       const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-concurrent-worktrees-'));
@@ -954,19 +1240,19 @@ if (runsWithElectronAbi)
         secondProject.id,
       );
       const runtime = new BlockingWorkerRuntime();
-      const manager = new WorkerWorktreeManager({ worktreesRoot });
+      const manager = new TrackingIntegrationManager({ worktreesRoot });
       const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
       const firstWorker = await coordinator.hireWorker({
         taskId: firstTask.id,
         role: 'first writer',
-        objective: 'hold the root lease',
+        objective: 'run concurrently',
         contextInheritancePolicy: 'none',
         writeCapable: true,
       });
       const secondWorker = await coordinator.hireWorker({
         taskId: secondTask.id,
         role: 'second writer',
-        objective: 'must not overlap the first writer',
+        objective: 'overlap the first writer',
         contextInheritancePolicy: 'none',
         writeCapable: true,
       });
@@ -982,15 +1268,32 @@ if (runsWithElectronAbi)
         taskId: secondTask.id,
         targetAgentId: secondWorker.id,
         content: 'second write',
-        doneCriteria: ['second must not overlap'],
+        doneCriteria: ['second overlaps'],
         accessMode: 'workspace-write',
       });
-      await waitFor(() => persistence.getTeamExecution(second.executionId).state === 'failed');
-      expect(runtime.contents).toEqual(['first write']);
-      expect(persistence.getTeamExecutionIsolation(second.executionId)).toBeNull();
+      await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2);
+      expect(new Set(runtime.contents)).toEqual(new Set(['first write', 'second write']));
+      expect(persistence.getTeamExecutionIsolation(first.executionId)).toMatchObject({
+        phase: 'running',
+      });
+      expect(persistence.getTeamExecutionIsolation(second.executionId)).toMatchObject({
+        phase: 'running',
+      });
 
-      runtime.releases.shift()?.();
-      await waitFor(() => persistence.getTeamExecution(first.executionId).state === 'completed');
+      for (const release of runtime.releases.splice(0)) release();
+      await waitFor(
+        () =>
+          persistence.getTeamExecution(first.executionId).state === 'completed' &&
+          persistence.getTeamExecution(second.executionId).state === 'completed',
+      );
+      expect(spawnSync('git', ['-C', repo, 'status', '--porcelain']).stdout.toString().trim()).toBe(
+        '',
+      );
+      expect(manager.integratedRepositories).toHaveLength(2);
+      expect(new Set(manager.integratedRepositories.map((path) => path.toLowerCase())).size).toBe(
+        1,
+      );
+      expect(manager.maxActiveIntegrations).toBe(1);
       persistence.close();
     });
 
@@ -1362,8 +1665,9 @@ if (runsWithElectronAbi)
       persistence.initializeMutationRecovery('resumed-instance', '2026-08-02T00:10:00.000Z');
       const resumedManager = new WorkerWorktreeManager({ worktreesRoot });
       const resumedIntegrate = vi.spyOn(resumedManager, 'integrate');
+      const resumedRevalidate = vi.spyOn(resumedManager, 'revalidateIntegration');
       const resumedCoordinator = coordinatorWithWorktrees(persistence, runtime, resumedManager);
-      resumedCoordinator.recoverOnStartup();
+      persistence.recoverTeamsOnStartup('2026-08-02T00:10:01.000Z');
       writeFileSync(join(secondaryRepo, 'outside.txt'), 'changed after partial integration\n');
       expect(spawnSync('git', ['-C', secondaryRepo, 'add', 'outside.txt']).status).toBe(0);
       expect(
@@ -1380,40 +1684,34 @@ if (runsWithElectronAbi)
           'external change',
         ]).status,
       ).toBe(0);
-      await expect(resumedCoordinator.resumeMission(task.id, mission.id)).rejects.toThrow(
-        'Workspace HEAD changed before integration',
-      );
-      expect(persistence.getTeamMission(mission.id).state).toBe('waiting_resume');
-      expect(
-        spawnSync('git', ['-C', primaryRepo, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' })
-          .stdout,
-      ).toBe('1\n');
-      const secondaryIntegratedHead = partialIsolation?.repositories[1]?.integratedHead;
-      if (secondaryIntegratedHead === null || secondaryIntegratedHead === undefined)
-        throw new Error('Secondary integrated HEAD was not sealed');
-      expect(
-        spawnSync('git', ['-C', secondaryRepo, 'reset', '--hard', secondaryIntegratedHead]).status,
-      ).toBe(0);
       await resumedCoordinator.resumeMission(task.id, mission.id);
       await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 20_000);
+      expect(readFileSync(join(secondaryRepo, 'outside.txt'), 'utf8')).toBe(
+        'changed after partial integration\n',
+      );
       expect(runtime.workspaceSets).toHaveLength(1);
       expect(persistence.listTeamAttempts(executionId)).toHaveLength(1);
       expect(persistence.getTeamExecutionIsolationCompletion(executionId)).toBeNull();
       expect(resumedIntegrate.mock.calls.map(([input]) => basename(input.repoPath))).toEqual([
-        basename(secondaryRepo),
-        basename(secondaryRepo),
         basename(primaryRepo),
+      ]);
+      expect(resumedRevalidate.mock.calls.map(([input]) => basename(input.repoPath))).toEqual([
+        basename(secondaryRepo),
       ]);
       expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
         phase: 'completed',
         resumeKind: null,
         repositories: [{ state: 'cleaned' }, { state: 'cleaned' }],
       });
-      for (const repo of [primaryRepo, secondaryRepo])
-        expect(
-          spawnSync('git', ['-C', repo, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' })
-            .stdout,
-        ).toBe('2\n');
+      expect(
+        spawnSync('git', ['-C', primaryRepo, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' })
+          .stdout,
+      ).toBe('2\n');
+      expect(
+        spawnSync('git', ['-C', secondaryRepo, 'rev-list', '--count', 'HEAD'], {
+          encoding: 'utf8',
+        }).stdout,
+      ).toBe('3\n');
       persistence.close();
     });
 
