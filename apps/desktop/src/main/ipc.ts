@@ -2396,11 +2396,16 @@ export class IpcRouter {
           if (!runtimeStopped) {
             let canceledEvent: TurnEvent | null = null;
             let goalTask: TaskSummary | null = null;
-            const cancellation = this.runMutation(
-              event,
-              envelope,
+            // Do not complete the caller's Stop-and-Send operation here. The first attempt returns
+            // an explicit error, and the same operationId must be able to retry with input.text
+            // after the canceled Turn is durable. A separate internal operation records only the
+            // recovery transition and cannot make a later user retry look like a successful send.
+            this.persistence.executeOperation(
+              principalFor(event),
               input.taskId,
-              IPC_CHANNELS.turnsStopAndSend,
+              `${IPC_CHANNELS.turnsStopAndSend}:cancel-recovery`,
+              `${envelope.operationId}:cancel-recovery`,
+              hash,
               () => {
                 const completion = this.persistence.cancelTurnAndFinishGoal(
                   input.taskId,
@@ -2410,11 +2415,9 @@ export class IpcRouter {
                 goalTask = completion.task;
               },
             );
-            if (cancellation.executed) {
-              this.approvalCoordinator.turnEnded(input.taskId, activeTurnId, 'canceled');
-              if (goalTask !== null) this.pushTaskUpdated(goalTask);
-              if (canceledEvent !== null) this.publish(canceledEvent);
-            }
+            this.approvalCoordinator.turnEnded(input.taskId, activeTurnId, 'canceled');
+            if (goalTask !== null) this.pushTaskUpdated(goalTask);
+            if (canceledEvent !== null) this.publish(canceledEvent);
             // Keep the failed-stop quarantine while this Turn's process is unknown, but no longer
             // treat the terminalized Turn itself as an active runtime once persistence is settled.
             this.releaseCanceledRuntime(activeTurnId);
