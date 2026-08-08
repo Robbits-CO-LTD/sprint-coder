@@ -312,7 +312,7 @@ export class CodexRuntimeAdapter {
           clientInfo: {
             name: 'sprint-coder',
             title: 'Sprint Coder',
-            version: '0.1.0-beta.0',
+            version: '0.1.0-beta.1',
           },
           capabilities: multiRoot ? { experimentalApi: true } : {},
         });
