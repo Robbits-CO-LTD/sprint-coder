@@ -52,6 +52,7 @@ describe('team domain', () => {
     expect(transitionTeam('active', 'paused')).toBe('paused');
     expect(transitionTeam('paused', 'active')).toBe('active');
     expect(transitionTeam('winding_down', 'completed')).toBe('completed');
+    expect(transitionTeam('completed', 'forming')).toBe('forming');
     expect(() => transitionTeam('completed', 'active')).toThrow('Invalid team transition');
   });
 

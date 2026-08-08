@@ -309,7 +309,14 @@ export class TeamCoordinator {
     if (roleKey === undefined) throw new Error('Team Blueprint適用中はblueprintRoleKeyが必要です');
     const role = binding.blueprint.roles.find(({ key }) => key === roleKey);
     if (role === undefined) throw new Error(`Blueprintに定義されていないRoleです: ${roleKey}`);
-    if (snapshot.agents.some((agent) => agent.blueprintRoleKey === roleKey))
+    if (
+      snapshot.agents.some(
+        (agent) =>
+          agent.blueprintRoleKey === roleKey &&
+          agent.state !== 'stopped' &&
+          (snapshot.team.state !== 'completed' || !['done', 'failed'].includes(agent.state)),
+      )
+    )
       throw new Error(`Blueprint Roleはすでに採用済みです: ${roleKey}`);
     const requesterRoleKey = requester.kind === 'leader' ? 'leader' : requester.blueprintRoleKey;
     if (role.parentKey !== requesterRoleKey)
@@ -341,6 +348,7 @@ export class TeamCoordinator {
   private blueprintReady(binding: TeamBlueprintBindingRecord, snapshot: TeamSnapshot): boolean {
     const hired = new Set(
       snapshot.agents
+        .filter(({ state }) => state !== 'stopped')
         .map(({ blueprintRoleKey }) => blueprintRoleKey)
         .filter((value): value is string => value !== null),
     );
@@ -513,6 +521,14 @@ export class TeamCoordinator {
       .map((message) => this.messageSummaryFromSnapshot(snapshot, message.id));
   }
 
+  latestTeamMessageSeq(taskId: string): number {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) return 0;
+    return this.persistence
+      .getTeamSnapshot(team.id)
+      .messages.reduce((latest, message) => Math.max(latest, message.seq), 0);
+  }
+
   async sendAgentMessageAs(
     taskId: string,
     requesterAgentId: string,
@@ -584,6 +600,8 @@ export class TeamCoordinator {
       const effectiveRequesterId = requesterAgentId ?? team.leaderAgentId;
       const requester = before.agents.find(({ id }) => id === effectiveRequesterId);
       if (requester === undefined) throw new Error('Hiring Agent not found in Team');
+      if (['done', 'failed', 'stopped'].includes(requester.state))
+        throw new Error('A terminal Agent cannot hire child Agents');
       if (
         requester.canDelegate &&
         requester.managerPolicy !== null &&
@@ -606,7 +624,7 @@ export class TeamCoordinator {
       if (input.modelSelection !== undefined)
         await this.validateModelSelection?.(input.modelSelection, input.taskId);
       if (team.state === 'draft') team = this.persistence.transitionTeamState(team.id, 'forming');
-      if (!['forming', 'active', 'paused'].includes(team.state))
+      if (!['forming', 'active', 'paused', 'completed'].includes(team.state))
         throw new Error('Team does not accept new workers');
 
       const childDepth = requester.depth + 1;
@@ -694,6 +712,12 @@ export class TeamCoordinator {
         });
         let current = this.persistence.transitionWorkerState(worker.id, 'spawning');
         await this.runtime.start(current);
+        // Do not reopen the completed run until the replacement runtime is known to be usable.
+        // Re-forming atomically archives old terminal Workers so UI counts, Blueprint roles, and
+        // required-Worker checks only see this new run.
+        const latestBeforeReady = this.persistence.getTeam(team.id);
+        if (latestBeforeReady.state === 'completed')
+          team = this.persistence.reformCompletedTeam(team.id);
         current = this.persistence.transitionWorkerState(worker.id, 'ready');
         this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
         // spawnSlots is a concurrency lease, not cumulative usage. Keeping it committed after
