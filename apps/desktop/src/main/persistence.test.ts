@@ -5291,6 +5291,119 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('bridges the known legacy v35-v38 lineage and keeps the bridge idempotent', () => {
+      const { persistence, path } = createPersistence();
+      persistence.close();
+
+      const legacy = new Database(path);
+      legacy
+        .prepare('UPDATE schema_migrations SET checksum = ? WHERE version = ?')
+        .run('real-runtimes-only-v35-migrate-legacy-runtime-records', 35);
+      legacy
+        .prepare('UPDATE schema_migrations SET checksum = ? WHERE version = ?')
+        .run('project-context-hub-a1-v36-projects-and-task-membership', 36);
+      legacy
+        .prepare('UPDATE schema_migrations SET checksum = ? WHERE version = ?')
+        .run('project-context-hub-v37-references-memories-manifests', 37);
+      legacy
+        .prepare('UPDATE schema_migrations SET checksum = ? WHERE version = ?')
+        .run('project-context-hub-v38-reference-content-digest', 38);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      const compatibility = new Database(path, { readonly: true });
+      expect(
+        compatibility.prepare('SELECT lineage FROM schema_migration_compatibility').get(),
+      ).toEqual({ lineage: 'legacy-team-project-lineage-v1' });
+      expect(
+        compatibility
+          .prepare('SELECT checksum FROM schema_migrations WHERE version IN (55, 56, 57, 58)')
+          .all(),
+      ).toEqual([
+        { checksum: 'project-context-hub-v55-project-core' },
+        { checksum: 'project-context-hub-v56-context-seals' },
+        { checksum: 'project-context-hub-v57-reference-files' },
+        { checksum: 'project-context-hub-v58-explicit-memory' },
+      ]);
+      compatibility.close();
+      migrated.close();
+
+      expect(() => new SqlitePersistenceClient(path)).not.toThrow();
+    });
+
+    it('converts the legacy Project reference and memory tables during the bridge', () => {
+      const { persistence, path } = createPersistence();
+      persistence.close();
+
+      const legacy = new Database(path);
+      legacy.exec(`
+        DROP TABLE project_references;
+        DROP INDEX IF EXISTS project_memories_project_order_idx;
+        DROP TABLE project_memories;
+        CREATE TABLE project_reference_files (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          relative_path TEXT NOT NULL,
+          workspace_binding_digest TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+          revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          content_digest TEXT NOT NULL DEFAULT '',
+          UNIQUE(project_id, source_task_id, relative_path)
+        );
+        CREATE TABLE project_memories (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          content TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND 4000),
+          status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'disabled')),
+          source_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+          source_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+          revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        DELETE FROM schema_migrations WHERE version IN (55, 56, 57, 58);
+        UPDATE schema_migrations SET checksum = 'real-runtimes-only-v35-migrate-legacy-runtime-records'
+          WHERE version = 35;
+        UPDATE schema_migrations SET checksum = 'project-context-hub-a1-v36-projects-and-task-membership'
+          WHERE version = 36;
+        UPDATE schema_migrations SET checksum = 'project-context-hub-v37-references-memories-manifests'
+          WHERE version = 37;
+        UPDATE schema_migrations SET checksum = 'project-context-hub-v38-reference-content-digest'
+          WHERE version = 38;
+      `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project_reference_files'",
+          )
+          .get(),
+      ).toBeUndefined();
+      expect(inspection.prepare("PRAGMA table_info('project_memories')").all()).toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: 'local_only' })]),
+      );
+      inspection.close();
+      migrated.close();
+    });
+
+    it('still rejects an unknown migration checksum', () => {
+      const { persistence, path } = createPersistence();
+      persistence.close();
+      const tampered = new Database(path);
+      tampered
+        .prepare('UPDATE schema_migrations SET checksum = ? WHERE version = 35')
+        .run('unexpected-checksum');
+      tampered.close();
+
+      expect(() => new SqlitePersistenceClient(path)).toThrow('Migration checksum mismatch');
+    });
+
     it('migrates a v1 database with duplicate active turns without crashing', () => {
       const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-migration-'));
       cleanup.push(directory);

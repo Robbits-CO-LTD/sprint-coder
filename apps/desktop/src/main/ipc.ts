@@ -228,6 +228,23 @@ import {
 /** sha256 of nothing, used when a refusal has no file to hash. */
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
+
+/**
+ * Cancellation is a durable state transition first and a runtime best-effort cleanup second. A
+ * Runtime Host can disappear before it acknowledges stop; that must not strand the Turn in
+ * `canceling` and block the composer after the next launch.
+ */
+export async function runBestEffortCancellation(
+  cancellation: () => Promise<void>,
+  onFailure: (error: unknown) => void,
+): Promise<void> {
+  try {
+    await cancellation();
+  } catch (error) {
+    onFailure(error);
+  }
+}
+
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import {
   ToolAuthorizationDeniedError,
@@ -3686,43 +3703,55 @@ export class IpcRouter {
   }
 
   private async cancelRuntime(taskId: string, turnId: string): Promise<void> {
-    await this.runtimeCancelActions.run(turnId, () => {
-      this.pendingTaskTitles.delete(turnId);
-      const kind = this.turnRuntimes.get(turnId);
-      let cancelAction: () => Promise<void>;
-      if (kind === 'codex' || kind === 'claude')
-        cancelAction = async () => {
-          await this.runtimeFor(kind).cancel(taskId, turnId);
-        };
-      else if (kind === 'provider') {
-        const controller = this.providerAbortByTurn.get(turnId);
-        const executionId = this.providerExecutionIdByTurn.get(turnId);
-        const identity = this.persistence.getTurnModelIdentity(taskId, turnId);
-        const provider =
-          identity.selection.connectionId === null
-            ? null
-            : this.providerRegistry.resolve(
-                this.persistence.getProviderConnection(identity.selection.connectionId),
-              );
-        cancelAction = async () => {
-          controller?.abort();
-          if (provider !== null && controller !== undefined && executionId !== undefined)
-            await this.cancelProviderExecution(provider, controller, executionId);
-        };
-      } else
-        cancelAction = async () => {
-          await this.mockRuntime.cancel(turnId);
-        };
-      this.turnRuntimes.delete(turnId);
-      this.teamMcpBridge.unregister(turnId);
-      this.teamRequiredTurns.delete(turnId);
-      this.teamSkillExpectedTurns.delete(turnId);
-      this.teamSkillResolutionByTurn.delete(turnId);
-      this.pendingProjectMemoriesByTurn.delete(turnId);
-      this.providerAbortByTurn.delete(turnId);
-      this.providerExecutionIdByTurn.delete(turnId);
-      return cancelAction;
-    });
+    await runBestEffortCancellation(
+      () =>
+        this.runtimeCancelActions.run(turnId, () => {
+          this.pendingTaskTitles.delete(turnId);
+          const kind = this.turnRuntimes.get(turnId);
+          let cancelAction: () => Promise<void>;
+          if (kind === 'codex' || kind === 'claude')
+            cancelAction = async () => {
+              await this.runtimeFor(kind).cancel(taskId, turnId);
+            };
+          else if (kind === 'provider') {
+            const controller = this.providerAbortByTurn.get(turnId);
+            const executionId = this.providerExecutionIdByTurn.get(turnId);
+            const identity = this.persistence.getTurnModelIdentity(taskId, turnId);
+            const provider =
+              identity.selection.connectionId === null
+                ? null
+                : this.providerRegistry.resolve(
+                    this.persistence.getProviderConnection(identity.selection.connectionId),
+                  );
+            cancelAction = async () => {
+              controller?.abort();
+              if (provider !== null && controller !== undefined && executionId !== undefined)
+                await this.cancelProviderExecution(provider, controller, executionId);
+            };
+          } else
+            cancelAction = async () => {
+              await this.mockRuntime.cancel(turnId);
+            };
+          this.turnRuntimes.delete(turnId);
+          this.teamMcpBridge.unregister(turnId);
+          this.teamRequiredTurns.delete(turnId);
+          this.teamSkillExpectedTurns.delete(turnId);
+          this.teamSkillResolutionByTurn.delete(turnId);
+          this.pendingProjectMemoriesByTurn.delete(turnId);
+          this.providerAbortByTurn.delete(turnId);
+          this.providerExecutionIdByTurn.delete(turnId);
+          return cancelAction;
+        }),
+      (error) =>
+        secureLogger.warn(
+          'Runtime cancellation was not confirmed; persisted Turn cancellation will continue',
+          {
+            taskId,
+            turnId,
+            error,
+          },
+        ),
+    );
   }
 
   private cancelProviderExecution(
