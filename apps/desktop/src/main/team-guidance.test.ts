@@ -97,6 +97,9 @@ describe('builtin Team skill', () => {
     expect(requiresTeamWorkersInput('Workerを3名雇ってください')).toBe(true);
     expect(requiresTeamWorkersInput('Teamで実行してほしい')).toBe(true);
     expect(requiresTeamWorkersInput('チームでの編集をお願いします')).toBe(true);
+    expect(
+      requiresTeamWorkersInput('Workerを3名雇って実装してください。完了後に結果を教えて'),
+    ).toBe(true);
     expect(requiresTeamWorkersInput('/team リポジトリを並列調査して')).toBe(true);
   });
 
