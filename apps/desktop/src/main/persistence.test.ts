@@ -5328,7 +5328,8 @@ if (runsWithElectronAbi)
       compatibility.close();
       migrated.close();
 
-      expect(() => new SqlitePersistenceClient(path)).not.toThrow();
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.close();
     });
 
     it('converts the legacy Project reference and memory tables during the bridge', () => {
