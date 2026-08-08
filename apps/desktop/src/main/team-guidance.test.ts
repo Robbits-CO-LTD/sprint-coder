@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { CONTEXT_SYSTEM_PROMPT } from './context-ledger';
 import {
   isTeamContinuationInput,
   isTeamScenarioInput,
@@ -25,6 +26,12 @@ afterEach(async () => {
 });
 
 describe('builtin Team skill', () => {
+  it('routes team-related conversation through the builtin Team skill', () => {
+    expect(CONTEXT_SYSTEM_PROMPT).toContain('必ず組み込みSkill `sprint-coder-team` を使い');
+    expect(CONTEXT_SYSTEM_PROMPT).toContain('架空のリーダーやメンバーを作らず');
+    expect(isTeamScenarioInput('チームで二人雇って挨拶して')).toBe(true);
+  });
+
   it('is the single source of Leader guidance', () => {
     expect(LEADER_MCP_SYSTEM_PROMPT).toBe(BUILTIN_TEAM_SKILL_CONTENT);
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_list_models');
