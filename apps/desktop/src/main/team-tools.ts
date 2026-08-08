@@ -1115,8 +1115,10 @@ const TEAM_RELATION_INTENT =
 // gain team capabilities just because an older turn once used them.
 const TEAM_CONTINUATION =
   /^(?:continue|resume|retry|続けて|続行|再開|再試行|リトライ)(?:してください|して|お願い)?[。.!！]?$/i;
-const TEAM_MEMBER_CHANGE_CONTINUATION =
-  /^(?=.*(?:codex|claude|ollama|worker|agent|モデル|担当|メンバー))(?=.*(?:にして|へ変更|を変更|変えて|入れ替|交代|nisite|kaete|change|switch|replace)).+$/i;
+const TEAM_MEMBER_CHANGE_TARGET = /worker|agent|担当|メンバー/i;
+const TEAM_MEMBER_MODEL_TARGET = /codex|claude|ollama/gi;
+const TEAM_MEMBER_CHANGE_ACTION =
+  /にして|へ変更|を変更|変えて|入れ替|交代|nisite|kaete|change|switch|replace/i;
 
 export function isTeamScenarioInput(input: string): boolean {
   return TEAM_INTENT.test(input) || TEAM_RELATION_INTENT.test(input);
@@ -1124,7 +1126,13 @@ export function isTeamScenarioInput(input: string): boolean {
 
 export function isTeamContinuationInput(input: string): boolean {
   const trimmed = input.trim();
-  return TEAM_CONTINUATION.test(trimmed) || TEAM_MEMBER_CHANGE_CONTINUATION.test(trimmed);
+  if (TEAM_CONTINUATION.test(trimmed)) return true;
+  if (!TEAM_MEMBER_CHANGE_ACTION.test(trimmed)) return false;
+  if (TEAM_MEMBER_CHANGE_TARGET.test(trimmed)) return true;
+  const namedModels = new Set(
+    (trimmed.match(TEAM_MEMBER_MODEL_TARGET) ?? []).map((model) => model.toLowerCase()),
+  );
+  return namedModels.size >= 2;
 }
 
 type ToolCallResult = { callId: string; arguments: unknown; result: unknown };

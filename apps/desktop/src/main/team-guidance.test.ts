@@ -98,9 +98,17 @@ describe('builtin Team skill', () => {
       'codex to ollamanisite',
       'CodexとOllamaにして',
       '担当をCodexとOllamaへ変更して',
+      'Ollama担当にして',
     ])
       expect(isTeamContinuationInput(input), input).toBe(true);
-    for (const input of ['続きを説明して', 'continue implementing this feature', '通常の依頼です'])
+    for (const input of [
+      '続きを説明して',
+      'continue implementing this feature',
+      '通常の依頼です',
+      'モデルを変更して',
+      '使用モデルをClaudeにして',
+      'Codexに変更して',
+    ])
       expect(isTeamContinuationInput(input), input).toBe(false);
   });
 
