@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CONTEXT_SYSTEM_PROMPT } from './context-ledger';
 import {
+  isExistingTeamFollowupInput,
   isTeamContinuationInput,
   isTeamScenarioInput,
   requiresTeamWorkersInput,
@@ -129,6 +130,30 @@ describe('builtin Team skill', () => {
       'Codexに変更して',
     ])
       expect(isTeamContinuationInput(input), input).toBe(false);
+  });
+
+  it('recognizes follow-up actions that target an existing Team without the Team keyword', () => {
+    for (const input of [
+      'worker同士で挨拶して',
+      'メンバーからの報告を確認して',
+      'リーダーにもう一度連絡して',
+      'もう一回挨拶して',
+      '再度会話させて',
+      'workerに実装させて',
+      'メンバーへ調査を依頼して',
+    ])
+      expect(isExistingTeamFollowupInput(input), input).toBe(true);
+    for (const input of [
+      '続きを説明して',
+      'もう一回ビルドして',
+      'もう一回実装して',
+      'worker.tsを編集して',
+      'メンバー変数を実装して',
+      'agentの実装をレビューして',
+      'workerの実装を確認して',
+      '通常の依頼です',
+    ])
+      expect(isExistingTeamFollowupInput(input), input).toBe(false);
   });
 
   it('keeps the built-in and Provider hire schemas on the same discriminated contract', () => {

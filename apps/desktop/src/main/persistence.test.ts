@@ -894,6 +894,33 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('keeps Team guidance for follow-up actions against existing Workers', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('team follow-up');
+      const initial = persistence.startTurn(task.id, 'Codex teamで2人雇用して挨拶して');
+      expect(initial.teamTurn).toBe(true);
+      persistence.promoteTaskToTeam(task.id);
+      persistence.completeTurn(task.id, initial.turnId, 'failed');
+
+      const workerGreeting = persistence.startTurn(task.id, 'worker同士で挨拶して');
+      expect(workerGreeting.teamTurn).toBe(true);
+      expect(
+        persistence
+          .prepareContext(task.id, workerGreeting.turnId)
+          .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
+      persistence.completeTurn(task.id, workerGreeting.turnId, 'failed');
+
+      const repeatedGreeting = persistence.startTurn(task.id, 'もう一回挨拶して');
+      expect(repeatedGreeting.teamTurn).toBe(true);
+      expect(
+        persistence
+          .prepareContext(task.id, repeatedGreeting.turnId)
+          .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
+      persistence.close();
+    });
+
     it('derives Team guidance at dequeue time for a legacy v55 queued payload', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('legacy queue');
