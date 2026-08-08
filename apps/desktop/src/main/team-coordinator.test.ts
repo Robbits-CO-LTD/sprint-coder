@@ -2647,7 +2647,7 @@ if (runsWithElectronAbi)
       );
       expect(persistence.getTeamByTask(task.id)?.state).toBe('forming');
 
-      await coordinator.hireWorkerAs(
+      const implementer = await coordinator.hireWorkerAs(
         {
           taskId: task.id,
           role: '実装担当',
@@ -2662,6 +2662,55 @@ if (runsWithElectronAbi)
       expect(persistence.getTeamBlueprint(manager.teamId!)?.selection.ref.digest).toBe(
         'a'.repeat(64),
       );
+
+      await coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: implementer.id,
+        content: 'implement once',
+      });
+      await coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: manager.id,
+        content: 'manage once',
+      });
+      expect(persistence.getTeamByTask(task.id)?.state).toBe('completed');
+
+      const replacementManager = await coordinator.hireWorker(
+        {
+          taskId: task.id,
+          role: '開発部長',
+          objective: 'もう一度統括',
+          contextInheritancePolicy: 'summary',
+          writeCapable: false,
+          blueprintRoleKey: 'engineering-manager',
+        },
+        {
+          maxDirectChildren: 3,
+          maxDelegationLevels: 3,
+          allowManagerChildren: false,
+        },
+      );
+      expect(persistence.getTeamByTask(task.id)?.state).toBe('forming');
+      expect(replacementManager.state).toBe('ready');
+      expect(coordinator.get(task.id)?.workers.find(({ id }) => id === manager.id)?.state).toBe(
+        'stopped',
+      );
+      expect(coordinator.get(task.id)?.workers.find(({ id }) => id === implementer.id)?.state).toBe(
+        'stopped',
+      );
+      const replacementImplementer = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: '実装担当',
+          objective: 'もう一度実装',
+          contextInheritancePolicy: 'summary',
+          writeCapable: true,
+          blueprintRoleKey: 'implementer',
+        },
+        replacementManager.id,
+      );
+      expect(replacementImplementer.state).toBe('ready');
+      expect(persistence.getTeamByTask(task.id)?.state).toBe('active');
       persistence.close();
     });
 
@@ -3935,6 +3984,76 @@ if (runsWithElectronAbi)
           .filter(({ kind }) => kind === 'worker')
           .every(({ state }) => state === 'stopped'),
       ).toBe(true);
+      persistence.close();
+    });
+
+    it('re-forms a completed Team when a later turn explicitly hires a fresh Worker', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask();
+      const runtime = new TestWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const previous = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'previous greeting worker',
+        objective: 'greet once',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+
+      await coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: previous.id,
+        content: 'first greeting',
+      });
+      expect(coordinator.get(task.id)?.workers.find(({ id }) => id === previous.id)?.state).toBe(
+        'done',
+      );
+      const historicalMessageSeq = coordinator.latestTeamMessageSeq(task.id);
+      expect(historicalMessageSeq).toBeGreaterThan(0);
+      await expect(
+        coordinator.hireWorkerAs(
+          {
+            taskId: task.id,
+            role: 'invalid child',
+            objective: 'must not reopen the Team',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          },
+          previous.id,
+        ),
+      ).rejects.toThrow('A terminal Agent cannot hire child Agents');
+      expect(coordinator.get(task.id)?.team.state).toBe('completed');
+
+      vi.spyOn(runtime, 'start').mockRejectedValueOnce(new Error('runtime unavailable'));
+      await expect(
+        coordinator.hireWorker({
+          taskId: task.id,
+          role: 'failed replacement',
+          objective: 'must not reopen before runtime startup',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        }),
+      ).rejects.toThrow('runtime unavailable');
+      expect(coordinator.get(task.id)?.team.state).toBe('completed');
+      const failedReplacement = coordinator
+        .get(task.id)
+        ?.workers.find(({ role }) => role === 'failed replacement');
+      expect(failedReplacement?.state).toBe('failed');
+
+      const fresh = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'fresh greeting worker',
+        objective: 'greet again',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+
+      const detail = coordinator.get(task.id);
+      expect(detail?.team.state).toBe('active');
+      expect(detail?.workers.find(({ id }) => id === previous.id)?.state).toBe('stopped');
+      expect(detail?.workers.find(({ id }) => id === failedReplacement?.id)?.state).toBe('stopped');
+      expect(detail?.workers.find(({ id }) => id === fresh.id)?.state).toBe('ready');
+      expect(coordinator.latestTeamMessageSeq(task.id)).toBe(historicalMessageSeq);
       persistence.close();
     });
   });

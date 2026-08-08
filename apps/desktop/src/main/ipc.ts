@@ -3262,6 +3262,7 @@ export class IpcRouter {
       taskId,
       token,
       contextOwner: { type: 'turn', id: turnId },
+      initialWaitCursor: this.teamCoordinator.latestTeamMessageSeq(taskId),
       requireModelResearch,
       ...(options.skillCreatorTurn ? { allowSkillDrafts: true } : {}),
       ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
@@ -3338,6 +3339,7 @@ export class IpcRouter {
         executionId === undefined
           ? 'read-only'
           : this.persistence.getTeamExecution(executionId).accessMode,
+      initialWaitCursor: this.teamCoordinator.latestTeamMessageSeq(taskId),
       ...(executionId === undefined
         ? {}
         : { contextOwner: { type: 'team_execution' as const, id: executionId } }),
@@ -3364,6 +3366,7 @@ export class IpcRouter {
       taskId,
       token,
       requesterAgentId,
+      initialWaitCursor: this.teamCoordinator.latestTeamMessageSeq(taskId),
       ...(executionId === undefined
         ? {}
         : { contextOwner: { type: 'team_execution' as const, id: executionId } }),
@@ -3939,7 +3942,7 @@ export class IpcRouter {
     this.providerAbortByTurn.set(started.turnId, controller);
     let synthesizing = false;
     const messageId = randomUUID();
-    let reportCursorValue = 0;
+    let reportCursorValue = this.teamCoordinator.latestTeamMessageSeq(taskId);
     let modelCatalogQueried = false;
     let runtime: ProviderRuntime | undefined;
     const reportCursor = {

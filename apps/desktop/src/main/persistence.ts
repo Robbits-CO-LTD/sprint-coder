@@ -3632,6 +3632,7 @@ export interface PersistenceClient {
   getTeamByTask(taskId: string): TeamRecord | null;
   getTeamSnapshot(teamId: string): TeamSnapshot;
   transitionTeamState(teamId: string, to: TeamState): TeamRecord;
+  reformCompletedTeam(teamId: string): TeamRecord;
   updateTeamPolicy(teamId: string, policy: TeamPolicy, expectedRevision: number): TeamRecord;
   getTeamBlueprint(teamId: string): TeamBlueprintBindingRecord | null;
   bindTeamBlueprint(input: {
@@ -6393,6 +6394,42 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  reformCompletedTeam(teamId: string): TeamRecord {
+    return this.db.transaction(() => {
+      const current = this.getTeam(teamId);
+      if (current.state !== 'completed') throw new Error('Only a completed Team can be re-formed');
+      transitionTeam(current.state, 'forming');
+      const now = new Date().toISOString();
+      const historicalWorkers = this.getTeamSnapshot(teamId).agents.filter(
+        ({ kind, state }) => kind === 'worker' && (state === 'done' || state === 'failed'),
+      );
+      for (const worker of historicalWorkers) {
+        const archived = this.db
+          .prepare(
+            `UPDATE agents SET state = 'stopped', updated_at = ?
+             WHERE id = ? AND state = ?`,
+          )
+          .run(now, worker.id, worker.state);
+        if (archived.changes !== 1) throw new TeamConflictError();
+        this.recordTeamV2Activity({
+          teamId,
+          type: 'worker_stopped',
+          subjectAgentId: worker.id,
+          payload: { from: worker.state, to: 'stopped', reason: 'team_reformed' },
+          now,
+        });
+      }
+      const reformed = this.db
+        .prepare(
+          `UPDATE teams SET state = 'forming', revision = revision + 1, updated_at = ?
+           WHERE id = ? AND state = 'completed' AND revision = ?`,
+        )
+        .run(now, teamId, current.revision);
+      if (reformed.changes !== 1) throw new TeamConflictError();
+      return this.getTeam(teamId);
+    })();
+  }
+
   updateTeamPolicy(teamId: string, policy: TeamPolicy, expectedRevision: number): TeamRecord {
     const parsed = assertTeamPolicy(policy);
     return this.db.transaction(() => {
@@ -6522,7 +6559,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     assertWorkerPersistenceInput(input);
     return this.db.transaction(() => {
       const team = this.getTeam(input.teamId);
-      if (!['draft', 'forming', 'active', 'paused'].includes(team.state))
+      if (!['draft', 'forming', 'active', 'paused', 'completed'].includes(team.state))
         throw new Error('Team does not accept new workers');
       const parent = this.getAgent(input.parentAgentId ?? team.leaderAgentId);
       if (parent.teamId !== team.id) throw new Error('Parent Agent must belong to the same Team');

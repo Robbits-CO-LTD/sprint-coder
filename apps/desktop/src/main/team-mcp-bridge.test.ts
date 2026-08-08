@@ -213,6 +213,39 @@ describe('TeamMcpBridge', () => {
     expect(coordinator.stopWorker).toHaveBeenCalledWith('task-1', 'worker-1');
   });
 
+  it('starts a new Turn report wait after the messages that already existed at registration', async () => {
+    const listWorkerReports = vi.fn(
+      () =>
+        [
+          {
+            sourceAgentId: 'fresh-worker',
+            seq: 8,
+            content: 'fresh report',
+            executionId: 'execution-2',
+            attemptId: 'attempt-2',
+          },
+        ] as never,
+    );
+    const coordinator = fakeCoordinator({ listWorkerReports } as Partial<TeamCoordinator>);
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-follow-up', {
+      taskId: 'task-1',
+      token,
+      initialWaitCursor: 7,
+    });
+
+    await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_wait_reports',
+      args: {},
+    });
+
+    expect(listWorkerReports).toHaveBeenCalledWith('task-1', 7, undefined);
+  });
+
   it('allows Draft creation only for a turn explicitly bound to skill-creator', async () => {
     const createSkillDraft = vi.fn(async (input: unknown) => ({
       id: 'draft-1',

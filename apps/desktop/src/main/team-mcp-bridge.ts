@@ -135,6 +135,7 @@ export type TeamMcpRegistration = Readonly<{
   allowProjectMemory?: boolean;
   allowTeamTools?: boolean;
   contextOwner?: { type: 'turn' | 'team_execution'; id: string };
+  initialWaitCursor?: number;
 }>;
 
 type Registered = TeamMcpRegistration & {
@@ -289,7 +290,7 @@ export class TeamMcpBridge {
   register(turnId: string, registration: TeamMcpRegistration): void {
     this.registrations.set(turnId, {
       ...registration,
-      waitCursor: 0,
+      waitCursor: registration.initialWaitCursor ?? 0,
       modelCatalogQueried: false,
       researchedModels: new Set(),
     });

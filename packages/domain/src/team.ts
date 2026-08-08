@@ -108,7 +108,9 @@ const teamTransitions: Readonly<Record<TeamState, readonly TeamState[]>> = {
   active: ['paused', 'winding_down', 'failed'],
   paused: ['active', 'winding_down', 'failed'],
   winding_down: ['completed', 'failed'],
-  completed: [],
+  // A later user turn may explicitly ask the same Task to do more Team work. Re-forming keeps
+  // the completed Workers as history while allowing the Leader to hire fresh Workers.
+  completed: ['forming'],
   failed: [],
 };
 
