@@ -4393,19 +4393,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
     mkdirSync(dirname(databasePath), { recursive: true });
     this.recoveryReport = recoverDatabaseIfCorrupt(databasePath);
     this.db = new Database(databasePath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.db.pragma('busy_timeout = 5000');
-    this.runMigrations(databasePath);
-    this.backfillLegacyMutationScopes();
-    this.backfillLegacyEditSagaBindings();
-    this.backfillLegacyNativeEditSagaRevisions();
-    this.backfillLegacyEditSagaRootBindings();
-    this.backfillAcceptanceContracts();
-    this.interruptActiveCommands();
-    this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
-      this.liveStateForReminder(taskId, turnId),
-    );
+    try {
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma('busy_timeout = 5000');
+      this.runMigrations(databasePath);
+      this.backfillLegacyMutationScopes();
+      this.backfillLegacyEditSagaBindings();
+      this.backfillLegacyNativeEditSagaRevisions();
+      this.backfillLegacyEditSagaRootBindings();
+      this.backfillAcceptanceContracts();
+      this.interruptActiveCommands();
+      this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
+        this.liveStateForReminder(taskId, turnId),
+      );
+    } catch (error) {
+      try {
+        this.db.close();
+      } catch {
+        // Preserve the initialization failure that explains why the client could not be created.
+      }
+      throw error;
+    }
   }
 
   /**
