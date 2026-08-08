@@ -93,6 +93,7 @@ describe('builtin Team skill', () => {
     expect(isTeamScenarioInput('teamで並列編集できますか？')).toBe(true);
     expect(requiresTeamWorkersInput('teamで並列編集できますか？')).toBe(false);
     expect(requiresTeamWorkersInput('Workerを3名雇って編集して')).toBe(true);
+    expect(requiresTeamWorkersInput('チームでコードを書いて')).toBe(true);
     expect(requiresTeamWorkersInput('チームで編集してください')).toBe(true);
     expect(requiresTeamWorkersInput('Workerを3名雇ってください')).toBe(true);
     expect(requiresTeamWorkersInput('Teamで実行してほしい')).toBe(true);
@@ -101,6 +102,8 @@ describe('builtin Team skill', () => {
       requiresTeamWorkersInput('Workerを3名雇って実装してください。完了後に結果を教えて'),
     ).toBe(true);
     expect(requiresTeamWorkersInput('/team リポジトリを並列調査して')).toBe(true);
+    expect(requiresTeamWorkersInput('チームで何ができますか？')).toBe(false);
+    expect(requiresTeamWorkersInput('チームの使い方を説明して')).toBe(false);
   });
 
   it('recognizes narrow retry and Team member reassignment instructions as continuation input', () => {

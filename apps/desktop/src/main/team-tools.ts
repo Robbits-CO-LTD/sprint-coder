@@ -1109,6 +1109,8 @@ const TEAM_INTENT =
   /^\s*\/team(?=\s+\S)|チームテスト|チーム(?:で|を|に|内(?:で|の))|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:り|名|人)(?=.*(?:雇|挨拶|会話|担当|メンバー))|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
 const TEAM_RELATION_INTENT =
   /チーム(?:の)?(?:メンバー|リーダー)|チームの(?:会話|挨拶|メッセージ|報告|担当|役割)/i;
+const TEAM_CONSULTATION_ENDING =
+  /(?:できますか|できる(?:の)?|可能ですか|可能(?:なの)?|教えて|説明して|とは)[。.!！?？]*$/i;
 const TEAM_WORKER_EXECUTION_ACTION =
   /(?:(?:雇って|雇用して|採用して|作成して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|挨拶して|会話させて|分担して|進めて)(?:ください|ほしい)?|(?:編集|実装|実行|作業|調査|検証|監査|レビュー|採用|雇用)?(?:を)?お願い(?:します)?)$/i;
 
@@ -1130,9 +1132,10 @@ export function isTeamScenarioInput(input: string): boolean {
 export function requiresTeamWorkersInput(input: string): boolean {
   const trimmed = input.trim();
   if (!isTeamScenarioInput(trimmed)) return false;
-  return trimmed
+  const hasExplicitExecutionClause = trimmed
     .split(/[、,。.!！?？\r\n]+/)
     .some((clause) => TEAM_WORKER_EXECUTION_ACTION.test(clause.trim()));
+  return hasExplicitExecutionClause || !TEAM_CONSULTATION_ENDING.test(trimmed);
 }
 
 export function isTeamScenarioFixtureInput(input: string): boolean {
