@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { CONTEXT_SYSTEM_PROMPT } from './context-ledger';
 import {
   isTeamContinuationInput,
   isTeamScenarioInput,
@@ -25,6 +26,15 @@ afterEach(async () => {
 });
 
 describe('builtin Team skill', () => {
+  it('routes team-related conversation through the builtin Team skill', () => {
+    expect(CONTEXT_SYSTEM_PROMPT).toContain('必ず組み込みSkill `sprint-coder-team` を使い');
+    expect(CONTEXT_SYSTEM_PROMPT).toContain(
+      'subagent機能、外部Skill、別のMCPで代用してはいけません',
+    );
+    expect(CONTEXT_SYSTEM_PROMPT).toContain('架空のリーダーやメンバーを作らず');
+    expect(isTeamScenarioInput('チームで二人雇って挨拶して')).toBe(true);
+  });
+
   it('is the single source of Leader guidance', () => {
     expect(LEADER_MCP_SYSTEM_PROMPT).toBe(BUILTIN_TEAM_SKILL_CONTENT);
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_list_models');
@@ -45,7 +55,14 @@ describe('builtin Team skill', () => {
   it('recognizes explicit Team and worker-count intent without activating ordinary turns', () => {
     for (const input of [
       'チームで進めて',
+      'チーム内で挨拶して',
+      'チーム内の会話を読んで',
+      'チームメンバー同士で挨拶して',
+      'チームのメンバーに会話させて',
+      'チームの会話を読んで',
+      'チームのメンバーに挨拶して',
       'Teamでお願い',
+      'team 2り雇って挨拶を交わして',
       '2人雇って調査して',
       '数学と実装の観点を2人体制で並行に検討して',
       '5人で作業して',
@@ -62,6 +79,7 @@ describe('builtin Team skill', () => {
       '簡単に説明して',
       '一人称を直して',
       'teamworkについて説明して',
+      'チームの意味を説明して',
       '/team',
       '/teamworkについて説明して',
       'READMEに /team 調査して と書いて',
@@ -69,10 +87,28 @@ describe('builtin Team skill', () => {
       expect(isTeamScenarioInput(input), input).toBe(false);
   });
 
-  it('recognizes only narrow retry instructions as Team continuation input', () => {
-    for (const input of ['continue', 'Resume', 'retry', '続けて', '再開してください', 'リトライ'])
+  it('recognizes narrow retry and Team member reassignment instructions as continuation input', () => {
+    for (const input of [
+      'continue',
+      'Resume',
+      'retry',
+      '続けて',
+      '再開してください',
+      'リトライ',
+      'codex to ollamanisite',
+      'CodexとOllamaにして',
+      '担当をCodexとOllamaへ変更して',
+      'Ollama担当にして',
+    ])
       expect(isTeamContinuationInput(input), input).toBe(true);
-    for (const input of ['続きを説明して', 'continue implementing this feature', '通常の依頼です'])
+    for (const input of [
+      '続きを説明して',
+      'continue implementing this feature',
+      '通常の依頼です',
+      'モデルを変更して',
+      '使用モデルをClaudeにして',
+      'Codexに変更して',
+    ])
       expect(isTeamContinuationInput(input), input).toBe(false);
   });
 

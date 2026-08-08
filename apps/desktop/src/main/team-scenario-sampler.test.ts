@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ToolTranscriptItem } from './context-compiler';
 import {
   createTeamScenarioSampler,
+  isTeamScenarioFixtureInput,
   isTeamScenarioInput,
   TEAM_SCENARIO_TRIGGER,
 } from './team-tools';
@@ -19,6 +20,8 @@ function toolResult(callId: string, value: unknown): ToolTranscriptItem {
 describe('isTeamScenarioInput', () => {
   it('matches only the fixture trigger phrase', () => {
     expect(isTeamScenarioInput(INPUT)).toBe(true);
+    expect(isTeamScenarioFixtureInput(INPUT)).toBe(true);
+    expect(isTeamScenarioFixtureInput('チームで二人雇って挨拶して')).toBe(false);
     expect(isTeamScenarioInput('通常の依頼です')).toBe(false);
   });
 });

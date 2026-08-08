@@ -129,6 +129,42 @@ if (runsWithElectronAbi)
       expect(persistence.getTeamByTask(task.id)).toBeNull();
       persistence.close();
     }, 20_000);
+
+    it('fails closed instead of running the fixed scenario for a natural Team continuation', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Team continuation');
+      const coordinator = new TeamCoordinator(persistence);
+      const published: TurnEvent[] = [];
+      const runtime = new MockRuntimeAdapter(
+        persistence,
+        (event) => published.push(event),
+        1,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        coordinator,
+      );
+
+      const failed = persistence.startTurn(task.id, 'チームで二人雇って挨拶して');
+      persistence.completeTurn(task.id, failed.turnId, 'failed');
+      expect(persistence.getTeamByTask(task.id)).toBeNull();
+
+      const continued = persistence.startTurn(task.id, 'codex to ollamanisite');
+      expect(continued.teamTurn).toBe(true);
+      runtime.start(task.id, continued.turnId, continued.text, continued.teamTurn);
+
+      await waitFor(() => published.some((event) => event.type === 'turn.completed'));
+      expect(persistence.getTeamByTask(task.id)).toBeNull();
+      const finalText = published
+        .filter((event) => event.type === 'message.delta')
+        .map((event) => (event as { delta: string }).delta)
+        .join('');
+      expect(finalText).toContain('組み込みTeam Skillを利用できない');
+      expect(finalText).toContain('架空のメンバーや別のsubagentには置き換えていません');
+      persistence.close();
+    }, 20_000);
   });
 else
   describe('Deterministic mock team scenario Electron ABI bridge', () => {

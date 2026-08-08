@@ -1106,20 +1106,37 @@ const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 // Natural team intent (「チームで進めて」「teamでお願い」…) auto-routes the turn into the team
 // orchestration path — the user should not need to know the fixture keyword or press ⬡ Team.
 const TEAM_INTENT =
-  /^\s*\/team(?=\s+\S)|チームテスト|チーム(?:で|を|に)|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
+  /^\s*\/team(?=\s+\S)|チームテスト|チーム(?:で|を|に|内(?:で|の))|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:り|名|人)(?=.*(?:雇|挨拶|会話|担当|メンバー))|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
+const TEAM_RELATION_INTENT =
+  /チーム(?:の)?(?:メンバー|リーダー)|チームの(?:会話|挨拶|メッセージ|報告|担当|役割)/i;
 
 // A failed/canceled Team turn is commonly resumed with a short instruction that no longer repeats
 // the word "Team". Keep this deliberately narrow: ordinary follow-up questions must not silently
 // gain team capabilities just because an older turn once used them.
 const TEAM_CONTINUATION =
   /^(?:continue|resume|retry|続けて|続行|再開|再試行|リトライ)(?:してください|して|お願い)?[。.!！]?$/i;
+const TEAM_MEMBER_CHANGE_TARGET = /worker|agent|担当|メンバー/i;
+const TEAM_MEMBER_MODEL_TARGET = /codex|claude|ollama/gi;
+const TEAM_MEMBER_CHANGE_ACTION =
+  /にして|へ変更|を変更|変えて|入れ替|交代|nisite|kaete|change|switch|replace/i;
 
 export function isTeamScenarioInput(input: string): boolean {
-  return TEAM_INTENT.test(input);
+  return TEAM_INTENT.test(input) || TEAM_RELATION_INTENT.test(input);
+}
+
+export function isTeamScenarioFixtureInput(input: string): boolean {
+  return input.includes(TEAM_SCENARIO_TRIGGER);
 }
 
 export function isTeamContinuationInput(input: string): boolean {
-  return TEAM_CONTINUATION.test(input.trim());
+  const trimmed = input.trim();
+  if (TEAM_CONTINUATION.test(trimmed)) return true;
+  if (!TEAM_MEMBER_CHANGE_ACTION.test(trimmed)) return false;
+  if (TEAM_MEMBER_CHANGE_TARGET.test(trimmed)) return true;
+  const namedModels = new Set(
+    (trimmed.match(TEAM_MEMBER_MODEL_TARGET) ?? []).map((model) => model.toLowerCase()),
+  );
+  return namedModels.size >= 2;
 }
 
 type ToolCallResult = { callId: string; arguments: unknown; result: unknown };

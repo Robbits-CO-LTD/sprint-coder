@@ -883,6 +883,10 @@ if (runsWithElectronAbi)
       ).toHaveLength(1);
       persistence.completeTurn(task.id, continued.turnId, 'failed');
 
+      const reassigned = persistence.startTurn(task.id, 'codex to ollamanisite');
+      expect(reassigned.teamTurn).toBe(true);
+      persistence.completeTurn(task.id, reassigned.turnId, 'failed');
+
       const ordinary = persistence.startTurn(task.id, '通常の依頼です');
       expect(ordinary.teamTurn).toBe(false);
       persistence.completeTurn(task.id, ordinary.turnId, 'failed');
