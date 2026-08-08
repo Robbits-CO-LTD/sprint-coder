@@ -53,6 +53,16 @@ describe('builtin Team skill', () => {
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_wait_reports');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('未着report');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('全execution ID');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('終端済みの旧Workerは再利用できない');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
+      'Team状態がfailedなどcompleted以外なら再形成できると判断せず',
+    );
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
+      '新しいWorkerの採用によって完了済みTeamは安全に再形成される',
+    );
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
+      '採用失敗だけを理由に「新しいTeamが必要」と判断してはならない',
+    );
   });
 
   it('recognizes explicit Team and worker-count intent without activating ordinary turns', () => {
