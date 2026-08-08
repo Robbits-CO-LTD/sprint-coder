@@ -1123,6 +1123,14 @@ const TEAM_MEMBER_CHANGE_TARGET = /worker|agent|担当|メンバー/i;
 const TEAM_MEMBER_MODEL_TARGET = /codex|claude|ollama/gi;
 const TEAM_MEMBER_CHANGE_ACTION =
   /にして|へ変更|を変更|変えて|入れ替|交代|nisite|kaete|change|switch|replace/i;
+const EXISTING_TEAM_MEMBER_REFERENCE =
+  /(?:\b(?:worker|agent)\b|担当|メンバー|リーダー)(?:同士(?:で|の)?|たち(?:と|で|に|へ|から|の|を)?|達(?:と|で|に|へ|から|の|を)?|と|で|に|へ|から|の|を)/i;
+const EXISTING_TEAM_INTERACTION =
+  /(?:挨拶|会話|メッセージ|報告|連絡|返信|返事)(?:を|し|して|させ|させて)/i;
+const EXISTING_TEAM_DELEGATION =
+  /(?:\b(?:worker|agent)\b|担当|メンバー|リーダー)(?:に|へ)[^。.!！?？\r\n]{0,40}(?:作業|実行|編集|実装|調査|検証|レビュー)(?:を)?(?:させ|してもら|依頼し|任せ)/i;
+const REPEATED_TEAM_ACTION =
+  /(?:もう一度|もう一回|再度).*(?:挨拶|会話|メッセージ|連絡|返信|返事)(?:を|し|して|させ|させて)/i;
 
 export function isTeamScenarioInput(input: string): boolean {
   return TEAM_INTENT.test(input) || TEAM_RELATION_INTENT.test(input);
@@ -1151,6 +1159,16 @@ export function isTeamContinuationInput(input: string): boolean {
     (trimmed.match(TEAM_MEMBER_MODEL_TARGET) ?? []).map((model) => model.toLowerCase()),
   );
   return namedModels.size >= 2;
+}
+
+/** Existing Teamの相手や直前のTeam操作を指す、Teamという語を省略したfollow-up。 */
+export function isExistingTeamFollowupInput(input: string): boolean {
+  const trimmed = input.trim();
+  return (
+    (EXISTING_TEAM_MEMBER_REFERENCE.test(trimmed) && EXISTING_TEAM_INTERACTION.test(trimmed)) ||
+    EXISTING_TEAM_DELEGATION.test(trimmed) ||
+    REPEATED_TEAM_ACTION.test(trimmed)
+  );
 }
 
 type ToolCallResult = { callId: string; arguments: unknown; result: unknown };

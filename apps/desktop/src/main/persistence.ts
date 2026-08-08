@@ -152,7 +152,11 @@ import {
 } from './context-ledger';
 import { BUILTIN_TEAM_SKILL_CONTENT, BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
 import { readProjectReference } from './project-reference-file';
-import { isTeamContinuationInput, isTeamScenarioInput } from './team-tools';
+import {
+  isExistingTeamFollowupInput,
+  isTeamContinuationInput,
+  isTeamScenarioInput,
+} from './team-tools';
 import type { LiveState } from './context-reminder';
 import { deriveLiveState } from './live-state';
 import { redactSecrets } from './secret-redactor';
@@ -13467,7 +13471,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       includeBuiltinTeamSkill ||
       isTeamScenarioInput(text) ||
       parsedSkills.some(({ selection }) => selection.kind === 'team') ||
-      (isTeamContinuationInput(text) && this.latestTurnIncludedBuiltinTeamSkill(taskId));
+      (isTeamContinuationInput(text) && this.latestTurnIncludedBuiltinTeamSkill(taskId)) ||
+      (isExistingTeamFollowupInput(text) &&
+        (this.latestTurnIncludedBuiltinTeamSkill(taskId) || this.getTeamByTask(taskId) !== null));
     const taskSelection = this.getTaskModelSelection(taskId);
     const explicitRuntime =
       taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
