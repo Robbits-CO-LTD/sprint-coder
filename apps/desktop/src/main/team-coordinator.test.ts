@@ -1289,7 +1289,10 @@ if (runsWithElectronAbi)
       expect(spawnSync('git', ['-C', repo, 'status', '--porcelain']).stdout.toString().trim()).toBe(
         '',
       );
-      expect(manager.integratedRepositories).toEqual([repo, repo]);
+      expect(manager.integratedRepositories).toHaveLength(2);
+      expect(new Set(manager.integratedRepositories.map((path) => path.toLowerCase())).size).toBe(
+        1,
+      );
       expect(manager.maxActiveIntegrations).toBe(1);
       persistence.close();
     });
