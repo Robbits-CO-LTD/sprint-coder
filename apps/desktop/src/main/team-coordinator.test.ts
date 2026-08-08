@@ -994,7 +994,7 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('adopts a deterministic worktree after a crash in preparing', async () => {
+    it('terminalizes and quarantines a deterministic worktree after a crash in preparing', async () => {
       const persistence = createPersistence();
       const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-prepare-repo-')));
       const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-prepare-worktrees-'));
@@ -1061,22 +1061,22 @@ if (runsWithElectronAbi)
         ],
       });
 
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'failed');
       const executionId = mission.steps[0]!.executionId;
       const preparing = persistence.getTeamExecutionIsolation(executionId);
-      expect(preparing).toMatchObject({ phase: 'preparing' });
+      expect(preparing).toMatchObject({
+        phase: 'quarantined',
+        reason: 'simulated crash after first worktree creation',
+      });
       expect(existsSync(preparing!.repositories[0]!.worktreePath)).toBe(true);
       expect(runtime.workspaceSets).toHaveLength(0);
-
-      const resumed = coordinatorWithWorktrees(
-        persistence,
-        runtime,
-        new WorkerWorktreeManager({ worktreesRoot }),
-      );
-      await resumed.resumeMission(task.id, mission.id);
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 20_000);
-      expect(runtime.workspaceSets).toHaveLength(1);
-      expect(readFileSync(join(repo, 'worker-output.txt'), 'utf8')).toBe('repo\n');
+      expect(persistence.getTeamExecution(executionId).state).toBe('failed');
+      const dispatch = persistence.getTeamExecutionDispatch(executionId);
+      expect(persistence.getTeamTask(dispatch.teamTaskId).status).toBe('failed');
+      expect(persistence.getTeamDelivery(dispatch.messageId)).toMatchObject({
+        state: 'failed',
+        lastError: 'simulated crash after first worktree creation',
+      });
       persistence.close();
     });
 

@@ -1712,8 +1712,10 @@ export class TeamCoordinator {
       this.releaseReservations(reservations);
       if (missionWorktree !== null)
         this.quarantineMissionWorktree(missionWorktree.executionId, error);
-      if (executionIsolation !== null && !integrationResume)
-        this.quarantineExecutionIsolation(executionIsolation.executionId, error);
+      const persistedIsolation =
+        executionIsolation ?? this.persistence.getTeamExecutionIsolation(input.executionId);
+      if (persistedIsolation !== null && !integrationResume)
+        this.quarantineExecutionIsolation(persistedIsolation.executionId, error);
       if (
         attemptId !== null &&
         this.handleRequestedInterruption({
