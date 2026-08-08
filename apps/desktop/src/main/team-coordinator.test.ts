@@ -3056,6 +3056,63 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('terminalizes a Mission when preflight fails before its first Attempt starts', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Mission preflight failure state');
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          throw new Error('deliberate Mission preflight failure');
+        },
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'Mission preflight worker',
+        objective: 'prove terminal Mission state',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'fail Mission before runtime',
+        doneCriteria: ['never reached'],
+        steps: [
+          {
+            workerId: worker.id,
+            objective: 'first step',
+            doneCriteria: ['never reached'],
+            access: 'read-only',
+          },
+          {
+            workerId: worker.id,
+            objective: 'second step',
+            doneCriteria: ['never reached'],
+            access: 'read-only',
+          },
+        ],
+      });
+      const executionId = mission.steps[0]!.executionId;
+
+      await waitFor(() => persistence.getTeamExecution(executionId).state === 'failed');
+      const dispatch = persistence.getTeamExecutionDispatch(executionId);
+      expect(persistence.listTeamAttempts(executionId)).toHaveLength(0);
+      expect(persistence.getTeamTask(dispatch.teamTaskId).status).toBe('failed');
+      expect(persistence.getTeamMission(mission.id).state).toBe('failed');
+      expect(persistence.getTeamDelivery(dispatch.messageId)).toMatchObject({
+        state: 'failed',
+        lastError: 'deliberate Mission preflight failure',
+      });
+      persistence.close();
+    });
+
     it('interrupts running executions for steer or cancel without changing execution identity', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Running execution control');

@@ -136,6 +136,26 @@ describe('teamRunProgress', () => {
     });
     expect(currentTeamWorkerCount(detail(workers))).toBe(3);
   });
+
+  it('does not count historical reports from stopped Workers as current progress', () => {
+    const workers = [
+      worker('old-1', '停止1', 'stopped'),
+      worker('old-2', '停止2', 'stopped'),
+      worker('old-3', '停止3', 'stopped'),
+      worker('w1', '現役1', 'ready'),
+      worker('w2', '現役2', 'ready'),
+      worker('w3', '現役3', 'ready'),
+    ];
+    expect(
+      teamRunProgress(
+        detail(workers, [
+          { id: 'old-r1', workerId: 'old-1' },
+          { id: 'old-r2', workerId: 'old-2' },
+          { id: 'old-r3', workerId: 'old-3' },
+        ]),
+      ),
+    ).toEqual({ label: 'Team実行中', detail: '3人のWorkerへ依頼中' });
+  });
 });
 
 // The runtime name the Canvas card and the List row both put beside the objective. `engine` is a

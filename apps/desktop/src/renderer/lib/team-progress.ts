@@ -35,7 +35,12 @@ export function teamRunProgress(detail: TeamDetail | null | undefined): TeamRunP
 
   const reportingWorkerIds = new Set(
     detail.messages
-      .filter(({ sourceKind, targetKind }) => sourceKind === 'worker' && targetKind === 'leader')
+      .filter(
+        ({ sourceAgentId, sourceKind, targetKind }) =>
+          sourceKind === 'worker' &&
+          targetKind === 'leader' &&
+          workers.some(({ id }) => id === sourceAgentId),
+      )
       .map(({ sourceAgentId }) => sourceAgentId),
   );
   const reportCount = reportingWorkerIds.size;

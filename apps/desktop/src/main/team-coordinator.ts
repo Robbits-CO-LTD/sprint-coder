@@ -1758,10 +1758,9 @@ export class TeamCoordinator {
         nextActions: [],
         doneEvidence: [],
       });
+      const preflightFailure = attemptId === null;
       if (['assigned', 'running'].includes(this.persistence.getTeamTask(input.teamTaskId).status)) {
-        if (integrationResume)
-          this.persistence.transitionTeamTask(input.teamTaskId, 'blocked', this.isoNow());
-        else if (mission === null)
+        if (preflightFailure || (mission === null && !integrationResume))
           this.persistence.completeTeamTaskWithReport({
             teamTaskId: input.teamTaskId,
             agentId: worker.id,
@@ -1769,6 +1768,8 @@ export class TeamCoordinator {
             doneEvidence: [],
             now: this.isoNow(),
           });
+        else if (integrationResume)
+          this.persistence.transitionTeamTask(input.teamTaskId, 'blocked', this.isoNow());
         else this.persistence.transitionTeamTask(input.teamTaskId, 'blocked', this.isoNow());
       }
       const terminalReason =
@@ -1789,6 +1790,7 @@ export class TeamCoordinator {
       }
       const execution = this.persistence.getTeamExecution(input.executionId);
       if (
+        !preflightFailure &&
         (mission !== null || integrationResume) &&
         !['completed', 'failed', 'canceled'].includes(execution.state)
       ) {
@@ -1805,6 +1807,7 @@ export class TeamCoordinator {
           to: 'failed',
           now: this.isoNow(),
         });
+      if (preflightFailure && mission !== null) this.cancelMissionRemainder(execution.id, 'failed');
       if (attemptId !== null && !integrationResume)
         this.persistWorkerResult(
           input.teamId,

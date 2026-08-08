@@ -1112,7 +1112,7 @@ const TEAM_RELATION_INTENT =
 const TEAM_CONSULTATION_ENDING =
   /(?:できますか|できる(?:の)?|可能ですか|可能(?:なの)?|教えて|説明して|とは)[。.!！?？]*$/i;
 const TEAM_WORKER_EXECUTION_ACTION =
-  /(?:雇って|雇用して|採用して|作成して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|挨拶して|会話させて|分担して|進めて|お願い)[。.!！?？]*$/i;
+  /(?:(?:雇って|雇用して|採用して|作成して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|挨拶して|会話させて|分担して|進めて)(?:ください|ほしい)?|(?:編集|実装|実行|作業|調査|検証|監査|レビュー|採用|雇用)?(?:を)?お願い(?:します)?)[。.!！?？]*$/i;
 
 // A failed/canceled Team turn is commonly resumed with a short instruction that no longer repeats
 // the word "Team". Keep this deliberately narrow: ordinary follow-up questions must not silently

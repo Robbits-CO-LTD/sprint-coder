@@ -93,6 +93,10 @@ describe('builtin Team skill', () => {
     expect(isTeamScenarioInput('teamで並列編集できますか？')).toBe(true);
     expect(requiresTeamWorkersInput('teamで並列編集できますか？')).toBe(false);
     expect(requiresTeamWorkersInput('Workerを3名雇って編集して')).toBe(true);
+    expect(requiresTeamWorkersInput('チームで編集してください')).toBe(true);
+    expect(requiresTeamWorkersInput('Workerを3名雇ってください')).toBe(true);
+    expect(requiresTeamWorkersInput('Teamで実行してほしい')).toBe(true);
+    expect(requiresTeamWorkersInput('チームでの編集をお願いします')).toBe(true);
     expect(requiresTeamWorkersInput('/team リポジトリを並列調査して')).toBe(true);
   });
 
