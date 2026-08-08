@@ -27,6 +27,7 @@ import {
 import { ArrowLeft, List } from '../icons';
 import { TeamPolicyDialog, TeamPolicyTrigger } from '../TeamPolicyDialog';
 import { latestExecutionForWorker } from '../../lib/team-execution-display';
+import { currentTeamWorkerCount } from '../../lib/team-progress';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
 // Team Canvas: the spatial "promoted chat" experience from demo/index.html (§Team mode,
@@ -234,7 +235,7 @@ export function TeamCanvas({
         : [],
     [detail],
   );
-  const workerCount = workers.length;
+  const workerCount = detail ? currentTeamWorkerCount(detail) : 0;
   const leaderAgentId = detail?.team.leaderAgentId;
   // Default (pre-drag, pre-restore) positions for every Worker, from the Team's recorded agent
   // tree — `workers` is already in stable creation order, which is the sibling order the layout

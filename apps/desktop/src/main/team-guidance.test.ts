@@ -6,6 +6,7 @@ import { CONTEXT_SYSTEM_PROMPT } from './context-ledger';
 import {
   isTeamContinuationInput,
   isTeamScenarioInput,
+  requiresTeamWorkersInput,
   LEADER_MCP_SYSTEM_PROMPT,
   LEADER_PROVIDER_TOOLS,
   TEAM_HIRE_WORKER_TOOL,
@@ -41,6 +42,7 @@ describe('builtin Team skill', () => {
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_send_message');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_read_messages');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('team_hire_worker');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('writeCapable: true');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('agentKind: "manager"');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('maxDelegationLevels: 1');
     expect(BUILTIN_TEAM_SKILL_CONTENT).not.toContain('maxDelegationDepth');
@@ -85,6 +87,23 @@ describe('builtin Team skill', () => {
       'READMEに /team 調査して と書いて',
     ])
       expect(isTeamScenarioInput(input), input).toBe(false);
+  });
+
+  it('separates Team consultation from requests that must create Workers', () => {
+    expect(isTeamScenarioInput('teamで並列編集できますか？')).toBe(true);
+    expect(requiresTeamWorkersInput('teamで並列編集できますか？')).toBe(false);
+    expect(requiresTeamWorkersInput('Workerを3名雇って編集して')).toBe(true);
+    expect(requiresTeamWorkersInput('チームでコードを書いて')).toBe(true);
+    expect(requiresTeamWorkersInput('チームで編集してください')).toBe(true);
+    expect(requiresTeamWorkersInput('Workerを3名雇ってください')).toBe(true);
+    expect(requiresTeamWorkersInput('Teamで実行してほしい')).toBe(true);
+    expect(requiresTeamWorkersInput('チームでの編集をお願いします')).toBe(true);
+    expect(
+      requiresTeamWorkersInput('Workerを3名雇って実装してください。完了後に結果を教えて'),
+    ).toBe(true);
+    expect(requiresTeamWorkersInput('/team リポジトリを並列調査して')).toBe(true);
+    expect(requiresTeamWorkersInput('チームで何ができますか？')).toBe(false);
+    expect(requiresTeamWorkersInput('チームの使い方を説明して')).toBe(false);
   });
 
   it('recognizes narrow retry and Team member reassignment instructions as continuation input', () => {

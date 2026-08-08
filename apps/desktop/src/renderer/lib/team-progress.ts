@@ -1,5 +1,10 @@
 import type { TeamDetail } from '../types/sprint-coder';
 
+export function currentTeamWorkerCount(detail: TeamDetail): number {
+  return detail.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped')
+    .length;
+}
+
 export type TeamRunProgress = {
   label: 'Team実行中';
   detail: string;
@@ -7,7 +12,9 @@ export type TeamRunProgress = {
 
 export function teamRunProgress(detail: TeamDetail | null | undefined): TeamRunProgress | null {
   if (detail == null) return null;
-  const workers = detail.workers.filter(({ kind }) => kind === 'worker');
+  const workers = detail.workers.filter(
+    ({ kind, state }) => kind === 'worker' && state !== 'stopped',
+  );
   if (workers.length === 0) return { label: 'Team実行中', detail: 'Workerを編成中' };
 
   const spawning = workers.filter(({ state }) => state === 'invited' || state === 'spawning');
@@ -28,7 +35,12 @@ export function teamRunProgress(detail: TeamDetail | null | undefined): TeamRunP
 
   const reportingWorkerIds = new Set(
     detail.messages
-      .filter(({ sourceKind, targetKind }) => sourceKind === 'worker' && targetKind === 'leader')
+      .filter(
+        ({ sourceAgentId, sourceKind, targetKind }) =>
+          sourceKind === 'worker' &&
+          targetKind === 'leader' &&
+          workers.some(({ id }) => id === sourceAgentId),
+      )
       .map(({ sourceAgentId }) => sourceAgentId),
   );
   const reportCount = reportingWorkerIds.size;

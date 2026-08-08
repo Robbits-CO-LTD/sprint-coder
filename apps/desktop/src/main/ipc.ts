@@ -286,6 +286,7 @@ import {
 } from './team-worker-runtime';
 import {
   isTeamScenarioInput,
+  requiresTeamWorkersInput,
   LEADER_MCP_SYSTEM_PROMPT,
   LEADER_PROVIDER_TOOLS,
   MANAGER_PROVIDER_TOOLS,
@@ -3118,7 +3119,8 @@ export class IpcRouter {
         });
         return;
       }
-      if (teamTurn) this.teamRequiredTurns.add(started.turnId);
+      if (teamTurn && requiresTeamWorkersInput(started.text))
+        this.teamRequiredTurns.add(started.turnId);
     } else if (kind !== 'mock' && teamTurn) {
       // Team intent without Leader MCP always runs the leader orchestration
       // (hire→dispatch→reports→synthesis): the production adapters are no-tools by default, so a
@@ -4270,6 +4272,16 @@ export class IpcRouter {
       }
       if (!finished)
         throw new Error(`Provider Leader exceeded ${MAX_PROVIDER_LEADER_ROUNDS} provider rounds`);
+      if (
+        shouldFailRequiredTeamTurn(
+          requiresTeamWorkersInput(started.text),
+          this.teamCoordinator
+            .get(taskId)
+            ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped')
+            .length ?? 0,
+        )
+      )
+        throw new Error('Team MCP Worker was required but no Worker was created');
       if (aggregateUsage !== undefined)
         this.persistence.recordTurnProviderUsage(taskId, started.turnId, aggregateUsage);
       await this.mailbox.run(taskId, () => {
@@ -4370,7 +4382,9 @@ export class IpcRouter {
           if (
             shouldFailRequiredTeamTurn(
               this.teamRequiredTurns.has(turnId),
-              this.teamCoordinator.get(taskId)?.workers.filter(({ kind }) => kind === 'worker')
+              this.teamCoordinator
+                .get(taskId)
+                ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped')
                 .length ?? 0,
             )
           ) {

@@ -994,7 +994,7 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('adopts a deterministic worktree after a crash in preparing', async () => {
+    it('terminalizes and quarantines a deterministic worktree after a crash in preparing', async () => {
       const persistence = createPersistence();
       const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-prepare-repo-')));
       const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-prepare-worktrees-'));
@@ -1061,22 +1061,22 @@ if (runsWithElectronAbi)
         ],
       });
 
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'failed');
       const executionId = mission.steps[0]!.executionId;
       const preparing = persistence.getTeamExecutionIsolation(executionId);
-      expect(preparing).toMatchObject({ phase: 'preparing' });
+      expect(preparing).toMatchObject({
+        phase: 'quarantined',
+        reason: 'simulated crash after first worktree creation',
+      });
       expect(existsSync(preparing!.repositories[0]!.worktreePath)).toBe(true);
       expect(runtime.workspaceSets).toHaveLength(0);
-
-      const resumed = coordinatorWithWorktrees(
-        persistence,
-        runtime,
-        new WorkerWorktreeManager({ worktreesRoot }),
-      );
-      await resumed.resumeMission(task.id, mission.id);
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 20_000);
-      expect(runtime.workspaceSets).toHaveLength(1);
-      expect(readFileSync(join(repo, 'worker-output.txt'), 'utf8')).toBe('repo\n');
+      expect(persistence.getTeamExecution(executionId).state).toBe('failed');
+      const dispatch = persistence.getTeamExecutionDispatch(executionId);
+      expect(persistence.getTeamTask(dispatch.teamTaskId).status).toBe('failed');
+      expect(persistence.getTeamDelivery(dispatch.messageId)).toMatchObject({
+        state: 'failed',
+        lastError: 'simulated crash after first worktree creation',
+      });
       persistence.close();
     });
 
@@ -3008,6 +3008,107 @@ if (runsWithElectronAbi)
       expect(JSON.parse(reports[0]!.content)).toMatchObject({
         status: 'failed',
         summary: 'deliberate runtime failure',
+      });
+      persistence.close();
+    });
+
+    it('terminalizes Task, Execution, and Delivery when preflight fails before an Attempt starts', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Preflight failure state');
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          throw new Error('deliberate preflight failure');
+        },
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'preflight worker',
+        objective: 'prove terminal state',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'fail before runtime',
+        doneCriteria: ['never reached'],
+      });
+
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+      const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
+      expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(0);
+      expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
+        status: 'failed',
+      });
+      expect(persistence.getTeamDelivery(dispatch.messageId)).toMatchObject({
+        state: 'failed',
+        lastError: 'deliberate preflight failure',
+      });
+      persistence.close();
+    });
+
+    it('terminalizes a Mission when preflight fails before its first Attempt starts', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Mission preflight failure state');
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          throw new Error('deliberate Mission preflight failure');
+        },
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'Mission preflight worker',
+        objective: 'prove terminal Mission state',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'fail Mission before runtime',
+        doneCriteria: ['never reached'],
+        steps: [
+          {
+            workerId: worker.id,
+            objective: 'first step',
+            doneCriteria: ['never reached'],
+            access: 'read-only',
+          },
+          {
+            workerId: worker.id,
+            objective: 'second step',
+            doneCriteria: ['never reached'],
+            access: 'read-only',
+          },
+        ],
+      });
+      const executionId = mission.steps[0]!.executionId;
+
+      await waitFor(() => persistence.getTeamExecution(executionId).state === 'failed');
+      const dispatch = persistence.getTeamExecutionDispatch(executionId);
+      expect(persistence.listTeamAttempts(executionId)).toHaveLength(0);
+      expect(persistence.getTeamTask(dispatch.teamTaskId).status).toBe('failed');
+      expect(persistence.getTeamMission(mission.id).state).toBe('failed');
+      expect(persistence.getTeamDelivery(dispatch.messageId)).toMatchObject({
+        state: 'failed',
+        lastError: 'deliberate Mission preflight failure',
       });
       persistence.close();
     });

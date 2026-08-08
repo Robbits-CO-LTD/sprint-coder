@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TeamDetail, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
-import { teamRunProgress } from './team-progress';
+import { currentTeamWorkerCount, teamRunProgress } from './team-progress';
 import {
   EXTERNAL_API_RUNTIME_LABEL,
   LEADER_MESSAGE_PEER_LABEL,
@@ -119,6 +119,42 @@ describe('teamRunProgress', () => {
         ]),
       ),
     ).toEqual({ label: 'Team実行中', detail: '報告を統合中（3/3）' });
+  });
+
+  it('does not count stopped Workers as current Team members', () => {
+    const workers = [
+      worker('old-1', '停止1', 'stopped'),
+      worker('old-2', '停止2', 'stopped'),
+      worker('old-3', '停止3', 'stopped'),
+      worker('w1', '現役1', 'done'),
+      worker('w2', '現役2', 'done'),
+      worker('w3', '現役3', 'done'),
+    ];
+    expect(teamRunProgress(detail(workers))).toEqual({
+      label: 'Team実行中',
+      detail: '3人のWorkerへ依頼中',
+    });
+    expect(currentTeamWorkerCount(detail(workers))).toBe(3);
+  });
+
+  it('does not count historical reports from stopped Workers as current progress', () => {
+    const workers = [
+      worker('old-1', '停止1', 'stopped'),
+      worker('old-2', '停止2', 'stopped'),
+      worker('old-3', '停止3', 'stopped'),
+      worker('w1', '現役1', 'ready'),
+      worker('w2', '現役2', 'ready'),
+      worker('w3', '現役3', 'ready'),
+    ];
+    expect(
+      teamRunProgress(
+        detail(workers, [
+          { id: 'old-r1', workerId: 'old-1' },
+          { id: 'old-r2', workerId: 'old-2' },
+          { id: 'old-r3', workerId: 'old-3' },
+        ]),
+      ),
+    ).toEqual({ label: 'Team実行中', detail: '3人のWorkerへ依頼中' });
   });
 });
 

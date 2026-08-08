@@ -6,6 +6,7 @@ import { ArrowLeft, LayoutGrid } from './icons';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
 import { TeamPolicyDialog, TeamPolicyTrigger } from './TeamPolicyDialog';
 import { latestExecutionForWorker } from '../lib/team-execution-display';
+import { currentTeamWorkerCount } from '../lib/team-progress';
 import {
   describeMessagePeer,
   describeWorkerModel,
@@ -80,6 +81,7 @@ export function TeamListView({
   }
 
   const workers = detail.workers.filter((w) => w.kind === 'worker');
+  const currentWorkerCount = currentTeamWorkerCount(detail);
 
   return (
     <section
@@ -109,7 +111,7 @@ export function TeamListView({
           {/* Same wording as TeamCanvas's chip (the a11y list/canvas parity spec compares the two
               verbatim) and, like it, no denominator: the Worker count is dynamic — see the note on
               TeamCanvas's `liveText`. */}
-          <span className="team-status-chip">{`${detail.team.state} · Worker ${workers.length}人`}</span>
+          <span className="team-status-chip">{`${detail.team.state} · Worker ${currentWorkerCount}人`}</span>
           <button
             type="button"
             className="team-view-toggle-btn"
@@ -124,7 +126,7 @@ export function TeamListView({
             type="button"
             className="team-stop-all-btn"
             data-testid="team-stop-all"
-            disabled={teamBusy || workers.length === 0 || detail.team.state === 'completed'}
+            disabled={teamBusy || currentWorkerCount === 0 || detail.team.state === 'completed'}
             onClick={() => void stopAllTeamWorkers(task.id)}
           >
             すべて停止
@@ -132,7 +134,7 @@ export function TeamListView({
         </div>
       </header>
       <div aria-live="polite" className="visually-hidden">
-        {`Team status: ${detail.team.state}, workers ${workers.length}`}
+        {`Team status: ${detail.team.state}, workers ${currentWorkerCount}`}
       </div>
 
       <div className="tlv-body">
@@ -164,7 +166,7 @@ export function TeamListView({
                     <span className="role-name">{worker.role}</span>
                     <span className={`w-status team-status ${statusDotClass(worker.state)}`}>
                       <span className="dot" aria-hidden="true" />
-                      {worker.state}
+                      {worker.state === 'stopped' ? '停止済み' : worker.state}
                     </span>
                   </div>
                   <button
@@ -185,7 +187,13 @@ export function TeamListView({
                   {workerRuntimeLabel(worker)} · {worker.objective}
                 </p>
                 <p className="tlv-activity">
-                  現在: {worker.currentActivity ?? (worker.state === 'done' ? '完了' : '待機')}
+                  現在:{' '}
+                  {worker.currentActivity ??
+                    (worker.state === 'done'
+                      ? '完了'
+                      : worker.state === 'stopped'
+                        ? '停止済み'
+                        : '待機')}
                 </p>
                 {/* Same helper, same wording, same testids as the Canvas's Worker card — only the
                     variant class differs (see WorkerNode.tsx), so the two views never disagree
@@ -276,7 +284,7 @@ export function TeamListView({
               </li>
             );
           })}
-          {workers.length === 0 && (
+          {currentWorkerCount === 0 && (
             <li className="tlv-empty">Leaderに依頼すると、必要に応じてWorkerを雇用します</li>
           )}
         </ul>
