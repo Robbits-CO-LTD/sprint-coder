@@ -3156,7 +3156,7 @@ export class IpcRouter {
       );
     }
     if (kind === 'mock') {
-      this.mockRuntime.start(taskId, started.turnId, started.text);
+      this.mockRuntime.start(taskId, started.turnId, started.text, started.teamTurn);
       return;
     }
     const workspacePath = turnWorkspace;

@@ -117,7 +117,7 @@ export class MockRuntimeAdapter {
     );
   }
 
-  start(taskId: string, turnId: string, input: string): void {
+  start(taskId: string, turnId: string, input: string, teamTurn = false): void {
     const context = this.prepareContext?.(taskId, turnId);
     if (context !== undefined)
       this.contextAccepted?.(
@@ -140,7 +140,7 @@ export class MockRuntimeAdapter {
       resolveSettled,
     };
     this.active.set(turnId, control);
-    void this.run(taskId, turnId, input, control);
+    void this.run(taskId, turnId, input, control, teamTurn);
   }
 
   steer(turnId: string, text: string): void {
@@ -171,6 +171,7 @@ export class MockRuntimeAdapter {
     turnId: string,
     input: string,
     control: ActiveTurn,
+    teamTurn: boolean,
   ): Promise<void> {
     try {
       for (const stage of executionStages) {
@@ -240,7 +241,9 @@ export class MockRuntimeAdapter {
       // TeamCoordinator was actually wired in, since otherwise the team_* tools aren't registered.
       const teamScenarioActive =
         this.teamCoordinator !== undefined &&
-        ((this.persistence.getTeamByTask?.(taskId) ?? null) !== null || isTeamScenarioInput(input));
+        (teamTurn ||
+          (this.persistence.getTeamByTask?.(taskId) ?? null) !== null ||
+          isTeamScenarioInput(input));
       const loop = await runIntelligenceLoop({
         taskId,
         turnId,
