@@ -380,7 +380,7 @@ export class WorkerWorktreeManager {
     const integratedHead = (
       await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
     ).stdout.trim();
-    await this.assertEquivalentCommitPatch(repoPath, workerHead, integratedHead);
+    await this.assertEquivalentCommitPatch(repoPath, baseHead, workerHead, integratedHead);
     return { integratedHead, outcome: 'integrated' };
   }
 
@@ -414,20 +414,18 @@ export class WorkerWorktreeManager {
         `Workspace HEAD no longer contains integrated commit: ${integratedHead}`,
       );
     if (workerHead !== baseHead) {
-      await this.assertEquivalentCommitPatch(repoPath, workerHead, integratedHead);
+      await this.assertEquivalentCommitPatch(repoPath, baseHead, workerHead, integratedHead);
     }
     return { integratedHead, outcome: 'already_integrated' };
   }
 
   private async assertEquivalentCommitPatch(
     repoPath: string,
+    baseHead: string,
     workerHead: string,
     integratedHead: string,
   ): Promise<void> {
-    if (
-      (await this.normalizedCommitPatch(repoPath, integratedHead)) !==
-      (await this.normalizedCommitPatch(repoPath, workerHead))
-    )
+    if (!(await this.commitTreeMatchesWorker(repoPath, baseHead, integratedHead, workerHead)))
       throw new WorktreeError(
         'integration_failed',
         'Integrated patch does not match the isolated Worker result',
@@ -440,26 +438,38 @@ export class WorkerWorktreeManager {
     currentHead: string,
     workerHead: string,
   ): Promise<string | null> {
-    const workerPatch = await this.normalizedCommitPatch(repoPath, workerHead);
     const history = await this.runGit(
       repoPath,
       ['rev-list', '--reverse', `${baseHead}..${currentHead}`],
       'integration_failed',
     );
     for (const candidate of history.stdout.split(/\r?\n/u).filter((line) => line !== ''))
-      if ((await this.normalizedCommitPatch(repoPath, candidate)) === workerPatch) return candidate;
+      if (await this.commitTreeMatchesWorker(repoPath, baseHead, candidate, workerHead))
+        return candidate;
     return null;
   }
 
-  private async normalizedCommitPatch(repoPath: string, head: string): Promise<string> {
-    const patch = await this.runGit(
-      repoPath,
-      ['diff', '--binary', '--no-ext-diff', '--no-renames', '--unified=0', `${head}^`, head],
-      'integration_failed',
-    );
-    return patch.stdout
-      .replace(/^index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?$/gmu, 'index')
-      .replace(/^@@ .* @@.*$/gmu, '@@');
+  private async commitTreeMatchesWorker(
+    repoPath: string,
+    baseHead: string,
+    candidateHead: string,
+    workerHead: string,
+  ): Promise<boolean> {
+    const candidateParent = await this.tryRunGit(repoPath, ['rev-parse', `${candidateHead}^`]);
+    if (candidateParent === null) return false;
+    const expected = await this.tryRunGit(repoPath, [
+      'merge-tree',
+      '--write-tree',
+      `--merge-base=${baseHead}`,
+      candidateParent.stdout.trim(),
+      workerHead,
+    ]);
+    if (expected === null) return false;
+    const expectedTree = expected.stdout.split(/\r?\n/u)[0]?.trim();
+    const candidateTree = (
+      await this.runGit(repoPath, ['rev-parse', `${candidateHead}^{tree}`], 'integration_failed')
+    ).stdout.trim();
+    return expectedTree !== undefined && expectedTree === candidateTree;
   }
 
   private async runGit(

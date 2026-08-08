@@ -446,6 +446,74 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect((await git(['-C', repoPath, 'status', '--porcelain'])).trim()).toBe('');
   });
 
+  it('does not mistake the same replacement at a different location for the Worker change', async () => {
+    const { repoPath, manager } = await fixture();
+    const lines = ['foo', '2', '3', '4', '5', '6', '7', '8', '9', 'foo'];
+    await writeFile(join(repoPath, 'duplicates.txt'), `${lines.join('\n')}\n`);
+    await git(['-C', repoPath, 'add', 'duplicates.txt']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'duplicate lines base',
+    ]);
+    const baseHead = (await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim();
+    const worker = await manager.create({
+      agentId: 'duplicate-location',
+      worktreeId: 'duplicate-location',
+      repoPath,
+      baseRef: baseHead,
+    });
+    await writeFile(
+      join(worker.path, 'duplicates.txt'),
+      `${['bar', ...lines.slice(1)].join('\n')}\n`,
+    );
+    const finalized = await manager.finalizeChanges({
+      agentId: 'duplicate-location',
+      worktreeId: 'duplicate-location',
+      repoPath,
+      baseHead,
+      commitMessage: 'change first duplicate',
+    });
+    await writeFile(
+      join(repoPath, 'duplicates.txt'),
+      `${[...lines.slice(0, -1), 'bar'].join('\n')}\n`,
+    );
+    await git(['-C', repoPath, 'add', 'duplicates.txt']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'change second duplicate',
+    ]);
+
+    await expect(
+      manager.integrate({
+        repoPath,
+        baseHead,
+        workerHead: finalized.workerHead,
+      }),
+    ).resolves.toMatchObject({ outcome: 'integrated' });
+    expect(await readFile(join(repoPath, 'duplicates.txt'), 'utf8')).toBe(
+      `${['bar', ...lines.slice(1, -1), 'bar'].join('\n')}\n`,
+    );
+    expect((await git(['-C', repoPath, 'rev-list', '--count', `${baseHead}..HEAD`])).trim()).toBe(
+      '2',
+    );
+  });
+
   it('refuses integration when the primary workspace changed and preserves both sides', async () => {
     const { repoPath, head, manager } = await fixture();
     const worktreeId = 'execution-3';
