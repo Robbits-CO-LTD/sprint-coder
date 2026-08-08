@@ -31,6 +31,7 @@ import {
   type AccessPresetDefault,
 } from '../lib/access-preset-preference';
 import settingsConnectionsArt from '../../../assets/generated/settings-connections.webp';
+import mitLicenseText from '../../../../../LICENSE?raw';
 
 // Settings dialog (issue #5). The sidebar's "設定" button had no onClick and was not disabled
 // either, so it looked pressable and did nothing — and no settings screen existed anywhere in the
@@ -534,6 +535,10 @@ function LicenseGroup() {
         </span>
       </div>
       <p className="settings-hint">Copyright (c) 2026 株式会社Robbits</p>
+      <details className="settings-license-details" data-testid="settings-license-details">
+        <summary>ライセンス全文を表示</summary>
+        <pre data-testid="settings-license-text">{mitLicenseText.trim()}</pre>
+      </details>
     </div>
   );
 }

@@ -115,6 +115,9 @@ describe('which body the flag selects', () => {
       expect(html).toContain('data-testid="settings-license"');
       expect(html).toContain('MIT License');
       expect(html).toContain('Copyright (c) 2026 株式会社Robbits');
+      expect(html).toContain('data-testid="settings-license-details"');
+      expect(html).toContain('Permission is hereby granted, free of charge');
+      expect(html).toContain('THE SOFTWARE IS PROVIDED');
     }
   });
 
