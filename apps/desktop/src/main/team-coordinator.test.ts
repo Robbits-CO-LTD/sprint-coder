@@ -287,6 +287,24 @@ class FailRepositoryOnceManager extends WorkerWorktreeManager {
   }
 }
 
+class TrackingIntegrationManager extends WorkerWorktreeManager {
+  activeIntegrations = 0;
+  maxActiveIntegrations = 0;
+  readonly integratedRepositories: string[] = [];
+
+  override async integrate(input: Parameters<WorkerWorktreeManager['integrate']>[0]) {
+    this.activeIntegrations += 1;
+    this.maxActiveIntegrations = Math.max(this.maxActiveIntegrations, this.activeIntegrations);
+    this.integratedRepositories.push(realpathSync(input.repoPath));
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return await super.integrate(input);
+    } finally {
+      this.activeIntegrations -= 1;
+    }
+  }
+}
+
 class PausedIntegrationScheduler extends TeamIntegrationScheduler {
   readonly jobs: TeamIntegrationJob[] = [];
 
@@ -1222,7 +1240,7 @@ if (runsWithElectronAbi)
         secondProject.id,
       );
       const runtime = new BlockingWorkerRuntime();
-      const manager = new WorkerWorktreeManager({ worktreesRoot });
+      const manager = new TrackingIntegrationManager({ worktreesRoot });
       const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
       const firstWorker = await coordinator.hireWorker({
         taskId: firstTask.id,
@@ -1271,6 +1289,8 @@ if (runsWithElectronAbi)
       expect(spawnSync('git', ['-C', repo, 'status', '--porcelain']).stdout.toString().trim()).toBe(
         '',
       );
+      expect(manager.integratedRepositories).toEqual([repo, repo]);
+      expect(manager.maxActiveIntegrations).toBe(1);
       persistence.close();
     });
 

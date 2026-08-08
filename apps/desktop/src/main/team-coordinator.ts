@@ -3582,6 +3582,8 @@ function isolationLeaseBindings(
   mutationKey: string;
   identity: string;
 }[] {
+  // Root keys preserve the existing mutation boundary, while the canonical repository key is
+  // shared by sibling roots so two jobs can never cherry-pick into the same parent checkout.
   const repositories = isolation.repositories.map(({ ordinal, repoPath }) => {
     const canonicalKey = process.platform === 'win32' ? repoPath.toLowerCase() : repoPath;
     const mutationKey = createHash('sha256')
