@@ -114,7 +114,7 @@ describe('which body the flag selects', () => {
     for (const html of [workspace(), legacy()]) {
       expect(html).toContain('data-testid="settings-license"');
       expect(html).toContain('MIT License');
-      expect(html).toContain('Copyright (c) Sprint Coder contributors');
+      expect(html).toContain('Copyright (c) 2026 株式会社Robbits');
     }
   });
 

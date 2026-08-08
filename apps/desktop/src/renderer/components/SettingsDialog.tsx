@@ -533,7 +533,7 @@ function LicenseGroup() {
           MIT
         </span>
       </div>
-      <p className="settings-hint">Copyright (c) Sprint Coder contributors</p>
+      <p className="settings-hint">Copyright (c) 2026 株式会社Robbits</p>
     </div>
   );
 }
