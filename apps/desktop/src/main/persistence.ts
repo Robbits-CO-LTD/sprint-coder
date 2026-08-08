@@ -4817,10 +4817,39 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
     const v58 = this.migrationForVersion(58);
     if (!this.tableExists('project_memories')) this.db.exec(this.idempotentMigrationSql(v58.sql));
-    else this.ensureColumn('project_memories', 'local_only', 'INTEGER NOT NULL DEFAULT 0');
+    else if (!this.columnExists('project_memories', 'local_only'))
+      this.rebuildLegacyProjectMemories(v58.sql);
     this.db.exec(
       'CREATE INDEX IF NOT EXISTS project_memories_project_order_idx ON project_memories(project_id, status, updated_at DESC, id)',
     );
+  }
+
+  private rebuildLegacyProjectMemories(migrationSql: string): void {
+    if (this.tableExists('project_memories_legacy_v1'))
+      throw new Error('Legacy Project memory archive already exists');
+    this.db.exec('DROP INDEX IF EXISTS project_memories_project_order_idx');
+    this.db.exec('ALTER TABLE project_memories RENAME TO project_memories_legacy_v1');
+    this.db.exec(this.idempotentMigrationSql(migrationSql));
+    this.db.exec('ALTER TABLE project_memories_legacy_v1 ADD COLUMN migration_reason TEXT');
+    this.db.exec(`
+      UPDATE project_memories_legacy_v1
+      SET migration_reason = CASE
+        WHEN source_task_id IS NULL THEN 'missing_source_task'
+        WHEN source_turn_id IS NULL THEN 'missing_source_turn'
+        WHEN status = 'draft' THEN 'draft_status_mapped_to_disabled'
+        ELSE 'legacy_row_copied'
+      END;
+      INSERT INTO project_memories(
+        id, project_id, source_task_id, source_turn_id, content, status,
+        revision, local_only, created_at, updated_at
+      )
+      SELECT id, project_id, source_task_id, source_turn_id, content,
+        CASE WHEN status = 'active' THEN 'active' ELSE 'disabled' END,
+        CASE WHEN revision < 1 THEN 1 ELSE revision END,
+        0, created_at, updated_at
+      FROM project_memories_legacy_v1
+      WHERE source_task_id IS NOT NULL AND source_turn_id IS NOT NULL;
+    `);
   }
 
   private backfillLegacyMutationScopes(): void {

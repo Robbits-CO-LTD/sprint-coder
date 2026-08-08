@@ -5333,6 +5333,7 @@ if (runsWithElectronAbi)
 
     it('converts the legacy Project reference and memory tables during the bridge', () => {
       const { persistence, path } = createPersistence();
+      const project = persistence.createProject('legacy memory project');
       persistence.close();
 
       const legacy = new Database(path);
@@ -5364,6 +5365,13 @@ if (runsWithElectronAbi)
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        INSERT INTO project_memories(
+          id, project_id, content, status, source_task_id, source_turn_id,
+          revision, created_at, updated_at
+        ) VALUES (
+          'legacy-memory', '${project.id}', 'legacy content', 'draft', NULL, NULL,
+          0, '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z'
+        );
         DELETE FROM schema_migrations WHERE version IN (55, 56, 57, 58);
         UPDATE schema_migrations SET checksum = 'real-runtimes-only-v35-migrate-legacy-runtime-records'
           WHERE version = 35;
@@ -5388,6 +5396,13 @@ if (runsWithElectronAbi)
       expect(inspection.prepare("PRAGMA table_info('project_memories')").all()).toEqual(
         expect.arrayContaining([expect.objectContaining({ name: 'local_only' })]),
       );
+      expect(
+        inspection
+          .prepare(
+            "SELECT migration_reason FROM project_memories_legacy_v1 WHERE id = 'legacy-memory'",
+          )
+          .get(),
+      ).toEqual({ migration_reason: 'missing_source_task' });
       inspection.close();
       migrated.close();
     });
