@@ -2642,8 +2642,12 @@ export class IpcRouter {
     for (const turn of expected)
       await this.mailbox.run(turn.taskId, async () => {
         if (turn.turnId !== null && this.persistence.getActiveTurnId(turn.taskId) === turn.turnId) {
+          const runtimeStopped = await this.cancelRuntime(turn.taskId, turn.turnId);
+          if (!runtimeStopped)
+            throw new Error(
+              'Runtime停止を確認できないため、更新を開始しません。Runtimeの停止を再試行してください。',
+            );
           this.approvalCoordinator.turnEnded(turn.taskId, turn.turnId, 'canceled');
-          await this.cancelRuntime(turn.taskId, turn.turnId);
           const completion = this.persistence.cancelTurnAndFinishGoal(turn.taskId, turn.turnId);
           if (completion.task !== null) this.pushTaskUpdated(completion.task);
           if (completion.event !== null) this.publish(completion.event);
