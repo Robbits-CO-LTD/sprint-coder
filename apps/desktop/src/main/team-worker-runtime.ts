@@ -207,6 +207,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     };
     input.signal?.addEventListener('abort', abort, { once: true });
     let finalText: string;
+    let runtimeStarted = false;
     try {
       finalText = await new Promise<string>((resolve, reject) => {
         this.pending.set(turnId, {
@@ -220,7 +221,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         });
         this.activeByAgent.set(input.worker.id, { kind: choice.kind, taskId, turnId });
         input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
-        this.client(choice.kind).start(
+        runtimeStarted = this.client(choice.kind).start(
           taskId,
           turnId,
           prompt,
@@ -235,7 +236,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       });
     } finally {
       try {
-        await this.client(choice.kind).waitForTurnExit(turnId);
+        if (runtimeStarted) await this.client(choice.kind).waitForTurnExit(turnId);
       } finally {
         input.signal?.removeEventListener('abort', abort);
         this.pending.delete(turnId);

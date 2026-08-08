@@ -110,7 +110,7 @@ export class RuntimeHostClient {
     writeScope?: RuntimeWriteScope,
     skills: readonly RuntimeSkillInput[] = [],
     serializedPayload?: SerializedExecutionPayload,
-  ): void {
+  ): boolean {
     const prepared = preparedContext ?? this.prepareContext?.(taskId, turnId);
     const workspace =
       typeof workspaceInput === 'string' || workspaceInput === null
@@ -131,12 +131,12 @@ export class RuntimeHostClient {
       });
     if (this.disposed) {
       this.onFailure(taskId, turnId, this.unavailableError());
-      return;
+      return false;
     }
     if (this.process === null) this.launch();
     if (this.process === null) {
       this.onFailure(taskId, turnId, this.unavailableError());
-      return;
+      return false;
     }
     const operationId = randomUUID();
     this.active.set(turnId, {
@@ -165,6 +165,7 @@ export class RuntimeHostClient {
       ...(effort === undefined ? {} : { effort }),
       ...(writeScope === undefined ? {} : { writeScope }),
     });
+    return true;
   }
 
   cancel(taskId: string, turnId: string): Promise<RuntimeStopReceipt> {
