@@ -92,6 +92,9 @@ export type IntegrateWorktreeResult = Readonly<{
   outcome: 'integrated' | 'already_integrated' | 'no_changes';
 }>;
 
+export type RevalidateWorktreeIntegrationInput = IntegrateWorktreeInput &
+  Readonly<{ integratedHead: string }>;
+
 export type CleanRepositoryBase = Readonly<{ head: string }>;
 export type CleanRepository = Readonly<{
   repoPath: string;
@@ -316,10 +319,7 @@ export class WorkerWorktreeManager {
     return { workerHead, changedFiles };
   }
 
-  /**
-   * Integrate the isolated commit only when the primary checkout still matches baseHead.
-   * A failed cherry-pick is aborted before the error is surfaced.
-   */
+  /** Integrate onto a clean descendant of baseHead. A failed cherry-pick is always aborted. */
   async integrate({
     repoPath,
     baseHead,
@@ -336,28 +336,29 @@ export class WorkerWorktreeManager {
         'base_changed',
         'Workspace has changes outside the isolated Worker worktree',
       );
-    if (workerHead === baseHead) {
-      if (currentHead !== baseHead)
-        throw new WorktreeError(
-          'base_changed',
-          `Workspace HEAD changed before integration: expected ${baseHead}, got ${currentHead}`,
-        );
-      return { integratedHead: baseHead, outcome: 'no_changes' };
-    }
-    const workerTree = (
-      await this.runGit(repoPath, ['rev-parse', `${workerHead}^{tree}`], 'integration_failed')
-    ).stdout.trim();
+    const baseIsAncestor =
+      currentHead === baseHead ||
+      (await this.tryRunGit(repoPath, ['merge-base', '--is-ancestor', baseHead, currentHead])) !==
+        null;
+    if (!baseIsAncestor)
+      throw new WorktreeError(
+        'base_changed',
+        `Workspace HEAD is not descended from Worker base: ${baseHead} -> ${currentHead}`,
+      );
+    if (workerHead === baseHead) return { integratedHead: currentHead, outcome: 'no_changes' };
     if (currentHead !== baseHead) {
+      const workerTree = (
+        await this.runGit(repoPath, ['rev-parse', `${workerHead}^{tree}`], 'integration_failed')
+      ).stdout.trim();
       const currentTree = (
         await this.runGit(repoPath, ['rev-parse', 'HEAD^{tree}'], 'integration_failed')
       ).stdout.trim();
       const currentParent = await this.tryRunGit(repoPath, ['rev-parse', 'HEAD^']);
       if (currentTree === workerTree && currentParent?.stdout.trim() === baseHead)
         return { integratedHead: currentHead, outcome: 'already_integrated' };
-      throw new WorktreeError(
-        'base_changed',
-        `Workspace HEAD changed before integration: expected ${baseHead}, got ${currentHead}`,
-      );
+      const cherry = await this.tryRunGit(repoPath, ['cherry', currentHead, workerHead]);
+      if (cherry?.stdout.trim().startsWith('-'))
+        return { integratedHead: currentHead, outcome: 'already_integrated' };
     }
     try {
       await this.runGit(
@@ -374,15 +375,65 @@ export class WorkerWorktreeManager {
     const integratedHead = (
       await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
     ).stdout.trim();
-    const integratedTree = (
-      await this.runGit(repoPath, ['rev-parse', 'HEAD^{tree}'], 'integration_failed')
+    await this.assertEquivalentCommitPatch(repoPath, workerHead, integratedHead);
+    return { integratedHead, outcome: 'integrated' };
+  }
+
+  async revalidateIntegration({
+    repoPath,
+    baseHead,
+    workerHead,
+    integratedHead,
+  }: RevalidateWorktreeIntegrationInput): Promise<IntegrateWorktreeResult> {
+    for (const head of [baseHead, workerHead, integratedHead]) validateGitHead(head);
+    const currentHead = (
+      await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
     ).stdout.trim();
-    if (integratedTree !== workerTree)
+    const status = await this.runGit(repoPath, ['status', '--porcelain'], 'integration_failed');
+    if (status.stdout.trim() !== '')
+      throw new WorktreeError(
+        'base_changed',
+        'Workspace has changes outside the isolated Worker worktree',
+      );
+    if (
+      currentHead !== integratedHead &&
+      (await this.tryRunGit(repoPath, [
+        'merge-base',
+        '--is-ancestor',
+        integratedHead,
+        currentHead,
+      ])) === null
+    )
+      throw new WorktreeError(
+        'base_changed',
+        `Workspace HEAD no longer contains integrated commit: ${integratedHead}`,
+      );
+    if (workerHead !== baseHead) {
+      await this.assertEquivalentCommitPatch(repoPath, workerHead, integratedHead);
+    }
+    return { integratedHead, outcome: 'already_integrated' };
+  }
+
+  private async assertEquivalentCommitPatch(
+    repoPath: string,
+    workerHead: string,
+    integratedHead: string,
+  ): Promise<void> {
+    const patchFor = async (head: string): Promise<string> => {
+      const patch = await this.runGit(
+        repoPath,
+        ['diff', '--binary', '--no-ext-diff', '--no-renames', '--unified=0', `${head}^`, head],
+        'integration_failed',
+      );
+      return patch.stdout
+        .replace(/^index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?$/gmu, 'index')
+        .replace(/^@@ .* @@.*$/gmu, '@@');
+    };
+    if ((await patchFor(integratedHead)) !== (await patchFor(workerHead)))
       throw new WorktreeError(
         'integration_failed',
-        'Integrated tree does not match the isolated Worker result',
+        'Integrated patch does not match the isolated Worker result',
       );
-    return { integratedHead, outcome: 'integrated' };
   }
 
   private async runGit(

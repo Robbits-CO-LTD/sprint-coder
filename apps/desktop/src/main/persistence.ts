@@ -2989,6 +2989,51 @@ const migrations = [
        WHERE goal IS NOT NULL AND length(trim(goal)) > 0;
     `,
   },
+  {
+    version: 65,
+    checksum: 'team-waiting-integration-v65',
+    sql: `
+      DROP INDEX team_execution_isolations_phase_idx;
+      ALTER TABLE team_execution_isolation_completions
+        RENAME TO team_execution_isolation_completions_v64;
+      ALTER TABLE team_execution_isolations RENAME TO team_execution_isolations_v64;
+
+      CREATE TABLE team_execution_isolations (
+        execution_id TEXT PRIMARY KEY REFERENCES team_executions(id) ON DELETE CASCADE,
+        phase TEXT NOT NULL CHECK (phase IN (
+          'preparing', 'running', 'finalizing', 'waiting_integration', 'integrating',
+          'waiting_resume', 'completed', 'quarantined'
+        )),
+        resume_kind TEXT CHECK (resume_kind IS NULL OR resume_kind IN ('worker', 'integration')),
+        repositories_json TEXT NOT NULL,
+        roots_json TEXT NOT NULL,
+        reason TEXT CHECK (reason IS NULL OR length(reason) <= 2000),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX team_execution_isolations_phase_idx
+        ON team_execution_isolations(phase, updated_at, execution_id);
+
+      INSERT INTO team_execution_isolations
+      SELECT * FROM team_execution_isolations_v64;
+
+      CREATE TABLE team_execution_isolation_completions (
+        execution_id TEXT PRIMARY KEY REFERENCES team_execution_isolations(execution_id) ON DELETE CASCADE,
+        attempt_id TEXT NOT NULL REFERENCES team_attempts(id),
+        team_task_id TEXT NOT NULL REFERENCES team_tasks(id),
+        agent_id TEXT NOT NULL REFERENCES agents(id),
+        report_json TEXT NOT NULL,
+        done_evidence_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO team_execution_isolation_completions
+      SELECT * FROM team_execution_isolation_completions_v64;
+
+      DROP TABLE team_execution_isolation_completions_v64;
+      DROP TABLE team_execution_isolations_v64;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -7334,7 +7379,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     > = {
       preparing: ['running', 'quarantined'],
       running: ['finalizing', 'quarantined'],
-      finalizing: ['integrating', 'waiting_resume', 'quarantined'],
+      finalizing: ['waiting_integration', 'integrating', 'waiting_resume', 'quarantined'],
+      waiting_integration: ['integrating', 'waiting_resume', 'quarantined'],
       integrating: ['waiting_resume', 'completed', 'quarantined'],
       waiting_resume: ['finalizing', 'integrating', 'quarantined'],
       completed: ['waiting_resume', 'quarantined'],
@@ -7728,6 +7774,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
         start_reason: TeamAttemptStartReason;
       }[];
       for (const attempt of running) {
+        const isolation = this.getTeamExecutionIsolation(attempt.execution_id);
+        const completion = this.getTeamExecutionIsolationCompletion(attempt.execution_id);
+        const workerFinishedBeforeRestart =
+          isolation !== null &&
+          completion !== null &&
+          ['waiting_integration', 'waiting_resume'].includes(isolation.phase) &&
+          (isolation.phase === 'waiting_integration' || isolation.resumeKind === 'integration');
+        if (workerFinishedBeforeRestart) {
+          const execution = this.getTeamExecution(attempt.execution_id);
+          if (execution.state === 'running')
+            this.transitionTeamExecution({
+              executionId: execution.id,
+              to: 'waiting_resume',
+              now,
+            });
+          const mission = this.getTeamMissionForExecution(execution.id);
+          if (mission !== null && mission.state === 'running')
+            this.transitionTeamMission(mission.id, 'waiting_resume', now);
+          const teamTask = this.getTeamTask(completion.teamTaskId);
+          if (teamTask.status === 'running') this.transitionTeamTask(teamTask.id, 'blocked', now);
+          continue;
+        }
         this.transitionTeamAttempt({
           attemptId: attempt.id,
           to: 'interrupted',

@@ -219,7 +219,67 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     });
   });
 
-  it('revalidates a no-change repository before reporting it integrated', async () => {
+  it('revalidates a recorded integration without discarding later parent commits', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const worktreeId = 'execution-revalidate';
+    const { path: worktreePath } = await manager.create({
+      agentId: 'agent-revalidate',
+      worktreeId,
+      repoPath,
+    });
+    await writeFile(join(worktreePath, 'worker.txt'), 'worker result\n');
+    const finalized = await manager.finalizeChanges({
+      agentId: 'agent-revalidate',
+      worktreeId,
+      repoPath,
+      baseHead: head,
+      commitMessage: 'recorded integration',
+    });
+    const integrated = await manager.integrate({
+      repoPath,
+      baseHead: head,
+      workerHead: finalized.workerHead,
+    });
+    await writeFile(join(repoPath, 'later.txt'), 'later parent change\n');
+    await git(['-C', repoPath, 'add', 'later.txt']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'later parent commit',
+    ]);
+
+    await expect(
+      manager.revalidateIntegration({
+        repoPath,
+        baseHead: head,
+        workerHead: finalized.workerHead,
+        integratedHead: integrated.integratedHead,
+      }),
+    ).resolves.toEqual({
+      integratedHead: integrated.integratedHead,
+      outcome: 'already_integrated',
+    });
+    expect(await readFile(join(repoPath, 'later.txt'), 'utf8')).toBe('later parent change\n');
+
+    await git(['-C', repoPath, 'reset', '--hard', head]);
+    await expect(
+      manager.revalidateIntegration({
+        repoPath,
+        baseHead: head,
+        workerHead: finalized.workerHead,
+        integratedHead: integrated.integratedHead,
+      }),
+    ).rejects.toMatchObject({ code: 'base_changed' });
+  });
+
+  it('keeps descendant parent commits when a Worker has no changes', async () => {
     const { repoPath, head, manager } = await fixture();
 
     await writeFile(join(repoPath, 'outside.txt'), 'unsealed\n');
@@ -242,7 +302,124 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     ]);
     await expect(
       manager.integrate({ repoPath, baseHead: head, workerHead: head }),
-    ).rejects.toMatchObject({ code: 'base_changed' });
+    ).resolves.toEqual({
+      integratedHead: expect.any(String),
+      outcome: 'no_changes',
+    });
+  });
+
+  it('cherry-picks independent Worker commits created from the same base in FIFO order', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const first = await manager.create({
+      agentId: 'parallel-a',
+      worktreeId: 'parallel-a',
+      repoPath,
+      baseRef: head,
+    });
+    const second = await manager.create({
+      agentId: 'parallel-b',
+      worktreeId: 'parallel-b',
+      repoPath,
+      baseRef: head,
+    });
+    await writeFile(join(first.path, 'first.txt'), 'first\n');
+    await writeFile(join(second.path, 'second.txt'), 'second\n');
+    const firstFinalized = await manager.finalizeChanges({
+      agentId: 'parallel-a',
+      worktreeId: 'parallel-a',
+      repoPath,
+      baseHead: head,
+      commitMessage: 'first Worker',
+    });
+    const secondFinalized = await manager.finalizeChanges({
+      agentId: 'parallel-b',
+      worktreeId: 'parallel-b',
+      repoPath,
+      baseHead: head,
+      commitMessage: 'second Worker',
+    });
+
+    const firstIntegrated = await manager.integrate({
+      repoPath,
+      baseHead: head,
+      workerHead: firstFinalized.workerHead,
+    });
+    const secondIntegrated = await manager.integrate({
+      repoPath,
+      baseHead: head,
+      workerHead: secondFinalized.workerHead,
+    });
+
+    expect(firstIntegrated.outcome).toBe('integrated');
+    expect(secondIntegrated.outcome).toBe('integrated');
+    expect(await readFile(join(repoPath, 'first.txt'), 'utf8')).toBe('first\n');
+    expect(await readFile(join(repoPath, 'second.txt'), 'utf8')).toBe('second\n');
+    expect((await git(['-C', repoPath, 'rev-list', '--count', `${head}..HEAD`])).trim()).toBe('2');
+    expect((await git(['-C', repoPath, 'status', '--porcelain'])).trim()).toBe('');
+  });
+
+  it('keeps non-conflicting changes made to different lines of the same file', async () => {
+    const { repoPath, manager } = await fixture();
+    await writeFile(join(repoPath, 'shared.txt'), 'top\nmiddle\nbottom\n');
+    await git(['-C', repoPath, 'add', 'shared.txt']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'shared base',
+    ]);
+    const baseHead = (await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim();
+    const first = await manager.create({
+      agentId: 'same-file-a',
+      worktreeId: 'same-file-a',
+      repoPath,
+      baseRef: baseHead,
+    });
+    const second = await manager.create({
+      agentId: 'same-file-b',
+      worktreeId: 'same-file-b',
+      repoPath,
+      baseRef: baseHead,
+    });
+    await writeFile(join(first.path, 'shared.txt'), 'TOP\nmiddle\nbottom\n');
+    await writeFile(join(second.path, 'shared.txt'), 'top\nmiddle\nBOTTOM\n');
+    const firstFinalized = await manager.finalizeChanges({
+      agentId: 'same-file-a',
+      worktreeId: 'same-file-a',
+      repoPath,
+      baseHead,
+      commitMessage: 'change top line',
+    });
+    const secondFinalized = await manager.finalizeChanges({
+      agentId: 'same-file-b',
+      worktreeId: 'same-file-b',
+      repoPath,
+      baseHead,
+      commitMessage: 'change bottom line',
+    });
+
+    await manager.integrate({
+      repoPath,
+      baseHead,
+      workerHead: firstFinalized.workerHead,
+    });
+    await manager.integrate({
+      repoPath,
+      baseHead,
+      workerHead: secondFinalized.workerHead,
+    });
+
+    expect(await readFile(join(repoPath, 'shared.txt'), 'utf8')).toBe('TOP\nmiddle\nBOTTOM\n');
+    expect((await git(['-C', repoPath, 'rev-list', '--count', `${baseHead}..HEAD`])).trim()).toBe(
+      '2',
+    );
+    expect((await git(['-C', repoPath, 'status', '--porcelain'])).trim()).toBe('');
   });
 
   it('refuses integration when the primary workspace changed and preserves both sides', async () => {

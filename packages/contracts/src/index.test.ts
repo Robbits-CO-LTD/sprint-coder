@@ -668,6 +668,19 @@ describe('public contracts', () => {
     expect(
       teamExecutionIsolationSchema.parse({
         ...isolation,
+        phase: 'waiting_integration',
+        repositories: [
+          {
+            ...isolation.repositories[0],
+            workerHead: 'd'.repeat(40),
+            state: 'ready',
+          },
+        ],
+      }),
+    ).toMatchObject({ phase: 'waiting_integration', resumeKind: null });
+    expect(
+      teamExecutionIsolationSchema.parse({
+        ...isolation,
         phase: 'waiting_resume',
         resumeKind: 'integration',
         reason: 'resume finalization',
