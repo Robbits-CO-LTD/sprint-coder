@@ -13,6 +13,7 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
     }),
     listWorkerReports: vi.fn(() => []),
     assignTaskAs: vi.fn(async () => ({ executionId: 'execution-1', state: 'queued' }) as never),
+    listAgentMessages: vi.fn(() => []),
     hasBusyWorkers: vi.fn(() => false),
     stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
     ...overrides,
@@ -20,6 +21,7 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
 }
 
 const bridges: TeamMcpBridge[] = [];
+let nextRequestId = 1;
 afterEach(async () => {
   for (const bridge of bridges.splice(0)) await bridge.dispose();
 });
@@ -37,6 +39,7 @@ function isExpectedWindowsPipeClose(error: Error & { code?: string }): boolean {
 function roundTrip(
   socketPath: string,
   payload: unknown,
+  graceMs = 300,
 ): Promise<{ lines: string[]; closed: boolean }> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
@@ -50,8 +53,12 @@ function roundTrip(
     const graceTimer = setTimeout(() => {
       socket.destroy();
       finish();
-    }, 300);
-    socket.once('connect', () => socket.write(`${JSON.stringify(payload)}\n`));
+    }, graceMs);
+    const request =
+      typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+        ? { requestId: `test-${nextRequestId++}`, ...payload }
+        : payload;
+    socket.once('connect', () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on('data', (chunk: Buffer) => {
       buffer += chunk.toString('utf8');
       let index: number;
@@ -496,10 +503,9 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
       tool: '__authenticate__',
       args: {},
     });
-    expect(response.lines.map((line) => JSON.parse(line))).toContainEqual({
-      ok: true,
-      result: { authenticated: true },
-    });
+    expect(response.lines.map((line) => JSON.parse(line))).toContainEqual(
+      expect.objectContaining({ ok: true, result: { authenticated: true } }),
+    );
   });
 
   it('accepts rapid sequential reconnects on the same named pipe', async () => {
@@ -518,10 +524,83 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
         tool: '__authenticate__',
         args: {},
       });
-      expect(response.lines.map((line) => JSON.parse(line))).toContainEqual({
+      expect(response.lines.map((line) => JSON.parse(line))).toContainEqual(
+        expect.objectContaining({ ok: true, result: { authenticated: true } }),
+      );
+    }
+  });
+
+  it('accepts a Leader and three Workers concurrently', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const registrations = ['leader', 'worker-1', 'worker-2', 'worker-3'].map((name) => {
+      const token = TeamMcpBridge.generateToken();
+      bridge.register(`turn-${name}`, {
+        taskId: 'task-windows',
+        token,
+        ...(name === 'leader' ? {} : { requesterAgentId: name }),
+      });
+      return token;
+    });
+
+    const responses = await Promise.all(
+      registrations.map((token) =>
+        roundTrip(socketPath as string, {
+          token,
+          tool: '__authenticate__',
+          args: {},
+        }),
+      ),
+    );
+    for (const response of responses)
+      expect(JSON.parse(response.lines[0] as string)).toMatchObject({
         ok: true,
         result: { authenticated: true },
       });
-    }
+  });
+
+  it('serves Worker messages while the Leader is waiting for reports', async () => {
+    let busy = true;
+    const coordinator = fakeCoordinator({
+      hasBusyWorkers: vi.fn(() => busy),
+      listAgentMessages: vi.fn(() => []),
+    });
+    const bridge = new TeamMcpBridge(coordinator, defaultSocketPathFactory('C:\\ignored', 'win32'));
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const leaderToken = TeamMcpBridge.generateToken();
+    const workerToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-leader-wait', { taskId: 'task-windows', token: leaderToken });
+    bridge.register('turn-worker-read', {
+      taskId: 'task-windows',
+      token: workerToken,
+      requesterAgentId: 'worker-1',
+    });
+
+    const leaderWait = roundTrip(
+      socketPath as string,
+      {
+        token: leaderToken,
+        tool: 'team_wait_reports',
+        args: {},
+      },
+      1_000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const workerRead = await roundTrip(socketPath as string, {
+      token: workerToken,
+      tool: 'team_read_messages',
+      args: {},
+    });
+    expect(JSON.parse(workerRead.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { ok: true, messages: [] },
+    });
+    busy = false;
+    await expect(leaderWait).resolves.toMatchObject({ lines: [expect.any(String)] });
   });
 });

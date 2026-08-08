@@ -206,37 +206,44 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       void this.stop(input.worker.id).catch(() => undefined);
     };
     input.signal?.addEventListener('abort', abort, { once: true });
-    const finalText = await new Promise<string>((resolve, reject) => {
-      this.pending.set(turnId, {
-        resolve,
-        reject,
-        buffer: [],
-        ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
-        deltaBuffer: [],
-        deltaTimer: null,
-        reasoningActive: false,
+    let finalText: string;
+    try {
+      finalText = await new Promise<string>((resolve, reject) => {
+        this.pending.set(turnId, {
+          resolve,
+          reject,
+          buffer: [],
+          ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
+          deltaBuffer: [],
+          deltaTimer: null,
+          reasoningActive: false,
+        });
+        this.activeByAgent.set(input.worker.id, { kind: choice.kind, taskId, turnId });
+        input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
+        this.client(choice.kind).start(
+          taskId,
+          turnId,
+          prompt,
+          runtimeWorkspace,
+          choice.model,
+          this.deps.catalogFor(choice.kind, workspacePath) as never,
+          context,
+          teamMcp,
+          undefined,
+          writeScope,
+        );
       });
-      this.activeByAgent.set(input.worker.id, { kind: choice.kind, taskId, turnId });
-      input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
-      this.client(choice.kind).start(
-        taskId,
-        turnId,
-        prompt,
-        runtimeWorkspace,
-        choice.model,
-        this.deps.catalogFor(choice.kind, workspacePath) as never,
-        context,
-        teamMcp,
-        undefined,
-        writeScope,
-      );
-    }).finally(() => {
-      input.signal?.removeEventListener('abort', abort);
-      this.pending.delete(turnId);
-      if (this.activeByAgent.get(input.worker.id)?.turnId === turnId)
-        this.activeByAgent.delete(input.worker.id);
-      if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
-    });
+    } finally {
+      try {
+        await this.client(choice.kind).waitForTurnExit(turnId);
+      } finally {
+        input.signal?.removeEventListener('abort', abort);
+        this.pending.delete(turnId);
+        if (this.activeByAgent.get(input.worker.id)?.turnId === turnId)
+          this.activeByAgent.delete(input.worker.id);
+        if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
+      }
+    }
 
     const summary = finalText.trim() === '' ? '(空の応答)' : finalText.trim();
     return {

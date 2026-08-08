@@ -314,6 +314,12 @@ class PausedIntegrationScheduler extends TeamIntegrationScheduler {
   }
 }
 
+class PausedCleanupManager extends WorkerWorktreeManager {
+  override async cleanup(): Promise<never> {
+    return new Promise<never>(() => undefined);
+  }
+}
+
 class CrashAfterFirstWorktreeManager extends WorkerWorktreeManager {
   private crashed = false;
 
@@ -1026,6 +1032,123 @@ if (runsWithElectronAbi)
         15_000,
       );
       expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      persistence.close();
+    });
+
+    it('reclaims a clean integrated app-owned worktree after restart', async () => {
+      const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-cleanup-restart-'));
+      cleanup.push(databaseDirectory);
+      const databasePath = join(databaseDirectory, 'test.sqlite3');
+      let persistence = new SqlitePersistenceClient(databasePath);
+      const task = persistence.createTask('Integrated cleanup restart recovery');
+      const runtime = new WorktreeWritingRuntime();
+      const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new PausedCleanupManager({ worktreesRoot }),
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'cleanup writer',
+        objective: 'leave an integrated worktree for restart',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write before cleanup restart',
+        doneCriteria: ['integrated output is retained'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecutionIsolation(submission.executionId)?.phase === 'completed',
+        15_000,
+      );
+      const worktreePath = persistence.getTeamExecutionIsolation(submission.executionId)!
+        .repositories[0]!.worktreePath;
+      expect(existsSync(worktreePath)).toBe(true);
+      expect(
+        persistence.getTeamExecutionIsolationCompletion(submission.executionId),
+      ).not.toBeNull();
+      persistence.close();
+
+      persistence = new SqlitePersistenceClient(databasePath);
+      persistence.initializeMutationRecovery('cleanup-restart', '2026-08-08T10:00:00.000Z');
+      coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new WorkerWorktreeManager({ worktreesRoot }),
+      ).recoverOnStartup();
+      await waitFor(
+        () =>
+          !existsSync(worktreePath) &&
+          persistence
+            .getTeamExecutionIsolation(submission.executionId)
+            ?.repositories.every(({ state }) => state === 'cleaned') === true,
+        15_000,
+      );
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
+        phase: 'completed',
+        repositories: [{ state: 'cleaned' }],
+      });
+      expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      persistence.close();
+    });
+
+    it('keeps a dirty integrated worktree as restart evidence', async () => {
+      const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-dirty-restart-'));
+      cleanup.push(databaseDirectory);
+      const databasePath = join(databaseDirectory, 'test.sqlite3');
+      let persistence = new SqlitePersistenceClient(databasePath);
+      const task = persistence.createTask('Dirty cleanup restart evidence');
+      const runtime = new WorktreeWritingRuntime();
+      const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new PausedCleanupManager({ worktreesRoot }),
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'evidence writer',
+        objective: 'retain dirty evidence',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write before dirty restart',
+        doneCriteria: ['dirty evidence remains'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecutionIsolation(submission.executionId)?.phase === 'completed',
+        15_000,
+      );
+      const worktreePath = persistence.getTeamExecutionIsolation(submission.executionId)!
+        .repositories[0]!.worktreePath;
+      writeFileSync(join(worktreePath, 'post-integration-evidence.txt'), 'do not delete\n');
+      persistence.close();
+
+      persistence = new SqlitePersistenceClient(databasePath);
+      persistence.initializeMutationRecovery('dirty-restart', '2026-08-08T10:00:00.000Z');
+      coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new WorkerWorktreeManager({ worktreesRoot }),
+      ).recoverOnStartup();
+      await waitFor(
+        () =>
+          persistence.getTeamExecutionIsolation(submission.executionId)?.phase === 'quarantined',
+        15_000,
+      );
+      expect(existsSync(worktreePath)).toBe(true);
+      expect(readFileSync(join(worktreePath, 'post-integration-evidence.txt'), 'utf8')).toBe(
+        'do not delete\n',
+      );
       persistence.close();
     });
 

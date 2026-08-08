@@ -38,25 +38,41 @@ $rule = [System.IO.Pipes.PipeAccessRule]::new(
   [System.Security.AccessControl.AccessControlType]::Allow
 )
 $security.SetAccessRule($rule)
-$pipe = [System.IO.Pipes.NamedPipeServerStream]::new(
-  $name,
-  [System.IO.Pipes.PipeDirection]::InOut,
-  1,
-  [System.IO.Pipes.PipeTransmissionMode]::Byte,
-  [System.IO.Pipes.PipeOptions]::Asynchronous,
-  65536,
-  65536,
-  $security
-)
-$actual = $pipe.GetAccessControl()
-$rules = @($actual.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))
-if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid.Value) {
-  throw 'Named pipe DACL verification failed'
+function New-Listener {
+  $pipe = [System.IO.Pipes.NamedPipeServerStream]::new(
+    $name,
+    [System.IO.Pipes.PipeDirection]::InOut,
+    16,
+    [System.IO.Pipes.PipeTransmissionMode]::Byte,
+    [System.IO.Pipes.PipeOptions]::Asynchronous,
+    65536,
+    65536,
+    $security
+  )
+  $actual = $pipe.GetAccessControl()
+  $rules = @($actual.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))
+  if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid.Value) {
+    $pipe.Dispose()
+    throw 'Named pipe DACL verification failed'
+  }
+  return @{
+    Pipe = $pipe
+    Accept = $pipe.WaitForConnectionAsync()
+  }
 }
+$listeners = [System.Collections.ArrayList]::new()
+$connections = [System.Collections.ArrayList]::new()
+for ($i = 0; $i -lt 16; $i += 1) { [void]$listeners.Add((New-Listener)) }
 [Console]::Out.WriteLine('READY')
 while ($true) {
-  try {
-    $pipe.WaitForConnection()
+  $tasks = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
+  foreach ($listener in $listeners) { $tasks.Add($listener.Accept) }
+  foreach ($connection in $connections) { $tasks.Add($connection.Pump) }
+  $completed = [System.Threading.Tasks.Task]::WaitAny($tasks.ToArray())
+  if ($completed -lt $listeners.Count) {
+    $listener = $listeners[$completed]
+    $listeners.RemoveAt($completed)
+    $pipe = $listener.Pipe
     $tcp = [System.Net.Sockets.TcpClient]::new()
     $tcp.Connect('127.0.0.1', $port)
     $stream = $tcp.GetStream()
@@ -67,11 +83,21 @@ while ($true) {
     $stream.Flush()
     $toTcp = $pipe.CopyToAsync($stream)
     $toPipe = $stream.CopyToAsync($pipe)
-    [System.Threading.Tasks.Task]::WaitAny(@($toTcp, $toPipe)) | Out-Null
-  } finally {
-    if ($tcp) { $tcp.Dispose(); $tcp = $null }
-    if ($pipe.IsConnected) { $pipe.Disconnect() }
+    [void]$connections.Add(@{
+      Pipe = $pipe
+      Tcp = $tcp
+      Stream = $stream
+      Pump = [System.Threading.Tasks.Task]::WhenAny($toTcp, $toPipe)
+    })
+    continue
   }
+  $connectionIndex = $completed - $listeners.Count
+  $connection = $connections[$connectionIndex]
+  $connections.RemoveAt($connectionIndex)
+  $connection.Stream.Dispose()
+  $connection.Tcp.Dispose()
+  $connection.Pipe.Dispose()
+  [void]$listeners.Add((New-Listener))
 }
 `;
 
@@ -317,13 +343,25 @@ export class TeamMcpBridge {
     line: string,
     markAuthenticated: () => void,
   ): Promise<void> {
-    let request: { token?: unknown; tool?: unknown; args?: unknown };
+    let request: { requestId?: unknown; token?: unknown; tool?: unknown; args?: unknown };
     try {
       request = JSON.parse(line) as typeof request;
     } catch {
       socket.destroy();
       return;
     }
+    if (
+      typeof request.requestId !== 'string' ||
+      request.requestId.length === 0 ||
+      request.requestId.length > 128
+    ) {
+      socket.destroy();
+      return;
+    }
+    const respond = (payload: Readonly<Record<string, unknown>>): void => {
+      if (!socket.destroyed)
+        socket.write(`${JSON.stringify({ requestId: request.requestId, ...payload })}\n`);
+    };
     const found = this.findByToken(request.token);
     if (found === undefined) {
       // Unknown/forged token: close without responding rather than confirming or denying which
@@ -333,11 +371,11 @@ export class TeamMcpBridge {
     }
     markAuthenticated();
     if (typeof request.tool !== 'string') {
-      socket.write(`${JSON.stringify({ ok: false, error: 'invalid_tool' })}\n`);
+      respond({ ok: false, error: 'invalid_tool' });
       return;
     }
     if (request.tool === '__authenticate__') {
-      socket.write(`${JSON.stringify({ ok: true, result: { authenticated: true } })}\n`);
+      respond({ ok: true, result: { authenticated: true } });
       return;
     }
     const [turnId, registration] = found;
@@ -410,11 +448,9 @@ export class TeamMcpBridge {
                       : {}),
                   },
                 );
-      socket.write(`${JSON.stringify({ ok: true, result })}\n`);
+      respond({ ok: true, result });
     } catch (error) {
-      socket.write(
-        `${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`,
-      );
+      respond({ ok: false, error: error instanceof Error ? error.message : String(error) });
     }
     void turnId;
   }

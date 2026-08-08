@@ -4,6 +4,7 @@ import type { AgentRecord } from './persistence';
 
 const runtimeHostMock = vi.hoisted(() => ({
   starts: [] as unknown[][],
+  waitForExit: vi.fn<(turnId: string) => Promise<void>>(async (_turnId: string) => undefined),
 }));
 
 vi.mock('./runtime-host', () => ({
@@ -26,6 +27,9 @@ vi.mock('./runtime-host', () => ({
 
     async cancel(): Promise<{ turnId: string; forced: false; stoppedAt: string }> {
       return { turnId: 'turn', forced: false, stoppedAt: new Date().toISOString() };
+    }
+    waitForTurnExit(turnId: string): Promise<void> {
+      return runtimeHostMock.waitForExit(turnId);
     }
     dispose(): void {}
   },
@@ -105,6 +109,29 @@ function runtime(
 }
 
 describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
+  it('does not report Worker completion until the Codex process tree exits', async () => {
+    let confirmExit: (() => void) | undefined;
+    runtimeHostMock.waitForExit.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (confirmExit = resolve)),
+    );
+    const subject = runtime();
+    let settled = false;
+    const execution = subject
+      .execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '実装する',
+      })
+      .finally(() => {
+        settled = true;
+      });
+
+    await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    confirmExit?.();
+    await expect(execution).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+  });
+
   it('applies inherited context and write capability to the CLI turn', async () => {
     runtimeHostMock.starts.length = 0;
     const writableWorker = {

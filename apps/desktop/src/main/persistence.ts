@@ -3745,6 +3745,7 @@ export interface PersistenceClient {
     now: string;
   }): TeamExecutionIsolationRecord;
   getTeamExecutionIsolation(executionId: string): TeamExecutionIsolationRecord | null;
+  listTeamExecutionIsolations(): readonly TeamExecutionIsolationRecord[];
   saveTeamExecutionIsolationCompletion(input: {
     executionId: string;
     attemptId: string;
@@ -7424,6 +7425,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('SELECT * FROM team_execution_isolations WHERE execution_id = ?')
       .get(executionId) as TeamExecutionIsolationRow | undefined;
     return row === undefined ? null : toTeamExecutionIsolation(row);
+  }
+
+  listTeamExecutionIsolations(): readonly TeamExecutionIsolationRecord[] {
+    return (
+      this.db
+        .prepare('SELECT * FROM team_execution_isolations ORDER BY created_at, execution_id')
+        .all() as TeamExecutionIsolationRow[]
+    ).map(toTeamExecutionIsolation);
   }
 
   saveTeamExecutionIsolationCompletion(input: {

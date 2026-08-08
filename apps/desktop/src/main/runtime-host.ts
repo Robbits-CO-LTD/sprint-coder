@@ -41,6 +41,11 @@ type CancelWaiter = {
   reject(error: Error): void;
   timer: NodeJS.Timeout;
 };
+type ExitWaiter = {
+  resolve(): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+};
 type EventHandler = (taskId: string, turnId: string, event: RuntimeCanonicalEvent) => void;
 type FailureHandler = (taskId: string, turnId: string, error: PublicError) => void;
 type PrepareContext = (taskId: string, turnId: string) => PreparedContext;
@@ -70,6 +75,8 @@ export class RuntimeHostClient {
   });
   private readonly active = new Map<string, ActiveTurn>();
   private readonly cancelWaiters = new Map<string, CancelWaiter>();
+  private readonly exitWaiters = new Map<string, ExitWaiter>();
+  private readonly recentExits = new Map<string, NodeJS.Timeout>();
   private disposed = false;
 
   constructor(
@@ -198,6 +205,26 @@ export class RuntimeHostClient {
     });
   }
 
+  /** Wait until the adapter confirms that the CLI process tree for this turn has exited. */
+  waitForTurnExit(turnId: string, timeoutMs = 30_000): Promise<void> {
+    const recent = this.recentExits.get(turnId);
+    if (recent !== undefined) {
+      clearTimeout(recent);
+      this.recentExits.delete(turnId);
+      return Promise.resolve();
+    }
+    const existing = this.exitWaiters.get(turnId);
+    if (existing !== undefined)
+      return Promise.reject(new Error(`Already waiting for runtime exit: ${turnId}`));
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.exitWaiters.delete(turnId);
+        reject(new Error('Runtime process tree exit was not confirmed within 30 seconds'));
+      }, timeoutMs);
+      this.exitWaiters.set(turnId, { resolve, reject, timer });
+    });
+  }
+
   dispose(): void {
     this.disposed = true;
     this.active.clear();
@@ -206,6 +233,9 @@ export class RuntimeHostClient {
       waiter.resolve({ turnId, forced: true, stoppedAt: new Date().toISOString() });
     }
     this.cancelWaiters.clear();
+    this.rejectExitWaiters(new Error('Runtime Host was disposed before process exit confirmation'));
+    for (const timer of this.recentExits.values()) clearTimeout(timer);
+    this.recentExits.clear();
     this.process?.kill();
     this.process = null;
   }
@@ -276,6 +306,9 @@ export class RuntimeHostClient {
       this.resolveProbe = null;
       return;
     }
+    // An adapter error may have already removed the active turn, but its later exit envelope is
+    // still the process-tree confirmation awaited by Team cleanup.
+    if (raw.type === 'exit') this.markTurnExited(raw.turnId);
     const active = this.active.get(raw.turnId);
     if (
       active === undefined ||
@@ -287,7 +320,6 @@ export class RuntimeHostClient {
     active.lastSeq = raw.seq;
     if (raw.type === 'event') {
       this.onEvent(raw.taskId, raw.turnId, raw.event);
-      if (raw.event.type === 'completed') this.active.delete(raw.turnId);
     } else if (raw.type === 'started') {
       if (
         !sameIds(active.contextFragmentIds, raw.acceptedContextFragmentIds) ||
@@ -369,12 +401,34 @@ export class RuntimeHostClient {
       waiter.reject(new Error('Runtime Host exited before stop confirmation'));
       this.cancelWaiters.delete(turnId);
     }
+    this.rejectExitWaiters(new Error('Runtime Host exited before process exit confirmation'));
     for (const [turnId, active] of failures)
       this.onFailure(active.taskId, turnId, {
         code: 'RUNTIME_FAILED',
         userMessage: 'Runtime Hostが終了しました。',
         retryable: true,
       });
+  }
+
+  private markTurnExited(turnId: string): void {
+    const waiter = this.exitWaiters.get(turnId);
+    if (waiter !== undefined) {
+      clearTimeout(waiter.timer);
+      this.exitWaiters.delete(turnId);
+      waiter.resolve();
+      return;
+    }
+    const timer = setTimeout(() => this.recentExits.delete(turnId), 60_000);
+    timer.unref();
+    this.recentExits.set(turnId, timer);
+  }
+
+  private rejectExitWaiters(error: Error): void {
+    for (const waiter of this.exitWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.exitWaiters.clear();
   }
 
   private restartHostAfterUnconfirmedStop(error: Error): void {
