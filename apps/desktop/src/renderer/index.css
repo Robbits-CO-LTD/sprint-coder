@@ -6004,6 +6004,35 @@ button.composer-permission-chip[aria-expanded='true'] {
 .settings-status .settings-hint {
   margin-left: auto;
 }
+.settings-license-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+}
+.settings-license-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.settings-license-copy strong {
+  font-size: 13px;
+}
+.settings-license-badge {
+  flex: none;
+  padding: 4px 7px;
+  border: 1px solid var(--accent-line-soft);
+  border-radius: var(--r-xs);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
 .settings-ok {
   color: var(--success);
   display: inline-flex;
