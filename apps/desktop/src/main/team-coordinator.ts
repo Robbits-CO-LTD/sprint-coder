@@ -1758,7 +1758,7 @@ export class TeamCoordinator {
         nextActions: [],
         doneEvidence: [],
       });
-      if (this.persistence.getTeamTask(input.teamTaskId).status === 'running') {
+      if (['assigned', 'running'].includes(this.persistence.getTeamTask(input.teamTaskId).status)) {
         if (integrationResume)
           this.persistence.transitionTeamTask(input.teamTaskId, 'blocked', this.isoNow());
         else if (mission === null)

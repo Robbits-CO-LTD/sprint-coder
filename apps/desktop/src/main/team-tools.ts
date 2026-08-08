@@ -1109,6 +1109,10 @@ const TEAM_INTENT =
   /^\s*\/team(?=\s+\S)|チームテスト|チーム(?:で|を|に|内(?:で|の))|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:り|名|人)(?=.*(?:雇|挨拶|会話|担当|メンバー))|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
 const TEAM_RELATION_INTENT =
   /チーム(?:の)?(?:メンバー|リーダー)|チームの(?:会話|挨拶|メッセージ|報告|担当|役割)/i;
+const TEAM_CONSULTATION_ENDING =
+  /(?:できますか|できる(?:の)?|可能ですか|可能(?:なの)?|教えて|説明して|とは)[。.!！?？]*$/i;
+const TEAM_WORKER_EXECUTION_ACTION =
+  /(?:雇って|雇用して|採用して|作成して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|挨拶して|会話させて|分担して|進めて|お願い)[。.!！?？]*$/i;
 
 // A failed/canceled Team turn is commonly resumed with a short instruction that no longer repeats
 // the word "Team". Keep this deliberately narrow: ordinary follow-up questions must not silently
@@ -1122,6 +1126,16 @@ const TEAM_MEMBER_CHANGE_ACTION =
 
 export function isTeamScenarioInput(input: string): boolean {
   return TEAM_INTENT.test(input) || TEAM_RELATION_INTENT.test(input);
+}
+
+/** Team相談にもSkill/MCPは提供するが、Worker不在を失敗にするのは明示的な実行依頼だけ。 */
+export function requiresTeamWorkersInput(input: string): boolean {
+  const trimmed = input.trim();
+  return (
+    isTeamScenarioInput(trimmed) &&
+    !TEAM_CONSULTATION_ENDING.test(trimmed) &&
+    TEAM_WORKER_EXECUTION_ACTION.test(trimmed)
+  );
 }
 
 export function isTeamScenarioFixtureInput(input: string): boolean {

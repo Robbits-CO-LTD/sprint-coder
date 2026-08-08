@@ -3012,6 +3012,50 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('terminalizes Task, Execution, and Delivery when preflight fails before an Attempt starts', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Preflight failure state');
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          throw new Error('deliberate preflight failure');
+        },
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'preflight worker',
+        objective: 'prove terminal state',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'fail before runtime',
+        doneCriteria: ['never reached'],
+      });
+
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+      const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
+      expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(0);
+      expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
+        status: 'failed',
+      });
+      expect(persistence.getTeamDelivery(dispatch.messageId)).toMatchObject({
+        state: 'failed',
+        lastError: 'deliberate preflight failure',
+      });
+      persistence.close();
+    });
+
     it('interrupts running executions for steer or cancel without changing execution identity', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Running execution control');

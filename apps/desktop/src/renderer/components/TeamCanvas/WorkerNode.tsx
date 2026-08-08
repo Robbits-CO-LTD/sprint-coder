@@ -131,14 +131,21 @@ export function WorkerNode({
         </div>
         <span className={`w-status ${dotClass}`}>
           <span className="dot" aria-hidden="true" />
-          <span className="w-status-label team-status">{worker.state}</span>
+          <span className="w-status-label team-status">
+            {worker.state === 'stopped' ? '停止済み' : worker.state}
+          </span>
         </span>
         <button type="button" className="w-stop-btn" disabled={!canStop} onClick={onStop}>
           停止
         </button>
       </div>
       <div className="w-activity" aria-live="polite">
-        {worker.currentActivity ?? (worker.state === 'done' ? '完了' : worker.state)}
+        {worker.currentActivity ??
+          (worker.state === 'done'
+            ? '完了'
+            : worker.state === 'stopped'
+              ? '停止済み'
+              : worker.state)}
       </div>
       {/* Which model this Worker actually got, and on which Connection (Team v2). The exact same
           block, from the exact same helper, is rendered by TeamListView — only the variant class
@@ -245,7 +252,7 @@ export function WorkerNode({
           <summary>詳細</summary>
           <dl>
             <dt>状態</dt>
-            <dd>{worker.state}</dd>
+            <dd>{worker.state === 'stopped' ? '停止済み' : worker.state}</dd>
             <dt>Thread</dt>
             <dd>{worker.threadId}</dd>
             <dt>Token</dt>
