@@ -316,8 +316,23 @@ const TOOLS = [
 
 let socket = null;
 let socketReady = null;
-const pending = [];
+const pending = new Map();
 let sockBuffer = '';
+let nextBridgeRequestId = 1;
+const NORMAL_BRIDGE_TIMEOUT_MS =
+  process.env.NODE_ENV === 'test' && process.env.TEAM_BRIDGE_TEST_NORMAL_TIMEOUT_MS
+    ? Number(process.env.TEAM_BRIDGE_TEST_NORMAL_TIMEOUT_MS)
+    : 15000;
+const LONG_BRIDGE_TIMEOUT_MS =
+  process.env.NODE_ENV === 'test' && process.env.TEAM_BRIDGE_TEST_LONG_TIMEOUT_MS
+    ? Number(process.env.TEAM_BRIDGE_TEST_LONG_TIMEOUT_MS)
+    : 70000;
+
+function bridgeRequestId() {
+  const id = String(process.pid) + '-' + String(nextBridgeRequestId);
+  nextBridgeRequestId += 1;
+  return id;
+}
 
 function handleSocketData(chunk) {
   sockBuffer += chunk.toString('utf8');
@@ -326,18 +341,45 @@ function handleSocketData(chunk) {
     const line = sockBuffer.slice(0, idx);
     sockBuffer = sockBuffer.slice(idx + 1);
     if (!line.trim()) continue;
-    const waiter = pending.shift();
-    if (!waiter) continue;
+    let response;
     try {
-      waiter.resolve(JSON.parse(line));
+      response = JSON.parse(line);
     } catch (error) {
-      waiter.reject(error);
+      rejectPending(error);
+      continue;
     }
+    const waiter =
+      response && typeof response.requestId === 'string'
+        ? pending.get(response.requestId)
+        : undefined;
+    if (!waiter) continue;
+    pending.delete(response.requestId);
+    clearTimeout(waiter.timer);
+    waiter.resolve(response);
   }
 }
 
 function rejectPending(error) {
-  while (pending.length > 0) pending.shift().reject(error);
+  for (const waiter of pending.values()) {
+    clearTimeout(waiter.timer);
+    waiter.reject(error);
+  }
+  pending.clear();
+}
+
+function writeBridgeRequest(sock, tool, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const requestId = bridgeRequestId();
+    const timer = setTimeout(() => {
+      if (!pending.delete(requestId)) return;
+      reject(new Error('team bridge request timed out: ' + tool));
+    }, timeoutMs);
+    timer.unref();
+    pending.set(requestId, { resolve, reject, timer });
+    sock.write(
+      JSON.stringify({ requestId: requestId, token: TOKEN, tool: tool, args: args }) + '\\n',
+    );
+  });
 }
 
 function connectSocket() {
@@ -346,17 +388,16 @@ function connectSocket() {
     const s = net.createConnection(SOCKET_PATH);
     s.on('data', handleSocketData);
     s.once('connect', () => {
-      pending.push({
-        resolve: (response) => {
+      writeBridgeRequest(s, '__authenticate__', {}, NORMAL_BRIDGE_TIMEOUT_MS).then(
+        (response) => {
           if (!response || response.ok !== true) {
             reject(new Error('team bridge authentication failed'));
             return;
           }
           resolve(s);
         },
-        reject: reject,
-      });
-      s.write(JSON.stringify({ token: TOKEN, tool: '__authenticate__', args: {} }) + '\\n');
+        reject,
+      );
     });
     s.on('error', (error) => {
       reject(error);
@@ -371,10 +412,14 @@ function connectSocket() {
 function callBridge(tool, args) {
   return connectSocket().then(
     (sock) =>
-      new Promise((resolve, reject) => {
-        pending.push({ resolve, reject });
-        sock.write(JSON.stringify({ token: TOKEN, tool: tool, args: args }) + '\\n');
-      }),
+      writeBridgeRequest(
+        sock,
+        tool,
+        args,
+        tool === 'team_wait_reports' || tool === 'team_wait_events'
+          ? LONG_BRIDGE_TIMEOUT_MS
+          : NORMAL_BRIDGE_TIMEOUT_MS,
+      ),
   );
 }
 

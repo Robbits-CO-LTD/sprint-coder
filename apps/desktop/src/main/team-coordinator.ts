@@ -2235,6 +2235,7 @@ export class TeamCoordinator {
         void resume.catch(() => undefined);
       }
     }
+    void this.recoverIntegratedWorktreeCleanup();
     return recovered;
   }
 
@@ -3133,6 +3134,42 @@ export class TeamCoordinator {
       } catch (error) {
         this.quarantineExecutionIsolation(current.executionId, error);
         return;
+      }
+    }
+  }
+
+  private async recoverIntegratedWorktreeCleanup(): Promise<void> {
+    if (this.worktreeManager === undefined) return;
+    for (const isolation of this.persistence.listTeamExecutionIsolations()) {
+      if (
+        isolation.phase !== 'completed' ||
+        !isolation.repositories.some(({ state }) => state === 'integrated')
+      )
+        continue;
+      const completion = this.persistence.getTeamExecutionIsolationCompletion(
+        isolation.executionId,
+      );
+      if (completion === null) continue;
+      try {
+        for (const repository of isolation.repositories) {
+          if (repository.state === 'cleaned') continue;
+          const worktreeId = isolationWorktreeId(isolation.executionId, repository.ordinal);
+          if (!this.worktreeManager.ownsWorktreePath(worktreeId, repository.worktreePath))
+            throw new Error('Recorded worktree path is not owned by Sprint Coder');
+        }
+        const verified = await this.revalidateIntegratedIsolation(isolation);
+        await this.cleanupIntegratedExecutionIsolation(verified, completion.agentId);
+        const current = this.persistence.getTeamExecutionIsolation(isolation.executionId);
+        if (current?.repositories.every(({ state }) => state === 'cleaned')) {
+          this.persistence.deleteTeamExecutionIsolationCompletion(isolation.executionId);
+        } else if (current !== null) {
+          this.quarantineExecutionIsolation(
+            isolation.executionId,
+            new Error('Integrated worktree could not be safely reclaimed'),
+          );
+        }
+      } catch (error) {
+        this.quarantineExecutionIsolation(isolation.executionId, error);
       }
     }
   }

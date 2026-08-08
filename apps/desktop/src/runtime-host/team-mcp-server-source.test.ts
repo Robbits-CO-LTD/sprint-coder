@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { createServer, type Server } from 'node:net';
+import { createServer, type Server, type Socket } from 'node:net';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,8 +22,9 @@ type Harness = {
   directory: string;
   send(message: Record<string, unknown>): void;
   nextMessage(): Promise<Record<string, unknown>>;
-  bridgeReceived: { token: unknown; tool: unknown; args: unknown }[];
-  bridgeRespond(response: unknown): void;
+  bridgeReceived: { requestId: unknown; token: unknown; tool: unknown; args: unknown }[];
+  bridgeRespond(response: unknown, pendingIndex?: number): void;
+  disconnectBridge(): void;
 };
 
 const harnesses: Harness[] = [];
@@ -37,7 +38,9 @@ afterEach(async () => {
   }
 });
 
-async function startHarness(): Promise<Harness> {
+async function startHarness(
+  options: { normalTimeoutMs?: number; longTimeoutMs?: number } = {},
+): Promise<Harness> {
   const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-mcp-test-'));
   const scriptPath = join(directory, 'team-mcp-server.cjs');
   writeFileSync(scriptPath, TEAM_MCP_SERVER_SOURCE, { mode: 0o600 });
@@ -47,9 +50,12 @@ async function startHarness(): Promise<Harness> {
       : join(directory, 'bridge.sock');
   const token = 'test-bridge-token-0123456789';
 
-  const bridgeReceived: { token: unknown; tool: unknown; args: unknown }[] = [];
-  const bridgeResponders: ((response: unknown) => void)[] = [];
+  const bridgeReceived: { requestId: unknown; token: unknown; tool: unknown; args: unknown }[] = [];
+  const bridgeResponders: { requestId: unknown; respond(response: unknown): void }[] = [];
+  const bridgeSockets = new Set<Socket>();
   const fakeBridge = createServer((socket) => {
+    bridgeSockets.add(socket);
+    socket.once('close', () => bridgeSockets.delete(socket));
     // Teardown kills the child before closing this fixture server. Linux can report the expected
     // peer reset asynchronously after the test has completed; consume only that socket-level
     // teardown event so Vitest does not misclassify a fully passing suite as an unhandled error.
@@ -64,20 +70,44 @@ async function startHarness(): Promise<Harness> {
         const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
         if (line.trim() === '') continue;
-        const request = JSON.parse(line) as { token: unknown; tool: unknown; args: unknown };
+        const request = JSON.parse(line) as {
+          requestId: unknown;
+          token: unknown;
+          tool: unknown;
+          args: unknown;
+        };
         if (request.tool === '__authenticate__') {
-          socket.write(`${JSON.stringify({ ok: true, result: { authenticated: true } })}\n`);
+          socket.write(
+            `${JSON.stringify({ requestId: request.requestId, ok: true, result: { authenticated: true } })}\n`,
+          );
           continue;
         }
         bridgeReceived.push(request);
-        bridgeResponders.push((response) => socket.write(`${JSON.stringify(response)}\n`));
+        bridgeResponders.push({
+          requestId: request.requestId,
+          respond: (response) =>
+            socket.write(
+              `${JSON.stringify({ ...(response as object), requestId: request.requestId })}\n`,
+            ),
+        });
       }
     });
   });
   await new Promise<void>((resolve) => fakeBridge.listen(socketPath, resolve));
 
   const child = spawn(process.execPath, [scriptPath], {
-    env: { ...process.env, TEAM_BRIDGE_SOCKET: socketPath, TEAM_BRIDGE_TOKEN: token },
+    env: {
+      ...process.env,
+      NODE_ENV: 'test',
+      TEAM_BRIDGE_SOCKET: socketPath,
+      TEAM_BRIDGE_TOKEN: token,
+      ...(options.normalTimeoutMs === undefined
+        ? {}
+        : { TEAM_BRIDGE_TEST_NORMAL_TIMEOUT_MS: String(options.normalTimeoutMs) }),
+      ...(options.longTimeoutMs === undefined
+        ? {}
+        : { TEAM_BRIDGE_TEST_LONG_TIMEOUT_MS: String(options.longTimeoutMs) }),
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   child.stderr.resume();
@@ -103,10 +133,13 @@ async function startHarness(): Promise<Harness> {
         ? Promise.resolve(inbox.shift() as Record<string, unknown>)
         : new Promise((resolve) => waiters.push(resolve)),
     bridgeReceived,
-    bridgeRespond: (response) => {
-      const responder = bridgeResponders.shift();
+    bridgeRespond: (response, pendingIndex = 0) => {
+      const [responder] = bridgeResponders.splice(pendingIndex, 1);
       if (responder === undefined) throw new Error('no pending bridge request to respond to');
-      responder(response);
+      responder.respond(response);
+    },
+    disconnectBridge: () => {
+      for (const socket of bridgeSockets) socket.destroy();
     },
   };
   harnesses.push(harness);
@@ -186,6 +219,7 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     });
     await vi_waitFor(() => harness.bridgeReceived.length === 1);
     expect(harness.bridgeReceived[0]).toMatchObject({
+      requestId: expect.any(String),
       token: 'test-bridge-token-0123456789',
       tool: 'team_hire_worker',
       args: { agentKind: 'worker', role: '調査', objective: '調べる' },
@@ -200,6 +234,71 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     const content = (reply['result'] as { content: { type: string; text: string }[] }).content;
     expect(JSON.parse(content[0]?.text ?? '{}')).toMatchObject({ workerId: 'w1' });
     expect(reply['result']).not.toHaveProperty('isError', true);
+  });
+
+  it('matches reversed bridge responses to their request IDs', async () => {
+    const harness = await startHarness();
+    harness.send({
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'tools/call',
+      params: { name: 'team_read_messages', arguments: { afterSeq: 1 } },
+    });
+    harness.send({
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'tools/call',
+      params: { name: 'team_get_status', arguments: {} },
+    });
+    await vi_waitFor(() => harness.bridgeReceived.length === 2);
+    expect(harness.bridgeReceived[0]?.requestId).not.toBe(harness.bridgeReceived[1]?.requestId);
+
+    harness.bridgeRespond({ ok: true, result: { marker: 'second' } }, 1);
+    harness.bridgeRespond({ ok: true, result: { marker: 'first' } }, 0);
+
+    const replies = [await harness.nextMessage(), await harness.nextMessage()];
+    const byId = new Map(replies.map((reply) => [reply['id'], reply]));
+    const firstContent = (byId.get(20)?.['result'] as { content: { text: string }[] }).content;
+    const secondContent = (byId.get(21)?.['result'] as { content: { text: string }[] }).content;
+    expect(JSON.parse(firstContent[0]!.text)).toEqual({ marker: 'first' });
+    expect(JSON.parse(secondContent[0]!.text)).toEqual({ marker: 'second' });
+  });
+
+  it('uses a longer timeout for wait tools than for ordinary requests', async () => {
+    const harness = await startHarness({ normalTimeoutMs: 30, longTimeoutMs: 120 });
+    harness.send({
+      jsonrpc: '2.0',
+      id: 22,
+      method: 'tools/call',
+      params: { name: 'team_get_status', arguments: {} },
+    });
+    harness.send({
+      jsonrpc: '2.0',
+      id: 23,
+      method: 'tools/call',
+      params: { name: 'team_wait_reports', arguments: {} },
+    });
+    await vi_waitFor(() => harness.bridgeReceived.length === 2);
+
+    expect((await harness.nextMessage())['id']).toBe(22);
+    expect((await harness.nextMessage())['id']).toBe(23);
+  });
+
+  it('releases every pending request when the bridge disconnects', async () => {
+    const harness = await startHarness();
+    for (const id of [24, 25])
+      harness.send({
+        jsonrpc: '2.0',
+        id,
+        method: 'tools/call',
+        params: { name: 'team_get_status', arguments: {} },
+      });
+    await vi_waitFor(() => harness.bridgeReceived.length === 2);
+    harness.disconnectBridge();
+
+    const replies = [await harness.nextMessage(), await harness.nextMessage()];
+    expect(new Set(replies.map((reply) => reply['id']))).toEqual(new Set([24, 25]));
+    for (const reply of replies) expect(reply['result']).toMatchObject({ isError: true });
   });
 
   it('marks the MCP result isError:true when the bridge reports a failure', async () => {

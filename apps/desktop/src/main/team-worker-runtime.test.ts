@@ -4,28 +4,43 @@ import type { AgentRecord } from './persistence';
 
 const runtimeHostMock = vi.hoisted(() => ({
   starts: [] as unknown[][],
+  waitForExit: vi.fn<(turnId: string) => Promise<void>>(async (_turnId: string) => undefined),
+  startSucceeds: true,
 }));
 
 vi.mock('./runtime-host', () => ({
   RuntimeHostClient: class {
     constructor(
       private readonly onEvent: (taskId: string, turnId: string, event: unknown) => void,
+      private readonly onFailure: (
+        taskId: string,
+        turnId: string,
+        error: { userMessage: string },
+      ) => void,
     ) {}
 
     async probe(): Promise<{ available: boolean; models: never[] }> {
       return { available: true, models: [] };
     }
 
-    start(...args: unknown[]): void {
+    start(...args: unknown[]): boolean {
       runtimeHostMock.starts.push(args);
       const taskId = args[0] as string;
       const turnId = args[1] as string;
+      if (!runtimeHostMock.startSucceeds) {
+        this.onFailure(taskId, turnId, { userMessage: 'runtime unavailable' });
+        return false;
+      }
       this.onEvent(taskId, turnId, { type: 'delta', delta: '完了' });
       this.onEvent(taskId, turnId, { type: 'completed' });
+      return true;
     }
 
     async cancel(): Promise<{ turnId: string; forced: false; stoppedAt: string }> {
       return { turnId: 'turn', forced: false, stoppedAt: new Date().toISOString() };
+    }
+    waitForTurnExit(turnId: string): Promise<void> {
+      return runtimeHostMock.waitForExit(turnId);
     }
     dispose(): void {}
   },
@@ -105,6 +120,45 @@ function runtime(
 }
 
 describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
+  it('fails immediately without waiting for exit when the runtime was not started', async () => {
+    runtimeHostMock.startSucceeds = false;
+    runtimeHostMock.waitForExit.mockClear();
+    const subject = runtime();
+
+    await expect(
+      subject.execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '実装する',
+      }),
+    ).rejects.toThrow('runtime unavailable');
+    expect(runtimeHostMock.waitForExit).not.toHaveBeenCalled();
+    runtimeHostMock.startSucceeds = true;
+  });
+
+  it('does not report Worker completion until the Codex process tree exits', async () => {
+    let confirmExit: (() => void) | undefined;
+    runtimeHostMock.waitForExit.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (confirmExit = resolve)),
+    );
+    const subject = runtime();
+    let settled = false;
+    const execution = subject
+      .execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '実装する',
+      })
+      .finally(() => {
+        settled = true;
+      });
+
+    await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    confirmExit?.();
+    await expect(execution).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+  });
+
   it('applies inherited context and write capability to the CLI turn', async () => {
     runtimeHostMock.starts.length = 0;
     const writableWorker = {

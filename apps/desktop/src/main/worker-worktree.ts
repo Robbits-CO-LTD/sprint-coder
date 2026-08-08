@@ -44,6 +44,8 @@ export type ExecFileImpl = (
 export type WorkerWorktreeManagerOptions = Readonly<{
   worktreesRoot: string;
   execFileImpl?: ExecFileImpl;
+  platform?: NodeJS.Platform;
+  delay?: (milliseconds: number) => Promise<void>;
 }>;
 
 export type CreateWorktreeInput = Readonly<{
@@ -114,10 +116,16 @@ const WORKER_GIT_IDENTITY = [
 export class WorkerWorktreeManager {
   private readonly worktreesRoot: string;
   private readonly execFileImpl: ExecFileImpl;
+  private readonly platform: NodeJS.Platform;
+  private readonly delay: (milliseconds: number) => Promise<void>;
 
   constructor(options: WorkerWorktreeManagerOptions) {
     this.worktreesRoot = options.worktreesRoot;
     this.execFileImpl = options.execFileImpl ?? defaultExecFile;
+    this.platform = options.platform ?? process.platform;
+    this.delay =
+      options.delay ??
+      ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
   async requireCleanBase(repoPath: string): Promise<CleanRepositoryBase> {
@@ -194,6 +202,15 @@ export class WorkerWorktreeManager {
     return join(this.worktreesRoot, `worktree-${worktreeId}`);
   }
 
+  /** True only for the exact deterministic directory owned by this app instance. */
+  ownsWorktreePath(worktreeId: string, candidatePath: string): boolean {
+    const expected = resolve(this.worktreePathFor(worktreeId));
+    const candidate = resolve(candidatePath);
+    return this.platform === 'win32'
+      ? expected.toLocaleLowerCase('en-US') === candidate.toLocaleLowerCase('en-US')
+      : expected === candidate;
+  }
+
   async create({
     agentId,
     repoPath,
@@ -261,6 +278,18 @@ export class WorkerWorktreeManager {
       // remove call. Surface that distinctly rather than reporting a generic failure.
       if (error instanceof WorktreeError && /modified or untracked files/i.test(error.message))
         throw new WorktreeError('dirty', error.message, { cause: error });
+      if (this.platform === 'win32' && isPermissionDenied(error)) {
+        for (const delayMs of [100, 200, 400, 800, 1_600, 3_200]) {
+          await this.delay(delayMs);
+          try {
+            await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
+            return { outcome: 'removed' };
+          } catch (retryError) {
+            if (!isPermissionDenied(retryError)) throw retryError;
+          }
+        }
+        return { outcome: 'quarantined' };
+      }
       throw error;
     }
     return { outcome: 'removed' };
@@ -558,6 +587,14 @@ function isEnoent(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isPermissionDenied(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = 'code' in error ? String((error as NodeJS.ErrnoException).code ?? '') : '';
+  if (code === 'EACCES' || code === 'EPERM') return true;
+  if (/permission denied|access (?:is )?denied/i.test(error.message)) return true;
+  return 'cause' in error && isPermissionDenied((error as Error & { cause?: unknown }).cause);
 }
 
 const defaultExecFile: ExecFileImpl = (file, args, options) =>

@@ -4,10 +4,21 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { WorkerWorktreeManager } from './worker-worktree';
+import { WorkerWorktreeManager, type ExecFileImpl } from './worker-worktree';
 
 const execFileAsync = promisify(execFile);
 const gitAvailable = isGitAvailable();
+
+function interceptWorktreeRemove(beforeRemove: () => void): ExecFileImpl {
+  return async (file, args, options) => {
+    if (args.includes('worktree') && args.includes('remove')) beforeRemove();
+    const result = await execFileAsync(file, [...args], {
+      env: options.env,
+      timeout: options.timeout,
+    });
+    return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+  };
+}
 
 describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
   const cleanupRoots: string[] = [];
@@ -147,6 +158,49 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     const result = await manager.cleanup({ agentId: 'agent-5', repoPath });
 
     expect(result).toEqual({ outcome: 'removed' });
+  });
+
+  it('retries temporary Windows access denial with exponential backoff', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    await manager.create({ agentId: 'agent-retry', repoPath });
+    let removeAttempts = 0;
+    const delays: number[] = [];
+    const retrying = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      delay: async (milliseconds) => void delays.push(milliseconds),
+      execFileImpl: interceptWorktreeRemove(() => {
+        removeAttempts += 1;
+        if (removeAttempts < 3)
+          throw Object.assign(new Error('Permission denied'), { code: 'EACCES' });
+      }),
+    });
+
+    await expect(retrying.cleanup({ agentId: 'agent-retry', repoPath })).resolves.toEqual({
+      outcome: 'removed',
+    });
+    expect(removeAttempts).toBe(3);
+    expect(delays).toEqual([100, 200]);
+  });
+
+  it('quarantines a clean Windows worktree while access denial persists', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-locked', repoPath });
+    const delays: number[] = [];
+    const retrying = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      delay: async (milliseconds) => void delays.push(milliseconds),
+      execFileImpl: interceptWorktreeRemove(() => {
+        throw Object.assign(new Error('Access is denied'), { code: 'EPERM' });
+      }),
+    });
+
+    await expect(retrying.cleanup({ agentId: 'agent-locked', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
+    expect((await stat(created.path)).isDirectory()).toBe(true);
   });
 
   it('collapses Worker changes into one commit and integrates them into a clean workspace', async () => {
