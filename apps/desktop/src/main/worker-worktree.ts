@@ -356,9 +356,14 @@ export class WorkerWorktreeManager {
       const currentParent = await this.tryRunGit(repoPath, ['rev-parse', 'HEAD^']);
       if (currentTree === workerTree && currentParent?.stdout.trim() === baseHead)
         return { integratedHead: currentHead, outcome: 'already_integrated' };
-      const cherry = await this.tryRunGit(repoPath, ['cherry', currentHead, workerHead]);
-      if (cherry?.stdout.trim().startsWith('-'))
-        return { integratedHead: currentHead, outcome: 'already_integrated' };
+      const equivalentCommit = await this.findEquivalentIntegratedCommit(
+        repoPath,
+        baseHead,
+        currentHead,
+        workerHead,
+      );
+      if (equivalentCommit !== null)
+        return { integratedHead: equivalentCommit, outcome: 'already_integrated' };
     }
     try {
       await this.runGit(
@@ -419,21 +424,42 @@ export class WorkerWorktreeManager {
     workerHead: string,
     integratedHead: string,
   ): Promise<void> {
-    const patchFor = async (head: string): Promise<string> => {
-      const patch = await this.runGit(
-        repoPath,
-        ['diff', '--binary', '--no-ext-diff', '--no-renames', '--unified=0', `${head}^`, head],
-        'integration_failed',
-      );
-      return patch.stdout
-        .replace(/^index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?$/gmu, 'index')
-        .replace(/^@@ .* @@.*$/gmu, '@@');
-    };
-    if ((await patchFor(integratedHead)) !== (await patchFor(workerHead)))
+    if (
+      (await this.normalizedCommitPatch(repoPath, integratedHead)) !==
+      (await this.normalizedCommitPatch(repoPath, workerHead))
+    )
       throw new WorktreeError(
         'integration_failed',
         'Integrated patch does not match the isolated Worker result',
       );
+  }
+
+  private async findEquivalentIntegratedCommit(
+    repoPath: string,
+    baseHead: string,
+    currentHead: string,
+    workerHead: string,
+  ): Promise<string | null> {
+    const workerPatch = await this.normalizedCommitPatch(repoPath, workerHead);
+    const history = await this.runGit(
+      repoPath,
+      ['rev-list', '--reverse', `${baseHead}..${currentHead}`],
+      'integration_failed',
+    );
+    for (const candidate of history.stdout.split(/\r?\n/u).filter((line) => line !== ''))
+      if ((await this.normalizedCommitPatch(repoPath, candidate)) === workerPatch) return candidate;
+    return null;
+  }
+
+  private async normalizedCommitPatch(repoPath: string, head: string): Promise<string> {
+    const patch = await this.runGit(
+      repoPath,
+      ['diff', '--binary', '--no-ext-diff', '--no-renames', '--unified=0', `${head}^`, head],
+      'integration_failed',
+    );
+    return patch.stdout
+      .replace(/^index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?$/gmu, 'index')
+      .replace(/^@@ .* @@.*$/gmu, '@@');
   }
 
   private async runGit(

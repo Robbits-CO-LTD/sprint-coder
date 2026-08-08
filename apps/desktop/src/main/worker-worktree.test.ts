@@ -205,6 +205,21 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       baseHead: head,
       workerHead: finalized.workerHead,
     });
+    await writeFile(join(repoPath, 'after-integration.txt'), 'later parent commit\n');
+    await git(['-C', repoPath, 'add', 'after-integration.txt']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'later unrelated commit',
+    ]);
+    const laterHead = (await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim();
 
     const recovered = await manager.integrate({
       repoPath,
@@ -213,10 +228,19 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     });
 
     expect(first.outcome).toBe('integrated');
+    expect(laterHead).not.toBe(first.integratedHead);
     expect(recovered).toEqual({
       integratedHead: first.integratedHead,
       outcome: 'already_integrated',
     });
+    await expect(
+      manager.revalidateIntegration({
+        repoPath,
+        baseHead: head,
+        workerHead: finalized.workerHead,
+        integratedHead: recovered.integratedHead,
+      }),
+    ).resolves.toMatchObject({ outcome: 'already_integrated' });
   });
 
   it('revalidates a recorded integration without discarding later parent commits', async () => {
