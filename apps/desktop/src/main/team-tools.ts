@@ -1107,6 +1107,8 @@ const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 // orchestration path — the user should not need to know the fixture keyword or press ⬡ Team.
 const TEAM_INTENT =
   /^\s*\/team(?=\s+\S)|チームテスト|チーム(?:で|を|に|内(?:で|の))|(?:^|[^a-zA-Z])team(?:で|を|に)|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:り|名|人)(?=.*(?:雇|挨拶|会話|担当|メンバー))|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
+const TEAM_RELATION_INTENT =
+  /チーム(?:の)?(?:メンバー|リーダー)|チームの(?:会話|挨拶|メッセージ|報告|担当|役割)/i;
 
 // A failed/canceled Team turn is commonly resumed with a short instruction that no longer repeats
 // the word "Team". Keep this deliberately narrow: ordinary follow-up questions must not silently
@@ -1117,7 +1119,7 @@ const TEAM_MEMBER_CHANGE_CONTINUATION =
   /^(?=.*(?:codex|claude|ollama|worker|agent|モデル|担当|メンバー))(?=.*(?:にして|へ変更|を変更|変えて|入れ替|交代|nisite|kaete|change|switch|replace)).+$/i;
 
 export function isTeamScenarioInput(input: string): boolean {
-  return TEAM_INTENT.test(input);
+  return TEAM_INTENT.test(input) || TEAM_RELATION_INTENT.test(input);
 }
 
 export function isTeamContinuationInput(input: string): boolean {
