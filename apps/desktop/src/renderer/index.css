@@ -6004,6 +6004,67 @@ button.composer-permission-chip[aria-expanded='true'] {
 .settings-status .settings-hint {
   margin-left: auto;
 }
+.settings-license-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+}
+.settings-license-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.settings-license-copy strong {
+  font-size: 13px;
+}
+.settings-license-badge {
+  flex: none;
+  padding: 4px 7px;
+  border: 1px solid var(--accent-line-soft);
+  border-radius: var(--r-xs);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.settings-license-details {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+.settings-license-details summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  outline: none;
+}
+.settings-license-details summary:focus-visible {
+  border-radius: var(--r-xs);
+  box-shadow: var(--focus-ring);
+}
+.settings-license-details pre {
+  max-height: 220px;
+  margin: 8px 0 0;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-app);
+  color: var(--text-secondary);
+  font:
+    11px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+}
 .settings-ok {
   color: var(--success);
   display: inline-flex;

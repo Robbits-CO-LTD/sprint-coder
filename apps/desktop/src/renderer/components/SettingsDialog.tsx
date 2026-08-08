@@ -31,6 +31,7 @@ import {
   type AccessPresetDefault,
 } from '../lib/access-preset-preference';
 import settingsConnectionsArt from '../../../assets/generated/settings-connections.webp';
+import mitLicenseText from '../../../../../LICENSE?raw';
 
 // Settings dialog (issue #5). The sidebar's "設定" button had no onClick and was not disabled
 // either, so it looked pressable and did nothing — and no settings screen existed anywhere in the
@@ -73,7 +74,7 @@ export const SETTINGS_SECTIONS: readonly {
   },
   { id: 'team', label: 'Team', description: '新しいTeamの既定値', eyebrow: 'Team' },
   { id: 'skills', label: 'Skill', description: '読み込みと有効化', eyebrow: 'Skills' },
-  { id: 'advanced', label: '詳細', description: 'CLI検出と診断', eyebrow: 'Advanced' },
+  { id: 'advanced', label: '詳細', description: 'CLI検出・診断・ライセンス', eyebrow: 'Advanced' },
 ];
 
 export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -206,6 +207,7 @@ export function LegacyBody({
           />
         </>
       )}
+      <LicenseGroup />
     </div>
   );
 }
@@ -256,6 +258,7 @@ export function WorkspaceBody({
             <p className="settings-note" data-testid="settings-unsupported">
               この環境では設定APIが利用できません。
             </p>
+            <LicenseGroup />
           </div>
         </div>
       ) : (
@@ -310,6 +313,7 @@ export function WorkspaceBody({
                   which is exactly where a user who cannot select a Runtime will not look. */}
               <CliDetectionGroup />
               <DiagnosticsGroup />
+              <LicenseGroup />
             </WorkspacePage>
           </div>
         </>
@@ -513,6 +517,28 @@ function DiagnosticsGroup() {
         </li>
       </ul>
       <p className="settings-hint">表示だけの項目です。ここから変わる設定はありません。</p>
+    </div>
+  );
+}
+
+function LicenseGroup() {
+  return (
+    <div className="settings-group settings-license" data-testid="settings-license">
+      <span className="settings-field-label">ライセンス</span>
+      <div className="settings-license-row">
+        <div className="settings-license-copy">
+          <strong>MIT License</strong>
+          <p className="settings-hint">Sprint CoderはMIT Licenseのもとで配布されています。</p>
+        </div>
+        <span className="settings-license-badge" aria-hidden="true">
+          MIT
+        </span>
+      </div>
+      <p className="settings-hint">Copyright (c) 2026 株式会社Robbits</p>
+      <details className="settings-license-details" data-testid="settings-license-details">
+        <summary>ライセンス全文を表示</summary>
+        <pre data-testid="settings-license-text">{mitLicenseText.trim()}</pre>
+      </details>
     </div>
   );
 }

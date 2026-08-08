@@ -109,6 +109,18 @@ describe('which body the flag selects', () => {
     expect(unsupported).not.toContain('class="settings-nav"');
   });
 
+  it('shows the MIT License information in both settings layouts', () => {
+    stubBridge();
+    for (const html of [workspace(), legacy()]) {
+      expect(html).toContain('data-testid="settings-license"');
+      expect(html).toContain('MIT License');
+      expect(html).toContain('Copyright (c) 2026 株式会社Robbits');
+      expect(html).toContain('data-testid="settings-license-details"');
+      expect(html).toContain('Permission is hereby granted, free of charge');
+      expect(html).toContain('THE SOFTWARE IS PROVIDED');
+    }
+  });
+
   it('does not add a second heading called Skills', () => {
     // The Skill section's own heading is contributed by SkillSettingsSection. A page heading by the
     // same name would give the sheet two, which is ambiguous to a rotor and to a by-name locator.
