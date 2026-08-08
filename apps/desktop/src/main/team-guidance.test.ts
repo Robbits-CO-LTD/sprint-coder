@@ -28,6 +28,9 @@ afterEach(async () => {
 describe('builtin Team skill', () => {
   it('routes team-related conversation through the builtin Team skill', () => {
     expect(CONTEXT_SYSTEM_PROMPT).toContain('必ず組み込みSkill `sprint-coder-team` を使い');
+    expect(CONTEXT_SYSTEM_PROMPT).toContain(
+      'subagent機能、外部Skill、別のMCPで代用してはいけません',
+    );
     expect(CONTEXT_SYSTEM_PROMPT).toContain('架空のリーダーやメンバーを作らず');
     expect(isTeamScenarioInput('チームで二人雇って挨拶して')).toBe(true);
   });
@@ -53,6 +56,7 @@ describe('builtin Team skill', () => {
     for (const input of [
       'チームで進めて',
       'Teamでお願い',
+      'team 2り雇って挨拶を交わして',
       '2人雇って調査して',
       '数学と実装の観点を2人体制で並行に検討して',
       '5人で作業して',
@@ -76,8 +80,18 @@ describe('builtin Team skill', () => {
       expect(isTeamScenarioInput(input), input).toBe(false);
   });
 
-  it('recognizes only narrow retry instructions as Team continuation input', () => {
-    for (const input of ['continue', 'Resume', 'retry', '続けて', '再開してください', 'リトライ'])
+  it('recognizes narrow retry and Team member reassignment instructions as continuation input', () => {
+    for (const input of [
+      'continue',
+      'Resume',
+      'retry',
+      '続けて',
+      '再開してください',
+      'リトライ',
+      'codex to ollamanisite',
+      'CodexとOllamaにして',
+      '担当をCodexとOllamaへ変更して',
+    ])
       expect(isTeamContinuationInput(input), input).toBe(true);
     for (const input of ['続きを説明して', 'continue implementing this feature', '通常の依頼です'])
       expect(isTeamContinuationInput(input), input).toBe(false);

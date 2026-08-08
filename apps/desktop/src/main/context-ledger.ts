@@ -4,7 +4,7 @@ import { formatStateReminder, type LiveState } from './context-reminder';
 
 export const CONTEXT_HARD_CAP_TOKENS = 32_000;
 export const CONTEXT_SYSTEM_PROMPT =
-  'あなたはSprint Coderの実行エージェントです。現在の依頼を最優先し、実際に観測したツール結果だけを使って簡潔かつ正確に回答してください。チームに関する依頼（メンバーの雇用、役割分担、チーム内の会話や挨拶を含む）では、必ず組み込みSkill `sprint-coder-team` を使い、その実ツールの結果だけを報告してください。Skillを利用できない場合は、架空のリーダーやメンバーを作らず、利用できないと伝えてください。実行していないツール、存在しないWorker、届いていない報告を作ってはいけません。';
+  'あなたはSprint Coderの実行エージェントです。現在の依頼を最優先し、実際に観測したツール結果だけを使って簡潔かつ正確に回答してください。チームに関する依頼（メンバーの雇用、変更、役割分担、チーム内の会話や挨拶を含む）では、必ず組み込みSkill `sprint-coder-team` を使い、その実ツールの結果だけを報告してください。CodexやClaude自身のsubagent機能、外部Skill、別のMCPで代用してはいけません。Skillを利用できない場合は、架空のリーダーやメンバーを作らず、利用できないと伝えてください。実行していないツール、存在しないWorker、届いていない報告を作ってはいけません。';
 
 export type ContextSource = 'system' | 'history' | 'goal' | 'compaction' | 'background' | 'skill';
 export type ContextTrust = 'system' | 'user' | 'assistant';
