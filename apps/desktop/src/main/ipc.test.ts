@@ -96,9 +96,26 @@ import {
   shouldRetryProviderWithoutTools,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
+  runBestEffortCancellation,
   resolveEffectiveWorkspaceRoot,
   verifyTurnWorkspaceIdentities,
 } from './ipc';
+
+describe('Turn cancellation boundary', () => {
+  it('continues after a runtime stop cannot be confirmed', async () => {
+    const onFailure = vi.fn();
+    const finalize = vi.fn();
+
+    const stopped = await runBestEffortCancellation(async () => {
+      throw new Error('runtime host exited before stop acknowledgement');
+    }, onFailure);
+    finalize();
+
+    expect(stopped).toBe(false);
+    expect(onFailure).toHaveBeenCalledOnce();
+    expect(finalize).toHaveBeenCalledOnce();
+  });
+});
 
 describe('Project home-directory confirmation', () => {
   const home = join(dirname(process.cwd()), 'home-owner');

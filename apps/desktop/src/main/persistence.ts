@@ -1001,6 +1001,19 @@ const TEAM_BUDGET_STRUCTURED_SEED = JSON.stringify({
 const TEAM_POLICY_SEED = JSON.stringify(DEFAULT_TEAM_POLICY);
 const MANAGER_POLICY_SEED = JSON.stringify(DEFAULT_MANAGER_POLICY);
 
+/**
+ * A development build briefly shipped a different migration lineage that reused versions 35–38.
+ * Keep the old checksums as an explicitly recognised compatibility case instead of weakening the
+ * checksum guard for arbitrary database edits.
+ */
+const LEGACY_MIGRATION_LINEAGE = new Map<number, string>([
+  [35, 'real-runtimes-only-v35-migrate-legacy-runtime-records'],
+  [36, 'project-context-hub-a1-v36-projects-and-task-membership'],
+  [37, 'project-context-hub-v37-references-memories-manifests'],
+  [38, 'project-context-hub-v38-reference-content-digest'],
+]);
+const LEGACY_MIGRATION_COMPATIBILITY_KEY = 'legacy-team-project-lineage-v1';
+
 const migrations = [
   {
     version: 1,
@@ -3863,6 +3876,7 @@ export interface PersistenceClient {
   pauseGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
+    startNext?: boolean,
   ): {
     task: TaskSummary;
     canceledEvent: TurnEvent | null;
@@ -3871,6 +3885,7 @@ export interface PersistenceClient {
   clearGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
+    startNext?: boolean,
   ): {
     task: TaskSummary;
     canceledEvent: TurnEvent | null;
@@ -4380,19 +4395,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
     mkdirSync(dirname(databasePath), { recursive: true });
     this.recoveryReport = recoverDatabaseIfCorrupt(databasePath);
     this.db = new Database(databasePath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.db.pragma('busy_timeout = 5000');
-    this.runMigrations(databasePath);
-    this.backfillLegacyMutationScopes();
-    this.backfillLegacyEditSagaBindings();
-    this.backfillLegacyNativeEditSagaRevisions();
-    this.backfillLegacyEditSagaRootBindings();
-    this.backfillAcceptanceContracts();
-    this.interruptActiveCommands();
-    this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
-      this.liveStateForReminder(taskId, turnId),
-    );
+    try {
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma('busy_timeout = 5000');
+      this.runMigrations(databasePath);
+      this.backfillLegacyMutationScopes();
+      this.backfillLegacyEditSagaBindings();
+      this.backfillLegacyNativeEditSagaRevisions();
+      this.backfillLegacyEditSagaRootBindings();
+      this.backfillAcceptanceContracts();
+      this.interruptActiveCommands();
+      this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
+        this.liveStateForReminder(taskId, turnId),
+      );
+    } catch (error) {
+      try {
+        this.db.close();
+      } catch {
+        // Preserve the initialization failure that explains why the client could not be created.
+      }
+      throw error;
+    }
   }
 
   /**
@@ -4577,20 +4601,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL
     )`);
-    const applied = new Map(
-      (
-        this.db.prepare('SELECT version, checksum FROM schema_migrations').all() as {
-          version: number;
-          checksum: string;
-        }[]
-      ).map((row) => [row.version, row.checksum]),
-    );
-    const pending = migrations.filter((migration) => !applied.has(migration.version));
-    if (pending.length > 0 && existsSync(databasePath) && applied.size > 0)
+    let applied = this.readAppliedMigrations();
+    const legacyLineage = this.isLegacyMigrationLineage(applied);
+    const hadPendingMigrations = migrations.some((migration) => !applied.has(migration.version));
+    if (hadPendingMigrations && existsSync(databasePath) && applied.size > 0)
       copyFileSync(databasePath, `${databasePath}.pre-migration.bak`);
+    if (legacyLineage) {
+      this.applyLegacyMigrationBridge();
+      applied = this.readAppliedMigrations();
+    }
     for (const migration of migrations) {
       const checksum = applied.get(migration.version);
-      if (checksum !== undefined && checksum !== migration.checksum)
+      const isRecognizedLegacyChecksum =
+        legacyLineage && LEGACY_MIGRATION_LINEAGE.get(migration.version) === checksum;
+      if (checksum !== undefined && checksum !== migration.checksum && !isRecognizedLegacyChecksum)
         throw new Error('Migration checksum mismatch');
       if (checksum !== undefined) continue;
       const applyMigration = (): void => {
@@ -4623,6 +4647,332 @@ export class SqlitePersistenceClient implements PersistenceClient {
         applyMigration();
       }
     }
+  }
+
+  private readAppliedMigrations(): Map<number, string> {
+    return new Map(
+      (
+        this.db.prepare('SELECT version, checksum FROM schema_migrations').all() as {
+          version: number;
+          checksum: string;
+        }[]
+      ).map((row) => [row.version, row.checksum]),
+    );
+  }
+
+  private isLegacyMigrationLineage(applied: ReadonlyMap<number, string>): boolean {
+    const hasLegacyChecksum = [...LEGACY_MIGRATION_LINEAGE.values()].some((checksum) =>
+      [...applied.values()].includes(checksum),
+    );
+    if (!hasLegacyChecksum) return false;
+    for (const [version, checksum] of LEGACY_MIGRATION_LINEAGE) {
+      if (applied.get(version) !== checksum) throw new Error('Migration checksum mismatch');
+    }
+    return true;
+  }
+
+  private migrationForVersion(version: number): (typeof migrations)[number] {
+    const migration = migrations.find((candidate) => candidate.version === version);
+    if (migration === undefined) throw new Error(`Missing migration ${version}`);
+    return migration;
+  }
+
+  private tableExists(tableName: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+        .get(tableName) !== undefined
+    );
+  }
+
+  private columnExists(tableName: string, columnName: string): boolean {
+    const escapedTableName = tableName.replace(/'/g, "''");
+    return (
+      this.db.prepare(`PRAGMA table_info('${escapedTableName}')`).all() as { name: string }[]
+    ).some((column) => column.name === columnName);
+  }
+
+  private ensureColumn(tableName: string, columnName: string, definition: string): void {
+    if (this.columnExists(tableName, columnName)) return;
+    const quote = (value: string): string => `"${value.replace(/"/g, '""')}"`;
+    this.db.exec(`ALTER TABLE ${quote(tableName)} ADD COLUMN ${quote(columnName)} ${definition}`);
+  }
+
+  private idempotentMigrationSql(sql: string): string {
+    return sql
+      .replace(/CREATE TABLE(?! IF NOT EXISTS)/g, 'CREATE TABLE IF NOT EXISTS')
+      .replace(/CREATE UNIQUE INDEX(?! IF NOT EXISTS)/g, 'CREATE UNIQUE INDEX IF NOT EXISTS')
+      .replace(/CREATE INDEX(?! IF NOT EXISTS)/g, 'CREATE INDEX IF NOT EXISTS');
+  }
+
+  /**
+   * Repairs the one known branch collision without rewriting its historical rows. The bridge is
+   * deliberately narrow: it only runs when all four old checksums are present, and it records a
+   * marker in a separate table so a retry cannot run ALTER/CREATE statements twice.
+   */
+  private applyLegacyMigrationBridge(): void {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS schema_migration_compatibility (
+      lineage TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+    )`);
+    const alreadyApplied = this.db
+      .prepare('SELECT 1 FROM schema_migration_compatibility WHERE lineage = ?')
+      .get(LEGACY_MIGRATION_COMPATIBILITY_KEY);
+    if (alreadyApplied !== undefined) return;
+
+    this.db.transaction(() => {
+      this.applyLegacyTeamMigrations();
+      this.applyLegacyProjectMigrations();
+      for (const version of [55, 56, 57, 58]) {
+        const migration = this.migrationForVersion(version);
+        const existing = this.db
+          .prepare('SELECT checksum FROM schema_migrations WHERE version = ?')
+          .get(version) as { checksum: string } | undefined;
+        if (existing !== undefined) {
+          if (existing.checksum !== migration.checksum)
+            throw new Error('Migration checksum mismatch');
+          continue;
+        }
+        this.db
+          .prepare('INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)')
+          .run(version, migration.checksum, new Date().toISOString());
+      }
+      this.db
+        .prepare('INSERT INTO schema_migration_compatibility(lineage, applied_at) VALUES (?, ?)')
+        .run(LEGACY_MIGRATION_COMPATIBILITY_KEY, new Date().toISOString());
+    })();
+  }
+
+  private applyLegacyTeamMigrations(): void {
+    const v35 = this.migrationForVersion(35);
+    this.ensureColumn('turns', 'connection_id', 'TEXT');
+    this.ensureColumn('turns', 'requested_provider', 'TEXT');
+    this.ensureColumn('turns', 'requested_model', 'TEXT');
+    this.ensureColumn('turns', 'resolved_provider', 'TEXT');
+    this.ensureColumn('turns', 'resolved_model', 'TEXT');
+    this.ensureColumn('agent_threads', 'connection_id', 'TEXT');
+    this.ensureColumn('agent_threads', 'requested_provider', 'TEXT');
+    this.ensureColumn('agent_threads', 'requested_model', 'TEXT');
+    this.ensureColumn('agents', 'connection_id', 'TEXT');
+    this.ensureColumn('agents', 'requested_provider', 'TEXT');
+    this.ensureColumn('agents', 'requested_model', 'TEXT');
+    // Referencing v35 above keeps this helper coupled to the migration definition: if that
+    // migration is ever removed or renumbered, this bridge fails loudly during development.
+    if (v35.version !== 35) throw new Error('Invalid legacy migration bridge');
+
+    const v36 = this.migrationForVersion(36);
+    this.ensureColumn('tasks', 'connection_id', 'TEXT');
+    this.ensureColumn('tasks', 'requested_provider', 'TEXT');
+    this.ensureColumn('tasks', 'requested_model', 'TEXT');
+    if (v36.version !== 36) throw new Error('Invalid legacy migration bridge');
+
+    const v37 = this.migrationForVersion(37);
+    const v37NeedsWork =
+      !this.columnExists('teams', 'policy_json') ||
+      !this.columnExists('agents', 'parent_agent_id') ||
+      !this.columnExists('agents', 'depth') ||
+      !this.columnExists('agents', 'can_delegate') ||
+      !this.columnExists('agents', 'manager_policy_json');
+    if (v37NeedsWork) this.db.exec(this.idempotentMigrationSql(v37.sql));
+
+    const v38 = this.migrationForVersion(38);
+    if (!this.tableExists('team_executions')) this.db.exec(this.idempotentMigrationSql(v38.sql));
+  }
+
+  private applyLegacyProjectMigrations(): void {
+    const v55 = this.migrationForVersion(55);
+    const v55Sql = v55.sql.replace(
+      /ALTER TABLE tasks ADD COLUMN project_id TEXT REFERENCES projects\(id\) ON DELETE SET NULL;\s*/,
+      '',
+    );
+    if (!this.tableExists('projects')) this.db.exec(this.idempotentMigrationSql(v55Sql));
+    this.ensureColumn('tasks', 'project_id', 'TEXT REFERENCES projects(id) ON DELETE SET NULL');
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS tasks_project_activity_idx ON tasks(project_id, pinned DESC, updated_at DESC, id)',
+    );
+
+    const v56 = this.migrationForVersion(56);
+    this.ensureColumn('projects', 'instruction', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn(
+      'projects',
+      'context_epoch',
+      'INTEGER NOT NULL DEFAULT 0 CHECK (context_epoch >= 0)',
+    );
+    this.ensureColumn('input_queue', 'payload_digest', "TEXT NOT NULL DEFAULT ''");
+    const v56Sql = v56.sql
+      .replace(/ALTER TABLE projects ADD COLUMN instruction TEXT NOT NULL DEFAULT '';\s*/, '')
+      .replace(
+        /ALTER TABLE projects ADD COLUMN context_epoch INTEGER NOT NULL DEFAULT 0\s+CHECK \(context_epoch >= 0\);\s*/,
+        '',
+      )
+      .replace(
+        /ALTER TABLE input_queue ADD COLUMN payload_digest TEXT NOT NULL DEFAULT '';\s*/,
+        '',
+      );
+    this.db.exec(this.idempotentMigrationSql(v56Sql));
+
+    const v57 = this.migrationForVersion(57);
+    if (!this.tableExists('project_references')) this.db.exec(this.idempotentMigrationSql(v57.sql));
+    if (this.tableExists('project_reference_files')) {
+      this.db.exec(`
+        INSERT INTO project_references(
+          id, project_id, source_task_id, relative_path, registered_root_identity,
+          enabled, revision, last_sealed_digest, created_at, updated_at
+        )
+        SELECT id, project_id, source_task_id, relative_path, workspace_binding_digest,
+          enabled, CASE WHEN revision < 1 THEN 1 ELSE revision END,
+          NULLIF(content_digest, ''), created_at, updated_at
+        FROM project_reference_files;
+      `);
+      this.db.exec('DROP TABLE project_reference_files');
+    }
+
+    const v58 = this.migrationForVersion(58);
+    if (!this.tableExists('project_memories')) this.db.exec(this.idempotentMigrationSql(v58.sql));
+    else if (!this.columnExists('project_memories', 'local_only'))
+      this.rebuildLegacyProjectMemories(v58.sql);
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS project_memories_project_order_idx ON project_memories(project_id, status, updated_at DESC, id)',
+    );
+  }
+
+  private rebuildLegacyProjectMemories(migrationSql: string): void {
+    if (this.tableExists('project_memories_legacy_v1'))
+      throw new Error('Legacy Project memory archive already exists');
+    this.db.exec('DROP INDEX IF EXISTS project_memories_project_order_idx');
+    this.db.exec('ALTER TABLE project_memories RENAME TO project_memories_legacy_v1');
+    this.db.exec(this.idempotentMigrationSql(migrationSql));
+    this.db.exec('ALTER TABLE project_memories_legacy_v1 ADD COLUMN migration_reason TEXT');
+    const hasLocalOnly = this.columnExists('project_memories_legacy_v1', 'local_only');
+    const rows = this.db
+      .prepare(
+        `SELECT id, project_id, content, status, source_task_id, source_turn_id,
+                revision, created_at, updated_at, ${hasLocalOnly ? 'local_only' : '0'} AS local_only
+         FROM project_memories_legacy_v1
+         ORDER BY created_at, id`,
+      )
+      .all() as {
+      id: string;
+      project_id: string;
+      content: string;
+      status: 'draft' | 'active' | 'disabled';
+      source_task_id: string | null;
+      source_turn_id: string | null;
+      revision: number;
+      local_only: number;
+      created_at: string;
+      updated_at: string;
+    }[];
+    const fallbackTaskByProject = new Map<string, string>();
+    const updateArchive = this.db.prepare(
+      'UPDATE project_memories_legacy_v1 SET migration_reason = ? WHERE id = ?',
+    );
+    const insertCurrent = this.db.prepare(`
+      INSERT INTO project_memories(
+        id, project_id, source_task_id, source_turn_id, content, status,
+        revision, local_only, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const turnSource = this.db.prepare('SELECT 1 FROM turns WHERE id = ? AND task_id = ? LIMIT 1');
+    for (const row of rows) {
+      const sourceIsValid =
+        row.source_task_id !== null &&
+        row.source_turn_id !== null &&
+        turnSource.get(row.source_turn_id, row.source_task_id) !== undefined;
+      let sourceTaskId = row.source_task_id;
+      let sourceTurnId = row.source_turn_id;
+      let migrationReason: string;
+      if (!sourceIsValid) {
+        const fallback = this.createLegacyProjectMemoryProvenance(
+          row.project_id,
+          row.content,
+          fallbackTaskByProject,
+          row.created_at,
+        );
+        sourceTaskId = fallback.taskId;
+        sourceTurnId = fallback.turnId;
+        migrationReason =
+          row.source_task_id === null
+            ? 'missing_source_task'
+            : row.source_turn_id === null
+              ? 'missing_source_turn'
+              : 'invalid_source_provenance';
+      } else if (row.status === 'draft') migrationReason = 'draft_status_mapped_to_disabled';
+      else migrationReason = 'legacy_row_copied';
+      insertCurrent.run(
+        row.id,
+        row.project_id,
+        sourceTaskId,
+        sourceTurnId,
+        row.content,
+        row.status === 'active' ? 'active' : 'disabled',
+        Math.max(1, row.revision),
+        row.local_only === 1 ? 1 : 0,
+        row.created_at,
+        row.updated_at,
+      );
+      updateArchive.run(migrationReason, row.id);
+    }
+  }
+
+  private createLegacyProjectMemoryProvenance(
+    projectId: string,
+    content: string,
+    fallbackTaskByProject: Map<string, string>,
+    createdAt: string,
+  ): { taskId: string; turnId: string } {
+    let taskId = fallbackTaskByProject.get(projectId);
+    if (taskId === undefined) {
+      taskId = randomUUID();
+      const threadId = randomUUID();
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO tasks(id, title, pinned, archived, created_at, updated_at, project_id)
+           VALUES (?, ?, 0, 1, ?, ?, ?)`,
+        )
+        .run(taskId, 'Imported Project memory provenance', now, now, projectId);
+      if (this.tableExists('agent_threads')) {
+        this.db
+          .prepare(
+            `INSERT INTO agent_threads(
+               id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at
+             ) VALUES (?, ?, 'mock', 'completed', NULL, 0, ?, ?)`,
+          )
+          .run(threadId, taskId, now, now);
+        if (this.columnExists('tasks', 'primary_thread_id'))
+          this.db
+            .prepare('UPDATE tasks SET primary_thread_id = ? WHERE id = ?')
+            .run(threadId, taskId);
+      }
+      fallbackTaskByProject.set(projectId, taskId);
+    }
+    const turnId = randomUUID();
+    const userMessageId = randomUUID();
+    const assistantMessageId = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO messages(id, task_id, turn_id, author, content, created_at)
+         VALUES (?, ?, ?, 'user', ?, ?)`,
+      )
+      .run(userMessageId, taskId, turnId, 'Imported legacy Project memory', createdAt);
+    this.db
+      .prepare(
+        `INSERT INTO turns(
+           id, task_id, user_message_id, state, seq, runtime_kind, model, created_at, updated_at
+         ) VALUES (?, ?, ?, 'completed', 0, 'mock', 'auto', ?, ?)`,
+      )
+      .run(turnId, taskId, userMessageId, createdAt, now);
+    this.db
+      .prepare(
+        `INSERT INTO messages(id, task_id, turn_id, author, content, created_at)
+         VALUES (?, ?, ?, 'assistant', ?, ?)`,
+      )
+      .run(assistantMessageId, taskId, turnId, content, createdAt);
+    this.db
+      .prepare('UPDATE turns SET assistant_message_id = ? WHERE id = ?')
+      .run(assistantMessageId, turnId);
+    return { taskId, turnId };
   }
 
   private backfillLegacyMutationScopes(): void {
@@ -8472,11 +8822,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   pauseGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
+    startNext = true,
   ): { task: TaskSummary; canceledEvent: TurnEvent | null; next: QueueTransition } {
     return this.db.transaction(() => {
       const canceledEvent = turnId === null ? null : this.cancelTurn(taskId, turnId);
       this.pauseGoal(taskId);
-      const next = canceledEvent === null ? null : this.startNextQueued(taskId);
+      const next = !startNext || canceledEvent === null ? null : this.startNextQueued(taskId);
       return { canceledEvent, next, task: this.getTask(taskId) };
     })();
   }
@@ -8484,11 +8835,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
   clearGoalAndCancelTurn(
     taskId: string,
     turnId: string | null,
+    startNext = true,
   ): { task: TaskSummary; canceledEvent: TurnEvent | null; next: QueueTransition } {
     return this.db.transaction(() => {
       const canceledEvent = turnId === null ? null : this.cancelTurn(taskId, turnId);
       this.clearGoal(taskId);
-      const next = canceledEvent === null ? null : this.startNextQueued(taskId);
+      const next = !startNext || canceledEvent === null ? null : this.startNextQueued(taskId);
       return { canceledEvent, next, task: this.getTask(taskId) };
     })();
   }
