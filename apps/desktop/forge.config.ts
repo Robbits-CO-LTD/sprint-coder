@@ -138,7 +138,7 @@ export function resolveWindowsSignOptions(
       certificatePassword: string;
       description: string;
     }>
-  | Readonly<{ signWithParams: string[]; description: string }>
+  | Readonly<{ signWithParams: string; description: string }>
   | undefined {
   const certificateFile = environment.SPRINT_CODER_WINDOWS_CERTIFICATE_FILE;
   const certificatePassword = environment.SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD;
@@ -159,7 +159,7 @@ export function resolveWindowsSignOptions(
     return { certificateFile, certificatePassword, description: 'Sprint Coder' };
   if (normalizedSha1 === undefined) return undefined;
   return {
-    signWithParams: ['/sha1', normalizedSha1, '/sm'],
+    signWithParams: `/sha1 ${normalizedSha1} /sm`,
     description: 'Sprint Coder',
   };
 }
