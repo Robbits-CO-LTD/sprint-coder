@@ -45,22 +45,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Static parent -> child connector geometry. Same anchor convention and the same +2000 world
-// offset the animated cables use (cables.ts, matching `.team-cables`' left/top:-2000px in
-// index.css), so a message cable travels along the connector it belongs to instead of a parallel
-// line of its own.
-const EDGE_OFFSET = 2000;
-function hierarchyEdgePath(from: Rect, to: Rect): string {
-  const a = { x: from.x + from.w, y: from.y + Math.min(90, from.h / 2) };
-  const b = { x: to.x, y: to.y + Math.min(60, to.h / 2) };
-  const dx = Math.max(70, Math.abs(b.x - a.x) * 0.45);
-  const o = EDGE_OFFSET;
-  return (
-    `M ${a.x + o} ${a.y + o} C ${a.x + o + dx} ${a.y + o}, ` +
-    `${b.x + o - dx} ${b.y + o}, ${b.x + o} ${b.y + o}`
-  );
-}
-
 // The seed camera state (docs §4.6 step 3 / demo/index.html lines 936-951): positions the world
 // so the fixed-size Leader node lands exactly where the normal chat column used to be —
 // sidebar width 264 / header height 52, the mock's own fallback constants (the real chat
@@ -230,7 +214,9 @@ export function TeamCanvas({
     () =>
       detail
         ? [...detail.workers]
-            .filter((w) => w.kind === 'worker')
+            // A stopped Worker remains in persistence for audit/history, but is no longer part of
+            // the working surface. Treat stopping one as dismissing it from the visible Team.
+            .filter((w) => w.kind === 'worker' && w.state !== 'stopped')
             .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
         : [],
     [detail],
@@ -921,37 +907,6 @@ export function TeamCanvas({
     ],
   );
 
-  // Static parent -> child connectors (Team v2 hierarchy). Deliberately NOT part of the message
-  // cable overlay: these describe STRUCTURE, so they are always drawn, never animated (nothing for
-  // `prefers-reduced-motion` to suppress — they look identical in every motion mode) and never
-  // removed after a message settles. Geometry comes from state rather than measured DOM rects, so
-  // a connector follows its card live while it is being dragged. The parent id is the same one the
-  // layout placed the card under, so a line can never disagree with the arrangement it explains.
-  const hierarchyEdges = useMemo(() => {
-    if (!leaderAgentId) return [];
-    const rectOf = (nodeId: string): Rect | null => {
-      if (nodeId === leaderAgentId) return LEADER_RECT;
-      const placement = hierarchyLayout.get(nodeId);
-      if (!placement) return null;
-      const pos = nodePositions[nodeId] ?? placement;
-      return { x: pos.x, y: pos.y, w: WORKER_SIZE.w, h: WORKER_SIZE.h };
-    };
-    const edges: { childId: string; parentId: string; d: string }[] = [];
-    for (const worker of workers) {
-      const placement = hierarchyLayout.get(worker.id);
-      if (!placement) continue;
-      const from = rectOf(placement.parentAgentId);
-      const to = rectOf(worker.id);
-      if (!from || !to) continue;
-      edges.push({
-        childId: worker.id,
-        parentId: placement.parentAgentId,
-        d: hierarchyEdgePath(from, to),
-      });
-    }
-    return edges;
-  }, [leaderAgentId, hierarchyLayout, nodePositions, workers]);
-
   // Deliberately worded differently from the visible `.team-status-chip` text below: Playwright's
   // getByText() is a substring match, so an aria-live region carrying the *exact same* string
   // would make `getByText('<state> · Worker N人')` resolve to two elements (chip + live region).
@@ -988,35 +943,8 @@ export function TeamCanvas({
       ) : (
         <>
           <div className="team-world" ref={worldRef}>
-            {/* Hierarchy connectors, painted under the cards (DOM order: both layers are
-                positioned, so `.team-world-nodes` below still paints on top). Reuses `.team-cables`
-                for its geometry/`pointer-events: none` rather than adding CSS, and styles the lines
-                with plain SVG presentation attributes — `currentColor` at low opacity keeps them
-                readable in either theme and visually distinct from an amber/blue message cable.
-                `aria-hidden` + non-interactive: the same depth/parent facts are text on every
-                Worker card (and in the List), so this steals neither pointer nor focus. */}
-            <svg
-              className="team-cables"
-              viewBox="0 0 7000 6000"
-              data-testid="team-hierarchy-edges"
-              aria-hidden="true"
-              pointerEvents="none"
-            >
-              {hierarchyEdges.map((edge) => (
-                <path
-                  key={edge.childId}
-                  d={edge.d}
-                  data-testid="team-hierarchy-edge"
-                  data-parent-id={edge.parentId}
-                  data-child-id={edge.childId}
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.4}
-                  strokeLinecap="round"
-                  opacity={0.32}
-                />
-              ))}
-            </svg>
+            {/* This overlay is intentionally empty between messages. A cable is created only
+                while an MCP-backed Team message is travelling, then removed by sendCable(). */}
             <svg className="team-cables" ref={svgRef} viewBox="0 0 7000 6000" />
             <div className="team-world-nodes">
               {/* SurfaceLayer (owned by App) portals the shared ChatSurface instance in here —

@@ -47,7 +47,7 @@ async function readWorldTransform(page: Page): Promise<string> {
 }
 
 test.describe('Phase 6 Slice 6.4: Communication cable', () => {
-  test('no cable or glow appears while hiring a Worker', async () => {
+  test('hire draws no cable and dismissal removes the Worker from both views', async () => {
     const userDataDir = createUserDataDir('cables-no-hire-glow');
     let app: ElectronApplication | null = null;
     try {
@@ -59,12 +59,20 @@ test.describe('Phase 6 Slice 6.4: Communication cable', () => {
 
       await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
+      await expect(page.getByTestId('team-hierarchy-edge')).toHaveCount(0);
 
       // Give any (incorrect) hire-triggered animation a moment to have appeared if it were going
       // to, then assert it never did.
       await page.waitForTimeout(300);
       await expect(page.locator('.cable-path')).toHaveCount(0);
       await expect(page.locator('.w-head.glow')).toHaveCount(0);
+
+      await page.getByRole('button', { name: '解雇' }).click();
+      await expect(page.getByTestId('team-worker')).toHaveCount(0);
+      await expect(page.locator('.team-status-chip')).toContainText('Worker 0人');
+
+      await page.getByTestId('team-view-toggle').click();
+      await expect(page.getByTestId('team-worker')).toHaveCount(0);
     } finally {
       await closeApp(app);
       removeUserDataDir(userDataDir);

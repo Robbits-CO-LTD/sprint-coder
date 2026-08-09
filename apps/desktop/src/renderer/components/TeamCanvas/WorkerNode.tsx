@@ -136,7 +136,7 @@ export function WorkerNode({
           </span>
         </span>
         <button type="button" className="w-stop-btn" disabled={!canStop} onClick={onStop}>
-          停止
+          解雇
         </button>
       </div>
       <div className="w-activity" aria-live="polite">
