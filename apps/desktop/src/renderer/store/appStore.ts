@@ -211,6 +211,8 @@ type AppState = {
   /** What this launch's database recovery pass did, once `app.getInfo()` resolves (issue #9).
    * Absent until then, and absent forever if the backend predates the field. */
   recovery: DatabaseRecovery | null;
+  /** Installed application version reported by Electron. Null until app.getInfo resolves. */
+  appVersion: string | null;
   /** Whether the recovery notice has been dismissed. A launch-scoped fact, so acknowledging it
    * should not require persistence — it simply stops being shown for this session. */
   recoveryAcknowledged: boolean;
@@ -841,6 +843,7 @@ export const useAppStore = create<AppState>((set, get) => {
     modelPicker: { taskId: null, enabled: null, selection: null },
     reasoningSeenByTurn: {},
     recovery: null,
+    appVersion: null,
     recoveryAcknowledged: false,
     settingsWorkspaceV2: true,
     projectMultiFolderUx: true,
@@ -918,6 +921,7 @@ export const useAppStore = create<AppState>((set, get) => {
           .then((info) => {
             set({
               ...(info.recovery === undefined ? {} : { recovery: info.recovery }),
+              ...(typeof info.version === 'string' ? { appVersion: info.version } : {}),
               settingsWorkspaceV2: info.settingsWorkspaceV2 ?? true,
               projectMultiFolderUx: info.projectMultiFolderUx ?? true,
             });

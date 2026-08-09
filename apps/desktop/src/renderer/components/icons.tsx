@@ -180,6 +180,15 @@ export function ArrowLeft(props: IconProps) {
   );
 }
 
+export function ArrowRight(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="m12 5 7 7-7 7" />
+      <path d="M5 12h14" />
+    </Icon>
+  );
+}
+
 export function ArrowUp(props: IconProps) {
   return (
     <Icon {...props}>

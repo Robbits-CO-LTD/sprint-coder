@@ -10,6 +10,7 @@ import {
   recoveryText,
   runtimeStatusText,
   samePolicy,
+  versionText,
 } from './SettingsDialog';
 
 // UI slice A: the settings workspace behind `settingsWorkspaceV2`. What is covered here is what the
@@ -169,6 +170,13 @@ describe('the Team defaults form', () => {
 });
 
 describe('the read-only lines in 詳細', () => {
+  it('formats the Electron application version without duplicating its prefix', () => {
+    expect(versionText(null)).toBe('まだ読み込まれていません');
+    expect(versionText('0.1.0')).toBe('v0.1.0');
+    expect(versionText('v1.2.3')).toBe('v1.2.3');
+    expect(workspace()).toContain('data-testid="settings-diagnostic-version"');
+  });
+
   it('names the Runtime and its state, and carries the backend message when there is one', () => {
     expect(runtimeStatusText(null)).toBe('まだ通知はありません');
     expect(

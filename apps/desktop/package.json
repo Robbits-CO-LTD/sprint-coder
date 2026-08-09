@@ -21,6 +21,7 @@
     "@sprint-coder/domain": "*",
     "better-sqlite3": "^12.2.0",
     "electron-squirrel-startup": "^1.0.1",
+    "lottie-web": "^5.13.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1"
   },

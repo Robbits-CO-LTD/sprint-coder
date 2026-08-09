@@ -497,16 +497,20 @@ function CliDetectionGroup() {
   );
 }
 
-/** Read-only facts the renderer already holds. No new backend call: the Runtime liveness push and
- * the launch's recovery record are both already in the store, and until now the only place either
- * appeared was a dot in the footer. */
+/** Read-only facts the renderer already holds. No new backend call: application info and Runtime
+ * liveness are loaded at launch, and the settings page only presents that canonical snapshot. */
 function DiagnosticsGroup() {
   const runtimeStatus = useAppStore((s) => s.runtimeStatus);
   const recovery = useAppStore((s) => s.recovery);
+  const appVersion = useAppStore((s) => s.appVersion);
   return (
     <div className="settings-group">
       <span className="settings-field-label">状態</span>
       <ul className="settings-status">
+        <li data-testid="settings-diagnostic-version">
+          <span>Version</span>
+          <span className="settings-hint">{versionText(appVersion)}</span>
+        </li>
         <li data-testid="settings-diagnostic-runtime">
           <span>Runtimeプロセス</span>
           <span className="settings-hint">{runtimeStatusText(runtimeStatus)}</span>
@@ -551,6 +555,11 @@ export function runtimeStatusText(status: RuntimeStatus | null): string {
   return status.userMessage === null || status.userMessage === ''
     ? head
     : `${head} · ${status.userMessage}`;
+}
+
+export function versionText(version: string | null): string {
+  if (version === null || version.trim() === '') return 'まだ読み込まれていません';
+  return version.startsWith('v') ? version : `v${version}`;
 }
 
 export function recoveryText(recovery: DatabaseRecovery | null): string {
