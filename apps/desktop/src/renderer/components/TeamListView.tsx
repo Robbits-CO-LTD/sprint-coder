@@ -80,9 +80,11 @@ export function TeamListView({
     );
   }
 
-  // Stopped Workers remain available to the persisted activity history, but dismissal removes
-  // them from both live Team projections.
-  const workers = detail.workers.filter((w) => w.kind === 'worker' && w.state !== 'stopped');
+  // Stopped Workers remain available to persistence and hierarchy resolution, but dismissal
+  // removes them from both live Team projections. Resolving parents against allWorkers preserves
+  // the recorded Manager relationship for any visible children of a dismissed Manager.
+  const allWorkers = detail.workers.filter((w) => w.kind === 'worker');
+  const workers = allWorkers.filter((w) => w.state !== 'stopped');
   const currentWorkerCount = currentTeamWorkerCount(detail);
 
   return (
@@ -146,7 +148,7 @@ export function TeamListView({
             const model = describeWorkerModel(worker);
             // Null when the parent is the Leader (it is not in `workers`) — exactly what the
             // Canvas passes into WorkerNode, so both views name the same parent.
-            const hierarchy = describeHierarchy(worker, parentAgentOf(worker, workers));
+            const hierarchy = describeHierarchy(worker, parentAgentOf(worker, allWorkers));
             const relevant = detail.messages
               .filter((m) => m.targetAgentId === worker.id || m.sourceAgentId === worker.id)
               .sort((a, b) => a.seq - b.seq)
@@ -158,7 +160,7 @@ export function TeamListView({
                 className="tlv-worker"
                 data-testid="team-worker"
                 data-depth={worker.depth}
-                data-parent-agent-id={parentAgentOf(worker, workers)?.id ?? ''}
+                data-parent-agent-id={parentAgentOf(worker, allWorkers)?.id ?? ''}
                 id={`team-agent-${worker.id}`}
                 tabIndex={-1}
                 aria-label={`Worker ${worker.role} · ${worker.state}`}

@@ -210,17 +210,19 @@ export function TeamCanvas({
   } | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
-  const workers = useMemo(
+  const allWorkers = useMemo(
     () =>
       detail
         ? [...detail.workers]
-            // A stopped Worker remains in persistence for audit/history, but is no longer part of
-            // the working surface. Treat stopping one as dismissing it from the visible Team.
-            .filter((w) => w.kind === 'worker' && w.state !== 'stopped')
+            .filter((w) => w.kind === 'worker')
             .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
         : [],
     [detail],
   );
+  // A stopped Worker remains in persistence for audit/history and hierarchy resolution, but is no
+  // longer part of the working surface. Keeping it in allWorkers prevents a dismissed Manager's
+  // visible children from being incorrectly described as direct reports of the Leader.
+  const workers = useMemo(() => allWorkers.filter((w) => w.state !== 'stopped'), [allWorkers]);
   const workerCount = detail ? currentTeamWorkerCount(detail) : 0;
   const leaderAgentId = detail?.team.leaderAgentId;
   // Default (pre-drag, pre-restore) positions for every Worker, from the Team's recorded agent
@@ -228,8 +230,8 @@ export function TeamCanvas({
   // uses. A Worker with a saved/dragged position in `nodePositions` keeps that instead; this only
   // ever answers "where does a card go if nothing else has decided".
   const hierarchyLayout = useMemo(
-    () => computeHierarchyLayout(leaderAgentId ?? null, workers),
-    [leaderAgentId, workers],
+    () => computeHierarchyLayout(leaderAgentId ?? null, allWorkers),
+    [allWorkers, leaderAgentId],
   );
   const defaultPositionFor = useCallback(
     (workerId: string): { x: number; y: number } => {
@@ -957,12 +959,12 @@ export function TeamCanvas({
                   <WorkerNode
                     key={worker.id}
                     worker={worker}
-                    parent={parentAgentOf(worker, workers)}
+                    parent={parentAgentOf(worker, allWorkers)}
                     // Message lines name their counterpart by its persisted agent id — the Leader
                     // by `leaderAgentId`, a sibling Worker by its own role. TeamListView resolves
                     // against the exact same two facts, so both views tag a message identically.
                     leaderAgentId={detail.team.leaderAgentId}
-                    agents={workers}
+                    agents={allWorkers}
                     x={pos.x}
                     y={pos.y}
                     messages={detail.messages}
