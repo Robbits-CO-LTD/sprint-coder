@@ -16,6 +16,17 @@ function Assert-NativeSuccess([string]$Operation) {
   if ($LASTEXITCODE -ne 0) { throw "$Operation failed with exit code $LASTEXITCODE." }
 }
 
+function Assert-ReleaseState([object]$Release, [string]$ExpectedCommit) {
+  if (-not $Release.isDraft) { throw "Release $Tag is not a draft; refusing to modify published assets." }
+  $targetCommitish = [string]$Release.targetCommitish
+  if ([string]::IsNullOrWhiteSpace($targetCommitish)) { throw "Release $Tag has no target commit." }
+  $resolvedTarget = gh api "repos/$Repository/commits/$targetCommitish" --jq .sha 2>$null
+  Assert-NativeSuccess "Resolve release target $targetCommitish"
+  if (([string]$resolvedTarget).Trim() -ne $ExpectedCommit) {
+    throw "Release $Tag targets $(([string]$resolvedTarget).Trim()), but HEAD is $ExpectedCommit."
+  }
+}
+
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
 $manifestPath = Join-Path $repositoryRoot 'apps\desktop\package.json'
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
@@ -56,7 +67,7 @@ try {
     Assert-NativeSuccess "Read draft release $Tag"
     $release = $releaseJson | ConvertFrom-Json
   }
-  if (-not $release.isDraft) { throw "Release $Tag is not a draft; refusing to replace published assets." }
+  Assert-ReleaseState $release $headCommit
 
   if ([string]::IsNullOrWhiteSpace($CertificateSha1)) {
     throw 'CertificateSha1 is required. Use the ROBBITS INC. code-signing certificate thumbprint.'
@@ -135,16 +146,30 @@ try {
     Copy-Item -LiteralPath $nupkg -Destination $stagedNupkg
     Copy-Item -LiteralPath $portableZip -Destination $stagedPortableZip
 
-    gh release upload $Tag --repo $Repository --clobber `
+    # Re-check after the potentially long build. Never use --clobber: replacing an asset that was
+    # published concurrently is more dangerous than requiring a deliberate cleanup and rerun.
+    $releaseJson = gh release view $Tag --repo $Repository --json body,assets,isDraft,targetCommitish
+    Assert-NativeSuccess "Re-check draft release $Tag before upload"
+    $release = $releaseJson | ConvertFrom-Json
+    Assert-ReleaseState $release $headCommit
+    $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
+    foreach ($expected in @('Sprint-Coder-Installer.exe', "Sprint-Coder-win32-x64-$version.zip", "SprintCoder-$version-full.nupkg", 'RELEASES')) {
+      if ($assetNames -contains $expected) {
+        throw "Release asset already exists and will not be overwritten: $expected"
+      }
+    }
+
+    gh release upload $Tag --repo $Repository `
       "$stagedInstaller#Windows x64 signed installer" `
       "$stagedPortableZip#Windows x64 portable ZIP" `
       "$stagedNupkg#Windows automatic update package" `
       "$stagedReleases#Windows automatic update feed"
     Assert-NativeSuccess "Upload Windows assets to $Tag"
 
-    $releaseJson = gh release view $Tag --repo $Repository --json body,assets,isDraft
+    $releaseJson = gh release view $Tag --repo $Repository --json body,assets,isDraft,targetCommitish
     Assert-NativeSuccess "Verify uploaded assets on $Tag"
     $release = $releaseJson | ConvertFrom-Json
+    Assert-ReleaseState $release $headCommit
     $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
     foreach ($expected in @('Sprint-Coder-Installer.exe', "Sprint-Coder-win32-x64-$version.zip", "SprintCoder-$version-full.nupkg", 'RELEASES')) {
       if ($assetNames -notcontains $expected) { throw "Uploaded asset was not found on GitHub: $expected" }

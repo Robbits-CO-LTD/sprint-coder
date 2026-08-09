@@ -50,7 +50,7 @@ powershell -ExecutionPolicy Bypass -File .agents/skills/release/scripts/release-
 - `npm ci`、Electron取得、Inno Setup検証、Windows x64 release build
 - `Sprint-Coder-Installer.exe` の署名者とthumbprintを検証
 - `RELEASES`、`SprintCoder-<version>-full.nupkg`、portable ZIPを検証
-- 対象Draftへ4ファイルを `--clobber` で添付
+- upload直前にもDraft状態と対象commitを再検証し、既存assetを上書きせず4ファイルを添付
 - GitHub上のassetを再取得し、実在するWindows/macOS assetから「パッケージ案内」を生成
 
 対象Draftがまだない場合だけ `-CreateDraftIfMissing` を付ける。PR merge前には付けない。
