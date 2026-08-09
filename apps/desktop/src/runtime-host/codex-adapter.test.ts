@@ -245,6 +245,7 @@ describe('Codex runtime probe', () => {
       type: 'operation',
       phase: 'tool_call_start',
       label: 'Codex tool call started (exec_command)',
+      sideEffect: false,
     });
     expect(
       codexOperationForItem(
@@ -255,6 +256,7 @@ describe('Codex runtime probe', () => {
       type: 'operation',
       phase: 'tool_call_end',
       label: 'Codex tool call finished (write_stdin)',
+      sideEffect: false,
     });
   });
 

@@ -1001,7 +1001,7 @@ describe('public contracts', () => {
     expect(() => claudeEffortSchema.parse('bogus')).toThrow();
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'])
       expect(claudeEffortSchema.parse(effort)).toBe(effort);
-    for (const code of ['STEER_UNSUPPORTED', 'USER_CANCELED'] as const)
+    for (const code of ['STEER_UNSUPPORTED', 'USER_CANCELED', 'RUNTIME_RATE_LIMIT'] as const)
       expect(
         publicErrorSchema.parse({
           code,

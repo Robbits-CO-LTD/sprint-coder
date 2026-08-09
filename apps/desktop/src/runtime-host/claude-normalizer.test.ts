@@ -315,7 +315,12 @@ describe('file writes (issue #37)', () => {
     // The intent alone proves nothing: under the ask preset the CLI denies every one of these, and
     // the denial arrives as the tool_result. Emitting on the intent would report edits that a
     // read-only Turn never made.
-    expect(normalizer.push(toolUse('t1', 'Edit', '/ws/a.ts'))).toEqual([]);
+    expect(normalizer.push(toolUse('t1', 'Edit', '/ws/a.ts'))).toContainEqual({
+      type: 'operation',
+      phase: 'tool_call_start',
+      label: 'Claude tool call started (Edit)',
+      sideEffect: true,
+    });
     expect(normalizer.push(toolResult('t1', 'The file has been updated.'))).toContainEqual({
       type: 'fileChange',
       changes: [{ path: '/ws/a.ts', kind: 'update' }],
@@ -356,9 +361,25 @@ describe('file writes (issue #37)', () => {
 
   it('ignores tools that do not write and results with no matching intent', () => {
     const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push(toolUse('t1', 'Read', '/ws/a.ts'));
+    expect(normalizer.push(toolUse('t1', 'Read', '/ws/a.ts'))).toContainEqual({
+      type: 'operation',
+      phase: 'tool_call_start',
+      label: 'Claude tool call started (Read)',
+      sideEffect: false,
+    });
     expect(normalizer.push(toolResult('t1', '1\tcontents'))).toEqual([]);
     expect(normalizer.push(toolResult('unknown', 'done'))).toEqual([]);
+  });
+
+  it('surfaces Team MCP tool use so a failed attempt is not retried after side effects', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+
+    expect(normalizer.push(toolUse('t1', 'mcp__team__team_hire', '/unused'))).toContainEqual({
+      type: 'operation',
+      phase: 'tool_call_start',
+      label: 'Claude tool call started (mcp__team__team_hire)',
+      sideEffect: true,
+    });
   });
 });
 

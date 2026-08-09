@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { ChatMessage, RuntimeKind, RuntimeWriteScope } from '@sprint-coder/contracts';
+import type {
+  ChatMessage,
+  PublicError,
+  RuntimeKind,
+  RuntimeWriteScope,
+} from '@sprint-coder/contracts';
 import { RuntimeHostClient } from './runtime-host';
 import {
   DeterministicTeamWorkerRuntime,
@@ -7,11 +12,9 @@ import {
   type TeamWorkerRuntime,
   type WorkerActivityEvent,
   type WorkerRuntimeResult,
-  type TeamExecutionAccess,
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
 import type { PreparedContext } from './context-ledger';
-import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
@@ -22,11 +25,34 @@ import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 // the app runs on the mock runtime without any real CLI available) execution fails explicitly.
 // Production must never present simulated Worker output as a real Team report.
 
-type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex'; model: string }>;
+export type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex'; model: string }>;
+
+const UNKNOWN_RUNTIME_RETRY_DELAY_MS = 60_000;
+
+export class TeamRuntimeAvailabilityTracker {
+  private readonly unavailableUntil = new Map<'claude' | 'codex', number>();
+
+  isAvailable(kind: 'claude' | 'codex', now = Date.now()): boolean {
+    const until = this.unavailableUntil.get(kind);
+    if (until === undefined) return true;
+    if (until > now) return false;
+    this.unavailableUntil.delete(kind);
+    return true;
+  }
+
+  markUnavailable(kind: 'claude' | 'codex', retryAt?: string, now = Date.now()): void {
+    const parsed = retryAt === undefined ? Number.NaN : Date.parse(retryAt);
+    this.unavailableUntil.set(
+      kind,
+      Number.isFinite(parsed) ? parsed : now + UNKNOWN_RUNTIME_RETRY_DELAY_MS,
+    );
+  }
+}
 
 export type TeamWorkerRuntimeDeps = Readonly<{
-  /** Which real runtime (if any) worker executions should use right now. */
-  selectRuntime: (worker: AgentRecord) => RealRuntimeChoice | null;
+  /** Ordered, policy-allowed runtime candidates. The selected model must be first. */
+  selectRuntimes: (worker: AgentRecord) => readonly RealRuntimeChoice[];
+  availability: TeamRuntimeAvailabilityTracker;
   workspaceFor: (taskId: string) => string | null;
   catalogFor: (kind: 'claude' | 'codex', workspacePath: string | null) => unknown;
   /** Provider egress gate; returns false when policy denies the dispatch. */
@@ -57,7 +83,22 @@ type PendingRun = {
   deltaBuffer: string[];
   deltaTimer: NodeJS.Timeout | null;
   reasoningActive: boolean;
+  runtimeStarted: boolean;
+  sideEffectsObserved: boolean;
+  writeScope: RuntimeWriteScope;
 };
+
+class TeamRuntimeExecutionError extends Error {
+  constructor(
+    readonly publicError: PublicError,
+    readonly safeToRetry: boolean,
+  ) {
+    super(publicError.userMessage);
+    this.name = 'TeamRuntimeExecutionError';
+  }
+}
+
+type TeamWorkerExecutionInput = Parameters<TeamWorkerRuntime['execute']>[0];
 
 export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   private readonly simulator = new DeterministicTeamWorkerRuntime();
@@ -88,13 +129,15 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             label: stageLabel(event.stage),
             at: new Date().toISOString(),
           });
-        if (event.type === 'operation')
+        if (event.type === 'operation') {
+          if (event.sideEffect === true) run.sideEffectsObserved = true;
           run.onEvent?.({
             type: 'activity',
             phase: event.phase,
             label: event.label,
             at: new Date().toISOString(),
           });
+        }
         if (event.type === 'delta') {
           run.buffer.push(event.delta);
           run.deltaBuffer.push(event.delta);
@@ -104,8 +147,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           run.reasoningActive = true;
           run.onEvent?.({ type: 'reasoningPresence', active: true });
         }
-        if (event.type === 'fileChange')
+        if (event.type === 'fileChange') {
+          run.sideEffectsObserved = true;
           run.onEvent?.({ type: 'fileChange', changes: event.changes });
+        }
         if (event.type === 'completed') {
           flushDelta(run);
           if (run.reasoningActive) run.onEvent?.({ type: 'reasoningPresence', active: false });
@@ -119,9 +164,13 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         if (run === undefined) return;
         flushDelta(run);
         if (run.reasoningActive) run.onEvent?.({ type: 'reasoningPresence', active: false });
-        run.onEvent?.({ type: 'failed', error: error.userMessage });
         this.pending.delete(turnId);
-        run.reject(new Error(error.userMessage));
+        run.reject(
+          new TeamRuntimeExecutionError(
+            error,
+            !run.runtimeStarted || (run.writeScope === 'read-only' && !run.sideEffectsObserved),
+          ),
+        );
       },
       undefined,
       undefined,
@@ -136,28 +185,16 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     return { pid: null };
   }
 
-  async execute(input: {
-    worker: AgentRecord;
-    envelope: TeamEnvelope;
-    content: string;
-    accessMode?: TeamExecutionAccess;
-    executionId?: string;
-    workspacePath?: string | null;
-    workspaceSet?: RuntimeWorkspaceSet;
-    priorConversation?: readonly TeamRuntimeConversationItem[];
-    onEvent?: (event: WorkerActivityEvent) => void;
-    signal?: AbortSignal;
-  }): Promise<WorkerRuntimeResult> {
-    const choice = this.deps.selectRuntime(input.worker);
-    if (choice === null) {
+  async execute(input: TeamWorkerExecutionInput): Promise<WorkerRuntimeResult> {
+    const choices = uniqueRuntimeChoices(this.deps.selectRuntimes(input.worker)).filter(
+      ({ kind }) => this.deps.availability.isAvailable(kind),
+    );
+    if (choices.length === 0) {
       if (this.deps.allowSimulation === true) return this.simulator.execute(input);
       throw new Error('Real Team Worker runtime is unavailable');
     }
-    const capability = await this.client(choice.kind).probe();
-    if (!capability.available) throw new Error(`${choice.kind} Team Worker runtime is unavailable`);
 
     const taskId = input.worker.taskId;
-    const turnId = randomUUID();
     const prompt = [
       `あなたはチームの「${input.worker.role}」担当Workerです。`,
       `あなたのAgent ID: ${input.worker.id}`,
@@ -184,12 +221,6 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         this.deps.contextFor?.(input.worker, input.executionId) ?? emptyPreparedContext(),
       ),
     );
-    if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, prompt, context))
-      throw new Error(`${choice.kind} Team Worker egress was denied`);
-    const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId);
-    if (input.worker.canDelegate === true && teamMcp === undefined)
-      throw new Error('Manager Team MCP is unavailable');
-
     const workspacePath =
       input.workspaceSet?.roots.find(({ rootId }) => rootId === input.workspaceSet?.primaryRootId)
         ?.path ??
@@ -202,14 +233,97 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     const writeScope = requestedWriteScope === 'full' ? 'workspace-write' : requestedWriteScope;
     const startedAt = Date.now();
     if (input.signal?.aborted) throw new Error('Worker execution was canceled before start');
+    input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
+
+    let lastAvailabilityError: Error | null = null;
+    for (const [index, choice] of choices.entries()) {
+      const capability = await this.client(choice.kind).probe();
+      if (!capability.available || capability.readiness !== 'ready') {
+        this.deps.availability.markUnavailable(choice.kind);
+        lastAvailabilityError = new Error(`${choice.kind} Team Worker runtime is unavailable`);
+        continue;
+      }
+      if (index > 0)
+        input.onEvent?.({
+          type: 'activity',
+          phase: 'executing',
+          label: `${runtimeLabel(choice.kind)}へfallbackして続行`,
+          at: new Date().toISOString(),
+        });
+      try {
+        const finalText = await this.executeChoice(
+          input,
+          choice,
+          taskId,
+          prompt,
+          context,
+          workspacePath,
+          runtimeWorkspace,
+          writeScope,
+        );
+        const summary = finalText.trim() === '' ? '(空の応答)' : finalText.trim();
+        return {
+          claims: {
+            deliveryId: input.envelope.deliveryId,
+            sourceAgentId: input.envelope.sourceAgentId,
+            targetAgentId: input.envelope.targetAgentId,
+          },
+          completion: {
+            status: 'succeeded',
+            summary,
+            artifacts: [],
+            verification: [{ name: `worker-runtime:${choice.kind}`, outcome: 'pass' }],
+            risks: [],
+          },
+          usage: {
+            costCents: 0,
+            tokens: Math.max(1, Math.ceil((prompt.length + summary.length) / 4)),
+            timeMs: Date.now() - startedAt,
+            toolCalls: 0,
+          },
+          resolution: {
+            resolvedProvider: choice.kind === 'codex' ? 'openai' : 'anthropic',
+            resolvedModel: choice.model,
+          },
+        };
+      } catch (error) {
+        if (!isRuntimeAvailabilityError(error)) throw error;
+        this.deps.availability.markUnavailable(choice.kind, error.publicError.retryAt);
+        if (!error.safeToRetry) {
+          input.onEvent?.({ type: 'failed', error: error.message });
+          throw error;
+        }
+        lastAvailabilityError = error;
+      }
+    }
+    const failure = lastAvailabilityError ?? new Error('Real Team Worker runtime is unavailable');
+    input.onEvent?.({ type: 'failed', error: failure.message });
+    throw failure;
+  }
+
+  private async executeChoice(
+    input: TeamWorkerExecutionInput,
+    choice: RealRuntimeChoice,
+    taskId: string,
+    prompt: string,
+    context: PreparedContext,
+    workspacePath: string | null,
+    runtimeWorkspace: RuntimeWorkspaceSet | string | null,
+    writeScope: RuntimeWriteScope,
+  ): Promise<string> {
+    const turnId = randomUUID();
+    if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, prompt, context))
+      throw new Error(`${choice.kind} Team Worker egress was denied`);
+    const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId);
+    if (input.worker.canDelegate === true && teamMcp === undefined)
+      throw new Error('Manager Team MCP is unavailable');
     const abort = (): void => {
       void this.stop(input.worker.id).catch(() => undefined);
     };
     input.signal?.addEventListener('abort', abort, { once: true });
-    let finalText: string;
     let runtimeStarted = false;
     try {
-      finalText = await new Promise<string>((resolve, reject) => {
+      return await new Promise<string>((resolve, reject) => {
         this.pending.set(turnId, {
           resolve,
           reject,
@@ -218,9 +332,11 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           deltaBuffer: [],
           deltaTimer: null,
           reasoningActive: false,
+          runtimeStarted: false,
+          sideEffectsObserved: false,
+          writeScope,
         });
         this.activeByAgent.set(input.worker.id, { kind: choice.kind, taskId, turnId });
-        input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
         runtimeStarted = this.client(choice.kind).start(
           taskId,
           turnId,
@@ -233,6 +349,8 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           undefined,
           writeScope,
         );
+        const run = this.pending.get(turnId);
+        if (run !== undefined) run.runtimeStarted = runtimeStarted;
       });
     } finally {
       try {
@@ -245,32 +363,6 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
       }
     }
-
-    const summary = finalText.trim() === '' ? '(空の応答)' : finalText.trim();
-    return {
-      claims: {
-        deliveryId: input.envelope.deliveryId,
-        sourceAgentId: input.envelope.sourceAgentId,
-        targetAgentId: input.envelope.targetAgentId,
-      },
-      completion: {
-        status: 'succeeded',
-        summary,
-        artifacts: [],
-        verification: [{ name: `worker-runtime:${choice.kind}`, outcome: 'pass' }],
-        risks: [],
-      },
-      usage: {
-        costCents: 0,
-        tokens: Math.max(1, Math.ceil((prompt.length + summary.length) / 4)),
-        timeMs: Date.now() - startedAt,
-        toolCalls: 0,
-      },
-      resolution: {
-        resolvedProvider: choice.kind === 'codex' ? 'openai' : 'anthropic',
-        resolvedModel: choice.model,
-      },
-    };
   }
 
   async stop(agentId: string): Promise<void> {
@@ -295,6 +387,28 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
   }
+}
+
+function uniqueRuntimeChoices(choices: readonly RealRuntimeChoice[]): RealRuntimeChoice[] {
+  const seen = new Set<RealRuntimeChoice['kind']>();
+  return choices.filter(({ kind }) => {
+    if (seen.has(kind)) return false;
+    seen.add(kind);
+    return true;
+  });
+}
+
+function isRuntimeAvailabilityError(error: unknown): error is TeamRuntimeExecutionError {
+  return (
+    error instanceof TeamRuntimeExecutionError &&
+    ['RUNTIME_RATE_LIMIT', 'RUNTIME_UNAVAILABLE', 'RUNTIME_CLI_MISSING'].includes(
+      error.publicError.code,
+    )
+  );
+}
+
+function runtimeLabel(kind: RealRuntimeChoice['kind']): string {
+  return kind === 'codex' ? 'Codex' : 'Claude Code';
 }
 
 function emptyPreparedContext(): PreparedContext {

@@ -83,7 +83,7 @@ export class ClaudeJsonlNormalizer {
     // Write intents and their outcomes arrive on the full assistant/user messages, not on the
     // partial-message deltas: `input_json_delta` carries tool arguments a fragment at a time and is
     // useless until complete.
-    if (type === 'assistant') return this.rememberWriteIntents(value);
+    if (type === 'assistant') return this.rememberToolUse(value);
     if (type === 'user') return this.confirmWrites(value);
     if (type === 'rate_limit_event') {
       this.rememberRateLimit(value);
@@ -199,29 +199,36 @@ export class ClaudeJsonlNormalizer {
   }
 
   /**
-   * Records a `tool_use` for a file-writing tool, keyed by its tool_use_id.
+   * Surfaces every `tool_use` as an operation and records file-writing intents by tool_use_id.
    *
-   * Nothing is emitted here. A tool_use is an intent, and Claude's own permission layer can still
-   * refuse it — under the `ask` preset every one of them is denied (verified: the denial comes back
-   * as a `tool_result` and is listed in `permission_denials` on the result). Reporting the intent as
-   * an edit would tell the user a file changed when it did not.
+   * The operation lets Main stop an unsafe provider fallback after a tool may have produced side
+   * effects, including Team MCP calls. A write intent still is not a `fileChange`: Claude's
+   * permission layer may refuse it, so the change is emitted only after a successful result.
    */
-  private rememberWriteIntents(value: Record<string, unknown>): RuntimeCanonicalEvent[] {
+  private rememberToolUse(value: Record<string, unknown>): RuntimeCanonicalEvent[] {
     const message = isRecord(value['message']) ? value['message'] : null;
     const content = message === null ? null : message['content'];
     if (!Array.isArray(content)) return [];
+    const operations: RuntimeCanonicalEvent[] = [];
     for (const block of content) {
       if (!isRecord(block) || block['type'] !== 'tool_use') continue;
       const name = readString(block, 'name');
       const id = readString(block, 'id');
-      if (name === null || id === null || !WRITE_TOOLS.has(name)) continue;
+      if (name === null || id === null) continue;
+      operations.push({
+        type: 'operation',
+        phase: 'tool_call_start',
+        label: `Claude tool call started (${name})`,
+        sideEffect: WRITE_TOOLS.has(name) || name.startsWith('mcp__team__'),
+      });
+      if (!WRITE_TOOLS.has(name)) continue;
       const input = isRecord(block['input']) ? block['input'] : null;
       const path = input === null ? null : readString(input, 'file_path');
       if (path === null || path.length === 0 || path.length > 4096) continue;
       if (this.pendingWrites.size >= 200) continue;
       this.pendingWrites.set(id, { path, tool: name });
     }
-    return [];
+    return operations.length === 0 ? [] : [...this.advanceTo('executing'), ...operations];
   }
 
   /**

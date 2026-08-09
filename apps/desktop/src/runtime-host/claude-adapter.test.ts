@@ -274,7 +274,11 @@ describe('Claude runtime errors', () => {
       new ClaudeRateLimitError('weekly limit', 1_785_690_000),
     );
 
-    expect(error).toMatchObject({ code: 'RUNTIME_FAILED', retryable: false });
+    expect(error).toMatchObject({
+      code: 'RUNTIME_RATE_LIMIT',
+      retryable: false,
+      retryAt: '2026-08-02T17:00:00.000Z',
+    });
     expect(error.userMessage).toContain('Claude Codeの利用上限に達しました');
     expect(error.userMessage).toContain('リセット予定です');
     expect(error.userMessage).not.toContain('出力を解釈');

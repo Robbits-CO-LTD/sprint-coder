@@ -1758,6 +1758,7 @@ export const publicErrorCodeSchema = z.enum([
   'INVALID_REQUEST',
   'RUNTIME_UNAVAILABLE',
   'RUNTIME_CLI_MISSING',
+  'RUNTIME_RATE_LIMIT',
   'RUNTIME_FAILED',
   'RUNTIME_TIMEOUT',
   'RUNTIME_PROTOCOL_ERROR',
@@ -1770,6 +1771,7 @@ export const publicErrorSchema = z
     code: publicErrorCodeSchema,
     userMessage: z.string().min(1).max(500),
     retryable: z.boolean(),
+    retryAt: timestampSchema.optional(),
   })
   .strict();
 export type PublicError = z.infer<typeof publicErrorSchema>;

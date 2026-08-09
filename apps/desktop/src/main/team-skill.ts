@@ -20,6 +20,7 @@ Teamに関する質問・相談ではSkillとMCPを使って正確に回答す�
 
 1. \`team_list_models\` で利用可能なConnection／modelとsource付き能力を確認する。まず作業に必要な能力でfilterする。0件なら、CLI modelのunknown能力がfilterで除外された可能性があるため、capabilitiesを空にして再検索し、source付きのunknownとして候補を確認する。unknownを0やfalseと解釈せず、model名やProvider名から能力を推測しない。
 2. \`team_hire_worker\` で重複しない役割のAgentを必要人数だけ採用する。workspace-writeを割り当てる予定のAgentは、最初の採用時から\`writeCapable: true\`を必ず指定する。leaf Workerは\`agentKind: "worker"\`を指定し、\`managerPolicy\`を付けない。再委譲するManagerは\`agentKind: "manager"\`を指定し、\`managerPolicy.maxDelegationLevels\`へそのManagerの直下から許す追加段数を指定する。たとえばSubLeaderに直属Workerだけを雇わせる場合は\`{ maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false }\`とする。各作業に選んだconnection ID、provider ID、model IDを\`modelSelection\`へ、その選定根拠を\`modelSelectionReason\`へ必ず明示する。
+採用がConnection/modelの利用不能で失敗したら、同じ候補を再採用せず\`team_list_models\`を再実行し、現在availableな別ConnectionのAIを選ぶ。availableな候補がなければWorkerを追加せず、その事実を報告する。
 3. 30分以内で完了する単発作業は\`team_assign_task\`へ\`workerId\`、\`objective\`、\`doneCriteria\`、\`access\`を渡す。accessは必ずread-onlyまたはworkspace-writeを明示する。scope、nonGoals、targetPaths、constraintsなどは追加フィールドにせず\`objective\`本文へ含め、返されたexecution IDを記録する。queuedは失敗ではない。
 4. 30分を超える、または複数の検証可能な境界があるコーディングは\`team_assign_mission\`で2〜12工程に分割する。各工程へ担当workerId、objective、doneCriteria、read-onlyまたはworkspace-writeのaccessを明示する。workspace-writeは書き込み可能Workerだけに割り当てる。
 5. Missionがwaiting_resumeになった場合は状態と部分成果を確認し、重複操作を避けられると判断したときだけ\`team_resume_mission\`を呼ぶ。

@@ -1,11 +1,23 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
 
 const runtimeHostMock = vi.hoisted(() => ({
-  starts: [] as unknown[][],
+  starts: [] as Array<{ kind: 'claude' | 'codex'; args: unknown[] }>,
   waitForExit: vi.fn<(turnId: string) => Promise<void>>(async (_turnId: string) => undefined),
   startSucceeds: true,
+  failures: new Map<
+    'claude' | 'codex',
+    {
+      code: 'RUNTIME_RATE_LIMIT' | 'RUNTIME_UNAVAILABLE';
+      userMessage: string;
+      retryable: boolean;
+      retryAt?: string;
+      defer?: boolean;
+      emitOperation?: boolean;
+      emitReadOperation?: boolean;
+    }
+  >(),
 }));
 
 vi.mock('./runtime-host', () => ({
@@ -15,20 +27,52 @@ vi.mock('./runtime-host', () => ({
       private readonly onFailure: (
         taskId: string,
         turnId: string,
-        error: { userMessage: string },
+        error: {
+          code: 'RUNTIME_RATE_LIMIT' | 'RUNTIME_UNAVAILABLE';
+          userMessage: string;
+          retryable: boolean;
+          retryAt?: string;
+        },
       ) => void,
+      _prepareContext?: unknown,
+      _onContextAccepted?: unknown,
+      private readonly kind: 'claude' | 'codex' = 'codex',
     ) {}
 
-    async probe(): Promise<{ available: boolean; models: never[] }> {
-      return { available: true, models: [] };
+    async probe(): Promise<{ available: boolean; readiness: 'ready'; models: never[] }> {
+      return { available: true, readiness: 'ready', models: [] };
     }
 
     start(...args: unknown[]): boolean {
-      runtimeHostMock.starts.push(args);
+      runtimeHostMock.starts.push({ kind: this.kind, args });
       const taskId = args[0] as string;
       const turnId = args[1] as string;
+      const failure = runtimeHostMock.failures.get(this.kind);
+      if (failure !== undefined) {
+        if (failure.emitOperation === true)
+          this.onEvent(taskId, turnId, {
+            type: 'operation',
+            phase: 'tool_call_start',
+            label: 'Claude tool call started (mcp__team__team_hire)',
+            sideEffect: true,
+          });
+        if (failure.emitReadOperation === true)
+          this.onEvent(taskId, turnId, {
+            type: 'operation',
+            phase: 'tool_call_start',
+            label: 'Claude tool call started (Read)',
+            sideEffect: false,
+          });
+        if (failure.defer === true) queueMicrotask(() => this.onFailure(taskId, turnId, failure));
+        else this.onFailure(taskId, turnId, failure);
+        return true;
+      }
       if (!runtimeHostMock.startSucceeds) {
-        this.onFailure(taskId, turnId, { userMessage: 'runtime unavailable' });
+        this.onFailure(taskId, turnId, {
+          code: 'RUNTIME_UNAVAILABLE',
+          userMessage: 'runtime unavailable',
+          retryable: false,
+        });
         return false;
       }
       this.onEvent(taskId, turnId, { type: 'delta', delta: '完了' });
@@ -50,8 +94,16 @@ import {
   RuntimeHostTeamWorkerRuntime,
   applyWorkerContextInheritance,
   buildInheritedWorkerContext,
+  TeamRuntimeAvailabilityTracker,
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
+
+afterEach(() => {
+  runtimeHostMock.failures.clear();
+  runtimeHostMock.startSucceeds = true;
+  runtimeHostMock.waitForExit.mockReset();
+  runtimeHostMock.waitForExit.mockResolvedValue(undefined);
+});
 
 function worker(canDelegate: boolean): AgentRecord {
   return {
@@ -105,10 +157,14 @@ function runtime(
     contextFor?: TeamWorkerRuntimeDeps['contextFor'];
     writeScopeFor?: TeamWorkerRuntimeDeps['writeScopeFor'];
     authorizeEgress?: TeamWorkerRuntimeDeps['authorizeEgress'];
+    selectRuntimes?: TeamWorkerRuntimeDeps['selectRuntimes'];
+    availability?: TeamRuntimeAvailabilityTracker;
   } = {},
 ): RuntimeHostTeamWorkerRuntime {
   return new RuntimeHostTeamWorkerRuntime({
-    selectRuntime: () => ({ kind: 'claude', model: 'claude-opus-5' }),
+    selectRuntimes:
+      overrides.selectRuntimes ?? (() => [{ kind: 'claude', model: 'claude-opus-5' }]),
+    availability: overrides.availability ?? new TeamRuntimeAvailabilityTracker(),
     workspaceFor: () => '/workspace',
     catalogFor: () => ({ tools: [] }),
     authorizeEgress: overrides.authorizeEgress ?? (() => true),
@@ -120,6 +176,152 @@ function runtime(
 }
 
 describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
+  it('re-enables a runtime after a short retry delay when no reset time is known', () => {
+    const availability = new TeamRuntimeAvailabilityTracker();
+    const unavailableAt = Date.parse('2026-08-09T12:00:00.000Z');
+
+    availability.markUnavailable('claude', undefined, unavailableAt);
+
+    expect(availability.isAvailable('claude', unavailableAt + 59_999)).toBe(false);
+    expect(availability.isAvailable('claude', unavailableAt + 60_000)).toBe(true);
+  });
+
+  it('falls back to another available AI and suppresses the rate-limited runtime until reset', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_RATE_LIMIT',
+      userMessage: 'Claude Codeの利用上限に達しました。',
+      retryable: false,
+      retryAt: '2099-08-10T02:00:00.000Z',
+    });
+    const availability = new TeamRuntimeAvailabilityTracker();
+    const activities: string[] = [];
+    const teamMcpFor = vi.fn(() => ({
+      socketPath: '/tmp/team.sock',
+      token: 'manager-token',
+      guidance: 'manager guidance',
+    }));
+    const releaseTeamMcp = vi.fn();
+    const subject = runtime({
+      availability,
+      teamMcpFor,
+      releaseTeamMcp,
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    });
+
+    const result = await subject.execute({
+      worker: worker(true),
+      envelope,
+      content: '部下へ再委譲する',
+      onEvent: (event) => {
+        if (event.type === 'activity') activities.push(event.label);
+      },
+    });
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude', 'codex']);
+    expect(result.resolution).toEqual({
+      resolvedProvider: 'openai',
+      resolvedModel: 'gpt-5.6-terra',
+    });
+    expect(activities).toContain('Codexへfallbackして続行');
+    expect(teamMcpFor).toHaveBeenCalledTimes(2);
+    expect(releaseTeamMcp).toHaveBeenCalledTimes(2);
+    expect(availability.isAvailable('claude', Date.parse('2099-08-10T01:59:59.000Z'))).toBe(false);
+    expect(availability.isAvailable('claude', Date.parse('2099-08-10T02:00:00.000Z'))).toBe(true);
+  });
+
+  it('does not retry a workspace-write task after the runtime has started', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_UNAVAILABLE',
+      userMessage: 'Claude runtimeが途中で利用不能になりました。',
+      retryable: false,
+      defer: true,
+    });
+    const subject = runtime({
+      writeScopeFor: () => 'workspace-write',
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    });
+
+    await expect(
+      subject.execute({
+        worker: { ...worker(false), writeCapable: true },
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '実装する',
+        accessMode: 'workspace-write',
+      }),
+    ).rejects.toThrow('Claude runtimeが途中で利用不能になりました。');
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude']);
+  });
+
+  it('does not retry a read-only task after a Team MCP operation may have side effects', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_RATE_LIMIT',
+      userMessage: 'Claude Codeの利用上限に達しました。',
+      retryable: false,
+      defer: true,
+      emitOperation: true,
+    });
+    const subject = runtime({
+      teamMcpFor: () => ({
+        socketPath: '/tmp/team.sock',
+        token: 'manager-token',
+        guidance: 'manager guidance',
+      }),
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    });
+
+    await expect(
+      subject.execute({
+        worker: worker(true),
+        envelope,
+        content: '部下を採用する',
+      }),
+    ).rejects.toThrow('Claude Codeの利用上限に達しました。');
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude']);
+  });
+
+  it('retries a read-only task after an operation without side effects', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_RATE_LIMIT',
+      userMessage: 'Claude Codeの利用上限に達しました。',
+      retryable: false,
+      defer: true,
+      emitReadOperation: true,
+    });
+    const subject = runtime({
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    });
+
+    await expect(
+      subject.execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '調査する',
+      }),
+    ).resolves.toMatchObject({
+      resolution: { resolvedProvider: 'openai', resolvedModel: 'gpt-5.6-terra' },
+    });
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude', 'codex']);
+  });
+
   it('fails immediately without waiting for exit when the runtime was not started', async () => {
     runtimeHostMock.startSucceeds = false;
     runtimeHostMock.waitForExit.mockClear();
@@ -189,11 +391,11 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       workspacePath: '/isolated/worktree',
     });
 
-    expect(runtimeHostMock.starts[0]?.[3]).toBe('/isolated/worktree');
-    expect(runtimeHostMock.starts[0]?.[6]).toEqual(inherited);
-    expect(runtimeHostMock.starts[0]?.[9]).toBe('workspace-write');
-    expect(runtimeHostMock.starts[0]?.[2]).toContain('Workspace書き込み: 隔離範囲内で可');
-    expect(runtimeHostMock.starts[0]?.[2]).toContain('隔離worktree: /isolated/worktree');
+    expect(runtimeHostMock.starts[0]?.args[3]).toBe('/isolated/worktree');
+    expect(runtimeHostMock.starts[0]?.args[6]).toEqual(inherited);
+    expect(runtimeHostMock.starts[0]?.args[9]).toBe('workspace-write');
+    expect(runtimeHostMock.starts[0]?.args[2]).toContain('Workspace書き込み: 隔離範囲内で可');
+    expect(runtimeHostMock.starts[0]?.args[2]).toContain('隔離worktree: /isolated/worktree');
   });
 
   it('passes the complete isolated root set while deriving policy from its Primary root', async () => {
@@ -228,12 +430,12 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       workspaceSet,
     });
 
-    expect(runtimeHostMock.starts[0]?.[3]).toEqual(workspaceSet);
+    expect(runtimeHostMock.starts[0]?.args[3]).toEqual(workspaceSet);
     expect(writeScopeFor).toHaveBeenCalledWith(
       expect.objectContaining({ id: writableWorker.id }),
       '/isolated/primary',
     );
-    expect(runtimeHostMock.starts[0]?.[2]).toContain(
+    expect(runtimeHostMock.starts[0]?.args[2]).toContain(
       '隔離root: primary=/isolated/primary, secondary=/isolated/secondary',
     );
   });
@@ -298,7 +500,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
         ],
       }),
     );
-    expect(runtimeHostMock.starts[0]?.[6]).toMatchObject({
+    expect(runtimeHostMock.starts[0]?.args[6]).toMatchObject({
       projectItems: [{ id: 'project:one:instruction' }, { id: 'project:one:reference:one' }],
     });
   });
@@ -356,7 +558,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       ],
     });
 
-    const prompt = runtimeHostMock.starts[0]?.[2] as string;
+    const prompt = runtimeHostMock.starts[0]?.args[2] as string;
     expect(prompt).toContain('便益は生産性向上と知識アクセスです。');
     expect(prompt).toContain('この内容を取得し直すためにTeamツールを呼ぶ必要はありません。');
     expect(prompt.indexOf('便益は生産性向上と知識アクセスです。')).toBeLessThan(
@@ -451,7 +653,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       undefined,
     );
     expect(runtimeHostMock.starts).toHaveLength(1);
-    expect(runtimeHostMock.starts[0]?.[7]).toEqual({
+    expect(runtimeHostMock.starts[0]?.args[7]).toEqual({
       socketPath: '/tmp/team.sock',
       token: 'manager-token',
       guidance: 'manager guidance',
@@ -474,7 +676,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       expect.any(String),
       undefined,
     );
-    expect(runtimeHostMock.starts[0]?.[7]).toBeUndefined();
+    expect(runtimeHostMock.starts[0]?.args[7]).toBeUndefined();
 
     await expect(
       subject.execute({
