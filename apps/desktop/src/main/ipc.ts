@@ -608,21 +608,12 @@ export class IpcRouter {
             : { kind: selected.runtimeKind, model: selected.model };
         const candidates = primary === null ? [] : [primary];
         if (primary !== null && process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] !== '1') {
-          const available = this.modelCatalog.query(
-            {
-              taskId: worker.taskId,
-              text: '',
-              connectionIds: [],
-              providerIds: [],
-              accessTypes: [],
-              capabilities: [],
-              availableOnly: true,
-              cursor: null,
-              limit: 512,
-            },
+          const available = listAvailableTeamRuntimeModels(
+            this.modelCatalog,
+            worker.taskId,
             this.teamModelAllowedKeys(),
           );
-          for (const model of available.items) {
+          for (const model of available) {
             const candidate = builtinRuntimeForModelSelection({
               connectionId: model.connectionId,
               requestedProvider: model.providerId,
@@ -4963,6 +4954,34 @@ function sortValue(value: unknown): unknown {
     );
   }
   return value;
+}
+
+export function listAvailableTeamRuntimeModels(
+  catalog: ModelCatalogService,
+  taskId: string,
+  allowedModelKeys?: ReadonlySet<string>,
+): readonly ProviderModel[] {
+  const items: ProviderModel[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = catalog.query(
+      {
+        taskId,
+        text: '',
+        connectionIds: ['builtin:codex-cli', 'builtin:claude-cli'],
+        providerIds: [],
+        accessTypes: [],
+        capabilities: [],
+        availableOnly: true,
+        cursor,
+        limit: 100,
+      },
+      allowedModelKeys,
+    );
+    items.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+  return items;
 }
 
 export function providerModelsForBuiltin(

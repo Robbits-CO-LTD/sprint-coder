@@ -83,6 +83,7 @@ import {
   xAIConnectionCreateInputSchema,
   type EffectiveWorkspaceSet,
   type CodexModelOption,
+  type ProviderModel,
 } from '@sprint-coder/contracts';
 import {
   clampCodexEffort,
@@ -91,6 +92,7 @@ import {
   isCommittedProviderWorkspaceChange,
   isCommittedProviderWorkspaceMutation,
   isTrustedIpcSender,
+  listAvailableTeamRuntimeModels,
   shouldBlockProviderLeaderCompletion,
   providerWorkspaceToolsEligible,
   providerModelsForBuiltin,
@@ -105,6 +107,68 @@ import {
 import { ModelCatalogService } from './model-catalog-service';
 
 describe('built-in subscription model capabilities', () => {
+  it('pages fallback candidates within the catalog limit and preserves the allowlist', () => {
+    const runtimeMetadata = { value: true, source: 'runtime_metadata' as const };
+    const catalog = new ModelCatalogService();
+    const claudeModels: ProviderModel[] = Array.from({ length: 101 }, (_, index) => ({
+      connectionId: 'builtin:claude-cli',
+      providerId: 'anthropic',
+      modelId: `claude-${String(index).padStart(3, '0')}`,
+      displayName: `Claude ${index}`,
+      available: true,
+      availabilityCheckedAt: '2026-08-09T00:00:00.000Z',
+      contextWindow: { value: null, source: 'unknown' },
+      maxOutputTokens: { value: null, source: 'unknown' },
+      toolCalling: runtimeMetadata,
+      structuredOutput: runtimeMetadata,
+      multimodalInput: runtimeMetadata,
+      reasoning: runtimeMetadata,
+    }));
+    const codexModels: ProviderModel[] = [
+      {
+        connectionId: 'builtin:codex-cli',
+        providerId: 'openai',
+        modelId: 'gpt-test',
+        displayName: 'GPT Test',
+        available: true,
+        availabilityCheckedAt: '2026-08-09T00:00:00.000Z',
+        contextWindow: { value: null, source: 'unknown' },
+        maxOutputTokens: { value: null, source: 'unknown' },
+        toolCalling: runtimeMetadata,
+        structuredOutput: runtimeMetadata,
+        multimodalInput: runtimeMetadata,
+        reasoning: runtimeMetadata,
+      },
+      {
+        connectionId: 'builtin:codex-cli',
+        providerId: 'openai',
+        modelId: 'gpt-excluded',
+        displayName: 'GPT Excluded',
+        available: true,
+        availabilityCheckedAt: '2026-08-09T00:00:00.000Z',
+        contextWindow: { value: null, source: 'unknown' },
+        maxOutputTokens: { value: null, source: 'unknown' },
+        toolCalling: runtimeMetadata,
+        structuredOutput: runtimeMetadata,
+        multimodalInput: runtimeMetadata,
+        reasoning: runtimeMetadata,
+      },
+    ];
+    const allowed = new Set(
+      [...claudeModels, codexModels[0]!].map(
+        ({ connectionId, providerId, modelId }) =>
+          `${connectionId}\u0000${providerId}\u0000${modelId}`,
+      ),
+    );
+    catalog.replaceCatalog([...claudeModels, ...codexModels]);
+
+    const candidates = listAvailableTeamRuntimeModels(catalog, 'task-1', allowed);
+
+    expect(candidates).toHaveLength(102);
+    expect(candidates.some(({ modelId }) => modelId === 'gpt-test')).toBe(true);
+    expect(candidates.some(({ modelId }) => modelId === 'gpt-excluded')).toBe(false);
+  });
+
   it('preserves CLI and curated capability evidence in the shared model catalog', () => {
     const runtimeMetadata = { value: true, source: 'runtime_metadata' as const };
     const models: CodexModelOption[] = [
