@@ -158,10 +158,7 @@ export function resolveWindowsSignOptions(
   if (certificateFile !== undefined && certificatePassword !== undefined)
     return { certificateFile, certificatePassword, description: 'Sprint Coder' };
   if (normalizedSha1 === undefined) return undefined;
-  return {
-    signWithParams: `/sha1 ${normalizedSha1} /sm`,
-    description: 'Sprint Coder',
-  };
+  return { signWithParams: `/sha1 ${normalizedSha1}`, description: 'Sprint Coder' };
 }
 
 function copyHoistedRuntimeModules(buildPath: string): void {

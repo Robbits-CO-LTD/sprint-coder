@@ -46,13 +46,13 @@ describe('native package target', () => {
 });
 
 describe('Windows release signing', () => {
-  it('selects a LocalMachine code-signing certificate without exporting its private key', () => {
+  it('selects a CurrentUser code-signing certificate without exporting its private key', () => {
     expect(
       resolveWindowsSignOptions({
         SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1: '4f9b 4eaa cd58 21f7 e84f a525 955a 904d 5eb7 7826',
       }),
     ).toEqual({
-      signWithParams: '/sha1 4F9B4EAACD5821F7E84FA525955A904D5EB77826 /sm',
+      signWithParams: '/sha1 4F9B4EAACD5821F7E84FA525955A904D5EB77826',
       description: 'Sprint Coder',
     });
   });
