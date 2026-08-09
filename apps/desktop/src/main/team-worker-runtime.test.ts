@@ -158,6 +158,16 @@ function runtime(
 }
 
 describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
+  it('re-enables a runtime after a short retry delay when no reset time is known', () => {
+    const availability = new TeamRuntimeAvailabilityTracker();
+    const unavailableAt = Date.parse('2026-08-09T12:00:00.000Z');
+
+    availability.markUnavailable('claude', undefined, unavailableAt);
+
+    expect(availability.isAvailable('claude', unavailableAt + 59_999)).toBe(false);
+    expect(availability.isAvailable('claude', unavailableAt + 60_000)).toBe(true);
+  });
+
   it('falls back to another available AI and suppresses the rate-limited runtime until reset', async () => {
     runtimeHostMock.starts.length = 0;
     runtimeHostMock.failures.set('claude', {

@@ -27,6 +27,8 @@ import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 export type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex'; model: string }>;
 
+const UNKNOWN_RUNTIME_RETRY_DELAY_MS = 60_000;
+
 export class TeamRuntimeAvailabilityTracker {
   private readonly unavailableUntil = new Map<'claude' | 'codex', number>();
 
@@ -38,9 +40,12 @@ export class TeamRuntimeAvailabilityTracker {
     return true;
   }
 
-  markUnavailable(kind: 'claude' | 'codex', retryAt?: string): void {
-    const parsed = retryAt === undefined ? Number.POSITIVE_INFINITY : Date.parse(retryAt);
-    this.unavailableUntil.set(kind, Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY);
+  markUnavailable(kind: 'claude' | 'codex', retryAt?: string, now = Date.now()): void {
+    const parsed = retryAt === undefined ? Number.NaN : Date.parse(retryAt);
+    this.unavailableUntil.set(
+      kind,
+      Number.isFinite(parsed) ? parsed : now + UNKNOWN_RUNTIME_RETRY_DELAY_MS,
+    );
   }
 }
 
