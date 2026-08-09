@@ -83,10 +83,16 @@ type PendingRun = {
   deltaBuffer: string[];
   deltaTimer: NodeJS.Timeout | null;
   reasoningActive: boolean;
+  runtimeStarted: boolean;
+  sideEffectsObserved: boolean;
+  writeScope: RuntimeWriteScope;
 };
 
 class TeamRuntimeExecutionError extends Error {
-  constructor(readonly publicError: PublicError) {
+  constructor(
+    readonly publicError: PublicError,
+    readonly safeToRetry: boolean,
+  ) {
     super(publicError.userMessage);
     this.name = 'TeamRuntimeExecutionError';
   }
@@ -123,13 +129,15 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             label: stageLabel(event.stage),
             at: new Date().toISOString(),
           });
-        if (event.type === 'operation')
+        if (event.type === 'operation') {
+          run.sideEffectsObserved = true;
           run.onEvent?.({
             type: 'activity',
             phase: event.phase,
             label: event.label,
             at: new Date().toISOString(),
           });
+        }
         if (event.type === 'delta') {
           run.buffer.push(event.delta);
           run.deltaBuffer.push(event.delta);
@@ -139,8 +147,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           run.reasoningActive = true;
           run.onEvent?.({ type: 'reasoningPresence', active: true });
         }
-        if (event.type === 'fileChange')
+        if (event.type === 'fileChange') {
+          run.sideEffectsObserved = true;
           run.onEvent?.({ type: 'fileChange', changes: event.changes });
+        }
         if (event.type === 'completed') {
           flushDelta(run);
           if (run.reasoningActive) run.onEvent?.({ type: 'reasoningPresence', active: false });
@@ -155,7 +165,12 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         flushDelta(run);
         if (run.reasoningActive) run.onEvent?.({ type: 'reasoningPresence', active: false });
         this.pending.delete(turnId);
-        run.reject(new TeamRuntimeExecutionError(error));
+        run.reject(
+          new TeamRuntimeExecutionError(
+            error,
+            !run.runtimeStarted || (run.writeScope === 'read-only' && !run.sideEffectsObserved),
+          ),
+        );
       },
       undefined,
       undefined,
@@ -274,6 +289,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       } catch (error) {
         if (!isRuntimeAvailabilityError(error)) throw error;
         this.deps.availability.markUnavailable(choice.kind, error.publicError.retryAt);
+        if (!error.safeToRetry) {
+          input.onEvent?.({ type: 'failed', error: error.message });
+          throw error;
+        }
         lastAvailabilityError = error;
       }
     }
@@ -313,6 +332,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           deltaBuffer: [],
           deltaTimer: null,
           reasoningActive: false,
+          runtimeStarted: false,
+          sideEffectsObserved: false,
+          writeScope,
         });
         this.activeByAgent.set(input.worker.id, { kind: choice.kind, taskId, turnId });
         runtimeStarted = this.client(choice.kind).start(
@@ -327,6 +349,8 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           undefined,
           writeScope,
         );
+        const run = this.pending.get(turnId);
+        if (run !== undefined) run.runtimeStarted = runtimeStarted;
       });
     } finally {
       try {

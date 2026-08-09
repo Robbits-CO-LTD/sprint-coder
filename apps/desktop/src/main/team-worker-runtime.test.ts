@@ -13,6 +13,8 @@ const runtimeHostMock = vi.hoisted(() => ({
       userMessage: string;
       retryable: boolean;
       retryAt?: string;
+      defer?: boolean;
+      emitOperation?: boolean;
     }
   >(),
 }));
@@ -46,7 +48,14 @@ vi.mock('./runtime-host', () => ({
       const turnId = args[1] as string;
       const failure = runtimeHostMock.failures.get(this.kind);
       if (failure !== undefined) {
-        this.onFailure(taskId, turnId, failure);
+        if (failure.emitOperation === true)
+          this.onEvent(taskId, turnId, {
+            type: 'operation',
+            phase: 'tool_call_start',
+            label: 'Claude tool call started (mcp__team__team_hire)',
+          });
+        if (failure.defer === true) queueMicrotask(() => this.onFailure(taskId, turnId, failure));
+        else this.onFailure(taskId, turnId, failure);
         return true;
       }
       if (!runtimeHostMock.startSucceeds) {
@@ -213,6 +222,66 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(releaseTeamMcp).toHaveBeenCalledTimes(2);
     expect(availability.isAvailable('claude', Date.parse('2099-08-10T01:59:59.000Z'))).toBe(false);
     expect(availability.isAvailable('claude', Date.parse('2099-08-10T02:00:00.000Z'))).toBe(true);
+  });
+
+  it('does not retry a workspace-write task after the runtime has started', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_UNAVAILABLE',
+      userMessage: 'Claude runtimeが途中で利用不能になりました。',
+      retryable: false,
+      defer: true,
+    });
+    const subject = runtime({
+      writeScopeFor: () => 'workspace-write',
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    });
+
+    await expect(
+      subject.execute({
+        worker: { ...worker(false), writeCapable: true },
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '実装する',
+        accessMode: 'workspace-write',
+      }),
+    ).rejects.toThrow('Claude runtimeが途中で利用不能になりました。');
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude']);
+  });
+
+  it('does not retry a read-only task after a Team MCP operation may have side effects', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_RATE_LIMIT',
+      userMessage: 'Claude Codeの利用上限に達しました。',
+      retryable: false,
+      defer: true,
+      emitOperation: true,
+    });
+    const subject = runtime({
+      teamMcpFor: () => ({
+        socketPath: '/tmp/team.sock',
+        token: 'manager-token',
+        guidance: 'manager guidance',
+      }),
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    });
+
+    await expect(
+      subject.execute({
+        worker: worker(true),
+        envelope,
+        content: '部下を採用する',
+      }),
+    ).rejects.toThrow('Claude Codeの利用上限に達しました。');
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude']);
   });
 
   it('fails immediately without waiting for exit when the runtime was not started', async () => {
