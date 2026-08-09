@@ -51,6 +51,22 @@ export type ClaudeProbe = {
   models: CodexModelOption[];
 };
 
+const CLAUDE_MODEL_CONFIG_SOURCE = 'https://code.claude.com/docs/en/model-config';
+const CLAUDE_MODEL_OVERVIEW_SOURCE =
+  'https://platform.claude.com/docs/en/about-claude/models/overview';
+const CLAUDE_CLI_REFERENCE_SOURCE = 'https://code.claude.com/docs/en/cli-usage';
+const claudeCapability = (sourceReference: string) => ({
+  value: true,
+  source: 'official_curated' as const,
+  sourceReference,
+});
+const CLAUDE_CODE_CAPABILITIES: NonNullable<CodexModelOption['capabilities']> = {
+  toolCalling: claudeCapability(CLAUDE_MODEL_CONFIG_SOURCE),
+  structuredOutput: claudeCapability(CLAUDE_CLI_REFERENCE_SOURCE),
+  multimodalInput: claudeCapability(CLAUDE_MODEL_OVERVIEW_SOURCE),
+  reasoning: claudeCapability(CLAUDE_MODEL_CONFIG_SOURCE),
+};
+
 // The CLI does not expose a model catalog to enumerate (unlike Codex's models_cache.json), so a
 // static curated list ships instead, per the ADR. Every entry below is verified against the
 // installed CLI with a real probe turn (`claude -p "1" --model <id> --output-format json --tools ''
@@ -86,21 +102,25 @@ const CLAUDE_MODELS: CodexModelOption[] = [
     id: 'auto',
     displayName: 'Auto',
     description: 'Claude Codeの既定モデルを使用（現在: Sonnet 5 / claude-sonnet-5）',
+    capabilities: CLAUDE_CODE_CAPABILITIES,
   },
   {
     id: 'sonnet',
     displayName: 'Sonnet 5',
     description: 'バランス型モデル（claude-sonnet-5）',
+    capabilities: CLAUDE_CODE_CAPABILITIES,
   },
   {
     id: 'claude-opus-5',
     displayName: 'Opus 5',
     description: '最も高性能なモデル（claude-opus-5、低速・高コスト）',
+    capabilities: CLAUDE_CODE_CAPABILITIES,
   },
   {
     id: 'haiku',
     displayName: 'Haiku 4.5',
     description: '高速・軽量なモデル（claude-haiku-4-5）',
+    capabilities: CLAUDE_CODE_CAPABILITIES,
   },
 ];
 

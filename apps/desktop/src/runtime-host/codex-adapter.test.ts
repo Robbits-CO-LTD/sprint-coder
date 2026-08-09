@@ -393,7 +393,19 @@ describe('Codex runtime probe', () => {
           },
         ],
       }),
-    ).toEqual([{ id: 'gpt-5.6-terra', displayName: 'GPT-5.6-Terra', description: 'Balanced' }]);
+    ).toEqual([
+      {
+        id: 'gpt-5.6-terra',
+        displayName: 'GPT-5.6-Terra',
+        description: 'Balanced',
+        capabilities: {
+          toolCalling: expect.objectContaining({ value: true, source: 'runtime_metadata' }),
+          structuredOutput: expect.objectContaining({ value: true, source: 'runtime_metadata' }),
+          multimodalInput: { value: null, source: 'unknown' },
+          reasoning: { value: null, source: 'unknown' },
+        },
+      },
+    ]);
   });
 
   // issue #6: the valid reasoning levels are per-model and published by the CLI itself, so they are
@@ -412,6 +424,7 @@ describe('Codex runtime probe', () => {
             { effort: 'low', description: 'Fast responses with lighter reasoning' },
             { effort: 'ultra', description: 'Maximum reasoning with automatic task delegation' },
           ],
+          input_modalities: ['text', 'image'],
         },
       ],
     });
@@ -424,6 +437,30 @@ describe('Codex runtime probe', () => {
         { id: 'low', description: 'Fast responses with lighter reasoning' },
         { id: 'ultra', description: 'Maximum reasoning with automatic task delegation' },
       ],
+      capabilities: {
+        toolCalling: expect.objectContaining({ value: true, source: 'runtime_metadata' }),
+        structuredOutput: expect.objectContaining({ value: true, source: 'runtime_metadata' }),
+        multimodalInput: expect.objectContaining({ value: true, source: 'runtime_metadata' }),
+        reasoning: expect.objectContaining({ value: true, source: 'runtime_metadata' }),
+      },
+    });
+  });
+
+  it('publishes a negative image capability when the cache explicitly lists text only', () => {
+    const [model] = parseCodexModels({
+      models: [
+        {
+          slug: 'text-only',
+          display_name: 'Text only',
+          description: '',
+          visibility: 'list',
+          input_modalities: ['text'],
+        },
+      ],
+    });
+    expect(model?.capabilities?.multimodalInput).toMatchObject({
+      value: false,
+      source: 'runtime_metadata',
     });
   });
 

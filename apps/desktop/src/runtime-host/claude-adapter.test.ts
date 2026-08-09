@@ -104,7 +104,21 @@ describe('Claude runtime probe', () => {
       available: true,
       version: 'e2e-fixture',
       models: expect.arrayContaining([
-        expect.objectContaining({ id: 'sonnet' }),
+        expect.objectContaining({
+          id: 'sonnet',
+          capabilities: {
+            toolCalling: expect.objectContaining({ value: true, source: 'official_curated' }),
+            structuredOutput: expect.objectContaining({
+              value: true,
+              source: 'official_curated',
+            }),
+            multimodalInput: expect.objectContaining({
+              value: true,
+              source: 'official_curated',
+            }),
+            reasoning: expect.objectContaining({ value: true, source: 'official_curated' }),
+          },
+        }),
         expect.objectContaining({ id: 'claude-opus-5' }),
       ]),
     });
