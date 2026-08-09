@@ -24,6 +24,8 @@ import {
   writeStoredTeamViewPreference,
 } from './lib/team-view-preference';
 import type { TeamViewPreference } from './lib/team-view-preference';
+import { readSetupComplete, shouldShowSetupWizard } from './lib/setup-preference';
+import { SetupWizard } from './components/SetupWizard';
 
 export default function App() {
   const sprintCoderAvailable = useAppStore((s) => s.sprintCoderAvailable);
@@ -75,6 +77,9 @@ export default function App() {
     readStoredTeamViewPreference,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [setupComplete] = useState(readSetupComplete);
+  const [setupReveal, setSetupReveal] = useState(false);
+  const setupWasVisibleRef = useRef(false);
   const openSettings = useCallback(() => setSettingsOpen(true), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
@@ -171,6 +176,23 @@ export default function App() {
   }
 
   const showTeamCanvas = (teamCanvasActive || exiting) && selectedTask !== null;
+  const showSetupWizard = shouldShowSetupWizard({
+    initialized,
+    taskCount: tasks.length,
+    setupComplete,
+  });
+
+  useEffect(() => {
+    if (showSetupWizard) {
+      setupWasVisibleRef.current = true;
+      return;
+    }
+    if (!setupWasVisibleRef.current) return;
+    setupWasVisibleRef.current = false;
+    setSetupReveal(true);
+    const timer = window.setTimeout(() => setSetupReveal(false), 1_250);
+    return () => window.clearTimeout(timer);
+  }, [showSetupWizard]);
 
   const requestEnterTeam = useCallback(() => {
     if (exiting) {
@@ -258,21 +280,24 @@ export default function App() {
           className={[
             'app-shell',
             chromeInert ? 'team-mode' : '',
+            setupReveal ? 'setup-reveal' : '',
             sidebarCollapsed ? 'sidebar-collapsed' : '',
             narrowViewport ? 'sidebar-overlay' : '',
           ]
             .filter(Boolean)
             .join(' ')}
         >
-          <Sidebar
-            inert={chromeInert || sidebarCollapsed}
-            collapsed={sidebarCollapsed}
-            onOpenSettings={openSettings}
-          />
+          {!showSetupWizard && (
+            <Sidebar
+              inert={chromeInert || sidebarCollapsed}
+              collapsed={sidebarCollapsed}
+              onOpenSettings={openSettings}
+            />
+          )}
           {/* Tapping outside an overlaid sidebar closes it, the usual expectation for a panel that
           covers content. Only rendered in the overlay form, where the sidebar is not a layout
           sibling and so cannot be dismissed by simply looking away from it. */}
-          {narrowViewport && !sidebarCollapsed && (
+          {!showSetupWizard && narrowViewport && !sidebarCollapsed && (
             <button
               type="button"
               className="sidebar-scrim"
@@ -281,8 +306,10 @@ export default function App() {
               onClick={toggleSidebar}
             />
           )}
-          <div className="main">
-            {selectedTask ? (
+          <div className={`main ${showSetupWizard ? 'main--setup' : ''}`}>
+            {showSetupWizard ? (
+              <SetupWizard onOpenSettings={openSettings} />
+            ) : selectedTask ? (
               <>
                 <TaskHeader
                   task={selectedTask}
