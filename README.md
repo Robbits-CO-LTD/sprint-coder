@@ -118,11 +118,15 @@ tasks/              実装計画と設計レビュー記録
 ## 現在の配布状態
 
 - desktop packageの正式版versionはSemVerで管理しています。beta版には`-beta.N`を付けます。
+- stable版は現時点ではGitHub Actionsで自動公開せず、version更新をPRでレビューした後、
+  macOS／Windowsのartifactを検証して既存のDraft Releaseへ手動添付します。タグとReleaseの公開も
+  全artifact確認後に手動で行います。
 - beta版のGitHub ActionsはmacOSのDMG / 更新用ZIPと、Ubuntuのportable ZIPを作成し、GitHub prereleaseをDraftとして用意します。
 - Windowsのウィザード付きインストーラー / portable ZIP / Squirrel更新artifactは、ローカルでコード署名して同じDraft Releaseへ添付します。
 - Windowsインストーラー版は起動時と6時間ごとにGitHub Releasesを確認し、更新を取得すると再起動の確認を表示します。portable ZIP版は自動更新の対象外です。
 - macOS ARM64版も、配布元と更新先を同じ正式なAppleコード署名IDでビルドした場合に自動更新が有効になります。
 - macOSのbeta artifactは現時点ではad-hoc署名でApple notarizationも未対応のため、自動更新は安全側に無効化されます。
+- stable 0.1.0のmacOS artifactも未署名・notarizationなしで配布し、起動時の注意事項をReleaseへ明記します。
 - 配布物が公開されている場合は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases)から取得できます。
 
 ## 設計資料
