@@ -28,6 +28,12 @@ test.describe('keyboard-only smoke: create task, type, send without a mouse', ()
     app = await launchApp(userDataDir);
     const page: Page = await firstWindow(app);
 
+    // This smoke covers the established-app keyboard flow; the first-run wizard has its own E2E.
+    // Mark setup complete before exercising the sidebar, then reload through the normal startup path.
+    await page.evaluate(() => window.localStorage.setItem('sprint-coder:setup-complete-v1', '1'));
+    await page.reload();
+    await page.waitForLoadState('domcontentloaded');
+
     // Reach the "+ new Task" control purely by tabbing (no .click()).
     await focusByKeyboard(page, 'sidebar-new-task-button');
     await page.keyboard.press('Enter');
