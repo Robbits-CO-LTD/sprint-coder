@@ -15,6 +15,7 @@ import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError } from '@sprint-coder/contracts';
+import desktopPackage from '../../package.json';
 import type {
   CodexModelOption,
   EffortOption,
@@ -339,7 +340,7 @@ export class CodexRuntimeAdapter {
           clientInfo: {
             name: 'sprint-coder',
             title: 'Sprint Coder',
-            version: '0.1.0',
+            version: desktopPackage.version,
           },
           capabilities: multiRoot ? { experimentalApi: true } : {},
         });
