@@ -1,4 +1,5 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
+# Keep this file UTF-8 with BOM so Windows PowerShell 5.1 can parse the Japanese release-note text.
 param(
   [string]$Tag,
   [string]$CertificateSha1,
