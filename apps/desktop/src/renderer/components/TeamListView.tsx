@@ -80,7 +80,9 @@ export function TeamListView({
     );
   }
 
-  const workers = detail.workers.filter((w) => w.kind === 'worker');
+  // Stopped Workers remain available to the persisted activity history, but dismissal removes
+  // them from both live Team projections.
+  const workers = detail.workers.filter((w) => w.kind === 'worker' && w.state !== 'stopped');
   const currentWorkerCount = currentTeamWorkerCount(detail);
 
   return (
@@ -175,7 +177,7 @@ export function TeamListView({
                     disabled={!canStop}
                     onClick={() => void stopTeamWorker(task.id, worker.id)}
                   >
-                    停止
+                    解雇
                   </button>
                 </div>
                 {/* Same text the Canvas renders in `.role-sub`, from the same pure helper — the
