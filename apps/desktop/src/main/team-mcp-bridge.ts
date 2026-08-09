@@ -376,7 +376,18 @@ export class TeamMcpBridge {
       return;
     }
     if (request.tool === '__authenticate__') {
-      respond({ ok: true, result: { authenticated: true } });
+      const [, registration] = found;
+      respond({
+        ok: true,
+        result: {
+          authenticated: true,
+          capabilities: {
+            projectMemory: registration.allowProjectMemory === true,
+            skillDrafts: registration.allowSkillDrafts === true,
+            teamTools: registration.allowTeamTools !== false,
+          },
+        },
+      });
       return;
     }
     const [turnId, registration] = found;

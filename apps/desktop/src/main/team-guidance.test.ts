@@ -68,6 +68,9 @@ describe('builtin Team skill', () => {
   it('recognizes explicit Team and worker-count intent without activating ordinary turns', () => {
     for (const input of [
       'チームで進めて',
+      'Codexでチーム編成して',
+      'チーム作成してください',
+      'チーム編成をお願いします',
       'チーム内で挨拶して',
       'チーム内の会話を読んで',
       'チームメンバー同士で挨拶して',
@@ -96,6 +99,8 @@ describe('builtin Team skill', () => {
       '一人称を直して',
       'teamworkについて説明して',
       'チームの意味を説明して',
+      'チーム編成について説明して',
+      'チーム作成とは何か説明して',
       '/team',
       '/teamworkについて説明して',
       'READMEに /team 調査して と書いて',

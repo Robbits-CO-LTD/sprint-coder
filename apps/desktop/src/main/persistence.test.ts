@@ -884,6 +884,20 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('seals Team capability for a Japanese compound Team creation request', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('team creation compound');
+      const started = persistence.startTurn(task.id, 'Codexでチーム編成して');
+
+      expect(started.teamTurn).toBe(true);
+      expect(
+        persistence
+          .prepareContext(task.id, started.turnId)
+          .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
+      persistence.close();
+    });
+
     it('keeps Team guidance on a short continuation after a failed Team turn', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('team retry');

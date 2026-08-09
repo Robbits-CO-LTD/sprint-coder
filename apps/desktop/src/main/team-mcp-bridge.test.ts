@@ -104,6 +104,33 @@ describe('defaultSocketPathFactory', () => {
 });
 
 describe('TeamMcpBridge', () => {
+  it('returns registered tool capabilities during authentication', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-project-memory', {
+      taskId: 'task-1',
+      token,
+      allowProjectMemory: true,
+      allowTeamTools: false,
+    });
+
+    const response = await roundTrip(socketPath as string, {
+      token,
+      tool: '__authenticate__',
+      args: {},
+    });
+
+    expect(JSON.parse(response.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: {
+        authenticated: true,
+        capabilities: { projectMemory: true, skillDrafts: false, teamTools: false },
+      },
+    });
+  });
+
   it('closes accepted sockets during dispose instead of hanging app shutdown', async () => {
     const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
     bridges.push(bridge);

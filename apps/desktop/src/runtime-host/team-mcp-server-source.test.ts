@@ -39,7 +39,15 @@ afterEach(async () => {
 });
 
 async function startHarness(
-  options: { normalTimeoutMs?: number; longTimeoutMs?: number } = {},
+  options: {
+    normalTimeoutMs?: number;
+    longTimeoutMs?: number;
+    capabilities?: {
+      projectMemory: boolean;
+      skillDrafts: boolean;
+      teamTools: boolean;
+    };
+  } = {},
 ): Promise<Harness> {
   const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-mcp-test-'));
   const scriptPath = join(directory, 'team-mcp-server.cjs');
@@ -78,7 +86,18 @@ async function startHarness(
         };
         if (request.tool === '__authenticate__') {
           socket.write(
-            `${JSON.stringify({ requestId: request.requestId, ok: true, result: { authenticated: true } })}\n`,
+            `${JSON.stringify({
+              requestId: request.requestId,
+              ok: true,
+              result: {
+                authenticated: true,
+                capabilities: options.capabilities ?? {
+                  projectMemory: true,
+                  skillDrafts: true,
+                  teamTools: true,
+                },
+              },
+            })}\n`,
           );
           continue;
         }
@@ -234,6 +253,18 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     const content = (reply['result'] as { content: { type: string; text: string }[] }).content;
     expect(JSON.parse(content[0]?.text ?? '{}')).toMatchObject({ workerId: 'w1' });
     expect(reply['result']).not.toHaveProperty('isError', true);
+  });
+
+  it('lists only Project memory for a non-Team Project turn', async () => {
+    const harness = await startHarness({
+      capabilities: { projectMemory: true, skillDrafts: false, teamTools: false },
+    });
+    harness.send({ jsonrpc: '2.0', id: 11, method: 'tools/list' });
+    const listReply = await harness.nextMessage();
+    const tools = (listReply['result'] as { tools: { name: string }[] }).tools;
+
+    expect(tools.map(({ name }) => name)).toEqual(['project_memory_remember']);
+    expect(tools.some(({ name }) => name.startsWith('team_'))).toBe(false);
   });
 
   it('matches reversed bridge responses to their request IDs', async () => {

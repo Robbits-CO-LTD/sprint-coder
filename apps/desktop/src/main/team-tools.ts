@@ -1107,6 +1107,8 @@ const TEAM_SCENARIO_ROLES = ['調査', '実装', 'レビュー'] as const;
 // orchestration path — the user should not need to know the fixture keyword or press ⬡ Team.
 const TEAM_INTENT =
   /^\s*\/team(?=\s+\S)|チームテスト|チーム(?:で|を|に|内(?:で|の))|(?:^|[^a-zA-Z])team(?=[ぁ-んァ-ヶ一-龠々ー])|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:り|名|人)(?=.*(?:雇|挨拶|会話|担当|メンバー))|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人(?:(?:体制)?で|雇って|を雇))/i;
+const TEAM_COMPOUND_EXECUTION_INTENT =
+  /チーム(?:編成|作成)(?=(?:して|し|する|を?お願い|してください|してほしい))/i;
 const TEAM_RELATION_INTENT =
   /チーム(?:の)?(?:メンバー|リーダー)|チームの(?:会話|挨拶|メッセージ|報告|担当|役割)/i;
 const TEAM_CONSULTATION_ENDING =
@@ -1133,7 +1135,11 @@ const REPEATED_TEAM_ACTION =
   /(?:もう一度|もう一回|再度).*(?:挨拶|会話|メッセージ|連絡|返信|返事)(?:を|し|して|させ|させて)/i;
 
 export function isTeamScenarioInput(input: string): boolean {
-  return TEAM_INTENT.test(input) || TEAM_RELATION_INTENT.test(input);
+  return (
+    TEAM_INTENT.test(input) ||
+    TEAM_COMPOUND_EXECUTION_INTENT.test(input) ||
+    TEAM_RELATION_INTENT.test(input)
+  );
 }
 
 /** Team相談にもSkill/MCPは提供するが、Worker不在を失敗にするのは明示的な実行依頼だけ。 */

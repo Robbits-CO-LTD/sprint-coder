@@ -316,6 +316,7 @@ const TOOLS = [
 
 let socket = null;
 let socketReady = null;
+let availableTools = [];
 const pending = new Map();
 let sockBuffer = '';
 let nextBridgeRequestId = 1;
@@ -394,6 +395,14 @@ function connectSocket() {
             reject(new Error('team bridge authentication failed'));
             return;
           }
+          const capabilities = response.result && response.result.capabilities;
+          availableTools = TOOLS.filter((tool) =>
+            tool.name === 'project_memory_remember'
+              ? capabilities && capabilities.projectMemory === true
+              : tool.name === 'skill_draft_create'
+                ? capabilities && capabilities.skillDrafts === true
+                : capabilities && capabilities.teamTools === true,
+          );
           resolve(s);
         },
         reject,
@@ -469,7 +478,14 @@ function handleLine(line) {
     return;
   }
   if (message.method === 'tools/list') {
-    send({ jsonrpc: '2.0', id: message.id, result: { tools: TOOLS } });
+    if (!SOCKET_PATH || !TOKEN) {
+      send({ jsonrpc: '2.0', id: message.id, result: { tools: [] } });
+      return;
+    }
+    connectSocket().then(
+      () => send({ jsonrpc: '2.0', id: message.id, result: { tools: availableTools } }),
+      () => send({ jsonrpc: '2.0', id: message.id, result: { tools: [] } }),
+    );
     return;
   }
   if (message.method === 'tools/call') {
