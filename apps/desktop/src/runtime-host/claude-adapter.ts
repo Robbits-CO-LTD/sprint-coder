@@ -35,6 +35,12 @@ import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-s
 import { terminateRuntimeProcessTree } from './process-tree';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
+import {
+  RUNTIME_FIRST_EVENT_TIMEOUT_MS,
+  RUNTIME_IDLE_TIMEOUT_MS,
+  RuntimeProgressDeadline,
+  type RuntimeProgressTimeoutPhase,
+} from './runtime-progress-deadline';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -295,16 +301,25 @@ export class ClaudeRuntimeAdapter {
     let failed = false;
     let sawCompletion = false;
     const effectiveTimeoutMs = teamMcp === undefined ? this.timeoutMs : 60 * 60_000;
-    const timeout = setTimeout(() => {
-      if (!failed && !control.canceled) {
-        failed = true;
-        fail(publicError('RUNTIME_TIMEOUT', 'Claude runtimeがタイムアウトしました。', true));
-      }
-      void terminateProcessTree(child);
-    }, effectiveTimeoutMs);
+    const deadline = new RuntimeProgressDeadline(
+      {
+        firstEventMs: RUNTIME_FIRST_EVENT_TIMEOUT_MS,
+        idleMs: RUNTIME_IDLE_TIMEOUT_MS,
+        totalMs: effectiveTimeoutMs,
+      },
+      (phase) => {
+        if (!failed && !control.canceled) {
+          failed = true;
+          fail(publicError('RUNTIME_TIMEOUT', claudeTimeoutMessage(phase), true));
+        }
+        void terminateProcessTree(child);
+      },
+    );
+    deadline.start();
 
     createInterface({ input: child.stdout }).on('line', (line) => {
       if (failed || control.canceled || line.trim() === '') return;
+      deadline.progress();
       try {
         for (const event of normalizer.push(line)) {
           if (event.type === 'completed') sawCompletion = true;
@@ -334,7 +349,7 @@ export class ClaudeRuntimeAdapter {
       );
     });
     child.once('exit', (code) => {
-      clearTimeout(timeout);
+      deadline.stop();
       this.active.delete(turnId);
       cleanup();
       const exitCode = code ?? -1;
@@ -356,6 +371,14 @@ export class ClaudeRuntimeAdapter {
   dispose(): void {
     for (const [turnId] of this.active) void this.cancel(turnId);
   }
+}
+
+function claudeTimeoutMessage(phase: RuntimeProgressTimeoutPhase): string {
+  if (phase === 'first_event')
+    return 'Claude runtimeから45秒間応答がなかったため、このTurnを終了しました。接続とCLI実行環境を確認して、もう一度お試しください。';
+  if (phase === 'idle')
+    return 'Claude runtimeから90秒間新しい応答がなかったため、このTurnを終了しました。接続状態を確認して、もう一度お試しください。';
+  return 'Claude runtimeがタイムアウトしました。';
 }
 
 export function claudeOutputErrorToPublicError(error: unknown): PublicError {
