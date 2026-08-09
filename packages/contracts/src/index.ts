@@ -1961,7 +1961,12 @@ export const providerProfileConnectionCreateInputSchema = z
 export type ProviderProfileConnectionCreateInput = z.infer<
   typeof providerProfileConnectionCreateInputSchema
 >;
-export const capabilitySourceSchema = z.enum(['provider_api', 'official_curated', 'unknown']);
+export const capabilitySourceSchema = z.enum([
+  'provider_api',
+  'runtime_metadata',
+  'official_curated',
+  'unknown',
+]);
 export type CapabilitySource = z.infer<typeof capabilitySourceSchema>;
 export type CatalogValue<T> = Readonly<{
   value: T | null;
@@ -2259,6 +2264,18 @@ export const codexModelOptionSchema = z
     // (switching from Sol to GPT-5.5 drops `max`/`ultra`, and keeping the old value would fail the
     // next turn outright).
     defaultEffort: effortOptionSchema.shape.id.optional(),
+    // Built-in subscription runtimes do not expose the same provider model-list APIs as API-key
+    // connections. Preserve the capability evidence discovered by the CLI adapter so Main does
+    // not have to discard it and turn every subscription model into "unknown".
+    capabilities: z
+      .object({
+        toolCalling: catalogValueSchema(z.boolean()),
+        structuredOutput: catalogValueSchema(z.boolean()),
+        multimodalInput: catalogValueSchema(z.boolean()),
+        reasoning: catalogValueSchema(z.boolean()),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type CodexModelOption = z.infer<typeof codexModelOptionSchema>;

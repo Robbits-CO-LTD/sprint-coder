@@ -4928,7 +4928,7 @@ function sortValue(value: unknown): unknown {
   return value;
 }
 
-function providerModelsForBuiltin(
+export function providerModelsForBuiltin(
   connectionId: string,
   connectionDisplayName: string,
   providerId: string,
@@ -4947,10 +4947,10 @@ function providerModelsForBuiltin(
     availabilityCheckedAt: checkedAt,
     contextWindow: unknown,
     maxOutputTokens: unknown,
-    toolCalling: unknown,
-    structuredOutput: unknown,
-    multimodalInput: unknown,
-    reasoning: unknown,
+    toolCalling: model.capabilities?.toolCalling ?? unknown,
+    structuredOutput: model.capabilities?.structuredOutput ?? unknown,
+    multimodalInput: model.capabilities?.multimodalInput ?? unknown,
+    reasoning: model.capabilities?.reasoning ?? unknown,
   }));
 }
 

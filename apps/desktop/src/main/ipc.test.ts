@@ -82,6 +82,7 @@ import {
   turnSubscriptionInputSchema,
   xAIConnectionCreateInputSchema,
   type EffectiveWorkspaceSet,
+  type CodexModelOption,
 } from '@sprint-coder/contracts';
 import {
   clampCodexEffort,
@@ -92,6 +93,7 @@ import {
   isTrustedIpcSender,
   shouldBlockProviderLeaderCompletion,
   providerWorkspaceToolsEligible,
+  providerModelsForBuiltin,
   requireExplicitProviderCommandApproval,
   shouldRetryProviderWithoutTools,
   shouldFailRequiredTeamTurn,
@@ -100,6 +102,57 @@ import {
   resolveEffectiveWorkspaceRoot,
   verifyTurnWorkspaceIdentities,
 } from './ipc';
+import { ModelCatalogService } from './model-catalog-service';
+
+describe('built-in subscription model capabilities', () => {
+  it('preserves CLI and curated capability evidence in the shared model catalog', () => {
+    const runtimeMetadata = { value: true, source: 'runtime_metadata' as const };
+    const models: CodexModelOption[] = [
+      {
+        id: 'gpt-test',
+        displayName: 'GPT Test',
+        description: '',
+        capabilities: {
+          toolCalling: runtimeMetadata,
+          structuredOutput: runtimeMetadata,
+          multimodalInput: runtimeMetadata,
+          reasoning: runtimeMetadata,
+        },
+      },
+    ];
+
+    const builtinModels = providerModelsForBuiltin(
+      'builtin:codex-cli',
+      'Codex CLI',
+      'openai',
+      models,
+      true,
+      '2026-08-09T00:00:00.000Z',
+    );
+    expect(builtinModels[0]).toMatchObject({
+      toolCalling: runtimeMetadata,
+      structuredOutput: runtimeMetadata,
+      multimodalInput: runtimeMetadata,
+      reasoning: runtimeMetadata,
+    });
+
+    const catalog = new ModelCatalogService();
+    catalog.replaceCatalog(builtinModels, new Set(['builtin:codex-cli']));
+    expect(
+      catalog.query({
+        taskId: 'task-1',
+        text: '',
+        connectionIds: [],
+        providerIds: [],
+        accessTypes: ['subscription'],
+        capabilities: ['toolCalling', 'structuredOutput', 'multimodalInput', 'reasoning'],
+        availableOnly: true,
+        cursor: null,
+        limit: 10,
+      }).items,
+    ).toHaveLength(1);
+  });
+});
 
 describe('Turn cancellation boundary', () => {
   it('continues after a runtime stop cannot be confirmed', async () => {

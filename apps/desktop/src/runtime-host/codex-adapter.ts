@@ -52,8 +52,29 @@ export type CodexProbe = {
   models: CodexModelOption[];
 };
 
+const CODEX_CLI_REFERENCE = 'https://developers.openai.com/codex/cli/reference';
+const CODEX_MODEL_CACHE_REFERENCE = 'Codex CLI models_cache.json';
+const unknownCapability = { value: null, source: 'unknown' as const };
+const codexRuntimeCapability = (value: boolean, sourceReference: string) => ({
+  value,
+  source: 'runtime_metadata' as const,
+  sourceReference,
+});
+
+const CODEX_AUTO_MODEL: CodexModelOption = {
+  id: 'auto',
+  displayName: 'Auto',
+  description: 'Codexの既定モデルを使用',
+  capabilities: {
+    toolCalling: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
+    structuredOutput: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
+    multimodalInput: unknownCapability,
+    reasoning: unknownCapability,
+  },
+};
+
 const E2E_CODEX_MODELS: CodexModelOption[] = [
-  { id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' },
+  CODEX_AUTO_MODEL,
   {
     id: 'gpt-5.6-terra',
     displayName: 'GPT-5.6-Terra',
@@ -65,6 +86,12 @@ const E2E_CODEX_MODELS: CodexModelOption[] = [
       { id: 'high', description: '深い推論' },
       { id: 'xhigh', description: 'より深い推論' },
     ],
+    capabilities: {
+      toolCalling: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
+      structuredOutput: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
+      multimodalInput: codexRuntimeCapability(true, CODEX_MODEL_CACHE_REFERENCE),
+      reasoning: codexRuntimeCapability(true, CODEX_MODEL_CACHE_REFERENCE),
+    },
   },
 ];
 
@@ -750,6 +777,27 @@ function parseSupportedEfforts(
   return defaultEffort === undefined ? { efforts } : { efforts, defaultEffort };
 }
 
+function parseCodexModelCapabilities(
+  record: Record<string, unknown>,
+  efforts: Pick<CodexModelOption, 'efforts' | 'defaultEffort'>,
+): NonNullable<CodexModelOption['capabilities']> {
+  const modalities = record['input_modalities'];
+  const multimodalInput = Array.isArray(modalities)
+    ? codexRuntimeCapability(modalities.includes('image'), CODEX_MODEL_CACHE_REFERENCE)
+    : unknownCapability;
+  return {
+    // These are Codex CLI execution-surface capabilities (`tools` and `--output-schema`), while
+    // image input and reasoning support are genuinely per-model fields published by the cache.
+    toolCalling: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
+    structuredOutput: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
+    multimodalInput,
+    reasoning:
+      efforts.efforts === undefined
+        ? unknownCapability
+        : codexRuntimeCapability(true, CODEX_MODEL_CACHE_REFERENCE),
+  };
+}
+
 export function parseCodexModels(value: unknown): CodexModelOption[] {
   if (typeof value !== 'object' || value === null || !('models' in value)) return [];
   const models = (value as { models?: unknown }).models;
@@ -775,7 +823,14 @@ export function parseCodexModels(value: unknown): CodexModelOption[] {
     )
       continue;
     seen.add(id);
-    result.push({ id, displayName, description, ...parseSupportedEfforts(record) });
+    const efforts = parseSupportedEfforts(record);
+    result.push({
+      id,
+      displayName,
+      description,
+      ...efforts,
+      capabilities: parseCodexModelCapabilities(record, efforts),
+    });
     if (result.length === 31) break;
   }
   return result;
@@ -790,12 +845,9 @@ export function readCodexModels(
     const parsed = JSON.parse(
       readFileSync(join(codexRoot, 'models_cache.json'), 'utf8'),
     ) as unknown;
-    return [
-      { id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' },
-      ...parseCodexModels(parsed),
-    ];
+    return [CODEX_AUTO_MODEL, ...parseCodexModels(parsed)];
   } catch {
-    return [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }];
+    return [CODEX_AUTO_MODEL];
   }
 }
 
