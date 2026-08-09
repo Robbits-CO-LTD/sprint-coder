@@ -102,7 +102,7 @@ npm run make:windows
 
 ウィザード付きインストーラーは`apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer.exe`、展開して起動できるZIP版は`apps/desktop/out/make/zip/win32/x64/`に出力されます。インストーラーは日本語・英語の標準ウィザードで案内し、内部のSquirrel bootstrapperがユーザー領域へセットアップするため、既存の自動更新との互換性を維持します。
 
-手元で作るインストーラーは未署名のため、Windowsから警告が表示されることがあります。正式配布ではコード署名証明書（`.pfx`）を用意し、`SPRINT_CODER_RELEASE=1`、`SPRINT_CODER_WINDOWS_CERTIFICATE_FILE`、`SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD`を設定してください。検証用betaのworkflowのみ、`SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1`を明示して未署名artifactを作成します。
+手元で作るインストーラーは未署名のため、Windowsから警告が表示されることがあります。正式配布では`SPRINT_CODER_RELEASE=1`を設定し、コード署名証明書（`.pfx`）を使う場合は`SPRINT_CODER_WINDOWS_CERTIFICATE_FILE`と`SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD`、LocalMachine証明書ストアを使う場合は`SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1`を設定してください。検証用betaのworkflowのみ、`SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1`を明示して未署名artifactを作成します。
 
 ## リポジトリ構成
 
