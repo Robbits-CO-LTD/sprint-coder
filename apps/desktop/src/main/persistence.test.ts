@@ -867,6 +867,23 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('seals Team capability for a failure report that starts with English Team', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('team failure report');
+      const started = persistence.startTurn(
+        task.id,
+        'Team作成は完了できませんでした。Teamがfailed状態です。利用可能な別AIへfallbackしてください。',
+      );
+
+      expect(started.teamTurn).toBe(true);
+      expect(
+        persistence
+          .prepareContext(task.id, started.turnId)
+          .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
+      persistence.close();
+    });
+
     it('keeps Team guidance on a short continuation after a failed Team turn', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('team retry');
