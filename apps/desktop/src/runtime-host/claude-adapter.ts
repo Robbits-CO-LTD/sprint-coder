@@ -361,9 +361,10 @@ export class ClaudeRuntimeAdapter {
 export function claudeOutputErrorToPublicError(error: unknown): PublicError {
   if (error instanceof ClaudeRateLimitError) {
     return publicError(
-      'RUNTIME_FAILED',
+      'RUNTIME_RATE_LIMIT',
       `Claude Codeの利用上限に達しました。${claudeRateLimitResetMessage(error.resetAtEpochSeconds)}`,
       false,
+      claudeRateLimitRetryAt(error.resetAtEpochSeconds),
     );
   }
   if (error instanceof ClaudeAuthenticationError)
@@ -398,6 +399,12 @@ function claudeRateLimitResetMessage(resetAtEpochSeconds: number | null): string
     timeZoneName: 'short',
   }).format(resetAt);
   return `${formatted}にリセット予定です。`;
+}
+
+function claudeRateLimitRetryAt(resetAtEpochSeconds: number | null): string | undefined {
+  if (resetAtEpochSeconds === null) return undefined;
+  const retryAt = new Date(resetAtEpochSeconds * 1_000);
+  return Number.isFinite(retryAt.getTime()) ? retryAt.toISOString() : undefined;
 }
 
 // Kept as a small local constant rather than importing team-tools.ts's tool name list: the
@@ -640,6 +647,7 @@ function publicError(
   code: PublicError['code'],
   userMessage: string,
   retryable: boolean,
+  retryAt?: string,
 ): PublicError {
-  return { code, userMessage, retryable };
+  return { code, userMessage, retryable, ...(retryAt === undefined ? {} : { retryAt }) };
 }

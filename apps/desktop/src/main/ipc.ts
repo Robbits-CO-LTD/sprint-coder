@@ -281,6 +281,7 @@ import { TeamCoordinator } from './team-coordinator';
 import { WorkerWorktreeManager } from './worker-worktree';
 import {
   RuntimeHostTeamWorkerRuntime,
+  TeamRuntimeAvailabilityTracker,
   buildInheritedWorkerContext,
   chooseWorkerRuntime,
 } from './team-worker-runtime';
@@ -476,6 +477,7 @@ export class IpcRouter {
   private readonly teamMcpBridge: TeamMcpBridge;
   private readonly skillSettings: SkillSettingsService;
   private readonly modelCatalog = new ModelCatalogService();
+  private readonly teamRuntimeAvailability = new TeamRuntimeAvailabilityTracker();
   private readonly providerRegistry = new MainProviderRegistry();
   private readonly providerProfiles = new MainProviderProfileRegistry();
   private readonly providerEgressTrustForConnection: (
@@ -591,11 +593,12 @@ export class IpcRouter {
       homePath: process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'),
     });
     const cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
-      // Real worker execution is opt-in when the selected chat runtime is mock. Runtime probe or
-      // policy failures remain explicit and are never replaced with simulated Team output.
-      selectRuntime: (worker) => {
+      // Real worker execution is opt-in when the selected chat runtime is mock. Availability and
+      // quota failures may use another policy-allowed real AI; permission failures remain explicit,
+      // and simulated Team output is never used in production.
+      selectRuntimes: (worker) => {
         const selected = builtinRuntimeForModelSelection(worker.modelSelection);
-        const choice =
+        const primary =
           selected === null
             ? chooseWorkerRuntime(
                 this.persistence.getRuntime(),
@@ -603,10 +606,42 @@ export class IpcRouter {
                 process.env['SPRINT_CODER_REAL_WORKERS'] === '1',
               )
             : { kind: selected.runtimeKind, model: selected.model };
-        return process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] === '1' && choice?.kind !== 'codex'
-          ? null
-          : choice;
+        const candidates = primary === null ? [] : [primary];
+        if (primary !== null && process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] !== '1') {
+          const available = this.modelCatalog.query(
+            {
+              taskId: worker.taskId,
+              text: '',
+              connectionIds: [],
+              providerIds: [],
+              accessTypes: [],
+              capabilities: [],
+              availableOnly: true,
+              cursor: null,
+              limit: 512,
+            },
+            this.teamModelAllowedKeys(),
+          );
+          for (const model of available.items) {
+            const candidate = builtinRuntimeForModelSelection({
+              connectionId: model.connectionId,
+              requestedProvider: model.providerId,
+              requestedModel: model.modelId,
+            });
+            if (
+              candidate !== null &&
+              this.teamRuntimeAvailability.isAvailable(candidate.runtimeKind)
+            )
+              candidates.push({ kind: candidate.runtimeKind, model: candidate.model });
+          }
+        }
+        return candidates.filter(
+          (choice) =>
+            (process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] !== '1' || choice.kind === 'codex') &&
+            this.teamRuntimeAvailability.isAvailable(choice.kind),
+        );
       },
+      availability: this.teamRuntimeAvailability,
       workspaceFor: (taskId) => this.persistence.getWorkspace(taskId),
       catalogFor: (kind, workspacePath) =>
         createEmptyToolCatalogSnapshot(
@@ -3412,7 +3447,8 @@ export class IpcRouter {
           'Codex CLI',
           'openai',
           codexCapability.models,
-          codexCapability.readiness === 'ready',
+          codexCapability.readiness === 'ready' &&
+            this.teamRuntimeAvailability.isAvailable('codex'),
           checkedAt,
         ),
         ...providerModelsForBuiltin(
@@ -3420,7 +3456,8 @@ export class IpcRouter {
           'Claude Code',
           'anthropic',
           claudeCapability.models,
-          claudeCapability.readiness === 'ready',
+          claudeCapability.readiness === 'ready' &&
+            this.teamRuntimeAvailability.isAvailable('claude'),
           checkedAt,
         ),
         ...externalModels,
