@@ -3,7 +3,11 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import config, { assertNativePackagingHost, verifyBundledNodeResources } from './forge.config';
+import config, {
+  assertNativePackagingHost,
+  resolveWindowsSignOptions,
+  verifyBundledNodeResources,
+} from './forge.config';
 import { macAutoUpdateEligibleForIdentity } from './vite.main.config';
 import {
   planWindowsWizardInstaller,
@@ -39,6 +43,42 @@ describe('native package target', () => {
       expect(() => verifyBundledNodeResources()).not.toThrow();
     },
   );
+});
+
+describe('Windows release signing', () => {
+  it('selects a CurrentUser code-signing certificate without exporting its private key', () => {
+    expect(
+      resolveWindowsSignOptions({
+        SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1: '4f9b 4eaa cd58 21f7 e84f a525 955a 904d 5eb7 7826',
+      }),
+    ).toEqual({
+      signWithParams: '/sha1 4F9B4EAACD5821F7E84FA525955A904D5EB77826',
+      description: 'Sprint Coder',
+    });
+  });
+
+  it('rejects malformed store thumbprints and incomplete PFX settings', () => {
+    expect(() =>
+      resolveWindowsSignOptions({ SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1: 'not-a-thumbprint' }),
+    ).toThrow('40-character SHA-1 thumbprint');
+    expect(() =>
+      resolveWindowsSignOptions({ SPRINT_CODER_WINDOWS_CERTIFICATE_FILE: 'release.pfx' }),
+    ).toThrow('must be provided together');
+    expect(() =>
+      resolveWindowsSignOptions({
+        SPRINT_CODER_WINDOWS_CERTIFICATE_FILE: 'release.pfx',
+        SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD: 'secret',
+        SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1: 'not-a-thumbprint',
+      }),
+    ).toThrow('40-character SHA-1 thumbprint');
+    expect(() =>
+      resolveWindowsSignOptions({
+        SPRINT_CODER_WINDOWS_CERTIFICATE_FILE: 'release.pfx',
+        SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD: 'secret',
+        SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1: '4F9B4EAACD5821F7E84FA525955A904D5EB77826',
+      }),
+    ).toThrow('mutually exclusive');
+  });
 });
 
 describe('macOS auto-update signing gate', () => {

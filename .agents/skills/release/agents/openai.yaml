@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sprint Coder Release"
+  short_description: "署名済み成果物を検証してDraft Releaseへ登録"
+  default_prompt: "Use $release to prepare and verify a Sprint Coder draft release."

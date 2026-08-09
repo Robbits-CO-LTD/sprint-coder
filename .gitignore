@@ -9,3 +9,4 @@ test-results/
 playwright-report/
 .dev-data/
 .sprint-coder-team/tmp/
+.tmp-release-tools/

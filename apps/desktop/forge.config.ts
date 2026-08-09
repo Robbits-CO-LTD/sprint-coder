@@ -51,16 +51,7 @@ const releasePackage = process.env['SPRINT_CODER_RELEASE'] === '1';
 const ciPackage = process.env['CI'] === '1' || process.env['CI'] === 'true';
 const allowAdhocCodeSign = process.env['SPRINT_CODER_ALLOW_ADHOC_CODESIGN'] === '1';
 const allowUnsignedWindows = process.env['SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS'] === '1';
-const windowsCertificateFile = process.env['SPRINT_CODER_WINDOWS_CERTIFICATE_FILE'];
-const windowsCertificatePassword = process.env['SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD'];
-const windowsSign =
-  windowsCertificateFile !== undefined && windowsCertificatePassword !== undefined
-    ? {
-        certificateFile: windowsCertificateFile,
-        certificatePassword: windowsCertificatePassword,
-        description: 'Sprint Coder',
-      }
-    : undefined;
+const windowsSign = resolveWindowsSignOptions(process.env);
 const BUNDLED_NODE_VERSION = '22.23.2';
 const BUNDLED_NODE_SHA256 = '0D0F5E39F9F3D9587BC19F73EAB3C2C9C4903FD02D6DBF9C853DD81B3D95FAD4';
 const BUNDLED_NODE_SIGNER_SUBJECT =
@@ -127,15 +118,48 @@ export function assertNativePackagingHost(targetPlatform: ForgePlatform): void {
   );
 }
 
-if (
-  process.platform === 'win32' &&
-  releasePackage &&
-  !allowUnsignedWindows &&
-  (windowsCertificateFile === undefined || windowsCertificatePassword === undefined)
-)
+if (process.platform === 'win32' && releasePackage && !allowUnsignedWindows && !windowsSign)
   throw new Error(
-    'SPRINT_CODER_WINDOWS_CERTIFICATE_FILE and SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD are required for a production Windows package unless SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1 is explicitly set',
+    'A PFX certificate or SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1 is required for a production Windows package unless SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS=1 is explicitly set',
   );
+
+export function resolveWindowsSignOptions(
+  environment: Partial<
+    Record<
+      | 'SPRINT_CODER_WINDOWS_CERTIFICATE_FILE'
+      | 'SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD'
+      | 'SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1',
+      string | undefined
+    >
+  >,
+):
+  | Readonly<{
+      certificateFile: string;
+      certificatePassword: string;
+      description: string;
+    }>
+  | Readonly<{ signWithParams: string; description: string }>
+  | undefined {
+  const certificateFile = environment.SPRINT_CODER_WINDOWS_CERTIFICATE_FILE;
+  const certificatePassword = environment.SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD;
+  const certificateSha1 = environment.SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1;
+  const normalizedSha1 = certificateSha1?.replaceAll(' ', '').toUpperCase();
+  if (normalizedSha1 !== undefined && !/^[0-9A-F]{40}$/.test(normalizedSha1))
+    throw new Error(
+      'SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1 must be a 40-character SHA-1 thumbprint',
+    );
+  if (
+    normalizedSha1 !== undefined &&
+    (certificateFile !== undefined || certificatePassword !== undefined)
+  )
+    throw new Error('Windows PFX and certificate-store signing settings are mutually exclusive');
+  if ((certificateFile === undefined) !== (certificatePassword === undefined))
+    throw new Error('Windows PFX certificate file and password must be provided together');
+  if (certificateFile !== undefined && certificatePassword !== undefined)
+    return { certificateFile, certificatePassword, description: 'Sprint Coder' };
+  if (normalizedSha1 === undefined) return undefined;
+  return { signWithParams: `/sha1 ${normalizedSha1}`, description: 'Sprint Coder' };
+}
 
 function copyHoistedRuntimeModules(buildPath: string): void {
   const rootNodeModules = resolve(__dirname, '..', '..', 'node_modules');
