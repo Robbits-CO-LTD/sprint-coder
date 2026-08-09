@@ -166,8 +166,8 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   }
 
   async execute(input: TeamWorkerExecutionInput): Promise<WorkerRuntimeResult> {
-    const choices = uniqueRuntimeChoices(this.deps.selectRuntimes(input.worker)).filter(({ kind }) =>
-      this.deps.availability.isAvailable(kind),
+    const choices = uniqueRuntimeChoices(this.deps.selectRuntimes(input.worker)).filter(
+      ({ kind }) => this.deps.availability.isAvailable(kind),
     );
     if (choices.length === 0) {
       if (this.deps.allowSimulation === true) return this.simulator.execute(input);

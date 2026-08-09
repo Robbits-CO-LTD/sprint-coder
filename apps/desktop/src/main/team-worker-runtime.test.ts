@@ -8,7 +8,12 @@ const runtimeHostMock = vi.hoisted(() => ({
   startSucceeds: true,
   failures: new Map<
     'claude' | 'codex',
-    { code: 'RUNTIME_RATE_LIMIT' | 'RUNTIME_UNAVAILABLE'; userMessage: string; retryable: boolean; retryAt?: string }
+    {
+      code: 'RUNTIME_RATE_LIMIT' | 'RUNTIME_UNAVAILABLE';
+      userMessage: string;
+      retryable: boolean;
+      retryAt?: string;
+    }
   >(),
 }));
 
@@ -196,12 +201,8 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(activities).toContain('Codexへfallbackして続行');
     expect(teamMcpFor).toHaveBeenCalledTimes(2);
     expect(releaseTeamMcp).toHaveBeenCalledTimes(2);
-    expect(availability.isAvailable('claude', Date.parse('2099-08-10T01:59:59.000Z'))).toBe(
-      false,
-    );
-    expect(availability.isAvailable('claude', Date.parse('2099-08-10T02:00:00.000Z'))).toBe(
-      true,
-    );
+    expect(availability.isAvailable('claude', Date.parse('2099-08-10T01:59:59.000Z'))).toBe(false);
+    expect(availability.isAvailable('claude', Date.parse('2099-08-10T02:00:00.000Z'))).toBe(true);
   });
 
   it('fails immediately without waiting for exit when the runtime was not started', async () => {
