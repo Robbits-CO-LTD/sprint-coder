@@ -15,6 +15,7 @@ const runtimeHostMock = vi.hoisted(() => ({
       retryAt?: string;
       defer?: boolean;
       emitOperation?: boolean;
+      emitReadOperation?: boolean;
     }
   >(),
 }));
@@ -53,6 +54,14 @@ vi.mock('./runtime-host', () => ({
             type: 'operation',
             phase: 'tool_call_start',
             label: 'Claude tool call started (mcp__team__team_hire)',
+            sideEffect: true,
+          });
+        if (failure.emitReadOperation === true)
+          this.onEvent(taskId, turnId, {
+            type: 'operation',
+            phase: 'tool_call_start',
+            label: 'Claude tool call started (Read)',
+            sideEffect: false,
           });
         if (failure.defer === true) queueMicrotask(() => this.onFailure(taskId, turnId, failure));
         else this.onFailure(taskId, turnId, failure);
@@ -282,6 +291,35 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     ).rejects.toThrow('Claude Codeの利用上限に達しました。');
 
     expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude']);
+  });
+
+  it('retries a read-only task after an operation without side effects', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_RATE_LIMIT',
+      userMessage: 'Claude Codeの利用上限に達しました。',
+      retryable: false,
+      defer: true,
+      emitReadOperation: true,
+    });
+    const subject = runtime({
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    });
+
+    await expect(
+      subject.execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '調査する',
+      }),
+    ).resolves.toMatchObject({
+      resolution: { resolvedProvider: 'openai', resolvedModel: 'gpt-5.6-terra' },
+    });
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude', 'codex']);
   });
 
   it('fails immediately without waiting for exit when the runtime was not started', async () => {

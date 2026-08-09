@@ -101,6 +101,7 @@ export type RuntimeCanonicalEvent =
       type: 'operation';
       phase: 'command_start' | 'command_end' | 'tool_call_start' | 'tool_call_end';
       label: string;
+      sideEffect?: boolean;
     }
   | { type: 'stage'; stage: TurnStage }
   | { type: 'delta'; messageId: string; delta: string }
@@ -521,7 +522,10 @@ function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent
       'label' in value &&
       typeof value.label === 'string' &&
       value.label.length > 0 &&
-      value.label.length <= 1_000
+      value.label.length <= 1_000 &&
+      (!('sideEffect' in value) ||
+        value.sideEffect === undefined ||
+        typeof value.sideEffect === 'boolean')
     );
   if (value.type === 'reasoning')
     return (

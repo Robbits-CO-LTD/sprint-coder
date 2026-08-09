@@ -130,7 +130,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             at: new Date().toISOString(),
           });
         if (event.type === 'operation') {
-          run.sideEffectsObserved = true;
+          if (event.sideEffect === true) run.sideEffectsObserved = true;
           run.onEvent?.({
             type: 'activity',
             phase: event.phase,

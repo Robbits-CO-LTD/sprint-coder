@@ -531,12 +531,17 @@ export function codexOperationForItem(
       type: 'operation',
       phase: timing === 'started' ? 'command_start' : 'command_end',
       label: timing === 'started' ? 'Codex command started' : 'Codex command finished',
+      sideEffect: false,
     };
   if (typeof item['type'] !== 'string' || !CODEX_TOOL_ITEM_TYPES.has(item['type'])) return null;
   const toolName = typeof item['tool'] === 'string' ? ` (${item['tool']})` : '';
   return {
     type: 'operation',
     phase: timing === 'started' ? 'tool_call_start' : 'tool_call_end',
+    sideEffect:
+      item['type'] === 'mcpToolCall' ||
+      item['type'] === 'collabAgentToolCall' ||
+      item['type'] === 'imageGeneration',
     label:
       timing === 'started'
         ? `Codex tool call started${toolName}`

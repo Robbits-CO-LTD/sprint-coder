@@ -219,6 +219,7 @@ export class ClaudeJsonlNormalizer {
         type: 'operation',
         phase: 'tool_call_start',
         label: `Claude tool call started (${name})`,
+        sideEffect: WRITE_TOOLS.has(name) || name.startsWith('mcp__team__'),
       });
       if (!WRITE_TOOLS.has(name)) continue;
       const input = isRecord(block['input']) ? block['input'] : null;

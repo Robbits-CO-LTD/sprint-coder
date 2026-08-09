@@ -319,6 +319,7 @@ describe('file writes (issue #37)', () => {
       type: 'operation',
       phase: 'tool_call_start',
       label: 'Claude tool call started (Edit)',
+      sideEffect: true,
     });
     expect(normalizer.push(toolResult('t1', 'The file has been updated.'))).toContainEqual({
       type: 'fileChange',
@@ -364,6 +365,7 @@ describe('file writes (issue #37)', () => {
       type: 'operation',
       phase: 'tool_call_start',
       label: 'Claude tool call started (Read)',
+      sideEffect: false,
     });
     expect(normalizer.push(toolResult('t1', '1\tcontents'))).toEqual([]);
     expect(normalizer.push(toolResult('unknown', 'done'))).toEqual([]);
@@ -376,6 +378,7 @@ describe('file writes (issue #37)', () => {
       type: 'operation',
       phase: 'tool_call_start',
       label: 'Claude tool call started (mcp__team__team_hire)',
+      sideEffect: true,
     });
   });
 });
