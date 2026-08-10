@@ -74,6 +74,14 @@ describe('release signing and notarization', () => {
     expect(workflow).toContain('Windows版はコード署名されていません');
   });
 
+  it('normalizes cross-platform asset names before creating manifests and uploading drafts', () => {
+    expect(workflow).toContain('Sprint-Coder-${RELEASE_VERSION}-arm64.dmg');
+    expect(workflow).toContain('Sprint-Coder-darwin-arm64-${RELEASE_VERSION}.zip');
+    expect(workflow).toContain('Sprint-Coder-linux-x64-${RELEASE_VERSION}.zip');
+    expect(workflow).toContain('--json assets');
+    expect(workflow).not.toContain('releases/tags/${RELEASE_TAG}');
+  });
+
   it('resumes partial draft uploads by replacing the complete validated asset set', () => {
     const draftCheck = workflow.indexOf("Release is not a draft; refusing to replace published assets.");
     const tagCheck = workflow.indexOf(

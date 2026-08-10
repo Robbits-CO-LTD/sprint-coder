@@ -415,6 +415,23 @@ jobs:
             exit 1
           fi
 
+          normalized_asset_dir='release-assets/normalized'
+          mkdir -p "${normalized_asset_dir}"
+
+          normalized_dmg="${normalized_asset_dir}/Sprint-Coder-${RELEASE_VERSION}-arm64.dmg"
+          normalized_mac_zip="${normalized_asset_dir}/Sprint-Coder-darwin-arm64-${RELEASE_VERSION}.zip"
+          normalized_linux_zip="${normalized_asset_dir}/Sprint-Coder-linux-x64-${RELEASE_VERSION}.zip"
+          for index in "${!assets[@]}"; do
+            case "${assets[${index}]}" in
+              "${dmg}") mv -- "${dmg}" "${normalized_dmg}"; assets[${index}]="${normalized_dmg}" ;;
+              "${mac_zip}") mv -- "${mac_zip}" "${normalized_mac_zip}"; assets[${index}]="${normalized_mac_zip}" ;;
+              "${linux_zip}") mv -- "${linux_zip}" "${normalized_linux_zip}"; assets[${index}]="${normalized_linux_zip}" ;;
+            esac
+          done
+          dmg="${normalized_dmg}"
+          mac_zip="${normalized_mac_zip}"
+          linux_zip="${normalized_linux_zip}"
+
           node apps/desktop/scripts/create-macos-update-manifest.mjs \
             --version "${RELEASE_VERSION}" \
             --tag "${RELEASE_TAG}" \
@@ -468,7 +485,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 
-          uploaded_release_assets="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          uploaded_release_assets="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets)"
           for asset in "${assets[@]}"; do
             asset_name="$(basename "${asset}")"
             uploaded_count="$(jq --arg name "${asset_name}" '[.assets[] | select(.name == $name)] | length' <<<"${uploaded_release_assets}")"
