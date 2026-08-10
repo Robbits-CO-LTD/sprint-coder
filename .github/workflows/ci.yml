@@ -45,7 +45,9 @@ jobs:
           full_matrix=true
           if [[ "${EVENT_NAME}" == 'pull_request' ]]; then
             full_matrix=false
-            changed_files="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")"
+            # Treat renames as a delete + add so moving an OS-sensitive file out of a protected
+            # path cannot hide the risky source path from the classifier.
+            changed_files="$(git diff --no-renames --name-only "${BASE_SHA}" "${HEAD_SHA}")"
             printf '%s\n' "${changed_files}"
 
             # Renderer, styling, docs, and pure package changes use the fast lane. Changes that
@@ -92,6 +94,7 @@ jobs:
     # lane. It gives every PR complete Vitest coverage while Linux/Windows focus on their platform
     # boundaries only when relevant.
     name: build (macos-latest)
+    needs: classify
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -135,6 +138,13 @@ jobs:
 
       - name: Test
         run: npm run test
+
+      # The full lane proves packaged startup on Linux. Keep a production Forge boundary in the
+      # fast lane too, reusing this job's installed dependencies and cached native binaries.
+      - name: Production package smoke (fast lane)
+        if: needs.classify.outputs.full_matrix != 'true'
+        working-directory: apps/desktop
+        run: npx electron-forge package
 
   windows-smoke:
     name: build (windows-2022, smoke)
