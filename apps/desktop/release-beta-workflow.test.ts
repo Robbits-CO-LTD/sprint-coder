@@ -76,7 +76,9 @@ describe('release signing and notarization', () => {
 
   it('resumes partial draft uploads by replacing the complete validated asset set', () => {
     const draftCheck = workflow.indexOf("Release is not a draft; refusing to replace published assets.");
-    const tagCheck = workflow.indexOf('Release tag targets ${tag_commit}, expected ${GITHUB_SHA}.');
+    const tagCheck = workflow.indexOf(
+      'Release tag targets ${tag_commit}, expected ${expected_commit}.',
+    );
     const upload = workflow.indexOf('gh release upload "${RELEASE_TAG}" "${assets[@]}"');
 
     expect(draftCheck).toBeGreaterThan(-1);
@@ -88,9 +90,20 @@ describe('release signing and notarization', () => {
 
   it('validates the tag commit and replaces its managed release-notes section on reruns', () => {
     expect(workflow).toContain('commits/${RELEASE_TAG}');
+    expect(workflow).toContain('git rev-parse "${GITHUB_SHA}^{commit}"');
     expect(workflow).not.toContain('targetCommitish');
     expect(workflow).toContain('<!-- sprint-coder-packages:start -->');
     expect(workflow).toContain('<!-- sprint-coder-packages:end -->');
     expect(workflow).toContain('$0 == managed_start { managed = 1; next }');
+  });
+
+  it('refuses to turn an existing published release back into a draft', () => {
+    const publishedGuard = workflow.indexOf(
+      'Release is already published; refusing to modify it.',
+    );
+    const existingReleaseEdit = workflow.indexOf('gh release edit "${RELEASE_TAG}"');
+
+    expect(publishedGuard).toBeGreaterThan(-1);
+    expect(existingReleaseEdit).toBeGreaterThan(publishedGuard);
   });
 });

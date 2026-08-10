@@ -429,6 +429,11 @@ jobs:
           fi
 
           if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            existing_release_state="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft)"
+            if [[ "$(jq -r '.isDraft' <<<"${existing_release_state}")" != 'true' ]]; then
+              echo '::error::Release is already published; refusing to modify it.'
+              exit 1
+            fi
             gh release edit "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Sprint Coder ${RELEASE_VERSION}" \
@@ -453,8 +458,9 @@ jobs:
             exit 1
           fi
           tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq .sha)"
-          if [[ "${tag_commit}" != "${GITHUB_SHA}" ]]; then
-            echo "::error::Release tag targets ${tag_commit}, expected ${GITHUB_SHA}."
+          expected_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if [[ "${tag_commit}" != "${expected_commit}" ]]; then
+            echo "::error::Release tag targets ${tag_commit}, expected ${expected_commit}."
             exit 1
           fi
 
