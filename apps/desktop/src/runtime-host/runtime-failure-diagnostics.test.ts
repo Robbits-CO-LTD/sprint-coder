@@ -81,4 +81,16 @@ describe('RuntimeFailureDiagnosticCollector', () => {
     collector.setCliVersion('codex sk-proj-secret-value');
     expect(collector.snapshot('protocol_error').cliVersion).toBeNull();
   });
+
+  it('accepts only the documented Claude version shape', () => {
+    const collector = new RuntimeFailureDiagnosticCollector(
+      'claude',
+      '0.2.1',
+      '2.1.218 (Claude Code)',
+      false,
+    );
+    expect(collector.snapshot('abnormal_exit').cliVersion).toBe('2.1.218 (Claude Code)');
+    collector.setCliVersion('claude-code /Users/private');
+    expect(collector.snapshot('abnormal_exit').cliVersion).toBeNull();
+  });
 });

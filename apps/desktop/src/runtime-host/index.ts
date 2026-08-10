@@ -75,6 +75,7 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
 
 void (runtimeKind === 'claude' ? probeClaude() : probeCodex()).then((probe) => {
   if (adapter instanceof CodexRuntimeAdapter) adapter.setCliVersion(probe.version ?? null);
+  if (adapter instanceof ClaudeRuntimeAdapter) adapter.setCliVersion(probe.version ?? null);
   send('', '', 'probe', {
     type: 'hello',
     ...(runtimeKind === 'claude'

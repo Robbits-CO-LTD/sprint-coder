@@ -586,9 +586,13 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
     (record['cliVersion'] === null ||
       (typeof record['cliVersion'] === 'string' &&
         record['cliVersion'].length <= 128 &&
-        /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(
-          record['cliVersion'],
-        ))) &&
+        (record['runtimeKind'] === 'codex'
+          ? /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(
+              record['cliVersion'],
+            )
+          : /^(?:claude-code )?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \(Claude Code\))?$/.test(
+              record['cliVersion'],
+            )))) &&
     typeof teamMcp === 'object' &&
     teamMcp !== null &&
     Object.keys(teamMcp).every((key) => key === 'enabled' || key === 'status') &&

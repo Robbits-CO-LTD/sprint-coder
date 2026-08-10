@@ -13,6 +13,7 @@ import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { CodexModelOption } from '@sprint-coder/contracts';
+import desktopPackage from '../../package.json';
 import {
   ClaudeAuthenticationError,
   ClaudeCapabilityViolationError,
@@ -23,6 +24,8 @@ import {
 import type {
   RuntimeCanonicalEvent,
   RuntimeContextFragment,
+  RuntimeFailureDiagnostic,
+  RuntimeFailureStage,
   RuntimeProjectContextItem,
   RuntimeSkillInput,
   RuntimeTeamMcpOption,
@@ -41,6 +44,7 @@ import {
   RuntimeProgressDeadline,
   type RuntimeProgressTimeoutPhase,
 } from './runtime-progress-deadline';
+import { RuntimeFailureDiagnosticCollector } from './runtime-failure-diagnostics';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -48,7 +52,7 @@ type ActiveProcess = {
   cleanup: () => void;
 };
 type EmitEvent = (event: RuntimeCanonicalEvent) => void;
-type EmitError = (error: PublicError) => void;
+type EmitError = (error: PublicError, diagnostic?: RuntimeFailureDiagnostic) => void;
 
 export type ClaudeProbe = {
   available: boolean;
@@ -190,8 +194,13 @@ export async function probeClaude(
 
 export class ClaudeRuntimeAdapter {
   private readonly active = new Map<string, ActiveProcess>();
+  private cliVersion: string | null = null;
 
   constructor(private readonly timeoutMs = 10 * 60_000) {}
+
+  setCliVersion(version: string | null): void {
+    this.cliVersion = version;
+  }
 
   start(
     turnId: string,
@@ -214,6 +223,14 @@ export class ClaudeRuntimeAdapter {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
       return;
     }
+    const diagnostics = new RuntimeFailureDiagnosticCollector(
+      'claude',
+      desktopPackage.version,
+      this.cliVersion,
+      teamMcp !== undefined,
+    );
+    const failWithDiagnostic = (error: PublicError, stage: RuntimeFailureStage): void =>
+      fail(error, diagnostics.snapshot(stage));
     let temporaryDirectory: string | null = null;
     const workspace =
       typeof workspaceInput === 'string' || workspaceInput === null
@@ -233,12 +250,13 @@ export class ClaudeRuntimeAdapter {
       } catch {
         if (temporaryDirectory !== null)
           rmSync(temporaryDirectory, { recursive: true, force: true });
-        fail(
+        failWithDiagnostic(
           publicError(
             'RUNTIME_FAILED',
             'Team機能に必要な同梱Node.jsを起動できません。アプリを再インストールしてください。',
             false,
           ),
+          'startup_error',
         );
         return;
       }
@@ -310,7 +328,10 @@ export class ClaudeRuntimeAdapter {
       (phase) => {
         if (!failed && !control.canceled) {
           failed = true;
-          fail(publicError('RUNTIME_TIMEOUT', claudeTimeoutMessage(phase), true));
+          failWithDiagnostic(
+            publicError('RUNTIME_TIMEOUT', claudeTimeoutMessage(phase), true),
+            `${phase}_timeout`,
+          );
         }
         void terminateProcessTree(child);
       },
@@ -327,16 +348,16 @@ export class ClaudeRuntimeAdapter {
         }
       } catch (error) {
         failed = true;
-        fail(claudeOutputErrorToPublicError(error));
+        failWithDiagnostic(claudeOutputErrorToPublicError(error), 'protocol_error');
         void terminateProcessTree(child);
       }
     });
-    // Drain diagnostics so the child cannot block, but never forward or retain provider output.
-    child.stderr.resume();
+    // Keep only presence/size metadata; provider stderr text never crosses the Runtime boundary.
+    child.stderr.on('data', (chunk: Buffer) => diagnostics.recordStderr(chunk));
     child.once('error', (error) => {
       if (failed || control.canceled) return;
       failed = true;
-      fail(
+      failWithDiagnostic(
         publicError(
           (error as NodeJS.ErrnoException).code === 'ENOENT'
             ? 'RUNTIME_CLI_MISSING'
@@ -346,6 +367,7 @@ export class ClaudeRuntimeAdapter {
             : 'Claude runtimeを起動できませんでした。',
           false,
         ),
+        'spawn_error',
       );
     });
     child.once('exit', (code) => {
@@ -355,7 +377,10 @@ export class ClaudeRuntimeAdapter {
       const exitCode = code ?? -1;
       if (!control.canceled && !failed && (exitCode !== 0 || !sawCompletion)) {
         failed = true;
-        fail(publicError('RUNTIME_FAILED', 'Claude runtimeが正常に完了しませんでした。', true));
+        failWithDiagnostic(
+          publicError('RUNTIME_FAILED', 'Claude runtimeが正常に完了しませんでした。', true),
+          'abnormal_exit',
+        );
       }
       exited(exitCode, control.canceled);
     });

@@ -27,7 +27,7 @@ export class RuntimeFailureDiagnosticCollector {
   ) {}
 
   setCliVersion(version: string | null): void {
-    this.cliVersion = safeCliVersion(version);
+    this.cliVersion = safeCliVersion(this.runtimeKind, version);
   }
 
   recordNotification(method: string): void {
@@ -58,7 +58,7 @@ export class RuntimeFailureDiagnosticCollector {
       failureStage: stage,
       elapsedMs: Math.max(0, Math.round(now - this.startedAt)),
       appVersion: boundedText(this.appVersion, 64) ?? 'unknown',
-      cliVersion: safeCliVersion(this.cliVersion),
+      cliVersion: safeCliVersion(this.runtimeKind, this.cliVersion),
       teamMcp: {
         enabled: this.teamMcpEnabled,
         status: this.teamMcpEnabled ? 'configured' : 'not_configured',
@@ -79,10 +79,11 @@ function boundedText(value: string | null, maxLength: number): string | null {
   return value.length <= maxLength ? value : value.slice(0, maxLength);
 }
 
-function safeCliVersion(value: string | null): string | null {
+function safeCliVersion(runtimeKind: 'codex' | 'claude', value: string | null): string | null {
   const bounded = boundedText(value, 128);
-  return bounded !== null &&
-    /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(bounded)
-    ? bounded
-    : null;
+  const pattern =
+    runtimeKind === 'codex'
+      ? /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
+      : /^(?:claude-code )?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \(Claude Code\))?$/;
+  return bounded !== null && pattern.test(bounded) ? bounded : null;
 }

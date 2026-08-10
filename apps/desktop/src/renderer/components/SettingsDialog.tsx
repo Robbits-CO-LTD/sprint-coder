@@ -508,6 +508,9 @@ function DiagnosticsGroup() {
     runtimeStatus?.state === 'failed' && runtimeStatus.taskId === selectedTaskId
       ? (runtimeStatus.diagnosticId ?? undefined)
       : undefined;
+  const currentFailureCannotBeCopied =
+    runtimeStatus?.state === 'failed' &&
+    (runtimeStatus.taskId !== selectedTaskId || runtimeStatus.diagnosticId === null);
   const diagnosticSelectionKey = `${selectedTaskId ?? 'none'}:${currentDiagnosticId ?? 'latest'}`;
   const [copyResult, setCopyResult] = useState<{ key: string; text: string } | null>(null);
   const [copyPendingKey, setCopyPendingKey] = useState<string | null>(null);
@@ -529,6 +532,13 @@ function DiagnosticsGroup() {
   async function copyFailureDiagnostic(): Promise<void> {
     if (selectedTaskId === null || window.sprintCoder?.runtime?.getFailureDiagnostic === undefined)
       return;
+    if (currentFailureCannotBeCopied) {
+      setCopyResult({
+        key: diagnosticSelectionKey,
+        text: '現在の失敗にはコピー可能な診断がありません',
+      });
+      return;
+    }
     const taskId = selectedTaskId;
     const diagnosticId = currentDiagnosticId;
     const selectionKey = diagnosticSelectionKey;
@@ -577,7 +587,11 @@ function DiagnosticsGroup() {
         <button
           type="button"
           className="settings-secondary-button"
-          disabled={selectedTaskId === null || copyPendingKey === diagnosticSelectionKey}
+          disabled={
+            selectedTaskId === null ||
+            currentFailureCannotBeCopied ||
+            copyPendingKey === diagnosticSelectionKey
+          }
           onClick={() => void copyFailureDiagnostic()}
           data-testid="settings-copy-runtime-diagnostic"
         >
