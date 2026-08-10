@@ -415,6 +415,28 @@ jobs:
             exit 1
           fi
 
+          normalized_asset_dir='release-assets/normalized'
+          mkdir -p "${normalized_asset_dir}"
+
+          normalized_dmg="${normalized_asset_dir}/Sprint-Coder-${RELEASE_VERSION}-arm64.dmg"
+          normalized_mac_zip="${normalized_asset_dir}/Sprint-Coder-darwin-arm64-${RELEASE_VERSION}.zip"
+          normalized_linux_zip="${normalized_asset_dir}/Sprint-Coder-linux-x64-${RELEASE_VERSION}.zip"
+          legacy_asset_names=()
+          for legacy_asset in "${dmg}" "${mac_zip}" "${linux_zip}"; do
+            legacy_asset_name="$(basename "${legacy_asset}")"
+            legacy_asset_names+=("${legacy_asset_name// /.}")
+          done
+          for index in "${!assets[@]}"; do
+            case "${assets[${index}]}" in
+              "${dmg}") mv -- "${dmg}" "${normalized_dmg}"; assets[${index}]="${normalized_dmg}" ;;
+              "${mac_zip}") mv -- "${mac_zip}" "${normalized_mac_zip}"; assets[${index}]="${normalized_mac_zip}" ;;
+              "${linux_zip}") mv -- "${linux_zip}" "${normalized_linux_zip}"; assets[${index}]="${normalized_linux_zip}" ;;
+            esac
+          done
+          dmg="${normalized_dmg}"
+          mac_zip="${normalized_mac_zip}"
+          linux_zip="${normalized_linux_zip}"
+
           node apps/desktop/scripts/create-macos-update-manifest.mjs \
             --version "${RELEASE_VERSION}" \
             --tag "${RELEASE_TAG}" \
@@ -468,12 +490,32 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 
-          uploaded_release_assets="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          uploaded_release_assets="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets)"
           for asset in "${assets[@]}"; do
             asset_name="$(basename "${asset}")"
             uploaded_count="$(jq --arg name "${asset_name}" '[.assets[] | select(.name == $name)] | length' <<<"${uploaded_release_assets}")"
             if [[ "${uploaded_count}" != '1' ]]; then
               echo "::error::Expected exactly one uploaded release asset named ${asset_name}."
+              exit 1
+            fi
+          done
+
+          for legacy_asset_name in "${legacy_asset_names[@]}"; do
+            legacy_asset_api_url="$(
+              jq -r --arg name "${legacy_asset_name}" \
+                '.assets[] | select(.name == $name) | .apiUrl' \
+                <<<"${uploaded_release_assets}"
+            )"
+            [[ -n "${legacy_asset_api_url}" ]] || continue
+            legacy_asset_endpoint="${legacy_asset_api_url#https://api.github.com/}"
+            gh api --method DELETE "${legacy_asset_endpoint}"
+          done
+
+          final_release_assets="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets)"
+          for legacy_asset_name in "${legacy_asset_names[@]}"; do
+            legacy_asset_count="$(jq --arg name "${legacy_asset_name}" '[.assets[] | select(.name == $name)] | length' <<<"${final_release_assets}")"
+            if [[ "${legacy_asset_count}" != '0' ]]; then
+              echo "::error::Legacy release asset ${legacy_asset_name} was not removed."
               exit 1
             fi
           done
