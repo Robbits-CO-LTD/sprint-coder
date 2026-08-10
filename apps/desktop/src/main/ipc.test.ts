@@ -43,6 +43,7 @@ import {
   projectUpdateInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeEffortSetInputSchema,
+  runtimeFailureDiagnosticQuerySchema,
   runtimeModelSetInputSchema,
   runtimeSetInputSchema,
   skillCandidateInputSchema,
@@ -585,6 +586,7 @@ describe('isTrustedIpcSender', () => {
 // asserted absent below.
 const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.appGetInfo]: emptyPayloadSchema,
+  [IPC_CHANNELS.runtimeFailureDiagnosticGet]: runtimeFailureDiagnosticQuerySchema,
   [IPC_CHANNELS.settingsGetRuntime]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetRuntime]: runtimeSetInputSchema,
   [IPC_CHANNELS.settingsSetModel]: runtimeModelSetInputSchema,

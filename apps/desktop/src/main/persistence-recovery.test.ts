@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -36,6 +37,34 @@ afterEach(() => {
 
 if (runsWithElectronAbi)
   describe('database corruption recovery (backup/restore)', () => {
+    it('includes committed WAL-only pages in a pre-migration backup on every OS', () => {
+      const path = tempDatabasePath();
+      const seeded = new SqlitePersistenceClient(path);
+      const task = seeded.createTask('before WAL update');
+      seeded.close();
+
+      const writer = new Database(path);
+      writer.pragma('journal_mode = WAL');
+      writer.pragma('wal_autocheckpoint = 0');
+      writer.exec(`
+        DROP TABLE runtime_failure_diagnostics;
+        DELETE FROM schema_migrations WHERE version = 66;
+      `);
+      writer.prepare('UPDATE tasks SET title = ? WHERE id = ?').run('committed in WAL', task.id);
+      expect(existsSync(`${path}-wal`)).toBe(true);
+
+      const migrated = new SqlitePersistenceClient(path);
+      migrated.close();
+      writer.close();
+      expect(existsSync(`${path}.pre-migration.bak`)).toBe(true);
+
+      writeFileSync(path, 'not a sqlite database — simulated post-migration corruption');
+      const recovered = new SqlitePersistenceClient(path);
+      expect(recovered.recoveryReport.restoredFromBackup).toBe(true);
+      expect(recovered.getTask(task.id).title).toBe('committed in WAL');
+      recovered.close();
+    });
+
     it('restores from the pre-migration backup when the database file is corrupt', () => {
       const path = tempDatabasePath();
       const seeded = new SqlitePersistenceClient(path);

@@ -218,6 +218,69 @@ describe('Runtime Host protocol', () => {
     expect(isMainToRuntimeEnvelope({ ...valid, effort: 5 })).toBe(false);
   });
 
+  it('accepts only bounded structured diagnostics on Runtime errors', () => {
+    const error = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: 'operation-1',
+      type: 'error',
+      error: { code: 'RUNTIME_FAILED', userMessage: 'failed', retryable: true },
+      diagnostic: {
+        version: 1,
+        diagnosticId: '123e4567-e89b-42d3-a456-426614174000',
+        runtimeKind: 'codex',
+        failureStage: 'abnormal_exit',
+        elapsedMs: 123,
+        appVersion: '0.2.1',
+        cliVersion: 'codex 1.0.0',
+        teamMcp: { enabled: false, status: 'not_configured' },
+        lastRecognizedNotification: 'turn/started',
+        lastReceivedNotification: '[unsupported]',
+        unsupportedNotificationCount: 1,
+        stderrObserved: true,
+        stderrTruncated: false,
+        recordedAt: new Date().toISOString(),
+      },
+    };
+
+    expect(isRuntimeToMainEnvelope(error)).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, cliVersion: 'codex /Users/alice/private' },
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, failureStage: 'made_up' },
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, requestBody: 'must never cross' },
+      }),
+    ).toBe(false);
+    const cyclic: Record<string, unknown> = {};
+    cyclic['self'] = cyclic;
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, appVersion: cyclic },
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, elapsedMs: 1n },
+      }),
+    ).toBe(false);
+  });
+
   it('validates the additive optional resolvedModel field on the completed canonical event', () => {
     const event = {
       protocolVersion: RUNTIME_PROTOCOL_VERSION,

@@ -503,6 +503,59 @@ function DiagnosticsGroup() {
   const runtimeStatus = useAppStore((s) => s.runtimeStatus);
   const recovery = useAppStore((s) => s.recovery);
   const appVersion = useAppStore((s) => s.appVersion);
+  const selectedTaskId = useAppStore((s) => s.selectedTaskId);
+  const currentDiagnosticId =
+    runtimeStatus?.state === 'failed' && runtimeStatus.taskId === selectedTaskId
+      ? (runtimeStatus.diagnosticId ?? undefined)
+      : undefined;
+  const diagnosticSelectionKey = `${selectedTaskId ?? 'none'}:${currentDiagnosticId ?? 'latest'}`;
+  const [copyResult, setCopyResult] = useState<{ key: string; text: string } | null>(null);
+  const [copyPendingKey, setCopyPendingKey] = useState<string | null>(null);
+  const diagnosticRequestGeneration = useRef(0);
+  const diagnosticsMounted = useRef(true);
+
+  useEffect(() => {
+    diagnosticsMounted.current = true;
+    return () => {
+      diagnosticsMounted.current = false;
+      diagnosticRequestGeneration.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    diagnosticRequestGeneration.current += 1;
+  }, [diagnosticSelectionKey]);
+
+  async function copyFailureDiagnostic(): Promise<void> {
+    if (selectedTaskId === null || window.sprintCoder?.runtime?.getFailureDiagnostic === undefined)
+      return;
+    const taskId = selectedTaskId;
+    const diagnosticId = currentDiagnosticId;
+    const selectionKey = diagnosticSelectionKey;
+    const generation = ++diagnosticRequestGeneration.current;
+    setCopyPendingKey(selectionKey);
+    try {
+      const diagnostic = await window.sprintCoder.runtime.getFailureDiagnostic({
+        taskId,
+        ...(diagnosticId === undefined ? {} : { diagnosticId }),
+      });
+      if (!diagnosticsMounted.current || generation !== diagnosticRequestGeneration.current) return;
+      if (diagnostic === null) {
+        setCopyResult({ key: selectionKey, text: 'このTaskに失敗診断はありません' });
+        return;
+      }
+      await navigator.clipboard.writeText(diagnostic);
+      if (!diagnosticsMounted.current || generation !== diagnosticRequestGeneration.current) return;
+      setCopyResult({ key: selectionKey, text: '失敗診断をコピーしました' });
+    } catch {
+      if (diagnosticsMounted.current && generation === diagnosticRequestGeneration.current)
+        setCopyResult({ key: selectionKey, text: '失敗診断をコピーできませんでした' });
+    } finally {
+      if (diagnosticsMounted.current && generation === diagnosticRequestGeneration.current)
+        setCopyPendingKey(null);
+    }
+  }
+
   return (
     <div className="settings-group">
       <span className="settings-field-label">状態</span>
@@ -520,7 +573,25 @@ function DiagnosticsGroup() {
           <span className="settings-hint">{recoveryText(recovery)}</span>
         </li>
       </ul>
-      <p className="settings-hint">表示だけの項目です。ここから変わる設定はありません。</p>
+      <div className="settings-inline-actions">
+        <button
+          type="button"
+          className="settings-secondary-button"
+          disabled={selectedTaskId === null || copyPendingKey === diagnosticSelectionKey}
+          onClick={() => void copyFailureDiagnostic()}
+          data-testid="settings-copy-runtime-diagnostic"
+        >
+          最新の失敗診断をコピー
+        </button>
+        {copyResult?.key === diagnosticSelectionKey && (
+          <span className="settings-hint" role="status">
+            {copyResult.text}
+          </span>
+        )}
+      </div>
+      <p className="settings-hint">
+        診断には依頼・回答・推論・ツール引数・認証情報・絶対パスを含めません。
+      </p>
     </div>
   );
 }

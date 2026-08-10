@@ -80,6 +80,8 @@ import {
   skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
+  runtimeFailureDiagnosticQuerySchema,
+  runtimeFailureDiagnosticExportSchema,
   fileChangeRecordSchema,
   filePathPayloadSchema,
   fileOpenResultSchema,
@@ -517,6 +519,13 @@ const api: SprintCoderApi = {
       ipcRenderer.on(IPC_CHANNELS.runtimeStatusEvent, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.runtimeStatusEvent, handler);
     },
+    getFailureDiagnostic: (input) =>
+      invoke(
+        IPC_CHANNELS.runtimeFailureDiagnosticGet,
+        runtimeFailureDiagnosticQuerySchema,
+        runtimeFailureDiagnosticExportSchema,
+        input,
+      ),
   },
   fileEdits: {
     // Push-only, mirroring `reasoning` above: the frame carries its own taskId/turnId and the store

@@ -63,7 +63,15 @@ describe('describeConnection', () => {
   it('stays hidden while a turn is running', () => {
     expect(
       describeConnection(
-        { kind: 'codex', state: 'running', taskId: 't1', errorCode: null, userMessage: null },
+        {
+          kind: 'codex',
+          state: 'running',
+          taskId: 't1',
+          turnId: null,
+          diagnosticId: null,
+          errorCode: null,
+          userMessage: null,
+        },
         'mock',
       ),
     ).toBeNull();
@@ -78,6 +86,8 @@ describe('describeConnection', () => {
           kind: 'claude',
           state: 'failed',
           taskId: 't1',
+          turnId: 'turn-1',
+          diagnosticId: null,
           errorCode: 'RUNTIME_CLI_MISSING',
           userMessage: 'Claude CLIが見つかりません。',
         },
@@ -89,7 +99,15 @@ describe('describeConnection', () => {
   it('still says something useful when a failure carries no message', () => {
     expect(
       describeConnection(
-        { kind: 'codex', state: 'failed', taskId: null, errorCode: null, userMessage: null },
+        {
+          kind: 'codex',
+          state: 'failed',
+          taskId: null,
+          turnId: null,
+          diagnosticId: null,
+          errorCode: null,
+          userMessage: null,
+        },
         'codex',
       ),
     ).toEqual({ tone: 'failed', text: 'Codex: 接続が失われました' });
@@ -99,7 +117,15 @@ describe('describeConnection', () => {
     // A failure that arrives just after the user switched Runtime must still name the Runtime that
     // actually failed.
     const description = describeConnection(
-      { kind: 'claude', state: 'failed', taskId: null, errorCode: null, userMessage: null },
+      {
+        kind: 'claude',
+        state: 'failed',
+        taskId: null,
+        turnId: null,
+        diagnosticId: null,
+        errorCode: null,
+        userMessage: null,
+      },
       'mock',
     );
     expect(description).not.toBeNull();

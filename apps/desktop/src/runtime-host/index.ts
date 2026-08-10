@@ -48,7 +48,12 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
       data.workspace,
       data.model,
       (event) => send(data.taskId, data.turnId, data.operationId, { type: 'event', event }),
-      (error) => send(data.taskId, data.turnId, data.operationId, { type: 'error', error }),
+      (error, diagnostic) =>
+        send(data.taskId, data.turnId, data.operationId, {
+          type: 'error',
+          error,
+          ...(diagnostic === undefined ? {} : { diagnostic }),
+        }),
       (code, canceled) => {
         send(data.taskId, data.turnId, data.operationId, { type: 'exit', code, canceled });
         activeTurns.delete(data.turnId);
@@ -68,7 +73,8 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
   }
 });
 
-void (runtimeKind === 'claude' ? probeClaude() : probeCodex()).then((probe) =>
+void (runtimeKind === 'claude' ? probeClaude() : probeCodex()).then((probe) => {
+  if (adapter instanceof CodexRuntimeAdapter) adapter.setCliVersion(probe.version ?? null);
   send('', '', 'probe', {
     type: 'hello',
     ...(runtimeKind === 'claude'
@@ -90,8 +96,8 @@ void (runtimeKind === 'claude' ? probeClaude() : probeCodex()).then((probe) =>
           claudeReadiness: 'unavailable',
           claudeModels: [],
         }),
-  }),
-);
+  });
+});
 
 process.once('exit', () => {
   clearInterval(heartbeat);
@@ -126,7 +132,7 @@ function send(
         | 'acceptedPayloadDigest'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'exit' }>, 'type' | 'code' | 'canceled'>
-    | Pick<Extract<RuntimeToMainEnvelope, { type: 'error' }>, 'type' | 'error'>,
+    | Pick<Extract<RuntimeToMainEnvelope, { type: 'error' }>, 'type' | 'error' | 'diagnostic'>,
 ): void {
   const seq = (sequences.get(turnId) ?? 0) + 1;
   sequences.set(turnId, seq);

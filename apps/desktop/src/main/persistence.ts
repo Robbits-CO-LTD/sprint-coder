@@ -169,6 +169,11 @@ import {
 } from './connection-identity';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
 import {
+  isRuntimeFailureDiagnostic,
+  type RuntimeFailureDiagnostic,
+} from '../runtime-host/protocol';
+import { RUNTIME_DIAGNOSTIC_MAX_BYTES } from '../runtime-host/runtime-failure-diagnostics';
+import {
   legacyMutationWorkspaceKey,
   MutationClockRollbackError,
   MutationLeaseBusyError,
@@ -3038,6 +3043,27 @@ const migrations = [
       DROP TABLE team_execution_isolations_v64;
     `,
   },
+  {
+    version: 66,
+    checksum: 'runtime-failure-diagnostics-v66',
+    sql: `
+      CREATE TABLE runtime_failure_diagnostics (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('codex', 'claude')),
+        failure_stage TEXT NOT NULL CHECK (failure_stage IN (
+          'first_event_timeout', 'idle_timeout', 'total_timeout', 'protocol_error',
+          'startup_error', 'spawn_error', 'abnormal_exit'
+        )),
+        diagnostic_json TEXT NOT NULL
+          CHECK (length(CAST(diagnostic_json AS BLOB)) <= 16384),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX runtime_failure_diagnostics_task_created_idx
+        ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3267,6 +3293,8 @@ export type BackgroundCompletionRecord = Readonly<{
   attachedAt: string | null;
   runtimeAckedAt: string | null;
 }>;
+export type PersistedRuntimeFailureDiagnostic = RuntimeFailureDiagnostic &
+  Readonly<{ taskId: string; turnId: string }>;
 type PersistedJsonValue =
   | string
   | number
@@ -3948,6 +3976,15 @@ export interface PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
   ): { event: TurnEvent; task: TaskSummary | null };
+  recordRuntimeFailureDiagnostic(
+    taskId: string,
+    turnId: string,
+    diagnostic: RuntimeFailureDiagnostic,
+  ): PersistedRuntimeFailureDiagnostic;
+  getRuntimeFailureDiagnostic(input: {
+    taskId?: string | undefined;
+    diagnosticId?: string | undefined;
+  }): PersistedRuntimeFailureDiagnostic | null;
   cancelTurnAndFinishGoal(
     taskId: string,
     turnId: string,
@@ -4409,13 +4446,13 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
   report.corruptFileMovedTo = movedTo;
   for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
   const backupPath = `${databasePath}.pre-migration.bak`;
-  if (existsSync(backupPath)) {
-    copyFileSync(backupPath, databasePath);
+  for (const candidate of [backupPath, `${backupPath}.previous`]) {
+    if (!existsSync(candidate)) continue;
+    copyFileSync(candidate, databasePath);
     if (probe()) {
       report.restoredFromBackup = true;
       return report;
     }
-    // The backup itself is unusable — fall through to a fresh database.
     rmSync(databasePath, { force: true });
   }
   report.freshStart = true;
@@ -4656,7 +4693,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const legacyLineage = this.isLegacyMigrationLineage(applied);
     const hadPendingMigrations = migrations.some((migration) => !applied.has(migration.version));
     if (hadPendingMigrations && existsSync(databasePath) && applied.size > 0)
-      copyFileSync(databasePath, `${databasePath}.pre-migration.bak`);
+      this.createPreMigrationBackup(databasePath);
     if (legacyLineage) {
       this.applyLegacyMigrationBridge();
       applied = this.readAppliedMigrations();
@@ -4697,6 +4734,53 @@ export class SqlitePersistenceClient implements PersistenceClient {
       } else {
         applyMigration();
       }
+    }
+  }
+
+  private createPreMigrationBackup(databasePath: string): void {
+    const backupPath = `${databasePath}.pre-migration.bak`;
+    const previousPath = `${backupPath}.previous`;
+    const temporaryPath = `${backupPath}.tmp-${randomUUID()}`;
+    // A byte copy of the main DB file is incomplete while committed pages still live in WAL.
+    // Checkpoint first, validate the copied snapshot, then rotate it into place. The previous
+    // snapshot remains recoverable until the new one is installed, including on Windows where a
+    // rename cannot replace an existing destination atomically.
+    const checkpoint = this.db.pragma('wal_checkpoint(TRUNCATE)') as {
+      busy?: number;
+      log?: number;
+      checkpointed?: number;
+    }[];
+    const result = checkpoint[0];
+    if (
+      result === undefined ||
+      result.busy !== 0 ||
+      result.log !== result.checkpointed ||
+      result.log !== 0
+    )
+      throw new Error('Could not checkpoint database before migration backup');
+    try {
+      copyFileSync(databasePath, temporaryPath);
+      const snapshot = new Database(temporaryPath, { readonly: true, fileMustExist: true });
+      try {
+        const rows = snapshot.pragma('quick_check') as { quick_check?: string }[] | string[];
+        const first = rows[0];
+        const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
+        if (verdict !== 'ok') throw new Error('Pre-migration backup failed integrity check');
+      } finally {
+        snapshot.close();
+      }
+      rmSync(previousPath, { force: true });
+      if (existsSync(backupPath)) renameSync(backupPath, previousPath);
+      try {
+        renameSync(temporaryPath, backupPath);
+      } catch (error) {
+        if (!existsSync(backupPath) && existsSync(previousPath))
+          renameSync(previousPath, backupPath);
+        throw error;
+      }
+      rmSync(previousPath, { force: true });
+    } finally {
+      rmSync(temporaryPath, { force: true });
     }
   }
 
@@ -9417,6 +9501,102 @@ export class SqlitePersistenceClient implements PersistenceClient {
     if (row?.value === 'codex') return 'codex';
     if (row?.value === 'claude') return 'claude';
     return 'mock';
+  }
+
+  recordRuntimeFailureDiagnostic(
+    taskId: string,
+    turnId: string,
+    diagnostic: RuntimeFailureDiagnostic,
+  ): PersistedRuntimeFailureDiagnostic {
+    this.getTurn(taskId, turnId);
+    if (!isRuntimeFailureDiagnostic(diagnostic)) throw new Error('Invalid Runtime diagnostic');
+    const safeDiagnostic: RuntimeFailureDiagnostic = {
+      version: 1,
+      diagnosticId: diagnostic.diagnosticId,
+      runtimeKind: diagnostic.runtimeKind,
+      failureStage: diagnostic.failureStage,
+      elapsedMs: diagnostic.elapsedMs,
+      appVersion: diagnostic.appVersion,
+      cliVersion: diagnostic.cliVersion,
+      teamMcp: diagnostic.teamMcp,
+      lastRecognizedNotification: diagnostic.lastRecognizedNotification,
+      lastReceivedNotification: diagnostic.lastReceivedNotification,
+      unsupportedNotificationCount: diagnostic.unsupportedNotificationCount,
+      stderrObserved: diagnostic.stderrObserved,
+      stderrTruncated: diagnostic.stderrTruncated,
+      recordedAt: new Date().toISOString(),
+    };
+    const serialized = JSON.stringify(safeDiagnostic);
+    if (Buffer.byteLength(serialized, 'utf8') > RUNTIME_DIAGNOSTIC_MAX_BYTES)
+      throw new Error('Runtime diagnostic exceeds byte limit');
+    this.db
+      .prepare(
+        `INSERT INTO runtime_failure_diagnostics(
+           id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(turn_id) DO NOTHING`,
+      )
+      .run(
+        safeDiagnostic.diagnosticId,
+        taskId,
+        turnId,
+        safeDiagnostic.runtimeKind,
+        safeDiagnostic.failureStage,
+        serialized,
+        safeDiagnostic.recordedAt,
+      );
+    const persisted = this.getRuntimeFailureDiagnostic({
+      diagnosticId: safeDiagnostic.diagnosticId,
+    });
+    if (persisted !== null) return persisted;
+    const existing = this.db
+      .prepare(
+        `SELECT task_id, turn_id, diagnostic_json FROM runtime_failure_diagnostics
+         WHERE turn_id = ?`,
+      )
+      .get(turnId) as { task_id: string; turn_id: string; diagnostic_json: string } | undefined;
+    if (existing === undefined) throw new Error('Runtime diagnostic was not persisted');
+    const existingDiagnostic = JSON.parse(existing.diagnostic_json) as unknown;
+    if (!isRuntimeFailureDiagnostic(existingDiagnostic))
+      throw new Error('Persisted Runtime diagnostic is invalid');
+    return Object.freeze({
+      ...existingDiagnostic,
+      taskId: existing.task_id,
+      turnId: existing.turn_id,
+    });
+  }
+
+  getRuntimeFailureDiagnostic(input: {
+    taskId?: string | undefined;
+    diagnosticId?: string | undefined;
+  }): PersistedRuntimeFailureDiagnostic | null {
+    if (input.taskId === undefined && input.diagnosticId === undefined)
+      throw new Error('Task id or diagnostic id is required');
+    const row = (
+      input.diagnosticId !== undefined
+        ? this.db
+            .prepare(
+              `SELECT task_id, turn_id, diagnostic_json FROM runtime_failure_diagnostics
+               WHERE id = ? AND length(CAST(diagnostic_json AS BLOB)) <= ?`,
+            )
+            .get(input.diagnosticId, RUNTIME_DIAGNOSTIC_MAX_BYTES)
+        : this.db
+            .prepare(
+              `SELECT task_id, turn_id, diagnostic_json FROM runtime_failure_diagnostics
+               WHERE task_id = ? AND length(CAST(diagnostic_json AS BLOB)) <= ?
+               ORDER BY created_at DESC, id DESC LIMIT 1`,
+            )
+            .get(input.taskId, RUNTIME_DIAGNOSTIC_MAX_BYTES)
+    ) as { task_id: string; turn_id: string; diagnostic_json: string } | undefined;
+    if (row === undefined) return null;
+    let diagnostic: unknown;
+    try {
+      diagnostic = JSON.parse(row.diagnostic_json) as unknown;
+    } catch {
+      return null;
+    }
+    if (!isRuntimeFailureDiagnostic(diagnostic)) return null;
+    return Object.freeze({ ...diagnostic, taskId: row.task_id, turnId: row.turn_id });
   }
 
   /**

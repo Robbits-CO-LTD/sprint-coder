@@ -175,6 +175,8 @@ describe('the read-only lines in 詳細', () => {
     expect(versionText('0.1.0')).toBe('v0.1.0');
     expect(versionText('v1.2.3')).toBe('v1.2.3');
     expect(workspace()).toContain('data-testid="settings-diagnostic-version"');
+    expect(workspace()).toContain('data-testid="settings-copy-runtime-diagnostic"');
+    expect(workspace()).toContain('認証情報・絶対パスを含めません');
   });
 
   it('names the Runtime and its state, and carries the backend message when there is one', () => {
@@ -184,6 +186,8 @@ describe('the read-only lines in 詳細', () => {
         kind: 'claude',
         state: 'running',
         taskId: null,
+        turnId: null,
+        diagnosticId: null,
         errorCode: null,
         userMessage: null,
       }),
@@ -193,6 +197,8 @@ describe('the read-only lines in 詳細', () => {
         kind: 'codex',
         state: 'failed',
         taskId: 't1',
+        turnId: 'turn-1',
+        diagnosticId: null,
         errorCode: 'SPAWN',
         userMessage: 'CLIを起動できません',
       }),

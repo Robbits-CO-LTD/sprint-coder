@@ -492,6 +492,8 @@ export type RuntimeStatus = {
   kind: RuntimeKind;
   state: RuntimeConnectionState;
   taskId: string | null;
+  turnId: string | null;
+  diagnosticId: string | null;
   errorCode: string | null;
   userMessage: string | null;
 };
@@ -805,6 +807,7 @@ export interface SprintCoderApi {
   };
   runtime: {
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
+    getFailureDiagnostic(input: { taskId: string; diagnosticId?: string }): Promise<string | null>;
   };
   tasks: {
     list(): Promise<TaskSummary[]>;

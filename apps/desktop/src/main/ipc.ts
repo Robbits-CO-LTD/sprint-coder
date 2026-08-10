@@ -117,6 +117,8 @@ import {
   skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
+  runtimeFailureDiagnosticQuerySchema,
+  runtimeFailureDiagnosticExportSchema,
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
@@ -254,7 +256,11 @@ import {
   type ToolAuthorizationDecision,
   type ToolAuthorizationRequest,
 } from './tool-broker';
-import type { RuntimeCanonicalEvent, RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import type {
+  RuntimeCanonicalEvent,
+  RuntimeFailureDiagnostic,
+  RuntimeWorkspaceSet,
+} from '../runtime-host/protocol';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import {
   permissionRequestFingerprint,
@@ -855,7 +861,8 @@ export class IpcRouter {
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
         this.handleRuntimeEvent('codex', taskId, turnId, runtimeEvent),
-      (taskId, turnId, error) => this.handleRuntimeFailure('codex', taskId, turnId, error),
+      (taskId, turnId, error, diagnostic) =>
+        this.handleRuntimeFailure('codex', taskId, turnId, error, diagnostic),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
         this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
@@ -864,7 +871,8 @@ export class IpcRouter {
     this.claudeRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
         this.handleRuntimeEvent('claude', taskId, turnId, runtimeEvent),
-      (taskId, turnId, error) => this.handleRuntimeFailure('claude', taskId, turnId, error),
+      (taskId, turnId, error, diagnostic) =>
+        this.handleRuntimeFailure('claude', taskId, turnId, error, diagnostic),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
         this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
@@ -892,6 +900,20 @@ export class IpcRouter {
       // just the first path that ever carried it to the renderer.
       recovery: this.persistence.getStartupRecovery(),
     }));
+    this.handle(
+      IPC_CHANNELS.runtimeFailureDiagnosticGet,
+      runtimeFailureDiagnosticQuerySchema,
+      runtimeFailureDiagnosticExportSchema,
+      (input) => {
+        const diagnostic = this.persistence.getRuntimeFailureDiagnostic(input);
+        if (
+          diagnostic === null ||
+          (input.taskId !== undefined && diagnostic.taskId !== input.taskId)
+        )
+          return null;
+        return JSON.stringify(diagnostic, null, 2);
+      },
+    );
     this.handle(
       IPC_CHANNELS.settingsGetRuntime,
       runtimeSettingsGetInputSchema,
@@ -4689,6 +4711,7 @@ export class IpcRouter {
     taskId: string,
     turnId: string,
     error: PublicError,
+    diagnostic?: RuntimeFailureDiagnostic,
   ): void {
     void this.mailbox.run(taskId, () => {
       if (this.canceledRuntimeTurns.has(turnId)) return;
@@ -4696,10 +4719,24 @@ export class IpcRouter {
       // The reason used to be dropped here, so the renderer saw a Turn end in `failed` with no way
       // to tell "the model refused" from "the CLI is gone" (issue #9). Pushed on the transient
       // status channel rather than folded into the persisted Turn event.
+      let diagnosticId: string | null = null;
+      if (diagnostic !== undefined && diagnostic.runtimeKind === kind) {
+        try {
+          diagnosticId = this.persistence.recordRuntimeFailureDiagnostic(
+            taskId,
+            turnId,
+            diagnostic,
+          ).diagnosticId;
+        } catch {
+          // A diagnostic must never prevent the Turn itself from reaching a terminal state.
+        }
+      }
       this.pushRuntimeStatus({
         kind,
         state: 'failed',
         taskId,
+        turnId,
+        diagnosticId,
         errorCode: error.code,
         userMessage: error.userMessage,
       });
@@ -4716,6 +4753,8 @@ export class IpcRouter {
     kind: RuntimeKind;
     state: 'idle' | 'running' | 'failed';
     taskId: string | null;
+    turnId?: string | null;
+    diagnosticId?: string | null;
     errorCode: string | null;
     userMessage: string | null;
   }): void {

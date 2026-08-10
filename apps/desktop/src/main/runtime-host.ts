@@ -14,6 +14,7 @@ import {
   type MainToRuntimeEnvelope,
   type RuntimeCanonicalEvent,
   type RuntimeContextFragment,
+  type RuntimeFailureDiagnostic,
   type RuntimeProjectContextItem,
   type RuntimeSkillInput,
   type RuntimeTeamMcpOption,
@@ -47,7 +48,12 @@ type ExitWaiter = {
   timer: NodeJS.Timeout;
 };
 type EventHandler = (taskId: string, turnId: string, event: RuntimeCanonicalEvent) => void;
-type FailureHandler = (taskId: string, turnId: string, error: PublicError) => void;
+type FailureHandler = (
+  taskId: string,
+  turnId: string,
+  error: PublicError,
+  diagnostic?: RuntimeFailureDiagnostic,
+) => void;
 type PrepareContext = (taskId: string, turnId: string) => PreparedContext;
 type ContextAccepted = (
   taskId: string,
@@ -357,7 +363,7 @@ export class RuntimeHostClient {
       this.finishCancel(raw.turnId, raw.forced);
     } else if (raw.type === 'error') {
       this.active.delete(raw.turnId);
-      this.onFailure(raw.taskId, raw.turnId, raw.error);
+      this.onFailure(raw.taskId, raw.turnId, raw.error, raw.diagnostic);
     } else if (raw.type === 'exit') {
       if (raw.canceled) this.finishCancel(raw.turnId, false);
       else {

@@ -1245,6 +1245,88 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('persists only explicitly recorded failure diagnostics without private stderr content', () => {
+      const { persistence, path } = createPersistence();
+      const successfulTask = persistence.createTask('successful');
+      const successfulTurn = persistence.startTurn(successfulTask.id, 'done');
+      finishTurn(persistence, successfulTask.id, successfulTurn.turnId);
+      expect(persistence.getRuntimeFailureDiagnostic({ taskId: successfulTask.id })).toBeNull();
+
+      const failedTask = persistence.createTask('failed');
+      const failedTurn = persistence.startTurn(failedTask.id, 'fail safely');
+      const diagnosticId = randomUUID();
+      persistence.recordRuntimeFailureDiagnostic(failedTask.id, failedTurn.turnId, {
+        version: 1,
+        diagnosticId,
+        runtimeKind: 'codex',
+        failureStage: 'protocol_error',
+        elapsedMs: 1234,
+        appVersion: '0.2.1',
+        cliVersion: 'codex 1.2.3',
+        teamMcp: { enabled: true, status: 'configured' },
+        lastRecognizedNotification: 'turn/started',
+        lastReceivedNotification: '[unsupported]',
+        unsupportedNotificationCount: 1,
+        stderrObserved: true,
+        stderrTruncated: false,
+        recordedAt: new Date().toISOString(),
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      const persisted = reopened.getRuntimeFailureDiagnostic({ diagnosticId });
+      expect(persisted).toMatchObject({
+        diagnosticId,
+        taskId: failedTask.id,
+        turnId: failedTurn.turnId,
+        failureStage: 'protocol_error',
+        unsupportedNotificationCount: 1,
+      });
+      expect(persisted?.stderrObserved).toBe(true);
+      expect(JSON.stringify(persisted)).not.toContain('abcdefghijkl');
+      expect(JSON.stringify(persisted)).not.toContain('/Users/example');
+      reopened.close();
+    });
+
+    it('rejects oversized diagnostic JSON at the DB boundary and skips tampered rows', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('diagnostic limits');
+      const turn = persistence.startTurn(task.id, 'fail');
+      persistence.recordRuntimeFailureDiagnostic(task.id, turn.turnId, {
+        version: 1,
+        diagnosticId: randomUUID(),
+        runtimeKind: 'codex',
+        failureStage: 'abnormal_exit',
+        elapsedMs: 1,
+        appVersion: '0.2.1',
+        cliVersion: 'codex-cli 1.2.3',
+        teamMcp: { enabled: false, status: 'not_configured' },
+        lastRecognizedNotification: null,
+        lastReceivedNotification: null,
+        unsupportedNotificationCount: 0,
+        stderrObserved: false,
+        stderrTruncated: false,
+        recordedAt: new Date().toISOString(),
+      });
+      persistence.close();
+
+      const raw = new Database(path);
+      expect(() =>
+        raw
+          .prepare('UPDATE runtime_failure_diagnostics SET diagnostic_json = ? WHERE turn_id = ?')
+          .run('x'.repeat(16 * 1024 + 1), turn.turnId),
+      ).toThrow();
+      raw.pragma('ignore_check_constraints = ON');
+      raw
+        .prepare('UPDATE runtime_failure_diagnostics SET diagnostic_json = ? WHERE turn_id = ?')
+        .run('x'.repeat(16 * 1024 + 1), turn.turnId);
+      raw.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getRuntimeFailureDiagnostic({ taskId: task.id })).toBeNull();
+      reopened.close();
+    });
+
     it('tells "never chose" apart from "chose mock", so a real CLI can be adopted once', () => {
       // Issue #50: the app used to start on Mock even with a real CLI installed, and Mock emits
       // plausible-looking code instantly — which reads as the app working rather than as a
@@ -5585,6 +5667,7 @@ if (runsWithElectronAbi)
         { version: 63 },
         { version: 64 },
         { version: 65 },
+        { version: 66 },
       ]);
       for (const [table, columns] of [
         [
