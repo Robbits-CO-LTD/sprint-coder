@@ -7,7 +7,15 @@ const workflow = readFileSync(
   'utf8',
 );
 
-describe('macOS beta release signing and notarization', () => {
+describe('release signing and notarization', () => {
+  it('accepts stable and beta tags while keeping releases as drafts', () => {
+    expect(workflow).toContain("- 'v*.*.*'");
+    expect(workflow).toContain("prerelease='false'");
+    expect(workflow).toContain("prerelease='true'");
+    expect(workflow).toContain('--prerelease="${RELEASE_PRERELEASE}"');
+    expect(workflow).toContain('--draft');
+  });
+
   it('initializes runner-temporary paths inside a step where the runner context is available', () => {
     const initializePaths = workflow.indexOf('Initialize temporary macOS signing paths');
     const signingSecrets = workflow.indexOf('secrets.MACOS_CI_KEYCHAIN_PASSWORD');
@@ -54,5 +62,15 @@ describe('macOS beta release signing and notarization', () => {
     expect(accepted).toBeGreaterThan(submit);
     expect(staple).toBeGreaterThan(accepted);
     expect(make).toBeGreaterThan(staple);
+  });
+
+  it('builds unsigned Windows update assets intentionally and labels them in release notes', () => {
+    expect(workflow).toContain('os: windows-2022');
+    expect(workflow).toContain("SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS: '1'");
+    expect(workflow).toContain('./scripts/verify-unsigned-windows-release.ps1 -RenamePortableZip');
+    expect(workflow).toContain('Sprint-Coder-Installer.exe');
+    expect(workflow).toContain('*-full.nupkg');
+    expect(workflow).toContain("-name 'RELEASES'");
+    expect(workflow).toContain('Windows版はコード署名されていません');
   });
 });

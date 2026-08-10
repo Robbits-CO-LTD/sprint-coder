@@ -96,32 +96,40 @@ describe('macOS auto-update signing gate', () => {
   });
 });
 
-describe('beta release artifacts', () => {
-  it('builds macOS and Ubuntu artifacts in Actions and leaves Windows for local signing', () => {
+describe('release artifacts', () => {
+  it('builds macOS, Ubuntu, and explicitly unsigned Windows artifacts in Actions', () => {
     const workflow = readFileSync(
       resolve(__dirname, '../../.github/workflows/release-beta.yml'),
       'utf8',
     );
     const ciWorkflow = readFileSync(resolve(__dirname, '../../.github/workflows/ci.yml'), 'utf8');
     const provisioner = readFileSync(resolve(__dirname, 'scripts/ensure-inno-setup.ps1'), 'utf8');
+    const unsignedVerifier = readFileSync(
+      resolve(__dirname, 'scripts/verify-unsigned-windows-release.ps1'),
+      'utf8',
+    );
 
     expect(workflow).toContain('apps/desktop/out/make/**/*.zip');
     expect(workflow).toContain('os: macos-latest');
     expect(workflow).toContain('os: ubuntu-latest');
-    expect(workflow).not.toContain('os: windows-2022');
+    expect(workflow).toContain('os: windows-2022');
+    expect(workflow).toContain("SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS: '1'");
     expect(workflow).toContain('mac_zip_count != 1');
     expect(workflow).toContain('linux_zip_count != 1');
     expect(workflow).toContain('release-assets/RELEASES.json');
-    expect(workflow).toContain('${#assets[@]} != 3');
-    expect(workflow).toContain('--prerelease');
+    expect(workflow).toContain('${#assets[@]} != 7');
+    expect(workflow).toContain('--prerelease="${RELEASE_PRERELEASE}"');
     expect(workflow).toContain('--draft');
     expect(readFileSync(resolve(__dirname, 'forge.config.ts'), 'utf8')).toContain(
       "new MakerZIP({}, ['darwin', 'linux', 'win32'])",
     );
     expect(workflow).toMatch(/release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@v7/);
     expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
-    expect(ciWorkflow).toContain("'Sprint-Coder-Installer.exe'");
-    expect(ciWorkflow).toContain("'Sprint-Coder-Setup.exe'");
+    expect(ciWorkflow).toContain('./apps/desktop/scripts/verify-unsigned-windows-release.ps1');
+    expect(unsignedVerifier).toContain('Sprint-Coder-Installer.exe');
+    expect(unsignedVerifier).toContain('Sprint-Coder-Setup.exe');
+    expect(unsignedVerifier).toContain("$installerSignature.Status -ne 'NotSigned'");
+    expect(unsignedVerifier).toContain("$appSignature.Status -ne 'NotSigned'");
     expect(provisioner).toContain('choco install innosetup --version=6.7.1');
     expect(provisioner).toContain('Get-AuthenticodeSignature -LiteralPath $compiler');
     expect(provisioner).toContain("$publisher -ne 'Pyrsys B.V.'");
