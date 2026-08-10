@@ -458,8 +458,42 @@ jobs:
             exit 1
           fi
 
-          gh release upload "${RELEASE_TAG}" "${assets[@]}" \
-            --repo "${GITHUB_REPOSITORY}"
+          release_assets="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          upload_assets=()
+          declare -A local_asset_names=()
+          for asset in "${assets[@]}"; do
+            asset_name="$(basename "${asset}")"
+            if [[ -n "${local_asset_names[${asset_name}]:-}" ]]; then
+              echo "::error::Multiple local release assets use the name ${asset_name}."
+              exit 1
+            fi
+            local_asset_names["${asset_name}"]="${asset}"
+
+            existing_count="$(jq --arg name "${asset_name}" '[.assets[] | select(.name == $name)] | length' <<<"${release_assets}")"
+            if [[ "${existing_count}" == '0' ]]; then
+              upload_assets+=("${asset}")
+            elif [[ "${existing_count}" == '1' ]]; then
+              echo "Reusing existing draft asset: ${asset_name}"
+            else
+              echo "::error::Draft release contains duplicate assets named ${asset_name}."
+              exit 1
+            fi
+          done
+
+          if (( ${#upload_assets[@]} > 0 )); then
+            gh release upload "${RELEASE_TAG}" "${upload_assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}"
+          fi
+
+          uploaded_release_assets="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          for asset in "${assets[@]}"; do
+            asset_name="$(basename "${asset}")"
+            uploaded_count="$(jq --arg name "${asset_name}" '[.assets[] | select(.name == $name)] | length' <<<"${uploaded_release_assets}")"
+            if [[ "${uploaded_count}" != '1' ]]; then
+              echo "::error::Expected exactly one uploaded release asset named ${asset_name}."
+              exit 1
+            fi
+          done
 
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
           generated_notes="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json body --jq .body)"

@@ -73,4 +73,12 @@ describe('release signing and notarization', () => {
     expect(workflow).toContain("-name 'RELEASES'");
     expect(workflow).toContain('Windows版はコード署名されていません');
   });
+
+  it('resumes partial draft uploads without overwriting existing release assets', () => {
+    expect(workflow).toContain('upload_assets=()');
+    expect(workflow).toContain('Reusing existing draft asset:');
+    expect(workflow).toContain('gh release upload "${RELEASE_TAG}" "${upload_assets[@]}"');
+    expect(workflow).toContain('Expected exactly one uploaded release asset named');
+    expect(workflow).not.toContain('--clobber');
+  });
 });
