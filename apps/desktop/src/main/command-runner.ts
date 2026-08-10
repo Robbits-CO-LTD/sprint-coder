@@ -310,7 +310,7 @@ export class CommandRunner {
     };
     child.stdout?.on('data', (data: Buffer) => outputConsumer('stdout', data));
     child.stderr?.on('data', (data: Buffer) => outputConsumer('stderr', data));
-    const processStartIdentity = await readProcessStartIdentity(child.pid);
+    const processStartIdentity = await readInitialProcessStartIdentity(child.pid);
     if (processStartIdentity === 'unavailable' || processStartIdentity.startsWith('unsupported:')) {
       try {
         await this.forceUnidentifiedProcess(active);
@@ -894,6 +894,17 @@ export function readProcessStartIdentity(pid: number): string {
     return 'unavailable';
   }
   return `unsupported:${pid}`;
+}
+
+async function readInitialProcessStartIdentity(pid: number): Promise<string> {
+  const attempts = process.platform === 'win32' ? 3 : 1;
+  let identity = 'unavailable';
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    identity = readProcessStartIdentity(pid);
+    if (identity !== 'unavailable') return identity;
+    if (attempt + 1 < attempts) await delay(50 * (attempt + 1));
+  }
+  return identity;
 }
 
 function buildEnvironment(delta: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
