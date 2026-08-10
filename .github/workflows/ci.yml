@@ -282,29 +282,19 @@ jobs:
         run: npx vitest run --shard=${{ matrix.windows_shard }}
 
       - name: Provision Inno Setup
-        if: github.event_name == 'push' && runner.os == 'Windows' && matrix.windows_shard == '1/2'
+        if: runner.os == 'Windows' && matrix.windows_shard == '1/2'
         shell: pwsh
         run: ./apps/desktop/scripts/ensure-inno-setup.ps1
 
       - name: Make Windows wizard installer
-        if: github.event_name == 'push' && runner.os == 'Windows' && matrix.windows_shard == '1/2'
+        if: runner.os == 'Windows' && matrix.windows_shard == '1/2'
         working-directory: apps/desktop
         run: npx electron-forge make --platform=win32 --arch=x64
 
       - name: Verify Windows wizard artifact
-        if: github.event_name == 'push' && runner.os == 'Windows' && matrix.windows_shard == '1/2'
+        if: runner.os == 'Windows' && matrix.windows_shard == '1/2'
         shell: pwsh
-        run: |
-          $directory = 'apps/desktop/out/make/squirrel.windows/x64'
-          $wizard = Join-Path $directory 'Sprint-Coder-Installer.exe'
-          $rawSetup = Join-Path $directory 'Sprint-Coder-Setup.exe'
-          if (-not (Test-Path -LiteralPath $wizard -PathType Leaf)) {
-            throw "Wizard installer was not created: $wizard"
-          }
-          if (Test-Path -LiteralPath $rawSetup) {
-            throw "Raw Squirrel setup must not remain user-facing: $rawSetup"
-          }
-          Get-Item -LiteralPath $wizard | Format-List FullName,Length,VersionInfo
+        run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1
 
       - name: Packaged startup smoke (Linux)
         if: runner.os == 'Linux'

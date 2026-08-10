@@ -7,7 +7,15 @@ const workflow = readFileSync(
   'utf8',
 );
 
-describe('macOS beta release signing and notarization', () => {
+describe('release signing and notarization', () => {
+  it('accepts stable and beta tags while keeping releases as drafts', () => {
+    expect(workflow).toContain("- 'v*.*.*'");
+    expect(workflow).toContain("prerelease='false'");
+    expect(workflow).toContain("prerelease='true'");
+    expect(workflow).toContain('--prerelease="${RELEASE_PRERELEASE}"');
+    expect(workflow).toContain('--draft');
+  });
+
   it('initializes runner-temporary paths inside a step where the runner context is available', () => {
     const initializePaths = workflow.indexOf('Initialize temporary macOS signing paths');
     const signingSecrets = workflow.indexOf('secrets.MACOS_CI_KEYCHAIN_PASSWORD');
@@ -54,5 +62,48 @@ describe('macOS beta release signing and notarization', () => {
     expect(accepted).toBeGreaterThan(submit);
     expect(staple).toBeGreaterThan(accepted);
     expect(make).toBeGreaterThan(staple);
+  });
+
+  it('builds unsigned Windows update assets intentionally and labels them in release notes', () => {
+    expect(workflow).toContain('os: windows-2022');
+    expect(workflow).toContain("SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS: '1'");
+    expect(workflow).toContain('./scripts/verify-unsigned-windows-release.ps1 -RenamePortableZip');
+    expect(workflow).toContain('Sprint-Coder-Installer.exe');
+    expect(workflow).toContain('*-full.nupkg');
+    expect(workflow).toContain("-name 'RELEASES'");
+    expect(workflow).toContain('Windows版はコード署名されていません');
+  });
+
+  it('resumes partial draft uploads by replacing the complete validated asset set', () => {
+    const draftCheck = workflow.indexOf("Release is not a draft; refusing to replace published assets.");
+    const tagCheck = workflow.indexOf(
+      'Release tag targets ${tag_commit}, expected ${expected_commit}.',
+    );
+    const upload = workflow.indexOf('gh release upload "${RELEASE_TAG}" "${assets[@]}"');
+
+    expect(draftCheck).toBeGreaterThan(-1);
+    expect(tagCheck).toBeGreaterThan(draftCheck);
+    expect(upload).toBeGreaterThan(tagCheck);
+    expect(workflow).toContain('--clobber');
+    expect(workflow).toContain('Expected exactly one uploaded release asset named');
+  });
+
+  it('validates the tag commit and replaces its managed release-notes section on reruns', () => {
+    expect(workflow).toContain('commits/${RELEASE_TAG}');
+    expect(workflow).toContain('git rev-parse "${GITHUB_SHA}^{commit}"');
+    expect(workflow).not.toContain('targetCommitish');
+    expect(workflow).toContain('<!-- sprint-coder-packages:start -->');
+    expect(workflow).toContain('<!-- sprint-coder-packages:end -->');
+    expect(workflow).toContain('$0 == managed_start { managed = 1; next }');
+  });
+
+  it('refuses to turn an existing published release back into a draft', () => {
+    const publishedGuard = workflow.indexOf(
+      'Release is already published; refusing to modify it.',
+    );
+    const existingReleaseEdit = workflow.indexOf('gh release edit "${RELEASE_TAG}"');
+
+    expect(publishedGuard).toBeGreaterThan(-1);
+    expect(existingReleaseEdit).toBeGreaterThan(publishedGuard);
   });
 });
