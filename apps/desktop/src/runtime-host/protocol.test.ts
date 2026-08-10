@@ -444,6 +444,22 @@ describe('Runtime Host protocol', () => {
         ],
       }),
     ).toBe(false);
+
+    const assistantMemory = {
+      id: 'memory-1',
+      kind: 'memory' as const,
+      authority: 'none' as const,
+      localOnly: false,
+      sealedDigest: 'b'.repeat(64),
+      content: 'AIがProjectへ保存したMemory',
+    };
+    expect(isMainToRuntimeEnvelope({ ...valid, projectItems: [assistantMemory] })).toBe(true);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        projectItems: [{ ...assistantMemory, kind: 'instruction' }],
+      }),
+    ).toBe(false);
   });
 
   it('enforces combined Project protocol count and UTF-8 byte budgets', () => {

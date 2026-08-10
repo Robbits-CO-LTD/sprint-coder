@@ -30,6 +30,10 @@ import {
   type ImageAttachmentRuntimeCurrent,
   type ImageAttachmentRuntimeSnapshot,
 } from './image-attachment-capability';
+import {
+  RUNTIME_START_ACCEPTANCE_TIMEOUT_MS,
+  RuntimeStartAcceptanceDeadline,
+} from './runtime-start-acceptance-deadline';
 
 type ActiveTurn = {
   taskId: string;
@@ -39,6 +43,8 @@ type ActiveTurn = {
   projectItemIds: string[];
   projectSnapshotDigest: string | null;
   payloadDigest: string;
+  startAcceptanceDeadline: RuntimeStartAcceptanceDeadline;
+  startFailed: boolean;
 };
 export type RuntimeStopReceipt = Readonly<{
   turnId: string;
@@ -244,6 +250,10 @@ export class RuntimeHostClient {
       this.consumedImageReceipts.add(preparedImages);
       this.imagePreparationByTurn.delete(turnId);
     }
+    const startAcceptanceDeadline = new RuntimeStartAcceptanceDeadline(
+      RUNTIME_START_ACCEPTANCE_TIMEOUT_MS,
+      () => this.failUnacknowledgedStart(taskId, turnId, operationId),
+    );
     this.active.set(turnId, {
       taskId,
       operationId,
@@ -252,7 +262,10 @@ export class RuntimeHostClient {
       projectItemIds: projectItems.map((item) => item.id),
       projectSnapshotDigest,
       payloadDigest: payload.digest,
+      startAcceptanceDeadline,
+      startFailed: false,
     });
+    startAcceptanceDeadline.start();
     const startPayload = {
       ...this.base(taskId, turnId, operationId, 1),
       input,
@@ -372,6 +385,7 @@ export class RuntimeHostClient {
         forced: false,
         stoppedAt: new Date().toISOString(),
       });
+    active.startAcceptanceDeadline.stop();
     this.post({
       ...this.base(taskId, turnId, active.operationId, active.lastSeq + 1),
       type: 'cancel',
@@ -438,6 +452,7 @@ export class RuntimeHostClient {
     this.resolveProbe?.(unavailable);
     this.resolveProbe = null;
     this.expectedProbeOperationId = null;
+    for (const active of this.active.values()) active.startAcceptanceDeadline.stop();
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
       clearTimeout(waiter.timer);
@@ -608,9 +623,12 @@ export class RuntimeHostClient {
     )
       return;
     active.lastSeq = raw.seq;
+    if (active.startFailed && raw.type !== 'stopped' && raw.type !== 'error' && raw.type !== 'exit')
+      return;
     if (raw.type === 'event') {
       this.onEvent(raw.taskId, raw.turnId, raw.event);
     } else if (raw.type === 'started') {
+      active.startAcceptanceDeadline.accept();
       if (
         !sameIds(active.contextFragmentIds, raw.acceptedContextFragmentIds) ||
         !sameIds(active.projectItemIds, raw.acceptedProjectItemIds) ||
@@ -645,13 +663,15 @@ export class RuntimeHostClient {
     } else if (raw.type === 'stopped') {
       this.finishCancel(raw.turnId, raw.forced);
     } else if (raw.type === 'error') {
+      active.startAcceptanceDeadline.stop();
       this.active.delete(raw.turnId);
-      this.onFailure(raw.taskId, raw.turnId, raw.error, raw.diagnostic);
+      if (!active.startFailed) this.onFailure(raw.taskId, raw.turnId, raw.error, raw.diagnostic);
     } else if (raw.type === 'exit') {
+      active.startAcceptanceDeadline.stop();
       if (raw.canceled) this.finishCancel(raw.turnId, false);
       else {
         this.active.delete(raw.turnId);
-        if (raw.code !== 0)
+        if (raw.code !== 0 && !active.startFailed)
           this.onFailure(raw.taskId, raw.turnId, {
             code: 'RUNTIME_FAILED',
             userMessage:
@@ -665,6 +685,7 @@ export class RuntimeHostClient {
   }
 
   private finishCancel(turnId: string, forced: boolean): void {
+    this.active.get(turnId)?.startAcceptanceDeadline.stop();
     this.active.delete(turnId);
     const waiter = this.cancelWaiters.get(turnId);
     if (waiter === undefined) return;
@@ -690,6 +711,7 @@ export class RuntimeHostClient {
     this.rejectAllImagePrepareWaiters(new Error('Runtime Host exited during image prepare'));
     this.invalidateAllImagePreparationPhases();
     const failures = [...this.active.entries()];
+    for (const active of this.active.values()) active.startAcceptanceDeadline.stop();
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
       clearTimeout(waiter.timer);
@@ -698,11 +720,12 @@ export class RuntimeHostClient {
     }
     this.rejectExitWaiters(new Error('Runtime Host exited before process exit confirmation'));
     for (const [turnId, active] of failures)
-      this.onFailure(active.taskId, turnId, {
-        code: 'RUNTIME_FAILED',
-        userMessage: 'Runtime Hostが終了しました。',
-        retryable: true,
-      });
+      if (!active.startFailed)
+        this.onFailure(active.taskId, turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage: 'Runtime Hostが終了しました。',
+          retryable: true,
+        });
   }
 
   private markTurnExited(turnId: string): void {
@@ -780,6 +803,7 @@ export class RuntimeHostClient {
       this.expectedProbeOperationId = null;
     }
     const failures = [...this.active.entries()];
+    for (const active of this.active.values()) active.startAcceptanceDeadline.stop();
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
       clearTimeout(waiter.timer);
@@ -788,12 +812,29 @@ export class RuntimeHostClient {
     }
     child?.kill();
     for (const [turnId, active] of failures)
-      this.onFailure(active.taskId, turnId, {
-        code: 'RUNTIME_FAILED',
-        userMessage: '停止を確認できなかったためRuntime Hostを再起動しました。',
-        retryable: true,
-      });
+      if (!active.startFailed)
+        this.onFailure(active.taskId, turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage: '停止を確認できなかったためRuntime Hostを再起動しました。',
+          retryable: true,
+        });
     if (!this.disposed) this.launch();
+  }
+
+  private failUnacknowledgedStart(taskId: string, turnId: string, operationId: string): void {
+    const active = this.active.get(turnId);
+    if (active === undefined || active.operationId !== operationId) return;
+    active.startFailed = true;
+    // Reuse the normal stop receipt watchdog. If the host discarded `start`, it still answers this
+    // valid cancel; if the host itself is wedged, cancel() restarts it after five seconds so an
+    // already-spawned CLI process cannot become untracked.
+    void this.cancel(taskId, turnId).catch(() => undefined);
+    this.onFailure(taskId, turnId, {
+      code: 'RUNTIME_PROTOCOL_ERROR',
+      userMessage:
+        'Runtime HostがTurnの開始を15秒以内に受理しませんでした。アプリを再起動してから再試行してください。',
+      retryable: true,
+    });
   }
 
   private post(message: MainToRuntimeEnvelope): void {

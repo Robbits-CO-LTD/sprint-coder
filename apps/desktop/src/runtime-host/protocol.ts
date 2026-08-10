@@ -536,7 +536,7 @@ function isRuntimeProjectContextItems(
       ids.has(record['id']) ||
       !['instruction', 'memory', 'reference'].includes(record['kind'] as string) ||
       !['user', 'none'].includes(record['authority'] as string) ||
-      record['authority'] !== (record['kind'] === 'reference' ? 'none' : 'user') ||
+      !hasValidProjectItemAuthority(record['kind'], record['authority']) ||
       typeof record['localOnly'] !== 'boolean' ||
       !isSha256(record['sealedDigest']) ||
       typeof record['content'] !== 'string'
@@ -549,6 +549,14 @@ function isRuntimeProjectContextItems(
     ids.add(record['id']);
   }
   return true;
+}
+
+function hasValidProjectItemAuthority(kind: unknown, authority: unknown): boolean {
+  if (kind === 'instruction') return authority === 'user';
+  if (kind === 'reference') return authority === 'none';
+  // Project Memory preserves its creator: user-authored Memory carries user authority while
+  // assistant-authored Memory is context only and must never be upgraded from `none` in transit.
+  return kind === 'memory' && (authority === 'user' || authority === 'none');
 }
 
 function isSha256(value: unknown): value is string {
