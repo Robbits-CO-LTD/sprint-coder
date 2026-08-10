@@ -7,6 +7,7 @@ import {
   BUILTIN_TEAM_SKILL_FRAGMENT_ID,
 } from './team-skill';
 import { TEAM_ASSIGN_TASK_TOOL, TEAM_TOOLS } from './team-tools';
+import { TEAM_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-server-source';
 
 // The Leader's guidance is a promise about an API, and it is written by hand while the API is
 // generated from `TEAM_TOOLS`. Nothing makes the two agree, so they drift: a tool gets renamed, an
@@ -42,6 +43,11 @@ const INTENTIONALLY_UNDOCUMENTED = new Set(['team_send_to_worker', 'team_wait_ev
 const GUIDANCE_TOKEN_BUDGET = 1_200;
 
 describe('Leader guidance names only tools that exist', () => {
+  it('publishes every registered Team tool through the real Leader MCP', () => {
+    const published = new Set<string>(TEAM_MCP_TOOL_NAMES);
+    expect(REGISTERED_TOOL_NAMES.filter((name) => !published.has(name))).toEqual([]);
+  });
+
   it('mentions no tool that is not registered', () => {
     const mentioned = [...new Set(BUILTIN_TEAM_SKILL_CONTENT.match(/\bteam_[a-z_]+\b/g) ?? [])];
     expect(mentioned.length).toBeGreaterThan(0);
@@ -91,6 +97,11 @@ describe('Leader guidance describes the real assign-task arguments', () => {
 });
 
 describe('Leader guidance stays within its budget and its digest stays honest', () => {
+  it('uses explicit decision, recovery, completion, and reporting sections', () => {
+    for (const heading of ['# 判断', '# 実行フロー', '# 復旧', '# 完了ゲート', '# 最終報告'])
+      expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(heading);
+  });
+
   it('fits the per-turn token budget', () => {
     expect(estimateTokens(BUILTIN_TEAM_SKILL_CONTENT)).toBeLessThanOrEqual(GUIDANCE_TOKEN_BUDGET);
   });

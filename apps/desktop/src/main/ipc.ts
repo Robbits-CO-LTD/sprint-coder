@@ -3441,10 +3441,11 @@ export class IpcRouter {
       name: skill.selection.ref.skillId,
       path: skill.packagePath,
     }));
+    const runtimeContextFragments = context.fragments.map(toRuntimeContextFragment);
     const serializedPayload = serializeCliExecutionPayload({
       kind,
       request: started.text,
-      contextFragments: context.fragments.map(toRuntimeContextFragment),
+      contextFragments: runtimeContextFragments,
       projectItems: context.projectItems,
       ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
       skills: runtimeSkills,
@@ -3508,6 +3509,9 @@ export class IpcRouter {
             started.model,
             createEmptyToolCatalogSnapshot(kind, workspaceId),
             context,
+            // Keep the sealed Team guidance intact here: the Claude adapter promotes it with
+            // --append-system-prompt. The serializer independently removes its duplicate from the
+            // user payload while retaining the authority-labelled context fragment.
             teamMcp,
             // Reasoning effort: read live (not captured on StartedTurn) since it isn't persisted
             // per-turn, unlike model — see persistence.ts's getEffort doc comment. The Codex value

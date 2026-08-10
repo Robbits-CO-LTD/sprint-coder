@@ -265,6 +265,8 @@ export class RuntimeHostClient {
       payloadDigest: payload.digest,
       skills: [...skills],
       toolCatalogSnapshot,
+      // Runtime adapters need the complete sealed guidance. Claude places it in its system prompt;
+      // serializeCliExecutionPayload only removes the duplicate from the user payload.
       ...(teamMcp === undefined ? {} : { teamMcp }),
       ...(effort === undefined ? {} : { effort }),
       ...(writeScope === undefined ? {} : { writeScope }),

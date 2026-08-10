@@ -23,6 +23,7 @@ import type { PreparedContext } from './context-ledger';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { projectContextProviderMessages } from './project-context-delivery';
 import { applyWorkerContextInheritance, reserveTeamWorkerContext } from './team-worker-runtime';
+import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 
 export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   fallback: TeamWorkerRuntime;
@@ -152,6 +153,16 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         ? this.deps.managerGuidance(input.worker)
         : this.deps.managerGuidance
       : this.deps.workerGuidance;
+    const effectiveToolGuidance = removeSealedGuidancePrefix(
+      toolGuidance,
+      inheritedContext.fragments.map((fragment) => ({
+        id: fragment.id,
+        source: fragment.source,
+        trust: fragment.trust,
+        authority: fragment.source === 'system' ? 'system' : 'none',
+        content: fragment.content,
+      })),
+    );
     const reportCursor = {
       read: () => reportCursorValue,
       advance: (seq: number) => {
@@ -165,7 +176,9 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       },
     };
     const messages: ProviderExecutionRequest['messages'] = [
-      ...(availableTools.length > 0 ? [{ role: 'system' as const, content: toolGuidance }] : []),
+      ...(availableTools.length > 0 && effectiveToolGuidance !== ''
+        ? [{ role: 'system' as const, content: effectiveToolGuidance }]
+        : []),
       ...projectContextProviderMessages(inheritedContext.projectItems),
       ...inheritedContext.fragments.map((fragment) => ({
         role:

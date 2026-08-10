@@ -187,6 +187,19 @@ describe('Claude runtime probe', () => {
     expect(withResearch[withResearch.indexOf('--allowedTools') + 1]).toContain('WebSearch');
   });
 
+  it('keeps the complete Team guidance in Claude system authority', () => {
+    const guidance = 'sealed Team guidance\nManager-only guidance';
+    const args = buildClaudeArgs(
+      'auto',
+      { configPath: '/tmp/team.json', guidance, enableWebSearch: false },
+      undefined,
+      'read-only',
+      ['/tmp/ws'],
+    );
+
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toBe(guidance);
+  });
+
   it('does not pin a directory it was not given, rather than inventing one', () => {
     // A wrong --add-dir would widen the writable set, so the absence of a Workspace has to mean the
     // flag is absent — never a fallback like cwd.

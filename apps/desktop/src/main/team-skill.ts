@@ -12,33 +12,44 @@ description: Sprint Coderで実在するWorkerを安全に編成・監視する
 
 # Sprint Coder Team
 
-Team利用が明示された依頼では、必ずMCPサーバー \`team\` の実ツールを呼び出す。ツール名を文章へ書くだけで利用したことにしない。
-CodexやClaude自身のsubagent／Agent Teams機能、外部skill、別MCPを代替として使ってはいけない。
-\`team_list_models\`が実際に呼び出せない場合は、代替実行へ進まず「Sprint Coder Team MCPを利用できない」と報告して終了する。
-Teamに関する質問・相談ではSkillとMCPを使って正確に回答するが、Workerを採用する必要はない。「雇って」「編集して」「実行して」などの実行依頼だけ、指定されたWorkerの採用と終端reportを完了条件にする。
-後続Turnの実行依頼で旧Workerへの割り当てが「Team must be active」になった場合は、team_get_statusでTeam状態を確認する。状態がcompletedなら、そこで終了しない。終端済みの旧Workerは再利用できないため、team_list_modelsの後、今回必要な役割の新しいWorkerをteam_hire_workerで必要人数だけ採用して続行する。新しいWorkerの採用によって完了済みTeamは安全に再形成される。採用が失敗した場合は具体的なエラーを報告し、入力・Role順・モデル選択などを修正できるなら同じTeamで再試行する。採用失敗だけを理由に「新しいTeamが必要」と判断してはならない。Team状態がfailedなどcompleted以外なら再形成できると判断せず、実際の状態とエラーを報告する。
+MCPサーバー \`team\` の実結果だけを使う。ツール名を文章へ書くだけで利用したことにしない。CodexやClaude自身のsubagent／Agent Teams、外部skill、別MCPで代用しない。存在しないWorker、未実行操作、未着report、架空の議論を生成しない。Team MCP、Skill、digest、context fragmentを検証できなければ、利用不能を報告してfail closedにする。
 
-1. \`team_list_models\` で利用可能なConnection／modelとsource付き能力を確認する。まず作業に必要な能力でfilterする。0件なら、CLI modelのunknown能力がfilterで除外された可能性があるため、capabilitiesを空にして再検索し、source付きのunknownとして候補を確認する。unknownを0やfalseと解釈せず、model名やProvider名から能力を推測しない。
+# 判断
+
+- 質問・相談: Teamの実状態を調べるためにMCPを使うが、Workerは採用しない。
+- 単発実行: 30分以内で、1つの検証可能な完了点ならTaskフローを使う。
+- 長時間実行: 30分超、または複数の検証可能な境界があるコーディングならMissionフローを使う。
+- 人数指定を守り、必要以上に採用しない。
+
+# 実行フロー
+
+1. \`team_list_models\`で現在availableなConnection／modelとsource付き能力を確認する。能力filterが0件ならcapabilitiesを空にして再検索し、unknownをfalseや0と解釈せず、名前から能力を推測しない。呼び出せなければ「Sprint Coder Team MCPを利用できない」と報告して終了する。
 Claudeを選ぶ場合、利用可能な\`builtin:claude-cli\`候補があるならOpenRouter上のClaudeよりClaude CLIを優先する。ユーザーがOpenRouterを明示指定した場合を除き、同じClaudeをAPI経由で採用しない。
-2. \`team_hire_worker\` で重複しない役割のAgentを必要人数だけ採用する。workspace-writeを割り当てる予定のAgentは、最初の採用時から\`writeCapable: true\`を必ず指定する。leaf Workerは\`agentKind: "worker"\`を指定し、\`managerPolicy\`を付けない。再委譲するManagerは\`agentKind: "manager"\`を指定し、\`managerPolicy.maxDelegationLevels\`へそのManagerの直下から許す追加段数を指定する。たとえばSubLeaderに直属Workerだけを雇わせる場合は\`{ maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false }\`とする。各作業に選んだconnection ID、provider ID、model IDを\`modelSelection\`へ、その選定根拠を\`modelSelectionReason\`へ必ず明示する。
-採用がConnection/modelの利用不能で失敗したら、同じ候補を再採用せず\`team_list_models\`を再実行し、現在availableな別ConnectionのAIを選ぶ。availableな候補がなければWorkerを追加せず、その事実を報告する。
-3. 30分以内で完了する単発作業は\`team_assign_task\`へ\`workerId\`、\`objective\`、\`doneCriteria\`、\`access\`を渡す。accessは必ずread-onlyまたはworkspace-writeを明示する。scope、nonGoals、targetPaths、constraintsなどは追加フィールドにせず\`objective\`本文へ含め、返されたexecution IDを記録する。queuedは失敗ではない。
-4. 30分を超える、または複数の検証可能な境界があるコーディングは\`team_assign_mission\`で2〜12工程に分割する。各工程へ担当workerId、objective、doneCriteria、read-onlyまたはworkspace-writeのaccessを明示する。workspace-writeは書き込み可能Workerだけに割り当てる。
-5. Missionがwaiting_resumeになった場合は状態と部分成果を確認し、重複操作を避けられると判断したときだけ\`team_resume_mission\`を呼ぶ。
-6. 実行中は \`team_get_status\` を繰り返してcurrentActivity、liveOutput、階層、待機理由を監視する。scope逸脱、誤った実装、重複作業を見つけた時点で、完了を待たず \`team_steer_execution\` を呼ぶ。
-7. \`team_wait_reports\` を繰り返し、記録した全execution IDについてaccepted、queued、runningではなく終端reportが届くまで待つ。
-8. 全Workerの終端reportを確認してから、実際に届いたreportだけを統合する。存在しないWorker、未着report、行われていない議論を生成しない。
-9. blocked、needs_input、failed、canceledをcompletedへ読み替えない。
+2. \`team_hire_worker\`で重複しない役割を必要人数だけ採用する。workspace-write予定なら最初から\`writeCapable: true\`。leafは\`agentKind: "worker"\`かつmanagerPolicyなし。再委譲するManagerだけ\`agentKind: "manager"\`とmanagerPolicyを使う。直属Workerだけなら\`{ maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false }\`。実際に選んだconnection／provider／modelと根拠をmodelSelection／modelSelectionReasonへ入れる。
+3. Taskフローは\`team_assign_task\`へ\`workerId\`、\`objective\`、\`doneCriteria\`、\`access\`を渡し、execution IDを記録する。scope、nonGoals、targetPaths、constraintsは追加フィールドにせず\`objective\`本文へ含める。accessはread-onlyかworkspace-write。queuedは失敗ではない。
+4. Missionフローは\`team_assign_mission\`へ全体のobjective、doneCriteria、2〜12工程のstepsを渡す。各工程へworkerId、objective、doneCriteria、accessを明示し、workspace-writeはwriteCapableなWorkerだけに割り当てる。
+5. 実行中は\`team_get_status\`でcurrentActivity、liveOutput、階層、待機理由を確認する。逸脱、誤実装、重複作業には\`team_steer_execution\`をexecutionId付きで呼ぶ。runningへのsteerは同じexecution IDの新attemptになる。不要なら\`team_cancel_execution\`をexecutionId付きで呼ぶ。Agent間共有は認証済み送信元identityで\`team_send_message\`、受信は\`team_read_messages\`。Team Policyを迂回しない。
+6. 記録した全execution IDについて\`team_wait_reports\`を繰り返し、終端reportを集める。
 
-待機中または実行中の指示を直す場合は \`team_steer_execution\`、不要になった作業を止める場合は
-\`team_cancel_execution\` をexecution ID付きで使う。実行中のsteerは同じexecutionの新attemptとして再開される。
-Worker自体を終了する場合は\`team_stop_worker\`を\`workerId\`付きで使う。停止は作業成功を意味しないため、未着reportや失敗をcompletedとして報告しない。
+# 復旧
 
-Agent同士で情報共有が必要な場合は、送信元Agentの認証済みidentityで
-\`team_send_message\`を使い、受信側は\`team_read_messages\`で監査済みmessageを読む。
-Team PolicyがWorker間通信を禁止している場合は迂回しない。
+- Connection/modelが利用不能なら同じ候補を再採用せず、\`team_list_models\`を更新して別候補を選ぶ。候補0件なら採用せず報告する。
+- Missionがwaiting_resumeなら部分成果を確認し、重複操作を避けられる場合だけ\`team_resume_mission\`をmissionId付きで呼ぶ。
+- 後続Turnで「Team must be active」なら\`team_get_status\`を確認する。completedでは終端済みの旧Workerは再利用できない。モデル再確認後に必要な新Workerを採用し、新しいWorkerの採用によって完了済みTeamは安全に再形成される。採用失敗だけを理由に「新しいTeamが必要」と判断してはならない。Team状態がfailedなどcompleted以外なら再形成できると判断せず、状態とエラーを報告する。
 
-人数指定を守り、必要以上に採用しない。Team MCP、Skill、digest、context fragmentの検証に失敗した場合は、Teamを使ったように振る舞わずfail closedにする。
+# 完了ゲート
+
+次をすべて満たすまで成功またはcompletedとして報告しない。
+- 全execution IDがaccepted、queued、runningではなく終端状態。
+- 全execution IDの終端reportを受信済みで、未着reportがない。
+- Missionではwaiting_resumeを終端扱いせず、Missionがcompleted、failed、canceledのいずれかで、全step executionの状態とreportを確認済み。
+- 各doneCriteriaを満たす証拠がreportにある。
+- blocked、needs_input、failed、canceledをcompletedへ読み替えていない。
+Worker停止が必要なら\`team_stop_worker\`をworkerId付きで使うが、停止を作業成功やcompletedとして報告しない。
+
+# 最終報告
+
+Team構成、各Worker／executionの終端状態、実成果、検証証拠、未完了事項を、実際に得た結果だけで簡潔に報告する。
 `;
 export const BUILTIN_TEAM_SKILL_DIGEST = createHash('sha256')
   .update(BUILTIN_TEAM_SKILL_CONTENT)
