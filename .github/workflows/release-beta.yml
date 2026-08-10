@@ -481,11 +481,23 @@ jobs:
             exit 1
           fi
 
+          existing_release_assets="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets)"
+          while IFS= read -r asset_api_url; do
+            [[ -n "${asset_api_url}" ]] || continue
+            asset_endpoint="${asset_api_url#https://api.github.com/}"
+            gh api --method DELETE "${asset_endpoint}"
+          done < <(jq -r '.assets[].apiUrl' <<<"${existing_release_assets}")
+
           gh release upload "${RELEASE_TAG}" "${assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 
           uploaded_release_assets="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets)"
+          uploaded_asset_count="$(jq '.assets | length' <<<"${uploaded_release_assets}")"
+          if [[ "${uploaded_asset_count}" != "${#assets[@]}" ]]; then
+            echo "::error::Expected ${#assets[@]} uploaded release assets, found ${uploaded_asset_count}."
+            exit 1
+          fi
           for asset in "${assets[@]}"; do
             asset_name="$(basename "${asset}")"
             uploaded_count="$(jq --arg name "${asset_name}" '[.assets[] | select(.name == $name)] | length' <<<"${uploaded_release_assets}")"
