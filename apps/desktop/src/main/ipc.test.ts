@@ -16,12 +16,14 @@ import {
   goalControlInputSchema,
   goalResumeInputSchema,
   goalStartInputSchema,
+  imageAttachmentRemoveInputSchema,
   modelCatalogQueryInputSchema,
   modelCatalogSelectionSetInputSchema,
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   permissionSetInputSchema,
   providerConnectionRateLimitLowerInputSchema,
+  providerConnectionModelReleaseUpdateInputSchema,
   providerProfileConnectionCreateInputSchema,
   projectAssignTaskInputSchema,
   projectContextManifestGetInputSchema,
@@ -46,6 +48,7 @@ import {
   runtimeFailureDiagnosticQuerySchema,
   runtimeModelSetInputSchema,
   runtimeSetInputSchema,
+  sprintCoderPrePromptSetInputSchema,
   skillCandidateInputSchema,
   skillDraftCreateInputSchema,
   skillDraftIdInputSchema,
@@ -66,6 +69,7 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   teamHireWorkerInputSchema,
+  teamModelSelectionGuidanceSetInputSchema,
   teamResumeMissionInputSchema,
   teamResumeExecutionIntegrationInputSchema,
   teamPolicySchema,
@@ -89,6 +93,8 @@ import {
 import {
   clampCodexEffort,
   confirmFullAccessOnce,
+  cancelRuntimeWithFinalCleanup,
+  IpcRouter,
   invalidModelUserMessage,
   isCommittedProviderWorkspaceChange,
   isCommittedProviderWorkspaceMutation,
@@ -104,8 +110,17 @@ import {
   runBestEffortCancellation,
   resolveEffectiveWorkspaceRoot,
   verifyTurnWorkspaceIdentities,
+  toPublicError,
 } from './ipc';
 import { ModelCatalogService } from './model-catalog-service';
+import { ImageAttachmentValidationError } from './image-attachment-store';
+import { ImageAttachmentAcceptanceError, ImageAttachmentLimitError } from './persistence';
+import {
+  buildImageAttachmentSelectionIdentity,
+  imageAttachmentSelectionIdentityDigest,
+  type ImageAttachmentRuntimeSnapshot,
+} from './image-attachment-capability';
+import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
 
 describe('built-in subscription model capabilities', () => {
   it('pages fallback candidates within the catalog limit and preserves the allowlist', () => {
@@ -277,6 +292,191 @@ describe('Full Access confirmation', () => {
       confirmFullAccessOnce(persistence, vi.fn().mockResolvedValue(false)),
     ).rejects.toThrow();
     expect(persistence.acknowledgeFullAccessRisk).not.toHaveBeenCalled();
+  });
+});
+
+describe('image attachment public errors', () => {
+  it('keeps validation errors actionable without leaking selected paths', () => {
+    const error = new ImageAttachmentValidationError('invalid_image');
+    Object.assign(error, { selectedPath: '/Users/private/secret.png' });
+    const result = toPublicError(error);
+    expect(result).toEqual({
+      code: 'INVALID_REQUEST',
+      userMessage: 'PNG・JPEG・WebPの静止画像を選んでください。',
+      retryable: false,
+    });
+    expect(JSON.stringify(result)).not.toContain('/Users/private');
+  });
+
+  it('maps count and aggregate limits to a fixed non-retryable message', () => {
+    expect(toPublicError(new ImageAttachmentLimitError('internal aggregate details'))).toEqual({
+      code: 'INVALID_REQUEST',
+      userMessage: '画像は4枚まで、合計16MB以下にしてください。',
+      retryable: false,
+    });
+  });
+
+  it('maps acceptance races and unsupported runtimes without leaking custody details', () => {
+    expect(toPublicError(new ImageAttachmentAcceptanceError('unsupported'))).toEqual({
+      code: 'INVALID_REQUEST',
+      userMessage: '選択中のRuntimeでは画像添付を送信できません。',
+      retryable: false,
+    });
+    expect(toPublicError(new ImageAttachmentAcceptanceError('stale'))).toEqual({
+      code: 'INVALID_REQUEST',
+      userMessage: '画像添付の状態が変わりました。最新の一覧を確認してください。',
+      retryable: false,
+    });
+  });
+});
+
+describe('Main image attachment dispatch boundary', () => {
+  it('passes canonical accepted bytes through custody and exact Runtime preparation, then releases', async () => {
+    const taskId = 'task-image-main';
+    const turnId = 'turn-image-main';
+    const selection = {
+      taskId,
+      runtimeKind: 'codex' as const,
+      model: 'gpt-5',
+      modelSelection: {
+        connectionId: BUILTIN_CODEX_CONNECTION_ID,
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-5',
+      },
+    };
+    const snapshot: ImageAttachmentRuntimeSnapshot = {
+      runtimeKind: 'codex',
+      available: true,
+      readiness: 'ready',
+      runtimeInstanceId: 'runtime-image-main',
+      readinessRevision: 7,
+      catalogRevision: 'catalog-image-main',
+      modelIds: ['gpt-5'],
+      capturedAtMs: Date.now(),
+    };
+    const identity = buildImageAttachmentSelectionIdentity(selection, snapshot)!;
+    const selectionIdentity = imageAttachmentSelectionIdentityDigest(identity);
+    const bytes = Buffer.from('canonical-image');
+    const attachment = {
+      id: 'attachment-image-main',
+      fileName: 'image.png',
+      mimeType: 'image/png' as const,
+      byteLength: bytes.byteLength,
+      sha256: 'a'.repeat(64),
+      bytes,
+      createdAt: '2026-08-05T00:00:00.000Z',
+    };
+    const lease = Object.freeze({
+      turnId,
+      operationId: 'custody-image-main',
+      manifest: Object.freeze([
+        {
+          id: attachment.id,
+          mimeType: attachment.mimeType,
+          byteLength: attachment.byteLength,
+          sha256: attachment.sha256,
+        },
+      ]),
+      manifestDigest: 'b'.repeat(64),
+      paths: Object.freeze(['/private/custody/001.png']),
+    });
+    const prepareCustody = vi.fn().mockResolvedValue(lease);
+    const releaseCustody = vi.fn().mockResolvedValue(true);
+    const prepareRuntime = vi.fn().mockResolvedValue(
+      Object.freeze({
+        runtimeInstanceId: snapshot.runtimeInstanceId,
+        taskId,
+        turnId,
+        operationId: 'runtime-operation-image-main',
+        selectionIdentity,
+        manifestDigest: lease.manifestDigest,
+        decodedByteLength: attachment.byteLength,
+      }),
+    );
+    const current = {
+      runtimeKind: 'codex' as const,
+      runtimeInstanceId: snapshot.runtimeInstanceId,
+      readinessRevision: snapshot.readinessRevision,
+      catalogRevision: snapshot.catalogRevision,
+    };
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      persistence: {
+        getAcceptedImageAttachments: vi.fn().mockReturnValue([attachment]),
+        getImageAttachmentAcceptanceSelection: vi.fn().mockReturnValue(selection),
+      },
+      codexRuntime: {
+        captureImageAttachmentCapability: vi.fn().mockResolvedValue(snapshot),
+        currentImageAttachmentCapability: vi.fn().mockReturnValue(current),
+        prepareImageAttachments: prepareRuntime,
+      },
+      attachmentCustodyStore: { prepare: prepareCustody, release: releaseCustody },
+      attachmentCapabilityByTurn: new Map([
+        [turnId, Object.freeze({ snapshot, selectionIdentity })],
+      ]),
+      attachmentCustodyByTurn: new Map(),
+      turnRuntimes: new Map([[turnId, 'codex']]),
+    });
+    const probe = router as unknown as {
+      prepareTurnImageAttachments(
+        started: unknown,
+        kind: 'codex',
+      ): Promise<{
+        receipt: { selectionIdentity: string };
+        manifestDigest: string;
+        byteCount: number;
+      }>;
+      releaseTurnAttachmentCustody(turnId: string): Promise<void>;
+    };
+    const started = { turnId, event: { taskId } };
+
+    const prepared = await probe.prepareTurnImageAttachments(started, 'codex');
+
+    expect(prepareCustody).toHaveBeenCalledWith({
+      turnId,
+      attachments: [
+        {
+          id: attachment.id,
+          mimeType: attachment.mimeType,
+          byteLength: attachment.byteLength,
+          sha256: attachment.sha256,
+          bytes,
+        },
+      ],
+    });
+    expect(prepareRuntime).toHaveBeenCalledWith({
+      taskId,
+      turnId,
+      selectionIdentity,
+      manifest: lease.manifest,
+      paths: lease.paths,
+      manifestDigest: lease.manifestDigest,
+    });
+    expect(prepared).toMatchObject({
+      receipt: { selectionIdentity },
+      manifestDigest: lease.manifestDigest,
+      byteCount: attachment.byteLength,
+    });
+
+    await probe.releaseTurnAttachmentCustody(turnId);
+    expect(releaseCustody).toHaveBeenCalledWith(lease);
+  });
+
+  it('releases custody in finally when forced Runtime cancellation rejects', async () => {
+    const calls: string[] = [];
+    const cancel = vi.fn().mockImplementation(async () => {
+      calls.push('cancel');
+      throw new Error('forced restart after unconfirmed stop');
+    });
+    const release = vi.fn().mockImplementation(async () => {
+      calls.push('release');
+    });
+
+    await expect(cancelRuntimeWithFinalCleanup(cancel, release)).rejects.toThrow(
+      'forced restart after unconfirmed stop',
+    );
+    expect(calls).toEqual(['cancel', 'release']);
+    expect(release).toHaveBeenCalledOnce();
   });
 });
 
@@ -614,6 +814,10 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.filesSave]: fileSaveInputSchema,
   [IPC_CHANNELS.imagesList]: taskIdPayloadSchema,
   [IPC_CHANNELS.imagesRead]: generatedImageRefSchema,
+  [IPC_CHANNELS.attachmentsCapability]: taskIdPayloadSchema,
+  [IPC_CHANNELS.attachmentsPick]: taskIdPayloadSchema,
+  [IPC_CHANNELS.attachmentsListDraft]: taskIdPayloadSchema,
+  [IPC_CHANNELS.attachmentsRemove]: imageAttachmentRemoveInputSchema,
   [IPC_CHANNELS.settingsSetCodexEffort]: runtimeCodexEffortSetInputSchema,
   [IPC_CHANNELS.modelsCatalogQuery]: modelCatalogQueryInputSchema,
   [IPC_CHANNELS.modelsSetSelection]: modelCatalogSelectionSetInputSchema,
@@ -627,6 +831,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.providersCreateProfileConnection]: providerProfileConnectionCreateInputSchema,
   [IPC_CHANNELS.providersVerifyConnection]: z.object({ connectionId: connectionIdSchema }).strict(),
   [IPC_CHANNELS.providersLowerRateLimits]: providerConnectionRateLimitLowerInputSchema,
+  [IPC_CHANNELS.providersSetAutomaticModelRelease]: providerConnectionModelReleaseUpdateInputSchema,
   [IPC_CHANNELS.permissionsGet]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsListAutoDecisions]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsSet]: permissionSetInputSchema,
@@ -687,6 +892,10 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.workspaceSelect]: taskIdPayloadSchema,
   [IPC_CHANNELS.settingsGetTeamModelResearch]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamModelResearch]: teamModelResearchSettingsSetInputSchema,
+  [IPC_CHANNELS.settingsGetTeamModelSelectionGuidance]: emptyPayloadSchema,
+  [IPC_CHANNELS.settingsSetTeamModelSelectionGuidance]: teamModelSelectionGuidanceSetInputSchema,
+  [IPC_CHANNELS.settingsGetSprintCoderPrePrompt]: emptyPayloadSchema,
+  [IPC_CHANNELS.settingsSetSprintCoderPrePrompt]: sprintCoderPrePromptSetInputSchema,
   [IPC_CHANNELS.settingsGetTeamModelSettings]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamModelRestriction]: teamModelRestrictionSetInputSchema,
   [IPC_CHANNELS.settingsGetDefaultTeamPolicy]: emptyPayloadSchema,

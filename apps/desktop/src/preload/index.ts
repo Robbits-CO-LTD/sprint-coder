@@ -27,6 +27,7 @@ import {
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerConnectionModelReleaseUpdateInputSchema,
   providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
@@ -65,6 +66,8 @@ import {
   runtimeSetInputSchema,
   runtimeSettingsGetInputSchema,
   runtimeSettingsSchema,
+  sprintCoderPrePromptSchema,
+  sprintCoderPrePromptSetInputSchema,
   skillCandidateInputSchema,
   skillCatalogSchema,
   skillCatalogItemSchema,
@@ -96,6 +99,10 @@ import {
   goalResumeInputSchema,
   goalRunResultSchema,
   goalStartInputSchema,
+  imageAttachmentCapabilitySchema,
+  imageAttachmentMetadataListSchema,
+  imageAttachmentMetadataSchema,
+  imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -118,6 +125,8 @@ import {
   teamPolicySchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
+  teamModelSelectionGuidanceSchema,
+  teamModelSelectionGuidanceSetInputSchema,
   teamModelRestrictionSetInputSchema,
   teamModelSettingsSchema,
   teamSendMessageInputSchema,
@@ -261,6 +270,36 @@ const api: SprintCoderApi = {
       }),
     clear: (taskId) =>
       invoke(IPC_CHANNELS.goalsClear, goalControlInputSchema, taskSummarySchema, { taskId }),
+  },
+  attachments: {
+    capability: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsCapability,
+        taskIdPayloadSchema,
+        imageAttachmentCapabilitySchema,
+        { taskId },
+      ),
+    pick: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsPick,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataSchema.nullable(),
+        { taskId },
+      ),
+    listDraft: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsListDraft,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataListSchema,
+        { taskId },
+      ),
+    remove: (input) =>
+      invoke(
+        IPC_CHANNELS.attachmentsRemove,
+        imageAttachmentRemoveInputSchema,
+        z.undefined(),
+        input,
+      ),
   },
   projects: {
     list: () =>
@@ -623,6 +662,34 @@ const api: SprintCoderApi = {
         z.undefined(),
         input,
       ),
+    getTeamModelSelectionGuidance: () =>
+      invoke(
+        IPC_CHANNELS.settingsGetTeamModelSelectionGuidance,
+        emptyPayloadSchema,
+        teamModelSelectionGuidanceSchema,
+        {},
+      ),
+    setTeamModelSelectionGuidance: (input) =>
+      invoke(
+        IPC_CHANNELS.settingsSetTeamModelSelectionGuidance,
+        teamModelSelectionGuidanceSetInputSchema,
+        z.undefined(),
+        input,
+      ),
+    getSprintCoderPrePrompt: () =>
+      invoke(
+        IPC_CHANNELS.settingsGetSprintCoderPrePrompt,
+        emptyPayloadSchema,
+        sprintCoderPrePromptSchema,
+        {},
+      ),
+    setSprintCoderPrePrompt: (input) =>
+      invoke(
+        IPC_CHANNELS.settingsSetSprintCoderPrePrompt,
+        sprintCoderPrePromptSetInputSchema,
+        z.undefined(),
+        input,
+      ),
     getTeamModelSettings: () =>
       invoke(
         IPC_CHANNELS.settingsGetTeamModelSettings,
@@ -797,6 +864,13 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersLowerRateLimits,
         providerConnectionRateLimitLowerInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    setAutomaticModelRelease: (input) =>
+      invoke(
+        IPC_CHANNELS.providersSetAutomaticModelRelease,
+        providerConnectionModelReleaseUpdateInputSchema,
         providerConnectionSchema,
         input,
       ),

@@ -18,6 +18,8 @@ import type {
   CommandOutputRecord,
   FileChange,
   GeneratedImage,
+  ImageAttachmentCapability,
+  ImageAttachmentMetadata,
   QueuedInput,
   PermissionSettings,
   DatabaseRecovery,
@@ -169,6 +171,12 @@ type AppState = {
   lastSeqByTask: Record<string, number>;
   sendingByTask: Record<string, boolean>;
   draftByTask: Record<string, string>;
+  draftAttachmentsByTask: Record<string, ImageAttachmentMetadata[] | undefined>;
+  attachmentCapabilityByTask: Record<string, ImageAttachmentCapability | undefined>;
+  attachmentRequestRevisionByTask: Record<string, number | undefined>;
+  attachmentBusyByTask: Record<string, boolean | undefined>;
+  attachmentErrorByTask: Record<string, string | undefined>;
+  attachmentAnnouncementByTask: Record<string, string | undefined>;
   skillCatalog: SkillCatalogItem[];
   skillCatalogRevision: string | null;
   skillSelectionByTask: Record<string, TurnSkillSelection[] | undefined>;
@@ -288,11 +296,19 @@ type AppState = {
     expectedRevision: number,
   ): Promise<{ ok: true } | { ok: false; message: string }>;
   setDraft(taskId: string, text: string): void;
+  refreshDraftAttachments(taskId: string): Promise<void>;
+  pickDraftAttachment(taskId: string): Promise<void>;
+  removeDraftAttachment(taskId: string, attachmentId: string): Promise<boolean>;
   loadSkills(): Promise<void>;
   setSkillSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
   installSkillDraft(taskId: string, draft: SkillDraft): Promise<void>;
   discardSkillDraft(taskId: string, draftId: string): Promise<void>;
-  startTurn(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
+  startTurn(
+    taskId: string,
+    text: string,
+    skills?: readonly TurnSkillSelection[],
+    attachmentIds?: readonly string[],
+  ): Promise<void>;
   queueMessage(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
   steerMessage(taskId: string, text: string, expectedTurnId: string): Promise<void>;
   stopAndSend(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
@@ -496,6 +512,15 @@ function mergeRestoredCommands(
   );
 }
 
+export function removeAcceptedAttachmentDrafts(
+  drafts: readonly ImageAttachmentMetadata[],
+  accepted: readonly ImageAttachmentMetadata[],
+): ImageAttachmentMetadata[] {
+  if (accepted.length === 0) return [...drafts];
+  const acceptedIds = new Set(accepted.map(({ id }) => id));
+  return drafts.filter(({ id }) => !acceptedIds.has(id));
+}
+
 function upsertApprovalHistory(
   approvals: readonly ApprovalSummary[],
   approval: ApprovalSummary,
@@ -514,7 +539,7 @@ function upsertAutoDecision(
   );
 }
 
-function handleTurnEvent(
+export function handleTurnEvent(
   taskId: string,
   ev: TurnEvent,
   apply: (fn: (state: AppState) => Partial<AppState>) => void,
@@ -539,6 +564,13 @@ function handleTurnEvent(
           },
           pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: undefined },
           sendingByTask: { ...state.sendingByTask, [taskId]: false },
+          draftAttachmentsByTask: {
+            ...state.draftAttachmentsByTask,
+            [taskId]: removeAcceptedAttachmentDrafts(
+              state.draftAttachmentsByTask[taskId] ?? [],
+              ev.userMessage.attachments,
+            ),
+          },
           turnByTask: {
             ...state.turnByTask,
             [taskId]: {
@@ -710,6 +742,7 @@ function handleTurnEvent(
             turnId: ev.turnId,
             author: 'assistant',
             content: turn.streamingContent,
+            attachments: [],
             createdAt: new Date().toISOString(),
           };
           nextMessages = [...existing.filter((m) => m.id !== partial.id), partial];
@@ -809,6 +842,12 @@ export const useAppStore = create<AppState>((set, get) => {
     lastSeqByTask: {},
     sendingByTask: {},
     draftByTask: {},
+    draftAttachmentsByTask: {},
+    attachmentCapabilityByTask: {},
+    attachmentRequestRevisionByTask: {},
+    attachmentBusyByTask: {},
+    attachmentErrorByTask: {},
+    attachmentAnnouncementByTask: {},
     skillCatalog: [],
     skillCatalogRevision: null,
     skillSelectionByTask: {},
@@ -1234,6 +1273,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       set({ teamViewOpen: false });
       void restoreDraft(taskId, apply, get);
+      void get().refreshDraftAttachments(taskId);
       void restoreSkillSelection(taskId, apply, get);
       void get().loadSkills();
       void loadWorkspace(taskId, apply, get);
@@ -1836,6 +1876,115 @@ export const useAppStore = create<AppState>((set, get) => {
       persistDraftDebounced(taskId, text);
     },
 
+    async refreshDraftAttachments(taskId: string) {
+      const api = window.sprintCoder?.attachments;
+      if (!api) return;
+      const revision = (get().attachmentRequestRevisionByTask[taskId] ?? 0) + 1;
+      set((state) => ({
+        attachmentRequestRevisionByTask: {
+          ...state.attachmentRequestRevisionByTask,
+          [taskId]: revision,
+        },
+      }));
+      try {
+        const [capability, attachments] = await Promise.all([
+          api.capability(taskId),
+          api.listDraft(taskId),
+        ]);
+        if (get().attachmentRequestRevisionByTask[taskId] !== revision) return;
+        set((state) => ({
+          attachmentCapabilityByTask: {
+            ...state.attachmentCapabilityByTask,
+            [taskId]: capability,
+          },
+          draftAttachmentsByTask: {
+            ...state.draftAttachmentsByTask,
+            [taskId]: attachments,
+          },
+          attachmentErrorByTask: {
+            ...state.attachmentErrorByTask,
+            [taskId]: undefined,
+          },
+        }));
+      } catch (error) {
+        if (get().attachmentRequestRevisionByTask[taskId] !== revision) return;
+        set((state) => ({
+          attachmentErrorByTask: {
+            ...state.attachmentErrorByTask,
+            [taskId]: describeError(error),
+          },
+        }));
+      }
+    },
+
+    async pickDraftAttachment(taskId: string) {
+      const api = window.sprintCoder?.attachments;
+      if (!api || get().attachmentBusyByTask[taskId]) return;
+      set((state) => ({
+        attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: true },
+        attachmentErrorByTask: { ...state.attachmentErrorByTask, [taskId]: undefined },
+      }));
+      try {
+        const picked = await api.pick(taskId);
+        await get().refreshDraftAttachments(taskId);
+        set((state) => ({
+          attachmentAnnouncementByTask: {
+            ...state.attachmentAnnouncementByTask,
+            [taskId]:
+              picked === null
+                ? '画像の選択をキャンセルしました'
+                : `${picked.fileName}を追加しました`,
+          },
+        }));
+      } catch (error) {
+        set((state) => ({
+          attachmentErrorByTask: {
+            ...state.attachmentErrorByTask,
+            [taskId]: describeError(error),
+          },
+        }));
+      } finally {
+        set((state) => ({
+          attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: false },
+        }));
+      }
+    },
+
+    async removeDraftAttachment(taskId: string, attachmentId: string) {
+      const api = window.sprintCoder?.attachments;
+      if (!api || get().attachmentBusyByTask[taskId]) return false;
+      set((state) => ({
+        attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: true },
+        attachmentErrorByTask: { ...state.attachmentErrorByTask, [taskId]: undefined },
+      }));
+      try {
+        const fileName = get().draftAttachmentsByTask[taskId]?.find(
+          ({ id }) => id === attachmentId,
+        )?.fileName;
+        await api.remove({ taskId, attachmentId });
+        await get().refreshDraftAttachments(taskId);
+        set((state) => ({
+          attachmentAnnouncementByTask: {
+            ...state.attachmentAnnouncementByTask,
+            [taskId]: `${fileName ?? '画像'}を削除しました`,
+          },
+        }));
+        return true;
+      } catch (error) {
+        set((state) => ({
+          attachmentErrorByTask: {
+            ...state.attachmentErrorByTask,
+            [taskId]: describeError(error),
+          },
+        }));
+        return false;
+      } finally {
+        set((state) => ({
+          attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: false },
+        }));
+      }
+    },
+
     async loadSkills() {
       if (!window.sprintCoder || typeof window.sprintCoder.skills?.list !== 'function') return;
       try {
@@ -1899,10 +2048,21 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async startTurn(taskId: string, text: string, skills) {
+    async startTurn(taskId: string, text: string, skills, attachmentIds = []) {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder) return;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
+      const selectedAttachmentIds = [...attachmentIds];
+      const draftsById = new Map(
+        (get().draftAttachmentsByTask[taskId] ?? []).map((attachment) => [
+          attachment.id,
+          attachment,
+        ]),
+      );
+      const selectedAttachments = selectedAttachmentIds.flatMap((id) => {
+        const attachment = draftsById.get(id);
+        return attachment === undefined ? [] : [attachment];
+      });
       const turn = get().turnByTask[taskId];
       if (turn && (turn.status === 'running' || turn.status === 'canceling')) return;
 
@@ -1913,6 +2073,7 @@ export const useAppStore = create<AppState>((set, get) => {
         turnId: null,
         author: 'user',
         content: trimmed,
+        attachments: selectedAttachments,
         createdAt: new Date().toISOString(),
       };
       set((state) => ({
@@ -1933,6 +2094,11 @@ export const useAppStore = create<AppState>((set, get) => {
           taskId,
           text: trimmed,
           skills: selectedSkills,
+          attachmentIds: selectedAttachmentIds,
+          attachmentSelectionIdentity:
+            selectedAttachmentIds.length === 0
+              ? null
+              : (get().attachmentCapabilityByTask[taskId]?.selectionIdentity ?? null),
         });
         // turn.accepted event (delivered via subscription) reconciles the optimistic message.
         // A DB Task exists before this point so per-Task settings have a stable id, but it becomes
@@ -1973,6 +2139,7 @@ export const useAppStore = create<AppState>((set, get) => {
         });
         if (restoredDraft) persistDraftDebounced(taskId, trimmed);
         persistSkillDraftSelection(taskId, selectedSkills);
+        if (selectedAttachmentIds.length > 0) void get().refreshDraftAttachments(taskId);
         if (code === 'TURN_ACTIVE') {
           get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
         }

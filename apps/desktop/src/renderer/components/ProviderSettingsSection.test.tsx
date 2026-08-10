@@ -934,6 +934,37 @@ describe('the concurrency control on a card', () => {
 });
 
 describe('ProviderConnectionCard', () => {
+  it('offers the persisted automatic-release toggle only for an Ollama Connection', () => {
+    const ollama = renderToStaticMarkup(
+      <ProviderConnectionCard
+        connection={connection({
+          id: 'ollama:local',
+          providerId: 'ollama',
+          runtimeKind: 'openai_compatible',
+          automaticModelRelease: false,
+        })}
+        verifying={false}
+        disabled={false}
+        onRetry={() => {}}
+        modelRelease={{ saving: false, onChange: () => {} }}
+      />,
+    );
+    expect(ollama).toContain('モデルを使用後に自動解放');
+    expect(ollama).toContain('data-testid="settings-connection-model-release-ollama:local"');
+    expect(ollama).not.toMatch(/settings-connection-model-release-ollama:local"[^>]*checked/);
+
+    const openAi = renderToStaticMarkup(
+      <ProviderConnectionCard
+        connection={connection()}
+        verifying={false}
+        disabled={false}
+        onRetry={() => {}}
+        modelRelease={{ saving: false, onChange: () => {} }}
+      />,
+    );
+    expect(openAi).not.toContain('モデルを使用後に自動解放');
+  });
+
   it('shows the name, kind and Japanese verification state, and offers retry for external ones', () => {
     const html = renderToStaticMarkup(
       <ProviderConnectionCard

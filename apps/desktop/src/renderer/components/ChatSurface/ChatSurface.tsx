@@ -63,7 +63,7 @@ export function ChatSurface({
         {stageAnnouncement}
       </div>
       <Timeline taskId={task.id} variant={variant} />
-      <Composer taskId={task.id} />
+      <Composer key={task.id} taskId={task.id} />
       <SurfaceFooter variant={variant} />
     </div>
   );

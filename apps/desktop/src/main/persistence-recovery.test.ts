@@ -48,7 +48,7 @@ if (runsWithElectronAbi)
       writer.pragma('wal_autocheckpoint = 0');
       writer.exec(`
         DROP TABLE runtime_failure_diagnostics;
-        DELETE FROM schema_migrations WHERE version = 66;
+        DELETE FROM schema_migrations WHERE version = 69;
       `);
       writer.prepare('UPDATE tasks SET title = ? WHERE id = ?').run('committed in WAL', task.id);
       expect(existsSync(`${path}-wal`)).toBe(true);

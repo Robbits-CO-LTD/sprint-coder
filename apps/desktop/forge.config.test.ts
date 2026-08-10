@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import config, {
   assertNativePackagingHost,
   resolveWindowsSignOptions,
+  NATIVE_ASAR_UNPACK_GLOB,
   verifyBundledNodeResources,
 } from './forge.config';
 import { macAutoUpdateEligibleForIdentity } from './vite.main.config';
@@ -28,6 +29,11 @@ describe('desktop package icon', () => {
 });
 
 describe('native package target', () => {
+  it('unpacks versioned Linux shared libraries required by Sharp', () => {
+    expect(NATIVE_ASAR_UNPACK_GLOB).toContain('so.*');
+    expect(config.packagerConfig?.asar).toEqual({ unpack: NATIVE_ASAR_UNPACK_GLOB });
+  });
+
   it('rejects cross-platform packages before Forge can emit an incomplete artifact', () => {
     const otherPlatform = process.platform === 'win32' ? 'linux' : 'win32';
 
