@@ -74,12 +74,16 @@ describe('release signing and notarization', () => {
     expect(workflow).toContain('Windows版はコード署名されていません');
   });
 
-  it('resumes partial draft uploads without overwriting existing release assets', () => {
-    expect(workflow).toContain('upload_assets=()');
-    expect(workflow).toContain('Reusing existing draft asset:');
-    expect(workflow).toContain('gh release upload "${RELEASE_TAG}" "${upload_assets[@]}"');
+  it('resumes partial draft uploads by replacing the complete validated asset set', () => {
+    const draftCheck = workflow.indexOf("Release is not a draft; refusing to replace published assets.");
+    const tagCheck = workflow.indexOf('Release tag targets ${tag_commit}, expected ${GITHUB_SHA}.');
+    const upload = workflow.indexOf('gh release upload "${RELEASE_TAG}" "${assets[@]}"');
+
+    expect(draftCheck).toBeGreaterThan(-1);
+    expect(tagCheck).toBeGreaterThan(draftCheck);
+    expect(upload).toBeGreaterThan(tagCheck);
+    expect(workflow).toContain('--clobber');
     expect(workflow).toContain('Expected exactly one uploaded release asset named');
-    expect(workflow).not.toContain('--clobber');
   });
 
   it('validates the tag commit and replaces its managed release-notes section on reruns', () => {
