@@ -121,15 +121,24 @@ jobs:
     timeout-minutes: 60
     env:
       MACOS_CODESIGN_IDENTITY: 'Developer ID Application: ROBBITS INC. (7TDY87Y997)'
-      MACOS_SIGNING_TEMP_DIR: ${{ runner.temp }}/sprint-coder-signing-${{ github.run_id }}-${{ github.run_attempt }}
-      MACOS_KEYCHAIN_PATH: ${{ runner.temp }}/sprint-coder-signing-${{ github.run_id }}-${{ github.run_attempt }}/ci-signing.keychain-db
-      MACOS_CERTIFICATE_PATH: ${{ runner.temp }}/sprint-coder-signing-${{ github.run_id }}-${{ github.run_attempt }}/certificate.p12
-      MACOS_API_KEY_PATH: ${{ runner.temp }}/sprint-coder-signing-${{ github.run_id }}-${{ github.run_attempt }}/AuthKey.p8
-      MACOS_NOTARIZATION_ARCHIVE: ${{ runner.temp }}/sprint-coder-signing-${{ github.run_id }}-${{ github.run_attempt }}/notarization.zip
-      MACOS_NOTARIZATION_RESULT: ${{ runner.temp }}/sprint-coder-signing-${{ github.run_id }}-${{ github.run_attempt }}/notarization-result.json
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Initialize temporary macOS signing paths
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          signing_temp_dir="${RUNNER_TEMP}/sprint-coder-signing-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          {
+            printf 'MACOS_SIGNING_TEMP_DIR=%s\n' "${signing_temp_dir}"
+            printf 'MACOS_KEYCHAIN_PATH=%s\n' "${signing_temp_dir}/ci-signing.keychain-db"
+            printf 'MACOS_CERTIFICATE_PATH=%s\n' "${signing_temp_dir}/certificate.p12"
+            printf 'MACOS_API_KEY_PATH=%s\n' "${signing_temp_dir}/AuthKey.p8"
+            printf 'MACOS_NOTARIZATION_ARCHIVE=%s\n' "${signing_temp_dir}/notarization.zip"
+            printf 'MACOS_NOTARIZATION_RESULT=%s\n' "${signing_temp_dir}/notarization-result.json"
+          } >> "${GITHUB_ENV}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v7

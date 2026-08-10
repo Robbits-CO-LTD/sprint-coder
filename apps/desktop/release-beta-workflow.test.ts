@@ -8,6 +8,16 @@ const workflow = readFileSync(
 );
 
 describe('macOS beta release signing and notarization', () => {
+  it('initializes runner-temporary paths inside a step where the runner context is available', () => {
+    const initializePaths = workflow.indexOf('Initialize temporary macOS signing paths');
+    const signingSecrets = workflow.indexOf('secrets.MACOS_CI_KEYCHAIN_PASSWORD');
+
+    expect(workflow).not.toContain('${{ runner.temp }}');
+    expect(workflow).toContain('signing_temp_dir="${RUNNER_TEMP}/sprint-coder-signing-');
+    expect(initializePaths).toBeGreaterThan(-1);
+    expect(signingSecrets).toBeGreaterThan(initializePaths);
+  });
+
   it('gates signing secrets behind an environment and a main-reachability check', () => {
     const reachability = workflow.indexOf('git merge-base --is-ancestor');
     const signingSecrets = workflow.indexOf('secrets.MACOS_CI_KEYCHAIN_PASSWORD');
