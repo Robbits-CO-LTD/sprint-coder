@@ -12,6 +12,7 @@ import {
   LEADER_PROVIDER_TOOLS,
   TEAM_HIRE_WORKER_TOOL,
 } from './team-tools';
+import { teamGuidance } from './ipc';
 import {
   attachBuiltinTeamSkill,
   BUILTIN_TEAM_SKILL_CONTENT,
@@ -63,6 +64,19 @@ describe('builtin Team skill', () => {
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
       '採用失敗だけを理由に「新しいTeamが必要」と判断してはならない',
     );
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('builtin:claude-cli');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('OpenRouter上のClaudeよりClaude CLIを優先');
+  });
+
+  it('adds the saved model-selection policy to Team guidance', () => {
+    const guidance = teamGuidance(
+      'base',
+      false,
+      'APIを使う前にユーザーへ確認する。ClaudeはClaude CLIを選ぶ。',
+    );
+    expect(guidance).toContain('<team-model-selection-guidance>');
+    expect(guidance).toContain('APIを使う前にユーザーへ確認する');
+    expect(guidance).toContain('必ず従ってください');
   });
 
   it('recognizes explicit Team and worker-count intent without activating ordinary turns', () => {

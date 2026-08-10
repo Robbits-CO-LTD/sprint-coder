@@ -119,7 +119,22 @@ export type ChatMessage = {
   author: 'user' | 'assistant' | 'system';
   content: string;
   workContent?: string | null;
+  attachments: ImageAttachmentMetadata[];
   createdAt: string;
+};
+
+export type ImageAttachmentMetadata = {
+  id: string;
+  fileName: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+  byteLength: number;
+  createdAt: string;
+};
+
+export type ImageAttachmentCapability = {
+  status: 'pending' | 'supported' | 'unsupported';
+  reason: string | null;
+  selectionIdentity: string | null;
 };
 
 export type TurnStage =
@@ -492,6 +507,8 @@ export type RuntimeStatus = {
   kind: RuntimeKind;
   state: RuntimeConnectionState;
   taskId: string | null;
+  turnId: string | null;
+  diagnosticId: string | null;
   errorCode: string | null;
   userMessage: string | null;
 };
@@ -805,6 +822,7 @@ export interface SprintCoderApi {
   };
   runtime: {
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
+    getFailureDiagnostic(input: { taskId: string; diagnosticId?: string }): Promise<string | null>;
   };
   tasks: {
     list(): Promise<TaskSummary[]>;
@@ -834,6 +852,12 @@ export interface SprintCoderApi {
       skills?: readonly TurnSkillSelection[],
     ): Promise<{ task: TaskSummary; turnId: string }>;
     clear(taskId: string): Promise<TaskSummary>;
+  };
+  attachments: {
+    capability(taskId: string): Promise<ImageAttachmentCapability>;
+    pick(taskId: string): Promise<ImageAttachmentMetadata | null>;
+    listDraft(taskId: string): Promise<ImageAttachmentMetadata[]>;
+    remove(input: { taskId: string; attachmentId: string }): Promise<void>;
   };
   projects: {
     list(): Promise<ProjectSummary[]>;
@@ -949,6 +973,8 @@ export interface SprintCoderApi {
       taskId: string;
       text: string;
       skills?: import('@sprint-coder/contracts').TurnSkillSelection[];
+      attachmentIds: string[];
+      attachmentSelectionIdentity: string | null;
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     cancel(input: { taskId: string; turnId: string }): Promise<void>;
     queue(input: {
@@ -1014,6 +1040,16 @@ export interface SprintCoderApi {
     setCodexEffort(effort: string): Promise<void>;
     getTeamModelResearch(): Promise<{ researchBeforeHiring: boolean }>;
     setTeamModelResearch(input: { researchBeforeHiring: boolean }): Promise<void>;
+    getTeamModelSelectionGuidance(): Promise<
+      import('@sprint-coder/contracts').TeamModelSelectionGuidance
+    >;
+    setTeamModelSelectionGuidance(
+      input: import('@sprint-coder/contracts').TeamModelSelectionGuidance,
+    ): Promise<void>;
+    getSprintCoderPrePrompt(): Promise<import('@sprint-coder/contracts').SprintCoderPrePrompt>;
+    setSprintCoderPrePrompt(
+      input: import('@sprint-coder/contracts').SprintCoderPrePrompt,
+    ): Promise<void>;
     getTeamModelSettings(): Promise<import('@sprint-coder/contracts').TeamModelSettings>;
     setTeamModelRestriction(
       input: import('@sprint-coder/contracts').TeamModelRestriction,
@@ -1095,6 +1131,9 @@ export interface SprintCoderApi {
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
     lowerRateLimits(
       input: import('@sprint-coder/contracts').ProviderConnectionRateLimitLowerInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    setAutomaticModelRelease(
+      input: import('@sprint-coder/contracts').ProviderConnectionModelReleaseUpdateInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
   };
   permissions: {

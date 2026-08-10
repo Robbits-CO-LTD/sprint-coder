@@ -34,6 +34,10 @@ function stubBridge(): void {
         getRuntime: () => Promise.resolve(),
         getTeamModelResearch: () => Promise.resolve({ researchBeforeHiring: false }),
         setTeamModelResearch: () => Promise.resolve(),
+        getTeamModelSelectionGuidance: () => Promise.resolve({ guidance: '' }),
+        setTeamModelSelectionGuidance: () => Promise.resolve(),
+        getSprintCoderPrePrompt: () => Promise.resolve({ prompt: '' }),
+        setSprintCoderPrePrompt: () => Promise.resolve(),
         getTeamModelSettings: () =>
           Promise.resolve({
             restriction: { mode: 'all', allowedModels: [] },
@@ -78,6 +82,10 @@ describe('which body the flag selects', () => {
     expect(html).toContain('data-testid="settings-team-research"');
     expect(html).toContain('data-testid="settings-team-defaults"');
     expect(html).toContain('data-testid="settings-team-models"');
+    expect(html).toContain('data-testid="settings-team-model-guidance"');
+    expect(html).toContain('覚えておいてほしいこと');
+    expect(html).toContain('data-testid="settings-sprint-coder-pre-prompt"');
+    expect(html).toContain('Sprint Coderの事前プロンプト');
     expect(html).toMatch(/data-testid="settings-page-models"[^>]*>/);
     expect(html).toMatch(/data-testid="settings-page-team"[^>]*hidden=""/);
   });
@@ -175,6 +183,8 @@ describe('the read-only lines in 詳細', () => {
     expect(versionText('0.1.0')).toBe('v0.1.0');
     expect(versionText('v1.2.3')).toBe('v1.2.3');
     expect(workspace()).toContain('data-testid="settings-diagnostic-version"');
+    expect(workspace()).toContain('data-testid="settings-copy-runtime-diagnostic"');
+    expect(workspace()).toContain('認証情報・絶対パスを含めません');
   });
 
   it('names the Runtime and its state, and carries the backend message when there is one', () => {
@@ -184,6 +194,8 @@ describe('the read-only lines in 詳細', () => {
         kind: 'claude',
         state: 'running',
         taskId: null,
+        turnId: null,
+        diagnosticId: null,
         errorCode: null,
         userMessage: null,
       }),
@@ -193,6 +205,8 @@ describe('the read-only lines in 詳細', () => {
         kind: 'codex',
         state: 'failed',
         taskId: 't1',
+        turnId: 'turn-1',
+        diagnosticId: null,
         errorCode: 'SPAWN',
         userMessage: 'CLIを起動できません',
       }),

@@ -296,6 +296,8 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
 
   it('lets an external API Manager execute coordinator-bound Team tools and continue', async () => {
     const requests: unknown[] = [];
+    const release = vi.fn(async () => undefined);
+    const acquireModelLease = vi.fn(async () => ({ release }));
     let call = 0;
     const runtime: ProviderRuntime = {
       verify: vi.fn(),
@@ -317,6 +319,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
         yield { type: 'completed', stopReason: 'completed' };
       },
       cancel: vi.fn(),
+      acquireModelLease,
     };
     const registry = new MainProviderRegistry();
     registry.register({ runtimeKind: 'official_api', providerId: 'openai', runtime });
@@ -384,6 +387,8 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       }),
     );
     expect(authorizeEgress).toHaveBeenCalledTimes(2);
+    expect(acquireModelLease).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
     expect(requests).toHaveLength(2);
     expect(requests[1]).toMatchObject({
       messages: [

@@ -29,6 +29,8 @@ import {
   AcceptanceEvidenceMissingError,
   CanvasViewConflictError,
   InvalidCanvasViewError,
+  ImageAttachmentLimitError,
+  ImageAttachmentAcceptanceError,
   NotFoundError,
   OperationConflictError,
   SqliteEditSagaLeaseGuard,
@@ -75,7 +77,7 @@ const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 // The bridge runs the full SQLite integration suite in a child Electron process. Native startup,
 // the Windows-only Job Object case, and hosted-runner contention can exceed a short timeout.
-const persistenceBridgeTimeoutMs = 60_000;
+const persistenceBridgeTimeoutMs = process.platform === 'win32' ? 120_000 : 60_000;
 const artifactIt = it.skipIf(process.platform === 'win32');
 const commandExecutionIt = it.skipIf(process.platform === 'win32');
 const windowsCommandGateIt = it.runIf(process.platform === 'win32');
@@ -129,6 +131,380 @@ function bindMutationWorkspace(
 
 if (runsWithElectronAbi)
   describe('provider connections', () => {
+    it('migrates and owns image attachment drafts by Task', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('attachment owner');
+      const otherTask = persistence.createTask('other task');
+      const bytes = Buffer.from('canonical-image-bytes');
+
+      const created = persistence.createDraftImageAttachment({
+        taskId: task.id,
+        fileName: 'diagram.png',
+        mimeType: 'image/png',
+        bytes,
+        createdAt: '2026-08-05T00:00:00.000Z',
+      });
+      expect(persistence.listDraftImageAttachments(task.id)).toEqual([created]);
+      expect(persistence.listDraftImageAttachments(otherTask.id)).toEqual([]);
+      expect(() => persistence.removeDraftImageAttachment(otherTask.id, created.id)).toThrow(
+        NotFoundError,
+      );
+
+      for (let index = 1; index < 4; index += 1)
+        persistence.createDraftImageAttachment({
+          taskId: task.id,
+          fileName: `diagram-${index}.png`,
+          mimeType: 'image/png',
+          bytes,
+        });
+      expect(() =>
+        persistence.createDraftImageAttachment({
+          taskId: task.id,
+          fileName: 'fifth.png',
+          mimeType: 'image/png',
+          bytes,
+        }),
+      ).toThrow(ImageAttachmentLimitError);
+
+      const aggregateTask = persistence.createTask('aggregate limit');
+      for (let index = 0; index < 3; index += 1)
+        persistence.createDraftImageAttachment({
+          taskId: aggregateTask.id,
+          fileName: `large-${index}.png`,
+          mimeType: 'image/png',
+          bytes: Buffer.alloc(5 * 1024 * 1024, index),
+        });
+      expect(() =>
+        persistence.createDraftImageAttachment({
+          taskId: aggregateTask.id,
+          fileName: 'overflow.png',
+          mimeType: 'image/png',
+          bytes: Buffer.alloc(2 * 1024 * 1024),
+        }),
+      ).toThrow(ImageAttachmentLimitError);
+
+      persistence.removeDraftImageAttachment(task.id, created.id);
+      expect(persistence.listDraftImageAttachments(task.id)).toHaveLength(3);
+      persistence.close();
+
+      const db = new Database(path);
+      db.pragma('foreign_keys = ON');
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+      expect(db.pragma('foreign_key_list(image_attachments)')).toHaveLength(3);
+      expect(
+        db.prepare('SELECT sha256 FROM image_attachments WHERE task_id = ? LIMIT 1').get(task.id),
+      ).toEqual({ sha256: createHash('sha256').update(bytes).digest('hex') });
+      db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+      expect(
+        db
+          .prepare('SELECT COUNT(*) AS count FROM image_attachments WHERE task_id = ?')
+          .get(task.id),
+      ).toEqual({ count: 0 });
+      db.close();
+    });
+
+    it('rejects malformed attachment hashes at the v67 database boundary', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('hash constraint');
+      persistence.close();
+      const db = new Database(path);
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO image_attachments(
+               id, task_id, message_id, state, file_name, mime_type,
+               byte_length, sha256, bytes, created_at
+             ) VALUES (?, ?, NULL, 'draft', ?, 'image/png', 1, ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            task.id,
+            'bad.png',
+            'z'.repeat(64),
+            Buffer.from('x'),
+            '2026-08-05T00:00:00.000Z',
+          ),
+      ).toThrow(/CHECK constraint failed/);
+      db.close();
+    });
+
+    it('applies the image attachment migrations from v66 and reopens idempotently', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('v63 attachment migration');
+      persistence.close();
+      const downgraded = new Database(path);
+      downgraded.pragma('foreign_keys = OFF');
+      downgraded.exec(`
+        DROP TABLE image_attachments;
+        DROP INDEX messages_id_task_unique;
+        DELETE FROM schema_migrations WHERE version IN (67, 68);
+      `);
+      downgraded.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.listDraftImageAttachments(task.id)).toEqual([]);
+      migrated.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listDraftImageAttachments(task.id)).toEqual([]);
+      reopened.close();
+    });
+
+    it('upgrades an existing v67 image attachment database without losing drafts', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('v64 attachment migration');
+      const attachment = persistence.createDraftImageAttachment({
+        taskId: task.id,
+        fileName: 'preserved.png',
+        mimeType: 'image/png',
+        bytes: Buffer.from('canonical'),
+      });
+      persistence.close();
+
+      const downgraded = new Database(path);
+      downgraded.exec(`
+        DROP TRIGGER image_attachments_state_insert_guard;
+        DROP TRIGGER image_attachments_state_update_guard;
+        DROP INDEX image_attachments_message_ordinal_idx;
+        ALTER TABLE image_attachments DROP COLUMN message_ordinal;
+        DELETE FROM schema_migrations WHERE version = 68;
+      `);
+      downgraded.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.listDraftImageAttachments(task.id)).toEqual([attachment]);
+      migrated.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listDraftImageAttachments(task.id)).toEqual([attachment]);
+      reopened.close();
+    });
+
+    it('fails the v68 migration closed when a v67 database contains unordered message rows', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('v64 unordered accepted attachment');
+      const attachment = persistence.createDraftImageAttachment({
+        taskId: task.id,
+        fileName: 'ambiguous.png',
+        mimeType: 'image/png',
+        bytes: Buffer.from('canonical'),
+      });
+      persistence.startTurn(task.id, 'legacy owner');
+      const messageId = persistence.listMessages(task.id)[0]!.id;
+      persistence.close();
+
+      const downgraded = new Database(path);
+      downgraded.exec(`
+        DROP TRIGGER image_attachments_state_insert_guard;
+        DROP TRIGGER image_attachments_state_update_guard;
+        DROP INDEX image_attachments_message_ordinal_idx;
+        ALTER TABLE image_attachments DROP COLUMN message_ordinal;
+        DELETE FROM schema_migrations WHERE version = 68;
+      `);
+      downgraded
+        .prepare(`UPDATE image_attachments SET state = 'message', message_id = ? WHERE id = ?`)
+        .run(messageId, attachment.id);
+      downgraded.close();
+
+      expect(() => new SqlitePersistenceClient(path)).toThrow(/CHECK constraint failed/);
+      const preserved = new Database(path, { readonly: true });
+      expect(
+        preserved.prepare('SELECT version FROM schema_migrations WHERE version = 68').get(),
+      ).toBeUndefined();
+      expect(
+        preserved
+          .prepare('SELECT state, message_id FROM image_attachments WHERE id = ?')
+          .get(attachment.id),
+      ).toEqual({ state: 'message', message_id: messageId });
+      expect(preserved.pragma('table_info(image_attachments)')).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: 'message_ordinal' })]),
+      );
+      expect(preserved.pragma('foreign_key_check')).toEqual([]);
+      preserved.close();
+    });
+
+    it('atomically binds same-Task drafts to direct Turn history and restart events', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('accept attachments');
+      const first = persistence.createDraftImageAttachment({
+        taskId: task.id,
+        fileName: 'first.png',
+        mimeType: 'image/png',
+        bytes: Buffer.from('canonical-first'),
+        createdAt: '2026-08-05T00:00:00.000Z',
+      });
+      const second = persistence.createDraftImageAttachment({
+        taskId: task.id,
+        fileName: 'second.webp',
+        mimeType: 'image/webp',
+        bytes: Buffer.from('canonical-second'),
+        createdAt: '2026-08-05T00:00:01.000Z',
+      });
+      persistence.setTaskModelSelection(task.id, {
+        connectionId: 'builtin:codex-cli',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-5.6-sol',
+      });
+
+      const started = persistence.startTurn(
+        task.id,
+        '画像を確認して',
+        [],
+        false,
+        [second.id, first.id],
+        (selection) => {
+          expect(selection).toEqual({
+            taskId: task.id,
+            modelSelection: {
+              connectionId: 'builtin:codex-cli',
+              requestedProvider: 'openai',
+              requestedModel: 'gpt-5.6-sol',
+            },
+            runtimeKind: 'codex',
+            model: 'gpt-5.6-sol',
+          });
+          return true;
+        },
+      );
+      expect(persistence.listDraftImageAttachments(task.id)).toEqual([]);
+      expect(persistence.listMessages(task.id)[0]).toMatchObject({
+        attachments: [{ id: second.id }, { id: first.id }],
+      });
+      expect(started.event).toMatchObject({
+        type: 'turn.accepted',
+        userMessage: { attachments: [{ id: second.id }, { id: first.id }] },
+      });
+      expect(persistence.getAcceptedImageAttachments(task.id, started.turnId)).toEqual([
+        expect.objectContaining({
+          id: second.id,
+          sha256: createHash('sha256').update('canonical-second').digest('hex'),
+          bytes: Buffer.from('canonical-second'),
+        }),
+        expect.objectContaining({
+          id: first.id,
+          sha256: createHash('sha256').update('canonical-first').digest('hex'),
+          bytes: Buffer.from('canonical-first'),
+        }),
+      ]);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listMessages(task.id)[0]?.attachments).toEqual([
+        expect.objectContaining({ id: second.id, fileName: 'second.webp' }),
+        expect.objectContaining({ id: first.id, fileName: 'first.png' }),
+      ]);
+      expect(
+        reopened.listEventsAfter(task.id, 0).find(({ type }) => type === 'turn.accepted'),
+      ).toMatchObject({ userMessage: { attachments: [{ id: second.id }, { id: first.id }] } });
+      expect(
+        reopened.getAcceptedImageAttachments(task.id, started.turnId).map(({ id }) => id),
+      ).toEqual([second.id, first.id]);
+      const tamper = new Database(path);
+      tamper
+        .prepare('UPDATE image_attachments SET bytes = ? WHERE id = ?')
+        .run(Buffer.from('corrupted-second'), second.id);
+      expect(() => reopened.getAcceptedImageAttachments(task.id, started.turnId)).toThrow(
+        ImageAttachmentAcceptanceError,
+      );
+      tamper
+        .prepare('UPDATE image_attachments SET bytes = ? WHERE id = ?')
+        .run(Buffer.from('canonical-second'), second.id);
+      tamper.prepare('DELETE FROM image_attachments WHERE id = ?').run(first.id);
+      tamper.close();
+      expect(() => reopened.getAcceptedImageAttachments(task.id, started.turnId)).toThrow(
+        ImageAttachmentAcceptanceError,
+      );
+      reopened.close();
+    });
+
+    it('rejects unsupported, duplicate, cross-Task, and tampered attachment acceptance', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('attachment refusal');
+      const otherTask = persistence.createTask('other attachment owner');
+      const attachment = persistence.createDraftImageAttachment({
+        taskId: task.id,
+        fileName: 'owned.png',
+        mimeType: 'image/png',
+        bytes: Buffer.from('canonical'),
+      });
+
+      expect(() =>
+        persistence.startTurn(task.id, 'unsupported', [], false, [attachment.id], () => false),
+      ).toThrow(ImageAttachmentAcceptanceError);
+      const staleSelection = persistence.getTaskModelSelection(task.id);
+      persistence.setTaskModelSelection(task.id, {
+        connectionId: 'builtin:claude-cli',
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-sonnet-5',
+      });
+      expect(() =>
+        persistence.startTurn(
+          task.id,
+          'selection changed',
+          [],
+          false,
+          [attachment.id],
+          (current) => JSON.stringify(current.modelSelection) === JSON.stringify(staleSelection),
+        ),
+      ).toThrow(ImageAttachmentAcceptanceError);
+      expect(() =>
+        persistence.startTurn(task.id, 'validator failed', [], false, [attachment.id], () => {
+          throw new Error('readiness snapshot expired');
+        }),
+      ).toThrow(/readiness snapshot expired/);
+      expect(() =>
+        persistence.startTurn(
+          task.id,
+          'duplicate',
+          [],
+          false,
+          [attachment.id, attachment.id],
+          () => true,
+        ),
+      ).toThrow();
+      expect(() =>
+        persistence.startTurn(otherTask.id, 'cross task', [], false, [attachment.id], () => true),
+      ).toThrow(ImageAttachmentAcceptanceError);
+      expect(persistence.listMessages(task.id)).toEqual([]);
+      expect(persistence.listMessages(otherTask.id)).toEqual([]);
+      expect(persistence.listDraftImageAttachments(task.id)).toEqual([attachment]);
+
+      const tamper = new Database(path);
+      tamper
+        .prepare('UPDATE image_attachments SET bytes = ? WHERE id = ?')
+        .run(Buffer.from('corrupted'), attachment.id);
+      tamper.close();
+      expect(() =>
+        persistence.startTurn(task.id, 'tampered', [], false, [attachment.id], () => true),
+      ).toThrow(ImageAttachmentAcceptanceError);
+      expect(persistence.listMessages(task.id)).toEqual([]);
+      persistence.close();
+    });
+
+    it('rolls attachment ownership back when a later Turn insert fails', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('attachment rollback');
+      const attachment = persistence.createDraftImageAttachment({
+        taskId: task.id,
+        fileName: 'rollback.png',
+        mimeType: 'image/png',
+        bytes: Buffer.from('canonical'),
+      });
+      const triggerDb = new Database(path);
+      triggerDb.exec(`
+        CREATE TRIGGER fail_attachment_turn_insert
+        BEFORE INSERT ON turns BEGIN
+          SELECT RAISE(ABORT, 'injected turn failure');
+        END;
+      `);
+      triggerDb.close();
+
+      expect(() =>
+        persistence.startTurn(task.id, 'rollback', [], false, [attachment.id], () => true),
+      ).toThrow(/injected turn failure/);
+      expect(persistence.listDraftImageAttachments(task.id)).toEqual([attachment]);
+      expect(persistence.listMessages(task.id)).toEqual([]);
+      persistence.close();
+    });
+
     it('seeds stable built-in CLI connections and restores them from SQLite', () => {
       const { persistence, path } = createPersistence();
 
@@ -330,6 +706,49 @@ if (runsWithElectronAbi)
           maxConcurrentRequests: 1,
         }),
       ).toThrow('Built-in CLI concurrency');
+      persistence.close();
+    });
+
+    it('persists an Ollama Connection model-release opt-out without enabling other Providers', () => {
+      const { persistence } = createPersistence();
+      const now = new Date().toISOString();
+      const create = (providerId: string, automaticModelRelease: boolean) =>
+        persistence.createProviderConnection({
+          id: `${providerId}:model-release-test`,
+          providerId,
+          runtimeKind: 'openai_compatible',
+          displayName: providerId,
+          enabled: true,
+          automaticModelRelease,
+          secretReference: null,
+          verification: {
+            status: 'unverified',
+            verifiedAt: null,
+            expiresAt: null,
+            message: null,
+          },
+          rateLimit: {
+            mode: 'auto',
+            maxConcurrentRequests: 2,
+            requestsPerMinute: null,
+            tokensPerMinute: null,
+            lastObservedRateLimitHeaders: null,
+          },
+          createdAt: now,
+          updatedAt: now,
+        });
+      const ollama = create('ollama', true);
+      const localAi = create('localai', false);
+
+      expect(
+        persistence.setProviderConnectionAutomaticModelRelease(ollama.id, false),
+      ).toMatchObject({ automaticModelRelease: false });
+      expect(persistence.getProviderConnection(localAi.id)).toMatchObject({
+        automaticModelRelease: false,
+      });
+      expect(() =>
+        persistence.setProviderConnectionAutomaticModelRelease(localAi.id, true),
+      ).toThrow('only configurable for Ollama');
       persistence.close();
     });
   });
@@ -1245,6 +1664,88 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('persists only explicitly recorded failure diagnostics without private stderr content', () => {
+      const { persistence, path } = createPersistence();
+      const successfulTask = persistence.createTask('successful');
+      const successfulTurn = persistence.startTurn(successfulTask.id, 'done');
+      finishTurn(persistence, successfulTask.id, successfulTurn.turnId);
+      expect(persistence.getRuntimeFailureDiagnostic({ taskId: successfulTask.id })).toBeNull();
+
+      const failedTask = persistence.createTask('failed');
+      const failedTurn = persistence.startTurn(failedTask.id, 'fail safely');
+      const diagnosticId = randomUUID();
+      persistence.recordRuntimeFailureDiagnostic(failedTask.id, failedTurn.turnId, {
+        version: 1,
+        diagnosticId,
+        runtimeKind: 'codex',
+        failureStage: 'protocol_error',
+        elapsedMs: 1234,
+        appVersion: '0.2.1',
+        cliVersion: 'codex 1.2.3',
+        teamMcp: { enabled: true, status: 'configured' },
+        lastRecognizedNotification: 'turn/started',
+        lastReceivedNotification: '[unsupported]',
+        unsupportedNotificationCount: 1,
+        stderrObserved: true,
+        stderrTruncated: false,
+        recordedAt: new Date().toISOString(),
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      const persisted = reopened.getRuntimeFailureDiagnostic({ diagnosticId });
+      expect(persisted).toMatchObject({
+        diagnosticId,
+        taskId: failedTask.id,
+        turnId: failedTurn.turnId,
+        failureStage: 'protocol_error',
+        unsupportedNotificationCount: 1,
+      });
+      expect(persisted?.stderrObserved).toBe(true);
+      expect(JSON.stringify(persisted)).not.toContain('abcdefghijkl');
+      expect(JSON.stringify(persisted)).not.toContain('/Users/example');
+      reopened.close();
+    });
+
+    it('rejects oversized diagnostic JSON at the DB boundary and skips tampered rows', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('diagnostic limits');
+      const turn = persistence.startTurn(task.id, 'fail');
+      persistence.recordRuntimeFailureDiagnostic(task.id, turn.turnId, {
+        version: 1,
+        diagnosticId: randomUUID(),
+        runtimeKind: 'codex',
+        failureStage: 'abnormal_exit',
+        elapsedMs: 1,
+        appVersion: '0.2.1',
+        cliVersion: 'codex-cli 1.2.3',
+        teamMcp: { enabled: false, status: 'not_configured' },
+        lastRecognizedNotification: null,
+        lastReceivedNotification: null,
+        unsupportedNotificationCount: 0,
+        stderrObserved: false,
+        stderrTruncated: false,
+        recordedAt: new Date().toISOString(),
+      });
+      persistence.close();
+
+      const raw = new Database(path);
+      expect(() =>
+        raw
+          .prepare('UPDATE runtime_failure_diagnostics SET diagnostic_json = ? WHERE turn_id = ?')
+          .run('x'.repeat(16 * 1024 + 1), turn.turnId),
+      ).toThrow();
+      raw.pragma('ignore_check_constraints = ON');
+      raw
+        .prepare('UPDATE runtime_failure_diagnostics SET diagnostic_json = ? WHERE turn_id = ?')
+        .run('x'.repeat(16 * 1024 + 1), turn.turnId);
+      raw.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getRuntimeFailureDiagnostic({ taskId: task.id })).toBeNull();
+      reopened.close();
+    });
+
     it('tells "never chose" apart from "chose mock", so a real CLI can be adopted once', () => {
       // Issue #50: the app used to start on Mock even with a real CLI installed, and Mock emits
       // plausible-looking code instantly — which reads as the app working rather than as a
@@ -1362,6 +1863,44 @@ if (runsWithElectronAbi)
       expect(reopened.getTeamModelResearchBeforeHiring()).toBe(true);
       reopened.setTeamModelResearchBeforeHiring(false);
       expect(reopened.getTeamModelResearchBeforeHiring()).toBe(false);
+      reopened.close();
+    });
+
+    it('persists trimmed Team model-selection guidance across restart', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getTeamModelSelectionGuidance()).toBe('');
+      persistence.setTeamModelSelectionGuidance(
+        '  APIを使う前に確認する。ClaudeはClaude CLIを優先する。  ',
+      );
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTeamModelSelectionGuidance()).toBe(
+        'APIを使う前に確認する。ClaudeはClaude CLIを優先する。',
+      );
+      reopened.close();
+    });
+
+    it('persists the Sprint Coder pre-prompt and seals it before conversation history', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getSprintCoderPrePrompt()).toBe('');
+      persistence.setSprintCoderPrePrompt('  既存設計を確認してから実装する。  ');
+      const task = persistence.createTask('pre-prompt task');
+      const started = persistence.startTurn(task.id, '実装して');
+      const prepared = persistence.prepareContext(task.id, started.turnId);
+
+      expect(prepared.fragments[0]?.content).toContain('Sprint Coderの実行エージェント');
+      expect(prepared.fragments[1]).toMatchObject({
+        source: 'system',
+        trust: 'system',
+      });
+      expect(prepared.fragments[1]?.content).toContain('<sprint-coder-pre-prompt>');
+      expect(prepared.fragments[1]?.content).toContain('既存設計を確認してから実装する。');
+      expect(prepared.fragments[2]?.content).toBe('実装して');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getSprintCoderPrePrompt()).toBe('既存設計を確認してから実装する。');
       reopened.close();
     });
 
@@ -5585,6 +6124,10 @@ if (runsWithElectronAbi)
         { version: 63 },
         { version: 64 },
         { version: 65 },
+        { version: 66 },
+        { version: 67 },
+        { version: 68 },
+        { version: 69 },
       ]);
       for (const [table, columns] of [
         [

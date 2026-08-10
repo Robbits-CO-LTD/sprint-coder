@@ -14,6 +14,12 @@ import type { ProviderFetch } from './openai-provider-client';
 import { openAICompatibleResponseRequest } from './openai-provider-client';
 import { normalizeOpenAIResponsesStream } from './openai-responses-stream';
 import { normalizeOpenAIChatCompletionsStream } from './openai-chat-completions-stream';
+import {
+  OllamaModelLeaseCoordinator,
+  type OllamaModelTarget,
+  type ProviderModelLease,
+} from './ollama-model-lifecycle';
+import { secureLogger } from './secure-logger';
 
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
 
@@ -23,13 +29,42 @@ export type OpenAICompatibleCredentialResolver = (
 
 export class OpenAICompatibleProviderClient implements ProviderRuntime {
   private readonly executions = new Map<string, AbortController>();
+  private readonly modelLifecycle: OllamaModelLeaseCoordinator;
 
   constructor(
     private readonly profiles: ProviderProfileRegistry,
     private readonly resolveCredential: OpenAICompatibleCredentialResolver,
     private readonly providerFetch: ProviderFetch = fetch,
     private readonly now: () => Date = () => new Date(),
-  ) {}
+  ) {
+    this.modelLifecycle = new OllamaModelLeaseCoordinator(
+      (target) => this.unloadOllamaModel(target),
+      (target, error) => {
+        secureLogger.warn('Ollama model release failed', {
+          modelId: target.modelId,
+          category: 'provider_model_release',
+          failure:
+            error instanceof CompatibleHttpError
+              ? { kind: 'http', status: error.status }
+              : { kind: 'transport', name: error instanceof Error ? error.name : 'unknown' },
+        });
+      },
+    );
+  }
+
+  async acquireModelLease(
+    connection: ProviderConnection,
+    modelId: string,
+  ): Promise<ProviderModelLease> {
+    const target = await this.ollamaModelTarget(connection, modelId);
+    if (target === null) return { release: async () => undefined };
+    return this.modelLifecycle.acquire(target, connection.automaticModelRelease !== false);
+  }
+
+  async dispose(): Promise<void> {
+    for (const controller of this.executions.values()) controller.abort();
+    await this.modelLifecycle.dispose();
+  }
 
   async verify(
     connection: ProviderConnection,
@@ -203,6 +238,38 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     this.executions.get(executionId)?.abort();
   }
 
+  private async ollamaModelTarget(
+    connection: ProviderConnection,
+    modelId: string,
+  ): Promise<OllamaModelTarget | null> {
+    if (connection.providerId !== 'ollama') return null;
+    const profile = this.profiles.get(connection.providerId);
+    if (profile.id !== 'ollama' || profile.nativeModelLifecycle !== 'ollama') return null;
+    const credential = await this.resolveCredential(connection);
+    const endpoint = resolveOllamaNativeGenerateEndpoint(
+      resolveProfileBaseUrl(profile, credential),
+    );
+    return endpoint === null ? null : { endpoint, modelId };
+  }
+
+  private async unloadOllamaModel(target: OllamaModelTarget): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3_000);
+    try {
+      const response = await this.providerFetch(target.endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: target.modelId, keep_alive: 0 }),
+        redirect: 'error',
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new CompatibleHttpError(response.status);
+      await response.body?.cancel();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async fetchModels(
     connection: ProviderConnection,
     signal: AbortSignal,
@@ -289,6 +356,34 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     const baseUrl = resolveProfileBaseUrl(profile, credential);
     return this.providerFetch(`${baseUrl}${path}`, { ...init, headers, signal });
   }
+}
+
+export function resolveOllamaNativeGenerateEndpoint(baseUrl: string): string | null {
+  const parsed = new URL(baseUrl);
+  if (
+    parsed.protocol !== 'http:' ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    !['/', '/v1', '/v1/'].includes(parsed.pathname) ||
+    parsed.search !== '' ||
+    parsed.hash !== ''
+  )
+    return null;
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname === 'localhost') parsed.hostname = '127.0.0.1';
+  else if (!isLoopbackIpLiteral(hostname)) return null;
+  parsed.pathname = '/api/generate';
+  return parsed.toString();
+}
+
+function isLoopbackIpLiteral(hostname: string): boolean {
+  if (hostname === '[::1]' || hostname === '::1') return true;
+  const octets = hostname.split('.');
+  return (
+    octets.length === 4 &&
+    octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255) &&
+    octets[0] === '127'
+  );
 }
 
 type CompatibleModelList = Readonly<{

@@ -11,8 +11,9 @@ import { Eye, EyeOff, Plus, X } from './icons';
 // Raw provider errors and secret references are never rendered.
 
 type CurrentProvidersApi = NonNullable<Window['sprintCoder']>['providers'];
-type ProvidersApi = Omit<CurrentProvidersApi, 'lowerRateLimits'> & {
+type ProvidersApi = Omit<CurrentProvidersApi, 'lowerRateLimits' | 'setAutomaticModelRelease'> & {
   lowerRateLimits?: CurrentProvidersApi['lowerRateLimits'];
+  setAutomaticModelRelease?: CurrentProvidersApi['setAutomaticModelRelease'];
 };
 
 /** Null whenever this build of Main has not wired the provider IPC, per the contract's
@@ -54,6 +55,12 @@ export function supportsRateLimitLowering(api: ProvidersApi | null): boolean {
   return rateLimitLoweringApi(api) !== null;
 }
 
+type ModelReleaseApi = Pick<CurrentProvidersApi, 'setAutomaticModelRelease'>;
+
+function modelReleaseApi(api: ProvidersApi | null): ModelReleaseApi | null {
+  return typeof api?.setAutomaticModelRelease === 'function' ? (api as ModelReleaseApi) : null;
+}
+
 export const VERIFICATION_LABEL: Record<ProviderVerificationStatus, string> = {
   not_required: '確認不要',
   unverified: '未確認',
@@ -85,6 +92,8 @@ export const PROFILE_UNAVAILABLE_NOTICE =
   '選択していたプロバイダープロファイルは利用できなくなりました。入力したAPIキーなどは消去しました。プロバイダーを選び直してください。';
 export const RATE_LIMIT_ERROR =
   '同時実行上限を変更できませんでした。値を確認して再試行してください。';
+export const MODEL_RELEASE_ERROR =
+  'モデルの自動解放設定を変更できませんでした。再試行してください。';
 export const UNSUPPORTED_TEXT = 'この環境ではプロバイダー設定APIが利用できません。';
 export const LOADING_TEXT = '接続を読み込んでいます。';
 export const EMPTY_TEXT = '登録済みの接続はまだありません。';
@@ -367,12 +376,14 @@ export function isSectionBusy(state: {
   verifyingId: string | null;
   /** Optional so a caller written before the concurrency control still reads as plain idle. */
   savingRateLimitId?: string | null;
+  savingModelReleaseId?: string | null;
 }): boolean {
   return (
     state.loading ||
     state.submitting ||
     state.verifyingId !== null ||
-    (state.savingRateLimitId ?? null) !== null
+    (state.savingRateLimitId ?? null) !== null ||
+    (state.savingModelReleaseId ?? null) !== null
   );
 }
 
@@ -536,12 +547,18 @@ export type ConnectionRateLimitControl = {
   onSave: (connection: ProviderConnection, input: string) => void;
 };
 
+export type ConnectionModelReleaseControl = {
+  saving: boolean;
+  onChange: (connection: ProviderConnection, enabled: boolean) => void;
+};
+
 export function ProviderConnectionCard({
   connection,
   verifying,
   disabled,
   onRetry,
   rateLimit,
+  modelRelease,
 }: {
   connection: ProviderConnection;
   verifying: boolean;
@@ -549,6 +566,7 @@ export function ProviderConnectionCard({
   onRetry: (connection: ProviderConnection) => void;
   /** Omitted wherever the concurrency control is not wired; the rest of the card is unaffected. */
   rateLimit?: ConnectionRateLimitControl;
+  modelRelease?: ConnectionModelReleaseControl;
 }) {
   const status = connection.verification.status;
   const currentLimit = connection.rateLimit.maxConcurrentRequests;
@@ -615,6 +633,21 @@ export function ProviderConnectionCard({
             </span>
           </span>
         )}
+        {connection.providerId === 'ollama' &&
+          connection.runtimeKind === 'openai_compatible' &&
+          modelRelease !== undefined && (
+            <label className="settings-field settings-provider-model-release">
+              <span className="settings-field-label">モデルを使用後に自動解放</span>
+              <input
+                type="checkbox"
+                data-testid={`settings-connection-model-release-${connection.id}`}
+                checked={connection.automaticModelRelease !== false}
+                disabled={disabled || modelRelease.saving}
+                onChange={(event) => modelRelease.onChange(connection, event.target.checked)}
+              />
+              <span className="settings-hint">ローカルOllama接続だけに適用されます。</span>
+            </label>
+          )}
       </span>
       {/* A fact about the Connection, not a control. Deliberately a plain <span> with no border,
           no fill and no role: 「確認不要」is not something anyone can press, and dressing it as a
@@ -936,6 +969,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
   const [status, setStatus] = useState('');
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const [savingRateLimitId, setSavingRateLimitId] = useState<string | null>(null);
+  const [savingModelReleaseId, setSavingModelReleaseId] = useState<string | null>(null);
   const [form, setForm] = useState<ProviderFormValues>(EMPTY_FORM);
   const [showKey, setShowKey] = useState(false);
   // Closed on arrival: the registered Connections are what this screen is for, and adding one is an
@@ -946,7 +980,13 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
   const generation = useRef(0);
   const mounted = useRef(true);
 
-  const busy = isSectionBusy({ loading, submitting, verifyingId, savingRateLimitId });
+  const busy = isSectionBusy({
+    loading,
+    submitting,
+    verifyingId,
+    savingRateLimitId,
+    savingModelReleaseId,
+  });
   // Read at render because that is when a card has to decide whether to offer the control at all.
   const rateLimitSupported = supportsRateLimitLowering(providerApi());
 
@@ -1053,6 +1093,28 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     }
   }
 
+  async function setAutomaticModelRelease(
+    connection: ProviderConnection,
+    enabled: boolean,
+  ): Promise<void> {
+    const api = modelReleaseApi(providerApi());
+    if (api === null || busy) return;
+    setError(null);
+    setSavingModelReleaseId(connection.id);
+    try {
+      const updated = await api.setAutomaticModelRelease({
+        connectionId: connection.id,
+        automaticModelRelease: enabled,
+      });
+      setConnections((current) => upsertConnection(current ?? [], updated));
+      setStatus(`${updated.displayName}のモデル自動解放を${enabled ? '有効' : '無効'}にしました。`);
+    } catch {
+      setError(MODEL_RELEASE_ERROR);
+    } finally {
+      setSavingModelReleaseId(null);
+    }
+  }
+
   async function submitForm(): Promise<void> {
     const api = providerApi();
     if (api === null) {
@@ -1149,6 +1211,15 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
                       saving: savingRateLimitId === connection.id,
                       onSave: (target, input) => void lowerRateLimit(target, input),
                     }}
+                    {...(typeof providerApi()?.setAutomaticModelRelease !== 'function'
+                      ? {}
+                      : {
+                          modelRelease: {
+                            saving: savingModelReleaseId === connection.id,
+                            onChange: (target: ProviderConnection, enabled: boolean) =>
+                              void setAutomaticModelRelease(target, enabled),
+                          },
+                        })}
                   />
                 ))}
               </ul>

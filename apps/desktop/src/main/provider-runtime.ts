@@ -6,6 +6,7 @@ import {
   type ProviderModel,
   type ProviderRuntimeKind,
 } from '@sprint-coder/contracts';
+import type { ProviderModelLease } from './ollama-model-lifecycle';
 
 export type ProviderVerificationResult = Readonly<{
   status: 'verified' | 'invalid_credentials' | 'unavailable';
@@ -26,6 +27,20 @@ export interface ProviderRuntime {
     signal: AbortSignal,
   ): AsyncIterable<CanonicalProviderEvent>;
   cancel(executionId: string): Promise<void>;
+  acquireModelLease?(connection: ProviderConnection, modelId: string): Promise<ProviderModelLease>;
+  dispose?(): Promise<void>;
+}
+
+const NOOP_MODEL_LEASE: ProviderModelLease = Object.freeze({
+  release: async () => undefined,
+});
+
+export async function acquireProviderModelLease(
+  runtime: ProviderRuntime,
+  connection: ProviderConnection,
+  modelId: string,
+): Promise<ProviderModelLease> {
+  return runtime.acquireModelLease?.(connection, modelId) ?? NOOP_MODEL_LEASE;
 }
 
 export type ProviderRuntimeRegistration = Readonly<{

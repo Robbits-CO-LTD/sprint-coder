@@ -74,7 +74,12 @@ export const SETTINGS_SECTIONS: readonly {
   },
   { id: 'team', label: 'Team', description: '新しいTeamの既定値', eyebrow: 'Team' },
   { id: 'skills', label: 'Skill', description: '読み込みと有効化', eyebrow: 'Skills' },
-  { id: 'advanced', label: '詳細', description: 'CLI検出・診断・ライセンス', eyebrow: 'Advanced' },
+  {
+    id: 'advanced',
+    label: '詳細',
+    description: '事前プロンプト・CLI検出・診断',
+    eyebrow: 'Advanced',
+  },
 ];
 
 export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -197,7 +202,9 @@ export function LegacyBody({
           {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item, which
               is exactly where a user who cannot select a Runtime will not look. */}
           <CliDetectionGroup />
+          <SprintCoderPrePromptSetting active={open} />
           <TeamModelRestrictionSetting active={open} />
+          <TeamModelSelectionGuidanceSetting active={open} />
           <TeamResearchSetting active={open} />
           {/* Unmounting clears the renderer-local plaintext credential state. */}
           {open && <ProviderSettingsSection active={open} />}
@@ -298,6 +305,7 @@ export function WorkspaceBody({
             <WorkspacePage {...page('team')} active={current === 'team'}>
               <TeamDefaultPolicySetting active={open} />
               <TeamModelRestrictionSetting active={open} />
+              <TeamModelSelectionGuidanceSetting active={open} />
               <TeamResearchSetting active={open} />
             </WorkspacePage>
 
@@ -309,6 +317,7 @@ export function WorkspaceBody({
             </WorkspacePage>
 
             <WorkspacePage {...page('advanced')} active={current === 'advanced'}>
+              <SprintCoderPrePromptSetting active={open} />
               {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item,
                   which is exactly where a user who cannot select a Runtime will not look. */}
               <CliDetectionGroup />
@@ -503,6 +512,69 @@ function DiagnosticsGroup() {
   const runtimeStatus = useAppStore((s) => s.runtimeStatus);
   const recovery = useAppStore((s) => s.recovery);
   const appVersion = useAppStore((s) => s.appVersion);
+  const selectedTaskId = useAppStore((s) => s.selectedTaskId);
+  const currentDiagnosticId =
+    runtimeStatus?.state === 'failed' && runtimeStatus.taskId === selectedTaskId
+      ? (runtimeStatus.diagnosticId ?? undefined)
+      : undefined;
+  const currentFailureCannotBeCopied =
+    runtimeStatus?.state === 'failed' &&
+    (runtimeStatus.taskId !== selectedTaskId || runtimeStatus.diagnosticId === null);
+  const diagnosticSelectionKey = `${selectedTaskId ?? 'none'}:${currentDiagnosticId ?? 'latest'}`;
+  const [copyResult, setCopyResult] = useState<{ key: string; text: string } | null>(null);
+  const [copyPendingKey, setCopyPendingKey] = useState<string | null>(null);
+  const diagnosticRequestGeneration = useRef(0);
+  const diagnosticsMounted = useRef(true);
+
+  useEffect(() => {
+    diagnosticsMounted.current = true;
+    return () => {
+      diagnosticsMounted.current = false;
+      diagnosticRequestGeneration.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    diagnosticRequestGeneration.current += 1;
+  }, [diagnosticSelectionKey]);
+
+  async function copyFailureDiagnostic(): Promise<void> {
+    if (selectedTaskId === null || window.sprintCoder?.runtime?.getFailureDiagnostic === undefined)
+      return;
+    if (currentFailureCannotBeCopied) {
+      setCopyResult({
+        key: diagnosticSelectionKey,
+        text: '現在の失敗にはコピー可能な診断がありません',
+      });
+      return;
+    }
+    const taskId = selectedTaskId;
+    const diagnosticId = currentDiagnosticId;
+    const selectionKey = diagnosticSelectionKey;
+    const generation = ++diagnosticRequestGeneration.current;
+    setCopyPendingKey(selectionKey);
+    try {
+      const diagnostic = await window.sprintCoder.runtime.getFailureDiagnostic({
+        taskId,
+        ...(diagnosticId === undefined ? {} : { diagnosticId }),
+      });
+      if (!diagnosticsMounted.current || generation !== diagnosticRequestGeneration.current) return;
+      if (diagnostic === null) {
+        setCopyResult({ key: selectionKey, text: 'このTaskに失敗診断はありません' });
+        return;
+      }
+      await navigator.clipboard.writeText(diagnostic);
+      if (!diagnosticsMounted.current || generation !== diagnosticRequestGeneration.current) return;
+      setCopyResult({ key: selectionKey, text: '失敗診断をコピーしました' });
+    } catch {
+      if (diagnosticsMounted.current && generation === diagnosticRequestGeneration.current)
+        setCopyResult({ key: selectionKey, text: '失敗診断をコピーできませんでした' });
+    } finally {
+      if (diagnosticsMounted.current && generation === diagnosticRequestGeneration.current)
+        setCopyPendingKey(null);
+    }
+  }
+
   return (
     <div className="settings-group">
       <span className="settings-field-label">状態</span>
@@ -520,7 +592,29 @@ function DiagnosticsGroup() {
           <span className="settings-hint">{recoveryText(recovery)}</span>
         </li>
       </ul>
-      <p className="settings-hint">表示だけの項目です。ここから変わる設定はありません。</p>
+      <div className="settings-inline-actions">
+        <button
+          type="button"
+          className="settings-secondary-button"
+          disabled={
+            selectedTaskId === null ||
+            currentFailureCannotBeCopied ||
+            copyPendingKey === diagnosticSelectionKey
+          }
+          onClick={() => void copyFailureDiagnostic()}
+          data-testid="settings-copy-runtime-diagnostic"
+        >
+          最新の失敗診断をコピー
+        </button>
+        {copyResult?.key === diagnosticSelectionKey && (
+          <span className="settings-hint" role="status">
+            {copyResult.text}
+          </span>
+        )}
+      </div>
+      <p className="settings-hint">
+        診断には依頼・回答・推論・ツール引数・認証情報・絶対パスを含めません。
+      </p>
     </div>
   );
 }
@@ -1165,6 +1259,220 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
   );
 }
 
+function TeamModelSelectionGuidanceSetting({ active }: { active: boolean }) {
+  const [api] = useState(teamModelSelectionGuidanceApi);
+  const [canonical, setCanonical] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'saving'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+  const generation = useRef(0);
+
+  useEffect(() => {
+    if (!active || api === null) return;
+    const request = ++generation.current;
+    void (async () => {
+      setPhase('loading');
+      setError(null);
+      try {
+        const result = await api.getTeamModelSelectionGuidance();
+        if (request !== generation.current) return;
+        setCanonical(result.guidance);
+        setDraft(result.guidance);
+      } catch {
+        if (request !== generation.current) return;
+        setError('モデル選定の指示を読み込めませんでした。');
+      } finally {
+        if (request === generation.current) setPhase('idle');
+      }
+    })();
+    return () => {
+      if (request === generation.current) generation.current += 1;
+    };
+  }, [active, api]);
+
+  async function save(): Promise<void> {
+    if (api === null || phase !== 'idle') return;
+    const request = ++generation.current;
+    setPhase('saving');
+    setError(null);
+    setStatus('');
+    try {
+      await api.setTeamModelSelectionGuidance({ guidance: draft });
+      if (request !== generation.current) return;
+      const normalized = draft.trim();
+      setCanonical(normalized);
+      setDraft(normalized);
+      setStatus('モデル選定の指示を保存しました。');
+    } catch {
+      if (request !== generation.current) return;
+      setError('モデル選定の指示を保存できませんでした。');
+    } finally {
+      if (request === generation.current) setPhase('idle');
+    }
+  }
+
+  const disabled = api === null || canonical === null || phase !== 'idle';
+  return (
+    <form
+      className="settings-group team-model-guidance"
+      data-testid="settings-team-model-guidance"
+      aria-busy={phase === 'loading'}
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+    >
+      <div className="settings-section-heading">
+        <div>
+          <h3>AIを選ぶときの指示</h3>
+          <p>LeaderとManagerが新しいWorkerのAIを選ぶ際に参照します。</p>
+        </div>
+        <span className="settings-count-badge">{draft.length} / 4000</span>
+      </div>
+      <label className="settings-field" htmlFor="settings-team-model-guidance-input">
+        <span className="settings-field-label">覚えておいてほしいこと</span>
+        <textarea
+          id="settings-team-model-guidance-input"
+          rows={5}
+          maxLength={4000}
+          disabled={disabled}
+          placeholder="例: APIを使う前に確認する。ClaudeはOpenRouterではなくClaude CLIを優先する。"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+      </label>
+      <div className="settings-inline-actions">
+        <p className="settings-hint">保存後に始まる新しい採用から全Teamへ適用されます。</p>
+        <button
+          type="submit"
+          className="settings-secondary-button"
+          data-testid="settings-team-model-guidance-save"
+          disabled={disabled || draft.trim() === canonical}
+        >
+          {phase === 'saving' ? '保存中…' : '指示を保存'}
+        </button>
+      </div>
+      {error !== null && (
+        <p className="settings-skill-error" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status}
+      </p>
+    </form>
+  );
+}
+
+function SprintCoderPrePromptSetting({ active }: { active: boolean }) {
+  const [api] = useState(sprintCoderPrePromptApi);
+  const [canonical, setCanonical] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'saving'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+  const generation = useRef(0);
+
+  useEffect(() => {
+    if (!active || api === null) return;
+    const request = ++generation.current;
+    void (async () => {
+      setPhase('loading');
+      setError(null);
+      try {
+        const result = await api.getSprintCoderPrePrompt();
+        if (request !== generation.current) return;
+        setCanonical(result.prompt);
+        setDraft(result.prompt);
+      } catch {
+        if (request !== generation.current) return;
+        setError('事前プロンプトを読み込めませんでした。');
+      } finally {
+        if (request === generation.current) setPhase('idle');
+      }
+    })();
+    return () => {
+      if (request === generation.current) generation.current += 1;
+    };
+  }, [active, api]);
+
+  async function save(): Promise<void> {
+    if (api === null || phase !== 'idle') return;
+    const request = ++generation.current;
+    setPhase('saving');
+    setError(null);
+    setStatus('');
+    try {
+      await api.setSprintCoderPrePrompt({ prompt: draft });
+      if (request !== generation.current) return;
+      const normalized = draft.trim();
+      setCanonical(normalized);
+      setDraft(normalized);
+      setStatus('事前プロンプトを保存しました。');
+    } catch {
+      if (request !== generation.current) return;
+      setError('事前プロンプトを保存できませんでした。');
+    } finally {
+      if (request === generation.current) setPhase('idle');
+    }
+  }
+
+  const disabled = api === null || canonical === null || phase !== 'idle';
+  return (
+    <form
+      className="settings-group pre-prompt-settings"
+      data-testid="settings-sprint-coder-pre-prompt"
+      aria-busy={phase === 'loading'}
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+    >
+      <div className="settings-section-heading">
+        <div>
+          <h3>Sprint Coderの事前プロンプト</h3>
+          <p>すべての新しい依頼で、会話履歴より前に追加する指示です。</p>
+        </div>
+        <span className="settings-count-badge">{draft.length} / 8000</span>
+      </div>
+      <label className="settings-field" htmlFor="settings-sprint-coder-pre-prompt-input">
+        <span className="settings-field-label">常に覚えておいてほしいこと</span>
+        <textarea
+          id="settings-sprint-coder-pre-prompt-input"
+          rows={7}
+          maxLength={8000}
+          disabled={disabled}
+          placeholder="例: 実装前に既存設計を確認し、判断理由を日本語で簡潔に説明する。"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+      </label>
+      <div className="settings-inline-actions">
+        <p className="settings-hint">
+          内蔵の安全・権限・Teamルールは維持されます。保存後に始まるTurnから適用されます。
+        </p>
+        <button
+          type="submit"
+          className="settings-secondary-button"
+          data-testid="settings-sprint-coder-pre-prompt-save"
+          disabled={disabled || draft.trim() === canonical}
+        >
+          {phase === 'saving' ? '保存中…' : '事前プロンプトを保存'}
+        </button>
+      </div>
+      {error !== null && (
+        <p className="settings-skill-error" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status}
+      </p>
+    </form>
+  );
+}
+
 // Global Team setting: whether a Leader/Manager researches the Web before hiring Workers. Kept in
 // this file rather than the store because it is a persisted backend value with no renderer-side
 // consumer — the canonical answer lives in Main, so the dialog reads it fresh on every open instead
@@ -1326,6 +1634,28 @@ function teamModelSettingsApi(): NonNullable<Window['sprintCoder']>['settings'] 
     settings === undefined ||
     typeof settings.getTeamModelSettings !== 'function' ||
     typeof settings.setTeamModelRestriction !== 'function'
+  )
+    return null;
+  return settings;
+}
+
+function teamModelSelectionGuidanceApi(): NonNullable<Window['sprintCoder']>['settings'] | null {
+  const settings = typeof window === 'undefined' ? undefined : window.sprintCoder?.settings;
+  if (
+    settings === undefined ||
+    typeof settings.getTeamModelSelectionGuidance !== 'function' ||
+    typeof settings.setTeamModelSelectionGuidance !== 'function'
+  )
+    return null;
+  return settings;
+}
+
+function sprintCoderPrePromptApi(): NonNullable<Window['sprintCoder']>['settings'] | null {
+  const settings = typeof window === 'undefined' ? undefined : window.sprintCoder?.settings;
+  if (
+    settings === undefined ||
+    typeof settings.getSprintCoderPrePrompt !== 'function' ||
+    typeof settings.setSprintCoderPrePrompt !== 'function'
   )
     return null;
   return settings;

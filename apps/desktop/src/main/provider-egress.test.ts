@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,6 +54,69 @@ if (runsWithElectronAbi)
           reason: 'execution_revalidation_valid',
         }),
       ]);
+      fixture.persistence.close();
+    });
+
+    it('binds attachment bytes and the exact manifest into provider permission audit', () => {
+      const fixture = createFixture(false);
+      const attachmentManifestDigest = 'a'.repeat(64);
+      let dispatches = 0;
+      const decision = dispatchAfterCodexProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'turn-provider-images',
+          prompt: 'image prompt',
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+          attachmentManifestDigest,
+          attachmentByteCount: 4096,
+        },
+        () => {
+          dispatches += 1;
+        },
+      );
+
+      expect(decision.allowed).toBe(true);
+      expect(dispatches).toBe(1);
+      const expectedResourceDigest = createHash('sha256')
+        .update(
+          JSON.stringify({
+            kind: 'provider',
+            providerId: 'openai-codex',
+            fragmentKind: 'prompt',
+            byteCount: Buffer.byteLength('image prompt', 'utf8') + 4096,
+            providerTrust: 'trusted-remote',
+            dataResidency: 'unspecified',
+            provenanceTrust: 'system',
+            secretScan: 'clean',
+            localOnlyTask: false,
+            attachmentManifestDigest,
+            attachmentByteCount: 4096,
+          }),
+        )
+        .digest('hex');
+      expect(readAudit(fixture.path)).toEqual([
+        expect.objectContaining({ resource_digest: expectedResourceDigest }),
+        expect.objectContaining({ resource_digest: expectedResourceDigest }),
+      ]);
+      fixture.persistence.close();
+    });
+
+    it('rejects partial or unsafe attachment egress facts before evaluation', () => {
+      const fixture = createFixture(false);
+      expect(() =>
+        authorizeCodexProviderEgress({
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'turn-provider-invalid-images',
+          prompt: 'image prompt',
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+          attachmentByteCount: 1,
+        }),
+      ).toThrow('Invalid provider attachment egress facts');
+      expect(readAudit(fixture.path)).toEqual([]);
       fixture.persistence.close();
     });
 
@@ -282,7 +346,7 @@ function readAudit(path: string) {
   const database = new Database(path, { readonly: true });
   const rows = database
     .prepare(
-      `SELECT capability, decision, reason FROM permission_audit
+      `SELECT capability, decision, reason, resource_digest FROM permission_audit
        ORDER BY created_at, rowid`,
     )
     .all();

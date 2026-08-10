@@ -90,6 +90,86 @@ describe('public contracts', () => {
     budgetMode: 'bounded',
   } as const;
 
+  it('bounds public image attachment draft metadata', () => {
+    const attachment = {
+      id: 'attachment-1',
+      fileName: 'diagram.png',
+      mimeType: 'image/png',
+      byteLength: 4 * 1024 * 1024,
+      createdAt: '2026-08-05T00:00:00.000Z',
+    } as const;
+    expect(contracts.imageAttachmentMetadataListSchema.parse([attachment])).toEqual([attachment]);
+    expect(() =>
+      contracts.imageAttachmentMetadataListSchema.parse([attachment, attachment]),
+    ).toThrow(/unique/i);
+    expect(() =>
+      contracts.imageAttachmentMetadataListSchema.parse(
+        Array.from({ length: 4 }, (_, index) => ({
+          ...attachment,
+          id: `attachment-${index}`,
+          byteLength: 5 * 1024 * 1024,
+        })),
+      ),
+    ).toThrow(/aggregate/i);
+    expect(() =>
+      contracts.imageAttachmentMetadataSchema.parse({
+        ...attachment,
+        mimeType: 'image/gif',
+      }),
+    ).toThrow();
+  });
+
+  it('keeps image IDs exclusive to direct Turn start and defaults old message outputs', () => {
+    expect(
+      contracts.turnStartInputSchema.parse({
+        taskId: 'task-1',
+        text: 'この画像を説明して',
+        attachmentIds: ['attachment-1'],
+        attachmentSelectionIdentity: 'selection-1',
+      }),
+    ).toMatchObject({
+      attachmentIds: ['attachment-1'],
+      attachmentSelectionIdentity: 'selection-1',
+      skills: [],
+    });
+    expect(() =>
+      contracts.turnStartInputSchema.parse({
+        taskId: 'task-1',
+        text: 'missing identity',
+        attachmentIds: ['attachment-1'],
+        attachmentSelectionIdentity: null,
+      }),
+    ).toThrow();
+    expect(
+      contracts.turnStartInputSchema.parse({
+        taskId: 'task-1',
+        text: 'text only',
+        attachmentIds: [],
+        attachmentSelectionIdentity: null,
+      }),
+    ).toMatchObject({ attachmentIds: [], attachmentSelectionIdentity: null });
+    expect(() =>
+      contracts.turnStartInputSchema.parse({ taskId: 'task-1', text: 'missing IDs' }),
+    ).toThrow();
+    expect(() =>
+      contracts.turnQueueInputSchema.parse({
+        taskId: 'task-1',
+        text: 'queue',
+        attachmentIds: ['attachment-1'],
+      }),
+    ).toThrow();
+    expect(
+      contracts.chatMessageSchema.parse({
+        id: 'message-1',
+        taskId: 'task-1',
+        turnId: null,
+        author: 'user',
+        content: 'legacy',
+        createdAt: '2026-08-05T00:00:00.000Z',
+      }).attachments,
+    ).toEqual([]);
+  });
+
   it('validates Project summaries and mutation CAS inputs', () => {
     expect(projectCreateInputSchema.parse({ name: '  Project A  ' })).toEqual({
       name: 'Project A',

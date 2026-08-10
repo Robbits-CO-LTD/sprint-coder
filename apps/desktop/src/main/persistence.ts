@@ -51,7 +51,14 @@ import {
   type FileChangeRecord,
   type GeneratedImage,
   generatedImageSchema,
+  imageAttachmentMetadataSchema,
+  imageAttachmentMetadataListSchema,
+  imageAttachmentIdsSchema,
+  IMAGE_ATTACHMENT_MAX_COUNT,
+  IMAGE_ATTACHMENT_MAX_TOTAL_BYTES,
   type TaskSummary,
+  type ImageAttachmentMetadata,
+  type ImageAttachmentMimeType,
   type TeamBudgetStatus,
   type TeamBlueprint,
   type TeamMissionAccess,
@@ -168,6 +175,11 @@ import {
   modelSelectionForRuntime,
 } from './connection-identity';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
+import {
+  isRuntimeFailureDiagnostic,
+  type RuntimeFailureDiagnostic,
+} from '../runtime-host/protocol';
+import { RUNTIME_DIAGNOSTIC_MAX_BYTES } from '../runtime-host/runtime-failure-diagnostics';
 import {
   legacyMutationWorkspaceKey,
   MutationClockRollbackError,
@@ -416,6 +428,7 @@ type ProviderConnectionRow = {
   runtime_kind: ProviderRuntimeKind;
   display_name: string;
   enabled: number;
+  automatic_model_release: number;
   secret_reference: string | null;
   verification_status:
     | 'not_required'
@@ -3038,6 +3051,106 @@ const migrations = [
       DROP TABLE team_execution_isolations_v64;
     `,
   },
+  {
+    version: 66,
+    checksum: 'provider-automatic-model-release-v66',
+    sql: `
+      ALTER TABLE provider_connections ADD COLUMN automatic_model_release INTEGER NOT NULL DEFAULT 0
+        CHECK (automatic_model_release IN (0, 1));
+      UPDATE provider_connections
+         SET automatic_model_release = 1
+       WHERE provider_id = 'ollama';
+    `,
+  },
+  {
+    version: 67,
+    checksum: 'image-attachment-drafts-v67',
+    sql: `
+      CREATE UNIQUE INDEX messages_id_task_unique ON messages(id, task_id);
+      CREATE TABLE image_attachments (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        message_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('draft', 'message')),
+        file_name TEXT NOT NULL CHECK (length(file_name) BETWEEN 1 AND 255),
+        mime_type TEXT NOT NULL CHECK (mime_type IN ('image/png', 'image/jpeg', 'image/webp')),
+        byte_length INTEGER NOT NULL CHECK (byte_length BETWEEN 1 AND 5242880),
+        sha256 TEXT NOT NULL CHECK (
+          length(sha256) = 64
+          AND sha256 = lower(sha256)
+          AND sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        bytes BLOB NOT NULL CHECK (length(bytes) = byte_length),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (state = 'draft' AND message_id IS NULL) OR
+          (state = 'message' AND message_id IS NOT NULL)
+        ),
+        FOREIGN KEY (message_id, task_id) REFERENCES messages(id, task_id) ON DELETE CASCADE
+      );
+      CREATE INDEX image_attachments_task_draft_idx
+        ON image_attachments(task_id, created_at, id) WHERE state = 'draft';
+      CREATE INDEX image_attachments_message_idx
+        ON image_attachments(message_id, created_at, id);
+    `,
+  },
+  {
+    version: 68,
+    checksum: 'image-attachment-message-order-v68',
+    sql: `
+      CREATE TABLE image_attachment_v68_migration_guard (
+        valid INTEGER NOT NULL CHECK (valid = 1)
+      );
+      INSERT INTO image_attachment_v68_migration_guard(valid)
+        SELECT 0 FROM image_attachments WHERE state = 'message' LIMIT 1;
+      DROP TABLE image_attachment_v68_migration_guard;
+      ALTER TABLE image_attachments ADD COLUMN message_ordinal INTEGER
+        CHECK (message_ordinal IS NULL OR message_ordinal BETWEEN 0 AND 3);
+      CREATE UNIQUE INDEX image_attachments_message_ordinal_idx
+        ON image_attachments(message_id, message_ordinal) WHERE state = 'message';
+      CREATE TRIGGER image_attachments_state_insert_guard
+      BEFORE INSERT ON image_attachments
+      WHEN NOT (
+        (NEW.state = 'draft' AND NEW.message_id IS NULL AND NEW.message_ordinal IS NULL) OR
+        (NEW.state = 'message' AND NEW.message_id IS NOT NULL
+          AND NEW.message_ordinal BETWEEN 0 AND 3)
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid image attachment ownership state');
+      END;
+      CREATE TRIGGER image_attachments_state_update_guard
+      BEFORE UPDATE OF state, message_id, message_ordinal ON image_attachments
+      WHEN NOT (
+        (NEW.state = 'draft' AND NEW.message_id IS NULL AND NEW.message_ordinal IS NULL) OR
+        (NEW.state = 'message' AND NEW.message_id IS NOT NULL
+          AND NEW.message_ordinal BETWEEN 0 AND 3)
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid image attachment ownership state');
+      END;
+    `,
+  },
+  {
+    version: 69,
+    checksum: 'runtime-failure-diagnostics-v69',
+    sql: `
+      CREATE TABLE runtime_failure_diagnostics (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('codex', 'claude')),
+        failure_stage TEXT NOT NULL CHECK (failure_stage IN (
+          'first_event_timeout', 'idle_timeout', 'total_timeout', 'protocol_error',
+          'startup_error', 'spawn_error', 'abnormal_exit'
+        )),
+        diagnostic_json TEXT NOT NULL
+          CHECK (length(CAST(diagnostic_json AS BLOB)) <= 16384),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX runtime_failure_diagnostics_task_created_idx
+        ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3064,6 +3177,43 @@ export type CanvasViewRecord = {
   revision: number;
   updatedAt: string;
 };
+
+export type DraftImageAttachmentInput = Readonly<{
+  taskId: string;
+  fileName: string;
+  mimeType: ImageAttachmentMimeType;
+  bytes: Buffer;
+  createdAt?: string;
+}>;
+
+type ImageAttachmentRow = Readonly<{
+  id: string;
+  task_id: string;
+  message_id: string | null;
+  state: 'draft' | 'message';
+  file_name: string;
+  mime_type: ImageAttachmentMimeType;
+  byte_length: number;
+  sha256: string;
+  bytes: Buffer;
+  created_at: string;
+  message_ordinal: number | null;
+}>;
+
+type ImageAttachmentMetadataRow = Pick<
+  ImageAttachmentRow,
+  'id' | 'message_id' | 'file_name' | 'mime_type' | 'byte_length' | 'created_at'
+>;
+
+function toImageAttachmentMetadata(row: ImageAttachmentMetadataRow): ImageAttachmentMetadata {
+  return imageAttachmentMetadataSchema.parse({
+    id: row.id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    byteLength: row.byte_length,
+    createdAt: row.created_at,
+  });
+}
 
 function assertCanvasCoordinate(value: number, label: string): void {
   if (!Number.isFinite(value) || Math.abs(value) > CANVAS_WORLD_BOUND)
@@ -3267,6 +3417,8 @@ export type BackgroundCompletionRecord = Readonly<{
   attachedAt: string | null;
   runtimeAckedAt: string | null;
 }>;
+export type PersistedRuntimeFailureDiagnostic = RuntimeFailureDiagnostic &
+  Readonly<{ taskId: string; turnId: string }>;
 type PersistedJsonValue =
   | string
   | number
@@ -3525,6 +3677,10 @@ export interface PersistenceClient {
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
   createProviderConnection(connection: ProviderConnection): ProviderConnection;
+  setProviderConnectionAutomaticModelRelease(
+    connectionId: string,
+    automaticModelRelease: boolean,
+  ): ProviderConnection;
   setProviderConnectionSecretReference(
     connectionId: string,
     secretReference: string | null,
@@ -3624,6 +3780,7 @@ export interface PersistenceClient {
   }): TaskSummary;
   unassignTaskFromProject(input: { taskId: string; expectedProjectId: string | null }): TaskSummary;
   getTaskModelSelection(taskId: string): ModelSelection | null;
+  getImageAttachmentAcceptanceSelection(taskId: string): ImageAttachmentAcceptanceSelection;
   setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null;
   getTaskLeader(taskId: string): AgentRecord;
   setAgentModelSelection(agentId: string, selection: ModelSelection): AgentRecord;
@@ -3948,12 +4105,25 @@ export interface PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
   ): { event: TurnEvent; task: TaskSummary | null };
+  recordRuntimeFailureDiagnostic(
+    taskId: string,
+    turnId: string,
+    diagnostic: RuntimeFailureDiagnostic,
+  ): PersistedRuntimeFailureDiagnostic;
+  getRuntimeFailureDiagnostic(input: {
+    taskId?: string | undefined;
+    diagnosticId?: string | undefined;
+  }): PersistedRuntimeFailureDiagnostic | null;
   cancelTurnAndFinishGoal(
     taskId: string,
     turnId: string,
   ): { event: TurnEvent | null; task: TaskSummary | null };
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
+  createDraftImageAttachment(input: DraftImageAttachmentInput): ImageAttachmentMetadata;
+  listDraftImageAttachments(taskId: string): ImageAttachmentMetadata[];
+  getAcceptedImageAttachments(taskId: string, turnId: string): AcceptedImageAttachment[];
+  removeDraftImageAttachment(taskId: string, attachmentId: string): void;
   getDraftSkillSelections(taskId: string): TurnSkillSelection[];
   setDraftSkillSelections(taskId: string, skills: readonly TurnSkillSelection[]): void;
   getCanvasView(taskId: string): CanvasViewRecord | null;
@@ -4004,6 +4174,10 @@ export interface PersistenceClient {
   acknowledgeFullAccessRisk(): void;
   getTeamModelResearchBeforeHiring(): boolean;
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
+  getTeamModelSelectionGuidance(): string;
+  setTeamModelSelectionGuidance(guidance: string): void;
+  getSprintCoderPrePrompt(): string;
+  setSprintCoderPrePrompt(prompt: string): void;
   getTeamModelRestriction(): TeamModelRestriction;
   setTeamModelRestriction(restriction: TeamModelRestriction): void;
   getDefaultTeamPolicy(): TeamPolicy;
@@ -4227,6 +4401,8 @@ export interface PersistenceClient {
     text: string,
     skills?: readonly PersistedTurnSkill[],
     includeBuiltinTeamSkill?: boolean,
+    attachmentIds?: readonly string[],
+    attachmentCapability?: ImageAttachmentCapabilityValidator | undefined,
   ): StartedTurn;
   replaceActiveTurn(
     taskId: string,
@@ -4409,13 +4585,13 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
   report.corruptFileMovedTo = movedTo;
   for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
   const backupPath = `${databasePath}.pre-migration.bak`;
-  if (existsSync(backupPath)) {
-    copyFileSync(backupPath, databasePath);
+  for (const candidate of [backupPath, `${backupPath}.previous`]) {
+    if (!existsSync(candidate)) continue;
+    copyFileSync(candidate, databasePath);
     if (probe()) {
       report.restoredFromBackup = true;
       return report;
     }
-    // The backup itself is unusable — fall through to a fresh database.
     rmSync(databasePath, { force: true });
   }
   report.freshStart = true;
@@ -4525,11 +4701,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare(
         `INSERT INTO provider_connections(
-           id, provider_id, runtime_kind, display_name, enabled, secret_reference,
+           id, provider_id, runtime_kind, display_name, enabled, automatic_model_release,
+           secret_reference,
            verification_status, verified_at, verification_expires_at, verification_message,
            rate_limit_mode, max_concurrent_requests, requests_per_minute, tokens_per_minute,
            last_observed_rate_limit_headers_json, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         parsed.id,
@@ -4537,6 +4714,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         parsed.runtimeKind,
         parsed.displayName,
         parsed.enabled ? 1 : 0,
+        parsed.automaticModelRelease === true ? 1 : 0,
         parsed.secretReference,
         parsed.verification.status,
         parsed.verification.verifiedAt,
@@ -4553,6 +4731,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
         parsed.updatedAt,
       );
     return this.getProviderConnection(parsed.id);
+  }
+
+  setProviderConnectionAutomaticModelRelease(
+    connectionId: string,
+    automaticModelRelease: boolean,
+  ): ProviderConnection {
+    const current = this.getProviderConnection(connectionId);
+    if (current.providerId !== 'ollama' || current.runtimeKind !== 'openai_compatible')
+      throw new Error('Automatic model release is only configurable for Ollama Connections');
+    const result = this.db
+      .prepare(
+        `UPDATE provider_connections
+         SET automatic_model_release = ?, updated_at = ?
+         WHERE id = ? AND provider_id = 'ollama' AND runtime_kind = 'openai_compatible'`,
+      )
+      .run(automaticModelRelease ? 1 : 0, new Date().toISOString(), connectionId);
+    if (result.changes !== 1) throw new NotFoundError('Provider connection not found');
+    return this.getProviderConnection(connectionId);
   }
 
   setProviderConnectionSecretReference(
@@ -4656,7 +4852,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const legacyLineage = this.isLegacyMigrationLineage(applied);
     const hadPendingMigrations = migrations.some((migration) => !applied.has(migration.version));
     if (hadPendingMigrations && existsSync(databasePath) && applied.size > 0)
-      copyFileSync(databasePath, `${databasePath}.pre-migration.bak`);
+      this.createPreMigrationBackup(databasePath);
     if (legacyLineage) {
       this.applyLegacyMigrationBridge();
       applied = this.readAppliedMigrations();
@@ -4697,6 +4893,53 @@ export class SqlitePersistenceClient implements PersistenceClient {
       } else {
         applyMigration();
       }
+    }
+  }
+
+  private createPreMigrationBackup(databasePath: string): void {
+    const backupPath = `${databasePath}.pre-migration.bak`;
+    const previousPath = `${backupPath}.previous`;
+    const temporaryPath = `${backupPath}.tmp-${randomUUID()}`;
+    // A byte copy of the main DB file is incomplete while committed pages still live in WAL.
+    // Checkpoint first, validate the copied snapshot, then rotate it into place. The previous
+    // snapshot remains recoverable until the new one is installed, including on Windows where a
+    // rename cannot replace an existing destination atomically.
+    const checkpoint = this.db.pragma('wal_checkpoint(TRUNCATE)') as {
+      busy?: number;
+      log?: number;
+      checkpointed?: number;
+    }[];
+    const result = checkpoint[0];
+    if (
+      result === undefined ||
+      result.busy !== 0 ||
+      result.log !== result.checkpointed ||
+      result.log !== 0
+    )
+      throw new Error('Could not checkpoint database before migration backup');
+    try {
+      copyFileSync(databasePath, temporaryPath);
+      const snapshot = new Database(temporaryPath, { readonly: true, fileMustExist: true });
+      try {
+        const rows = snapshot.pragma('quick_check') as { quick_check?: string }[] | string[];
+        const first = rows[0];
+        const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
+        if (verdict !== 'ok') throw new Error('Pre-migration backup failed integrity check');
+      } finally {
+        snapshot.close();
+      }
+      rmSync(previousPath, { force: true });
+      if (existsSync(backupPath)) renameSync(backupPath, previousPath);
+      try {
+        renameSync(temporaryPath, backupPath);
+      } catch (error) {
+        if (!existsSync(backupPath) && existsSync(previousPath))
+          renameSync(previousPath, backupPath);
+        throw error;
+      }
+      rmSync(previousPath, { force: true });
+    } finally {
+      rmSync(temporaryPath, { force: true });
     }
   }
 
@@ -6240,6 +6483,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
       requestedProvider: row.requested_provider,
       requestedModel: row.requested_model,
     });
+  }
+
+  getImageAttachmentAcceptanceSelection(taskId: string): ImageAttachmentAcceptanceSelection {
+    const taskSelection = this.getTaskModelSelection(taskId);
+    const explicitRuntime =
+      taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+    const runtimeKind = explicitRuntime?.runtimeKind ?? this.getRuntime();
+    const model = explicitRuntime?.model ?? this.getModel();
+    return {
+      taskId,
+      modelSelection: taskSelection ?? modelSelectionForRuntime(runtimeKind, model),
+      runtimeKind,
+      model,
+    };
   }
 
   setTaskModelSelection(taskId: string, selection: ModelSelection): ModelSelection | null {
@@ -9059,6 +9316,132 @@ export class SqlitePersistenceClient implements PersistenceClient {
     if (result.changes !== 1) throw new NotFoundError('Task not found');
   }
 
+  createDraftImageAttachment(input: DraftImageAttachmentInput): ImageAttachmentMetadata {
+    return this.db.transaction(() => {
+      this.assertTask(input.taskId);
+      const aggregate = this.db
+        .prepare(
+          `SELECT COUNT(*) AS count, COALESCE(SUM(byte_length), 0) AS byte_length
+           FROM image_attachments WHERE task_id = ? AND state = 'draft'`,
+        )
+        .get(input.taskId) as { count: number; byte_length: number };
+      if (aggregate.count >= IMAGE_ATTACHMENT_MAX_COUNT)
+        throw new ImageAttachmentLimitError('A draft cannot contain more than four images');
+      const id = randomUUID();
+      const createdAt = input.createdAt ?? new Date().toISOString();
+      const metadata = imageAttachmentMetadataSchema.parse({
+        id,
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        byteLength: input.bytes.byteLength,
+        createdAt,
+      });
+      if (aggregate.byte_length + metadata.byteLength > IMAGE_ATTACHMENT_MAX_TOTAL_BYTES)
+        throw new ImageAttachmentLimitError('Draft image bytes exceed the aggregate limit');
+      const sha256 = createHash('sha256').update(input.bytes).digest('hex');
+      this.db
+        .prepare(
+          `INSERT INTO image_attachments(
+             id, task_id, message_id, state, file_name, mime_type,
+             byte_length, sha256, bytes, created_at
+           ) VALUES (?, ?, NULL, 'draft', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.taskId,
+          metadata.fileName,
+          metadata.mimeType,
+          metadata.byteLength,
+          sha256,
+          input.bytes,
+          metadata.createdAt,
+        );
+      return metadata;
+    })();
+  }
+
+  listDraftImageAttachments(taskId: string): ImageAttachmentMetadata[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM image_attachments
+         WHERE task_id = ? AND state = 'draft'
+         ORDER BY created_at, rowid`,
+      )
+      .all(taskId) as ImageAttachmentRow[];
+    return imageAttachmentMetadataListSchema.parse(rows.map(toImageAttachmentMetadata));
+  }
+
+  getAcceptedImageAttachments(taskId: string, turnId: string): AcceptedImageAttachment[] {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT attachment.*
+         FROM image_attachments attachment
+         JOIN messages message
+           ON message.id = attachment.message_id AND message.task_id = attachment.task_id
+         JOIN turns turn
+           ON turn.id = message.turn_id AND turn.task_id = message.task_id
+          AND turn.user_message_id = message.id
+         WHERE attachment.task_id = ? AND turn.id = ? AND message.author = 'user'
+           AND attachment.state = 'message' AND attachment.message_ordinal IS NOT NULL
+         ORDER BY attachment.message_ordinal`,
+      )
+      .all(taskId, turnId) as ImageAttachmentRow[];
+    const metadata = imageAttachmentMetadataListSchema.parse(rows.map(toImageAttachmentMetadata));
+    let expectedMetadata: readonly ImageAttachmentMetadata[];
+    try {
+      const eventRow = this.db
+        .prepare(
+          `SELECT payload_json FROM turn_events
+           WHERE task_id = ? AND turn_id = ? AND type = 'turn.accepted'
+           ORDER BY seq LIMIT 1`,
+        )
+        .get(taskId, turnId) as { payload_json: string } | undefined;
+      if (eventRow === undefined) throw new Error('missing acceptance event');
+      const event = turnEventSchema.parse(JSON.parse(eventRow.payload_json));
+      if (event.type !== 'turn.accepted' || event.turnId !== turnId)
+        throw new Error('mismatched acceptance event');
+      expectedMetadata = event.userMessage.attachments;
+    } catch {
+      throw new ImageAttachmentAcceptanceError('stale');
+    }
+    if (
+      expectedMetadata.length !== metadata.length ||
+      expectedMetadata.some((expected, index) =>
+        ['id', 'fileName', 'mimeType', 'byteLength', 'createdAt'].some(
+          (key) =>
+            expected[key as keyof ImageAttachmentMetadata] !==
+            metadata[index]![key as keyof ImageAttachmentMetadata],
+        ),
+      )
+    )
+      throw new ImageAttachmentAcceptanceError('stale');
+    return rows.map((row, index) => {
+      if (
+        row.bytes.byteLength !== row.byte_length ||
+        createHash('sha256').update(row.bytes).digest('hex') !== row.sha256
+      )
+        throw new ImageAttachmentAcceptanceError('stale');
+      return Object.freeze({
+        ...metadata[index]!,
+        sha256: row.sha256,
+        bytes: Buffer.from(row.bytes),
+      });
+    });
+  }
+
+  removeDraftImageAttachment(taskId: string, attachmentId: string): void {
+    this.assertTask(taskId);
+    const result = this.db
+      .prepare(
+        `DELETE FROM image_attachments
+         WHERE id = ? AND task_id = ? AND state = 'draft' AND message_id IS NULL`,
+      )
+      .run(attachmentId, taskId);
+    if (result.changes !== 1) throw new NotFoundError('Draft image attachment not found');
+  }
+
   getDraftSkillSelections(taskId: string): TurnSkillSelection[] {
     this.assertTask(taskId);
     const rows = this.db
@@ -9419,6 +9802,102 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return 'mock';
   }
 
+  recordRuntimeFailureDiagnostic(
+    taskId: string,
+    turnId: string,
+    diagnostic: RuntimeFailureDiagnostic,
+  ): PersistedRuntimeFailureDiagnostic {
+    this.getTurn(taskId, turnId);
+    if (!isRuntimeFailureDiagnostic(diagnostic)) throw new Error('Invalid Runtime diagnostic');
+    const safeDiagnostic: RuntimeFailureDiagnostic = {
+      version: 1,
+      diagnosticId: diagnostic.diagnosticId,
+      runtimeKind: diagnostic.runtimeKind,
+      failureStage: diagnostic.failureStage,
+      elapsedMs: diagnostic.elapsedMs,
+      appVersion: diagnostic.appVersion,
+      cliVersion: diagnostic.cliVersion,
+      teamMcp: diagnostic.teamMcp,
+      lastRecognizedNotification: diagnostic.lastRecognizedNotification,
+      lastReceivedNotification: diagnostic.lastReceivedNotification,
+      unsupportedNotificationCount: diagnostic.unsupportedNotificationCount,
+      stderrObserved: diagnostic.stderrObserved,
+      stderrTruncated: diagnostic.stderrTruncated,
+      recordedAt: new Date().toISOString(),
+    };
+    const serialized = JSON.stringify(safeDiagnostic);
+    if (Buffer.byteLength(serialized, 'utf8') > RUNTIME_DIAGNOSTIC_MAX_BYTES)
+      throw new Error('Runtime diagnostic exceeds byte limit');
+    this.db
+      .prepare(
+        `INSERT INTO runtime_failure_diagnostics(
+           id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(turn_id) DO NOTHING`,
+      )
+      .run(
+        safeDiagnostic.diagnosticId,
+        taskId,
+        turnId,
+        safeDiagnostic.runtimeKind,
+        safeDiagnostic.failureStage,
+        serialized,
+        safeDiagnostic.recordedAt,
+      );
+    const persisted = this.getRuntimeFailureDiagnostic({
+      diagnosticId: safeDiagnostic.diagnosticId,
+    });
+    if (persisted !== null) return persisted;
+    const existing = this.db
+      .prepare(
+        `SELECT task_id, turn_id, diagnostic_json FROM runtime_failure_diagnostics
+         WHERE turn_id = ?`,
+      )
+      .get(turnId) as { task_id: string; turn_id: string; diagnostic_json: string } | undefined;
+    if (existing === undefined) throw new Error('Runtime diagnostic was not persisted');
+    const existingDiagnostic = JSON.parse(existing.diagnostic_json) as unknown;
+    if (!isRuntimeFailureDiagnostic(existingDiagnostic))
+      throw new Error('Persisted Runtime diagnostic is invalid');
+    return Object.freeze({
+      ...existingDiagnostic,
+      taskId: existing.task_id,
+      turnId: existing.turn_id,
+    });
+  }
+
+  getRuntimeFailureDiagnostic(input: {
+    taskId?: string | undefined;
+    diagnosticId?: string | undefined;
+  }): PersistedRuntimeFailureDiagnostic | null {
+    if (input.taskId === undefined && input.diagnosticId === undefined)
+      throw new Error('Task id or diagnostic id is required');
+    const row = (
+      input.diagnosticId !== undefined
+        ? this.db
+            .prepare(
+              `SELECT task_id, turn_id, diagnostic_json FROM runtime_failure_diagnostics
+               WHERE id = ? AND length(CAST(diagnostic_json AS BLOB)) <= ?`,
+            )
+            .get(input.diagnosticId, RUNTIME_DIAGNOSTIC_MAX_BYTES)
+        : this.db
+            .prepare(
+              `SELECT task_id, turn_id, diagnostic_json FROM runtime_failure_diagnostics
+               WHERE task_id = ? AND length(CAST(diagnostic_json AS BLOB)) <= ?
+               ORDER BY created_at DESC, id DESC LIMIT 1`,
+            )
+            .get(input.taskId, RUNTIME_DIAGNOSTIC_MAX_BYTES)
+    ) as { task_id: string; turn_id: string; diagnostic_json: string } | undefined;
+    if (row === undefined) return null;
+    let diagnostic: unknown;
+    try {
+      diagnostic = JSON.parse(row.diagnostic_json) as unknown;
+    } catch {
+      return null;
+    }
+    if (!isRuntimeFailureDiagnostic(diagnostic)) return null;
+    return Object.freeze({ ...diagnostic, taskId: row.task_id, turnId: row.turn_id });
+  }
+
   /**
    * The Runtime the user actually chose, or null if they never have (issue #50).
    *
@@ -9554,6 +10033,42 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(enabled ? '1' : '0', new Date().toISOString());
+  }
+
+  getTeamModelSelectionGuidance(): string {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'team.model-selection-guidance'")
+      .get() as { value: string } | undefined;
+    return row?.value ?? '';
+  }
+
+  setTeamModelSelectionGuidance(guidance: string): void {
+    const normalized = guidance.trim();
+    if (normalized.length > 4000) throw new Error('Team model selection guidance is too long');
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('team.model-selection-guidance', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(normalized, new Date().toISOString());
+  }
+
+  getSprintCoderPrePrompt(): string {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'prompt.sprint-coder-pre-prompt'")
+      .get() as { value: string } | undefined;
+    return row?.value ?? '';
+  }
+
+  setSprintCoderPrePrompt(prompt: string): void {
+    const normalized = prompt.trim();
+    if (normalized.length > 8000) throw new Error('Sprint Coder pre-prompt is too long');
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('prompt.sprint-coder-pre-prompt', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(normalized, new Date().toISOString());
   }
 
   getTeamModelRestriction(): TeamModelRestriction {
@@ -12240,11 +12755,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   listMessages(taskId: string): ChatMessage[] {
     this.assertTask(taskId);
-    return (
-      this.db
-        .prepare('SELECT * FROM messages WHERE task_id = ? ORDER BY created_at, rowid')
-        .all(taskId) as MessageRow[]
-    ).map(toMessage);
+    const messages = this.db
+      .prepare('SELECT * FROM messages WHERE task_id = ? ORDER BY created_at, rowid')
+      .all(taskId) as MessageRow[];
+    const attachmentRows = this.db
+      .prepare(
+        `SELECT id, message_id, file_name, mime_type, byte_length, created_at
+         FROM image_attachments
+         WHERE task_id = ? AND message_id IS NOT NULL AND state = 'message'
+         ORDER BY message_id, message_ordinal`,
+      )
+      .all(taskId) as ImageAttachmentMetadataRow[];
+    const attachmentsByMessage = new Map<string, ImageAttachmentMetadata[]>();
+    for (const row of attachmentRows) {
+      if (row.message_id === null) continue;
+      const attachments = attachmentsByMessage.get(row.message_id) ?? [];
+      attachments.push(toImageAttachmentMetadata(row));
+      attachmentsByMessage.set(row.message_id, attachments);
+    }
+    return messages.map((row) =>
+      toMessage(
+        row,
+        imageAttachmentMetadataListSchema.parse(attachmentsByMessage.get(row.id) ?? []),
+      ),
+    );
   }
 
   startTurn(
@@ -12252,12 +12786,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     text: string,
     skills: readonly PersistedTurnSkill[] = [],
     includeBuiltinTeamSkill = false,
+    attachmentIds: readonly string[] = [],
+    attachmentCapability?: ImageAttachmentCapabilityValidator | undefined,
   ): StartedTurn {
     return this.db.transaction(() => {
       this.assertTask(taskId);
       this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
-      return this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
+      return this.startTurnInTransaction(
+        taskId,
+        text,
+        skills,
+        includeBuiltinTeamSkill,
+        attachmentIds,
+        attachmentCapability,
+      );
     })();
   }
 
@@ -13015,6 +13558,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     includeBuiltinTeamSkill = false,
   ): PreparedContext {
     const prepared = this.contextLedger.prepare(taskId, turnId);
+    const prePrompt = this.getSprintCoderPrePrompt();
+    const prePromptContent = sprintCoderPrePromptContent(prePrompt);
+    const prePromptFragment: ContextFragment | null =
+      prePrompt === ''
+        ? null
+        : {
+            id: `settings:sprint-coder-pre-prompt:${sha256(prePrompt)}`,
+            taskId,
+            source: 'system',
+            trust: 'system',
+            tokenEstimate: estimateTokens(prePromptContent),
+            content: prePromptContent,
+            createdAt: new Date().toISOString(),
+            messageId: null,
+          };
     const skillFragments: ContextFragment[] = this.getTurnSkills(taskId, turnId).map((skill) => {
       const trust = skill.selection.ref.source === 'builtin' ? 'system' : 'user';
       const id = `skill:${sha256(
@@ -13043,8 +13601,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
         messageId: null,
       });
     }
-    if (skillFragments.length === 0) return prepared;
-    const fragments = [...prepared.fragments, ...skillFragments];
+    if (skillFragments.length === 0 && prePromptFragment === null) return prepared;
+    const [systemFragment, ...remainingFragments] = prepared.fragments;
+    const fragments = [
+      ...(systemFragment === undefined ? [] : [systemFragment]),
+      ...(prePromptFragment === null ? [] : [prePromptFragment]),
+      ...remainingFragments,
+      ...skillFragments,
+    ];
     return {
       ...prepared,
       fragments,
@@ -13058,6 +13622,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private assembleManualTeamContextSnapshot(taskId: string, executionId: string): PreparedContext {
     const task = this.getTaskRow(taskId);
     const createdAt = new Date().toISOString();
+    const prePrompt = this.getSprintCoderPrePrompt();
+    const prePromptContent = sprintCoderPrePromptContent(prePrompt);
     const rows = this.db
       .prepare(
         `SELECT id, author, content, created_at
@@ -13078,6 +13644,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
         createdAt,
         messageId: null,
       },
+      ...(prePrompt === ''
+        ? []
+        : [
+            {
+              id: `team-execution:${executionId}:pre-prompt`,
+              taskId,
+              source: 'system' as const,
+              trust: 'system' as const,
+              tokenEstimate: estimateTokens(prePromptContent),
+              content: prePromptContent,
+              createdAt,
+              messageId: null,
+            },
+          ]),
       ...(task.goal === null || task.goal === ''
         ? []
         : [
@@ -13500,10 +14080,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
     text: string,
     skills: readonly PersistedTurnSkill[] = [],
     includeBuiltinTeamSkill = false,
+    attachmentIds: readonly string[] = [],
+    attachmentCapability?: ImageAttachmentCapabilityValidator | undefined,
   ): StartedTurn {
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
+    const selection = this.getImageAttachmentAcceptanceSelection(taskId);
+    const { runtimeKind, model, modelSelection } = selection;
+    const acceptedAttachments = this.prepareAcceptedImageAttachments(
+      taskId,
+      attachmentIds,
+      attachmentCapability,
+      selection,
+    );
     const shouldSealBuiltinTeamSkill =
       includeBuiltinTeamSkill ||
       isTeamScenarioInput(text) ||
@@ -13511,18 +14101,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
       (isTeamContinuationInput(text) && this.latestTurnIncludedBuiltinTeamSkill(taskId)) ||
       (isExistingTeamFollowupInput(text) &&
         (this.latestTurnIncludedBuiltinTeamSkill(taskId) || this.getTeamByTask(taskId) !== null));
-    const taskSelection = this.getTaskModelSelection(taskId);
-    const explicitRuntime =
-      taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
-    const runtimeKind = explicitRuntime?.runtimeKind ?? this.getRuntime();
-    const model = explicitRuntime?.model ?? this.getModel();
-    const modelSelection = taskSelection ?? modelSelectionForRuntime(runtimeKind, model);
     const userMessage = chatMessageSchema.parse({
       id: randomUUID(),
       taskId,
       turnId,
       author: 'user',
       content: text,
+      attachments: acceptedAttachments.map(toImageAttachmentMetadata),
       createdAt: now,
     });
     this.db
@@ -13530,6 +14115,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
         'INSERT INTO messages(id, task_id, turn_id, author, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       )
       .run(userMessage.id, taskId, turnId, userMessage.author, userMessage.content, now);
+    const bindAttachment = this.db.prepare(
+      `UPDATE image_attachments
+       SET state = 'message', message_id = ?, message_ordinal = ?
+       WHERE id = ? AND task_id = ? AND state = 'draft'
+         AND message_id IS NULL AND message_ordinal IS NULL`,
+    );
+    acceptedAttachments.forEach((attachment, ordinal) => {
+      if (bindAttachment.run(userMessage.id, ordinal, attachment.id, taskId).changes !== 1)
+        throw new ImageAttachmentAcceptanceError('stale');
+    });
     this.db
       .prepare(
         `INSERT INTO turns(
@@ -13599,6 +14194,38 @@ export class SqlitePersistenceClient implements PersistenceClient {
       workspaceSet,
       ...(renamedTask === null ? {} : { renamedTask }),
     };
+  }
+
+  private prepareAcceptedImageAttachments(
+    taskId: string,
+    attachmentIds: readonly string[],
+    attachmentCapability: ImageAttachmentCapabilityValidator | undefined,
+    selection: ImageAttachmentAcceptanceSelection,
+  ): ImageAttachmentRow[] {
+    const parsedIds = imageAttachmentIdsSchema.parse(attachmentIds);
+    if (parsedIds.length === 0) return [];
+    if (attachmentCapability?.(selection) !== true)
+      throw new ImageAttachmentAcceptanceError('unsupported');
+    const placeholders = parsedIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM image_attachments
+         WHERE task_id = ? AND state = 'draft' AND message_id IS NULL
+           AND id IN (${placeholders})`,
+      )
+      .all(taskId, ...parsedIds) as ImageAttachmentRow[];
+    if (rows.length !== parsedIds.length) throw new ImageAttachmentAcceptanceError('stale');
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const ordered = parsedIds.map((id) => byId.get(id)!);
+    for (const row of ordered) {
+      if (
+        row.bytes.byteLength !== row.byte_length ||
+        createHash('sha256').update(row.bytes).digest('hex') !== row.sha256
+      )
+        throw new ImageAttachmentAcceptanceError('stale');
+    }
+    imageAttachmentMetadataListSchema.parse(ordered.map(toImageAttachmentMetadata));
+    return ordered;
   }
 
   private latestTurnIncludedBuiltinTeamSkill(taskId: string): boolean {
@@ -14577,6 +15204,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
 }
 
 export class NotFoundError extends Error {}
+export class ImageAttachmentLimitError extends Error {}
+export type ImageAttachmentAcceptanceSelection = Readonly<{
+  taskId: string;
+  modelSelection: ModelSelection;
+  runtimeKind: RuntimeKind;
+  model: string;
+}>;
+export type AcceptedImageAttachment = Readonly<
+  ImageAttachmentMetadata & { sha256: string; bytes: Buffer }
+>;
+export type ImageAttachmentCapabilityValidator = (
+  selection: ImageAttachmentAcceptanceSelection,
+) => boolean;
+export class ImageAttachmentAcceptanceError extends Error {
+  constructor(readonly reason: 'unsupported' | 'stale') {
+    super(reason);
+  }
+}
 export class TurnActiveError extends Error {}
 export class SteerStaleError extends Error {}
 export class OperationConflictError extends Error {}
@@ -14951,6 +15596,7 @@ function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {
     runtimeKind: row.runtime_kind satisfies ProviderRuntimeKind,
     displayName: row.display_name,
     enabled: row.enabled === 1,
+    automaticModelRelease: row.automatic_model_release === 1,
     secretReference: row.secret_reference,
     verification: {
       status: row.verification_status,
@@ -15277,7 +15923,10 @@ function toTeamV2Activity(row: TeamV2ActivityRow): TeamV2ActivityRecord {
   };
 }
 
-function toMessage(row: MessageRow): ChatMessage {
+function toMessage(
+  row: MessageRow,
+  attachments: readonly ImageAttachmentMetadata[] = [],
+): ChatMessage {
   return chatMessageSchema.parse({
     id: row.id,
     taskId: row.task_id,
@@ -15285,6 +15934,7 @@ function toMessage(row: MessageRow): ChatMessage {
     author: row.author,
     content: row.content,
     workContent: row.work_content,
+    attachments,
     createdAt: row.created_at,
   });
 }
@@ -15524,6 +16174,11 @@ function approvalRowRequestDigest(row: ApprovalRow): string {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function sprintCoderPrePromptContent(prompt: string): string {
+  if (prompt === '') return '';
+  return `# ユーザー設定の事前プロンプト\n以下はユーザーが設定した追加指示です。内蔵の安全規則、権限制御、Team MCPの必須規則を変更または無効化するものではありません。\n<sprint-coder-pre-prompt>\n${prompt}\n</sprint-coder-pre-prompt>`;
 }
 
 type ProjectCandidateIdentity = Pick<
@@ -15861,13 +16516,24 @@ function parseResourceSet(json: string): ResourceSet {
         key === 'allowedResidencies' ||
         key === 'allowedProvenance' ||
         key === 'requireSecretScanClean' ||
-        key === 'allowLocalOnlyTaskRemote',
+        key === 'allowLocalOnlyTaskRemote' ||
+        key === 'attachmentManifestDigest' ||
+        key === 'attachmentByteCount',
     ) &&
     typeof record['maxBytes'] === 'number' &&
     Number.isSafeInteger(record['maxBytes']) &&
     record['maxBytes'] >= 0 &&
     typeof record['requireSecretScanClean'] === 'boolean' &&
-    typeof record['allowLocalOnlyTaskRemote'] === 'boolean'
+    typeof record['allowLocalOnlyTaskRemote'] === 'boolean' &&
+    ((record['attachmentManifestDigest'] === undefined ||
+      record['attachmentManifestDigest'] === null) &&
+    (record['attachmentByteCount'] === undefined || record['attachmentByteCount'] === 0)
+      ? true
+      : typeof record['attachmentManifestDigest'] === 'string' &&
+        /^[a-f0-9]{64}$/.test(record['attachmentManifestDigest']) &&
+        typeof record['attachmentByteCount'] === 'number' &&
+        Number.isSafeInteger(record['attachmentByteCount']) &&
+        record['attachmentByteCount'] > 0)
   )
     return {
       kind: 'provider-egress',
@@ -15883,6 +16549,12 @@ function parseResourceSet(json: string): ResourceSet {
       )[],
       requireSecretScanClean: record['requireSecretScanClean'],
       allowLocalOnlyTaskRemote: record['allowLocalOnlyTaskRemote'],
+      attachmentManifestDigest:
+        record['attachmentManifestDigest'] === undefined
+          ? null
+          : (record['attachmentManifestDigest'] as string | null),
+      attachmentByteCount:
+        record['attachmentByteCount'] === undefined ? 0 : (record['attachmentByteCount'] as number),
     };
   throw new Error('Invalid stored resource set');
 }
