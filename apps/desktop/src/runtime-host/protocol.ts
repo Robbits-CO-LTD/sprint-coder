@@ -120,6 +120,45 @@ export type RuntimeTeamMcpOption = Readonly<{
   enableWebSearch?: boolean;
 }>;
 
+export type RuntimeFailureStage =
+  | 'first_event_timeout'
+  | 'idle_timeout'
+  | 'total_timeout'
+  | 'protocol_error'
+  | 'startup_error'
+  | 'spawn_error'
+  | 'abnormal_exit';
+
+export const RECOGNIZED_CODEX_NOTIFICATION_NAMES = new Set([
+  'turn/started',
+  'item/agentMessage/delta',
+  'item/reasoning/textDelta',
+  'item/reasoning/summaryTextDelta',
+  'item/started',
+  'item/completed',
+  'turn/completed',
+]);
+
+export type RuntimeFailureDiagnostic = Readonly<{
+  version: 1;
+  diagnosticId: string;
+  runtimeKind: 'codex' | 'claude';
+  failureStage: RuntimeFailureStage;
+  elapsedMs: number;
+  appVersion: string;
+  cliVersion: string | null;
+  teamMcp: Readonly<{
+    enabled: boolean;
+    status: 'configured' | 'not_configured';
+  }>;
+  lastRecognizedNotification: string | null;
+  lastReceivedNotification: string | null;
+  unsupportedNotificationCount: number;
+  stderrObserved: boolean;
+  stderrTruncated: boolean;
+  recordedAt: string;
+}>;
+
 type EnvelopeBase = {
   protocolVersion: typeof RUNTIME_PROTOCOL_VERSION;
   runtimeInstanceId: string;
@@ -248,7 +287,11 @@ export type RuntimeToMainEnvelope =
   | (EnvelopeBase & { type: 'stopped'; forced: boolean })
   | (EnvelopeBase & { type: 'event'; event: RuntimeCanonicalEvent })
   | (EnvelopeBase & { type: 'exit'; code: number; canceled: boolean })
-  | (EnvelopeBase & { type: 'error'; error: PublicError });
+  | (EnvelopeBase & {
+      type: 'error';
+      error: PublicError;
+      diagnostic?: RuntimeFailureDiagnostic;
+    });
 
 export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeEnvelope {
   if (!hasValidBase(value)) return false;
@@ -604,8 +647,96 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       typeof value.canceled === 'boolean'
     );
   return (
-    value.type === 'error' && 'error' in value && publicErrorSchema.safeParse(value.error).success
+    value.type === 'error' &&
+    'error' in value &&
+    publicErrorSchema.safeParse(value.error).success &&
+    (!('diagnostic' in value) ||
+      value.diagnostic === undefined ||
+      isRuntimeFailureDiagnostic(value.diagnostic))
   );
+}
+
+export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFailureDiagnostic {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  const teamMcp = record['teamMcp'];
+  const structurallyValid =
+    Object.keys(record).every((key) =>
+      [
+        'version',
+        'diagnosticId',
+        'runtimeKind',
+        'failureStage',
+        'elapsedMs',
+        'appVersion',
+        'cliVersion',
+        'teamMcp',
+        'lastRecognizedNotification',
+        'lastReceivedNotification',
+        'unsupportedNotificationCount',
+        'stderrObserved',
+        'stderrTruncated',
+        'recordedAt',
+      ].includes(key),
+    ) &&
+    record['version'] === 1 &&
+    typeof record['diagnosticId'] === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      record['diagnosticId'],
+    ) &&
+    (record['runtimeKind'] === 'codex' || record['runtimeKind'] === 'claude') &&
+    [
+      'first_event_timeout',
+      'idle_timeout',
+      'total_timeout',
+      'protocol_error',
+      'startup_error',
+      'spawn_error',
+      'abnormal_exit',
+    ].includes(String(record['failureStage'])) &&
+    typeof record['elapsedMs'] === 'number' &&
+    Number.isSafeInteger(record['elapsedMs']) &&
+    record['elapsedMs'] >= 0 &&
+    typeof record['appVersion'] === 'string' &&
+    record['appVersion'].length <= 64 &&
+    (record['cliVersion'] === null ||
+      (typeof record['cliVersion'] === 'string' &&
+        record['cliVersion'].length <= 128 &&
+        (record['runtimeKind'] === 'codex'
+          ? /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(
+              record['cliVersion'],
+            )
+          : /^(?:claude-code )?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \(Claude Code\))?$/.test(
+              record['cliVersion'],
+            )))) &&
+    typeof teamMcp === 'object' &&
+    teamMcp !== null &&
+    Object.keys(teamMcp).every((key) => key === 'enabled' || key === 'status') &&
+    typeof (teamMcp as Record<string, unknown>)['enabled'] === 'boolean' &&
+    ['configured', 'not_configured'].includes(
+      String((teamMcp as Record<string, unknown>)['status']),
+    ) &&
+    (record['lastRecognizedNotification'] === null ||
+      (typeof record['lastRecognizedNotification'] === 'string' &&
+        RECOGNIZED_CODEX_NOTIFICATION_NAMES.has(record['lastRecognizedNotification']))) &&
+    (record['lastReceivedNotification'] === null ||
+      record['lastReceivedNotification'] === '[unsupported]' ||
+      (typeof record['lastReceivedNotification'] === 'string' &&
+        RECOGNIZED_CODEX_NOTIFICATION_NAMES.has(record['lastReceivedNotification']))) &&
+    typeof record['unsupportedNotificationCount'] === 'number' &&
+    Number.isSafeInteger(record['unsupportedNotificationCount']) &&
+    record['unsupportedNotificationCount'] >= 0 &&
+    typeof record['stderrObserved'] === 'boolean' &&
+    typeof record['stderrTruncated'] === 'boolean' &&
+    typeof record['recordedAt'] === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(record['recordedAt']) &&
+    Number.isFinite(Date.parse(record['recordedAt']));
+  if (!structurallyValid) return false;
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8') <= 16 * 1024;
+  } catch {
+    return false;
+  }
 }
 
 function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent {

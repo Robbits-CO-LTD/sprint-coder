@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -19,6 +19,7 @@ import {
   isUnsupportedMultiRootError,
 } from './codex-adapter';
 import { TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
+import type { RuntimeFailureDiagnostic } from './protocol';
 
 const temporaryRoots: string[] = [];
 
@@ -29,6 +30,178 @@ afterEach(async () => {
 });
 
 describe('Codex runtime probe', () => {
+  it('captures a bounded diagnostic when a fake CLI emits an unsupported notification then stops', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-fake-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'fake-codex.mjs');
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+        "createInterface({ input: process.stdin }).on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
+        "  if (message.method === 'turn/start') {",
+        "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+        "    send({ jsonrpc: '2.0', method: 'future/unsupported', params: { private: 'not recorded' } });",
+        "    process.stderr.write('token=abcd');",
+        "    process.stderr.write('efghijkl at /Users/example/private/file.ts');",
+        '    setTimeout(() => process.exit(7), 30);',
+        '  }',
+        '});',
+      ].join('\n'),
+    );
+    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+    adapter.setCliVersion('codex-cli 1.0.0');
+    const diagnostics: RuntimeFailureDiagnostic[] = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'fake-diagnostic-turn',
+        'request body must not be recorded',
+        [],
+        () => undefined,
+        null,
+        'auto',
+        () => undefined,
+        (_error, diagnostic) => {
+          if (diagnostic !== undefined) diagnostics.push(diagnostic);
+        },
+        () => resolve(),
+      );
+    });
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      failureStage: 'abnormal_exit',
+      cliVersion: 'codex-cli 1.0.0',
+      lastRecognizedNotification: 'turn/started',
+      lastReceivedNotification: '[unsupported]',
+      unsupportedNotificationCount: 1,
+    });
+    expect(diagnostics[0]?.stderrObserved).toBe(true);
+    expect(JSON.stringify(diagnostics[0])).not.toContain('abcdefghijkl');
+    expect(JSON.stringify(diagnostics[0])).not.toContain('request body');
+    expect(JSON.stringify(diagnostics[0])).not.toContain('not recorded');
+  });
+
+  it('classifies a fake CLI total timeout', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-timeout-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'silent-codex.mjs');
+    await writeFile(script, 'setInterval(() => {}, 1000);\n');
+    const adapter = new CodexRuntimeAdapter(30, process.execPath, [script]);
+    const diagnostics: RuntimeFailureDiagnostic[] = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'fake-timeout-turn',
+        'request',
+        [],
+        () => undefined,
+        null,
+        'auto',
+        () => undefined,
+        (_error, diagnostic) => {
+          if (diagnostic !== undefined) diagnostics.push(diagnostic);
+        },
+        () => resolve(),
+      );
+    });
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ failureStage: 'total_timeout' });
+    expect(diagnostics[0]?.elapsedMs).toBeGreaterThanOrEqual(20);
+  });
+
+  it('classifies malformed fake CLI output as a protocol error', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-protocol-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'malformed-codex.mjs');
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        "createInterface({ input: process.stdin }).once('line', () => {",
+        "  process.stdout.write('not-json\\n');",
+        '  setInterval(() => {}, 1000);',
+        '});',
+      ].join('\n'),
+    );
+    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+    const diagnostics: RuntimeFailureDiagnostic[] = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'fake-protocol-turn',
+        'request',
+        [],
+        () => undefined,
+        null,
+        'auto',
+        () => undefined,
+        (_error, diagnostic) => {
+          if (diagnostic !== undefined) diagnostics.push(diagnostic);
+        },
+        () => resolve(),
+      );
+    });
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ failureStage: 'protocol_error' });
+  });
+
+  it('completes without retaining stderr in a small workspace or the user home', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-success-codex-'));
+    temporaryRoots.push(root);
+    const smallWorkspace = await mkdtemp(join(root, 'small-workspace-'));
+    const script = join(root, 'successful-codex.mjs');
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+        "createInterface({ input: process.stdin }).on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
+        "  if (message.method === 'turn/start') {",
+        "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+        "    process.stderr.write('successful diagnostic noise token=abcdefghijkl');",
+        "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
+        '  }',
+        '});',
+      ].join('\n'),
+    );
+
+    for (const workspace of [smallWorkspace, homedir()]) {
+      const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+      const diagnostics: RuntimeFailureDiagnostic[] = [];
+      const events: Array<{ type: string }> = [];
+      await new Promise<void>((resolve) => {
+        adapter.start(
+          `successful-${workspace === smallWorkspace ? 'small' : 'home'}`,
+          'request',
+          [],
+          () => undefined,
+          workspace,
+          'auto',
+          (event) => events.push(event),
+          (_error, diagnostic) => {
+            if (diagnostic !== undefined) diagnostics.push(diagnostic);
+          },
+          () => resolve(),
+        );
+      });
+      expect(events.at(-1)).toMatchObject({ type: 'completed' });
+      expect(diagnostics).toEqual([]);
+    }
+  });
+
   it('constructs ordered app-server localImage inputs without embedding paths in text', () => {
     expect(
       buildCodexTurnInput(

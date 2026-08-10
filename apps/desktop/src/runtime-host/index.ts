@@ -263,7 +263,12 @@ function startAdapter(
       data.workspace,
       data.model,
       (event) => send(data.taskId, data.turnId, data.operationId, { type: 'event', event }),
-      (error) => send(data.taskId, data.turnId, data.operationId, { type: 'error', error }),
+      (error, diagnostic) =>
+        send(data.taskId, data.turnId, data.operationId, {
+          type: 'error',
+          error,
+          ...(diagnostic === undefined ? {} : { diagnostic }),
+        }),
       (code, canceled) => {
         send(data.taskId, data.turnId, data.operationId, { type: 'exit', code, canceled });
         activeTurns.delete(data.turnId);
@@ -335,6 +340,8 @@ function terminateImagePreparationForTurn(turnId: string): void {
 
 async function probeAndSendCapability(operationId: string): Promise<void> {
   const probe = await (runtimeKind === 'claude' ? probeClaude() : probeCodex());
+  if (adapter instanceof CodexRuntimeAdapter) adapter.setCliVersion(probe.version ?? null);
+  if (adapter instanceof ClaudeRuntimeAdapter) adapter.setCliVersion(probe.version ?? null);
   send('', '', operationId, {
     type: 'hello',
     ...(runtimeKind === 'claude'
@@ -402,7 +409,7 @@ function send(
         | 'acceptedPayloadDigest'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'exit' }>, 'type' | 'code' | 'canceled'>
-    | Pick<Extract<RuntimeToMainEnvelope, { type: 'error' }>, 'type' | 'error'>,
+    | Pick<Extract<RuntimeToMainEnvelope, { type: 'error' }>, 'type' | 'error' | 'diagnostic'>,
 ): void {
   const seq = (sequences.get(turnId) ?? 0) + 1;
   sequences.set(turnId, seq);

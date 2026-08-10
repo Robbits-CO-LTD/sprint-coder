@@ -3013,11 +3013,20 @@ export const runtimeStatusSchema = z
     kind: runtimeKindSchema,
     state: runtimeConnectionStateSchema,
     taskId: idSchema.nullable(),
+    turnId: idSchema.nullable().default(null),
+    diagnosticId: idSchema.nullable().default(null),
     errorCode: z.string().max(64).nullable(),
     userMessage: z.string().max(500).nullable(),
   })
   .strict();
 export type RuntimeStatus = z.infer<typeof runtimeStatusSchema>;
+export const runtimeFailureDiagnosticQuerySchema = z
+  .object({
+    taskId: idSchema,
+    diagnosticId: idSchema.optional(),
+  })
+  .strict();
+export const runtimeFailureDiagnosticExportSchema = z.string().max(20_000).nullable();
 export const turnStartResultSchema = z
   .object({
     turnId: idSchema,
@@ -3178,6 +3187,8 @@ export interface SprintCoderApi {
   runtime: {
     /** Subscribes to Runtime process liveness. Returns an unsubscribe function. */
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
+    /** Returns a redacted JSON diagnostic for the latest failed Turn or a diagnostic id. */
+    getFailureDiagnostic(input: { taskId: string; diagnosticId?: string }): Promise<string | null>;
   };
   files: {
     /** Every edit recorded for this Task, oldest first. Read on select rather than replayed through
@@ -3395,6 +3406,7 @@ export const IPC_CHANNELS = {
   reasoningEvent: 'sprint-coder:turns:reasoning',
   fileEditEvent: 'sprint-coder:turns:file-edit',
   runtimeStatusEvent: 'sprint-coder:runtime:status',
+  runtimeFailureDiagnosticGet: 'sprint-coder:runtime:failure-diagnostic:get',
   imagesList: 'sprint-coder:images:list',
   filesList: 'sprint-coder:files:list',
   filesPick: 'sprint-coder:files:pick',
