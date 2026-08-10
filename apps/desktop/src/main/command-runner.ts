@@ -266,17 +266,16 @@ export class CommandRunner {
     }
     if (child.pid === undefined)
       throw new CommandRunnerError('SPAWN_FAILED', 'Command process did not receive a PID');
+    let windowsLaunchRequest: string | undefined;
     if (process.platform === 'win32') {
       try {
         assignProcessToOwnedJob(child.pid, executionId);
-        child.stdin?.end(
-          JSON.stringify({
-            executable: spec.absoluteExecutable,
-            argv: [...spec.argv],
-            cwd: spec.cwdIdentity.canonicalPath,
-            env: buildEnvironment(spec.envDelta),
-          }),
-        );
+        windowsLaunchRequest = JSON.stringify({
+          executable: spec.absoluteExecutable,
+          argv: [...spec.argv],
+          cwd: spec.cwdIdentity.canonicalPath,
+          env: buildEnvironment(spec.envDelta),
+        });
       } catch (error) {
         child.kill();
         throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
@@ -328,6 +327,28 @@ export class CommandRunner {
       }
     }
     active.processStartIdentity = processStartIdentity;
+    // The Windows wrapper deliberately waits for EOF before spawning the requested executable.
+    // Keep it paused until its PID identity is sealed: a short-lived command can otherwise let the
+    // wrapper exit before the PowerShell identity query observes it.
+    if (windowsLaunchRequest !== undefined) {
+      try {
+        child.stdin?.end(windowsLaunchRequest);
+      } catch (error) {
+        try {
+          await this.forceOwnedTree(executionId, lease);
+          this.active.delete(executionId);
+          active.resolveSettled();
+        } catch (terminationError) {
+          if (
+            terminationError instanceof CommandRunnerError &&
+            terminationError.code === 'PROCESS_TREE_TERMINATION_FAILED'
+          )
+            this.retainUntilOutcome(executionId, active);
+          throw terminationError;
+        }
+        throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
+      }
+    }
     try {
       options.onStarted?.({
         executionId,
