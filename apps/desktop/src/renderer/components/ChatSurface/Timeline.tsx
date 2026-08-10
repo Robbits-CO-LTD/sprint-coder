@@ -343,7 +343,11 @@ export function Timeline({
               : null;
           return (
             <div key={message.id} style={{ display: 'contents' }}>
-              <MessageBubble author={message.author} content={message.content} />
+              <MessageBubble
+                author={message.author}
+                content={message.content}
+                attachments={message.attachments}
+              />
               {message.author === 'assistant' && message.turnId !== null && (
                 <button
                   type="button"

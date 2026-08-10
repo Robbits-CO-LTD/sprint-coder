@@ -14,6 +14,9 @@ import {
   type MainToRuntimeEnvelope,
   type RuntimeCanonicalEvent,
   type RuntimeContextFragment,
+  type RuntimeFailureDiagnostic,
+  type RuntimeImageAttachmentManifestEntry,
+  type RuntimePreparedImageAttachments,
   type RuntimeProjectContextItem,
   type RuntimeSkillInput,
   type RuntimeTeamMcpOption,
@@ -21,6 +24,12 @@ import {
   runtimeWorkspaceSetFromLegacyPath,
 } from '../runtime-host/protocol';
 import { RUNTIME_HOST_HELLO_TIMEOUT_MS } from '../runtime-host/probe-budget';
+import {
+  IMAGE_ATTACHMENT_CAPABILITY_MAX_AGE_MS,
+  runtimeCapabilityCatalogRevision,
+  type ImageAttachmentRuntimeCurrent,
+  type ImageAttachmentRuntimeSnapshot,
+} from './image-attachment-capability';
 
 type ActiveTurn = {
   taskId: string;
@@ -37,6 +46,8 @@ export type RuntimeStopReceipt = Readonly<{
   stoppedAt: string;
 }>;
 type CancelWaiter = {
+  taskId: string;
+  operationId: string;
   resolve(receipt: RuntimeStopReceipt): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout;
@@ -46,8 +57,30 @@ type ExitWaiter = {
   reject(error: Error): void;
   timer: NodeJS.Timeout;
 };
+type ImagePrepareWaiter = {
+  taskId: string;
+  turnId: string;
+  selectionIdentity: string;
+  manifestDigest: string;
+  decodedByteLength: number;
+  resolve(value: RuntimePreparedImageAttachments): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+};
+type ImagePreparationPhase = {
+  taskId: string;
+  turnId: string;
+  operationId: string;
+  state: 'preparing' | 'prepared';
+  receipt?: RuntimePreparedImageAttachments;
+};
 type EventHandler = (taskId: string, turnId: string, event: RuntimeCanonicalEvent) => void;
-type FailureHandler = (taskId: string, turnId: string, error: PublicError) => void;
+type FailureHandler = (
+  taskId: string,
+  turnId: string,
+  error: PublicError,
+  diagnostic?: RuntimeFailureDiagnostic,
+) => void;
 type PrepareContext = (taskId: string, turnId: string) => PreparedContext;
 type ContextAccepted = (
   taskId: string,
@@ -60,14 +93,22 @@ type ContextAccepted = (
 export type RuntimeCapabilityReport = {
   available: boolean;
   readiness: 'ready' | 'authentication_required' | 'unavailable';
-  models: CodexModelOption[];
+  models: readonly CodexModelOption[];
 };
+type RuntimeCapabilityState = Readonly<{
+  report: RuntimeCapabilityReport;
+  runtimeInstanceId: string;
+  readinessRevision: number;
+  catalogRevision: string;
+  observedAtMs: number;
+}>;
 
 export class RuntimeHostClient {
   private process: UtilityProcess | null = null;
   private runtimeInstanceId = '';
   private spawnReady: Promise<void> = Promise.resolve();
   private resolveProbe: ((report: RuntimeCapabilityReport) => void) | null = null;
+  private expectedProbeOperationId: string | null = null;
   private probeResult: Promise<RuntimeCapabilityReport> = Promise.resolve({
     available: false,
     readiness: 'unavailable',
@@ -77,6 +118,18 @@ export class RuntimeHostClient {
   private readonly cancelWaiters = new Map<string, CancelWaiter>();
   private readonly exitWaiters = new Map<string, ExitWaiter>();
   private readonly recentExits = new Map<string, NodeJS.Timeout>();
+  private readonly imagePrepareWaiters = new Map<string, ImagePrepareWaiter>();
+  private readonly preparedImageReceipts = new WeakSet<object>();
+  private readonly consumedImageReceipts = new WeakSet<object>();
+  private readonly invalidImageReceipts = new WeakSet<object>();
+  private readonly imagePreparationByTurn = new Map<string, ImagePreparationPhase>();
+  private capabilityState: RuntimeCapabilityState = {
+    report: { available: false, readiness: 'unavailable', models: [] },
+    runtimeInstanceId: '',
+    readinessRevision: 0,
+    catalogRevision: runtimeCapabilityCatalogRevision([]),
+    observedAtMs: 0,
+  };
   private disposed = false;
 
   constructor(
@@ -92,6 +145,36 @@ export class RuntimeHostClient {
   async probe(): Promise<RuntimeCapabilityReport> {
     if (this.process === null && !this.disposed) this.launch();
     return this.probeResult;
+  }
+
+  async captureImageAttachmentCapability(): Promise<ImageAttachmentRuntimeSnapshot> {
+    await this.probe();
+    if (
+      this.capabilityState.observedAtMs > 0 &&
+      Date.now() - this.capabilityState.observedAtMs > IMAGE_ATTACHMENT_CAPABILITY_MAX_AGE_MS
+    )
+      await this.refreshCapabilityProbe();
+    const state = this.capabilityState;
+    return Object.freeze({
+      runtimeKind: this.kind,
+      available: state.report.available,
+      readiness: state.report.readiness,
+      runtimeInstanceId: state.runtimeInstanceId,
+      readinessRevision: state.readinessRevision,
+      catalogRevision: state.catalogRevision,
+      modelIds: Object.freeze(state.report.models.map(({ id }) => id)),
+      capturedAtMs: state.observedAtMs,
+    });
+  }
+
+  currentImageAttachmentCapability(): ImageAttachmentRuntimeCurrent {
+    const state = this.capabilityState;
+    return Object.freeze({
+      runtimeKind: this.kind,
+      runtimeInstanceId: state.runtimeInstanceId,
+      readinessRevision: state.readinessRevision,
+      catalogRevision: state.catalogRevision,
+    });
   }
 
   start(
@@ -110,6 +193,7 @@ export class RuntimeHostClient {
     writeScope?: RuntimeWriteScope,
     skills: readonly RuntimeSkillInput[] = [],
     serializedPayload?: SerializedExecutionPayload,
+    preparedImages?: RuntimePreparedImageAttachments,
   ): boolean {
     const prepared = preparedContext ?? this.prepareContext?.(taskId, turnId);
     const workspace =
@@ -129,6 +213,10 @@ export class RuntimeHostClient {
         ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
         skills,
       });
+    if (preparedImages === undefined && this.imagePreparationByTurn.has(turnId)) {
+      this.onFailure(taskId, turnId, this.imageProtocolError());
+      return false;
+    }
     if (this.disposed) {
       this.onFailure(taskId, turnId, this.unavailableError());
       return false;
@@ -138,7 +226,24 @@ export class RuntimeHostClient {
       this.onFailure(taskId, turnId, this.unavailableError());
       return false;
     }
-    const operationId = randomUUID();
+    if (
+      preparedImages !== undefined &&
+      (!this.preparedImageReceipts.has(preparedImages) ||
+        this.consumedImageReceipts.has(preparedImages) ||
+        this.invalidImageReceipts.has(preparedImages) ||
+        preparedImages.runtimeInstanceId !== this.runtimeInstanceId ||
+        preparedImages.taskId !== taskId ||
+        preparedImages.turnId !== turnId ||
+        this.imagePreparationByTurn.get(turnId)?.receipt !== preparedImages)
+    ) {
+      this.onFailure(taskId, turnId, this.imageProtocolError());
+      return false;
+    }
+    const operationId = preparedImages?.operationId ?? randomUUID();
+    if (preparedImages !== undefined) {
+      this.consumedImageReceipts.add(preparedImages);
+      this.imagePreparationByTurn.delete(turnId);
+    }
     this.active.set(turnId, {
       taskId,
       operationId,
@@ -148,9 +253,8 @@ export class RuntimeHostClient {
       projectSnapshotDigest,
       payloadDigest: payload.digest,
     });
-    this.post({
+    const startPayload = {
       ...this.base(taskId, turnId, operationId, 1),
-      type: 'start',
       input,
       workspace,
       model,
@@ -164,11 +268,101 @@ export class RuntimeHostClient {
       ...(teamMcp === undefined ? {} : { teamMcp }),
       ...(effort === undefined ? {} : { effort }),
       ...(writeScope === undefined ? {} : { writeScope }),
-    });
+    };
+    this.post(
+      preparedImages === undefined
+        ? { ...startPayload, type: 'start' }
+        : {
+            ...startPayload,
+            type: 'commit_images',
+            selectionIdentity: preparedImages.selectionIdentity,
+            manifestDigest: preparedImages.manifestDigest,
+          },
+    );
     return true;
   }
 
+  prepareImageAttachments(input: {
+    taskId: string;
+    turnId: string;
+    selectionIdentity: string;
+    manifest: readonly RuntimeImageAttachmentManifestEntry[];
+    paths: readonly string[];
+    manifestDigest: string;
+  }): Promise<RuntimePreparedImageAttachments> {
+    if (this.disposed || this.kind !== 'codex')
+      return Promise.reject(new Error('Image attachment Runtime is unavailable'));
+    if (this.process === null) this.launch();
+    if (this.process === null)
+      return Promise.reject(new Error('Image attachment Runtime is unavailable'));
+    if (this.imagePreparationByTurn.has(input.turnId))
+      return Promise.reject(new Error('Image attachment Runtime prepare is already active'));
+    const operationId = randomUUID();
+    const decodedByteLength = input.manifest.reduce((total, entry) => total + entry.byteLength, 0);
+    return new Promise<RuntimePreparedImageAttachments>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const waiter = this.imagePrepareWaiters.get(operationId);
+        if (waiter === undefined) return;
+        this.imagePrepareWaiters.delete(operationId);
+        const phase = this.imagePreparationByTurn.get(input.turnId);
+        if (phase?.operationId === operationId) {
+          this.post({
+            ...this.base(input.taskId, input.turnId, operationId, 2),
+            type: 'cancel',
+          });
+          this.invalidateImagePreparationPhase(phase);
+        }
+        reject(new Error('Image attachment Runtime prepare timed out'));
+      }, 20_000);
+      this.imagePreparationByTurn.set(input.turnId, {
+        taskId: input.taskId,
+        turnId: input.turnId,
+        operationId,
+        state: 'preparing',
+      });
+      this.imagePrepareWaiters.set(operationId, {
+        taskId: input.taskId,
+        turnId: input.turnId,
+        selectionIdentity: input.selectionIdentity,
+        manifestDigest: input.manifestDigest,
+        decodedByteLength,
+        resolve,
+        reject,
+        timer,
+      });
+      this.post({
+        ...this.base(input.taskId, input.turnId, operationId, 1),
+        type: 'prepare_images',
+        selectionIdentity: input.selectionIdentity,
+        manifest: input.manifest.map((entry) => ({ ...entry })),
+        paths: [...input.paths],
+        manifestDigest: input.manifestDigest,
+      });
+    });
+  }
+
   cancel(taskId: string, turnId: string): Promise<RuntimeStopReceipt> {
+    const existing = this.cancelWaiters.get(turnId);
+    if (existing !== undefined) {
+      if (existing.taskId !== taskId)
+        return Promise.reject(new Error('Runtime stop Task identity mismatch'));
+      return this.joinCancelWaiter(existing);
+    }
+    const imagePhase = this.imagePreparationByTurn.get(turnId);
+    if (imagePhase !== undefined) {
+      const waiter = this.imagePrepareWaiters.get(imagePhase.operationId);
+      if (waiter !== undefined) {
+        clearTimeout(waiter.timer);
+        this.imagePrepareWaiters.delete(imagePhase.operationId);
+        waiter.reject(new Error('Image attachment Runtime prepare was canceled'));
+      }
+      this.invalidateImagePreparationPhase(imagePhase);
+      this.post({
+        ...this.base(taskId, turnId, imagePhase.operationId, 2),
+        type: 'cancel',
+      });
+      return this.waitForCancelConfirmation(taskId, turnId, imagePhase.operationId);
+    }
     const active = this.active.get(turnId);
     if (active === undefined)
       return Promise.resolve({
@@ -176,24 +370,33 @@ export class RuntimeHostClient {
         forced: false,
         stoppedAt: new Date().toISOString(),
       });
-    const existing = this.cancelWaiters.get(turnId);
-    if (existing !== undefined)
-      return new Promise<RuntimeStopReceipt>((resolve, reject) => {
-        const originalResolve = existing.resolve;
-        const originalReject = existing.reject;
-        existing.resolve = (receipt) => {
-          originalResolve(receipt);
-          resolve(receipt);
-        };
-        existing.reject = (error) => {
-          originalReject(error);
-          reject(error);
-        };
-      });
     this.post({
       ...this.base(taskId, turnId, active.operationId, active.lastSeq + 1),
       type: 'cancel',
     });
+    return this.waitForCancelConfirmation(taskId, turnId, active.operationId);
+  }
+
+  private joinCancelWaiter(existing: CancelWaiter): Promise<RuntimeStopReceipt> {
+    return new Promise<RuntimeStopReceipt>((resolve, reject) => {
+      const originalResolve = existing.resolve;
+      const originalReject = existing.reject;
+      existing.resolve = (receipt) => {
+        originalResolve(receipt);
+        resolve(receipt);
+      };
+      existing.reject = (error) => {
+        originalReject(error);
+        reject(error);
+      };
+    });
+  }
+
+  private waitForCancelConfirmation(
+    taskId: string,
+    turnId: string,
+    operationId: string,
+  ): Promise<RuntimeStopReceipt> {
     return new Promise<RuntimeStopReceipt>((resolve, reject) => {
       const timer = setTimeout(() => {
         const current = this.cancelWaiters.get(turnId);
@@ -202,7 +405,7 @@ export class RuntimeHostClient {
           new Error('Runtime stop was not confirmed within 5 seconds'),
         );
       }, 5_000);
-      this.cancelWaiters.set(turnId, { resolve, reject, timer });
+      this.cancelWaiters.set(turnId, { taskId, operationId, resolve, reject, timer });
     });
   }
 
@@ -228,6 +431,11 @@ export class RuntimeHostClient {
 
   dispose(): void {
     this.disposed = true;
+    this.invalidateCapabilityState();
+    const unavailable = { available: false, readiness: 'unavailable' as const, models: [] };
+    this.resolveProbe?.(unavailable);
+    this.resolveProbe = null;
+    this.expectedProbeOperationId = null;
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
       clearTimeout(waiter.timer);
@@ -237,6 +445,8 @@ export class RuntimeHostClient {
     this.rejectExitWaiters(new Error('Runtime Host was disposed before process exit confirmation'));
     for (const timer of this.recentExits.values()) clearTimeout(timer);
     this.recentExits.clear();
+    this.rejectAllImagePrepareWaiters(new Error('Runtime Host was disposed'));
+    this.invalidateAllImagePreparationPhases();
     this.process?.kill();
     this.process = null;
   }
@@ -244,12 +454,17 @@ export class RuntimeHostClient {
   private launch(): void {
     this.runtimeInstanceId = randomUUID();
     const instanceId = this.runtimeInstanceId;
+    this.invalidateCapabilityState(instanceId);
     this.probeResult = new Promise<RuntimeCapabilityReport>((resolve) => {
       this.resolveProbe = resolve;
+      this.expectedProbeOperationId = 'hello';
       setTimeout(() => {
         if (this.resolveProbe === resolve) {
           this.resolveProbe = null;
-          resolve({ available: false, readiness: 'unavailable', models: [] });
+          this.expectedProbeOperationId = null;
+          const report = { available: false, readiness: 'unavailable' as const, models: [] };
+          this.recordCapabilityState(instanceId, report);
+          resolve(report);
         }
       }, RUNTIME_HOST_HELLO_TIMEOUT_MS);
     });
@@ -267,8 +482,11 @@ export class RuntimeHostClient {
         },
       );
     } catch {
-      this.resolveProbe?.({ available: false, readiness: 'unavailable', models: [] });
+      const report = { available: false, readiness: 'unavailable' as const, models: [] };
+      this.recordCapabilityState(instanceId, report);
+      this.resolveProbe?.(report);
       this.resolveProbe = null;
+      this.expectedProbeOperationId = null;
       this.process = null;
       return;
     }
@@ -285,13 +503,15 @@ export class RuntimeHostClient {
 
   private receive(instanceId: string, raw: unknown): void {
     if (
+      this.disposed ||
       instanceId !== this.runtimeInstanceId ||
       !isRuntimeToMainEnvelope(raw) ||
       raw.runtimeInstanceId !== this.runtimeInstanceId
     )
       return;
     if (raw.type === 'hello') {
-      this.resolveProbe?.(
+      if (this.resolveProbe === null || raw.operationId !== this.expectedProbeOperationId) return;
+      const report =
         this.kind === 'claude'
           ? {
               available: raw.claudeAvailable,
@@ -302,14 +522,81 @@ export class RuntimeHostClient {
               available: raw.codexAvailable,
               readiness: raw.codexReadiness,
               models: raw.codexModels,
-            },
-      );
+            };
+      this.recordCapabilityState(instanceId, report);
+      this.resolveProbe?.(report);
       this.resolveProbe = null;
+      this.expectedProbeOperationId = null;
       return;
     }
     // An adapter error may have already removed the active turn, but its later exit envelope is
     // still the process-tree confirmation awaited by Team cleanup.
     if (raw.type === 'exit') this.markTurnExited(raw.turnId);
+    if (raw.type === 'images_prepared' || raw.type === 'images_prepare_failed') {
+      const waiter = this.imagePrepareWaiters.get(raw.operationId);
+      const phase = this.imagePreparationByTurn.get(raw.turnId);
+      if (waiter === undefined) {
+        if (raw.type === 'images_prepare_failed' && phase?.operationId === raw.operationId)
+          this.invalidateImagePreparationPhase(phase);
+        return;
+      }
+      clearTimeout(waiter.timer);
+      this.imagePrepareWaiters.delete(raw.operationId);
+      if (raw.type === 'images_prepare_failed') {
+        if (phase?.operationId === raw.operationId) this.invalidateImagePreparationPhase(phase);
+        waiter.reject(new Error(raw.error.userMessage));
+        return;
+      }
+      if (
+        raw.taskId !== waiter.taskId ||
+        raw.turnId !== waiter.turnId ||
+        raw.selectionIdentity !== waiter.selectionIdentity ||
+        raw.manifestDigest !== waiter.manifestDigest ||
+        raw.decodedByteLength !== waiter.decodedByteLength
+      ) {
+        this.post({
+          ...this.base(waiter.taskId, waiter.turnId, raw.operationId, 2),
+          type: 'cancel',
+        });
+        if (phase?.operationId === raw.operationId) this.invalidateImagePreparationPhase(phase);
+        waiter.reject(new Error('Image attachment Runtime prepare response mismatch'));
+        return;
+      }
+      const receipt = Object.freeze({
+        runtimeInstanceId: raw.runtimeInstanceId,
+        taskId: raw.taskId,
+        turnId: raw.turnId,
+        operationId: raw.operationId,
+        selectionIdentity: raw.selectionIdentity,
+        manifestDigest: raw.manifestDigest,
+        decodedByteLength: raw.decodedByteLength,
+      });
+      this.preparedImageReceipts.add(receipt);
+      if (phase?.operationId !== raw.operationId) {
+        this.post({
+          ...this.base(waiter.taskId, waiter.turnId, raw.operationId, 2),
+          type: 'cancel',
+        });
+        this.invalidImageReceipts.add(receipt);
+        waiter.reject(new Error('Image attachment Runtime prepare phase mismatch'));
+        return;
+      }
+      phase.state = 'prepared';
+      phase.receipt = receipt;
+      waiter.resolve(receipt);
+      return;
+    }
+    if (raw.type === 'stopped') {
+      const waiter = this.cancelWaiters.get(raw.turnId);
+      if (
+        waiter !== undefined &&
+        waiter.taskId === raw.taskId &&
+        waiter.operationId === raw.operationId
+      ) {
+        this.finishCancel(raw.turnId, raw.forced);
+        return;
+      }
+    }
     const active = this.active.get(raw.turnId);
     if (
       active === undefined ||
@@ -357,7 +644,7 @@ export class RuntimeHostClient {
       this.finishCancel(raw.turnId, raw.forced);
     } else if (raw.type === 'error') {
       this.active.delete(raw.turnId);
-      this.onFailure(raw.taskId, raw.turnId, raw.error);
+      this.onFailure(raw.taskId, raw.turnId, raw.error, raw.diagnostic);
     } else if (raw.type === 'exit') {
       if (raw.canceled) this.finishCancel(raw.turnId, false);
       else {
@@ -392,9 +679,14 @@ export class RuntimeHostClient {
 
   private handleExit(instanceId: string): void {
     if (instanceId !== this.runtimeInstanceId) return;
-    this.resolveProbe?.({ available: false, readiness: 'unavailable', models: [] });
+    const report = { available: false, readiness: 'unavailable' as const, models: [] };
+    this.recordCapabilityState(instanceId, report);
+    this.resolveProbe?.(report);
     this.resolveProbe = null;
+    this.expectedProbeOperationId = null;
     this.process = null;
+    this.rejectAllImagePrepareWaiters(new Error('Runtime Host exited during image prepare'));
+    this.invalidateAllImagePreparationPhases();
     const failures = [...this.active.entries()];
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
@@ -432,9 +724,59 @@ export class RuntimeHostClient {
     this.exitWaiters.clear();
   }
 
+  private recordCapabilityState(runtimeInstanceId: string, report: RuntimeCapabilityReport): void {
+    this.capabilityState = Object.freeze({
+      report: Object.freeze({ ...report, models: Object.freeze([...report.models]) }),
+      runtimeInstanceId,
+      readinessRevision: this.capabilityState.readinessRevision + 1,
+      catalogRevision: runtimeCapabilityCatalogRevision(report.models),
+      observedAtMs: Date.now(),
+    });
+  }
+
+  private invalidateCapabilityState(runtimeInstanceId = this.runtimeInstanceId): void {
+    this.recordCapabilityState(runtimeInstanceId, {
+      available: false,
+      readiness: 'unavailable',
+      models: [],
+    });
+  }
+
+  private refreshCapabilityProbe(): Promise<RuntimeCapabilityReport> {
+    if (this.disposed)
+      return Promise.resolve({ available: false, readiness: 'unavailable', models: [] });
+    if (this.process === null) return this.probe();
+    if (this.resolveProbe !== null) return this.probeResult;
+    const instanceId = this.runtimeInstanceId;
+    const operationId = `capability-refresh:${randomUUID()}`;
+    this.probeResult = new Promise<RuntimeCapabilityReport>((resolve) => {
+      this.resolveProbe = resolve;
+      this.expectedProbeOperationId = operationId;
+      setTimeout(() => {
+        if (this.resolveProbe !== resolve) return;
+        this.resolveProbe = null;
+        this.expectedProbeOperationId = null;
+        const report = { available: false, readiness: 'unavailable' as const, models: [] };
+        this.recordCapabilityState(instanceId, report);
+        resolve(report);
+      }, RUNTIME_HOST_HELLO_TIMEOUT_MS);
+    });
+    this.post({ ...this.base('', '', operationId, 1), type: 'hello' });
+    return this.probeResult;
+  }
+
   private restartHostAfterUnconfirmedStop(error: Error): void {
     const child = this.process;
     this.process = null;
+    this.rejectAllImagePrepareWaiters(error);
+    this.invalidateAllImagePreparationPhases();
+    if (this.resolveProbe !== null) {
+      const report = { available: false, readiness: 'unavailable' as const, models: [] };
+      this.recordCapabilityState(this.runtimeInstanceId, report);
+      this.resolveProbe(report);
+      this.resolveProbe = null;
+      this.expectedProbeOperationId = null;
+    }
     const failures = [...this.active.entries()];
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
@@ -484,6 +826,34 @@ export class RuntimeHostClient {
           : 'Codex runtimeを利用できません。',
       retryable: false,
     };
+  }
+
+  private imageProtocolError(): PublicError {
+    return {
+      code: 'RUNTIME_PROTOCOL_ERROR',
+      userMessage: '画像添付のRuntime準備情報が一致しません。',
+      retryable: true,
+    };
+  }
+
+  private rejectAllImagePrepareWaiters(error: Error): void {
+    for (const waiter of this.imagePrepareWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.imagePrepareWaiters.clear();
+  }
+
+  private invalidateImagePreparationPhase(phase: ImagePreparationPhase): void {
+    if (phase.receipt !== undefined) this.invalidImageReceipts.add(phase.receipt);
+    if (this.imagePreparationByTurn.get(phase.turnId) === phase)
+      this.imagePreparationByTurn.delete(phase.turnId);
+  }
+
+  private invalidateAllImagePreparationPhases(): void {
+    for (const phase of this.imagePreparationByTurn.values())
+      if (phase.receipt !== undefined) this.invalidImageReceipts.add(phase.receipt);
+    this.imagePreparationByTurn.clear();
   }
 }
 

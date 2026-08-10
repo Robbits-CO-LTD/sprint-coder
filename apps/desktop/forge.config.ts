@@ -44,7 +44,12 @@ const runtimeModuleFiles = [
   ['bindings', 'bindings.js'],
   ['file-uri-to-path', 'package.json'],
   ['file-uri-to-path', 'index.js'],
+  ['sharp'],
+  ['detect-libc'],
+  ['semver'],
+  ['@img'],
 ] as const;
+export const NATIVE_ASAR_UNPACK_GLOB = '*.{node,dylib,dll,wasm,so,so.*}';
 const appIconPath = resolve(__dirname, 'assets', 'sprint-coder-icon');
 const macCodeSignIdentity = process.env['SPRINT_CODER_CODESIGN_IDENTITY'] ?? '-';
 const releasePackage = process.env['SPRINT_CODER_RELEASE'] === '1';
@@ -220,8 +225,10 @@ const config: ForgeConfig = {
     // Electron Packager appends the platform-specific extension (.icns/.ico).
     icon: appIconPath,
     // @electron/asar matches `unpack` against the full source filename with matchBase enabled.
-    // Native addons cannot be loaded from inside app.asar, so unpack only `.node` binaries.
-    asar: { unpack: '*.node' },
+    // Native addons and sharp's platform libvips/wasm payload cannot be loaded from app.asar.
+    // Linux libvips is version-suffixed (for example libvips-cpp.so.8.18.3), so matching only
+    // files that end in `.so` leaves Sharp's shared library trapped inside app.asar.
+    asar: { unpack: NATIVE_ASAR_UNPACK_GLOB },
     extraResource: bundledNodeResources(),
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep

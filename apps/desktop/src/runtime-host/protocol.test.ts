@@ -39,6 +39,56 @@ function startEnvelope() {
 }
 
 describe('Runtime Host protocol', () => {
+  it('validates bounded same-directory image prepare and bound commit envelopes', () => {
+    const selectionIdentity = 'a'.repeat(64);
+    const manifestDigest = 'b'.repeat(64);
+    const manifest = [
+      {
+        id: 'attachment-1',
+        mimeType: 'image/png',
+        byteLength: 128,
+        sha256: 'c'.repeat(64),
+      },
+    ];
+    const prepare = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: 'operation-1',
+      type: 'prepare_images',
+      selectionIdentity,
+      manifest,
+      paths: [join(tmpdir(), 'turn-one', '001.png')],
+      manifestDigest,
+    } as const;
+    expect(isMainToRuntimeEnvelope(prepare)).toBe(true);
+    expect(isMainToRuntimeEnvelope({ ...prepare, paths: ['/tmp/001.jpg'] })).toBe(false);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...startEnvelope(),
+        type: 'commit_images',
+        selectionIdentity,
+        manifestDigest,
+      }),
+    ).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope({
+        protocolVersion: RUNTIME_PROTOCOL_VERSION,
+        runtimeInstanceId: 'runtime-1',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        seq: 1,
+        operationId: 'operation-1',
+        type: 'images_prepared',
+        selectionIdentity,
+        manifestDigest,
+        decodedByteLength: 128,
+      }),
+    ).toBe(true);
+  });
+
   it('requires a cryptographically valid explicit empty catalog for Codex read-only starts', () => {
     const valid = startEnvelope();
     expect(isMainToRuntimeEnvelope(valid)).toBe(true);
@@ -216,6 +266,69 @@ describe('Runtime Host protocol', () => {
     }
     expect(isMainToRuntimeEnvelope({ ...valid, effort: 'bogus' })).toBe(false);
     expect(isMainToRuntimeEnvelope({ ...valid, effort: 5 })).toBe(false);
+  });
+
+  it('accepts only bounded structured diagnostics on Runtime errors', () => {
+    const error = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: 'operation-1',
+      type: 'error',
+      error: { code: 'RUNTIME_FAILED', userMessage: 'failed', retryable: true },
+      diagnostic: {
+        version: 1,
+        diagnosticId: '123e4567-e89b-42d3-a456-426614174000',
+        runtimeKind: 'codex',
+        failureStage: 'abnormal_exit',
+        elapsedMs: 123,
+        appVersion: '0.2.1',
+        cliVersion: 'codex 1.0.0',
+        teamMcp: { enabled: false, status: 'not_configured' },
+        lastRecognizedNotification: 'turn/started',
+        lastReceivedNotification: '[unsupported]',
+        unsupportedNotificationCount: 1,
+        stderrObserved: true,
+        stderrTruncated: false,
+        recordedAt: new Date().toISOString(),
+      },
+    };
+
+    expect(isRuntimeToMainEnvelope(error)).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, cliVersion: 'codex /Users/alice/private' },
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, failureStage: 'made_up' },
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, requestBody: 'must never cross' },
+      }),
+    ).toBe(false);
+    const cyclic: Record<string, unknown> = {};
+    cyclic['self'] = cyclic;
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, appVersion: cyclic },
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: { ...error.diagnostic, elapsedMs: 1n },
+      }),
+    ).toBe(false);
   });
 
   it('validates the additive optional resolvedModel field on the completed canonical event', () => {

@@ -59,6 +59,7 @@ import {
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerConnectionModelReleaseUpdateInputSchema,
   providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
@@ -121,6 +122,8 @@ import {
   skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
+  runtimeFailureDiagnosticQuerySchema,
+  runtimeFailureDiagnosticExportSchema,
   generatedImageSchema,
   generatedImageBytesSchema,
   generatedImageRefSchema,
@@ -128,6 +131,10 @@ import {
   goalResumeInputSchema,
   goalRunResultSchema,
   goalStartInputSchema,
+  imageAttachmentCapabilitySchema,
+  imageAttachmentMetadataListSchema,
+  imageAttachmentMetadataSchema,
+  imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -185,6 +192,17 @@ import {
   type TurnEvent,
 } from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
+import {
+  ImageAttachmentDraftStore,
+  ImageAttachmentValidationError,
+} from './image-attachment-store';
+import { AttachmentCustodyStore, type AttachmentCustodyLease } from './attachment-custody-store';
+import { windowsNoReparseImageReaderAvailable } from './native-file-publication';
+import {
+  toPublicImageAttachmentCapability,
+  validateImageAttachmentCapabilitySnapshot,
+  type ImageAttachmentRuntimeSnapshot,
+} from './image-attachment-capability';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
 import type {
@@ -199,6 +217,8 @@ import { toApprovalAuditSummary, toApprovalSummary } from './persistence';
 import {
   CanvasViewConflictError,
   InvalidCanvasViewError,
+  ImageAttachmentLimitError,
+  ImageAttachmentAcceptanceError,
   NotFoundError,
   OperationConflictError,
   OperationInProgressError,
@@ -258,7 +278,12 @@ import {
   type ToolAuthorizationDecision,
   type ToolAuthorizationRequest,
 } from './tool-broker';
-import type { RuntimeCanonicalEvent, RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import type {
+  RuntimeCanonicalEvent,
+  RuntimeFailureDiagnostic,
+  RuntimePreparedImageAttachments,
+  RuntimeWorkspaceSet,
+} from '../runtime-host/protocol';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import {
   permissionRequestFingerprint,
@@ -349,7 +374,12 @@ import {
   ProviderSecretStorageUnavailableError,
 } from './provider-secret-storage';
 import { ElectronProviderSecretCipher } from './electron-provider-secret-cipher';
-import { MainProviderRegistry, type ProviderRuntime } from './provider-runtime';
+import {
+  acquireProviderModelLease,
+  MainProviderRegistry,
+  type ProviderRuntime,
+} from './provider-runtime';
+import type { ProviderModelLease } from './ollama-model-lifecycle';
 import {
   PROVIDER_FIRST_EVENT_TIMEOUT_MS,
   PROVIDER_IDLE_TIMEOUT_MS,
@@ -495,11 +525,20 @@ export class IpcRouter {
   private readonly teamRuntimeAvailability = new TeamRuntimeAvailabilityTracker();
   private readonly providerRegistry = new MainProviderRegistry();
   private readonly providerProfiles = new MainProviderProfileRegistry();
+  private readonly compatibleRuntime: OpenAICompatibleProviderClient;
   private readonly providerEgressTrustForConnection: (
     connection: ProviderConnection,
   ) => 'trusted-local' | 'trusted-remote';
   private readonly providerVerification: ProviderVerificationService;
   private readonly providerConnections: ProviderConnectionService;
+  private readonly attachmentDraftStore: ImageAttachmentDraftStore;
+  private readonly attachmentCustodyStore: AttachmentCustodyStore;
+  private readonly attachmentCapabilityByTurn = new Map<
+    string,
+    Readonly<{ snapshot: ImageAttachmentRuntimeSnapshot; selectionIdentity: string }>
+  >();
+  private readonly attachmentCustodyByTurn = new Map<string, AttachmentCustodyLease>();
+  private attachmentCustodyReady = false;
   private teamSkillReady = false;
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
@@ -515,6 +554,10 @@ export class IpcRouter {
     private readonly trustedRendererOrigin: string,
     workspaceEdit?: WorkspacePatchDeps,
   ) {
+    this.attachmentDraftStore = new ImageAttachmentDraftStore(this.persistence);
+    this.attachmentCustodyStore = new AttachmentCustodyStore(
+      join(app.getPath('userData'), 'attachment-custody'),
+    );
     const providerSecrets = new ProviderSecretStorage(
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),
@@ -534,14 +577,14 @@ export class IpcRouter {
         resolveCompatibleCredential(connection),
       );
     };
-    const compatible = new OpenAICompatibleProviderClient(
+    this.compatibleRuntime = new OpenAICompatibleProviderClient(
       this.providerProfiles,
       resolveCompatibleCredential,
     );
     this.providerRegistry.register({
       runtimeKind: 'openai_compatible',
       providerId: null,
-      runtime: compatible,
+      runtime: this.compatibleRuntime,
     });
     const openAI = new OpenAIProviderClient((connection) => {
       if (connection.secretReference === null)
@@ -875,16 +918,20 @@ export class IpcRouter {
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
         this.handleRuntimeEvent('codex', taskId, turnId, runtimeEvent),
-      (taskId, turnId, error) => this.handleRuntimeFailure('codex', taskId, turnId, error),
+      (taskId, turnId, error, diagnostic) =>
+        this.handleRuntimeFailure('codex', taskId, turnId, error, diagnostic),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
-      (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
-        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
+      (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) => {
+        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest);
+        void this.releaseTurnAttachmentCustody(turnId);
+      },
       'codex',
     );
     this.claudeRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
         this.handleRuntimeEvent('claude', taskId, turnId, runtimeEvent),
-      (taskId, turnId, error) => this.handleRuntimeFailure('claude', taskId, turnId, error),
+      (taskId, turnId, error, diagnostic) =>
+        this.handleRuntimeFailure('claude', taskId, turnId, error, diagnostic),
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
         this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
@@ -912,6 +959,69 @@ export class IpcRouter {
       // just the first path that ever carried it to the renderer.
       recovery: this.persistence.getStartupRecovery(),
     }));
+    this.handle(
+      IPC_CHANNELS.runtimeFailureDiagnosticGet,
+      runtimeFailureDiagnosticQuerySchema,
+      runtimeFailureDiagnosticExportSchema,
+      (input) => {
+        const diagnostic = this.persistence.getRuntimeFailureDiagnostic(input);
+        if (
+          diagnostic === null ||
+          (input.taskId !== undefined && diagnostic.taskId !== input.taskId)
+        )
+          return null;
+        return JSON.stringify(diagnostic, null, 2);
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.attachmentsCapability,
+      taskIdPayloadSchema,
+      imageAttachmentCapabilitySchema,
+      async (input) => {
+        this.persistence.listDraftImageAttachments(input.taskId);
+        if (!this.attachmentCustodyReady)
+          return {
+            status: 'unsupported' as const,
+            reason: '画像添付の安全な一時領域を準備できません',
+            selectionIdentity: null,
+          };
+        const selection = this.persistence.getImageAttachmentAcceptanceSelection(input.taskId);
+        const snapshot = await this.codexRuntime.captureImageAttachmentCapability();
+        return toPublicImageAttachmentCapability(
+          selection,
+          snapshot,
+          this.codexRuntime.currentImageAttachmentCapability(),
+          Date.now(),
+        );
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.attachmentsPick,
+      taskIdPayloadSchema,
+      imageAttachmentMetadataSchema.nullable(),
+      async (input) => {
+        this.persistence.listDraftImageAttachments(input.taskId);
+        const selected = await dialog.showOpenDialog(this.window, {
+          title: '画像を添付',
+          properties: ['openFile', 'dontAddToRecent'],
+          filters: [{ name: '画像', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+        });
+        if (selected.canceled || selected.filePaths.length !== 1) return null;
+        return this.attachmentDraftStore.addFromPath(input.taskId, selected.filePaths[0]!);
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.attachmentsListDraft,
+      taskIdPayloadSchema,
+      imageAttachmentMetadataListSchema,
+      (input) => this.attachmentDraftStore.list(input.taskId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.attachmentsRemove,
+      imageAttachmentRemoveInputSchema,
+      z.undefined(),
+      (input) => this.attachmentDraftStore.remove(input.taskId, input.attachmentId),
+    );
     this.handle(
       IPC_CHANNELS.settingsGetRuntime,
       runtimeSettingsGetInputSchema,
@@ -1328,6 +1438,18 @@ export class IpcRouter {
               ? {}
               : { tokensPerMinute: input.tokensPerMinute }),
           }),
+        ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersSetAutomaticModelRelease,
+      providerConnectionModelReleaseUpdateInputSchema,
+      providerConnectionSchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.providersSetAutomaticModelRelease, () =>
+          this.persistence.setProviderConnectionAutomaticModelRelease(
+            input.connectionId,
+            input.automaticModelRelease,
+          ),
         ).value,
     );
     this.handleMutation(
@@ -2371,6 +2493,32 @@ export class IpcRouter {
         const skills = await this.skillSettings
           .resolveSelections(input.skills)
           .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        let attachmentCapability:
+          | Readonly<{
+              snapshot: ImageAttachmentRuntimeSnapshot;
+              selectionIdentity: string;
+            }>
+          | undefined;
+        if (input.attachmentIds.length > 0) {
+          if (!this.attachmentCustodyReady || input.attachmentSelectionIdentity === null)
+            throw new ImageAttachmentAcceptanceError('unsupported');
+          const selection = this.persistence.getImageAttachmentAcceptanceSelection(input.taskId);
+          const snapshot = await this.codexRuntime.captureImageAttachmentCapability();
+          if (
+            !validateImageAttachmentCapabilitySnapshot({
+              selection,
+              snapshot,
+              current: this.codexRuntime.currentImageAttachmentCapability(),
+              expectedSelectionIdentity: input.attachmentSelectionIdentity,
+              nowMs: Date.now(),
+            })
+          )
+            throw new ImageAttachmentAcceptanceError('stale');
+          attachmentCapability = Object.freeze({
+            snapshot,
+            selectionIdentity: input.attachmentSelectionIdentity,
+          });
+        }
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -2383,6 +2531,16 @@ export class IpcRouter {
               input.text,
               skills,
               shouldSealBuiltinTeamSkill(input.text, skills),
+              input.attachmentIds,
+              (selection) =>
+                attachmentCapability !== undefined &&
+                validateImageAttachmentCapabilitySnapshot({
+                  selection,
+                  snapshot: attachmentCapability.snapshot,
+                  current: this.codexRuntime.currentImageAttachmentCapability(),
+                  expectedSelectionIdentity: attachmentCapability.selectionIdentity,
+                  nowMs: Date.now(),
+                }),
             );
             return {
               turnId: started.turnId,
@@ -2390,7 +2548,11 @@ export class IpcRouter {
             };
           },
         );
-        if (result.executed && started !== undefined) this.dispatchStarted(started);
+        if (result.executed && started !== undefined) {
+          if (attachmentCapability !== undefined)
+            this.attachmentCapabilityByTurn.set(started.turnId, attachmentCapability);
+          this.dispatchStarted(started);
+        }
         return result.value;
       },
     );
@@ -2615,6 +2777,12 @@ export class IpcRouter {
 
   async initialize(): Promise<void> {
     this.teamCoordinator.recoverOnStartup();
+    try {
+      await this.attachmentCustodyStore.initialize();
+      this.attachmentCustodyReady = windowsNoReparseImageReaderAvailable();
+    } catch {
+      this.attachmentCustodyReady = false;
+    }
     await this.permissionBroker.drainPolicyEpochOutbox();
     await this.teamMcpBridge.ensureStarted();
     try {
@@ -2679,6 +2847,7 @@ export class IpcRouter {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.taskTitleProviderAborts.abortAll();
+    for (const controller of this.providerAbortByTurn.values()) controller.abort();
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
     this.teamSubscriptions.clear();
@@ -2702,7 +2871,11 @@ export class IpcRouter {
     this.taskTitleRuntimes.dispose();
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
+    await this.compatibleRuntime.dispose();
     this.claudeRuntime.dispose();
+    await this.attachmentCustodyStore.dispose();
+    this.attachmentCustodyByTurn.clear();
+    this.attachmentCapabilityByTurn.clear();
     await this.teamMcpBridge.dispose();
   }
 
@@ -2839,6 +3012,7 @@ export class IpcRouter {
     this.pendingTaskTitles.delete(turnId);
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
+    void this.releaseTurnAttachmentCustody(turnId);
     // Flush the tail and stop the timer before the turn is finalised, so the last thought is not
     // lost to the 120ms window and no timer outlives the turn.
     this.reasoningByTurn.get(turnId)?.dispose();
@@ -3160,6 +3334,7 @@ export class IpcRouter {
       userMessage: null,
     });
     let kind = started.runtimeKind;
+    this.turnRuntimes.set(started.turnId, kind);
     // Leader MCP is enabled by default: a real Codex/Claude Leader drives team_* tools itself
     // over the MCP bridge instead of the deterministic mock scenario. Team tools are offered on
     // every real-runtime turn so the model itself senses
@@ -3206,6 +3381,14 @@ export class IpcRouter {
       // (hire→dispatch→reports→synthesis): the production adapters are no-tools by default, so a
       // real-runtime leader cannot drive a team — the deterministic leader orchestrates while
       // Workers execute on the real runtime.
+      if (this.attachmentCapabilityByTurn.has(started.turnId)) {
+        this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage: '画像添付を含むTurnではTeam Runtimeを無効化できません。',
+          retryable: true,
+        });
+        return;
+      }
       kind = 'mock';
     }
     this.turnRuntimes.set(started.turnId, kind);
@@ -3272,45 +3455,89 @@ export class IpcRouter {
       bytes: Buffer.from(serializedPayload.bytes),
       digest: serializedPayload.digest,
     });
-    const egress = dispatchEgress(
-      {
-        broker: this.permissionBroker,
-        task: this.persistence.getTask(taskId),
-        turnId: started.turnId,
-        prompt: gatePayload.toString('utf8'),
-        context,
-        now: new Date().toISOString(),
-        payloadDigest: serializedPayload.digest,
-        adapterVersion: 'runtime-protocol-v7',
-        connectionId: kind === 'claude' ? 'builtin:claude-cli' : 'builtin:codex-cli',
-        modelId: started.model,
-        endpointTrust: 'trusted-remote',
-        round: 1,
-        toolCatalogDigest: createEmptyToolCatalogSnapshot(kind, workspaceId).digest,
-      },
-      () =>
-        this.runtimeFor(kind).start(
-          taskId,
-          started.turnId,
-          started.text,
-          toRuntimeWorkspaceSet(started.workspaceSet),
-          started.model,
-          createEmptyToolCatalogSnapshot(kind, workspaceId),
+    let imageDispatch:
+      | Readonly<{
+          receipt: RuntimePreparedImageAttachments;
+          manifestDigest: string;
+          byteCount: number;
+        }>
+      | undefined;
+    try {
+      imageDispatch = await this.prepareTurnImageAttachments(started, kind);
+    } catch {
+      if (kind === 'codex') await this.cancelImageRuntimeBeforeRelease(taskId, started.turnId);
+      else await this.releaseTurnAttachmentCustody(started.turnId);
+      this.teamMcpBridge.unregister(started.turnId);
+      this.handleRuntimeFailure(kind, taskId, started.turnId, {
+        code: 'RUNTIME_FAILED',
+        userMessage: '画像添付の安全な送信準備に失敗しました。もう一度お試しください。',
+        retryable: true,
+      });
+      return;
+    }
+    let egress: ReturnType<typeof dispatchAfterCodexProviderEgress>;
+    try {
+      egress = dispatchEgress(
+        {
+          broker: this.permissionBroker,
+          task: this.persistence.getTask(taskId),
+          turnId: started.turnId,
+          prompt: gatePayload.toString('utf8'),
           context,
-          teamMcp,
-          // Reasoning effort: read live (not captured on StartedTurn) since it isn't persisted
-          // per-turn, unlike model — see persistence.ts's getEffort doc comment. The Codex value
-          // needs no probe here because setModel/setCodexEffort keep the stored level clamped to
-          // the selected model's advertised set; '' means "no override".
-          kind === 'claude'
-            ? this.persistence.getEffort()
-            : this.persistence.getCodexEffort() || undefined,
-          writeScope,
-          runtimeSkills,
-          dispatchPayload,
-        ),
-    );
+          now: new Date().toISOString(),
+          payloadDigest: serializedPayload.digest,
+          adapterVersion: 'runtime-protocol-v8',
+          connectionId: kind === 'claude' ? 'builtin:claude-cli' : 'builtin:codex-cli',
+          modelId: started.model,
+          endpointTrust: 'trusted-remote',
+          round: 1,
+          toolCatalogDigest: createEmptyToolCatalogSnapshot(kind, workspaceId).digest,
+          ...(imageDispatch === undefined
+            ? {}
+            : {
+                attachmentManifestDigest: imageDispatch.manifestDigest,
+                attachmentByteCount: imageDispatch.byteCount,
+              }),
+        },
+        () =>
+          this.runtimeFor(kind).start(
+            taskId,
+            started.turnId,
+            started.text,
+            toRuntimeWorkspaceSet(started.workspaceSet),
+            started.model,
+            createEmptyToolCatalogSnapshot(kind, workspaceId),
+            context,
+            teamMcp,
+            // Reasoning effort: read live (not captured on StartedTurn) since it isn't persisted
+            // per-turn, unlike model — see persistence.ts's getEffort doc comment. The Codex value
+            // needs no probe here because setModel/setCodexEffort keep the stored level clamped to
+            // the selected model's advertised set; '' means "no override".
+            kind === 'claude'
+              ? this.persistence.getEffort()
+              : this.persistence.getCodexEffort() || undefined,
+            writeScope,
+            runtimeSkills,
+            dispatchPayload,
+            imageDispatch?.receipt,
+          ),
+      );
+    } catch {
+      if (imageDispatch !== undefined && kind === 'codex')
+        await this.cancelImageRuntimeBeforeRelease(taskId, started.turnId);
+      else await this.releaseTurnAttachmentCustody(started.turnId);
+      this.teamMcpBridge.unregister(started.turnId);
+      this.handleRuntimeFailure(kind, taskId, started.turnId, {
+        code: 'RUNTIME_FAILED',
+        userMessage: 'Providerへの送信準備に失敗しました。',
+        retryable: true,
+      });
+      return;
+    }
     if (!egress.allowed) {
+      if (imageDispatch !== undefined && kind === 'codex')
+        await this.cancelImageRuntimeBeforeRelease(taskId, started.turnId);
+      else await this.releaseTurnAttachmentCustody(started.turnId);
       this.teamMcpBridge.unregister(started.turnId);
       this.handleRuntimeFailure(kind, taskId, started.turnId, {
         code: 'RUNTIME_FAILED',
@@ -3319,6 +3546,101 @@ export class IpcRouter {
       });
       return;
     }
+  }
+
+  private async prepareTurnImageAttachments(
+    started: StartedTurn,
+    kind: 'codex' | 'claude',
+  ): Promise<
+    | Readonly<{
+        receipt: RuntimePreparedImageAttachments;
+        manifestDigest: string;
+        byteCount: number;
+      }>
+    | undefined
+  > {
+    const attachments = this.persistence.getAcceptedImageAttachments(
+      started.event.taskId,
+      started.turnId,
+    );
+    if (attachments.length === 0) {
+      this.attachmentCapabilityByTurn.delete(started.turnId);
+      return undefined;
+    }
+    const binding = this.attachmentCapabilityByTurn.get(started.turnId);
+    if (
+      kind !== 'codex' ||
+      binding === undefined ||
+      !(await this.attachmentSelectionStillValid(started, binding))
+    )
+      throw new Error('Image attachment selection is stale');
+    const lease = await this.attachmentCustodyStore.prepare({
+      turnId: started.turnId,
+      attachments: attachments.map(({ id, mimeType, byteLength, sha256, bytes }) => ({
+        id,
+        mimeType,
+        byteLength,
+        sha256,
+        bytes,
+      })),
+    });
+    this.attachmentCustodyByTurn.set(started.turnId, lease);
+    if (
+      this.turnRuntimes.get(started.turnId) !== 'codex' ||
+      !(await this.attachmentSelectionStillValid(started, binding))
+    )
+      throw new Error('Image attachment Turn is no longer active');
+    const receipt = await this.codexRuntime.prepareImageAttachments({
+      taskId: started.event.taskId,
+      turnId: started.turnId,
+      selectionIdentity: binding.selectionIdentity,
+      manifest: lease.manifest,
+      paths: lease.paths,
+      manifestDigest: lease.manifestDigest,
+    });
+    if (
+      this.turnRuntimes.get(started.turnId) !== 'codex' ||
+      receipt.manifestDigest !== lease.manifestDigest ||
+      receipt.decodedByteLength !== attachments.reduce((sum, item) => sum + item.byteLength, 0) ||
+      !(await this.attachmentSelectionStillValid(started, binding))
+    )
+      throw new Error('Image attachment Runtime receipt is stale');
+    return Object.freeze({
+      receipt,
+      manifestDigest: lease.manifestDigest,
+      byteCount: receipt.decodedByteLength,
+    });
+  }
+
+  private async attachmentSelectionStillValid(
+    started: StartedTurn,
+    binding: Readonly<{
+      snapshot: ImageAttachmentRuntimeSnapshot;
+      selectionIdentity: string;
+    }>,
+  ): Promise<boolean> {
+    const snapshot = await this.codexRuntime.captureImageAttachmentCapability();
+    return validateImageAttachmentCapabilitySnapshot({
+      selection: this.persistence.getImageAttachmentAcceptanceSelection(started.event.taskId),
+      snapshot,
+      current: this.codexRuntime.currentImageAttachmentCapability(),
+      expectedSelectionIdentity: binding.selectionIdentity,
+      nowMs: Date.now(),
+    });
+  }
+
+  private async releaseTurnAttachmentCustody(turnId: string): Promise<void> {
+    this.attachmentCapabilityByTurn.delete(turnId);
+    const lease = this.attachmentCustodyByTurn.get(turnId);
+    if (lease === undefined) return;
+    const released = await this.attachmentCustodyStore.release(lease).catch(() => false);
+    if (released && this.attachmentCustodyByTurn.get(turnId) === lease)
+      this.attachmentCustodyByTurn.delete(turnId);
+  }
+
+  private async cancelImageRuntimeBeforeRelease(taskId: string, turnId: string): Promise<void> {
+    await this.codexRuntime.cancel(taskId, turnId).catch(() => undefined);
+    await this.releaseTurnAttachmentCustody(turnId);
   }
 
   private async assertTurnWorkspaceHealthy(started: StartedTurn): Promise<void> {
@@ -3808,6 +4130,7 @@ export class IpcRouter {
     const releaseController = this.taskTitleProviderAborts.track(controller);
     const timer = setTimeout(() => controller.abort(), MODEL_TASK_TITLE_TIMEOUT_MS);
     const executionId = randomUUID();
+    let modelLease: ProviderModelLease | undefined;
     try {
       const connection = await this.providerVerification.requireVerifiedForExecution(
         connectionId,
@@ -3845,6 +4168,7 @@ export class IpcRouter {
       if (!egress.allowed) return null;
 
       const runtime = this.providerRegistry.resolve(connection);
+      modelLease = await acquireProviderModelLease(runtime, connection, modelId);
       let output = '';
       for await (const event of runtime.execute(
         connection,
@@ -3862,6 +4186,7 @@ export class IpcRouter {
     } finally {
       clearTimeout(timer);
       releaseController();
+      await modelLease?.release();
       if (controller.signal.aborted) {
         try {
           const connection = this.persistence.getProviderConnection(connectionId);
@@ -3942,7 +4267,9 @@ export class IpcRouter {
             };
           this.detachCanceledTurnBookkeeping(turnId);
           return async () => {
-            await cancelAction();
+            await cancelRuntimeWithFinalCleanup(cancelAction, () =>
+              this.releaseTurnAttachmentCustody(turnId),
+            );
           };
         }),
       (error) => {
@@ -4037,6 +4364,7 @@ export class IpcRouter {
     let reportCursorValue = this.teamCoordinator.latestTeamMessageSeq(taskId);
     let modelCatalogQueried = false;
     let runtime: ProviderRuntime | undefined;
+    let modelLease: ProviderModelLease | undefined;
     const reportCursor = {
       read: () => reportCursorValue,
       advance: (seq: number) => {
@@ -4074,6 +4402,7 @@ export class IpcRouter {
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'executing'));
       });
       runtime = this.providerRegistry.resolve(connection);
+      modelLease = await acquireProviderModelLease(runtime, connection, modelId);
       const messages: ProviderExecutionRequest['messages'] = context.fragments.map((fragment) => ({
         role: fragment.trust,
         content: fragment.content,
@@ -4410,6 +4739,7 @@ export class IpcRouter {
         this.finishAndAdvance(taskId, started.turnId, 'failed');
       });
     } finally {
+      await modelLease?.release();
       if (workspaceToolSnapshot !== undefined)
         this.providerWorkspaceTools.finishTurn(taskId, started.turnId);
       if (this.providerAbortByTurn.get(started.turnId) === controller)
@@ -4753,17 +5083,38 @@ export class IpcRouter {
     taskId: string,
     turnId: string,
     error: PublicError,
+    diagnostic?: RuntimeFailureDiagnostic,
   ): void {
-    void this.mailbox.run(taskId, () => {
+    void this.mailbox.run(taskId, async () => {
       if (this.canceledRuntimeTurns.has(turnId)) return;
       if (this.turnRuntimes.get(turnId) !== kind) return;
+      if (this.attachmentCustodyByTurn.has(turnId)) {
+        await this.runtimeFor(kind)
+          .cancel(taskId, turnId)
+          .catch(() => undefined);
+        await this.releaseTurnAttachmentCustody(turnId);
+      }
       // The reason used to be dropped here, so the renderer saw a Turn end in `failed` with no way
       // to tell "the model refused" from "the CLI is gone" (issue #9). Pushed on the transient
       // status channel rather than folded into the persisted Turn event.
+      let diagnosticId: string | null = null;
+      if (diagnostic !== undefined && diagnostic.runtimeKind === kind) {
+        try {
+          diagnosticId = this.persistence.recordRuntimeFailureDiagnostic(
+            taskId,
+            turnId,
+            diagnostic,
+          ).diagnosticId;
+        } catch {
+          // A diagnostic must never prevent the Turn itself from reaching a terminal state.
+        }
+      }
       this.pushRuntimeStatus({
         kind,
         state: 'failed',
         taskId,
+        turnId,
+        diagnosticId,
         errorCode: error.code,
         userMessage: error.userMessage,
       });
@@ -4780,6 +5131,8 @@ export class IpcRouter {
     kind: RuntimeKind;
     state: 'idle' | 'running' | 'failed';
     taskId: string | null;
+    turnId?: string | null;
+    diagnosticId?: string | null;
     errorCode: string | null;
     userMessage: string | null;
   }): void {
@@ -4879,6 +5232,17 @@ export class TaskMailbox {
       release();
       if (this.tails.get(taskId) === tail) this.tails.delete(taskId);
     }
+  }
+}
+
+export async function cancelRuntimeWithFinalCleanup(
+  cancelRuntime: () => Promise<void>,
+  releaseCustody: () => Promise<void>,
+): Promise<void> {
+  try {
+    await cancelRuntime();
+  } finally {
+    await releaseCustody();
   }
 }
 
@@ -5320,7 +5684,24 @@ async function projectFolderHealth(
   }
 }
 
-function toPublicError(error: unknown): PublicError {
+export function toPublicError(error: unknown): PublicError {
+  if (error instanceof ImageAttachmentValidationError)
+    return { code: 'INVALID_REQUEST', userMessage: error.message, retryable: false };
+  if (error instanceof ImageAttachmentLimitError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: '画像は4枚まで、合計16MB以下にしてください。',
+      retryable: false,
+    };
+  if (error instanceof ImageAttachmentAcceptanceError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage:
+        error.reason === 'unsupported'
+          ? '選択中のRuntimeでは画像添付を送信できません。'
+          : '画像添付の状態が変わりました。最新の一覧を確認してください。',
+      retryable: false,
+    };
   if (error instanceof NotFoundError)
     return { code: 'NOT_FOUND', userMessage: '対象が見つかりません。', retryable: false };
   if (error instanceof TurnActiveError)

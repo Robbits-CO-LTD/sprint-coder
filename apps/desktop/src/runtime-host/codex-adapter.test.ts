@@ -1,13 +1,15 @@
 import { spawn } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CodexAgentMessageBoundary,
+  CodexRuntimeAdapter,
   advanceCodexAppServerStage,
   buildCodexArgs,
   buildCodexPrompt,
+  buildCodexTurnInput,
   codexOperationForItem,
   parseCodexModels,
   probeCodex,
@@ -17,6 +19,7 @@ import {
   isUnsupportedMultiRootError,
 } from './codex-adapter';
 import { TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
+import type { RuntimeFailureDiagnostic } from './protocol';
 
 const temporaryRoots: string[] = [];
 
@@ -27,6 +30,193 @@ afterEach(async () => {
 });
 
 describe('Codex runtime probe', () => {
+  it('captures a bounded diagnostic when a fake CLI emits an unsupported notification then stops', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-fake-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'fake-codex.mjs');
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+        "createInterface({ input: process.stdin }).on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
+        "  if (message.method === 'turn/start') {",
+        "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+        "    send({ jsonrpc: '2.0', method: 'future/unsupported', params: { private: 'not recorded' } });",
+        "    process.stderr.write('token=abcd');",
+        "    process.stderr.write('efghijkl at /Users/example/private/file.ts');",
+        '    setTimeout(() => process.exit(7), 30);',
+        '  }',
+        '});',
+      ].join('\n'),
+    );
+    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+    adapter.setCliVersion('codex-cli 1.0.0');
+    const diagnostics: RuntimeFailureDiagnostic[] = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'fake-diagnostic-turn',
+        'request body must not be recorded',
+        [],
+        () => undefined,
+        null,
+        'auto',
+        () => undefined,
+        (_error, diagnostic) => {
+          if (diagnostic !== undefined) diagnostics.push(diagnostic);
+        },
+        () => resolve(),
+      );
+    });
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      failureStage: 'abnormal_exit',
+      cliVersion: 'codex-cli 1.0.0',
+      lastRecognizedNotification: 'turn/started',
+      lastReceivedNotification: '[unsupported]',
+      unsupportedNotificationCount: 1,
+    });
+    expect(diagnostics[0]?.stderrObserved).toBe(true);
+    expect(JSON.stringify(diagnostics[0])).not.toContain('abcdefghijkl');
+    expect(JSON.stringify(diagnostics[0])).not.toContain('request body');
+    expect(JSON.stringify(diagnostics[0])).not.toContain('not recorded');
+  });
+
+  it('classifies a fake CLI total timeout', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-timeout-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'silent-codex.mjs');
+    await writeFile(script, 'setInterval(() => {}, 1000);\n');
+    const adapter = new CodexRuntimeAdapter(30, process.execPath, [script]);
+    const diagnostics: RuntimeFailureDiagnostic[] = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'fake-timeout-turn',
+        'request',
+        [],
+        () => undefined,
+        null,
+        'auto',
+        () => undefined,
+        (_error, diagnostic) => {
+          if (diagnostic !== undefined) diagnostics.push(diagnostic);
+        },
+        () => resolve(),
+      );
+    });
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ failureStage: 'total_timeout' });
+    expect(diagnostics[0]?.elapsedMs).toBeGreaterThanOrEqual(20);
+  });
+
+  it('classifies malformed fake CLI output as a protocol error', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-protocol-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'malformed-codex.mjs');
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        "createInterface({ input: process.stdin }).once('line', () => {",
+        "  process.stdout.write('not-json\\n');",
+        '  setInterval(() => {}, 1000);',
+        '});',
+      ].join('\n'),
+    );
+    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+    const diagnostics: RuntimeFailureDiagnostic[] = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'fake-protocol-turn',
+        'request',
+        [],
+        () => undefined,
+        null,
+        'auto',
+        () => undefined,
+        (_error, diagnostic) => {
+          if (diagnostic !== undefined) diagnostics.push(diagnostic);
+        },
+        () => resolve(),
+      );
+    });
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ failureStage: 'protocol_error' });
+  });
+
+  it('completes without retaining stderr in a small workspace or the user home', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-success-codex-'));
+    temporaryRoots.push(root);
+    const smallWorkspace = await mkdtemp(join(root, 'small-workspace-'));
+    const script = join(root, 'successful-codex.mjs');
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+        "createInterface({ input: process.stdin }).on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
+        "  if (message.method === 'turn/start') {",
+        "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+        "    process.stderr.write('successful diagnostic noise token=abcdefghijkl');",
+        "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
+        '  }',
+        '});',
+      ].join('\n'),
+    );
+
+    for (const workspace of [smallWorkspace, homedir()]) {
+      const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+      const diagnostics: RuntimeFailureDiagnostic[] = [];
+      const events: Array<{ type: string }> = [];
+      await new Promise<void>((resolve) => {
+        adapter.start(
+          `successful-${workspace === smallWorkspace ? 'small' : 'home'}`,
+          'request',
+          [],
+          () => undefined,
+          workspace,
+          'auto',
+          (event) => events.push(event),
+          (_error, diagnostic) => {
+            if (diagnostic !== undefined) diagnostics.push(diagnostic);
+          },
+          () => resolve(),
+        );
+      });
+      expect(events.at(-1)).toMatchObject({ type: 'completed' });
+      expect(diagnostics).toEqual([]);
+    }
+  });
+
+  it('constructs ordered app-server localImage inputs without embedding paths in text', () => {
+    expect(
+      buildCodexTurnInput(
+        'inspect these images',
+        [{ name: 'reviewer', path: '/skills/reviewer' }],
+        ['/custody/001.png', '/custody/002.webp'],
+      ),
+    ).toEqual([
+      { type: 'text', text: 'inspect these images' },
+      { type: 'localImage', path: '/custody/001.png' },
+      { type: 'localImage', path: '/custody/002.webp' },
+      { type: 'skill', name: 'reviewer', path: '/skills/reviewer' },
+    ]);
+  });
+
   it('distinguishes an unsupported experimental multi-root protocol from ordinary failures', () => {
     expect(isUnsupportedMultiRootError(new Error('unknown field `runtimeWorkspaceRoots`'))).toBe(
       true,
@@ -148,6 +338,187 @@ describe('Codex runtime probe', () => {
     await expect(terminateCodexProcessTree(parent)).resolves.toBe(true);
     await waitForProcessesToExit([parent.pid!, descendants.child, descendants.grandchild]);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'releases transferred local images exactly once when startup is canceled or times out',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-stalled-'));
+      temporaryRoots.push(root);
+      const executable = join(root, 'codex-stalled');
+      await writeFile(
+        executable,
+        '#!/usr/bin/env node\nprocess.stdin.resume(); setInterval(() => {}, 1000);\n',
+      );
+      await chmod(executable, 0o700);
+
+      for (const mode of ['cancel', 'timeout'] as const) {
+        const adapter = new CodexRuntimeAdapter(mode === 'timeout' ? 25 : 5_000, executable);
+        let releases = 0;
+        const failures: unknown[] = [];
+        const exited = new Promise<void>((resolve) => {
+          adapter.start(
+            `turn-${mode}`,
+            'inspect',
+            [],
+            () => undefined,
+            null,
+            'auto',
+            () => undefined,
+            (error) => failures.push(error),
+            () => resolve(),
+            undefined,
+            undefined,
+            'read-only',
+            [],
+            [],
+            undefined,
+            {
+              paths: ['/custody/001.png'],
+              beforeTurnStart: async () => undefined,
+              release: async () => {
+                releases += 1;
+              },
+            },
+          );
+        });
+        if (mode === 'cancel')
+          setTimeout(() => {
+            void adapter.cancel(`turn-${mode}`);
+          }, 25);
+        await exited;
+        expect(releases).toBe(1);
+        expect(failures).toHaveLength(mode === 'timeout' ? 1 : 0);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'acknowledges an image commit before flushing buffered app-server events',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-ordering-'));
+      temporaryRoots.push(root);
+      const executable = join(root, 'codex-ordering');
+      await writeFile(
+        executable,
+        [
+          '#!/usr/bin/env node',
+          "const readline = require('node:readline');",
+          'const rl = readline.createInterface({ input: process.stdin });',
+          "const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+          "rl.on('line', (line) => {",
+          '  const message = JSON.parse(line);',
+          "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
+          "  if (message.method === 'turn/start') {",
+          "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+          "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
+          '  }',
+          '});',
+        ].join('\n'),
+      );
+      await chmod(executable, 0o700);
+      const adapter = new CodexRuntimeAdapter(5_000, executable);
+      const order: string[] = [];
+      const failures: unknown[] = [];
+      let releases = 0;
+      await new Promise<void>((resolve) => {
+        adapter.start(
+          'turn-ordering',
+          'inspect',
+          [],
+          () => order.push('started'),
+          null,
+          'auto',
+          (event) => order.push(`event:${event.type}`),
+          (error) => failures.push(error),
+          () => resolve(),
+          undefined,
+          undefined,
+          'read-only',
+          [],
+          [],
+          undefined,
+          {
+            paths: ['/custody/001.png'],
+            beforeTurnStart: async () => {
+              order.push('reverify');
+            },
+            release: async () => {
+              releases += 1;
+            },
+          },
+        );
+      });
+      expect(failures).toEqual([]);
+      expect(order[0]).toBe('reverify');
+      expect(order[1]).toBe('started');
+      expect(order[2]).toBe('event:thread');
+      expect(order.slice(3, -1).every((entry) => entry === 'event:stage')).toBe(true);
+      expect(order.at(-1)).toBe('event:completed');
+      expect(releases).toBe(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed and releases images when pre-accept events exceed the buffer cap',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-overflow-'));
+      temporaryRoots.push(root);
+      const executable = join(root, 'codex-overflow');
+      await writeFile(
+        executable,
+        [
+          '#!/usr/bin/env node',
+          "const readline = require('node:readline');",
+          'const rl = readline.createInterface({ input: process.stdin });',
+          "const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+          "rl.on('line', (line) => {",
+          '  const message = JSON.parse(line);',
+          "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
+          "  if (message.method === 'turn/start') for (let index = 0; index < 300; index += 1) send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { itemId: 'message-1', delta: 'x' } });",
+          '});',
+        ].join('\n'),
+      );
+      await chmod(executable, 0o700);
+      const adapter = new CodexRuntimeAdapter(5_000, executable);
+      let accepted = false;
+      let releases = 0;
+      const failures: unknown[] = [];
+      await new Promise<void>((resolve) => {
+        adapter.start(
+          'turn-overflow',
+          'inspect',
+          [],
+          () => {
+            accepted = true;
+          },
+          null,
+          'auto',
+          () => undefined,
+          (error) => failures.push(error),
+          () => resolve(),
+          undefined,
+          undefined,
+          'read-only',
+          [],
+          [],
+          undefined,
+          {
+            paths: ['/custody/001.png'],
+            beforeTurnStart: async () => undefined,
+            release: async () => {
+              releases += 1;
+            },
+          },
+        );
+      });
+      expect(accepted).toBe(false);
+      expect(failures).toHaveLength(1);
+      expect(releases).toBe(1);
+    },
+  );
 
   it('resolves the native Codex executable behind the Windows npm shim', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-command-'));

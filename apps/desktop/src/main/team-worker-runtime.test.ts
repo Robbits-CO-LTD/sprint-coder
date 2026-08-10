@@ -375,6 +375,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
         turnId: 'turn-1',
         author: 'user',
         content: '親Taskの要件',
+        attachments: [],
         createdAt: '2026-07-28T00:00:00.000Z',
       },
     ]);
@@ -574,6 +575,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
         turnId: 'turn-1',
         author: 'user' as const,
         content: 'secret parent context',
+        attachments: [],
         createdAt: '2026-07-28T00:00:00.000Z',
       },
     ];

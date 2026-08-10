@@ -10,6 +10,7 @@ type PublicationAddon = Readonly<{
     kind: 'directory' | 'file',
     operation: 'secure' | 'verify',
   ) => boolean;
+  readNoReparseImageFile?: (path: string) => Buffer;
 }>;
 
 let cachedAddon: PublicationAddon | null = null;
@@ -43,6 +44,25 @@ export function replaceWindowsFileWithBackup(
     throw new Error('Native Windows file replacement is unavailable');
   if (replace(replacement, target, backup) !== true)
     throw new Error('Native Windows file replacement failed');
+}
+
+export function readWindowsNoReparseImageFile(path: string): Buffer {
+  const read = publicationAddon().readNoReparseImageFile;
+  if (process.platform !== 'win32' || typeof read !== 'function')
+    throw new Error('Native Windows image reader is unavailable');
+  const result = read(path);
+  if (!Buffer.isBuffer(result))
+    throw new Error('Native Windows image reader returned invalid data');
+  return result;
+}
+
+export function windowsNoReparseImageReaderAvailable(): boolean {
+  if (process.platform !== 'win32') return true;
+  try {
+    return typeof publicationAddon().readNoReparseImageFile === 'function';
+  } catch {
+    return false;
+  }
 }
 
 export function exchangePosixFiles(first: string, second: string): void {

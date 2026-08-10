@@ -1035,6 +1035,50 @@ export const canvasViewSaveResultSchema = z
   .strict();
 export type CanvasViewSaveResult = z.infer<typeof canvasViewSaveResultSchema>;
 
+export const IMAGE_ATTACHMENT_MAX_COUNT = 4;
+export const IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+export const IMAGE_ATTACHMENT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+export const imageAttachmentMimeTypeSchema = z.enum(['image/png', 'image/jpeg', 'image/webp']);
+export type ImageAttachmentMimeType = z.infer<typeof imageAttachmentMimeTypeSchema>;
+export const imageAttachmentMetadataSchema = z
+  .object({
+    id: idSchema,
+    fileName: z.string().min(1).max(255),
+    mimeType: imageAttachmentMimeTypeSchema,
+    byteLength: z.number().int().min(1).max(IMAGE_ATTACHMENT_MAX_BYTES),
+    createdAt: timestampSchema,
+  })
+  .strict();
+export type ImageAttachmentMetadata = z.infer<typeof imageAttachmentMetadataSchema>;
+export const imageAttachmentMetadataListSchema = z
+  .array(imageAttachmentMetadataSchema)
+  .max(IMAGE_ATTACHMENT_MAX_COUNT)
+  .superRefine((attachments, context) => {
+    if (new Set(attachments.map(({ id }) => id)).size !== attachments.length)
+      context.addIssue({ code: 'custom', message: 'Attachment IDs must be unique' });
+    const total = attachments.reduce((sum, attachment) => sum + attachment.byteLength, 0);
+    if (total > IMAGE_ATTACHMENT_MAX_TOTAL_BYTES)
+      context.addIssue({ code: 'custom', message: 'Attachment bytes exceed the aggregate limit' });
+  });
+export const imageAttachmentCapabilitySchema = z
+  .object({
+    status: z.enum(['pending', 'supported', 'unsupported']),
+    reason: z.string().min(1).max(500).nullable(),
+    selectionIdentity: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type ImageAttachmentCapability = z.infer<typeof imageAttachmentCapabilitySchema>;
+export const imageAttachmentRemoveInputSchema = z
+  .object({ taskId: idSchema, attachmentId: idSchema })
+  .strict();
+export const imageAttachmentIdsSchema = z
+  .array(idSchema)
+  .max(IMAGE_ATTACHMENT_MAX_COUNT)
+  .superRefine((ids, context) => {
+    if (new Set(ids).size !== ids.length)
+      context.addIssue({ code: 'custom', message: 'Attachment IDs must be unique' });
+  });
+
 export const chatMessageSchema = z
   .object({
     id: idSchema,
@@ -1043,6 +1087,7 @@ export const chatMessageSchema = z
     author: z.enum(['user', 'assistant', 'system']),
     content: z.string().max(1_000_000),
     workContent: z.string().max(1_000_000).nullable().optional(),
+    attachments: imageAttachmentMetadataListSchema.default([]),
     createdAt: timestampSchema,
   })
   .strict();
@@ -1840,6 +1885,9 @@ export const providerConnectionSchema = z
     runtimeKind: providerRuntimeKindSchema,
     displayName: z.string().min(1).max(100),
     enabled: z.boolean(),
+    /** Whether Sprint Coder may release a local Provider model after its last logical use.
+     * Optional while older renderer/main builds and persisted fixtures cross the upgrade boundary. */
+    automaticModelRelease: z.boolean().optional(),
     secretReference: z
       .string()
       .regex(
@@ -1853,6 +1901,15 @@ export const providerConnectionSchema = z
   })
   .strict();
 export type ProviderConnection = z.infer<typeof providerConnectionSchema>;
+export const providerConnectionModelReleaseUpdateInputSchema = z
+  .object({
+    connectionId: connectionIdSchema,
+    automaticModelRelease: z.boolean(),
+  })
+  .strict();
+export type ProviderConnectionModelReleaseUpdateInput = z.infer<
+  typeof providerConnectionModelReleaseUpdateInputSchema
+>;
 export const openAIConnectionCreateInputSchema = z
   .object({
     displayName: z.string().trim().min(1).max(100),
@@ -1915,6 +1972,8 @@ export const providerProfileSchema = z
     displayName: z.string().min(1).max(100),
     baseUrl: z.string().url().max(2_048),
     baseUrlConfigurable: z.boolean(),
+    /** A bundled, declarative hint. Runtime code still applies its own fixed Ollama allow-list. */
+    nativeModelLifecycle: z.literal('ollama').optional(),
     protocol: providerProfileProtocolSchema,
     modelsPath: z.string().startsWith('/').max(256).nullable(),
     curatedModels: z
@@ -2843,14 +2902,26 @@ export const goalResumeInputSchema = z
   .strict();
 export const goalRunResultSchema = z.object({ task: taskSummarySchema, turnId: idSchema }).strict();
 export const taskDraftInputSchema = z.object({ taskId: idSchema, draft: taskTextSchema }).strict();
+const turnTextAndSkillsInputShape = {
+  taskId: idSchema,
+  text: z.string().trim().min(1).max(100_000),
+  skills: turnSkillSelectionsSchema.default([]),
+} as const;
 export const turnStartInputSchema = z
   .object({
-    taskId: idSchema,
-    text: z.string().trim().min(1).max(100_000),
-    skills: turnSkillSelectionsSchema.default([]),
+    ...turnTextAndSkillsInputShape,
+    attachmentIds: imageAttachmentIdsSchema,
+    attachmentSelectionIdentity: z.string().min(1).max(512).nullable(),
   })
-  .strict();
-export const turnQueueInputSchema = turnStartInputSchema;
+  .strict()
+  .superRefine((input, context) => {
+    if (input.attachmentIds.length > 0 !== (input.attachmentSelectionIdentity !== null))
+      context.addIssue({
+        code: 'custom',
+        message: 'Attachment selection identity must match attachment presence',
+      });
+  });
+export const turnQueueInputSchema = z.object(turnTextAndSkillsInputShape).strict();
 export const turnQueueResultSchema = z.object({ ordinal: z.number().int().positive() }).strict();
 export const turnSteerInputSchema = z
   .object({
@@ -2859,7 +2930,7 @@ export const turnSteerInputSchema = z
     expectedTurnId: idSchema,
   })
   .strict();
-export const turnStopAndSendInputSchema = turnStartInputSchema;
+export const turnStopAndSendInputSchema = z.object(turnTextAndSkillsInputShape).strict();
 export const turnCancelInputSchema = z.object({ taskId: idSchema, turnId: idSchema }).strict();
 export const turnSubscriptionInputSchema = z
   .object({
@@ -2942,11 +3013,20 @@ export const runtimeStatusSchema = z
     kind: runtimeKindSchema,
     state: runtimeConnectionStateSchema,
     taskId: idSchema.nullable(),
+    turnId: idSchema.nullable().default(null),
+    diagnosticId: idSchema.nullable().default(null),
     errorCode: z.string().max(64).nullable(),
     userMessage: z.string().max(500).nullable(),
   })
   .strict();
 export type RuntimeStatus = z.infer<typeof runtimeStatusSchema>;
+export const runtimeFailureDiagnosticQuerySchema = z
+  .object({
+    taskId: idSchema,
+    diagnosticId: idSchema.optional(),
+  })
+  .strict();
+export const runtimeFailureDiagnosticExportSchema = z.string().max(20_000).nullable();
 export const turnStartResultSchema = z
   .object({
     turnId: idSchema,
@@ -3003,6 +3083,12 @@ export interface SprintCoderApi {
       skills?: readonly TurnSkillSelection[],
     ): Promise<{ task: TaskSummary; turnId: string }>;
     clear(taskId: string): Promise<TaskSummary>;
+  };
+  attachments: {
+    capability(taskId: string): Promise<ImageAttachmentCapability>;
+    pick(taskId: string): Promise<ImageAttachmentMetadata | null>;
+    listDraft(taskId: string): Promise<ImageAttachmentMetadata[]>;
+    remove(input: { taskId: string; attachmentId: string }): Promise<void>;
   };
   projects: {
     list(): Promise<ProjectSummary[]>;
@@ -3101,6 +3187,8 @@ export interface SprintCoderApi {
   runtime: {
     /** Subscribes to Runtime process liveness. Returns an unsubscribe function. */
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
+    /** Returns a redacted JSON diagnostic for the latest failed Turn or a diagnostic id. */
+    getFailureDiagnostic(input: { taskId: string; diagnosticId?: string }): Promise<string | null>;
   };
   files: {
     /** Every edit recorded for this Task, oldest first. Read on select rather than replayed through
@@ -3184,6 +3272,9 @@ export interface SprintCoderApi {
     ): Promise<ProviderConnection>;
     verifyConnection(connectionId: string): Promise<ProviderConnection>;
     lowerRateLimits(input: ProviderConnectionRateLimitLowerInput): Promise<ProviderConnection>;
+    setAutomaticModelRelease(
+      input: ProviderConnectionModelReleaseUpdateInput,
+    ): Promise<ProviderConnection>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
@@ -3209,6 +3300,8 @@ export interface SprintCoderApi {
       taskId: string;
       text: string;
       skills?: TurnSkillSelection[];
+      attachmentIds: string[];
+      attachmentSelectionIdentity: string | null;
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     queue(input: {
       taskId: string;
@@ -3248,6 +3341,10 @@ export const IPC_CHANNELS = {
   goalsClear: 'sprint-coder:goals:clear',
   tasksGetDraft: 'sprint-coder:tasks:get-draft',
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
+  attachmentsCapability: 'sprint-coder:attachments:capability',
+  attachmentsPick: 'sprint-coder:attachments:pick',
+  attachmentsListDraft: 'sprint-coder:attachments:list-draft',
+  attachmentsRemove: 'sprint-coder:attachments:remove',
   projectsList: 'sprint-coder:projects:list',
   projectsPickFolders: 'sprint-coder:projects:pick-folders',
   projectsFoldersList: 'sprint-coder:projects:folders:list',
@@ -3309,6 +3406,7 @@ export const IPC_CHANNELS = {
   reasoningEvent: 'sprint-coder:turns:reasoning',
   fileEditEvent: 'sprint-coder:turns:file-edit',
   runtimeStatusEvent: 'sprint-coder:runtime:status',
+  runtimeFailureDiagnosticGet: 'sprint-coder:runtime:failure-diagnostic:get',
   imagesList: 'sprint-coder:images:list',
   filesList: 'sprint-coder:files:list',
   filesPick: 'sprint-coder:files:pick',
@@ -3339,6 +3437,7 @@ export const IPC_CHANNELS = {
   providersCreateProfileConnection: 'sprint-coder:providers:create-profile-connection',
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   providersLowerRateLimits: 'sprint-coder:providers:lower-rate-limits',
+  providersSetAutomaticModelRelease: 'sprint-coder:providers:set-automatic-model-release',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

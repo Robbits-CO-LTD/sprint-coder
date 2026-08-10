@@ -54,6 +54,8 @@ export type PermissionResource =
       provenanceTrust: 'system' | 'user' | 'workspace' | 'untrusted';
       secretScan: 'clean' | 'blocked';
       localOnlyTask: boolean;
+      attachmentManifestDigest: string | null;
+      attachmentByteCount: number;
     }
   | { kind: 'secret'; secretId: string }
   | { kind: 'external'; target: string };
@@ -74,6 +76,8 @@ export type ResourceSet =
       allowedProvenance: readonly ('system' | 'user' | 'workspace' | 'untrusted')[];
       requireSecretScanClean: boolean;
       allowLocalOnlyTaskRemote: boolean;
+      attachmentManifestDigest: string | null;
+      attachmentByteCount: number;
     }
   | { kind: 'secret-exact'; secretId: string }
   | { kind: 'external-exact'; target: string }
@@ -741,6 +745,8 @@ function permissionResourceIdentity(resource: PermissionResource): string {
     resource.provenanceTrust,
     resource.secretScan,
     resource.localOnlyTask,
+    resource.attachmentManifestDigest,
+    resource.attachmentByteCount,
   ]);
 }
 
@@ -859,6 +865,12 @@ function resourceContains(set: ResourceSet, resource: PermissionResource): boole
       Number.isSafeInteger(resource.byteCount) &&
       resource.byteCount >= 0 &&
       resource.byteCount <= set.maxBytes &&
+      Number.isSafeInteger(resource.attachmentByteCount) &&
+      resource.attachmentByteCount >= 0 &&
+      attachmentEgressFactsValid(resource.attachmentManifestDigest, resource.attachmentByteCount) &&
+      attachmentEgressFactsValid(set.attachmentManifestDigest, set.attachmentByteCount) &&
+      resource.attachmentManifestDigest === set.attachmentManifestDigest &&
+      resource.attachmentByteCount === set.attachmentByteCount &&
       set.allowedProviderTrust.includes(resource.providerTrust) &&
       set.allowedResidencies.includes(resource.dataResidency) &&
       set.allowedProvenance.includes(resource.provenanceTrust) &&
@@ -1027,6 +1039,11 @@ function resourceSetIsSubset(candidate: ResourceSet, parent: ResourceSet): boole
     return candidate.target === parent.target;
   if (candidate.kind === 'provider-egress' && parent.kind === 'provider-egress')
     return (
+      attachmentEgressFactsValid(
+        candidate.attachmentManifestDigest,
+        candidate.attachmentByteCount,
+      ) &&
+      attachmentEgressFactsValid(parent.attachmentManifestDigest, parent.attachmentByteCount) &&
       candidate.providerIds.every((value) => parent.providerIds.includes(value)) &&
       candidate.fragmentKinds.every((value) => parent.fragmentKinds.includes(value)) &&
       candidate.maxBytes <= parent.maxBytes &&
@@ -1036,9 +1053,21 @@ function resourceSetIsSubset(candidate: ResourceSet, parent: ResourceSet): boole
       candidate.allowedResidencies.every((value) => parent.allowedResidencies.includes(value)) &&
       candidate.allowedProvenance.every((value) => parent.allowedProvenance.includes(value)) &&
       (!parent.requireSecretScanClean || candidate.requireSecretScanClean) &&
-      (!candidate.allowLocalOnlyTaskRemote || parent.allowLocalOnlyTaskRemote)
+      (!candidate.allowLocalOnlyTaskRemote || parent.allowLocalOnlyTaskRemote) &&
+      candidate.attachmentManifestDigest === parent.attachmentManifestDigest &&
+      candidate.attachmentByteCount === parent.attachmentByteCount
     );
   return false;
+}
+
+function attachmentEgressFactsValid(manifestDigest: string | null, byteCount: number): boolean {
+  return (
+    Number.isSafeInteger(byteCount) &&
+    byteCount >= 0 &&
+    (manifestDigest === null
+      ? byteCount === 0
+      : /^[a-f0-9]{64}$/.test(manifestDigest) && byteCount > 0)
+  );
 }
 
 function resourceSetContainsPath(

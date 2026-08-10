@@ -27,6 +27,7 @@ import {
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerConnectionModelReleaseUpdateInputSchema,
   providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
@@ -82,6 +83,8 @@ import {
   skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
+  runtimeFailureDiagnosticQuerySchema,
+  runtimeFailureDiagnosticExportSchema,
   fileChangeRecordSchema,
   filePathPayloadSchema,
   fileOpenResultSchema,
@@ -96,6 +99,10 @@ import {
   goalResumeInputSchema,
   goalRunResultSchema,
   goalStartInputSchema,
+  imageAttachmentCapabilitySchema,
+  imageAttachmentMetadataListSchema,
+  imageAttachmentMetadataSchema,
+  imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -263,6 +270,36 @@ const api: SprintCoderApi = {
       }),
     clear: (taskId) =>
       invoke(IPC_CHANNELS.goalsClear, goalControlInputSchema, taskSummarySchema, { taskId }),
+  },
+  attachments: {
+    capability: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsCapability,
+        taskIdPayloadSchema,
+        imageAttachmentCapabilitySchema,
+        { taskId },
+      ),
+    pick: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsPick,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataSchema.nullable(),
+        { taskId },
+      ),
+    listDraft: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsListDraft,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataListSchema,
+        { taskId },
+      ),
+    remove: (input) =>
+      invoke(
+        IPC_CHANNELS.attachmentsRemove,
+        imageAttachmentRemoveInputSchema,
+        z.undefined(),
+        input,
+      ),
   },
   projects: {
     list: () =>
@@ -521,6 +558,13 @@ const api: SprintCoderApi = {
       ipcRenderer.on(IPC_CHANNELS.runtimeStatusEvent, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.runtimeStatusEvent, handler);
     },
+    getFailureDiagnostic: (input) =>
+      invoke(
+        IPC_CHANNELS.runtimeFailureDiagnosticGet,
+        runtimeFailureDiagnosticQuerySchema,
+        runtimeFailureDiagnosticExportSchema,
+        input,
+      ),
   },
   fileEdits: {
     // Push-only, mirroring `reasoning` above: the frame carries its own taskId/turnId and the store
@@ -820,6 +864,13 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersLowerRateLimits,
         providerConnectionRateLimitLowerInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    setAutomaticModelRelease: (input) =>
+      invoke(
+        IPC_CHANNELS.providersSetAutomaticModelRelease,
+        providerConnectionModelReleaseUpdateInputSchema,
         providerConnectionSchema,
         input,
       ),

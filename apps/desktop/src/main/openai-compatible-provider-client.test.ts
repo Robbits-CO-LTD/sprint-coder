@@ -8,6 +8,7 @@ import { MainProviderProfileRegistry, resolvedProfileEndpointTrust } from './pro
 import {
   OpenAICompatibleProviderClient,
   openAICompatibleChatCompletionRequest,
+  resolveOllamaNativeGenerateEndpoint,
 } from './openai-compatible-provider-client';
 
 const profile: ProviderProfile = {
@@ -75,6 +76,104 @@ async function collect(
 }
 
 describe('OpenAICompatibleProviderClient', () => {
+  it.each([
+    ['http://localhost:11434/v1', 'http://127.0.0.1:11434/api/generate'],
+    ['http://127.9.8.7:11434/v1/', 'http://127.9.8.7:11434/api/generate'],
+    ['http://[::1]:11434/v1', 'http://[::1]:11434/api/generate'],
+    ['https://localhost:11434/v1', null],
+    ['http://192.168.1.20:11434/v1', null],
+    ['http://localhost:11434/custom', null],
+  ])('resolves only a pinned loopback Ollama native endpoint from %s', (baseUrl, expected) => {
+    expect(resolveOllamaNativeGenerateEndpoint(baseUrl)).toBe(expected);
+  });
+
+  it('releases a bundled loopback Ollama model after its logical lease', async () => {
+    const ollamaProfile: ProviderProfile = {
+      ...profile,
+      id: 'ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      nativeModelLifecycle: 'ollama',
+      requiredCredentialFields: [],
+    };
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(ollamaProfile);
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const client = new OpenAICompatibleProviderClient(
+      profiles,
+      () => ({}),
+      async (input, init) => {
+        requests.push({
+          url: String(input),
+          body: init?.body === undefined ? null : JSON.parse(String(init.body)),
+        });
+        return new Response('{}', { status: 200 });
+      },
+    );
+    const ollamaConnection = {
+      ...connection,
+      id: 'ollama:connection',
+      providerId: 'ollama',
+      automaticModelRelease: true,
+    };
+
+    const lease = await client.acquireModelLease(ollamaConnection, 'gemma3:1b');
+    await lease.release();
+
+    expect(requests).toEqual([
+      {
+        url: 'http://127.0.0.1:11434/api/generate',
+        body: { model: 'gemma3:1b', keep_alive: 0 },
+      },
+    ]);
+  });
+
+  it.runIf(process.env['SPRINT_CODER_OLLAMA_TEST'] === '1')(
+    'removes the exercised model from a real local Ollama process',
+    async () => {
+      const ollamaProfile: ProviderProfile = {
+        ...profile,
+        id: 'ollama',
+        baseUrl: 'http://localhost:11434/v1',
+        baseUrlConfigurable: true,
+        nativeModelLifecycle: 'ollama',
+        requiredCredentialFields: [],
+      };
+      const profiles = new MainProviderProfileRegistry();
+      profiles.register(ollamaProfile);
+      const client = new OpenAICompatibleProviderClient(profiles, () => ({}));
+      const ollamaConnection = {
+        ...connection,
+        id: 'ollama:real-local',
+        providerId: 'ollama',
+        automaticModelRelease: true,
+      };
+      const modelId = process.env['SPRINT_CODER_OLLAMA_MODEL'] ?? 'gemma3:1b';
+      const lease = await client.acquireModelLease(ollamaConnection, modelId);
+      try {
+        const events = await collect(
+          client.execute(
+            ollamaConnection,
+            {
+              executionId: 'ollama-real-local-execution',
+              connectionId: ollamaConnection.id,
+              modelId,
+              messages: [{ role: 'user', content: 'Reply with OK.' }],
+            },
+            new AbortController().signal,
+          ),
+        );
+        expect(events).toContainEqual(expect.objectContaining({ type: 'completed' }));
+      } finally {
+        await lease.release();
+      }
+      const processes = (await (await fetch('http://127.0.0.1:11434/api/ps')).json()) as {
+        models: Array<{ name: string }>;
+      };
+      expect(processes.models.some(({ name }) => name === modelId)).toBe(false);
+    },
+    120_000,
+  );
   it('classifies only resolved loopback endpoints as trusted local', () => {
     const configurable = { ...profile, baseUrlConfigurable: true };
     expect(

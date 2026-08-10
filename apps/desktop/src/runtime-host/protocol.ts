@@ -10,11 +10,45 @@ import {
   type TurnStage,
 } from '@sprint-coder/contracts';
 import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
-import { basename, isAbsolute, normalize, sep } from 'node:path';
+import { basename, dirname, isAbsolute, normalize, sep } from 'node:path';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 
-export const RUNTIME_PROTOCOL_VERSION = 7;
+export const RUNTIME_PROTOCOL_VERSION = 8;
+
+export type RuntimeImageAttachmentManifestEntry = Readonly<{
+  id: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+  byteLength: number;
+  sha256: string;
+}>;
+
+export type RuntimePreparedImageAttachments = Readonly<{
+  runtimeInstanceId: string;
+  taskId: string;
+  turnId: string;
+  operationId: string;
+  selectionIdentity: string;
+  manifestDigest: string;
+  decodedByteLength: number;
+}>;
+
+export function runtimeImageManifestDigest(
+  manifest: readonly RuntimeImageAttachmentManifestEntry[],
+): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify(
+        manifest.map(({ id, mimeType, byteLength, sha256 }) => ({
+          byteLength,
+          id,
+          mimeType,
+          sha256,
+        })),
+      ),
+    )
+    .digest('hex');
+}
 
 export type RuntimeWorkspaceRoot = Readonly<{
   rootId: string;
@@ -86,6 +120,45 @@ export type RuntimeTeamMcpOption = Readonly<{
   enableWebSearch?: boolean;
 }>;
 
+export type RuntimeFailureStage =
+  | 'first_event_timeout'
+  | 'idle_timeout'
+  | 'total_timeout'
+  | 'protocol_error'
+  | 'startup_error'
+  | 'spawn_error'
+  | 'abnormal_exit';
+
+export const RECOGNIZED_CODEX_NOTIFICATION_NAMES = new Set([
+  'turn/started',
+  'item/agentMessage/delta',
+  'item/reasoning/textDelta',
+  'item/reasoning/summaryTextDelta',
+  'item/started',
+  'item/completed',
+  'turn/completed',
+]);
+
+export type RuntimeFailureDiagnostic = Readonly<{
+  version: 1;
+  diagnosticId: string;
+  runtimeKind: 'codex' | 'claude';
+  failureStage: RuntimeFailureStage;
+  elapsedMs: number;
+  appVersion: string;
+  cliVersion: string | null;
+  teamMcp: Readonly<{
+    enabled: boolean;
+    status: 'configured' | 'not_configured';
+  }>;
+  lastRecognizedNotification: string | null;
+  lastReceivedNotification: string | null;
+  unsupportedNotificationCount: number;
+  stderrObserved: boolean;
+  stderrTruncated: boolean;
+  recordedAt: string;
+}>;
+
 type EnvelopeBase = {
   protocolVersion: typeof RUNTIME_PROTOCOL_VERSION;
   runtimeInstanceId: string;
@@ -146,30 +219,38 @@ export type RuntimeCanonicalEvent =
   // `turn_events` and be replayed on every re-subscribe.
   | { type: 'fileEdit'; path: string; text: string; complete: boolean };
 
+type RuntimeStartRequest = {
+  input: string;
+  workspace: RuntimeWorkspaceSet;
+  model: string;
+  effort?: string;
+  writeScope?: 'read-only' | 'workspace-write' | 'full';
+  contextFragments: RuntimeContextFragment[];
+  projectItems: RuntimeProjectContextItem[];
+  projectSnapshotDigest: string | null;
+  payload: string;
+  payloadDigest: string;
+  skills?: RuntimeSkillInput[];
+  toolCatalogSnapshot: ToolCatalogSnapshot;
+  teamMcp?: RuntimeTeamMcpOption;
+};
+
 export type MainToRuntimeEnvelope =
   | (EnvelopeBase & { type: 'hello' })
   | (EnvelopeBase & {
-      type: 'start';
-      input: string;
-      workspace: RuntimeWorkspaceSet;
-      model: string;
-      // Additive, optional: only meaningful for the Claude adapter (see buildClaudeArgs' effort
-      // param) — Codex has no equivalent CLI flag on this version and its adapter ignores it.
-      effort?: string;
-      // How much the Runtime may write this Turn (issue #37). Decided in Main from the Task's
-      // Access preset and whether a Workspace exists; the adapters translate it into CLI flags and
-      // never widen it. Optional so an older Main that omits it still starts a turn — absent means
-      // 'read-only', which is the pre-#37 behaviour.
-      writeScope?: 'read-only' | 'workspace-write' | 'full';
-      contextFragments: RuntimeContextFragment[];
-      projectItems: RuntimeProjectContextItem[];
-      projectSnapshotDigest: string | null;
-      payload: string;
-      payloadDigest: string;
-      skills?: RuntimeSkillInput[];
-      toolCatalogSnapshot: ToolCatalogSnapshot;
-      teamMcp?: RuntimeTeamMcpOption;
+      type: 'prepare_images';
+      selectionIdentity: string;
+      manifest: RuntimeImageAttachmentManifestEntry[];
+      paths: string[];
+      manifestDigest: string;
     })
+  | (EnvelopeBase & RuntimeStartRequest & { type: 'start' })
+  | (EnvelopeBase &
+      RuntimeStartRequest & {
+        type: 'commit_images';
+        selectionIdentity: string;
+        manifestDigest: string;
+      })
   | (EnvelopeBase & { type: 'cancel' });
 
 export type RuntimeToMainEnvelope =
@@ -190,6 +271,13 @@ export type RuntimeToMainEnvelope =
       claudeModels: CodexModelOption[];
     })
   | (EnvelopeBase & {
+      type: 'images_prepared';
+      selectionIdentity: string;
+      manifestDigest: string;
+      decodedByteLength: number;
+    })
+  | (EnvelopeBase & { type: 'images_prepare_failed'; error: PublicError })
+  | (EnvelopeBase & {
       type: 'started';
       acceptedContextFragmentIds: string[];
       acceptedProjectItemIds: string[];
@@ -199,13 +287,23 @@ export type RuntimeToMainEnvelope =
   | (EnvelopeBase & { type: 'stopped'; forced: boolean })
   | (EnvelopeBase & { type: 'event'; event: RuntimeCanonicalEvent })
   | (EnvelopeBase & { type: 'exit'; code: number; canceled: boolean })
-  | (EnvelopeBase & { type: 'error'; error: PublicError });
+  | (EnvelopeBase & {
+      type: 'error';
+      error: PublicError;
+      diagnostic?: RuntimeFailureDiagnostic;
+    });
 
 export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeEnvelope {
   if (!hasValidBase(value)) return false;
   if (value.type === 'hello' || value.type === 'cancel') return true;
+  if (value.type === 'prepare_images') return isRuntimeImagePreparation(value);
   return (
-    value.type === 'start' &&
+    (value.type === 'start' || value.type === 'commit_images') &&
+    (value.type !== 'commit_images' ||
+      ('selectionIdentity' in value &&
+        isSha256(value.selectionIdentity) &&
+        'manifestDigest' in value &&
+        isSha256(value.manifestDigest))) &&
     'input' in value &&
     typeof value.input === 'string' &&
     'workspace' in value &&
@@ -240,6 +338,54 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot) &&
     (!('teamMcp' in value) || value.teamMcp === undefined || isRuntimeTeamMcpOption(value.teamMcp))
   );
+}
+
+function isRuntimeImagePreparation(value: Record<string, unknown>): boolean {
+  if (
+    !isSha256(value['selectionIdentity']) ||
+    !isSha256(value['manifestDigest']) ||
+    !Array.isArray(value['manifest']) ||
+    value['manifest'].length < 1 ||
+    value['manifest'].length > 4 ||
+    !Array.isArray(value['paths']) ||
+    value['paths'].length !== value['manifest'].length
+  )
+    return false;
+  let total = 0;
+  let directory: string | null = null;
+  const ids = new Set<string>();
+  for (const [index, raw] of value['manifest'].entries()) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return false;
+    const entry = raw as Record<string, unknown>;
+    if (
+      typeof entry['id'] !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,128}$/.test(entry['id']) ||
+      ids.has(entry['id']) ||
+      !['image/png', 'image/jpeg', 'image/webp'].includes(String(entry['mimeType'])) ||
+      !Number.isSafeInteger(entry['byteLength']) ||
+      Number(entry['byteLength']) < 1 ||
+      Number(entry['byteLength']) > 5 * 1024 * 1024 ||
+      !isSha256(entry['sha256']) ||
+      Object.keys(entry).some((key) => !['id', 'mimeType', 'byteLength', 'sha256'].includes(key))
+    )
+      return false;
+    ids.add(entry['id']);
+    total += Number(entry['byteLength']);
+    const path = value['paths'][index];
+    if (typeof path !== 'string' || !isAbsolute(path)) return false;
+    const expectedExtension =
+      entry['mimeType'] === 'image/png'
+        ? '.png'
+        : entry['mimeType'] === 'image/jpeg'
+          ? '.jpg'
+          : '.webp';
+    if (basename(path) !== `${String(index + 1).padStart(3, '0')}${expectedExtension}`)
+      return false;
+    const currentDirectory = dirname(path);
+    if (directory === null) directory = currentDirectory;
+    else if (currentDirectory !== directory) return false;
+  }
+  return total <= 16 * 1024 * 1024;
 }
 
 function isRuntimeWorkspaceSet(value: unknown): value is RuntimeWorkspaceSet {
@@ -455,6 +601,19 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       value.claudeModels.length <= 32 &&
       value.claudeModels.every((model) => codexModelOptionSchema.safeParse(model).success)
     );
+  if (value.type === 'images_prepared')
+    return (
+      'selectionIdentity' in value &&
+      isSha256(value.selectionIdentity) &&
+      'manifestDigest' in value &&
+      isSha256(value.manifestDigest) &&
+      'decodedByteLength' in value &&
+      Number.isSafeInteger(value.decodedByteLength) &&
+      Number(value.decodedByteLength) > 0 &&
+      Number(value.decodedByteLength) <= 16 * 1024 * 1024
+    );
+  if (value.type === 'images_prepare_failed')
+    return 'error' in value && publicErrorSchema.safeParse(value.error).success;
   if (value.type === 'started')
     return (
       'acceptedContextFragmentIds' in value &&
@@ -488,8 +647,96 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       typeof value.canceled === 'boolean'
     );
   return (
-    value.type === 'error' && 'error' in value && publicErrorSchema.safeParse(value.error).success
+    value.type === 'error' &&
+    'error' in value &&
+    publicErrorSchema.safeParse(value.error).success &&
+    (!('diagnostic' in value) ||
+      value.diagnostic === undefined ||
+      isRuntimeFailureDiagnostic(value.diagnostic))
   );
+}
+
+export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFailureDiagnostic {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  const teamMcp = record['teamMcp'];
+  const structurallyValid =
+    Object.keys(record).every((key) =>
+      [
+        'version',
+        'diagnosticId',
+        'runtimeKind',
+        'failureStage',
+        'elapsedMs',
+        'appVersion',
+        'cliVersion',
+        'teamMcp',
+        'lastRecognizedNotification',
+        'lastReceivedNotification',
+        'unsupportedNotificationCount',
+        'stderrObserved',
+        'stderrTruncated',
+        'recordedAt',
+      ].includes(key),
+    ) &&
+    record['version'] === 1 &&
+    typeof record['diagnosticId'] === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      record['diagnosticId'],
+    ) &&
+    (record['runtimeKind'] === 'codex' || record['runtimeKind'] === 'claude') &&
+    [
+      'first_event_timeout',
+      'idle_timeout',
+      'total_timeout',
+      'protocol_error',
+      'startup_error',
+      'spawn_error',
+      'abnormal_exit',
+    ].includes(String(record['failureStage'])) &&
+    typeof record['elapsedMs'] === 'number' &&
+    Number.isSafeInteger(record['elapsedMs']) &&
+    record['elapsedMs'] >= 0 &&
+    typeof record['appVersion'] === 'string' &&
+    record['appVersion'].length <= 64 &&
+    (record['cliVersion'] === null ||
+      (typeof record['cliVersion'] === 'string' &&
+        record['cliVersion'].length <= 128 &&
+        (record['runtimeKind'] === 'codex'
+          ? /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(
+              record['cliVersion'],
+            )
+          : /^(?:claude-code )?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \(Claude Code\))?$/.test(
+              record['cliVersion'],
+            )))) &&
+    typeof teamMcp === 'object' &&
+    teamMcp !== null &&
+    Object.keys(teamMcp).every((key) => key === 'enabled' || key === 'status') &&
+    typeof (teamMcp as Record<string, unknown>)['enabled'] === 'boolean' &&
+    ['configured', 'not_configured'].includes(
+      String((teamMcp as Record<string, unknown>)['status']),
+    ) &&
+    (record['lastRecognizedNotification'] === null ||
+      (typeof record['lastRecognizedNotification'] === 'string' &&
+        RECOGNIZED_CODEX_NOTIFICATION_NAMES.has(record['lastRecognizedNotification']))) &&
+    (record['lastReceivedNotification'] === null ||
+      record['lastReceivedNotification'] === '[unsupported]' ||
+      (typeof record['lastReceivedNotification'] === 'string' &&
+        RECOGNIZED_CODEX_NOTIFICATION_NAMES.has(record['lastReceivedNotification']))) &&
+    typeof record['unsupportedNotificationCount'] === 'number' &&
+    Number.isSafeInteger(record['unsupportedNotificationCount']) &&
+    record['unsupportedNotificationCount'] >= 0 &&
+    typeof record['stderrObserved'] === 'boolean' &&
+    typeof record['stderrTruncated'] === 'boolean' &&
+    typeof record['recordedAt'] === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(record['recordedAt']) &&
+    Number.isFinite(Date.parse(record['recordedAt']));
+  if (!structurallyValid) return false;
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8') <= 16 * 1024;
+  } catch {
+    return false;
+  }
 }
 
 function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent {

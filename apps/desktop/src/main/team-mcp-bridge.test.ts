@@ -65,6 +65,12 @@ function roundTrip(
       while ((index = buffer.indexOf('\n')) >= 0) {
         lines.push(buffer.slice(0, index));
         buffer = buffer.slice(index + 1);
+        // Every request in this suite has exactly one response. Resolve as soon as that framed
+        // response arrives instead of relying on a 300ms grace window, which is too short under
+        // parallel Windows CI load and can produce an empty `lines` array.
+        socket.destroy();
+        finish();
+        return;
       }
     });
     socket.once('close', () => {
@@ -564,7 +570,10 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
       args: {},
     });
     expect(response.lines.map((line) => JSON.parse(line))).toContainEqual(
-      expect.objectContaining({ ok: true, result: { authenticated: true } }),
+      expect.objectContaining({
+        ok: true,
+        result: expect.objectContaining({ authenticated: true }),
+      }),
     );
   });
 
@@ -585,7 +594,10 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
         args: {},
       });
       expect(response.lines.map((line) => JSON.parse(line))).toContainEqual(
-        expect.objectContaining({ ok: true, result: { authenticated: true } }),
+        expect.objectContaining({
+          ok: true,
+          result: expect.objectContaining({ authenticated: true }),
+        }),
       );
     }
   });
