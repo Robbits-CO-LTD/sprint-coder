@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="658" height="498" viewBox="0 0 658 498">
+  <defs>
+    <linearGradient id="background" x1="42" y1="22" x2="604" y2="476" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101522"/>
+      <stop offset="0.52" stop-color="#090C14"/>
+      <stop offset="1" stop-color="#07080D"/>
+    </linearGradient>
+    <radialGradient id="cyanGlow" cx="0" cy="0" r="1" gradientTransform="translate(142 92) rotate(36) scale(290 220)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#24C8FF" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#24C8FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="violetGlow" cx="0" cy="0" r="1" gradientTransform="translate(548 424) rotate(-145) scale(330 245)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9B5CFF" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#9B5CFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#55E1FF"/>
+      <stop offset="0.5" stop-color="#5EA6FF"/>
+      <stop offset="1" stop-color="#B45CFF"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="84" y1="160" x2="574" y2="414" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.085"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.035"/>
+    </linearGradient>
+    <linearGradient id="panelStroke" x1="70" y1="158" x2="594" y2="414" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.20"/>
+      <stop offset="0.45" stop-color="#6EC7FF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#A96BFF" stop-opacity="0.18"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="20" stdDeviation="26" flood-color="#000000" flood-opacity="0.46"/>
+    </filter>
+    <filter id="softGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M28 0H0V28" fill="none" stroke="#FFFFFF" stroke-opacity="0.028" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="658" height="498" fill="url(#background)"/>
+  <rect width="658" height="498" fill="url(#cyanGlow)"/>
+  <rect width="658" height="498" fill="url(#violetGlow)"/>
+  <rect width="658" height="498" fill="url(#grid)"/>
+
+  <g transform="translate(46 42)">
+    <circle cx="13" cy="13" r="13" fill="url(#brand)" opacity="0.16"/>
+    <path d="M7.5 7.2L13.4 13L7.5 18.8M13.1 7.2L19 13L13.1 18.8" fill="none" stroke="url(#brand)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="38" y="18" fill="#F4F7FF" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="20" font-weight="650" letter-spacing="-0.4">Sprint Coder</text>
+  </g>
+
+  <g transform="translate(538 44)">
+    <rect width="74" height="25" rx="12.5" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.12"/>
+    <circle cx="16" cy="12.5" r="3" fill="#6DDCFF"/>
+    <text x="27" y="16.8" fill="#DDE5F5" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="11" font-weight="600" letter-spacing="0.2">macOS</text>
+  </g>
+
+  <text x="329" y="111" text-anchor="middle" fill="#F8FAFF" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="27" font-weight="680" letter-spacing="-0.8">Ready when you are.</text>
+  <text x="329" y="137" text-anchor="middle" fill="#9CA8BC" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="13" font-weight="450" letter-spacing="0.05">Drag Sprint Coder to Applications</text>
+
+  <g filter="url(#shadow)">
+    <rect x="64" y="166" width="530" height="260" rx="28" fill="url(#panel)" stroke="url(#panelStroke)"/>
+  </g>
+  <rect x="88" y="190" width="204" height="205" rx="22" fill="#070A10" fill-opacity="0.28" stroke="#FFFFFF" stroke-opacity="0.055"/>
+  <rect x="366" y="190" width="204" height="205" rx="22" fill="#070A10" fill-opacity="0.28" stroke="#FFFFFF" stroke-opacity="0.055"/>
+
+  <g opacity="0.9">
+    <circle cx="190" cy="296" r="72" fill="#2DD4FF" fill-opacity="0.08" filter="url(#softGlow)"/>
+    <circle cx="468" cy="296" r="72" fill="#A660FF" fill-opacity="0.08" filter="url(#softGlow)"/>
+  </g>
+
+  <g>
+    <path d="M305 296H350" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="12" stroke-linecap="round"/>
+    <path d="M305 296H350" fill="none" stroke="url(#brand)" stroke-width="3" stroke-linecap="round"/>
+    <path d="M344 287L353 296L344 305" fill="none" stroke="#9C8BFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="10" font-weight="650" letter-spacing="1.2">
+    <text x="190" y="214" text-anchor="middle" fill="#7C8AA2">STEP 1</text>
+    <text x="468" y="214" text-anchor="middle" fill="#7C8AA2">STEP 2</text>
+  </g>
+
+  <!-- Finder renders icon labels in black, so keep a light surface beneath them. -->
+  <g>
+    <rect x="124" y="362" width="132" height="26" rx="13" fill="#F5F8FF" fill-opacity="0.92" stroke="#FFFFFF" stroke-opacity="0.42"/>
+    <rect x="402" y="362" width="132" height="26" rx="13" fill="#F5F8FF" fill-opacity="0.92" stroke="#FFFFFF" stroke-opacity="0.42"/>
+  </g>
+
+  <circle cx="329" cy="451" r="2.5" fill="url(#brand)"/>
+  <text x="329" y="473" text-anchor="middle" fill="#68758A" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="10.5" font-weight="500" letter-spacing="0.55">BUILD · SHIP · REPEAT</text>
+</svg>
