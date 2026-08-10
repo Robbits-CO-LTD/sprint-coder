@@ -5,6 +5,10 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import config, {
   assertNativePackagingHost,
+  createDMGContents,
+  DMG_BACKGROUND_PATH,
+  DMG_ICON_SIZE,
+  DMG_WINDOW_SIZE,
   resolveWindowsSignOptions,
   NATIVE_ASAR_UNPACK_GLOB,
   verifyBundledNodeResources,
@@ -25,6 +29,28 @@ describe('desktop package icon', () => {
     expect(existsSync(`${iconPath}.ico`)).toBe(true);
     expect(readFileSync(`${iconPath}.icns`).subarray(0, 4).toString('ascii')).toBe('icns');
     expect([...readFileSync(`${iconPath}.ico`).subarray(0, 4)]).toEqual([0, 0, 1, 0]);
+  });
+});
+
+describe('macOS DMG presentation', () => {
+  it('uses branded standard and Retina backgrounds with a balanced drag-to-install layout', () => {
+    const retinaBackground = DMG_BACKGROUND_PATH.replace(/\.png$/, '@2x.png');
+    const background = readFileSync(DMG_BACKGROUND_PATH);
+    const retina = readFileSync(retinaBackground);
+    const pngDimensions = (png: Buffer) => ({
+      width: png.readUInt32BE(16),
+      height: png.readUInt32BE(20),
+    });
+
+    expect([...background.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect([...retina.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(pngDimensions(background)).toEqual(DMG_WINDOW_SIZE);
+    expect(pngDimensions(retina)).toEqual({ width: 1316, height: 996 });
+    expect(DMG_ICON_SIZE).toBe(112);
+    expect(createDMGContents('/tmp/Sprint Coder.app')).toEqual([
+      { x: 190, y: 300, type: 'file', path: '/tmp/Sprint Coder.app' },
+      { x: 468, y: 300, type: 'link', path: '/Applications' },
+    ]);
   });
 });
 

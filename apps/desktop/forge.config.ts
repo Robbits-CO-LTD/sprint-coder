@@ -51,6 +51,16 @@ const runtimeModuleFiles = [
 ] as const;
 export const NATIVE_ASAR_UNPACK_GLOB = '*.{node,dylib,dll,wasm,so,so.*}';
 const appIconPath = resolve(__dirname, 'assets', 'sprint-coder-icon');
+export const DMG_BACKGROUND_PATH = resolve(__dirname, 'assets', 'dmg-background.png');
+export const DMG_WINDOW_SIZE = { width: 658, height: 498 } as const;
+export const DMG_ICON_SIZE = 112;
+
+export function createDMGContents(appPath: string) {
+  return [
+    { x: 190, y: 300, type: 'file' as const, path: appPath },
+    { x: 468, y: 300, type: 'link' as const, path: '/Applications' },
+  ];
+}
 const macCodeSignIdentity = process.env['SPRINT_CODER_CODESIGN_IDENTITY'] ?? '-';
 const releasePackage = process.env['SPRINT_CODER_RELEASE'] === '1';
 const ciPackage = process.env['CI'] === '1' || process.env['CI'] === 'true';
@@ -305,6 +315,16 @@ const config: ForgeConfig = {
     new MakerDMG({
       name: 'Sprint Coder',
       format: 'ULFO',
+      background: DMG_BACKGROUND_PATH,
+      icon: `${appIconPath}.icns`,
+      iconSize: DMG_ICON_SIZE,
+      contents: ({ appPath }) => createDMGContents(appPath),
+      additionalDMGOptions: {
+        window: {
+          position: { x: 160, y: 100 },
+          size: DMG_WINDOW_SIZE,
+        },
+      },
     }),
   ],
   plugins: [
