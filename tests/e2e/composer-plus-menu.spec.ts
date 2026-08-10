@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
 // Issue #13: the Composer's only extra affordance was a permanently-`disabled` paperclip button —
@@ -114,7 +116,7 @@ test.describe('composer plus menu', () => {
       // Mock runtime is selected, so image generation states the Runtime requirement rather than a
       // generic "unavailable".
       await expect(page.getByTestId('composer-menu-imagegen')).toContainText('Codex Runtime');
-      await expect(page.getByTestId('composer-menu-attach')).toContainText('未実装');
+      await expect(page.getByTestId('composer-menu-attach')).toContainText('Codex Runtime');
 
       // Activating an unavailable item does nothing and the menu stays put.
       // `force` because Playwright's actionability check treats aria-disabled as disabled and would
@@ -122,6 +124,59 @@ test.describe('composer plus menu', () => {
       await page.getByTestId('composer-menu-attach').click({ force: true });
       await expect(page.getByTestId('composer-plus')).toHaveAttribute('aria-expanded', 'true');
     });
+  });
+
+  test('selects, removes, sends, and restores image attachment metadata', async () => {
+    const dir = createUserDataDir('composer-image-attachment');
+    const imagePath = join(dir, 'fixture.png');
+    writeFileSync(
+      imagePath,
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        'base64',
+      ),
+    );
+    let app: ElectronApplication | null = null;
+    const pickerEnvironment = { SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2: '0' };
+    try {
+      app = await launchApp(dir, undefined, pickerEnvironment);
+      let page = await firstWindow(app);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await page.getByTestId('runtime-selector').click();
+      await page.getByTestId('runtime-option-codex').click();
+      await page.getByTestId('model-selector').click();
+      await page.getByTestId('model-option-gpt-5.6-terra').click();
+      await app.evaluate(({ dialog }, selectedFile) => {
+        Object.defineProperty(dialog, 'showOpenDialog', {
+          configurable: true,
+          value: async () => ({ canceled: false, filePaths: [selectedFile] }),
+        });
+      }, imagePath);
+
+      const attach = page.getByTestId('composer-menu-attach');
+      await page.getByTestId('composer-plus').click();
+      await expect(attach).toHaveAttribute('aria-disabled', 'false');
+      await attach.click();
+      await expect(page.getByLabel('この送信に添付する画像')).toContainText('fixture.png');
+      await page.getByRole('button', { name: 'fixture.pngを削除' }).click();
+      await expect(page.getByLabel('この送信に添付する画像')).toHaveCount(0);
+
+      await page.getByTestId('composer-plus').click();
+      await page.getByTestId('composer-menu-attach').click();
+      await page.getByTestId('composer-textarea').fill('この画像を確認してください');
+      await page.getByTestId('composer-send-button').click();
+      await expect(page.getByLabel('この送信で参照した画像')).toContainText('fixture.png');
+      await expect(page.getByText('この画像を確認してください')).toBeVisible();
+
+      await closeApp(app);
+      app = await launchApp(dir, undefined, pickerEnvironment);
+      page = await firstWindow(app);
+      await expect(page.getByLabel('この送信で参照した画像')).toContainText('fixture.png');
+      await expect(page.getByText('この画像を確認してください')).toBeVisible();
+    } finally {
+      await closeApp(app);
+      removeUserDataDir(dir);
+    }
   });
 
   test('the menu stays inside the Leader node on the Team Canvas', async () => {

@@ -1035,6 +1035,50 @@ export const canvasViewSaveResultSchema = z
   .strict();
 export type CanvasViewSaveResult = z.infer<typeof canvasViewSaveResultSchema>;
 
+export const IMAGE_ATTACHMENT_MAX_COUNT = 4;
+export const IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+export const IMAGE_ATTACHMENT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+export const imageAttachmentMimeTypeSchema = z.enum(['image/png', 'image/jpeg', 'image/webp']);
+export type ImageAttachmentMimeType = z.infer<typeof imageAttachmentMimeTypeSchema>;
+export const imageAttachmentMetadataSchema = z
+  .object({
+    id: idSchema,
+    fileName: z.string().min(1).max(255),
+    mimeType: imageAttachmentMimeTypeSchema,
+    byteLength: z.number().int().min(1).max(IMAGE_ATTACHMENT_MAX_BYTES),
+    createdAt: timestampSchema,
+  })
+  .strict();
+export type ImageAttachmentMetadata = z.infer<typeof imageAttachmentMetadataSchema>;
+export const imageAttachmentMetadataListSchema = z
+  .array(imageAttachmentMetadataSchema)
+  .max(IMAGE_ATTACHMENT_MAX_COUNT)
+  .superRefine((attachments, context) => {
+    if (new Set(attachments.map(({ id }) => id)).size !== attachments.length)
+      context.addIssue({ code: 'custom', message: 'Attachment IDs must be unique' });
+    const total = attachments.reduce((sum, attachment) => sum + attachment.byteLength, 0);
+    if (total > IMAGE_ATTACHMENT_MAX_TOTAL_BYTES)
+      context.addIssue({ code: 'custom', message: 'Attachment bytes exceed the aggregate limit' });
+  });
+export const imageAttachmentCapabilitySchema = z
+  .object({
+    status: z.enum(['pending', 'supported', 'unsupported']),
+    reason: z.string().min(1).max(500).nullable(),
+    selectionIdentity: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type ImageAttachmentCapability = z.infer<typeof imageAttachmentCapabilitySchema>;
+export const imageAttachmentRemoveInputSchema = z
+  .object({ taskId: idSchema, attachmentId: idSchema })
+  .strict();
+export const imageAttachmentIdsSchema = z
+  .array(idSchema)
+  .max(IMAGE_ATTACHMENT_MAX_COUNT)
+  .superRefine((ids, context) => {
+    if (new Set(ids).size !== ids.length)
+      context.addIssue({ code: 'custom', message: 'Attachment IDs must be unique' });
+  });
+
 export const chatMessageSchema = z
   .object({
     id: idSchema,
@@ -1043,6 +1087,7 @@ export const chatMessageSchema = z
     author: z.enum(['user', 'assistant', 'system']),
     content: z.string().max(1_000_000),
     workContent: z.string().max(1_000_000).nullable().optional(),
+    attachments: imageAttachmentMetadataListSchema.default([]),
     createdAt: timestampSchema,
   })
   .strict();
@@ -2857,14 +2902,26 @@ export const goalResumeInputSchema = z
   .strict();
 export const goalRunResultSchema = z.object({ task: taskSummarySchema, turnId: idSchema }).strict();
 export const taskDraftInputSchema = z.object({ taskId: idSchema, draft: taskTextSchema }).strict();
+const turnTextAndSkillsInputShape = {
+  taskId: idSchema,
+  text: z.string().trim().min(1).max(100_000),
+  skills: turnSkillSelectionsSchema.default([]),
+} as const;
 export const turnStartInputSchema = z
   .object({
-    taskId: idSchema,
-    text: z.string().trim().min(1).max(100_000),
-    skills: turnSkillSelectionsSchema.default([]),
+    ...turnTextAndSkillsInputShape,
+    attachmentIds: imageAttachmentIdsSchema,
+    attachmentSelectionIdentity: z.string().min(1).max(512).nullable(),
   })
-  .strict();
-export const turnQueueInputSchema = turnStartInputSchema;
+  .strict()
+  .superRefine((input, context) => {
+    if (input.attachmentIds.length > 0 !== (input.attachmentSelectionIdentity !== null))
+      context.addIssue({
+        code: 'custom',
+        message: 'Attachment selection identity must match attachment presence',
+      });
+  });
+export const turnQueueInputSchema = z.object(turnTextAndSkillsInputShape).strict();
 export const turnQueueResultSchema = z.object({ ordinal: z.number().int().positive() }).strict();
 export const turnSteerInputSchema = z
   .object({
@@ -2873,7 +2930,7 @@ export const turnSteerInputSchema = z
     expectedTurnId: idSchema,
   })
   .strict();
-export const turnStopAndSendInputSchema = turnStartInputSchema;
+export const turnStopAndSendInputSchema = z.object(turnTextAndSkillsInputShape).strict();
 export const turnCancelInputSchema = z.object({ taskId: idSchema, turnId: idSchema }).strict();
 export const turnSubscriptionInputSchema = z
   .object({
@@ -3017,6 +3074,12 @@ export interface SprintCoderApi {
       skills?: readonly TurnSkillSelection[],
     ): Promise<{ task: TaskSummary; turnId: string }>;
     clear(taskId: string): Promise<TaskSummary>;
+  };
+  attachments: {
+    capability(taskId: string): Promise<ImageAttachmentCapability>;
+    pick(taskId: string): Promise<ImageAttachmentMetadata | null>;
+    listDraft(taskId: string): Promise<ImageAttachmentMetadata[]>;
+    remove(input: { taskId: string; attachmentId: string }): Promise<void>;
   };
   projects: {
     list(): Promise<ProjectSummary[]>;
@@ -3226,6 +3289,8 @@ export interface SprintCoderApi {
       taskId: string;
       text: string;
       skills?: TurnSkillSelection[];
+      attachmentIds: string[];
+      attachmentSelectionIdentity: string | null;
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
     queue(input: {
       taskId: string;
@@ -3265,6 +3330,10 @@ export const IPC_CHANNELS = {
   goalsClear: 'sprint-coder:goals:clear',
   tasksGetDraft: 'sprint-coder:tasks:get-draft',
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
+  attachmentsCapability: 'sprint-coder:attachments:capability',
+  attachmentsPick: 'sprint-coder:attachments:pick',
+  attachmentsListDraft: 'sprint-coder:attachments:list-draft',
+  attachmentsRemove: 'sprint-coder:attachments:remove',
   projectsList: 'sprint-coder:projects:list',
   projectsPickFolders: 'sprint-coder:projects:pick-folders',
   projectsFoldersList: 'sprint-coder:projects:folders:list',

@@ -81,6 +81,7 @@ function message(overrides: Partial<ChatMessage> = {}): ChatMessage {
     content: 'こんにちは',
     createdAt: '2026-07-28T01:00:00.000Z',
     ...overrides,
+    attachments: overrides.attachments ?? [],
   };
 }
 

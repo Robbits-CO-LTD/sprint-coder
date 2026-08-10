@@ -10,5 +10,5 @@ export default defineConfig({
       macAutoUpdateEligibleForIdentity(process.env['SPRINT_CODER_CODESIGN_IDENTITY']),
     ),
   },
-  build: { rollupOptions: { external: ['better-sqlite3'] } },
+  build: { rollupOptions: { external: ['better-sqlite3', 'sharp'] } },
 });

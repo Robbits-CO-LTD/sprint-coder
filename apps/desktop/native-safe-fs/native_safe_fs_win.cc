@@ -3,6 +3,7 @@
 #include <aclapi.h>
 
 #include <mutex>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -48,6 +49,141 @@ bool Utf8ToWide(const std::string& input, std::wstring* output) {
   output->resize(static_cast<size_t>(length));
   return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(),
                              static_cast<int>(input.size()), output->data(), length) == length;
+}
+
+napi_value ThrowUnsafeImageFile(napi_env env, const char* code) {
+  napi_value error;
+  napi_create_error(env, nullptr, MakeString(env, "The selected image file is unsafe"), &error);
+  napi_set_named_property(env, error, "code", MakeString(env, code));
+  napi_throw(env, error);
+  return nullptr;
+}
+
+std::wstring NormalizeFinalPath(std::wstring path) {
+  constexpr wchar_t kUncPrefix[] = L"\\\\?\\UNC\\";
+  constexpr wchar_t kLongPrefix[] = L"\\\\?\\";
+  if (path.rfind(kUncPrefix, 0) == 0) return L"\\\\" + path.substr(8);
+  if (path.rfind(kLongPrefix, 0) == 0) return path.substr(4);
+  return path;
+}
+
+bool SamePath(const std::wstring& left, const std::wstring& right) {
+  return CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(),
+                              static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+}
+
+bool QueryStableImageIdentity(HANDLE file, FILE_ID_INFO* id, FILE_BASIC_INFO* basic,
+                              FILE_STANDARD_INFO* standard) {
+  FILE_ATTRIBUTE_TAG_INFO tag{};
+  if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag, sizeof(tag)) ||
+      (tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+      tag.ReparseTag != 0 ||
+      !GetFileInformationByHandleEx(file, FileIdInfo, id, sizeof(*id)) ||
+      !GetFileInformationByHandleEx(file, FileBasicInfo, basic, sizeof(*basic)) ||
+      !GetFileInformationByHandleEx(file, FileStandardInfo, standard, sizeof(*standard)))
+    return false;
+  return !standard->Directory && !standard->DeletePending && standard->NumberOfLinks == 1;
+}
+
+bool SameImageIdentity(const FILE_ID_INFO& first_id, const FILE_BASIC_INFO& first_basic,
+                       const FILE_STANDARD_INFO& first_standard, const FILE_ID_INFO& second_id,
+                       const FILE_BASIC_INFO& second_basic,
+                       const FILE_STANDARD_INFO& second_standard) {
+  return first_id.VolumeSerialNumber == second_id.VolumeSerialNumber &&
+         std::memcmp(&first_id.FileId, &second_id.FileId, sizeof(FILE_ID_128)) == 0 &&
+         first_basic.CreationTime.QuadPart == second_basic.CreationTime.QuadPart &&
+         first_basic.LastWriteTime.QuadPart == second_basic.LastWriteTime.QuadPart &&
+         first_basic.ChangeTime.QuadPart == second_basic.ChangeTime.QuadPart &&
+         first_basic.FileAttributes == second_basic.FileAttributes &&
+         first_standard.EndOfFile.QuadPart == second_standard.EndOfFile.QuadPart &&
+         first_standard.AllocationSize.QuadPart == second_standard.AllocationSize.QuadPart &&
+         first_standard.NumberOfLinks == second_standard.NumberOfLinks &&
+         !second_standard.DeletePending && !second_standard.Directory;
+}
+
+napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
+    napi_throw_type_error(env, nullptr, "readNoReparseImageFile requires one absolute path");
+    return nullptr;
+  }
+  std::string path_utf8;
+  std::wstring path;
+  if (!ReadString(env, argv[0], &path_utf8) || !Utf8ToWide(path_utf8, &path)) {
+    napi_throw_type_error(env, nullptr, "Invalid image path");
+    return nullptr;
+  }
+  const DWORD full_length = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+  if (full_length == 0) return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+  std::vector<wchar_t> full_buffer(full_length, L'\0');
+  if (GetFullPathNameW(path.c_str(), full_length, full_buffer.data(), nullptr) == 0)
+    return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+  const std::wstring full_path(full_buffer.data());
+  if (!SamePath(path, full_path)) return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+
+  HANDLE file = CreateFileW(full_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+                                FILE_FLAG_SEQUENTIAL_SCAN,
+                            nullptr);
+  if (file == INVALID_HANDLE_VALUE) return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+
+  FILE_ID_INFO before_id{};
+  FILE_BASIC_INFO before_basic{};
+  FILE_STANDARD_INFO before_standard{};
+  constexpr LONGLONG kMaximumBytes = 5LL * 1024LL * 1024LL;
+  bool safe = QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard);
+  if (!safe || before_standard.EndOfFile.QuadPart < 1 ||
+      before_standard.EndOfFile.QuadPart > kMaximumBytes) {
+    const bool too_large = safe && before_standard.EndOfFile.QuadPart > kMaximumBytes;
+    CloseHandle(file);
+    return ThrowUnsafeImageFile(env, too_large ? "IMAGE_FILE_TOO_LARGE" : "UNSAFE_IMAGE_FILE");
+  }
+
+  const DWORD final_length = GetFinalPathNameByHandleW(
+      file, nullptr, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  std::vector<wchar_t> final_buffer(final_length + 1, L'\0');
+  if (final_length == 0 ||
+      GetFinalPathNameByHandleW(file, final_buffer.data(), final_length + 1,
+                                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) == 0 ||
+      !SamePath(full_path, NormalizeFinalPath(std::wstring(final_buffer.data())))) {
+    CloseHandle(file);
+    return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+  }
+
+  const size_t byte_length = static_cast<size_t>(before_standard.EndOfFile.QuadPart);
+  std::vector<unsigned char> bytes(byte_length);
+  size_t offset = 0;
+  while (offset < byte_length) {
+    DWORD bytes_read = 0;
+    const DWORD requested = static_cast<DWORD>(byte_length - offset);
+    if (!ReadFile(file, bytes.data() + offset, requested, &bytes_read, nullptr) || bytes_read == 0) {
+      CloseHandle(file);
+      return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+    }
+    offset += bytes_read;
+  }
+  unsigned char overflow = 0;
+  DWORD overflow_read = 0;
+  if (!ReadFile(file, &overflow, 1, &overflow_read, nullptr) || overflow_read != 0) {
+    CloseHandle(file);
+    return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+  }
+
+  FILE_ID_INFO after_id{};
+  FILE_BASIC_INFO after_basic{};
+  FILE_STANDARD_INFO after_standard{};
+  safe = QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard) &&
+         SameImageIdentity(before_id, before_basic, before_standard, after_id, after_basic,
+                           after_standard);
+  CloseHandle(file);
+  if (!safe) return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+
+  napi_value result;
+  if (napi_create_buffer_copy(env, bytes.size(), bytes.data(), nullptr, &result) != napi_ok)
+    return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+  return result;
 }
 
 bool SameParentPath(const std::wstring& first, const std::wstring& second) {
@@ -410,6 +546,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
        napi_default, nullptr},
       {"applyWindowsAcl", nullptr, ApplyWindowsAcl, nullptr, nullptr, nullptr, napi_default,
        nullptr},
+      {"readNoReparseImageFile", nullptr, ReadNoReparseImageFile, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   return exports;
