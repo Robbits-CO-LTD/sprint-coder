@@ -1030,6 +1030,8 @@ const LEGACY_MIGRATION_LINEAGE = new Map<number, string>([
   [38, 'project-context-hub-v38-reference-content-digest'],
 ]);
 const LEGACY_MIGRATION_COMPATIBILITY_KEY = 'legacy-team-project-lineage-v1';
+const LEGACY_RUNTIME_DIAGNOSTIC_CHECKSUM = 'runtime-failure-diagnostics-v66';
+const LEGACY_RUNTIME_DIAGNOSTIC_COMPATIBILITY_KEY = 'legacy-runtime-diagnostics-v66-collision-v1';
 
 const migrations = [
   {
@@ -4850,17 +4852,29 @@ export class SqlitePersistenceClient implements PersistenceClient {
     )`);
     let applied = this.readAppliedMigrations();
     const legacyLineage = this.isLegacyMigrationLineage(applied);
+    const legacyRuntimeDiagnosticCollision = this.isLegacyRuntimeDiagnosticCollision(applied);
     const hadPendingMigrations = migrations.some((migration) => !applied.has(migration.version));
-    if (hadPendingMigrations && existsSync(databasePath) && applied.size > 0)
+    if (
+      (hadPendingMigrations || legacyRuntimeDiagnosticCollision) &&
+      existsSync(databasePath) &&
+      applied.size > 0
+    )
       this.createPreMigrationBackup(databasePath);
     if (legacyLineage) {
       this.applyLegacyMigrationBridge();
       applied = this.readAppliedMigrations();
     }
+    if (legacyRuntimeDiagnosticCollision) {
+      this.applyLegacyRuntimeDiagnosticBridge();
+      applied = this.readAppliedMigrations();
+    }
     for (const migration of migrations) {
       const checksum = applied.get(migration.version);
       const isRecognizedLegacyChecksum =
-        legacyLineage && LEGACY_MIGRATION_LINEAGE.get(migration.version) === checksum;
+        (legacyLineage && LEGACY_MIGRATION_LINEAGE.get(migration.version) === checksum) ||
+        (legacyRuntimeDiagnosticCollision &&
+          migration.version === 66 &&
+          checksum === LEGACY_RUNTIME_DIAGNOSTIC_CHECKSUM);
       if (checksum !== undefined && checksum !== migration.checksum && !isRecognizedLegacyChecksum)
         throw new Error('Migration checksum mismatch');
       if (checksum !== undefined) continue;
@@ -4965,6 +4979,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return true;
   }
 
+  private isLegacyRuntimeDiagnosticCollision(applied: ReadonlyMap<number, string>): boolean {
+    return applied.get(66) === LEGACY_RUNTIME_DIAGNOSTIC_CHECKSUM;
+  }
+
   private migrationForVersion(version: number): (typeof migrations)[number] {
     const migration = migrations.find((candidate) => candidate.version === version);
     if (migration === undefined) throw new Error(`Missing migration ${version}`);
@@ -5033,6 +5051,51 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare('INSERT INTO schema_migration_compatibility(lineage, applied_at) VALUES (?, ?)')
         .run(LEGACY_MIGRATION_COMPATIBILITY_KEY, new Date().toISOString());
+    })();
+  }
+
+  /**
+   * Repairs the development-only v66 collision where runtime diagnostics occupied the version
+   * later assigned to automatic Ollama model release. The old diagnostics schema is identical to
+   * the current v69 migration, so retain its historical v66 row, apply the missing provider change,
+   * and record v69 without recreating the existing diagnostics table.
+   */
+  private applyLegacyRuntimeDiagnosticBridge(): void {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS schema_migration_compatibility (
+      lineage TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+    )`);
+    const alreadyApplied = this.db
+      .prepare('SELECT 1 FROM schema_migration_compatibility WHERE lineage = ?')
+      .get(LEGACY_RUNTIME_DIAGNOSTIC_COMPATIBILITY_KEY);
+    if (alreadyApplied !== undefined) return;
+
+    this.db.transaction(() => {
+      if (!this.tableExists('runtime_failure_diagnostics'))
+        throw new Error('Migration checksum mismatch');
+
+      const providerMigration = this.migrationForVersion(66);
+      if (!this.columnExists('provider_connections', 'automatic_model_release'))
+        this.db.exec(providerMigration.sql);
+
+      const relocatedDiagnosticMigration = this.migrationForVersion(69);
+      const existing = this.db
+        .prepare('SELECT checksum FROM schema_migrations WHERE version = ?')
+        .get(69) as { checksum: string } | undefined;
+      if (existing === undefined) {
+        this.db
+          .prepare('INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)')
+          .run(
+            relocatedDiagnosticMigration.version,
+            relocatedDiagnosticMigration.checksum,
+            new Date().toISOString(),
+          );
+      } else if (existing.checksum !== relocatedDiagnosticMigration.checksum) {
+        throw new Error('Migration checksum mismatch');
+      }
+
+      this.db
+        .prepare('INSERT INTO schema_migration_compatibility(lineage, applied_at) VALUES (?, ?)')
+        .run(LEGACY_RUNTIME_DIAGNOSTIC_COMPATIBILITY_KEY, new Date().toISOString());
     })();
   }
 
