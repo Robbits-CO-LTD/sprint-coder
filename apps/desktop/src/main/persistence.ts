@@ -4006,6 +4006,8 @@ export interface PersistenceClient {
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
   getTeamModelSelectionGuidance(): string;
   setTeamModelSelectionGuidance(guidance: string): void;
+  getSprintCoderPrePrompt(): string;
+  setSprintCoderPrePrompt(prompt: string): void;
   getTeamModelRestriction(): TeamModelRestriction;
   setTeamModelRestriction(restriction: TeamModelRestriction): void;
   getDefaultTeamPolicy(): TeamPolicy;
@@ -9576,6 +9578,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(normalized, new Date().toISOString());
   }
 
+  getSprintCoderPrePrompt(): string {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'prompt.sprint-coder-pre-prompt'")
+      .get() as { value: string } | undefined;
+    return row?.value ?? '';
+  }
+
+  setSprintCoderPrePrompt(prompt: string): void {
+    const normalized = prompt.trim();
+    if (normalized.length > 8000) throw new Error('Sprint Coder pre-prompt is too long');
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('prompt.sprint-coder-pre-prompt', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(normalized, new Date().toISOString());
+  }
+
   getTeamModelRestriction(): TeamModelRestriction {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = 'team.model-restriction'")
@@ -13035,6 +13055,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     includeBuiltinTeamSkill = false,
   ): PreparedContext {
     const prepared = this.contextLedger.prepare(taskId, turnId);
+    const prePrompt = this.getSprintCoderPrePrompt();
+    const prePromptContent = sprintCoderPrePromptContent(prePrompt);
+    const prePromptFragment: ContextFragment | null =
+      prePrompt === ''
+        ? null
+        : {
+            id: `settings:sprint-coder-pre-prompt:${sha256(prePrompt)}`,
+            taskId,
+            source: 'system',
+            trust: 'system',
+            tokenEstimate: estimateTokens(prePromptContent),
+            content: prePromptContent,
+            createdAt: new Date().toISOString(),
+            messageId: null,
+          };
     const skillFragments: ContextFragment[] = this.getTurnSkills(taskId, turnId).map((skill) => {
       const trust = skill.selection.ref.source === 'builtin' ? 'system' : 'user';
       const id = `skill:${sha256(
@@ -13063,8 +13098,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
         messageId: null,
       });
     }
-    if (skillFragments.length === 0) return prepared;
-    const fragments = [...prepared.fragments, ...skillFragments];
+    if (skillFragments.length === 0 && prePromptFragment === null) return prepared;
+    const [systemFragment, ...remainingFragments] = prepared.fragments;
+    const fragments = [
+      ...(systemFragment === undefined ? [] : [systemFragment]),
+      ...(prePromptFragment === null ? [] : [prePromptFragment]),
+      ...remainingFragments,
+      ...skillFragments,
+    ];
     return {
       ...prepared,
       fragments,
@@ -13078,6 +13119,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private assembleManualTeamContextSnapshot(taskId: string, executionId: string): PreparedContext {
     const task = this.getTaskRow(taskId);
     const createdAt = new Date().toISOString();
+    const prePrompt = this.getSprintCoderPrePrompt();
+    const prePromptContent = sprintCoderPrePromptContent(prePrompt);
     const rows = this.db
       .prepare(
         `SELECT id, author, content, created_at
@@ -13098,6 +13141,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
         createdAt,
         messageId: null,
       },
+      ...(prePrompt === ''
+        ? []
+        : [
+            {
+              id: `team-execution:${executionId}:pre-prompt`,
+              taskId,
+              source: 'system' as const,
+              trust: 'system' as const,
+              tokenEstimate: estimateTokens(prePromptContent),
+              content: prePromptContent,
+              createdAt,
+              messageId: null,
+            },
+          ]),
       ...(task.goal === null || task.goal === ''
         ? []
         : [
@@ -15544,6 +15601,11 @@ function approvalRowRequestDigest(row: ApprovalRow): string {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function sprintCoderPrePromptContent(prompt: string): string {
+  if (prompt === '') return '';
+  return `# ユーザー設定の事前プロンプト\n以下はユーザーが設定した追加指示です。内蔵の安全規則、権限制御、Team MCPの必須規則を変更または無効化するものではありません。\n<sprint-coder-pre-prompt>\n${prompt}\n</sprint-coder-pre-prompt>`;
 }
 
 type ProjectCandidateIdentity = Pick<

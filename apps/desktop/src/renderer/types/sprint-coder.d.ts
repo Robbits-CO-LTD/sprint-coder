@@ -1020,6 +1020,10 @@ export interface SprintCoderApi {
     setTeamModelSelectionGuidance(
       input: import('@sprint-coder/contracts').TeamModelSelectionGuidance,
     ): Promise<void>;
+    getSprintCoderPrePrompt(): Promise<import('@sprint-coder/contracts').SprintCoderPrePrompt>;
+    setSprintCoderPrePrompt(
+      input: import('@sprint-coder/contracts').SprintCoderPrePrompt,
+    ): Promise<void>;
     getTeamModelSettings(): Promise<import('@sprint-coder/contracts').TeamModelSettings>;
     setTeamModelRestriction(
       input: import('@sprint-coder/contracts').TeamModelRestriction,

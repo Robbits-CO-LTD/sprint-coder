@@ -36,6 +36,8 @@ function stubBridge(): void {
         setTeamModelResearch: () => Promise.resolve(),
         getTeamModelSelectionGuidance: () => Promise.resolve({ guidance: '' }),
         setTeamModelSelectionGuidance: () => Promise.resolve(),
+        getSprintCoderPrePrompt: () => Promise.resolve({ prompt: '' }),
+        setSprintCoderPrePrompt: () => Promise.resolve(),
         getTeamModelSettings: () =>
           Promise.resolve({
             restriction: { mode: 'all', allowedModels: [] },
@@ -82,6 +84,8 @@ describe('which body the flag selects', () => {
     expect(html).toContain('data-testid="settings-team-models"');
     expect(html).toContain('data-testid="settings-team-model-guidance"');
     expect(html).toContain('覚えておいてほしいこと');
+    expect(html).toContain('data-testid="settings-sprint-coder-pre-prompt"');
+    expect(html).toContain('Sprint Coderの事前プロンプト');
     expect(html).toMatch(/data-testid="settings-page-models"[^>]*>/);
     expect(html).toMatch(/data-testid="settings-page-team"[^>]*hidden=""/);
   });

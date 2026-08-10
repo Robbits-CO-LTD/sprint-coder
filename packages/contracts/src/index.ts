@@ -2362,6 +2362,13 @@ export const teamModelSelectionGuidanceSchema = z
   .strict();
 export type TeamModelSelectionGuidance = z.infer<typeof teamModelSelectionGuidanceSchema>;
 export const teamModelSelectionGuidanceSetInputSchema = teamModelSelectionGuidanceSchema;
+export const sprintCoderPrePromptSchema = z
+  .object({
+    prompt: z.string().max(8000),
+  })
+  .strict();
+export type SprintCoderPrePrompt = z.infer<typeof sprintCoderPrePromptSchema>;
+export const sprintCoderPrePromptSetInputSchema = sprintCoderPrePromptSchema;
 export const teamModelIdentitySchema = z
   .object({
     connectionId: connectionIdSchema,
@@ -3131,6 +3138,8 @@ export interface SprintCoderApi {
     setTeamModelResearch(input: TeamModelResearchSettings): Promise<void>;
     getTeamModelSelectionGuidance(): Promise<TeamModelSelectionGuidance>;
     setTeamModelSelectionGuidance(input: TeamModelSelectionGuidance): Promise<void>;
+    getSprintCoderPrePrompt(): Promise<SprintCoderPrePrompt>;
+    setSprintCoderPrePrompt(input: SprintCoderPrePrompt): Promise<void>;
     getTeamModelSettings(): Promise<TeamModelSettings>;
     setTeamModelRestriction(input: TeamModelRestriction): Promise<void>;
     getDefaultTeamPolicy(): Promise<TeamPolicy>;
@@ -3312,6 +3321,8 @@ export const IPC_CHANNELS = {
   settingsSetTeamModelResearch: 'sprint-coder:settings:set-team-model-research',
   settingsGetTeamModelSelectionGuidance: 'sprint-coder:settings:get-team-model-selection-guidance',
   settingsSetTeamModelSelectionGuidance: 'sprint-coder:settings:set-team-model-selection-guidance',
+  settingsGetSprintCoderPrePrompt: 'sprint-coder:settings:get-sprint-coder-pre-prompt',
+  settingsSetSprintCoderPrePrompt: 'sprint-coder:settings:set-sprint-coder-pre-prompt',
   settingsGetTeamModelSettings: 'sprint-coder:settings:get-team-model-settings',
   settingsSetTeamModelRestriction: 'sprint-coder:settings:set-team-model-restriction',
   settingsGetDefaultTeamPolicy: 'sprint-coder:settings:get-default-team-policy',

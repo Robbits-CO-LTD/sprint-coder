@@ -1380,6 +1380,29 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('persists the Sprint Coder pre-prompt and seals it before conversation history', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getSprintCoderPrePrompt()).toBe('');
+      persistence.setSprintCoderPrePrompt('  既存設計を確認してから実装する。  ');
+      const task = persistence.createTask('pre-prompt task');
+      const started = persistence.startTurn(task.id, '実装して');
+      const prepared = persistence.prepareContext(task.id, started.turnId);
+
+      expect(prepared.fragments[0]?.content).toContain('Sprint Coderの実行エージェント');
+      expect(prepared.fragments[1]).toMatchObject({
+        source: 'system',
+        trust: 'system',
+      });
+      expect(prepared.fragments[1]?.content).toContain('<sprint-coder-pre-prompt>');
+      expect(prepared.fragments[1]?.content).toContain('既存設計を確認してから実装する。');
+      expect(prepared.fragments[2]?.content).toBe('実装して');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getSprintCoderPrePrompt()).toBe('既存設計を確認してから実装する。');
+      reopened.close();
+    });
+
     it('defaults Team models to all and persists a selected-model restriction across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getTeamModelRestriction()).toEqual({

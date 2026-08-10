@@ -97,6 +97,8 @@ import {
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeSettingsSchema,
+  sprintCoderPrePromptSchema,
+  sprintCoderPrePromptSetInputSchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
   teamModelSelectionGuidanceSchema,
@@ -984,6 +986,21 @@ export class IpcRouter {
           '',
           IPC_CHANNELS.settingsSetTeamModelSelectionGuidance,
           () => this.persistence.setTeamModelSelectionGuidance(input.guidance),
+        ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetSprintCoderPrePrompt,
+      emptyPayloadSchema,
+      sprintCoderPrePromptSchema,
+      () => ({ prompt: this.persistence.getSprintCoderPrePrompt() }),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetSprintCoderPrePrompt,
+      sprintCoderPrePromptSetInputSchema,
+      z.undefined(),
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetSprintCoderPrePrompt, () =>
+          this.persistence.setSprintCoderPrePrompt(input.prompt),
         ).value,
     );
     this.handle(
