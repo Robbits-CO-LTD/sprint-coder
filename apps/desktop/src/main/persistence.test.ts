@@ -5933,6 +5933,54 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('bridges the known runtime-diagnostics v66 collision and keeps the bridge idempotent', () => {
+      const { persistence, path } = createPersistence();
+      persistence.close();
+
+      const legacy = new Database(path);
+      legacy.exec(`
+        DROP TABLE image_attachments;
+        DROP INDEX messages_id_task_unique;
+        ALTER TABLE provider_connections DROP COLUMN automatic_model_release;
+        DELETE FROM schema_migrations WHERE version IN (67, 68, 69);
+        UPDATE schema_migrations SET checksum = 'runtime-failure-diagnostics-v66'
+          WHERE version = 66;
+      `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      const inspection = new Database(path, { readonly: true });
+      expect(inspection.prepare("PRAGMA table_info('provider_connections')").all()).toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: 'automatic_model_release' })]),
+      );
+      expect(
+        inspection
+          .prepare('SELECT version, checksum FROM schema_migrations WHERE version IN (66, 69)')
+          .all(),
+      ).toEqual([
+        { version: 66, checksum: 'runtime-failure-diagnostics-v66' },
+        { version: 69, checksum: 'runtime-failure-diagnostics-v69' },
+      ]);
+      expect(
+        inspection
+          .prepare('SELECT lineage FROM schema_migration_compatibility WHERE lineage = ?')
+          .get('legacy-runtime-diagnostics-v66-collision-v1'),
+      ).toEqual({ lineage: 'legacy-runtime-diagnostics-v66-collision-v1' });
+      expect(
+        inspection
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'image_attachments'",
+          )
+          .get(),
+      ).toEqual({ name: 'image_attachments' });
+      expect(inspection.pragma('foreign_key_check')).toEqual([]);
+      inspection.close();
+      migrated.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.close();
+    });
+
     it('converts the legacy Project reference and memory tables during the bridge', () => {
       const { persistence, path } = createPersistence();
       const project = persistence.createProject('legacy memory project');
