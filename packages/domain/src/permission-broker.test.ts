@@ -599,6 +599,8 @@ describe('access preset expansion', () => {
         provenanceTrust: 'workspace',
         secretScan: 'clean',
         localOnlyTask: false,
+        attachmentManifestDigest: null,
+        attachmentByteCount: 0,
       },
     } as const;
 
@@ -634,6 +636,8 @@ describe('access preset expansion', () => {
         provenanceTrust: 'workspace',
         secretScan: 'clean',
         localOnlyTask: true,
+        attachmentManifestDigest: null,
+        attachmentByteCount: 0,
       },
     } as const;
     const providerRule = {
@@ -648,6 +652,8 @@ describe('access preset expansion', () => {
         allowedProvenance: ['workspace'],
         requireSecretScanClean: true,
         allowLocalOnlyTaskRemote: true,
+        attachmentManifestDigest: null,
+        attachmentByteCount: 0,
       },
       operations: ['egress'],
     } as const;
@@ -672,6 +678,78 @@ describe('access preset expansion', () => {
           modeCeiling: providerCeiling,
           allowRules: [providerRule],
         },
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'parent_ceiling' });
+  });
+
+  it('requires an exact attachment manifest in provider egress resource sets', () => {
+    const manifestDigest = 'a'.repeat(64);
+    const request = {
+      ...workspaceWriteRequest,
+      capability: 'provider.egress',
+      operation: 'egress',
+      providerEgress: 'trusted-remote',
+      resource: {
+        kind: 'provider',
+        providerId: 'cloud-model',
+        fragmentKind: 'prompt',
+        byteCount: 112,
+        providerTrust: 'trusted-remote',
+        dataResidency: 'jp',
+        provenanceTrust: 'user',
+        secretScan: 'clean',
+        localOnlyTask: false,
+        attachmentManifestDigest: manifestDigest,
+        attachmentByteCount: 12,
+      },
+    } as const;
+    const providerRule = {
+      capability: 'provider.egress',
+      resourceSet: {
+        kind: 'provider-egress',
+        providerIds: ['cloud-model'],
+        fragmentKinds: ['prompt'],
+        maxBytes: 112,
+        allowedProviderTrust: ['trusted-remote'],
+        allowedResidencies: ['jp'],
+        allowedProvenance: ['user'],
+        requireSecretScanClean: true,
+        allowLocalOnlyTaskRemote: false,
+        attachmentManifestDigest: manifestDigest,
+        attachmentByteCount: 12,
+      },
+      operations: ['egress'],
+    } as const;
+    const ceiling: CapabilityCeiling = {
+      entries: [
+        {
+          ...providerRule,
+          expiresAt: '2026-07-22T13:00:00.000Z',
+          providerEgress: ['trusted-remote'],
+          sandboxProfiles: ['workspace-write'],
+        },
+      ],
+      maxWorkerDepth: 0,
+      maxConcurrentWorkers: 0,
+    };
+    const policy = {
+      ...basePolicy(),
+      parentCeiling: ceiling,
+      modeCeiling: ceiling,
+      allowRules: [providerRule],
+    };
+
+    expect(evaluatePermissionPolicy({ request, policy, now: NOW })).toMatchObject({
+      decision: 'allow',
+    });
+    expect(
+      evaluatePermissionPolicy({
+        request: {
+          ...request,
+          resource: { ...request.resource, attachmentManifestDigest: 'b'.repeat(64) },
+        },
+        policy,
         now: NOW,
       }),
     ).toMatchObject({ decision: 'deny', reason: 'parent_ceiling' });

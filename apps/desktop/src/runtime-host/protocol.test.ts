@@ -39,6 +39,56 @@ function startEnvelope() {
 }
 
 describe('Runtime Host protocol', () => {
+  it('validates bounded same-directory image prepare and bound commit envelopes', () => {
+    const selectionIdentity = 'a'.repeat(64);
+    const manifestDigest = 'b'.repeat(64);
+    const manifest = [
+      {
+        id: 'attachment-1',
+        mimeType: 'image/png',
+        byteLength: 128,
+        sha256: 'c'.repeat(64),
+      },
+    ];
+    const prepare = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: 'operation-1',
+      type: 'prepare_images',
+      selectionIdentity,
+      manifest,
+      paths: [join(tmpdir(), 'turn-one', '001.png')],
+      manifestDigest,
+    } as const;
+    expect(isMainToRuntimeEnvelope(prepare)).toBe(true);
+    expect(isMainToRuntimeEnvelope({ ...prepare, paths: ['/tmp/001.jpg'] })).toBe(false);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...startEnvelope(),
+        type: 'commit_images',
+        selectionIdentity,
+        manifestDigest,
+      }),
+    ).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope({
+        protocolVersion: RUNTIME_PROTOCOL_VERSION,
+        runtimeInstanceId: 'runtime-1',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        seq: 1,
+        operationId: 'operation-1',
+        type: 'images_prepared',
+        selectionIdentity,
+        manifestDigest,
+        decodedByteLength: 128,
+      }),
+    ).toBe(true);
+  });
+
   it('requires a cryptographically valid explicit empty catalog for Codex read-only starts', () => {
     const valid = startEnvelope();
     expect(isMainToRuntimeEnvelope(valid)).toBe(true);

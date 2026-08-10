@@ -97,6 +97,10 @@ import {
   goalResumeInputSchema,
   goalRunResultSchema,
   goalStartInputSchema,
+  imageAttachmentCapabilitySchema,
+  imageAttachmentMetadataListSchema,
+  imageAttachmentMetadataSchema,
+  imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
   taskDraftInputSchema,
@@ -264,6 +268,36 @@ const api: SprintCoderApi = {
       }),
     clear: (taskId) =>
       invoke(IPC_CHANNELS.goalsClear, goalControlInputSchema, taskSummarySchema, { taskId }),
+  },
+  attachments: {
+    capability: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsCapability,
+        taskIdPayloadSchema,
+        imageAttachmentCapabilitySchema,
+        { taskId },
+      ),
+    pick: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsPick,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataSchema.nullable(),
+        { taskId },
+      ),
+    listDraft: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsListDraft,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataListSchema,
+        { taskId },
+      ),
+    remove: (input) =>
+      invoke(
+        IPC_CHANNELS.attachmentsRemove,
+        imageAttachmentRemoveInputSchema,
+        z.undefined(),
+        input,
+      ),
   },
   projects: {
     list: () =>
