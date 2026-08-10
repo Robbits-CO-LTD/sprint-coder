@@ -255,10 +255,7 @@ import {
   type ToolAuthorizationRequest,
 } from './tool-broker';
 import type { RuntimeCanonicalEvent, RuntimeWorkspaceSet } from '../runtime-host/protocol';
-import {
-  removeSealedGuidancePrefix,
-  serializeCliExecutionPayload,
-} from '../runtime-host/execution-payload';
+import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import {
   permissionRequestFingerprint,
   toolValueMatchesSchema,
@@ -3208,19 +3205,12 @@ export class IpcRouter {
       path: skill.packagePath,
     }));
     const runtimeContextFragments = context.fragments.map(toRuntimeContextFragment);
-    const effectiveTeamMcp =
-      teamMcp === undefined
-        ? undefined
-        : {
-            ...teamMcp,
-            guidance: removeSealedGuidancePrefix(teamMcp.guidance, runtimeContextFragments),
-          };
     const serializedPayload = serializeCliExecutionPayload({
       kind,
       request: started.text,
       contextFragments: runtimeContextFragments,
       projectItems: context.projectItems,
-      ...(effectiveTeamMcp === undefined ? {} : { teamGuidance: effectiveTeamMcp.guidance }),
+      ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
       skills: runtimeSkills,
     });
     const gatePayload = Buffer.from(serializedPayload.bytes);
@@ -3254,7 +3244,10 @@ export class IpcRouter {
           started.model,
           createEmptyToolCatalogSnapshot(kind, workspaceId),
           context,
-          effectiveTeamMcp,
+          // Keep the sealed Team guidance intact here: the Claude adapter promotes it with
+          // --append-system-prompt. The serializer above independently removes its duplicate from
+          // the user payload while retaining the authority-labelled context fragment.
+          teamMcp,
           // Reasoning effort: read live (not captured on StartedTurn) since it isn't persisted
           // per-turn, unlike model — see persistence.ts's getEffort doc comment. The Codex value
           // needs no probe here because setModel/setCodexEffort keep the stored level clamped to

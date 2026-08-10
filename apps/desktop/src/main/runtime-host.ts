@@ -5,7 +5,6 @@ import type { CodexModelOption, PublicError, RuntimeWriteScope } from '@sprint-c
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { PreparedContext } from './context-ledger';
 import {
-  removeSealedGuidancePrefix,
   serializeCliExecutionPayload,
   type SerializedExecutionPayload,
 } from '../runtime-host/execution-payload';
@@ -120,13 +119,6 @@ export class RuntimeHostClient {
     const contextFragments = (prepared?.fragments ?? []).map(toRuntimeContextFragment);
     const projectItems = (prepared?.projectItems ?? []).map(toRuntimeProjectContextItem);
     const projectSnapshotDigest = prepared?.projectSnapshotDigest ?? null;
-    const effectiveTeamMcp =
-      teamMcp === undefined
-        ? undefined
-        : {
-            ...teamMcp,
-            guidance: removeSealedGuidancePrefix(teamMcp.guidance, contextFragments),
-          };
     const payload =
       serializedPayload ??
       serializeCliExecutionPayload({
@@ -134,7 +126,7 @@ export class RuntimeHostClient {
         request: input,
         contextFragments,
         projectItems,
-        ...(effectiveTeamMcp === undefined ? {} : { teamGuidance: effectiveTeamMcp.guidance }),
+        ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
         skills,
       });
     if (this.disposed) {
@@ -169,7 +161,9 @@ export class RuntimeHostClient {
       payloadDigest: payload.digest,
       skills: [...skills],
       toolCatalogSnapshot,
-      ...(effectiveTeamMcp === undefined ? {} : { teamMcp: effectiveTeamMcp }),
+      // Runtime adapters need the complete sealed guidance. Claude places it in its system prompt;
+      // serializeCliExecutionPayload only removes the duplicate from the user payload.
+      ...(teamMcp === undefined ? {} : { teamMcp }),
       ...(effort === undefined ? {} : { effort }),
       ...(writeScope === undefined ? {} : { writeScope }),
     });
