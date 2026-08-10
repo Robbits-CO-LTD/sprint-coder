@@ -337,7 +337,25 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       registry,
       getConnection: () => connection,
       authorizeEgress,
-      managerGuidance: 'Use Team tools.',
+      contextFor: () => ({
+        projectItems: [],
+        projectSnapshotDigest: null,
+        fragments: [
+          {
+            id: 'builtin-team',
+            taskId: 'task-1',
+            source: 'system',
+            trust: 'system',
+            tokenEstimate: 4,
+            content: 'Use Team tools.',
+            createdAt: '2026-08-10T00:00:00.000Z',
+            messageId: null,
+          },
+        ],
+        usageEvents: [],
+        compacted: false,
+      }),
+      managerGuidance: 'Use Team tools.\nManager-only guidance.',
       managerTools: [
         {
           name: 'team_hire_worker',
@@ -351,7 +369,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     });
 
     const result = await adapter.execute({
-      worker: providerWorker(true),
+      worker: { ...providerWorker(true), contextInheritancePolicy: 'full_fork' },
       envelope,
       executionId: 'execution-durable-1',
       content: '実装を委譲してください',
@@ -369,7 +387,8 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     expect(requests).toHaveLength(2);
     expect(requests[1]).toMatchObject({
       messages: [
-        { role: 'system', content: 'Use Team tools.' },
+        { role: 'system', content: 'Manager-only guidance.' },
+        { role: 'system', content: '[継承コンテキスト:system]\nUse Team tools.' },
         expect.objectContaining({ role: 'user' }),
         {
           role: 'assistant',

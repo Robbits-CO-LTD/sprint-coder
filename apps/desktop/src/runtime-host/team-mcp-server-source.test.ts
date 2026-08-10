@@ -223,6 +223,38 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
         'modelSelectionReason',
       ]),
     );
+    const missionSchema = tools.find(({ name }) => name === 'team_assign_mission')?.inputSchema;
+    expect(missionSchema).toMatchObject({
+      required: ['objective', 'doneCriteria', 'steps'],
+      additionalProperties: false,
+      properties: {
+        objective: { minLength: 1, maxLength: 20_000 },
+        doneCriteria: { minItems: 1, maxItems: 64 },
+      },
+    });
+    const missionSteps = (missionSchema?.['properties'] as Record<string, unknown>)['steps'];
+    expect(missionSteps).toMatchObject({ minItems: 2, maxItems: 12 });
+    expect((missionSteps as { items: { required: string[] } }).items.required).toEqual([
+      'workerId',
+      'objective',
+      'doneCriteria',
+      'access',
+    ]);
+    expect(missionSteps).toMatchObject({
+      items: {
+        additionalProperties: false,
+        properties: {
+          workerId: { minLength: 1, maxLength: 128 },
+          objective: { minLength: 1, maxLength: 10_000 },
+          doneCriteria: { minItems: 1, maxItems: 20 },
+          access: { enum: ['read-only', 'workspace-write'] },
+        },
+      },
+    });
+    expect(tools.find(({ name }) => name === 'team_resume_mission')?.inputSchema).toMatchObject({
+      required: ['missionId'],
+      additionalProperties: false,
+    });
   });
 
   it('forwards tools/call to the bridge socket with the configured token and relays a success result', async () => {
@@ -295,7 +327,7 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     expect(JSON.parse(secondContent[0]!.text)).toEqual({ marker: 'second' });
   });
 
-  it('uses a longer timeout for wait tools than for ordinary requests', async () => {
+  it('uses a longer timeout for wait and Mission tools than for ordinary requests', async () => {
     const harness = await startHarness({ normalTimeoutMs: 30, longTimeoutMs: 120 });
     harness.send({
       jsonrpc: '2.0',
@@ -309,15 +341,33 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
       method: 'tools/call',
       params: { name: 'team_wait_reports', arguments: {} },
     });
-    await vi_waitFor(() => harness.bridgeReceived.length === 2);
+    harness.send({
+      jsonrpc: '2.0',
+      id: 24,
+      method: 'tools/call',
+      params: { name: 'team_assign_mission', arguments: {} },
+    });
+    harness.send({
+      jsonrpc: '2.0',
+      id: 25,
+      method: 'tools/call',
+      params: { name: 'team_resume_mission', arguments: { missionId: 'mission-1' } },
+    });
+    await vi_waitFor(() => harness.bridgeReceived.length === 4);
 
     expect((await harness.nextMessage())['id']).toBe(22);
-    expect((await harness.nextMessage())['id']).toBe(23);
+    expect(
+      new Set([
+        (await harness.nextMessage())['id'],
+        (await harness.nextMessage())['id'],
+        (await harness.nextMessage())['id'],
+      ]),
+    ).toEqual(new Set([23, 24, 25]));
   });
 
   it('releases every pending request when the bridge disconnects', async () => {
     const harness = await startHarness();
-    for (const id of [24, 25])
+    for (const id of [26, 27])
       harness.send({
         jsonrpc: '2.0',
         id,
@@ -328,7 +378,7 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     harness.disconnectBridge();
 
     const replies = [await harness.nextMessage(), await harness.nextMessage()];
-    expect(new Set(replies.map((reply) => reply['id']))).toEqual(new Set([24, 25]));
+    expect(new Set(replies.map((reply) => reply['id']))).toEqual(new Set([26, 27]));
     for (const reply of replies) expect(reply['result']).toMatchObject({ isError: true });
   });
 

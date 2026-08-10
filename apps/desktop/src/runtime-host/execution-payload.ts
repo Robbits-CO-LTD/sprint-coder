@@ -12,6 +12,23 @@ export type SerializedExecutionPayload = Readonly<{
   digest: string;
 }>;
 
+export function removeSealedGuidancePrefix(
+  guidance: string,
+  contextFragments: readonly RuntimeContextFragment[],
+): string {
+  const matchingFragment = contextFragments
+    .filter(
+      (fragment) =>
+        fragment.source === 'system' &&
+        fragment.authority === 'system' &&
+        fragment.trust === 'system' &&
+        (guidance === fragment.content || guidance.startsWith(`${fragment.content}\n`)),
+    )
+    .sort((left, right) => right.content.length - left.content.length)[0];
+  if (matchingFragment === undefined) return guidance;
+  return guidance.slice(matchingFragment.content.length).replace(/^\n+/, '');
+}
+
 /**
  * The sole serializer for app-controlled CLI payload bytes. Main calls this before the provider
  * gate and hands defensive copies of the resulting bytes to both the gate and Runtime Host.
@@ -31,10 +48,14 @@ export function serializeCliExecutionPayload(input: {
       ? `${skills.map((skill) => `$${skill.name}`).join(' ')}\n\n`
       : '';
   const currentRequest = `${skillInvocation}${input.request}`;
-  const request =
+  const remainingTeamGuidance =
     input.teamGuidance === undefined
+      ? undefined
+      : removeSealedGuidancePrefix(input.teamGuidance, input.contextFragments);
+  const request =
+    remainingTeamGuidance === undefined || remainingTeamGuidance === ''
       ? currentRequest
-      : `${input.teamGuidance}\n\n${currentRequest}`;
+      : `${remainingTeamGuidance}\n\n${currentRequest}`;
   const sections: string[] = [];
   if (input.contextFragments.length > 0) {
     sections.push(

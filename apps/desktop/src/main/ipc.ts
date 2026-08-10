@@ -255,7 +255,10 @@ import {
   type ToolAuthorizationRequest,
 } from './tool-broker';
 import type { RuntimeCanonicalEvent, RuntimeWorkspaceSet } from '../runtime-host/protocol';
-import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
+import {
+  removeSealedGuidancePrefix,
+  serializeCliExecutionPayload,
+} from '../runtime-host/execution-payload';
 import {
   permissionRequestFingerprint,
   toolValueMatchesSchema,
@@ -3204,12 +3207,20 @@ export class IpcRouter {
       name: skill.selection.ref.skillId,
       path: skill.packagePath,
     }));
+    const runtimeContextFragments = context.fragments.map(toRuntimeContextFragment);
+    const effectiveTeamMcp =
+      teamMcp === undefined
+        ? undefined
+        : {
+            ...teamMcp,
+            guidance: removeSealedGuidancePrefix(teamMcp.guidance, runtimeContextFragments),
+          };
     const serializedPayload = serializeCliExecutionPayload({
       kind,
       request: started.text,
-      contextFragments: context.fragments.map(toRuntimeContextFragment),
+      contextFragments: runtimeContextFragments,
       projectItems: context.projectItems,
-      ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
+      ...(effectiveTeamMcp === undefined ? {} : { teamGuidance: effectiveTeamMcp.guidance }),
       skills: runtimeSkills,
     });
     const gatePayload = Buffer.from(serializedPayload.bytes);
@@ -3243,7 +3254,7 @@ export class IpcRouter {
           started.model,
           createEmptyToolCatalogSnapshot(kind, workspaceId),
           context,
-          teamMcp,
+          effectiveTeamMcp,
           // Reasoning effort: read live (not captured on StartedTurn) since it isn't persisted
           // per-turn, unlike model — see persistence.ts's getEffort doc comment. The Codex value
           // needs no probe here because setModel/setCodexEffort keep the stored level clamped to
