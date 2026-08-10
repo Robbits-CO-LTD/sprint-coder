@@ -59,6 +59,7 @@ import {
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerConnectionModelReleaseUpdateInputSchema,
   providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
@@ -349,7 +350,12 @@ import {
   ProviderSecretStorageUnavailableError,
 } from './provider-secret-storage';
 import { ElectronProviderSecretCipher } from './electron-provider-secret-cipher';
-import { MainProviderRegistry, type ProviderRuntime } from './provider-runtime';
+import {
+  acquireProviderModelLease,
+  MainProviderRegistry,
+  type ProviderRuntime,
+} from './provider-runtime';
+import type { ProviderModelLease } from './ollama-model-lifecycle';
 import {
   PROVIDER_FIRST_EVENT_TIMEOUT_MS,
   PROVIDER_IDLE_TIMEOUT_MS,
@@ -495,6 +501,7 @@ export class IpcRouter {
   private readonly teamRuntimeAvailability = new TeamRuntimeAvailabilityTracker();
   private readonly providerRegistry = new MainProviderRegistry();
   private readonly providerProfiles = new MainProviderProfileRegistry();
+  private readonly compatibleRuntime: OpenAICompatibleProviderClient;
   private readonly providerEgressTrustForConnection: (
     connection: ProviderConnection,
   ) => 'trusted-local' | 'trusted-remote';
@@ -534,14 +541,14 @@ export class IpcRouter {
         resolveCompatibleCredential(connection),
       );
     };
-    const compatible = new OpenAICompatibleProviderClient(
+    this.compatibleRuntime = new OpenAICompatibleProviderClient(
       this.providerProfiles,
       resolveCompatibleCredential,
     );
     this.providerRegistry.register({
       runtimeKind: 'openai_compatible',
       providerId: null,
-      runtime: compatible,
+      runtime: this.compatibleRuntime,
     });
     const openAI = new OpenAIProviderClient((connection) => {
       if (connection.secretReference === null)
@@ -1328,6 +1335,18 @@ export class IpcRouter {
               ? {}
               : { tokensPerMinute: input.tokensPerMinute }),
           }),
+        ).value,
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersSetAutomaticModelRelease,
+      providerConnectionModelReleaseUpdateInputSchema,
+      providerConnectionSchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.providersSetAutomaticModelRelease, () =>
+          this.persistence.setProviderConnectionAutomaticModelRelease(
+            input.connectionId,
+            input.automaticModelRelease,
+          ),
         ).value,
     );
     this.handleMutation(
@@ -2679,6 +2698,7 @@ export class IpcRouter {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.taskTitleProviderAborts.abortAll();
+    for (const controller of this.providerAbortByTurn.values()) controller.abort();
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
     this.teamSubscriptions.clear();
@@ -2702,6 +2722,7 @@ export class IpcRouter {
     this.taskTitleRuntimes.dispose();
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
+    await this.compatibleRuntime.dispose();
     this.claudeRuntime.dispose();
     await this.teamMcpBridge.dispose();
   }
@@ -3808,6 +3829,7 @@ export class IpcRouter {
     const releaseController = this.taskTitleProviderAborts.track(controller);
     const timer = setTimeout(() => controller.abort(), MODEL_TASK_TITLE_TIMEOUT_MS);
     const executionId = randomUUID();
+    let modelLease: ProviderModelLease | undefined;
     try {
       const connection = await this.providerVerification.requireVerifiedForExecution(
         connectionId,
@@ -3845,6 +3867,7 @@ export class IpcRouter {
       if (!egress.allowed) return null;
 
       const runtime = this.providerRegistry.resolve(connection);
+      modelLease = await acquireProviderModelLease(runtime, connection, modelId);
       let output = '';
       for await (const event of runtime.execute(
         connection,
@@ -3862,6 +3885,7 @@ export class IpcRouter {
     } finally {
       clearTimeout(timer);
       releaseController();
+      await modelLease?.release();
       if (controller.signal.aborted) {
         try {
           const connection = this.persistence.getProviderConnection(connectionId);
@@ -4037,6 +4061,7 @@ export class IpcRouter {
     let reportCursorValue = this.teamCoordinator.latestTeamMessageSeq(taskId);
     let modelCatalogQueried = false;
     let runtime: ProviderRuntime | undefined;
+    let modelLease: ProviderModelLease | undefined;
     const reportCursor = {
       read: () => reportCursorValue,
       advance: (seq: number) => {
@@ -4074,6 +4099,7 @@ export class IpcRouter {
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'executing'));
       });
       runtime = this.providerRegistry.resolve(connection);
+      modelLease = await acquireProviderModelLease(runtime, connection, modelId);
       const messages: ProviderExecutionRequest['messages'] = context.fragments.map((fragment) => ({
         role: fragment.trust,
         content: fragment.content,
@@ -4410,6 +4436,7 @@ export class IpcRouter {
         this.finishAndAdvance(taskId, started.turnId, 'failed');
       });
     } finally {
+      await modelLease?.release();
       if (workspaceToolSnapshot !== undefined)
         this.providerWorkspaceTools.finishTurn(taskId, started.turnId);
       if (this.providerAbortByTurn.get(started.turnId) === controller)

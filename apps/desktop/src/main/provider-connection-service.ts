@@ -253,6 +253,7 @@ export class ProviderConnectionService {
         runtimeKind: 'openai_compatible',
         displayName: parsed.displayName,
         enabled: true,
+        automaticModelRelease: profile.nativeModelLifecycle === 'ollama',
         secretReference,
         verification: {
           status: 'unverified',

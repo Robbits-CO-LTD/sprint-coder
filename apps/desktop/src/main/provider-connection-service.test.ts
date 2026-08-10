@@ -187,6 +187,7 @@ describe('ProviderConnectionService', () => {
         providerId: profile.id,
         runtimeKind: 'openai_compatible',
         secretReference: 'provider-secret:00000000-0000-4000-8000-000000000005',
+        automaticModelRelease: profile.id === 'ollama',
       });
       expect(parseOpenAICompatibleCredential(stored[0] ?? '')).toEqual({});
     },
