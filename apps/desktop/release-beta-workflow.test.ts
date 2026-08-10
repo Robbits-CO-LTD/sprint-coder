@@ -81,4 +81,12 @@ describe('release signing and notarization', () => {
     expect(workflow).toContain('Expected exactly one uploaded release asset named');
     expect(workflow).not.toContain('--clobber');
   });
+
+  it('validates the tag commit and replaces its managed release-notes section on reruns', () => {
+    expect(workflow).toContain('commits/${RELEASE_TAG}');
+    expect(workflow).not.toContain('targetCommitish');
+    expect(workflow).toContain('<!-- sprint-coder-packages:start -->');
+    expect(workflow).toContain('<!-- sprint-coder-packages:end -->');
+    expect(workflow).toContain('$0 == managed_start { managed = 1; next }');
+  });
 });
