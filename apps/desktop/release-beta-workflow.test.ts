@@ -8,6 +8,15 @@ const workflow = readFileSync(
 );
 
 describe('macOS beta release signing and notarization', () => {
+  it('gates signing secrets behind an environment and a main-reachability check', () => {
+    const reachability = workflow.indexOf('git merge-base --is-ancestor');
+    const signingSecrets = workflow.indexOf('secrets.MACOS_CI_KEYCHAIN_PASSWORD');
+
+    expect(workflow).toContain('environment: macos-signing');
+    expect(reachability).toBeGreaterThan(-1);
+    expect(signingSecrets).toBeGreaterThan(reachability);
+  });
+
   it('uses the ROBBITS Developer ID identity without enabling ad-hoc signing', () => {
     expect(workflow).toContain(
       "MACOS_CODESIGN_IDENTITY: 'Developer ID Application: ROBBITS INC. (7TDY87Y997)'",

@@ -44,6 +44,16 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
+      - name: Verify release commit is reachable from main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main; then
+            echo "::error::Beta release commit ${GITHUB_SHA} is not reachable from main."
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
@@ -102,10 +112,12 @@ jobs:
           - os: macos-latest
             label: macOS
             artifact: macos
+            environment: macos-signing
           - os: ubuntu-latest
             label: Ubuntu
             artifact: ubuntu
     runs-on: ${{ matrix.os }}
+    environment: ${{ matrix.environment }}
     timeout-minutes: 60
     env:
       MACOS_CODESIGN_IDENTITY: 'Developer ID Application: ROBBITS INC. (7TDY87Y997)'
