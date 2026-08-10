@@ -155,6 +155,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Warm Windows process identity query
+        shell: pwsh
+        run: |
+          $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $identity = & $windowsPowerShell -NoProfile -NonInteractive -Command `
+            '(Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().Ticks'
+          if ($LASTEXITCODE -ne 0 -or -not $identity) {
+            throw 'Windows process identity query warm-up failed'
+          }
+
       # These specs exercise named pipes, process teardown, ACLs, watchers, and atomic file
       # replacement without paying for the Electron ABI rebuild required by the full suite.
       - name: Test Windows platform boundaries
@@ -237,6 +247,17 @@ jobs:
       - name: Build NativeSafeFs for Electron ABI
         if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
         run: npm run build:native-safe-fs
+
+      - name: Warm Windows process identity query
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $identity = & $windowsPowerShell -NoProfile -NonInteractive -Command `
+            '(Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().Ticks'
+          if ($LASTEXITCODE -ne 0 -or -not $identity) {
+            throw 'Windows process identity query warm-up failed'
+          }
 
       - name: Test
         if: runner.os != 'Windows'

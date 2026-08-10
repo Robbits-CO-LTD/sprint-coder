@@ -266,16 +266,17 @@ export class CommandRunner {
     }
     if (child.pid === undefined)
       throw new CommandRunnerError('SPAWN_FAILED', 'Command process did not receive a PID');
-    let windowsLaunchRequest: string | undefined;
     if (process.platform === 'win32') {
       try {
         assignProcessToOwnedJob(child.pid, executionId);
-        windowsLaunchRequest = JSON.stringify({
-          executable: spec.absoluteExecutable,
-          argv: [...spec.argv],
-          cwd: spec.cwdIdentity.canonicalPath,
-          env: buildEnvironment(spec.envDelta),
-        });
+        child.stdin?.end(
+          JSON.stringify({
+            executable: spec.absoluteExecutable,
+            argv: [...spec.argv],
+            cwd: spec.cwdIdentity.canonicalPath,
+            env: buildEnvironment(spec.envDelta),
+          }),
+        );
       } catch (error) {
         child.kill();
         throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
@@ -310,7 +311,7 @@ export class CommandRunner {
     };
     child.stdout?.on('data', (data: Buffer) => outputConsumer('stdout', data));
     child.stderr?.on('data', (data: Buffer) => outputConsumer('stderr', data));
-    const processStartIdentity = await readInitialProcessStartIdentity(child.pid);
+    const processStartIdentity = await readProcessStartIdentity(child.pid);
     if (processStartIdentity === 'unavailable' || processStartIdentity.startsWith('unsupported:')) {
       try {
         await this.forceUnidentifiedProcess(active);
@@ -327,28 +328,6 @@ export class CommandRunner {
       }
     }
     active.processStartIdentity = processStartIdentity;
-    // The Windows wrapper deliberately waits for EOF before spawning the requested executable.
-    // Keep it paused until its PID identity is sealed: a short-lived command can otherwise let the
-    // wrapper exit before the PowerShell identity query observes it.
-    if (windowsLaunchRequest !== undefined) {
-      try {
-        child.stdin?.end(windowsLaunchRequest);
-      } catch (error) {
-        try {
-          await this.forceOwnedTree(executionId, lease);
-          this.active.delete(executionId);
-          active.resolveSettled();
-        } catch (terminationError) {
-          if (
-            terminationError instanceof CommandRunnerError &&
-            terminationError.code === 'PROCESS_TREE_TERMINATION_FAILED'
-          )
-            this.retainUntilOutcome(executionId, active);
-          throw terminationError;
-        }
-        throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
-      }
-    }
     try {
       options.onStarted?.({
         executionId,
@@ -894,17 +873,6 @@ export function readProcessStartIdentity(pid: number): string {
     return 'unavailable';
   }
   return `unsupported:${pid}`;
-}
-
-async function readInitialProcessStartIdentity(pid: number): Promise<string> {
-  const attempts = process.platform === 'win32' ? 3 : 1;
-  let identity = 'unavailable';
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    identity = readProcessStartIdentity(pid);
-    if (identity !== 'unavailable') return identity;
-    if (attempt + 1 < attempts) await delay(50 * (attempt + 1));
-  }
-  return identity;
 }
 
 function buildEnvironment(delta: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
