@@ -93,9 +93,9 @@ describe('release signing and notarization', () => {
     expect(tagCheck).toBeGreaterThan(draftCheck);
     expect(upload).toBeGreaterThan(tagCheck);
     expect(workflow).toContain('--clobber');
-    expect(workflow).toContain("jq -r '.assets[].apiUrl'");
-    expect(workflow).toContain('gh api --method DELETE "${asset_endpoint}"');
-    expect(workflow).toContain('Expected ${#assets[@]} uploaded release assets');
+    expect(workflow).toContain('legacy_asset_names=()');
+    expect(workflow).toContain('gh api --method DELETE "${legacy_asset_endpoint}"');
+    expect(workflow).toContain('Legacy release asset ${legacy_asset_name} was not removed.');
     expect(workflow).toContain('Expected exactly one uploaded release asset named');
   });
 
