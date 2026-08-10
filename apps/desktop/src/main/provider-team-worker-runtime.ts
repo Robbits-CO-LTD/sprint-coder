@@ -36,7 +36,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     context: PreparedContext;
   }): boolean;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
-  managerGuidance: string;
+  managerGuidance: string | ((worker: AgentRecord) => string);
   managerTools: readonly ProviderTool[];
   workerGuidance: string;
   workerTools: readonly ProviderTool[];
@@ -147,7 +147,9 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       : this.deps.workerTools;
     const webSearch = connection.providerId === 'openrouter' || connection.providerId === 'xai';
     const toolGuidance = input.worker.canDelegate
-      ? this.deps.managerGuidance
+      ? typeof this.deps.managerGuidance === 'function'
+        ? this.deps.managerGuidance(input.worker)
+        : this.deps.managerGuidance
       : this.deps.workerGuidance;
     const reportCursor = {
       read: () => reportCursorValue,

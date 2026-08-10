@@ -99,6 +99,8 @@ import {
   runtimeSettingsSchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
+  teamModelSelectionGuidanceSchema,
+  teamModelSelectionGuidanceSetInputSchema,
   teamModelRestrictionSetInputSchema,
   teamModelSettingsSchema,
   teamBlueprintSchema,
@@ -385,8 +387,19 @@ const MODEL_RESEARCH_GUIDANCE = `
 4. その後にだけteam_hire_workerを呼び、modelSelectionReasonへWeb調査の根拠を明示する。
 Web検索できない、または信頼できる根拠が見つからない場合は、そのモデルを推測で採用しないでください。`;
 
-function teamGuidance(base: string, requireModelResearch: boolean): string {
-  return requireModelResearch ? `${base}\n${MODEL_RESEARCH_GUIDANCE}` : base;
+export function teamGuidance(
+  base: string,
+  requireModelResearch: boolean,
+  userModelSelectionGuidance = '',
+): string {
+  const sections = [base];
+  const normalized = userModelSelectionGuidance.trim();
+  if (normalized !== '')
+    sections.push(
+      `Team設定でユーザーが保存したモデル選定方針です。Workerを採用する際は、現在の依頼と矛盾しない範囲で必ず従ってください。\n<team-model-selection-guidance>\n${normalized}\n</team-model-selection-guidance>`,
+    );
+  if (requireModelResearch) sections.push(MODEL_RESEARCH_GUIDANCE);
+  return sections.join('\n\n');
 }
 
 type InvokeEvent = IpcMainInvokeEvent;
@@ -691,7 +704,12 @@ export class IpcRouter {
         executionId === undefined
           ? buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId))
           : this.persistence.prepareTeamExecutionContext(worker.taskId, executionId),
-      managerGuidance: MANAGER_MCP_SYSTEM_PROMPT,
+      managerGuidance: () =>
+        teamGuidance(
+          MANAGER_MCP_SYSTEM_PROMPT,
+          this.persistence.getTeamModelResearchBeforeHiring(),
+          this.persistence.getTeamModelSelectionGuidance(),
+        ),
       managerTools: MANAGER_PROVIDER_TOOLS,
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
       workerTools: WORKER_PROVIDER_TOOLS,
@@ -947,6 +965,25 @@ export class IpcRouter {
       (input, event, envelope) =>
         this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetTeamModelResearch, () =>
           this.persistence.setTeamModelResearchBeforeHiring(input.researchBeforeHiring),
+        ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetTeamModelSelectionGuidance,
+      emptyPayloadSchema,
+      teamModelSelectionGuidanceSchema,
+      () => ({ guidance: this.persistence.getTeamModelSelectionGuidance() }),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetTeamModelSelectionGuidance,
+      teamModelSelectionGuidanceSetInputSchema,
+      z.undefined(),
+      (input, event, envelope) =>
+        this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.settingsSetTeamModelSelectionGuidance,
+          () => this.persistence.setTeamModelSelectionGuidance(input.guidance),
         ).value,
     );
     this.handle(
@@ -3295,7 +3332,13 @@ export class IpcRouter {
       allowTeamTools: options.teamTurn,
     });
     const guidance = [
-      options.teamTurn ? teamGuidance(LEADER_MCP_SYSTEM_PROMPT, requireModelResearch) : null,
+      options.teamTurn
+        ? teamGuidance(
+            LEADER_MCP_SYSTEM_PROMPT,
+            requireModelResearch,
+            this.persistence.getTeamModelSelectionGuidance(),
+          )
+        : null,
       options.skillCreatorTurn
         ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
         : null,
@@ -3374,7 +3417,11 @@ export class IpcRouter {
     return {
       socketPath,
       token,
-      guidance: teamGuidance(MANAGER_MCP_SYSTEM_PROMPT, requireModelResearch),
+      guidance: teamGuidance(
+        MANAGER_MCP_SYSTEM_PROMPT,
+        requireModelResearch,
+        this.persistence.getTeamModelSelectionGuidance(),
+      ),
       enableWebSearch: requireModelResearch,
     };
   }

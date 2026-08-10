@@ -4004,6 +4004,8 @@ export interface PersistenceClient {
   acknowledgeFullAccessRisk(): void;
   getTeamModelResearchBeforeHiring(): boolean;
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
+  getTeamModelSelectionGuidance(): string;
+  setTeamModelSelectionGuidance(guidance: string): void;
   getTeamModelRestriction(): TeamModelRestriction;
   setTeamModelRestriction(restriction: TeamModelRestriction): void;
   getDefaultTeamPolicy(): TeamPolicy;
@@ -9554,6 +9556,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(enabled ? '1' : '0', new Date().toISOString());
+  }
+
+  getTeamModelSelectionGuidance(): string {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'team.model-selection-guidance'")
+      .get() as { value: string } | undefined;
+    return row?.value ?? '';
+  }
+
+  setTeamModelSelectionGuidance(guidance: string): void {
+    const normalized = guidance.trim();
+    if (normalized.length > 4000) throw new Error('Team model selection guidance is too long');
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('team.model-selection-guidance', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(normalized, new Date().toISOString());
   }
 
   getTeamModelRestriction(): TeamModelRestriction {

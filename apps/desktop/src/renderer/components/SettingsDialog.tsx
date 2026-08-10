@@ -198,6 +198,7 @@ export function LegacyBody({
               is exactly where a user who cannot select a Runtime will not look. */}
           <CliDetectionGroup />
           <TeamModelRestrictionSetting active={open} />
+          <TeamModelSelectionGuidanceSetting active={open} />
           <TeamResearchSetting active={open} />
           {/* Unmounting clears the renderer-local plaintext credential state. */}
           {open && <ProviderSettingsSection active={open} />}
@@ -298,6 +299,7 @@ export function WorkspaceBody({
             <WorkspacePage {...page('team')} active={current === 'team'}>
               <TeamDefaultPolicySetting active={open} />
               <TeamModelRestrictionSetting active={open} />
+              <TeamModelSelectionGuidanceSetting active={open} />
               <TeamResearchSetting active={open} />
             </WorkspacePage>
 
@@ -1165,6 +1167,112 @@ function TeamModelRestrictionSetting({ active }: { active: boolean }) {
   );
 }
 
+function TeamModelSelectionGuidanceSetting({ active }: { active: boolean }) {
+  const [api] = useState(teamModelSelectionGuidanceApi);
+  const [canonical, setCanonical] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'saving'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+  const generation = useRef(0);
+
+  useEffect(() => {
+    if (!active || api === null) return;
+    const request = ++generation.current;
+    void (async () => {
+      setPhase('loading');
+      setError(null);
+      try {
+        const result = await api.getTeamModelSelectionGuidance();
+        if (request !== generation.current) return;
+        setCanonical(result.guidance);
+        setDraft(result.guidance);
+      } catch {
+        if (request !== generation.current) return;
+        setError('モデル選定の指示を読み込めませんでした。');
+      } finally {
+        if (request === generation.current) setPhase('idle');
+      }
+    })();
+    return () => {
+      if (request === generation.current) generation.current += 1;
+    };
+  }, [active, api]);
+
+  async function save(): Promise<void> {
+    if (api === null || phase !== 'idle') return;
+    const request = ++generation.current;
+    setPhase('saving');
+    setError(null);
+    setStatus('');
+    try {
+      await api.setTeamModelSelectionGuidance({ guidance: draft });
+      if (request !== generation.current) return;
+      const normalized = draft.trim();
+      setCanonical(normalized);
+      setDraft(normalized);
+      setStatus('モデル選定の指示を保存しました。');
+    } catch {
+      if (request !== generation.current) return;
+      setError('モデル選定の指示を保存できませんでした。');
+    } finally {
+      if (request === generation.current) setPhase('idle');
+    }
+  }
+
+  const disabled = api === null || canonical === null || phase !== 'idle';
+  return (
+    <form
+      className="settings-group team-model-guidance"
+      data-testid="settings-team-model-guidance"
+      aria-busy={phase === 'loading'}
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+    >
+      <div className="settings-section-heading">
+        <div>
+          <h3>AIを選ぶときの指示</h3>
+          <p>LeaderとManagerが新しいWorkerのAIを選ぶ際に参照します。</p>
+        </div>
+        <span className="settings-count-badge">{draft.length} / 4000</span>
+      </div>
+      <label className="settings-field" htmlFor="settings-team-model-guidance-input">
+        <span className="settings-field-label">覚えておいてほしいこと</span>
+        <textarea
+          id="settings-team-model-guidance-input"
+          rows={5}
+          maxLength={4000}
+          disabled={disabled}
+          placeholder="例: APIを使う前に確認する。ClaudeはOpenRouterではなくClaude CLIを優先する。"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+      </label>
+      <div className="settings-inline-actions">
+        <p className="settings-hint">保存後に始まる新しい採用から全Teamへ適用されます。</p>
+        <button
+          type="submit"
+          className="settings-secondary-button"
+          data-testid="settings-team-model-guidance-save"
+          disabled={disabled || draft.trim() === canonical}
+        >
+          {phase === 'saving' ? '保存中…' : '指示を保存'}
+        </button>
+      </div>
+      {error !== null && (
+        <p className="settings-skill-error" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status}
+      </p>
+    </form>
+  );
+}
+
 // Global Team setting: whether a Leader/Manager researches the Web before hiring Workers. Kept in
 // this file rather than the store because it is a persisted backend value with no renderer-side
 // consumer — the canonical answer lives in Main, so the dialog reads it fresh on every open instead
@@ -1326,6 +1434,17 @@ function teamModelSettingsApi(): NonNullable<Window['sprintCoder']>['settings'] 
     settings === undefined ||
     typeof settings.getTeamModelSettings !== 'function' ||
     typeof settings.setTeamModelRestriction !== 'function'
+  )
+    return null;
+  return settings;
+}
+
+function teamModelSelectionGuidanceApi(): NonNullable<Window['sprintCoder']>['settings'] | null {
+  const settings = typeof window === 'undefined' ? undefined : window.sprintCoder?.settings;
+  if (
+    settings === undefined ||
+    typeof settings.getTeamModelSelectionGuidance !== 'function' ||
+    typeof settings.setTeamModelSelectionGuidance !== 'function'
   )
     return null;
   return settings;

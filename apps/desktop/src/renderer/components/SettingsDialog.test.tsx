@@ -34,6 +34,8 @@ function stubBridge(): void {
         getRuntime: () => Promise.resolve(),
         getTeamModelResearch: () => Promise.resolve({ researchBeforeHiring: false }),
         setTeamModelResearch: () => Promise.resolve(),
+        getTeamModelSelectionGuidance: () => Promise.resolve({ guidance: '' }),
+        setTeamModelSelectionGuidance: () => Promise.resolve(),
         getTeamModelSettings: () =>
           Promise.resolve({
             restriction: { mode: 'all', allowedModels: [] },
@@ -78,6 +80,8 @@ describe('which body the flag selects', () => {
     expect(html).toContain('data-testid="settings-team-research"');
     expect(html).toContain('data-testid="settings-team-defaults"');
     expect(html).toContain('data-testid="settings-team-models"');
+    expect(html).toContain('data-testid="settings-team-model-guidance"');
+    expect(html).toContain('覚えておいてほしいこと');
     expect(html).toMatch(/data-testid="settings-page-models"[^>]*>/);
     expect(html).toMatch(/data-testid="settings-page-team"[^>]*hidden=""/);
   });

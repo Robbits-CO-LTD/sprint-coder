@@ -1365,6 +1365,21 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('persists trimmed Team model-selection guidance across restart', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getTeamModelSelectionGuidance()).toBe('');
+      persistence.setTeamModelSelectionGuidance(
+        '  APIを使う前に確認する。ClaudeはClaude CLIを優先する。  ',
+      );
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTeamModelSelectionGuidance()).toBe(
+        'APIを使う前に確認する。ClaudeはClaude CLIを優先する。',
+      );
+      reopened.close();
+    });
+
     it('defaults Team models to all and persists a selected-model restriction across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getTeamModelRestriction()).toEqual({

@@ -116,6 +116,8 @@ import {
   teamPolicySchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
+  teamModelSelectionGuidanceSchema,
+  teamModelSelectionGuidanceSetInputSchema,
   teamModelRestrictionSetInputSchema,
   teamModelSettingsSchema,
   teamSendMessageInputSchema,
@@ -611,6 +613,20 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.settingsSetTeamModelResearch,
         teamModelResearchSettingsSetInputSchema,
+        z.undefined(),
+        input,
+      ),
+    getTeamModelSelectionGuidance: () =>
+      invoke(
+        IPC_CHANNELS.settingsGetTeamModelSelectionGuidance,
+        emptyPayloadSchema,
+        teamModelSelectionGuidanceSchema,
+        {},
+      ),
+    setTeamModelSelectionGuidance: (input) =>
+      invoke(
+        IPC_CHANNELS.settingsSetTeamModelSelectionGuidance,
+        teamModelSelectionGuidanceSetInputSchema,
         z.undefined(),
         input,
       ),

@@ -2355,6 +2355,13 @@ export const teamModelResearchSettingsSchema = z
   .strict();
 export type TeamModelResearchSettings = z.infer<typeof teamModelResearchSettingsSchema>;
 export const teamModelResearchSettingsSetInputSchema = teamModelResearchSettingsSchema;
+export const teamModelSelectionGuidanceSchema = z
+  .object({
+    guidance: z.string().max(4000),
+  })
+  .strict();
+export type TeamModelSelectionGuidance = z.infer<typeof teamModelSelectionGuidanceSchema>;
+export const teamModelSelectionGuidanceSetInputSchema = teamModelSelectionGuidanceSchema;
 export const teamModelIdentitySchema = z
   .object({
     connectionId: connectionIdSchema,
@@ -3122,6 +3129,8 @@ export interface SprintCoderApi {
     setCodexEffort(effort: string): Promise<void>;
     getTeamModelResearch(): Promise<TeamModelResearchSettings>;
     setTeamModelResearch(input: TeamModelResearchSettings): Promise<void>;
+    getTeamModelSelectionGuidance(): Promise<TeamModelSelectionGuidance>;
+    setTeamModelSelectionGuidance(input: TeamModelSelectionGuidance): Promise<void>;
     getTeamModelSettings(): Promise<TeamModelSettings>;
     setTeamModelRestriction(input: TeamModelRestriction): Promise<void>;
     getDefaultTeamPolicy(): Promise<TeamPolicy>;
@@ -3301,6 +3310,8 @@ export const IPC_CHANNELS = {
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
   settingsGetTeamModelResearch: 'sprint-coder:settings:get-team-model-research',
   settingsSetTeamModelResearch: 'sprint-coder:settings:set-team-model-research',
+  settingsGetTeamModelSelectionGuidance: 'sprint-coder:settings:get-team-model-selection-guidance',
+  settingsSetTeamModelSelectionGuidance: 'sprint-coder:settings:set-team-model-selection-guidance',
   settingsGetTeamModelSettings: 'sprint-coder:settings:get-team-model-settings',
   settingsSetTeamModelRestriction: 'sprint-coder:settings:set-team-model-restriction',
   settingsGetDefaultTeamPolicy: 'sprint-coder:settings:get-default-team-policy',

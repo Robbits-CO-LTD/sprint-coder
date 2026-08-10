@@ -6247,6 +6247,27 @@ button.composer-permission-chip[aria-expanded='true'] {
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-md);
 }
+.team-model-guidance {
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+}
+.team-model-guidance textarea {
+  width: 100%;
+  min-height: 112px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-input);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.team-model-guidance textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
 .settings-count-badge {
   flex: none;
   padding: 3px 8px;

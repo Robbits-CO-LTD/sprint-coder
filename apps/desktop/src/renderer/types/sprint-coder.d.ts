@@ -1014,6 +1014,12 @@ export interface SprintCoderApi {
     setCodexEffort(effort: string): Promise<void>;
     getTeamModelResearch(): Promise<{ researchBeforeHiring: boolean }>;
     setTeamModelResearch(input: { researchBeforeHiring: boolean }): Promise<void>;
+    getTeamModelSelectionGuidance(): Promise<
+      import('@sprint-coder/contracts').TeamModelSelectionGuidance
+    >;
+    setTeamModelSelectionGuidance(
+      input: import('@sprint-coder/contracts').TeamModelSelectionGuidance,
+    ): Promise<void>;
     getTeamModelSettings(): Promise<import('@sprint-coder/contracts').TeamModelSettings>;
     setTeamModelRestriction(
       input: import('@sprint-coder/contracts').TeamModelRestriction,
