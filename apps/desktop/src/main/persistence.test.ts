@@ -5981,6 +5981,72 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('bridges the known image-attachment v64 collision without losing drafts', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('legacy v64 image attachment');
+      const attachment = persistence.createDraftImageAttachment({
+        taskId: task.id,
+        fileName: 'preserved.png',
+        mimeType: 'image/png',
+        bytes: Buffer.from('preserved legacy attachment'),
+      });
+      persistence.close();
+
+      const legacy = new Database(path);
+      legacy.exec(`
+        DROP TRIGGER image_attachments_state_insert_guard;
+        DROP TRIGGER image_attachments_state_update_guard;
+        DROP INDEX image_attachments_message_ordinal_idx;
+        ALTER TABLE image_attachments DROP COLUMN message_ordinal;
+        DROP TABLE runtime_failure_diagnostics;
+        ALTER TABLE tasks DROP COLUMN goal_updated_at;
+        ALTER TABLE tasks DROP COLUMN goal_started_at;
+        ALTER TABLE tasks DROP COLUMN goal_time_used_seconds;
+        ALTER TABLE tasks DROP COLUMN goal_tokens_used;
+        ALTER TABLE tasks DROP COLUMN goal_token_budget;
+        ALTER TABLE tasks DROP COLUMN goal_status;
+        DELETE FROM schema_migrations WHERE version IN (67, 68, 69);
+        UPDATE schema_migrations SET checksum = 'image-attachment-drafts-v64'
+          WHERE version = 64;
+      `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.listDraftImageAttachments(task.id)).toEqual([attachment]);
+      migrated.close();
+
+      const inspection = new Database(path, { readonly: true });
+      expect(inspection.prepare("PRAGMA table_info('tasks')").all()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'goal_status' }),
+          expect.objectContaining({ name: 'goal_token_budget' }),
+          expect.objectContaining({ name: 'goal_tokens_used' }),
+          expect.objectContaining({ name: 'goal_time_used_seconds' }),
+          expect.objectContaining({ name: 'goal_started_at' }),
+          expect.objectContaining({ name: 'goal_updated_at' }),
+        ]),
+      );
+      expect(
+        inspection
+          .prepare('SELECT version, checksum FROM schema_migrations WHERE version IN (64, 67)')
+          .all(),
+      ).toEqual([
+        { version: 64, checksum: 'image-attachment-drafts-v64' },
+        { version: 67, checksum: 'image-attachment-drafts-v67' },
+      ]);
+      expect(
+        inspection
+          .prepare('SELECT lineage FROM schema_migration_compatibility WHERE lineage = ?')
+          .get('legacy-image-attachment-v64-collision-v1'),
+      ).toEqual({ lineage: 'legacy-image-attachment-v64-collision-v1' });
+      expect(inspection.pragma('foreign_key_check')).toEqual([]);
+      inspection.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.listDraftImageAttachments(task.id)).toEqual([attachment]);
+      reopened.close();
+    });
+
     it('converts the legacy Project reference and memory tables during the bridge', () => {
       const { persistence, path } = createPersistence();
       const project = persistence.createProject('legacy memory project');

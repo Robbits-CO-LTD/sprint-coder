@@ -1030,6 +1030,8 @@ const LEGACY_MIGRATION_LINEAGE = new Map<number, string>([
   [38, 'project-context-hub-v38-reference-content-digest'],
 ]);
 const LEGACY_MIGRATION_COMPATIBILITY_KEY = 'legacy-team-project-lineage-v1';
+const LEGACY_IMAGE_ATTACHMENT_CHECKSUM = 'image-attachment-drafts-v64';
+const LEGACY_IMAGE_ATTACHMENT_COMPATIBILITY_KEY = 'legacy-image-attachment-v64-collision-v1';
 const LEGACY_RUNTIME_DIAGNOSTIC_CHECKSUM = 'runtime-failure-diagnostics-v66';
 const LEGACY_RUNTIME_DIAGNOSTIC_COMPATIBILITY_KEY = 'legacy-runtime-diagnostics-v66-collision-v1';
 
@@ -4852,16 +4854,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
     )`);
     let applied = this.readAppliedMigrations();
     const legacyLineage = this.isLegacyMigrationLineage(applied);
+    const legacyImageAttachmentCollision = this.isLegacyImageAttachmentCollision(applied);
     const legacyRuntimeDiagnosticCollision = this.isLegacyRuntimeDiagnosticCollision(applied);
     const hadPendingMigrations = migrations.some((migration) => !applied.has(migration.version));
     if (
-      (hadPendingMigrations || legacyRuntimeDiagnosticCollision) &&
+      (hadPendingMigrations ||
+        legacyImageAttachmentCollision ||
+        legacyRuntimeDiagnosticCollision) &&
       existsSync(databasePath) &&
       applied.size > 0
     )
       this.createPreMigrationBackup(databasePath);
     if (legacyLineage) {
       this.applyLegacyMigrationBridge();
+      applied = this.readAppliedMigrations();
+    }
+    if (legacyImageAttachmentCollision) {
+      this.applyLegacyImageAttachmentBridge();
       applied = this.readAppliedMigrations();
     }
     if (legacyRuntimeDiagnosticCollision) {
@@ -4872,6 +4881,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const checksum = applied.get(migration.version);
       const isRecognizedLegacyChecksum =
         (legacyLineage && LEGACY_MIGRATION_LINEAGE.get(migration.version) === checksum) ||
+        (legacyImageAttachmentCollision &&
+          migration.version === 64 &&
+          checksum === LEGACY_IMAGE_ATTACHMENT_CHECKSUM) ||
         (legacyRuntimeDiagnosticCollision &&
           migration.version === 66 &&
           checksum === LEGACY_RUNTIME_DIAGNOSTIC_CHECKSUM);
@@ -4981,6 +4993,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   private isLegacyRuntimeDiagnosticCollision(applied: ReadonlyMap<number, string>): boolean {
     return applied.get(66) === LEGACY_RUNTIME_DIAGNOSTIC_CHECKSUM;
+  }
+
+  private isLegacyImageAttachmentCollision(applied: ReadonlyMap<number, string>): boolean {
+    return applied.get(64) === LEGACY_IMAGE_ATTACHMENT_CHECKSUM;
   }
 
   private migrationForVersion(version: number): (typeof migrations)[number] {
@@ -5096,6 +5112,75 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare('INSERT INTO schema_migration_compatibility(lineage, applied_at) VALUES (?, ?)')
         .run(LEGACY_RUNTIME_DIAGNOSTIC_COMPATIBILITY_KEY, new Date().toISOString());
+    })();
+  }
+
+  /**
+   * Repairs the development-only v64 collision where image attachment drafts occupied the version
+   * later assigned to Goal lifecycle state. The old attachment schema is identical to the current
+   * v67 migration, so retain its historical v64 row, apply the missing Goal change, and record v67
+   * without recreating the existing attachment table.
+   */
+  private applyLegacyImageAttachmentBridge(): void {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS schema_migration_compatibility (
+      lineage TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+    )`);
+    const alreadyApplied = this.db
+      .prepare('SELECT 1 FROM schema_migration_compatibility WHERE lineage = ?')
+      .get(LEGACY_IMAGE_ATTACHMENT_COMPATIBILITY_KEY);
+    if (alreadyApplied !== undefined) return;
+
+    this.db.transaction(() => {
+      const attachmentColumns = [
+        'id',
+        'task_id',
+        'message_id',
+        'state',
+        'file_name',
+        'mime_type',
+        'byte_length',
+        'sha256',
+        'bytes',
+        'created_at',
+      ];
+      if (
+        !this.tableExists('image_attachments') ||
+        attachmentColumns.some((column) => !this.columnExists('image_attachments', column))
+      )
+        throw new Error('Migration checksum mismatch');
+
+      const goalMigration = this.migrationForVersion(64);
+      const goalColumns = [
+        'goal_status',
+        'goal_token_budget',
+        'goal_tokens_used',
+        'goal_time_used_seconds',
+        'goal_started_at',
+        'goal_updated_at',
+      ];
+      if (goalColumns.some((column) => this.columnExists('tasks', column)))
+        throw new Error('Migration checksum mismatch');
+      this.db.exec(goalMigration.sql);
+
+      const relocatedAttachmentMigration = this.migrationForVersion(67);
+      const existing = this.db
+        .prepare('SELECT checksum FROM schema_migrations WHERE version = ?')
+        .get(67) as { checksum: string } | undefined;
+      if (existing === undefined) {
+        this.db
+          .prepare('INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)')
+          .run(
+            relocatedAttachmentMigration.version,
+            relocatedAttachmentMigration.checksum,
+            new Date().toISOString(),
+          );
+      } else if (existing.checksum !== relocatedAttachmentMigration.checksum) {
+        throw new Error('Migration checksum mismatch');
+      }
+
+      this.db
+        .prepare('INSERT INTO schema_migration_compatibility(lineage, applied_at) VALUES (?, ?)')
+        .run(LEGACY_IMAGE_ATTACHMENT_COMPATIBILITY_KEY, new Date().toISOString());
     })();
   }
 
