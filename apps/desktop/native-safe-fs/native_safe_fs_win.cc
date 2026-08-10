@@ -67,6 +67,17 @@ std::wstring NormalizeFinalPath(std::wstring path) {
   return path;
 }
 
+bool ExpandLongPath(const std::wstring& path, std::wstring* output) {
+  const DWORD length = GetLongPathNameW(path.c_str(), nullptr, 0);
+  if (length == 0) return false;
+  std::vector<wchar_t> buffer(length + 1, L'\0');
+  const DWORD written =
+      GetLongPathNameW(path.c_str(), buffer.data(), static_cast<DWORD>(buffer.size()));
+  if (written == 0 || written >= buffer.size()) return false;
+  *output = std::wstring(buffer.data(), written);
+  return true;
+}
+
 bool SamePath(const std::wstring& left, const std::wstring& right) {
   return CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(),
                               static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
@@ -122,6 +133,10 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
   const std::wstring full_path(full_buffer.data());
   if (!SamePath(path, full_path)) return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
 
+  std::wstring expected_final_path;
+  if (!ExpandLongPath(full_path, &expected_final_path))
+    return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
+
   HANDLE file = CreateFileW(full_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                             OPEN_EXISTING,
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
@@ -147,7 +162,7 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
   if (final_length == 0 ||
       GetFinalPathNameByHandleW(file, final_buffer.data(), final_length + 1,
                                 FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) == 0 ||
-      !SamePath(full_path, NormalizeFinalPath(std::wstring(final_buffer.data())))) {
+      !SamePath(expected_final_path, NormalizeFinalPath(std::wstring(final_buffer.data())))) {
     CloseHandle(file);
     return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
   }
