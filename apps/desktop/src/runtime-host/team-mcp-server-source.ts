@@ -22,6 +22,8 @@ export const TEAM_MCP_TOOL_NAMES = [
   'team_record_model_research',
   'team_hire_worker',
   'team_assign_task',
+  'team_assign_mission',
+  'team_resume_mission',
   'team_steer_execution',
   'team_cancel_execution',
   'team_get_status',
@@ -226,6 +228,57 @@ const TOOLS = [
     },
   },
   {
+    name: 'team_assign_mission',
+    description:
+      'Create a durable 2-12 step Mission for longer coding work. Steps run in order and each step has its own Worker, completion criteria, and access mode.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        objective: { type: 'string', minLength: 1, maxLength: 20000 },
+        doneCriteria: {
+          type: 'array',
+          items: { type: 'string', minLength: 1, maxLength: 1000 },
+          minItems: 1,
+          maxItems: 64,
+        },
+        steps: {
+          type: 'array',
+          minItems: 2,
+          maxItems: 12,
+          items: {
+            type: 'object',
+            properties: {
+              workerId: { type: 'string', minLength: 1, maxLength: 128 },
+              objective: { type: 'string', minLength: 1, maxLength: 10000 },
+              doneCriteria: {
+                type: 'array',
+                items: { type: 'string', minLength: 1, maxLength: 1000 },
+                minItems: 1,
+                maxItems: 20,
+              },
+              access: { type: 'string', enum: ['read-only', 'workspace-write'] },
+            },
+            required: ['workerId', 'objective', 'doneCriteria', 'access'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['objective', 'doneCriteria', 'steps'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_resume_mission',
+    description:
+      'Resume a Mission in waiting_resume as a new attempt after inspecting its partial result.',
+    inputSchema: {
+      type: 'object',
+      properties: { missionId: { type: 'string', minLength: 1, maxLength: 128 } },
+      required: ['missionId'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'team_steer_execution',
     description: 'Replace the instruction of a queued or running execution while preserving its execution ID and attempt history.',
     inputSchema: {
@@ -425,7 +478,10 @@ function callBridge(tool, args) {
         sock,
         tool,
         args,
-        tool === 'team_wait_reports' || tool === 'team_wait_events'
+        tool === 'team_wait_reports' ||
+        tool === 'team_wait_events' ||
+        tool === 'team_assign_mission' ||
+        tool === 'team_resume_mission'
           ? LONG_BRIDGE_TIMEOUT_MS
           : NORMAL_BRIDGE_TIMEOUT_MS,
       ),
