@@ -1106,6 +1106,9 @@ export interface SprintCoderApi {
     lowerRateLimits(
       input: import('@sprint-coder/contracts').ProviderConnectionRateLimitLowerInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    setAutomaticModelRelease(
+      input: import('@sprint-coder/contracts').ProviderConnectionModelReleaseUpdateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;

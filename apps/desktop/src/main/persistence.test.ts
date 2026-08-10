@@ -332,6 +332,49 @@ if (runsWithElectronAbi)
       ).toThrow('Built-in CLI concurrency');
       persistence.close();
     });
+
+    it('persists an Ollama Connection model-release opt-out without enabling other Providers', () => {
+      const { persistence } = createPersistence();
+      const now = new Date().toISOString();
+      const create = (providerId: string, automaticModelRelease: boolean) =>
+        persistence.createProviderConnection({
+          id: `${providerId}:model-release-test`,
+          providerId,
+          runtimeKind: 'openai_compatible',
+          displayName: providerId,
+          enabled: true,
+          automaticModelRelease,
+          secretReference: null,
+          verification: {
+            status: 'unverified',
+            verifiedAt: null,
+            expiresAt: null,
+            message: null,
+          },
+          rateLimit: {
+            mode: 'auto',
+            maxConcurrentRequests: 2,
+            requestsPerMinute: null,
+            tokensPerMinute: null,
+            lastObservedRateLimitHeaders: null,
+          },
+          createdAt: now,
+          updatedAt: now,
+        });
+      const ollama = create('ollama', true);
+      const localAi = create('localai', false);
+
+      expect(
+        persistence.setProviderConnectionAutomaticModelRelease(ollama.id, false),
+      ).toMatchObject({ automaticModelRelease: false });
+      expect(persistence.getProviderConnection(localAi.id)).toMatchObject({
+        automaticModelRelease: false,
+      });
+      expect(() =>
+        persistence.setProviderConnectionAutomaticModelRelease(localAi.id, true),
+      ).toThrow('only configurable for Ollama');
+      persistence.close();
+    });
   });
 
 class PersistenceTestArtifacts implements EditArtifactRepository {
@@ -5623,6 +5666,7 @@ if (runsWithElectronAbi)
         { version: 63 },
         { version: 64 },
         { version: 65 },
+        { version: 66 },
       ]);
       for (const [table, columns] of [
         [

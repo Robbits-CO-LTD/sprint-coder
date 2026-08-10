@@ -27,6 +27,7 @@ import {
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerConnectionModelReleaseUpdateInputSchema,
   providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
@@ -820,6 +821,13 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersLowerRateLimits,
         providerConnectionRateLimitLowerInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    setAutomaticModelRelease: (input) =>
+      invoke(
+        IPC_CHANNELS.providersSetAutomaticModelRelease,
+        providerConnectionModelReleaseUpdateInputSchema,
         providerConnectionSchema,
         input,
       ),

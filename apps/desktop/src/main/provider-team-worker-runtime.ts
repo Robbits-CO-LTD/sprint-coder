@@ -9,7 +9,8 @@ import type {
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import { builtinRuntimeForModelSelection } from './connection-identity';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
-import type { ProviderRegistry } from './provider-runtime';
+import { acquireProviderModelLease, type ProviderRegistry } from './provider-runtime';
+import type { ProviderModelLease } from './ollama-model-lifecycle';
 import type { ProviderVerificationService } from './provider-verification';
 import type {
   TeamRuntimeConversationItem,
@@ -184,8 +185,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       label: 'Providerで依頼を処理中',
       at: new Date().toISOString(),
     });
+    let modelLease: ProviderModelLease | undefined;
     try {
       const runtime = this.deps.registry.resolve(connection);
+      modelLease = await acquireProviderModelLease(runtime, connection, modelId);
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
         providerCallCount += 1;
         if (
@@ -326,6 +329,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         ...(providerUsage === undefined ? {} : { providerUsage }),
       };
     } finally {
+      await modelLease?.release();
       clearInterval(heartbeat);
       input.signal?.removeEventListener('abort', abortFromCaller);
       if (reasoningActive) input.onEvent?.({ type: 'reasoningPresence', active: false });

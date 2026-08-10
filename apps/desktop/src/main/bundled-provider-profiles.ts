@@ -174,6 +174,7 @@ export const LOCAL_PROVIDER_PROFILES: readonly ProviderProfile[] = [
     displayName: 'Ollama',
     baseUrl: 'http://localhost:11434/v1',
     baseUrlConfigurable: true,
+    nativeModelLifecycle: 'ollama',
     protocol: 'chat_completions',
     modelsPath: '/models',
     curatedModels: [],

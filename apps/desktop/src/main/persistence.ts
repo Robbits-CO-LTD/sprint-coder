@@ -416,6 +416,7 @@ type ProviderConnectionRow = {
   runtime_kind: ProviderRuntimeKind;
   display_name: string;
   enabled: number;
+  automatic_model_release: number;
   secret_reference: string | null;
   verification_status:
     | 'not_required'
@@ -3038,6 +3039,17 @@ const migrations = [
       DROP TABLE team_execution_isolations_v64;
     `,
   },
+  {
+    version: 66,
+    checksum: 'provider-automatic-model-release-v66',
+    sql: `
+      ALTER TABLE provider_connections ADD COLUMN automatic_model_release INTEGER NOT NULL DEFAULT 0
+        CHECK (automatic_model_release IN (0, 1));
+      UPDATE provider_connections
+         SET automatic_model_release = 1
+       WHERE provider_id = 'ollama';
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3525,6 +3537,10 @@ export interface PersistenceClient {
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
   createProviderConnection(connection: ProviderConnection): ProviderConnection;
+  setProviderConnectionAutomaticModelRelease(
+    connectionId: string,
+    automaticModelRelease: boolean,
+  ): ProviderConnection;
   setProviderConnectionSecretReference(
     connectionId: string,
     secretReference: string | null,
@@ -4529,11 +4545,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare(
         `INSERT INTO provider_connections(
-           id, provider_id, runtime_kind, display_name, enabled, secret_reference,
+           id, provider_id, runtime_kind, display_name, enabled, automatic_model_release,
+           secret_reference,
            verification_status, verified_at, verification_expires_at, verification_message,
            rate_limit_mode, max_concurrent_requests, requests_per_minute, tokens_per_minute,
            last_observed_rate_limit_headers_json, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         parsed.id,
@@ -4541,6 +4558,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         parsed.runtimeKind,
         parsed.displayName,
         parsed.enabled ? 1 : 0,
+        parsed.automaticModelRelease === true ? 1 : 0,
         parsed.secretReference,
         parsed.verification.status,
         parsed.verification.verifiedAt,
@@ -4557,6 +4575,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
         parsed.updatedAt,
       );
     return this.getProviderConnection(parsed.id);
+  }
+
+  setProviderConnectionAutomaticModelRelease(
+    connectionId: string,
+    automaticModelRelease: boolean,
+  ): ProviderConnection {
+    const current = this.getProviderConnection(connectionId);
+    if (current.providerId !== 'ollama' || current.runtimeKind !== 'openai_compatible')
+      throw new Error('Automatic model release is only configurable for Ollama Connections');
+    const result = this.db
+      .prepare(
+        `UPDATE provider_connections
+         SET automatic_model_release = ?, updated_at = ?
+         WHERE id = ? AND provider_id = 'ollama' AND runtime_kind = 'openai_compatible'`,
+      )
+      .run(automaticModelRelease ? 1 : 0, new Date().toISOString(), connectionId);
+    if (result.changes !== 1) throw new NotFoundError('Provider connection not found');
+    return this.getProviderConnection(connectionId);
   }
 
   setProviderConnectionSecretReference(
@@ -15028,6 +15064,7 @@ function toProviderConnection(row: ProviderConnectionRow): ProviderConnection {
     runtimeKind: row.runtime_kind satisfies ProviderRuntimeKind,
     displayName: row.display_name,
     enabled: row.enabled === 1,
+    automaticModelRelease: row.automatic_model_release === 1,
     secretReference: row.secret_reference,
     verification: {
       status: row.verification_status,

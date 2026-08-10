@@ -1840,6 +1840,9 @@ export const providerConnectionSchema = z
     runtimeKind: providerRuntimeKindSchema,
     displayName: z.string().min(1).max(100),
     enabled: z.boolean(),
+    /** Whether Sprint Coder may release a local Provider model after its last logical use.
+     * Optional while older renderer/main builds and persisted fixtures cross the upgrade boundary. */
+    automaticModelRelease: z.boolean().optional(),
     secretReference: z
       .string()
       .regex(
@@ -1853,6 +1856,15 @@ export const providerConnectionSchema = z
   })
   .strict();
 export type ProviderConnection = z.infer<typeof providerConnectionSchema>;
+export const providerConnectionModelReleaseUpdateInputSchema = z
+  .object({
+    connectionId: connectionIdSchema,
+    automaticModelRelease: z.boolean(),
+  })
+  .strict();
+export type ProviderConnectionModelReleaseUpdateInput = z.infer<
+  typeof providerConnectionModelReleaseUpdateInputSchema
+>;
 export const openAIConnectionCreateInputSchema = z
   .object({
     displayName: z.string().trim().min(1).max(100),
@@ -1915,6 +1927,8 @@ export const providerProfileSchema = z
     displayName: z.string().min(1).max(100),
     baseUrl: z.string().url().max(2_048),
     baseUrlConfigurable: z.boolean(),
+    /** A bundled, declarative hint. Runtime code still applies its own fixed Ollama allow-list. */
+    nativeModelLifecycle: z.literal('ollama').optional(),
     protocol: providerProfileProtocolSchema,
     modelsPath: z.string().startsWith('/').max(256).nullable(),
     curatedModels: z
@@ -3184,6 +3198,9 @@ export interface SprintCoderApi {
     ): Promise<ProviderConnection>;
     verifyConnection(connectionId: string): Promise<ProviderConnection>;
     lowerRateLimits(input: ProviderConnectionRateLimitLowerInput): Promise<ProviderConnection>;
+    setAutomaticModelRelease(
+      input: ProviderConnectionModelReleaseUpdateInput,
+    ): Promise<ProviderConnection>;
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
@@ -3339,6 +3356,7 @@ export const IPC_CHANNELS = {
   providersCreateProfileConnection: 'sprint-coder:providers:create-profile-connection',
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   providersLowerRateLimits: 'sprint-coder:providers:lower-rate-limits',
+  providersSetAutomaticModelRelease: 'sprint-coder:providers:set-automatic-model-release',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',
