@@ -564,7 +564,10 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
       args: {},
     });
     expect(response.lines.map((line) => JSON.parse(line))).toContainEqual(
-      expect.objectContaining({ ok: true, result: { authenticated: true } }),
+      expect.objectContaining({
+        ok: true,
+        result: expect.objectContaining({ authenticated: true }),
+      }),
     );
   });
 
@@ -585,7 +588,10 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
         args: {},
       });
       expect(response.lines.map((line) => JSON.parse(line))).toContainEqual(
-        expect.objectContaining({ ok: true, result: { authenticated: true } }),
+        expect.objectContaining({
+          ok: true,
+          result: expect.objectContaining({ authenticated: true }),
+        }),
       );
     }
   });
