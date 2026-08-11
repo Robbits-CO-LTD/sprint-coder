@@ -96,6 +96,33 @@ describe('resolveRuntimeFailureDiagnostic', () => {
     });
     expect(diagnostic).not.toBe(wrongRuntime);
   });
+
+  it('enriches a bounded start-rejection reason with canonical Main context', () => {
+    const transportDiagnostic = {
+      ...new RuntimeFailureDiagnosticCollector('codex', 'unknown', null, false).snapshot(
+        'protocol_error',
+        1_000,
+      ),
+      reasonCode: 'invalid_payload_digest' as const,
+    };
+
+    const diagnostic = resolveRuntimeFailureDiagnostic({
+      errorCode: 'RUNTIME_PROTOCOL_ERROR',
+      diagnostic: transportDiagnostic,
+      runtimeKind: 'codex',
+      appVersion: '0.2.3',
+      startedAtMs: 900,
+      teamMcpEnabled: true,
+      nowMs: 1_025,
+    });
+
+    expect(diagnostic).toMatchObject({
+      appVersion: '0.2.3',
+      elapsedMs: 125,
+      reasonCode: 'invalid_payload_digest',
+      teamMcp: { enabled: true, status: 'configured' },
+    });
+  });
 });
 
 describe('RuntimeFailureDiagnosticCollector', () => {

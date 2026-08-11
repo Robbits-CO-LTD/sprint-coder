@@ -507,6 +507,18 @@ describe('Runtime Host protocol', () => {
     expect(
       correlatedRuntimeStartRejection({ ...valid, payload: 'tampered' }, valid.runtimeInstanceId),
     ).toMatchObject({ rejection: { reasonCode: 'invalid_payload_digest' } });
+    expect(
+      correlatedRuntimeStartRejection(
+        { ...valid, payload: 'x'.repeat(512 * 1024 + 1) },
+        valid.runtimeInstanceId,
+      ),
+    ).toMatchObject({ rejection: { reasonCode: 'invalid_runtime_start_envelope' } });
+    expect(
+      correlatedRuntimeStartRejection(
+        { ...valid, projectItems: Array.from({ length: 257 }, () => null) },
+        valid.runtimeInstanceId,
+      ),
+    ).toMatchObject({ rejection: { reasonCode: 'invalid_runtime_start_envelope' } });
   });
 
   it('enforces combined Project protocol count and UTF-8 byte budgets', () => {

@@ -48,18 +48,21 @@ const heartbeat = setInterval(() => {
 heartbeat.unref();
 
 parentPort.on('message', ({ data }: Electron.MessageEvent) => {
+  const rejected = correlatedRuntimeStartRejection(data, runtimeInstanceId);
+  if (rejected !== null) {
+    send(rejected.taskId, rejected.turnId, rejected.operationId, {
+      type: 'error',
+      error: {
+        code: 'RUNTIME_PROTOCOL_ERROR',
+        userMessage: 'Runtime HostがTurn開始入力を拒否しました。',
+        retryable: false,
+      },
+      rejection: rejected.rejection,
+    });
+    if (!activeTurns.has(rejected.turnId)) sequences.delete(rejected.turnId);
+    return;
+  }
   if (!isMainToRuntimeEnvelope(data) || data.runtimeInstanceId !== runtimeInstanceId) {
-    const rejected = correlatedRuntimeStartRejection(data, runtimeInstanceId);
-    if (rejected !== null)
-      send(rejected.taskId, rejected.turnId, rejected.operationId, {
-        type: 'error',
-        error: {
-          code: 'RUNTIME_PROTOCOL_ERROR',
-          userMessage: 'Runtime HostがTurn開始入力を拒否しました。',
-          retryable: false,
-        },
-        rejection: rejected.rejection,
-      });
     return;
   }
   if (data.type === 'hello') {

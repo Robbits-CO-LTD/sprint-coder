@@ -330,8 +330,6 @@ export function correlatedRuntimeStartRejection(
   const operationId = safeCorrelationId(record['operationId']);
   if (taskId === null || turnId === null || operationId === null) return null;
 
-  if (record['runtimeInstanceId'] === expectedRuntimeInstanceId && isMainToRuntimeEnvelope(value))
-    return null;
   if (record['runtimeInstanceId'] !== expectedRuntimeInstanceId)
     return {
       taskId,
@@ -339,6 +337,14 @@ export function correlatedRuntimeStartRejection(
       operationId,
       rejection: { reasonCode: 'runtime_instance_mismatch' },
     };
+  if (!isWithinStartRejectionInspectionBudget(record))
+    return {
+      taskId,
+      turnId,
+      operationId,
+      rejection: { reasonCode: 'invalid_runtime_start_envelope' },
+    };
+  if (isMainToRuntimeEnvelope(value)) return null;
   const invalidAuthority = invalidProjectContextAuthority(record['projectItems']);
   if (invalidAuthority !== null)
     return {
@@ -360,6 +366,15 @@ export function correlatedRuntimeStartRejection(
     operationId,
     rejection: { reasonCode: 'invalid_runtime_start_envelope' },
   };
+}
+
+function isWithinStartRejectionInspectionBudget(record: Record<string, unknown>): boolean {
+  const projectItems = record['projectItems'];
+  if (Array.isArray(projectItems) && projectItems.length > 256) return false;
+  const payload = record['payload'];
+  if (typeof payload !== 'string') return true;
+  // Check code-unit length first so a hostile multi-megabyte string is never traversed or hashed.
+  return payload.length <= 512 * 1024 && Buffer.byteLength(payload, 'utf8') <= 512 * 1024;
 }
 
 export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeEnvelope {

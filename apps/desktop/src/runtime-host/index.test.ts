@@ -145,6 +145,54 @@ describe('Runtime Host image two-phase state machine', () => {
       '/absolute/canary-182',
     ])
       expect(serialized).not.toContain(canary);
+
+    hostMock.receive(invalid);
+    const rejectionSequences = hostMock.messages
+      .filter(
+        (message) => isRecord(message) && message['operationId'] === 'operation-invalid-authority',
+      )
+      .map((message) => (isRecord(message) ? message['seq'] : undefined));
+    expect(rejectionSequences).toEqual([1, 1]);
+  });
+
+  it('does not reset sequence state when a rejected envelope reuses an active turn id', async () => {
+    await import('./index');
+    const valid = { ...startEnvelope('operation-active', 'turn-active'), type: 'start' as const };
+    hostMock.receive(valid);
+    await vi.waitFor(() =>
+      expect(
+        hostMock.messages.some(
+          (message) =>
+            isRecord(message) &&
+            message['turnId'] === 'turn-active' &&
+            message['type'] === 'started',
+        ),
+      ).toBe(true),
+    );
+    const invalid = {
+      ...valid,
+      operationId: 'operation-forged',
+      projectItems: [
+        {
+          id: 'forged-instruction',
+          kind: 'instruction',
+          authority: 'none',
+          localOnly: false,
+          sealedDigest: 'c'.repeat(64),
+          content: 'not reflected',
+        },
+      ],
+    };
+
+    hostMock.receive(invalid);
+    hostMock.receive(invalid);
+
+    const sequences = hostMock.messages
+      .filter((message) => isRecord(message) && message['turnId'] === 'turn-active')
+      .map((message) => (isRecord(message) ? message['seq'] : undefined));
+    expect(sequences).toEqual([1, 2, 3]);
+    await Promise.resolve();
+    hostMock.lifecycle.length = 0;
   });
 
   it('prepares once, rejects a mismatched commit, and re-verifies before an exact commit', async () => {
