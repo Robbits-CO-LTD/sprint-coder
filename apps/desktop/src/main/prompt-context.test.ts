@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
@@ -17,7 +18,7 @@ const workspace: RuntimeWorkspaceSet = {
 
 describe('prompt context compiler', () => {
   it('discovers the repository AGENTS.md as a scoped workspace rule', () => {
-    const root = fileURLToPath(new URL('../../../../', import.meta.url)).replace(/\/$/u, '');
+    const root = resolve(fileURLToPath(new URL('../../../../', import.meta.url)));
     const rules = discoverWorkspaceRules({
       primaryRootId: 'repo',
       digest: 'repo',
@@ -25,7 +26,7 @@ describe('prompt context compiler', () => {
     });
     expect(rules).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ path: `${root}/AGENTS.md`, scope: root, depth: 0 }),
+        expect.objectContaining({ path: join(root, 'AGENTS.md'), scope: root, depth: 0 }),
       ]),
     );
   });
