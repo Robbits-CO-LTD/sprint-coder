@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import type { PathClassification, PermissionResource } from '@sprint-coder/domain';
-import { pathsEquivalent } from '../path-comparison';
+import { canonicalizeExistingPath, pathsEquivalent } from '../path-comparison';
 
 export type PathOperation = 'read' | 'write' | 'rename' | 'delete';
 export type FileIdentity = {
@@ -356,7 +356,7 @@ function classifyWorkspacePath(workspacePath: string, resolvedPath: string): Pat
     return 'credential';
   if (
     pathsEquivalent(workspacePath, parse(workspacePath).root) ||
-    pathsEquivalent(workspacePath, homedir())
+    pathsEquivalent(workspacePath, canonicalizeExistingPath(homedir()))
   )
     return 'unclassified';
   return 'workspace';
