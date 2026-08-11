@@ -127,6 +127,7 @@ import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
 import { requiresTeamWorkersInput } from './team-tools';
 import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
 import { secureLogger } from './secure-logger';
+import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
 
 describe('Codex selected Skill delivery', () => {
   const fragments = [
@@ -135,7 +136,7 @@ describe('Codex selected Skill delivery', () => {
       source: 'system' as const,
       trust: 'system' as const,
       authority: 'system' as const,
-      content: 'system context',
+      content: SPRINT_CODER_IDENTITY_PROMPT,
     },
     {
       id: 'selected-skill',
@@ -150,6 +151,10 @@ describe('Codex selected Skill delivery', () => {
     expect(contextFragmentsForRuntime('codex', fragments).map(({ id }) => id)).toEqual(['system']);
     expect(contextFragmentsForRuntime('claude', fragments)).toEqual(fragments);
     expect(contextFragmentsForRuntime('provider', fragments)).toEqual(fragments);
+    for (const runtime of ['codex', 'claude', 'provider'] as const)
+      expect(contextFragmentsForRuntime(runtime, fragments)[0]?.content).toBe(
+        SPRINT_CODER_IDENTITY_PROMPT,
+      );
   });
 });
 

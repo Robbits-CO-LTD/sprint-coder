@@ -355,6 +355,11 @@ import {
   BUILTIN_IMPORT_SKILL_DIGEST,
   BUILTIN_IMPORT_SKILL_ID,
 } from './import-skill-builtin';
+import {
+  BUILTIN_SPRINT_CODER_PRODUCT_SKILL_CONTENT,
+  BUILTIN_SPRINT_CODER_PRODUCT_SKILL_DIGEST,
+  BUILTIN_SPRINT_CODER_PRODUCT_SKILL_ID,
+} from './sprint-coder-product-skill';
 import { SkillStore } from './skill-store';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import {
@@ -2875,6 +2880,11 @@ export class IpcRouter {
           BUILTIN_IMPORT_SKILL_ID,
           BUILTIN_IMPORT_SKILL_CONTENT,
           BUILTIN_IMPORT_SKILL_DIGEST,
+        ),
+        store.installBuiltin(
+          BUILTIN_SPRINT_CODER_PRODUCT_SKILL_ID,
+          BUILTIN_SPRINT_CODER_PRODUCT_SKILL_CONTENT,
+          BUILTIN_SPRINT_CODER_PRODUCT_SKILL_DIGEST,
         ),
       ]);
       this.teamSkillReady = true;

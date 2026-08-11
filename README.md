@@ -91,6 +91,12 @@ Sprint Coderは、起動失敗、Main processの未処理エラー、Rendererや
 
 ログにはtimestamp、level、event、status、関連IDなどの診断metadataだけを記録し、prompt、response、Teamメッセージ本文、環境変数全体は保存しません。既知のcredential形式やsecret項目は保存前に秘匿化しますが、第三者へ共有する前には内容を確認してください。
 
+## Sprint Coder製品知識Skill
+
+内蔵の`sprint-coder-product` Skillは、Sprint Coderの用語、ChatとTeamの使い分け、OS別保存場所、設定、安全な不具合調査をAIが説明するための選択可能な製品知識です。Skill本文には対応するデスクトップversionを埋め込み、version更新時にdigestも更新します。ログ保存先などの重要仕様はREADMEと自動テストで同期し、食い違う場合は現在の画面とREADMEを優先します。
+
+短い製品identityだけはSkill選択やユーザー設定に依存せず、通常ChatとTeamのsystem contextへ常に含まれます。詳細な製品仕様は毎Turnへ埋め込まず、必要なときに`sprint-coder-product`を選択して参照します。
+
 ## 開発
 
 ```bash

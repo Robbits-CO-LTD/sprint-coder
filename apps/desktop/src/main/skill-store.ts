@@ -21,9 +21,15 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_DEPTH = 8;
 const SKILL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
-const BUILTIN_SKILL_IDS = new Set(['sprint-coder-team', 'skill-creator', 'import-skill']);
+const BUILTIN_SKILL_IDS = new Set([
+  'sprint-coder-team',
+  'sprint-coder-product',
+  'skill-creator',
+  'import-skill',
+]);
 const RESERVED_NAMES = new Set([
   'sprint-coder-team',
+  'sprint-coder-product',
   'skill-creator',
   'import-skill',
   'team',
@@ -675,7 +681,7 @@ export class SkillStore {
 
   async listSelectable(): Promise<SelectableSkill[]> {
     const items: SelectableSkill[] = [];
-    for (const skillId of ['skill-creator', 'import-skill'] as const) {
+    for (const skillId of ['sprint-coder-product', 'skill-creator', 'import-skill'] as const) {
       const builtin = await this.readSelectableAt('builtin', skillId, true);
       if (builtin !== null) items.push(builtin);
     }

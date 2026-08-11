@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CONTEXT_SYSTEM_PROMPT,
+  SPRINT_CODER_IDENTITY_PROMPT,
   aggregateContextUsage,
   estimateTokens,
   selectHistoryForCompaction,
@@ -7,6 +9,11 @@ import {
 } from './context-ledger';
 
 describe('ContextLedger calculations', () => {
+  it('keeps the product identity first in the immutable system prompt', () => {
+    expect(CONTEXT_SYSTEM_PROMPT.startsWith(SPRINT_CODER_IDENTITY_PROMPT)).toBe(true);
+    expect(SPRINT_CODER_IDENTITY_PROMPT).toContain('Sprint Coder上で動作');
+    expect(SPRINT_CODER_IDENTITY_PROMPT).not.toContain('ログ');
+  });
   it('estimates tokens as the ceiling of Unicode character count divided by three', () => {
     expect(estimateTokens('')).toBe(0);
     expect(estimateTokens('abc')).toBe(1);
