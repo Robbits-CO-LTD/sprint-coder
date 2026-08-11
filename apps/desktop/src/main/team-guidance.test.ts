@@ -211,6 +211,9 @@ describe('builtin Team skill', () => {
     }
     expect(requiresTeamWorkersInput('Teamで原因を調査して')).toBe(true);
     expect(requiresTeamWorkersInput('Workerを2名雇ってログを調査して')).toBe(true);
+    expect(requiresTeamWorkersInput('チームに調査してほしい')).toBe(true);
+    expect(requiresTeamWorkersInput('Team MCPを使って調査して')).toBe(true);
+    expect(requiresTeamWorkersInput('チーム内のメンバーでレビューして')).toBe(true);
   });
 
   it('recognizes narrow retry and Team member reassignment instructions as continuation input', () => {
