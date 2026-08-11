@@ -11,6 +11,7 @@ import {
 import { dirname, join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { RuntimeSkillInput } from './protocol';
+import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
 
 export type CodexSkillIsolation = Readonly<{
   codexHome: string;
@@ -50,7 +51,7 @@ export function prepareCodexSkillIsolation(input: {
       errorOnExist: true,
       force: false,
     });
-    return { name: skill.name, path: realpathSync(join(destination, 'SKILL.md')) };
+    return { name: skill.name, path: realpathSync.native(join(destination, 'SKILL.md')) };
   });
 
   const validationCwds = [
@@ -134,7 +135,7 @@ export function discoverWorkspaceSkillPaths(cwd: string): string[] {
         if (!entry.isDirectory()) continue;
         const skillFile = join(skillsRoot, entry.name, 'SKILL.md');
         try {
-          if (statSync(skillFile).isFile()) result.push(resolve(skillFile));
+          if (statSync(skillFile).isFile()) result.push(canonicalizeExistingPath(skillFile));
         } catch {
           // A disappearing or unreadable candidate is rechecked by skills/list after startup.
         }
@@ -183,9 +184,5 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function canonicalPath(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return resolve(path);
-  }
+  return pathComparisonKey(canonicalizeExistingPath(path));
 }

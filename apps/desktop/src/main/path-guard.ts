@@ -1,9 +1,10 @@
-import { constants, type BigIntStats } from 'node:fs';
+import { constants, realpathSync, type BigIntStats } from 'node:fs';
 import { lstat, open, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import type { PathClassification, PermissionResource } from '@sprint-coder/domain';
+import { canonicalizeExistingPath, pathsEquivalent } from '../path-comparison';
 
 export type PathOperation = 'read' | 'write' | 'rename' | 'delete';
 export type FileIdentity = {
@@ -235,7 +236,7 @@ export async function workspaceMutationBinding(inputPath: string): Promise<
     workspaceKey: string;
   }>
 > {
-  const canonicalPath = await realpath(inputPath);
+  const canonicalPath = realpathSync.native(inputPath);
   const identity = toIdentity(await lstat(canonicalPath, { bigint: true }));
   if (identity.kind !== 'directory')
     throw new PathGuardError('INVALID_PATH', 'Workspace must be a directory');
@@ -353,7 +354,10 @@ function classifyWorkspacePath(workspacePath: string, resolvedPath: string): Pat
     /\.(?:pem|key)$/.test(name)
   )
     return 'credential';
-  if (workspacePath === parse(workspacePath).root || workspacePath === homedir())
+  if (
+    pathsEquivalent(workspacePath, parse(workspacePath).root) ||
+    pathsEquivalent(workspacePath, canonicalizeExistingPath(homedir()))
+  )
     return 'unclassified';
   return 'workspace';
 }

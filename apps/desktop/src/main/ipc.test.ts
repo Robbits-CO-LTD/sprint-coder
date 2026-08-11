@@ -95,6 +95,7 @@ import {
   confirmFullAccessOnce,
   contextFragmentsForRuntime,
   cancelRuntimeWithFinalCleanup,
+  fileEditTrackingKey,
   IpcRouter,
   invalidModelUserMessage,
   isCommittedProviderWorkspaceChange,
@@ -115,6 +116,7 @@ import {
   verifyTurnWorkspaceIdentities,
   toPublicError,
 } from './ipc';
+
 import { ModelCatalogService } from './model-catalog-service';
 import { ImageAttachmentValidationError } from './image-attachment-store';
 import { ImageAttachmentAcceptanceError, ImageAttachmentLimitError } from './persistence';
@@ -128,6 +130,14 @@ import { requiresTeamWorkersInput } from './team-tools';
 import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
 import { secureLogger } from './secure-logger';
 import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
+
+describe('file edit tracking identity', () => {
+  it('deduplicates Windows relative paths that differ only by casing', () => {
+    expect(fileEditTrackingKey('turn', 'root', 'Src/App.ts', 'win32')).toBe(
+      fileEditTrackingKey('turn', 'root', 'src/app.ts', 'win32'),
+    );
+  });
+});
 
 describe('Codex selected Skill delivery', () => {
   const fragments = [

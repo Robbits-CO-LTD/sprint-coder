@@ -13,6 +13,7 @@ import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-cod
 import { basename, dirname, isAbsolute, normalize, sep } from 'node:path';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
+import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
 
 export const RUNTIME_PROTOCOL_VERSION = 8;
 
@@ -71,8 +72,9 @@ export function runtimeWorkspaceSetFromLegacyPath(path: string | null): RuntimeW
       roots: [],
       digest: createHash('sha256').update('').digest('hex'),
     };
-  const canonicalPath = normalize(path);
-  const rootId = createHash('sha256').update(canonicalPath).digest('hex');
+  const canonicalPath = canonicalizeExistingPath(path);
+  const identityPath = pathComparisonKey(canonicalPath);
+  const rootId = createHash('sha256').update(identityPath).digest('hex');
   return {
     primaryRootId: rootId,
     roots: [
@@ -83,7 +85,7 @@ export function runtimeWorkspaceSetFromLegacyPath(path: string | null): RuntimeW
         role: 'primary',
       },
     ],
-    digest: createHash('sha256').update(`legacy\0${canonicalPath}`).digest('hex'),
+    digest: createHash('sha256').update(`legacy\0${identityPath}`).digest('hex'),
   };
 }
 
@@ -496,11 +498,11 @@ function isRuntimeWorkspaceSet(value: unknown): value is RuntimeWorkspaceSet {
       item['label'].length === 0 ||
       (item['role'] !== 'primary' && item['role'] !== 'secondary') ||
       ids.has(item['rootId']) ||
-      paths.has(item['path'])
+      paths.has(pathComparisonKey(item['path']))
     )
       return false;
     ids.add(item['rootId']);
-    paths.add(item['path']);
+    paths.add(pathComparisonKey(item['path']));
     if (item['role'] === 'primary') {
       primaryCount += 1;
       if (item['rootId'] !== primaryRootId) return false;

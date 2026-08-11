@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { link, mkdtemp, mkdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, parse } from 'node:path';
 import {
   PathGuardError,
@@ -251,6 +251,21 @@ describe('path guard', () => {
     expect(workspacePermissionResourceFromGuard(guard).classification).toBe('workspace');
   });
 
+  it.runIf(process.platform === 'win32')(
+    'keeps the home-directory permission gate across drive-letter casing',
+    async () => {
+      const home = homedir();
+      const first = home[0]!;
+      const variant = `${first === first.toLowerCase() ? first.toUpperCase() : first.toLowerCase()}${home.slice(1)}`;
+      const guard = await createPathGuard({
+        workspacePath: variant,
+        targetPath: '.',
+        operation: 'read',
+      });
+      expect(workspacePermissionResourceFromGuard(guard).classification).toBe('unclassified');
+    },
+  );
+
   it('does not treat an OS root selected as a Workspace as ordinary Workspace content', async () => {
     const windowsDirectory = process.env['WINDIR'];
     const workspacePath =
@@ -321,6 +336,11 @@ describe('path guard', () => {
 
     const direct = await workspaceMutationBinding(workspace);
     const throughAlias = await workspaceMutationBinding(alias);
+    if (process.platform === 'win32') {
+      const first = workspace[0]!;
+      const caseVariant = `${first === first.toLowerCase() ? first.toUpperCase() : first.toLowerCase()}${workspace.slice(1)}`;
+      expect(await workspaceMutationBinding(caseVariant)).toEqual(direct);
+    }
     await writeFile(join(workspace, 'new-file.txt'), 'changes directory metadata');
     const afterContentChange = await workspaceMutationBinding(workspace);
     const renamed = join(root, 'renamed-workspace');

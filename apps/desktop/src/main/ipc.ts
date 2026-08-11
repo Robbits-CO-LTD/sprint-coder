@@ -20,6 +20,7 @@ import {
 } from 'node:path';
 import { workspaceMutationBinding } from './path-guard';
 import { CommandRunnerError } from './command-runner';
+import { pathComparisonKey } from '../path-comparison';
 import { TeamSubscriptionRegistry } from './team-subscription-registry';
 import { z } from 'zod';
 import {
@@ -5110,7 +5111,7 @@ export class IpcRouter {
     const rooted = resolveTurnRootedPath(workspace, absolutePath);
     if (rooted === null) return;
     const { root, path } = rooted;
-    const key = `${turnId}\u0000${root.rootId}\u0000${path}`;
+    const key = fileEditTrackingKey(turnId, root.rootId, path);
     let state = this.fileEditByKey.get(key);
     if (state === undefined) {
       if (this.fileEditByKey.size >= 16) return;
@@ -5234,7 +5235,7 @@ export class IpcRouter {
     // same bytes.
     for (const change of inside) {
       if (change.kind === 'delete') continue;
-      if (this.fileEditByKey.has(`${turnId}\u0000${change.rootId}\u0000${change.path}`)) continue;
+      if (this.fileEditByKey.has(fileEditTrackingKey(turnId, change.rootId, change.path))) continue;
       const body = readWorkspaceTextFile(change.rootPath, change.path);
       if (body !== null)
         this.pushFileEdit(taskId, turnId, resolvePath(change.rootPath, change.path), body, {
@@ -5938,6 +5939,15 @@ function resolveTurnRootedPath(
     if (path !== null) return { root, path };
   }
   return null;
+}
+
+export function fileEditTrackingKey(
+  turnId: string,
+  rootId: string,
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return `${turnId}\u0000${rootId}\u0000${pathComparisonKey(path, platform)}`;
 }
 
 export async function verifyTurnWorkspaceIdentities(
