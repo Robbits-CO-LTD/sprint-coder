@@ -1116,7 +1116,7 @@ const TEAM_CONSULTATION_ENDING =
 const TEAM_WORKER_EXECUTION_ACTION =
   /(?:(?:雇って|雇用して|採用して|作成して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|挨拶して|会話させて|分担して|進めて|コードを書いて)(?:ください|ほしい)?|(?:編集|実装|実行|作業|調査|検証|監査|レビュー|採用|雇用)?(?:を)?お願い(?:します)?)$/i;
 const TEAM_EXECUTION_MARKER =
-  /^\s*\/team(?=\s+\S)|チーム(?:で|を|に|内で|内の(?:メンバー|担当|リーダー)(?:で|に))|(?:^|[^a-zA-Z])team(?:で|を)|(?:^|[^a-zA-Z])team\s+(?:skill|mcp)(?:\s*を使って|で)|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:り|名|人)|(?:worker|agent|ワーカー|担当|メンバー|リーダー)[^。.!！?？\r\n]{0,40}(?:雇って|雇用して|採用して)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人)(?:(?:体制|構成)?で|を?雇)/i;
+  /^\s*\/team(?=\s+\S)|チーム(?:で|を|に|内で|(?:内の|の)?(?:メンバー|担当|リーダー)(?:で|に))|(?:^|[^a-zA-Z])team(?:で|を)|(?:^|[^a-zA-Z])team\s+(?:skill|mcp)(?:\s*を使って|で)|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:り|名|人)|(?:worker|agent|ワーカー|担当|メンバー|リーダー)[^。.!！?？\r\n]{0,40}(?:雇って|雇用して|採用して)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人)(?:(?:体制|構成)?で|を?雇)/i;
 const TEAM_ROLE_ASSIGNMENT_EXECUTION_ACTION =
   /(?:雇って|雇用して|採用して|作成して|構築して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|分担して|進めて)(?:ください|ほしい)?[。.!！?？]*$/i;
 const TEAM_ROLE_ASSIGNMENT_NEGATION =
@@ -1198,12 +1198,11 @@ export function requiresTeamWorkersInput(input: string): boolean {
   const trimmed = input.trim();
   if (!isTeamScenarioInput(trimmed)) return false;
   if (isExplicitTeamRoleAssignmentInput(trimmed)) return true;
+  if (TEAM_COMPOUND_EXECUTION_INTENT.test(trimmed)) return true;
   const hasExplicitExecutionClause = trimmed
     .split(/[、,。.!！?？\r\n]+/)
     .some((clause) => TEAM_WORKER_EXECUTION_ACTION.test(clause.trim()));
-  const hasExplicitTeamExecutionMarker =
-    TEAM_EXECUTION_MARKER.test(trimmed) || TEAM_COMPOUND_EXECUTION_INTENT.test(trimmed);
-  return hasExplicitTeamExecutionMarker && hasExplicitExecutionClause;
+  return TEAM_EXECUTION_MARKER.test(trimmed) && hasExplicitExecutionClause;
 }
 
 export function isTeamScenarioFixtureInput(input: string): boolean {
