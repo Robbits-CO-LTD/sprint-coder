@@ -3,7 +3,100 @@ import { describe, expect, it } from 'vitest';
 import {
   RUNTIME_DIAGNOSTIC_MAX_BYTES,
   RuntimeFailureDiagnosticCollector,
+  resolveRuntimeFailureDiagnostic,
 } from './runtime-failure-diagnostics';
+
+describe('resolveRuntimeFailureDiagnostic', () => {
+  it('creates a safe protocol-error fallback without retaining untrusted failure details', () => {
+    const untrusted = {
+      userMessage: 'private request body',
+      toolArguments: { token: 'secret-token' },
+      environment: { API_KEY: 'credential-value' },
+      path: '/Users/private/workspace/file.ts',
+    };
+
+    const diagnostic = resolveRuntimeFailureDiagnostic({
+      ...untrusted,
+      errorCode: 'RUNTIME_PROTOCOL_ERROR',
+      diagnostic: undefined,
+      runtimeKind: 'codex',
+      appVersion: '0.2.3',
+      startedAtMs: 1_000,
+      teamMcpEnabled: true,
+      nowMs: 1_025,
+    });
+
+    expect(diagnostic).toMatchObject({
+      runtimeKind: 'codex',
+      failureStage: 'protocol_error',
+      elapsedMs: 25,
+      appVersion: '0.2.3',
+      teamMcp: { enabled: true, status: 'configured' },
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(untrusted.userMessage);
+    expect(JSON.stringify(diagnostic)).not.toContain(untrusted.toolArguments.token);
+    expect(JSON.stringify(diagnostic)).not.toContain(untrusted.environment.API_KEY);
+    expect(JSON.stringify(diagnostic)).not.toContain(untrusted.path);
+  });
+
+  it('preserves an existing diagnostic and does not infer non-protocol failures', () => {
+    const existing = new RuntimeFailureDiagnosticCollector(
+      'codex',
+      '0.2.3',
+      'codex 1.2.3',
+      false,
+    ).snapshot('protocol_error', 2_000);
+
+    expect(
+      resolveRuntimeFailureDiagnostic({
+        errorCode: 'RUNTIME_PROTOCOL_ERROR',
+        diagnostic: existing,
+        runtimeKind: 'codex',
+        appVersion: 'ignored',
+        startedAtMs: 1_000,
+        teamMcpEnabled: true,
+        nowMs: 2_000,
+      }),
+    ).toBe(existing);
+    expect(
+      resolveRuntimeFailureDiagnostic({
+        errorCode: 'RUNTIME_FAILED',
+        diagnostic: undefined,
+        runtimeKind: 'codex',
+        appVersion: '0.2.3',
+        startedAtMs: 1_000,
+        teamMcpEnabled: false,
+        nowMs: 2_000,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('replaces a wrong-runtime protocol diagnostic with one for the failing runtime', () => {
+    const wrongRuntime = new RuntimeFailureDiagnosticCollector(
+      'claude',
+      '0.2.3',
+      '2.1.218 (Claude Code)',
+      false,
+    ).snapshot('protocol_error', 2_000);
+
+    const diagnostic = resolveRuntimeFailureDiagnostic({
+      errorCode: 'RUNTIME_PROTOCOL_ERROR',
+      diagnostic: wrongRuntime,
+      runtimeKind: 'codex',
+      appVersion: '0.2.3',
+      startedAtMs: 1_000,
+      teamMcpEnabled: true,
+      nowMs: 2_000,
+    });
+
+    expect(diagnostic).toMatchObject({
+      runtimeKind: 'codex',
+      failureStage: 'protocol_error',
+      elapsedMs: 1_000,
+    });
+    expect(diagnostic).not.toBe(wrongRuntime);
+  });
+});
 
 describe('RuntimeFailureDiagnosticCollector', () => {
   it('records recognized notifications and counts unsupported names without retaining them', () => {
