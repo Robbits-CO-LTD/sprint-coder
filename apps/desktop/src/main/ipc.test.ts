@@ -105,6 +105,7 @@ import {
   providerWorkspaceToolsEligible,
   providerModelsForBuiltin,
   requireExplicitProviderCommandApproval,
+  requiredTeamWorkerFailure,
   shouldRetryProviderWithoutTools,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
@@ -600,6 +601,17 @@ describe('Provider Team completion and model errors', () => {
     expect(shouldFailRequiredTeamTurn(true, 0)).toBe(true);
     expect(shouldFailRequiredTeamTurn(true, 1)).toBe(false);
     expect(shouldFailRequiredTeamTurn(false, 0)).toBe(false);
+  });
+
+  it('classifies missing required Workers as a policy failure, not a runtime protocol error', () => {
+    expect(requiredTeamWorkerFailure(false, 0)).toBeNull();
+    expect(requiredTeamWorkerFailure(true, 1)).toBeNull();
+    expect(requiredTeamWorkerFailure(true, 0)).toEqual({
+      code: 'RUNTIME_FAILED',
+      userMessage:
+        'Team MCP Workerが1名も作成されませんでした。外部のsubagent機能へfallbackせず終了します。',
+      retryable: true,
+    });
   });
 });
 

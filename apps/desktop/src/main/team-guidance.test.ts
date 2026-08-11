@@ -193,6 +193,26 @@ describe('builtin Team skill', () => {
     expect(requiresTeamWorkersInput('チームの使い方を説明して')).toBe(false);
   });
 
+  it('routes Team diagnostics without requiring a Worker', () => {
+    const roleAssignment =
+      'Sprint Coderで現在選択しているモデルをリーダーにしてOllamaのローカルLLMをワーカーにした実装skillを構築して';
+    const diagnostics = [
+      ['そもそもなぜsprint-coder-teamが使えないのか調査して。ログファイルを見て', true],
+      ['Team Skillのログを見て', true],
+      ['Team MCPの不具合を確認して', true],
+      ['チームの使い方を説明して', false],
+    ] as const;
+
+    expect(isTeamScenarioInput(roleAssignment)).toBe(true);
+    expect(requiresTeamWorkersInput(roleAssignment)).toBe(true);
+    for (const [input, teamScenario] of diagnostics) {
+      expect(isTeamScenarioInput(input), input).toBe(teamScenario);
+      expect(requiresTeamWorkersInput(input), input).toBe(false);
+    }
+    expect(requiresTeamWorkersInput('Teamで原因を調査して')).toBe(true);
+    expect(requiresTeamWorkersInput('Workerを2名雇ってログを調査して')).toBe(true);
+  });
+
   it('recognizes narrow retry and Team member reassignment instructions as continuation input', () => {
     for (const input of [
       'continue',
