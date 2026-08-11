@@ -1,6 +1,13 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
+import {
+  closeApp,
+  completeSetupForFeatureTest,
+  createUserDataDir,
+  firstWindow,
+  launchApp,
+  removeUserDataDir,
+} from './helpers';
 
 const LEGACY_PICKER_ENV = { SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2: '0' };
 
@@ -16,6 +23,7 @@ async function withApp(label: string, body: (page: Page) => Promise<void>): Prom
     // V2 Picker combines Runtime and model in one control and has its own parity coverage.
     app = await launchApp(dir, undefined, LEGACY_PICKER_ENV);
     const page = await firstWindow(app);
+    await completeSetupForFeatureTest(page);
     await page.getByTestId('sidebar-new-task-button').click();
     await expect(page.getByTestId('composer-textarea')).toBeVisible();
     await body(page);

@@ -1,6 +1,13 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
+import {
+  closeApp,
+  completeSetupForFeatureTest,
+  createUserDataDir,
+  firstWindow,
+  launchApp,
+  removeUserDataDir,
+} from './helpers';
 
 // Phase 7 (tasks/IMPLEMENTATION_PLAN.md §10.3): 200% zoom must not introduce horizontal scrolling
 // on the app shell, and the composer/send controls must stay visible and clickable. Uses the real
@@ -74,6 +81,7 @@ test.describe('200% zoom (NFR-A11Y-01 adjacent)', () => {
     try {
       app = await launchApp(dir);
       const page = await firstWindow(app);
+      await completeSetupForFeatureTest(page);
       await page.getByTestId('sidebar-new-task-button').click();
       await expect(page.getByTestId('composer-textarea')).toBeVisible();
 
@@ -87,12 +95,61 @@ test.describe('200% zoom (NFR-A11Y-01 adjacent)', () => {
     }
   });
 
+  test('running Composer actions reflow at 150%, 200%, and a 320px effective viewport', async () => {
+    const dir = createUserDataDir('a11y-zoom-composer-actions');
+    let app: ElectronApplication | null = null;
+    try {
+      app = await launchApp(dir);
+      const page = await firstWindow(app);
+      await completeSetupForFeatureTest(page);
+      await page.getByTestId('sidebar-new-task-button').click();
+      const textarea = page.getByTestId('composer-textarea');
+      await textarea.fill('承認テストをしてください');
+      await textarea.press('Enter');
+      await expect(page.getByTestId('approval-card')).toBeVisible();
+      await textarea.fill('割り込んで送信する入力');
+
+      const win = await app.browserWindow(page);
+      for (const factor of [1.5, 2.0]) {
+        await setZoomFactor(app, page, factor);
+        await assertNoHorizontalOverflow(page);
+        for (const control of [
+          page.getByTestId('composer-interrupt-button'),
+          page.getByTestId('composer-send-button'),
+        ]) {
+          await expect(control).toBeVisible();
+          const box = await control.boundingBox();
+          expect(box?.width ?? 0).toBeGreaterThanOrEqual(24);
+          expect(box?.height ?? 0).toBeGreaterThanOrEqual(24);
+        }
+      }
+
+      // Electron's product minimum width is 760 physical pixels. At 200% this already exercises
+      // 380 CSS px; lower only the test window's minimum to cover WCAG's exact 320 CSS px reflow.
+      await win.evaluate((browserWindow) => {
+        browserWindow.setMinimumSize(640, 480);
+        browserWindow.setSize(640, 800);
+      });
+      await page.waitForTimeout(150);
+      expect(await page.evaluate(() => document.documentElement.clientWidth)).toBeLessThanOrEqual(
+        320,
+      );
+      await assertNoHorizontalOverflow(page);
+      await expect(page.getByTestId('composer-interrupt-button')).toBeVisible();
+      await expect(page.getByTestId('composer-send-button')).toBeVisible();
+    } finally {
+      await closeApp(app);
+      removeUserDataDir(dir);
+    }
+  });
+
   test('list view at 2.0x: no horizontal scroll, controls remain reachable', async () => {
     const dir = createUserDataDir('a11y-zoom-list');
     let app: ElectronApplication | null = null;
     try {
       app = await launchApp(dir);
       const page = await firstWindow(app);
+      await completeSetupForFeatureTest(page);
       await page.getByTestId('sidebar-new-task-button').click();
       await page.getByTestId('team-toggle').click();
       await expect(page.getByTestId('team-list')).toBeVisible();

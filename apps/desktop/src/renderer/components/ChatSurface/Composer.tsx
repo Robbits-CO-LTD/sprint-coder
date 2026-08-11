@@ -4,7 +4,7 @@ import type { GoalSummary, SkillCatalogItem, TurnSkillSelection } from '@sprint-
 import { useAppStore } from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
 import { ContextBar, PermissionChip } from './ContextBar';
-import { ArrowUp, Paperclip, Pause, Pencil, Play, Plus, Target, Trash, X } from '../icons';
+import { ArrowUp, Paperclip, Pause, Pencil, Play, Plus, Square, Target, Trash, X } from '../icons';
 import { ComposerMenu } from './ComposerMenu';
 import { ModelPickerV2 } from '../ModelPickerV2';
 import { isModelPickerV2Active } from '../../lib/model-picker-parity';
@@ -42,6 +42,183 @@ import type {
 
 const EMPTY_SKILL_SELECTION: readonly TurnSkillSelection[] = [];
 
+export type ComposerActionKind = 'send' | 'queue' | 'cancel';
+
+export function composerSubmitShortcut(input: {
+  key: string;
+  shiftKey: boolean;
+  isComposing: boolean;
+}): 'submit' | 'none' {
+  return input.key === 'Enter' && !input.shiftKey && !input.isComposing ? 'submit' : 'none';
+}
+
+export function composerMessageText(raw: string, imageRequested: boolean): string {
+  return imageRequested ? `${IMAGEGEN_PREFIX} ${raw}` : raw;
+}
+
+export function imageRequestFailureRecovery(input: {
+  currentDraft: string;
+  rawDraft: string;
+  imageRequested: boolean;
+  draftRestored: boolean;
+  imageModeUnchanged: boolean;
+}): { draft: string; rearm: boolean } {
+  return input.imageRequested && input.draftRestored && input.imageModeUnchanged
+    ? { draft: input.rawDraft, rearm: true }
+    : { draft: input.currentDraft, rearm: false };
+}
+
+export type ComposerActionPolicy = Readonly<{
+  primary: Readonly<{
+    kind: ComposerActionKind;
+    label: string;
+    title: string;
+    disabled: boolean;
+    busy: boolean;
+  }>;
+  interrupt: Readonly<{
+    visible: boolean;
+    label: string;
+    title: string;
+    disabled: boolean;
+  }>;
+}>;
+
+export function composerActionPolicy(input: {
+  turnStatus: 'idle' | 'running' | 'canceling';
+  hasDraft: boolean;
+  canQueue: boolean;
+  canStopAndSend: boolean;
+  canCancel: boolean;
+  actionPending: boolean;
+  sendBlocked: boolean;
+}): ComposerActionPolicy {
+  const canceling = input.turnStatus === 'canceling';
+  const running = input.turnStatus === 'running';
+  const unavailableSuffix = '（この環境では利用できません）';
+  const interruptVisible = input.turnStatus !== 'idle' && input.hasDraft;
+
+  if (canceling || (running && !input.hasDraft)) {
+    const unavailable = !input.canCancel;
+    return {
+      primary: {
+        kind: 'cancel',
+        label: unavailable ? `実行を停止${unavailableSuffix}` : '実行を停止',
+        title: canceling
+          ? '実行を停止しています'
+          : unavailable
+            ? 'この環境では実行を停止できません'
+            : '実行を停止',
+        disabled: canceling || input.actionPending || unavailable,
+        busy: canceling || input.actionPending,
+      },
+      interrupt: {
+        visible: interruptVisible,
+        label: !input.canStopAndSend ? `割り込んで送信${unavailableSuffix}` : '割り込んで送信',
+        title: !input.canStopAndSend
+          ? 'この環境では割り込み送信を利用できません'
+          : '現在の実行を停止して、すぐに送信します',
+        disabled: true,
+      },
+    };
+  }
+
+  if (running) {
+    const unavailable = !input.canQueue;
+    return {
+      primary: {
+        kind: 'queue',
+        label: unavailable ? `キューに追加${unavailableSuffix}` : 'キューに追加',
+        title: unavailable
+          ? 'この環境ではキュー追加を利用できません'
+          : '現在の実行が終わったら送信します',
+        disabled: input.actionPending || input.sendBlocked || unavailable,
+        busy: false,
+      },
+      interrupt: {
+        visible: true,
+        label: !input.canStopAndSend ? `割り込んで送信${unavailableSuffix}` : '割り込んで送信',
+        title: !input.canStopAndSend
+          ? 'この環境では割り込み送信を利用できません'
+          : '現在の実行を停止して、すぐに送信します',
+        disabled: input.actionPending || input.sendBlocked || !input.canStopAndSend,
+      },
+    };
+  }
+
+  return {
+    primary: {
+      kind: 'send',
+      label: '送信',
+      title: '送信',
+      disabled: !input.hasDraft || input.actionPending || input.sendBlocked,
+      busy: false,
+    },
+    interrupt: {
+      visible: false,
+      label: '割り込んで送信',
+      title: '現在の実行を停止して、すぐに送信します',
+      disabled: true,
+    },
+  };
+}
+
+export function ComposerActionButtons({
+  policy,
+  onPrimary,
+  onInterrupt,
+}: {
+  policy: ComposerActionPolicy;
+  onPrimary: () => void;
+  onInterrupt: () => void;
+}) {
+  const unavailableReasons = [policy.primary, policy.interrupt]
+    .filter((action) => action.label.includes('この環境では利用できません'))
+    .map((action) => action.title);
+  return (
+    <div className="composer-action-buttons">
+      {unavailableReasons.length > 0 && (
+        <span className="composer-action-unavailable" role="status">
+          {unavailableReasons.join(' / ')}
+        </span>
+      )}
+      {policy.interrupt.visible && (
+        <button
+          type="button"
+          className="composer-interrupt-btn"
+          data-testid="composer-interrupt-button"
+          disabled={policy.interrupt.disabled}
+          onClick={onInterrupt}
+          aria-label={policy.interrupt.label}
+          title={policy.interrupt.title}
+        >
+          <Square size={11} />
+          <span>{policy.interrupt.label}</span>
+        </button>
+      )}
+      <button
+        type="button"
+        className={`send-btn ${policy.primary.kind === 'cancel' ? 'stop' : policy.primary.kind}`}
+        data-testid="composer-send-button"
+        disabled={policy.primary.disabled}
+        onClick={onPrimary}
+        aria-label={policy.primary.label}
+        aria-busy={policy.primary.busy || undefined}
+        title={policy.primary.title}
+      >
+        {policy.primary.kind === 'cancel' ? (
+          <Square size={13} />
+        ) : (
+          <>
+            {policy.primary.kind === 'queue' && <span className="send-btn-label">キュー</span>}
+            <ArrowUp size={15} />
+          </>
+        )}
+      </button>
+    </div>
+  );
+}
+
 export function Composer({ taskId }: { taskId: string }) {
   const draft = useAppStore((s) => s.draftByTask[taskId]) ?? '';
   const setDraft = useAppStore((s) => s.setDraft);
@@ -51,6 +228,8 @@ export function Composer({ taskId }: { taskId: string }) {
   const clearGoal = useAppStore((s) => s.clearGoal);
   const startTurn = useAppStore((s) => s.startTurn);
   const queueMessage = useAppStore((s) => s.queueMessage);
+  const stopAndSend = useAppStore((s) => s.stopAndSend);
+  const cancelActiveTurn = useAppStore((s) => s.cancelActiveTurn);
   const { createTask } = useTaskBoundary();
   const currentTask = useAppStore((state) => state.tasks.find(({ id }) => id === taskId));
   const currentProjectId = currentTask?.projectId ?? null;
@@ -94,9 +273,15 @@ export function Composer({ taskId }: { taskId: string }) {
   // Armed by the plus menu, consumed by the next send. One-shot rather than a mode, so a user who
   // opens the menu and changes their mind is not stuck generating images.
   const [imageRequested, setImageRequested] = useState(false);
+  const imageRequestRevisionRef = useRef(0);
   const [slashSelection, setSlashSelection] = useState(0);
   const [slashDismissedDraft, setSlashDismissedDraft] = useState<string | null>(null);
   const [composerCursor, setComposerCursor] = useState(draft.length);
+  const [turnActionPending, setTurnActionPending] = useState<
+    'queue' | 'interrupt' | 'cancel' | null
+  >(null);
+  const turnActionPendingRef = useRef<'queue' | 'interrupt' | 'cancel' | null>(null);
+  const [turnActionError, setTurnActionError] = useState<string | null>(null);
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
@@ -110,6 +295,8 @@ export function Composer({ taskId }: { taskId: string }) {
   const attachmentErrorId = attachmentError ? `composer-attachment-error-${taskId}` : undefined;
 
   const canQueue = typeof window.sprintCoder?.turns?.queue === 'function';
+  const canStopAndSend = typeof window.sprintCoder?.turns?.stopAndSend === 'function';
+  const canCancel = typeof window.sprintCoder?.turns?.cancel === 'function';
   const slashMatch = slashTokenAtCursor(draft, composerCursor);
   const slashQuery = slashMatch?.query ?? null;
   const skillIndex = useMemo(
@@ -246,13 +433,24 @@ export function Composer({ taskId }: { taskId: string }) {
     wasSendingRef.current = sending;
   }, [sending]);
 
-  const sendDisabled =
-    !draft.trim() ||
-    sending ||
-    goalControlPending ||
-    projectSwitching ||
-    attachmentPolicy.sendBlocked ||
-    (turnActive && (goalRequested || !canQueue));
+  const actionPolicy = composerActionPolicy({
+    turnStatus: turn?.status === 'canceling' ? 'canceling' : turnActive ? 'running' : 'idle',
+    hasDraft: draft.trim().length > 0,
+    canQueue,
+    canStopAndSend,
+    canCancel,
+    actionPending: sending || turnActionPending !== null,
+    sendBlocked:
+      goalControlPending ||
+      projectSwitching ||
+      attachmentPolicy.sendBlocked ||
+      (turnActive && goalRequested),
+  });
+
+  function updateImageRequested(next: boolean): void {
+    imageRequestRevisionRef.current += 1;
+    setImageRequested(next);
+  }
 
   async function handleRemoveAttachment(attachmentId: string): Promise<void> {
     const index = draftAttachments.findIndex(({ id }) => id === attachmentId);
@@ -272,7 +470,7 @@ export function Composer({ taskId }: { taskId: string }) {
 
   function handleSend() {
     const raw = draft.trim();
-    if (!raw || sendDisabled) return;
+    if (!raw || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel') return;
     // Enter while the slash picker is open already runs `/team` through runSlashCommand. Keep the
     // send button and `/team ` (with a trailing space) consistent: a standalone command opens the
     // Canvas, while `/team <request>` remains a message and Main routes it through Sprint Coder
@@ -304,13 +502,76 @@ export function Composer({ taskId }: { taskId: string }) {
     // The issue names this as an open question; traceability wins. An image appearing with no
     // explanation in the history is worse than a visible directive, and a hidden one would make
     // "why did this turn generate an image?" unanswerable after the fact.
-    const text = imageRequested ? `${IMAGEGEN_PREFIX} ${raw}` : raw;
-    setImageRequested(false);
+    const text = composerMessageText(raw, imageRequested);
+    updateImageRequested(false);
     if (!turnActive) {
       void startTurn(taskId, text, undefined, directTurnAttachmentIds(draftAttachments));
       return;
     }
-    if (canQueue) void queueMessage(taskId, text);
+    if (actionPolicy.primary.kind === 'queue') {
+      runTurnAction('queue', () => queueMessage(taskId, text, selectedSkills));
+    }
+  }
+
+  function runTurnAction(
+    action: 'queue' | 'interrupt' | 'cancel',
+    operation: () => Promise<boolean>,
+  ): void {
+    // The ref closes the same-event-loop gap before React commits the disabled state. A fast
+    // double-click (or Enter immediately followed by click) must never enqueue/cancel twice.
+    if (turnActionPendingRef.current !== null) return;
+    turnActionPendingRef.current = action;
+    setTurnActionError(null);
+    setTurnActionPending(action);
+    void operation()
+      .then((completed) => {
+        if (!completed) {
+          setTurnActionError(
+            action === 'cancel'
+              ? '実行を停止できませんでした。Turnを実行中に戻しました。'
+              : '操作を完了できませんでした。入力内容とSkillを復元しました。',
+          );
+        }
+      })
+      .finally(() => {
+        turnActionPendingRef.current = null;
+        setTurnActionPending(null);
+      });
+  }
+
+  function handlePrimaryAction(): void {
+    if (actionPolicy.primary.disabled) return;
+    if (actionPolicy.primary.kind === 'cancel') {
+      runTurnAction('cancel', () => cancelActiveTurn(taskId));
+      return;
+    }
+    handleSend();
+  }
+
+  function handleInterrupt(): void {
+    const raw = draft.trim();
+    if (!raw || actionPolicy.interrupt.disabled) return;
+    const text = composerMessageText(raw, imageRequested);
+    const restoreImageRequest = imageRequested;
+    updateImageRequested(false);
+    const imageRequestRevision = imageRequestRevisionRef.current;
+    runTurnAction('interrupt', async () => {
+      const result = await stopAndSend(taskId, text, selectedSkills);
+      if (!result.completed) {
+        const recovery = imageRequestFailureRecovery({
+          currentDraft: useAppStore.getState().draftByTask[taskId] ?? '',
+          rawDraft: raw,
+          imageRequested: restoreImageRequest,
+          draftRestored: result.draftRestored,
+          imageModeUnchanged: imageRequestRevisionRef.current === imageRequestRevision,
+        });
+        if (recovery.rearm) {
+          setDraft(taskId, recovery.draft);
+          updateImageRequested(true);
+        }
+      }
+      return result.completed;
+    });
   }
 
   function runGoalControl(action: () => Promise<void>): void {
@@ -347,7 +608,7 @@ export function Composer({ taskId }: { taskId: string }) {
         break;
       case 'goal':
         if (attachmentPolicy.goalBlocked) break;
-        setImageRequested(false);
+        updateImageRequested(false);
         setGoalEditDraftBackup(null);
         setGoalRequested(true);
         break;
@@ -356,14 +617,14 @@ export function Composer({ taskId }: { taskId: string }) {
         break;
       case 'image':
         cancelGoalRequest();
-        setImageRequested(true);
+        updateImageRequested(true);
         break;
     }
   }
 
   function editGoal() {
     if (goal === null || goal.status === 'active') return;
-    setImageRequested(false);
+    updateImageRequested(false);
     setGoalEditDraftBackup(draft);
     setGoalRequested(true);
     setDraft(taskId, goal.objective);
@@ -418,7 +679,13 @@ export function Composer({ taskId }: { taskId: string }) {
         }
       }
     }
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (
+      composerSubmitShortcut({
+        key: e.key,
+        shiftKey: e.shiftKey,
+        isComposing: e.nativeEvent.isComposing,
+      }) === 'submit'
+    ) {
       e.preventDefault();
       handleSend();
     } else if (e.key === 'Escape' && goalRequested) {
@@ -506,6 +773,20 @@ export function Composer({ taskId }: { taskId: string }) {
               {attachmentError}
             </div>
           )}
+          {turnActionError && (
+            <div className="composer-operation-error" role="alert">
+              {turnActionError}
+            </div>
+          )}
+          <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {turnActionPending === 'queue'
+              ? 'キューに追加しています'
+              : turnActionPending === 'interrupt'
+                ? '現在の実行を停止して送信しています'
+                : turnActionPending === 'cancel' || turn?.status === 'canceling'
+                  ? '実行を停止しています'
+                  : ''}
+          </div>
           <textarea
             ref={textareaRef}
             className="composer-input"
@@ -550,7 +831,7 @@ export function Composer({ taskId }: { taskId: string }) {
               onRequestAttachment={() => void pickDraftAttachment(taskId)}
               onRequestImage={() => {
                 cancelGoalRequest();
-                setImageRequested(true);
+                updateImageRequested(true);
               }}
             />
             <PermissionChip taskId={taskId} />
@@ -571,7 +852,7 @@ export function Composer({ taskId }: { taskId: string }) {
                 className="cmp-chip imagegen-armed"
                 data-testid="composer-imagegen-armed"
                 title="この送信で画像生成を呼び出します。クリックで取り消し"
-                onClick={() => setImageRequested(false)}
+                onClick={() => updateImageRequested(false)}
               >
                 画像生成 <X size={12} />
               </button>
@@ -596,23 +877,22 @@ export function Composer({ taskId }: { taskId: string }) {
               )}
               <EffortChip />
             </div>
-            <button
-              type="button"
-              className="send-btn"
-              data-testid="composer-send-button"
-              disabled={sendDisabled}
-              onClick={handleSend}
-              aria-label={goalRequested ? 'Goalを開始' : turnActive ? 'キューに追加' : '送信'}
-              title={
-                goalRequested
-                  ? 'Goalを開始'
-                  : turnActive
-                    ? '現在の実行が終わったら送信します'
-                    : '送信'
+            <ComposerActionButtons
+              policy={
+                goalRequested && actionPolicy.primary.kind === 'send'
+                  ? {
+                      ...actionPolicy,
+                      primary: {
+                        ...actionPolicy.primary,
+                        label: 'Goalを開始',
+                        title: 'Goalを開始',
+                      },
+                    }
+                  : actionPolicy
               }
-            >
-              <ArrowUp size={15} />
-            </button>
+              onPrimary={handlePrimaryAction}
+              onInterrupt={handleInterrupt}
+            />
           </div>
         </div>
       </div>
