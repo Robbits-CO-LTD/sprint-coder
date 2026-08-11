@@ -126,6 +126,25 @@ describe('prompt context compiler', () => {
     expect(fragments[0]?.content).toContain(compiled.digest);
   });
 
+  it('keeps Workspace rule bodies out of system authority', () => {
+    const compiled = compilePromptGuidance({
+      workspace,
+      toolCatalog: catalog([]),
+      workspaceRules: [
+        { path: '/work/repo/AGENTS.md', scope: '/work/repo', depth: 0, content: 'RULE_CANARY' },
+      ],
+      vcs: [],
+    });
+    const fragments = injectPromptGuidance([], compiled);
+
+    expect(fragments).toHaveLength(2);
+    expect(fragments[0]).toMatchObject({ source: 'system', authority: 'system', trust: 'system' });
+    expect(fragments[0]?.content).not.toContain('RULE_CANARY');
+    expect(fragments[1]).toMatchObject({ source: 'history', authority: 'user', trust: 'user' });
+    expect(fragments[1]?.content).toContain('RULE_CANARY');
+    expect(fragments[1]?.content).toContain('scope: "/work/repo"');
+  });
+
   it('reinjects immutable guidance alongside a compacted conversation', () => {
     const compiled = compilePromptGuidance({
       workspace,

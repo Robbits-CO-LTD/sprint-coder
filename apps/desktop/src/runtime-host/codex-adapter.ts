@@ -272,6 +272,7 @@ export class CodexRuntimeAdapter {
       const skillIsolation = prepareCodexSkillIsolation({
         temporaryRoot: skillIsolationDirectory,
         cwd,
+        runtimeWorkspaceRoots,
         skills,
       });
       let teamMcpProfile: CodexTeamMcpProfile | undefined;
@@ -462,8 +463,17 @@ export class CodexRuntimeAdapter {
           !skillIsolationVerificationPending
         ) {
           skillIsolationVerificationPending = true;
-          void send('skills/list', { cwds: [cwd], forceReload: true })
-            .then((response) => assertCodexSkillIsolation(response, skillIsolation.stagedSkills))
+          void send('skills/list', {
+            cwds: skillIsolation.validationCwds,
+            forceReload: true,
+          })
+            .then((response) =>
+              assertCodexSkillIsolation(
+                response,
+                skillIsolation.stagedSkills,
+                skillIsolation.validationCwds.length,
+              ),
+            )
             .catch(() => {
               if (failed || control.canceled) return;
               failed = true;
@@ -526,8 +536,12 @@ export class CodexRuntimeAdapter {
           extraRoots: [skillIsolation.selectedSkillsRoot],
         });
         assertCodexSkillIsolation(
-          await send('skills/list', { cwds: [cwd], forceReload: true }),
+          await send('skills/list', {
+            cwds: skillIsolation.validationCwds,
+            forceReload: true,
+          }),
           skillIsolation.stagedSkills,
+          skillIsolation.validationCwds.length,
         );
         skillIsolationReady = true;
         const threadResult = asRecord(

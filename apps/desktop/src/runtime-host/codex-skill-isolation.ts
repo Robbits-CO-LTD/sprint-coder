@@ -19,11 +19,13 @@ export type CodexSkillIsolation = Readonly<{
   selectedSkillsRoot: string;
   stagedSkills: readonly RuntimeSkillInput[];
   disabledWorkspaceSkillPaths: readonly string[];
+  validationCwds: readonly string[];
 }>;
 
 export function prepareCodexSkillIsolation(input: {
   temporaryRoot: string;
   cwd: string;
+  runtimeWorkspaceRoots?: readonly string[];
   skills: readonly RuntimeSkillInput[];
   environment?: Readonly<NodeJS.ProcessEnv>;
 }): CodexSkillIsolation {
@@ -51,13 +53,21 @@ export function prepareCodexSkillIsolation(input: {
     return { name: skill.name, path: realpathSync(join(destination, 'SKILL.md')) };
   });
 
+  const validationCwds = [
+    ...new Set(
+      input.runtimeWorkspaceRoots === undefined || input.runtimeWorkspaceRoots.length === 0
+        ? [input.cwd]
+        : input.runtimeWorkspaceRoots,
+    ),
+  ].sort();
   return {
     codexHome,
     isolatedUserHome,
     shellUserHome: environment['HOME'] ?? environment['USERPROFILE'] ?? homedir(),
     selectedSkillsRoot,
     stagedSkills,
-    disabledWorkspaceSkillPaths: discoverWorkspaceSkillPaths(input.cwd),
+    disabledWorkspaceSkillPaths: discoverWorkspaceSkillPathsForRoots(validationCwds),
+    validationCwds,
   };
 }
 
@@ -80,31 +90,37 @@ export function codexSkillIsolationArgs(isolation: CodexSkillIsolation): string[
 export function assertCodexSkillIsolation(
   response: unknown,
   expectedSkills: readonly RuntimeSkillInput[],
+  expectedCatalogCount = 1,
 ): void {
   const record = asRecord(response);
   const data = record['data'];
-  if (!Array.isArray(data) || data.length !== 1)
+  if (!Array.isArray(data) || data.length !== expectedCatalogCount)
     throw new Error('Codex Skill isolation returned an invalid catalog');
-  const entry = asRecord(data[0]);
-  const errors = entry['errors'];
-  if (!Array.isArray(errors) || errors.length !== 0)
-    throw new Error('Codex Skill isolation catalog contains load errors');
-  const skills = entry['skills'];
-  if (!Array.isArray(skills)) throw new Error('Codex Skill isolation catalog is missing skills');
-  const enabled = skills
-    .map(asRecord)
-    .filter((skill) => skill['enabled'] === true)
-    .map((skill) => ({ name: skill['name'], path: skill['path'] }));
-  if (enabled.some((skill) => typeof skill.name !== 'string' || typeof skill.path !== 'string'))
-    throw new Error('Codex Skill isolation catalog contains invalid metadata');
-  const actual = enabled
-    .map((skill) => `${String(skill.name)}\u0000${canonicalPath(String(skill.path))}`)
-    .sort();
   const expected = expectedSkills
     .map((skill) => `${skill.name}\u0000${canonicalPath(skill.path)}`)
     .sort();
-  if (actual.length !== expected.length || actual.some((value, index) => value !== expected[index]))
-    throw new Error('Codex Skill isolation exposed an unselected Skill');
+  for (const item of data) {
+    const entry = asRecord(item);
+    const errors = entry['errors'];
+    if (!Array.isArray(errors) || errors.length !== 0)
+      throw new Error('Codex Skill isolation catalog contains load errors');
+    const skills = entry['skills'];
+    if (!Array.isArray(skills)) throw new Error('Codex Skill isolation catalog is missing skills');
+    const enabled = skills
+      .map(asRecord)
+      .filter((skill) => skill['enabled'] === true)
+      .map((skill) => ({ name: skill['name'], path: skill['path'] }));
+    if (enabled.some((skill) => typeof skill.name !== 'string' || typeof skill.path !== 'string'))
+      throw new Error('Codex Skill isolation catalog contains invalid metadata');
+    const actual = enabled
+      .map((skill) => `${String(skill.name)}\u0000${canonicalPath(String(skill.path))}`)
+      .sort();
+    if (
+      actual.length !== expected.length ||
+      actual.some((value, index) => value !== expected[index])
+    )
+      throw new Error('Codex Skill isolation exposed an unselected Skill');
+  }
 }
 
 export function discoverWorkspaceSkillPaths(cwd: string): string[] {
@@ -130,6 +146,10 @@ export function discoverWorkspaceSkillPaths(cwd: string): string[] {
     current = dirname(current);
   }
   return [...new Set(result)].sort();
+}
+
+export function discoverWorkspaceSkillPathsForRoots(roots: readonly string[]): string[] {
+  return [...new Set(roots.flatMap((root) => discoverWorkspaceSkillPaths(root)))].sort();
 }
 
 function copyAuthentication(environment: Readonly<NodeJS.ProcessEnv>, codexHome: string): void {

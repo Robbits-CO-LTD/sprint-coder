@@ -7,7 +7,8 @@ import type { RuntimeContextFragment, RuntimeWorkspaceSet } from '../runtime-hos
 import { digestCanonical } from './context-compiler';
 
 export const PROMPT_CONTEXT_VERSION = 1;
-const MAX_WORKSPACE_RULE_BYTES = 64 * 1024;
+const MAX_WORKSPACE_RULE_BYTES = 24 * 1024;
+const MAX_WORKSPACE_RULE_TOTAL_BYTES = 32 * 1024;
 
 export type PromptAgent = Readonly<{
   role: 'primary' | 'subagent';
@@ -134,6 +135,23 @@ export function injectPromptGuidance(
       source === 'system' && authority === 'system' && trust === 'system',
   );
   const addendum = `\n\n[Sprint Coder execution context v${PROMPT_CONTEXT_VERSION}; digest=${compiled.digest}]\n${compiled.content}`;
+  const workspaceRuleFragments: RuntimeContextFragment[] = compiled.context.workspaceRules.map(
+    (rule, index) => ({
+      id: `workspace-rule:${compiled.digest.slice(0, 16)}:${index}`,
+      source: 'history',
+      authority: 'user',
+      trust: 'user',
+      content: [
+        '<workspace-rule>',
+        `path: ${JSON.stringify(rule.path)}`,
+        `scope: ${JSON.stringify(rule.scope)}`,
+        `depth: ${rule.depth}`,
+        '',
+        rule.content,
+        '</workspace-rule>',
+      ].join('\n'),
+    }),
+  );
   if (systemIndex < 0)
     return [
       {
@@ -143,15 +161,19 @@ export function injectPromptGuidance(
         trust: 'system',
         content: addendum.trimStart(),
       },
+      ...workspaceRuleFragments,
       ...fragments,
     ];
-  return fragments.map((fragment, index) =>
-    index === systemIndex ? { ...fragment, content: `${fragment.content}${addendum}` } : fragment,
+  return fragments.flatMap((fragment, index) =>
+    index === systemIndex
+      ? [{ ...fragment, content: `${fragment.content}${addendum}` }, ...workspaceRuleFragments]
+      : [fragment],
   );
 }
 
 export function discoverWorkspaceRules(workspace: RuntimeWorkspaceSet): PromptWorkspaceRule[] {
   const rules: PromptWorkspaceRule[] = [];
+  let totalBytes = 0;
   for (const root of [...workspace.roots].sort((left, right) =>
     left.path.localeCompare(right.path),
   )) {
@@ -159,14 +181,22 @@ export function discoverWorkspaceRules(workspace: RuntimeWorkspaceSet): PromptWo
       try {
         const stat = lstatSync(path);
         if (!stat.isFile() || stat.size > MAX_WORKSPACE_RULE_BYTES) continue;
+        const content = readFileSync(path, 'utf8');
+        const contentBytes = Buffer.byteLength(content, 'utf8');
+        if (
+          contentBytes > MAX_WORKSPACE_RULE_BYTES ||
+          totalBytes + contentBytes > MAX_WORKSPACE_RULE_TOTAL_BYTES
+        )
+          continue;
         const scope = dirname(path);
         const nested = relative(root.path, scope);
         rules.push({
           path,
           scope,
           depth: nested === '' ? 0 : nested.split(sep).length,
-          content: readFileSync(path, 'utf8'),
+          content,
         });
+        totalBytes += contentBytes;
       } catch {
         // Missing, unreadable, symlinked, and oversized rule files are omitted rather than guessed.
       }
@@ -245,9 +275,11 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
   }
   lines.push('', '実行環境:', JSON.stringify(context.environment));
   if (context.workspaceRules.length > 0) {
-    lines.push('', 'Workspace規則（後にある深いscopeほど優先）:');
-    for (const rule of context.workspaceRules)
-      lines.push(`- ${rule.path} (scope: ${rule.scope})\n${rule.content}`);
+    lines.push(
+      '',
+      'Workspace規則（本文は別のuser-authority fragment。後にある深いscopeほど優先）:',
+    );
+    for (const rule of context.workspaceRules) lines.push(`- ${rule.path} (scope: ${rule.scope})`);
   }
   if (context.tools.length > 0) {
     lines.push('', 'このTurnで実在が確認されたツール:');

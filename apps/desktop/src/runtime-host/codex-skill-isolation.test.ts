@@ -7,6 +7,7 @@ import {
   assertCodexSkillIsolation,
   codexSkillIsolationArgs,
   discoverWorkspaceSkillPaths,
+  discoverWorkspaceSkillPathsForRoots,
   prepareCodexSkillIsolation,
 } from './codex-skill-isolation';
 
@@ -52,6 +53,34 @@ describe('Codex Skill isolation', () => {
     await writeFile(join(skill, 'SKILL.md'), '---\nname: repo-skill\ndescription: test\n---\n');
 
     expect(discoverWorkspaceSkillPaths(nested)).toEqual([join(skill, 'SKILL.md')]);
+  });
+
+  it('discovers and validates Skills across every isolated Workspace root', async () => {
+    const root = await temporaryRoot();
+    const primary = join(root, 'primary');
+    const secondary = join(root, 'secondary');
+    const primarySkill = join(primary, '.agents', 'skills', 'primary-skill');
+    const secondarySkill = join(secondary, '.agents', 'skills', 'secondary-skill');
+    for (const [workspaceRoot, skillRoot, name] of [
+      [primary, primarySkill, 'primary-skill'],
+      [secondary, secondarySkill, 'secondary-skill'],
+    ] as const) {
+      await mkdir(join(workspaceRoot, '.git'), { recursive: true });
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: test\n---\n`);
+    }
+
+    expect(discoverWorkspaceSkillPathsForRoots([primary, secondary])).toEqual([
+      join(primarySkill, 'SKILL.md'),
+      join(secondarySkill, 'SKILL.md'),
+    ]);
+    const response = {
+      data: [primary, secondary].map((cwd) => ({ cwd, skills: [], errors: [] })),
+    };
+    expect(() => assertCodexSkillIsolation(response, [], 2)).not.toThrow();
+    expect(() => assertCodexSkillIsolation({ data: response.data.slice(0, 1) }, [], 2)).toThrow(
+      'invalid catalog',
+    );
   });
 
   it('accepts exactly the staged enabled Skills and rejects any extra enabled Skill', () => {
