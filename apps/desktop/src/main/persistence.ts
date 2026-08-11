@@ -180,6 +180,7 @@ import {
   type RuntimeFailureDiagnostic,
 } from '../runtime-host/protocol';
 import { RUNTIME_DIAGNOSTIC_MAX_BYTES } from '../runtime-host/runtime-failure-diagnostics';
+import { pathComparisonKey, pathsEquivalent } from '../path-comparison';
 import {
   legacyMutationWorkspaceKey,
   MutationClockRollbackError,
@@ -5893,7 +5894,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           const candidate = next[ordinal]!;
           return (
             root.id === candidate.id &&
-            root.canonical_path === candidate.canonicalPath &&
+            pathsEquivalent(root.canonical_path, candidate.canonicalPath) &&
             root.label === (candidate.label ?? folderLabel(candidate.canonicalPath)) &&
             root.role === candidate.role &&
             root.workspace_key === candidate.workspaceKey &&
@@ -9920,7 +9921,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .get(binding.workspaceKey);
       if (destinationQuarantine !== undefined) throw new MutationQuarantinedError();
       const changed =
-        current.workspace_path !== binding.path ||
+        !pathsEquivalent(current.workspace_path ?? '', binding.path) ||
         current.mutation_scope_key !== binding.workspaceKey ||
         current.mutation_root_identity_digest !== binding.rootIdentityDigest;
       const result = this.db
@@ -15541,7 +15542,8 @@ function validateProjectFolderBindings(folders: readonly ProjectFolderBinding[])
       throw new InvalidProjectError('Project folder must be an absolute non-filesystem-root path');
     validateMutationDigest(folder.workspaceKey, 'workspace mutation key');
     validateMutationDigest(folder.rootIdentityDigest, 'workspace root identity digest');
-    if (paths.has(folder.canonicalPath) || identities.has(folder.rootIdentityDigest))
+    const pathKey = pathComparisonKey(folder.canonicalPath);
+    if (paths.has(pathKey) || identities.has(folder.rootIdentityDigest))
       throw new InvalidProjectError('Project folders must resolve to distinct directories');
     for (const previous of folders.slice(0, index)) {
       const fromPrevious = relative(previous.canonicalPath, folder.canonicalPath);
@@ -15552,7 +15554,7 @@ function validateProjectFolderBindings(folders: readonly ProjectFolderBinding[])
       )
         throw new InvalidProjectError('Nested Project folders are not allowed');
     }
-    paths.add(folder.canonicalPath);
+    paths.add(pathKey);
     identities.add(folder.rootIdentityDigest);
   });
 }

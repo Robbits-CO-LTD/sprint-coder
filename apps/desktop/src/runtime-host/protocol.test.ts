@@ -8,6 +8,7 @@ import {
   correlatedRuntimeStartRejection,
   isMainToRuntimeEnvelope,
   isRuntimeToMainEnvelope,
+  runtimeWorkspaceSetFromLegacyPath,
 } from './protocol';
 
 function startEnvelope() {
@@ -40,6 +41,34 @@ function startEnvelope() {
 }
 
 describe('Runtime Host protocol', () => {
+  it.runIf(process.platform === 'win32')(
+    'keeps legacy Workspace identity stable across drive-letter casing',
+    () => {
+      const root = parseWin32DriveVariant(process.cwd());
+      const canonical = runtimeWorkspaceSetFromLegacyPath(process.cwd());
+      const variant = runtimeWorkspaceSetFromLegacyPath(root);
+      expect(variant.primaryRootId).toBe(canonical.primaryRootId);
+      expect(variant.digest).toBe(canonical.digest);
+    },
+  );
+  it.runIf(process.platform === 'win32')(
+    'rejects duplicate Runtime Workspace roots that differ only by drive-letter casing',
+    () => {
+      const valid = startEnvelope();
+      const canonical = process.cwd();
+      const variant = parseWin32DriveVariant(canonical);
+      const workspace = {
+        primaryRootId: 'root-a',
+        roots: [
+          { rootId: 'root-a', path: canonical, label: 'a', role: 'primary' },
+          { rootId: 'root-b', path: variant, label: 'b', role: 'secondary' },
+        ],
+        digest: 'a'.repeat(64),
+      } as const;
+
+      expect(isMainToRuntimeEnvelope({ ...valid, workspace })).toBe(false);
+    },
+  );
   it('validates bounded same-directory image prepare and bound commit envelopes', () => {
     const selectionIdentity = 'a'.repeat(64);
     const manifestDigest = 'b'.repeat(64);
@@ -575,3 +604,10 @@ describe('Runtime Host protocol', () => {
     ).toBe(true);
   });
 });
+
+function parseWin32DriveVariant(path: string): string {
+  const first = path[0];
+  if (first === undefined) return path;
+  const toggled = first === first.toLowerCase() ? first.toUpperCase() : first.toLowerCase();
+  return `${toggled}${path.slice(1)}`;
+}

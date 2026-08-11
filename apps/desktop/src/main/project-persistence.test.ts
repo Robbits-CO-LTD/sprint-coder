@@ -414,6 +414,59 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it.runIf(process.platform === 'win32')(
+      'treats drive-letter casing as the same active Project folder',
+      async () => {
+        const { persistence } = createPersistence();
+        const rootPath = mkdtempSync(join(tmpdir(), 'sprint-coder-project-case-'));
+        directories.push(rootPath);
+        const binding = await workspaceMutationBinding(rootPath);
+        const project = persistence.createProject({
+          name: 'Case-stable root',
+          folders: [{ ...binding, path: binding.canonicalPath, label: 'root', role: 'primary' }],
+        });
+        const task = persistence.createTask('active', false, project.id);
+        persistence.startTurn(task.id, 'working');
+        const first = binding.canonicalPath[0]!;
+        const variant = `${first === first.toLowerCase() ? first.toUpperCase() : first.toLowerCase()}${binding.canonicalPath.slice(1)}`;
+
+        const unchanged = persistence.replaceProjectFolders({
+          projectId: project.id,
+          expectedRevision: project.revision,
+          folders: [
+            {
+              ...binding,
+              id: persistence.listProjectFolders(project.id)[0]!.id,
+              path: variant,
+              canonicalPath: variant,
+              label: 'root',
+              role: 'primary',
+            },
+          ],
+        });
+
+        expect(unchanged.revision).toBe(project.revision);
+        persistence.close();
+      },
+    );
+
+    it.runIf(process.platform === 'win32')(
+      'rejects Project folder duplicates that differ only by casing',
+      () => {
+        const { persistence } = createPersistence();
+        expect(() =>
+          persistence.createProject({
+            name: 'Case duplicate',
+            folders: [
+              folderBinding('C:\\Workspace\\Repo', 'primary', 'a'),
+              folderBinding('c:\\workspace\\repo', 'secondary', 'b'),
+            ],
+          }),
+        ).toThrow('distinct directories');
+        persistence.close();
+      },
+    );
+
     it('rejects duplicate, nested, and active-work Project folder mutations', () => {
       const { persistence } = createPersistence();
       expect(() =>

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -52,7 +52,7 @@ describe('Codex Skill isolation', () => {
     await mkdir(skill, { recursive: true });
     await writeFile(join(skill, 'SKILL.md'), '---\nname: repo-skill\ndescription: test\n---\n');
 
-    expect(discoverWorkspaceSkillPaths(nested)).toEqual([join(skill, 'SKILL.md')]);
+    expect(discoverWorkspaceSkillPaths(nested)).toEqual([await realpath(join(skill, 'SKILL.md'))]);
   });
 
   it('discovers and validates Skills across every isolated Workspace root', async () => {
@@ -71,8 +71,8 @@ describe('Codex Skill isolation', () => {
     }
 
     expect(discoverWorkspaceSkillPathsForRoots([primary, secondary])).toEqual([
-      join(primarySkill, 'SKILL.md'),
-      join(secondarySkill, 'SKILL.md'),
+      await realpath(join(primarySkill, 'SKILL.md')),
+      await realpath(join(secondarySkill, 'SKILL.md')),
     ]);
     const response = {
       data: [primary, secondary].map((cwd) => ({ cwd, skills: [], errors: [] })),
@@ -114,6 +114,25 @@ describe('Codex Skill isolation', () => {
       ),
     ).toThrow('unselected Skill');
   });
+
+  it.runIf(process.platform === 'win32')(
+    'accepts CLI Skill paths whose drive-letter casing differs',
+    async () => {
+      const root = await temporaryRoot();
+      const skillFile = join(root, 'reviewer', 'SKILL.md');
+      await mkdir(join(root, 'reviewer'), { recursive: true });
+      await writeFile(skillFile, '---\nname: reviewer\ndescription: review\n---\n');
+      const first = skillFile[0]!;
+      const variant = `${first === first.toLowerCase() ? first.toUpperCase() : first.toLowerCase()}${skillFile.slice(1)}`;
+
+      expect(() =>
+        assertCodexSkillIsolation(
+          { data: [{ skills: [{ name: 'reviewer', path: variant, enabled: true }], errors: [] }] },
+          [{ name: 'reviewer', path: skillFile }],
+        ),
+      ).not.toThrow();
+    },
+  );
 
   async function temporaryRoot(): Promise<string> {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-skill-isolation-'));

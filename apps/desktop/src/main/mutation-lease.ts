@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { pathComparisonKey } from '../path-comparison';
 
 export type MutationLeasePurpose = 'forward' | 'recovery';
 export type WorkspaceMutationState = 'idle' | 'held' | 'quarantined';
@@ -60,12 +61,23 @@ export class MutationClockRollbackError extends Error {
   }
 }
 
-export function mutationWorkspaceKey(canonicalPath: string, rootIdentityDigest: string): string {
-  return digestJson(['workspace-mutation-v1', canonicalPath, rootIdentityDigest]);
+export function mutationWorkspaceKey(
+  canonicalPath: string,
+  rootIdentityDigest: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return digestJson([
+    'workspace-mutation-v1',
+    pathComparisonKey(canonicalPath, platform),
+    rootIdentityDigest,
+  ]);
 }
 
-export function legacyMutationWorkspaceKey(canonicalPath: string): string {
-  return digestJson(['workspace-mutation-legacy-v1', canonicalPath]);
+export function legacyMutationWorkspaceKey(
+  canonicalPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return digestJson(['workspace-mutation-legacy-v1', pathComparisonKey(canonicalPath, platform)]);
 }
 
 export function validateMutationDigest(value: string, name: string): void {

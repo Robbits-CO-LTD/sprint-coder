@@ -352,6 +352,31 @@ describe('CommandRunner', () => {
     },
   );
 
+  it.runIf(process.platform === 'win32')(
+    'preserves PATH resolution for commands started by an approved executable',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          "const result=require('node:child_process').spawnSync('where.exe',['where.exe'],{encoding:'utf8'}); process.stdout.write(result.stdout ?? ''); process.exit(result.status ?? 1)",
+        ],
+      });
+      let output = '';
+
+      await expect(
+        new CommandRunner().run(spec, {
+          onChunk: (chunk) => {
+            output += chunk.text;
+          },
+        }),
+      ).resolves.toMatchObject({ exitCode: 0 });
+      expect(output.toLowerCase()).toContain('where.exe');
+    },
+  );
+
   it.runIf(process.platform !== 'win32')(
     'rejects an executable rewritten in place after preparation',
     async () => {
