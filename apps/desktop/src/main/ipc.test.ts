@@ -124,6 +124,164 @@ import {
 } from './image-attachment-capability';
 import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
 import { requiresTeamWorkersInput } from './team-tools';
+import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
+import { secureLogger } from './secure-logger';
+
+describe('Main runtime failure diagnostics', () => {
+  function createRuntimeFailureHarness(diagnosticId = 'diagnostic-main-protocol') {
+    const recordRuntimeFailureDiagnostic = vi.fn().mockReturnValue({ diagnosticId });
+    const pushRuntimeStatus = vi.fn();
+    const turnRuntimes = new Map([['turn-protocol', 'codex']]);
+    const runtimeDiagnosticContextByTurn = new Map([
+      [
+        'turn-protocol',
+        { startedAtMs: Date.now() - 10, runtimeKind: 'codex', teamMcpEnabled: true },
+      ],
+    ]);
+    let activeTurnId: string | null = 'turn-protocol';
+    const finishAndAdvance = vi.fn((_taskId: string, turnId: string) => {
+      turnRuntimes.delete(turnId);
+      runtimeDiagnosticContextByTurn.delete(turnId);
+      activeTurnId = null;
+    });
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      mailbox: {
+        run: vi.fn((_taskId: string, action: () => unknown) => Promise.resolve(action())),
+      },
+      canceledRuntimeTurns: new Set<string>(),
+      turnRuntimes,
+      runtimeDiagnosticContextByTurn,
+      attachmentCustodyByTurn: new Map(),
+      persistence: {
+        getActiveTurnId: vi.fn(() => activeTurnId),
+        recordRuntimeFailureDiagnostic,
+      },
+      pushRuntimeStatus,
+      finishAndAdvance,
+    });
+    return {
+      probe: router as unknown as {
+        handleRuntimeFailure(
+          kind: 'codex',
+          taskId: string,
+          turnId: string,
+          error: { code: string; userMessage: string; retryable: boolean },
+          diagnostic?: ReturnType<RuntimeFailureDiagnosticCollector['snapshot']>,
+        ): void;
+      },
+      recordRuntimeFailureDiagnostic,
+      pushRuntimeStatus,
+      finishAndAdvance,
+      dropTransientRuntime: () => turnRuntimes.delete('turn-protocol'),
+    };
+  }
+
+  it('persists one fallback for a missing protocol diagnostic and relays its id', async () => {
+    const harness = createRuntimeFailureHarness();
+    const log = vi.spyOn(secureLogger, 'error');
+
+    harness.probe.handleRuntimeFailure('codex', 'task-protocol', 'turn-protocol', {
+      code: 'RUNTIME_PROTOCOL_ERROR',
+      userMessage: 'safe public message',
+      retryable: true,
+    });
+
+    await vi.waitFor(() => expect(harness.finishAndAdvance).toHaveBeenCalledOnce());
+    expect(harness.recordRuntimeFailureDiagnostic).toHaveBeenCalledOnce();
+    expect(harness.recordRuntimeFailureDiagnostic).toHaveBeenCalledWith(
+      'task-protocol',
+      'turn-protocol',
+      expect.objectContaining({
+        runtimeKind: 'codex',
+        failureStage: 'protocol_error',
+        teamMcp: { enabled: true, status: 'configured' },
+      }),
+    );
+    expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ diagnosticId: 'diagnostic-main-protocol' }),
+    );
+    expect(log).toHaveBeenCalledWith(
+      'Runtime failed',
+      expect.objectContaining({ diagnosticId: 'diagnostic-main-protocol' }),
+    );
+    expect(harness.finishAndAdvance).toHaveBeenCalledWith(
+      'task-protocol',
+      'turn-protocol',
+      'failed',
+    );
+    log.mockRestore();
+  });
+
+  it('keeps adapter diagnostics and does not invent diagnostics for non-protocol failures', async () => {
+    const existing = new RuntimeFailureDiagnosticCollector(
+      'codex',
+      '0.2.3',
+      'codex 1.2.3',
+      false,
+    ).snapshot('protocol_error');
+    const existingHarness = createRuntimeFailureHarness(existing.diagnosticId);
+    existingHarness.probe.handleRuntimeFailure(
+      'codex',
+      'task-protocol',
+      'turn-protocol',
+      { code: 'RUNTIME_PROTOCOL_ERROR', userMessage: 'safe', retryable: true },
+      existing,
+    );
+    await vi.waitFor(() => expect(existingHarness.finishAndAdvance).toHaveBeenCalledOnce());
+    expect(existingHarness.recordRuntimeFailureDiagnostic).toHaveBeenCalledWith(
+      'task-protocol',
+      'turn-protocol',
+      existing,
+    );
+
+    const nonProtocolHarness = createRuntimeFailureHarness();
+    nonProtocolHarness.probe.handleRuntimeFailure('codex', 'task-protocol', 'turn-protocol', {
+      code: 'RUNTIME_FAILED',
+      userMessage: 'safe',
+      retryable: true,
+    });
+    await vi.waitFor(() => expect(nonProtocolHarness.finishAndAdvance).toHaveBeenCalledOnce());
+    expect(nonProtocolHarness.recordRuntimeFailureDiagnostic).not.toHaveBeenCalled();
+    expect(nonProtocolHarness.pushRuntimeStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ diagnosticId: null }),
+    );
+  });
+
+  it('ignores a duplicate protocol failure after the Turn is terminalized', async () => {
+    const harness = createRuntimeFailureHarness();
+    const error = {
+      code: 'RUNTIME_PROTOCOL_ERROR',
+      userMessage: 'safe',
+      retryable: true,
+    };
+
+    harness.probe.handleRuntimeFailure('codex', 'task-protocol', 'turn-protocol', error);
+    await vi.waitFor(() => expect(harness.finishAndAdvance).toHaveBeenCalledOnce());
+    harness.probe.handleRuntimeFailure('codex', 'task-protocol', 'turn-protocol', error);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(harness.recordRuntimeFailureDiagnostic).toHaveBeenCalledOnce();
+    expect(harness.finishAndAdvance).toHaveBeenCalledOnce();
+  });
+
+  it('persists a late protocol diagnostic while the durable Turn is still active', async () => {
+    const harness = createRuntimeFailureHarness('diagnostic-late-protocol');
+    harness.dropTransientRuntime();
+
+    harness.probe.handleRuntimeFailure('codex', 'task-protocol', 'turn-protocol', {
+      code: 'RUNTIME_PROTOCOL_ERROR',
+      userMessage: 'safe',
+      retryable: true,
+    });
+
+    await vi.waitFor(() => expect(harness.finishAndAdvance).toHaveBeenCalledOnce());
+    expect(harness.recordRuntimeFailureDiagnostic).toHaveBeenCalledOnce();
+    expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ diagnosticId: 'diagnostic-late-protocol' }),
+    );
+  });
+});
 
 describe('built-in subscription model capabilities', () => {
   it('pages fallback candidates within the catalog limit and preserves the allowlist', () => {

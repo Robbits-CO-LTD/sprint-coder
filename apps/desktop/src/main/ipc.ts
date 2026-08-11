@@ -285,6 +285,7 @@ import type {
   RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
+import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure-diagnostics';
 import {
   permissionRequestFingerprint,
   toolValueMatchesSchema,
@@ -446,6 +447,11 @@ export function leaderMcpCapabilities(teamTurn: boolean): { allowTeamTools: bool
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
 type ActiveRuntimeKind = RuntimeKind | 'provider';
+type RuntimeDiagnosticContext = Readonly<{
+  startedAtMs: number;
+  runtimeKind: 'codex' | 'claude';
+  teamMcpEnabled: boolean;
+}>;
 type TaskTitleRequest = Pick<StartedTurn, 'text' | 'runtimeKind' | 'model' | 'modelSelection'> & {
   taskId: string;
 };
@@ -469,6 +475,8 @@ export class IpcRouter {
   private disposed = false;
   private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
+  /** Structure-only inputs retained until durable Turn completion for protocol-error diagnostics. */
+  private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
   /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
   private readonly canceledRuntimeTurns = new Set<string>();
   /** A failed stop confirmation blocks new work until the app is relaunched. */
@@ -3101,6 +3109,7 @@ export class IpcRouter {
         resolvedModel,
       });
     const completion = this.persistence.completeTurnAndFinishGoal(taskId, turnId, state, finalText);
+    this.runtimeDiagnosticContextByTurn.delete(turnId);
     const event = completion.event;
     if (completion.task !== null) this.pushTaskUpdated(completion.task);
     if (state === 'completed') this.commitProjectMemoryCandidates(turnId);
@@ -3446,6 +3455,12 @@ export class IpcRouter {
       kind = 'mock';
     }
     this.turnRuntimes.set(started.turnId, kind);
+    if (kind === 'codex' || kind === 'claude')
+      this.runtimeDiagnosticContextByTurn.set(started.turnId, {
+        startedAtMs: Date.now(),
+        runtimeKind: kind,
+        teamMcpEnabled: teamMcp !== undefined,
+      });
     this.turnWorkspaceByTurn.set(started.turnId, started.workspaceSet);
     // Watch the Workspace for the duration of the Turn (issue #39). Above the mock early-return on
     // purpose: this is about what the Turn writes, not about which Runtime writes it.
@@ -4364,6 +4379,7 @@ export class IpcRouter {
     this.teamSkillExpectedTurns.delete(turnId);
     this.teamSkillResolutionByTurn.delete(turnId);
     this.pendingProjectMemoriesByTurn.delete(turnId);
+    this.runtimeDiagnosticContextByTurn.delete(turnId);
     this.providerAbortByTurn.delete(turnId);
     this.providerExecutionIdByTurn.delete(turnId);
     this.reasoningByTurn.get(turnId)?.dispose();
@@ -5204,7 +5220,13 @@ export class IpcRouter {
   ): void {
     void this.mailbox.run(taskId, async () => {
       if (this.canceledRuntimeTurns.has(turnId)) return;
-      if (this.turnRuntimes.get(turnId) !== kind) return;
+      const activeRuntime = this.turnRuntimes.get(turnId);
+      const diagnosticContext = this.runtimeDiagnosticContextByTurn.get(turnId);
+      const ownsLateFailure =
+        activeRuntime === undefined &&
+        diagnosticContext?.runtimeKind === kind &&
+        this.persistence.getActiveTurnId(taskId) === turnId;
+      if (activeRuntime !== kind && !ownsLateFailure) return;
       if (this.attachmentCustodyByTurn.has(turnId)) {
         await this.runtimeFor(kind)
           .cancel(taskId, turnId)
@@ -5215,12 +5237,20 @@ export class IpcRouter {
       // to tell "the model refused" from "the CLI is gone" (issue #9). Pushed on the transient
       // status channel rather than folded into the persisted Turn event.
       let diagnosticId: string | null = null;
-      if (diagnostic !== undefined && diagnostic.runtimeKind === kind) {
+      const effectiveDiagnostic = resolveRuntimeFailureDiagnostic({
+        errorCode: error.code,
+        diagnostic,
+        runtimeKind: kind,
+        appVersion: typeof app?.getVersion === 'function' ? app.getVersion() : 'unknown',
+        startedAtMs: diagnosticContext?.startedAtMs,
+        teamMcpEnabled: diagnosticContext?.teamMcpEnabled ?? false,
+      });
+      if (effectiveDiagnostic !== undefined) {
         try {
           diagnosticId = this.persistence.recordRuntimeFailureDiagnostic(
             taskId,
             turnId,
-            diagnostic,
+            effectiveDiagnostic,
           ).diagnosticId;
         } catch (diagnosticError) {
           // A diagnostic must never prevent the Turn itself from reaching a terminal state.
