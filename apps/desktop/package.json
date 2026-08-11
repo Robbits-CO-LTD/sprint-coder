@@ -1,7 +1,7 @@
 {
   "name": "@sprint-coder/desktop",
   "productName": "Sprint Coder",
-  "version": "0.2.3",
+  "version": "1.2.4",
   "description": "ローカルファーストのAIコーディング・デスクトップアプリ",
   "author": "Sprint Coder contributors",
   "private": true,
