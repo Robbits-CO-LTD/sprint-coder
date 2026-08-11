@@ -196,6 +196,14 @@ export function createUserDataDir(label: string): string {
   return mkdtempSync(join(tmpdir(), `sprint-coder-e2e-${safeLabel}-`));
 }
 
+/** Feature specs start beyond first-run onboarding; setup-wizard.spec.ts owns that boundary. */
+export async function completeSetupForFeatureTest(page: Page): Promise<void> {
+  if ((await page.getByTestId('setup-wizard').count()) === 0) return;
+  await page.evaluate(() => window.localStorage.setItem('sprint-coder:setup-complete-v1', '1'));
+  await page.reload();
+  await page.getByTestId('sidebar-new-task-button').waitFor({ state: 'visible' });
+}
+
 export function removeUserDataDir(dir: string | null | undefined): void {
   if (!dir) return;
   try {

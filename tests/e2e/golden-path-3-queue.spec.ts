@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import {
   closeApp,
+  completeSetupForFeatureTest,
   createUserDataDir,
   firstWindow,
   launchApp,
@@ -26,6 +27,7 @@ test.describe('golden path 3: queued input auto-starts as the next turn', () => 
   test('a message queued during Turn 1 auto-starts as Turn 2 and completes', async () => {
     app = await launchApp(userDataDir);
     const page: Page = await firstWindow(app);
+    await completeSetupForFeatureTest(page);
 
     await page.getByTestId('sidebar-new-task-button').click();
     const textarea = page.getByTestId('composer-textarea');
@@ -65,5 +67,55 @@ test.describe('golden path 3: queued input auto-starts as the next turn', () => 
     await expect(userMessages.nth(1)).toHaveText(secondText);
     await expect(assistantMessages.nth(0)).toContainText('決定論的なモック応答です');
     await expect(assistantMessages.nth(1)).toContainText('決定論的なモック応答です');
+  });
+});
+
+test.describe('Composer interrupt keeps the existing queue behind the replacement turn', () => {
+  let userDataDir: string;
+  let app: ElectronApplication | null = null;
+
+  test.beforeAll(() => {
+    userDataDir = createUserDataDir('composer-interrupt');
+  });
+
+  test.afterAll(async () => {
+    await closeApp(app);
+    removeUserDataDir(userDataDir);
+  });
+
+  test('cancels Turn 1, starts the interruption, then runs the preserved queue', async () => {
+    app = await launchApp(userDataDir);
+    const page: Page = await firstWindow(app);
+    await completeSetupForFeatureTest(page);
+
+    await page.getByTestId('sidebar-new-task-button').click();
+    const textarea = page.getByTestId('composer-textarea');
+    const firstText = 'Turn1: 割り込み前の長い処理';
+    const queuedText = 'Turn3: 既存キューに残す依頼';
+    const interruptText = 'Turn2: 今すぐ優先する割り込み依頼';
+
+    await textarea.fill(firstText);
+    await textarea.press('Enter');
+    const runCard = page.getByTestId('run-card');
+    await expect(runCard).toHaveAttribute('data-run-status', 'running');
+
+    await textarea.fill(queuedText);
+    await textarea.press('Enter');
+    await expect(page.getByTestId('queued-item')).toContainText(queuedText);
+
+    await textarea.fill(interruptText);
+    const interruptButton = page.getByTestId('composer-interrupt-button');
+    await expect(interruptButton).toHaveAccessibleName('割り込んで送信');
+    await interruptButton.click();
+
+    // stopAndSend starts the interruption before the pre-existing queue. Once both finish, the
+    // history order proves that the queue was retained rather than dropped or run first.
+    const userMessages = page.getByTestId('user-message');
+    await expect(userMessages).toHaveCount(3, { timeout: 30_000 });
+    await expect(runCard).toHaveAttribute('data-run-status', 'completed', { timeout: 30_000 });
+    await expect(userMessages.nth(0)).toHaveText(firstText);
+    await expect(userMessages.nth(1)).toHaveText(interruptText);
+    await expect(userMessages.nth(2)).toHaveText(queuedText);
+    await expect(page.getByTestId('queued-item')).toHaveCount(0);
   });
 });
