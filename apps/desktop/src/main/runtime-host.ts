@@ -35,6 +35,7 @@ import {
   RUNTIME_START_ACCEPTANCE_TIMEOUT_MS,
   RuntimeStartAcceptanceDeadline,
 } from './runtime-start-acceptance-deadline';
+import { compilePromptGuidance, injectPromptGuidance, type PromptAgent } from './prompt-context';
 
 type ActiveTurn = {
   taskId: string;
@@ -202,13 +203,29 @@ export class RuntimeHostClient {
     skills: readonly RuntimeSkillInput[] = [],
     serializedPayload?: SerializedExecutionPayload,
     preparedImages?: RuntimePreparedImageAttachments,
+    promptAgent?: PromptAgent,
   ): boolean {
     const prepared = preparedContext ?? this.prepareContext?.(taskId, turnId);
     const workspace =
       typeof workspaceInput === 'string' || workspaceInput === null
         ? runtimeWorkspaceSetFromLegacyPath(workspaceInput)
         : workspaceInput;
-    const contextFragments = (prepared?.fragments ?? []).map(toRuntimeContextFragment);
+    const rawContextFragments = (prepared?.fragments ?? []).map(toRuntimeContextFragment);
+    // Main may hand us already-sealed payload bytes after its provider-egress gate. In that case
+    // the canonical guidance is already inside those bytes and must not be sampled a second time.
+    // Team Workers and compatibility callers use this fallback immediately before serialization.
+    const contextFragments =
+      serializedPayload === undefined
+        ? injectPromptGuidance(
+            rawContextFragments,
+            compilePromptGuidance({
+              workspace,
+              toolCatalog: toolCatalogSnapshot,
+              ...(writeScope === undefined ? {} : { writeScope }),
+              ...(promptAgent === undefined ? {} : { agent: promptAgent }),
+            }),
+          )
+        : rawContextFragments;
     const projectItems = (prepared?.projectItems ?? []).map(toRuntimeProjectContextItem);
     const projectSnapshotDigest = prepared?.projectSnapshotDigest ?? null;
     const payload =

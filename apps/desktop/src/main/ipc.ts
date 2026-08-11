@@ -205,6 +205,7 @@ import {
 } from './image-attachment-capability';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
+import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
 import type {
   PersistedTurnSkill,
   PersistenceClient,
@@ -3566,12 +3567,21 @@ export class IpcRouter {
       name: skill.selection.ref.skillId,
       path: skill.packagePath,
     }));
+    const runtimeWorkspaceSet = toRuntimeWorkspaceSet(started.workspaceSet);
+    const toolCatalogSnapshot = createEmptyToolCatalogSnapshot(kind, workspaceId);
     const runtimeContextFragments = contextFragmentsForRuntime(
       kind,
-      context.fragments
-        // Codex receives selected Skills only through structured `type: skill` inputs. Keeping the
-        // same Skill body here would inject it twice and bypass the adapter's isolated catalog.
-        .map(toRuntimeContextFragment),
+      injectPromptGuidance(
+        context.fragments
+          // Codex receives selected Skills only through structured `type: skill` inputs. Keeping the
+          // same Skill body here would inject it twice and bypass the adapter's isolated catalog.
+          .map(toRuntimeContextFragment),
+        compilePromptGuidance({
+          workspace: runtimeWorkspaceSet,
+          toolCatalog: toolCatalogSnapshot,
+          writeScope,
+        }),
+      ),
     );
     const serializedPayload = serializeCliExecutionPayload({
       kind,
@@ -3623,7 +3633,7 @@ export class IpcRouter {
           modelId: started.model,
           endpointTrust: 'trusted-remote',
           round: 1,
-          toolCatalogDigest: createEmptyToolCatalogSnapshot(kind, workspaceId).digest,
+          toolCatalogDigest: toolCatalogSnapshot.digest,
           ...(imageDispatch === undefined
             ? {}
             : {
@@ -3636,9 +3646,9 @@ export class IpcRouter {
             taskId,
             started.turnId,
             started.text,
-            toRuntimeWorkspaceSet(started.workspaceSet),
+            runtimeWorkspaceSet,
             started.model,
-            createEmptyToolCatalogSnapshot(kind, workspaceId),
+            toolCatalogSnapshot,
             context,
             // Keep the sealed Team guidance intact here: the Claude adapter promotes it with
             // --append-system-prompt. The serializer independently removes its duplicate from the
