@@ -46,6 +46,12 @@ import {
   type RuntimeProgressTimeoutPhase,
 } from './runtime-progress-deadline';
 import { RuntimeFailureDiagnosticCollector } from './runtime-failure-diagnostics';
+import {
+  assertCodexSkillIsolation,
+  codexSkillIsolationArgs,
+  prepareCodexSkillIsolation,
+  type CodexSkillIsolation,
+} from './codex-skill-isolation';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -233,8 +239,9 @@ export class CodexRuntimeAdapter {
       fail(error, diagnostics.snapshot(stage));
     let temporaryDirectory: string | null = null;
     let teamMcpDirectory: string | null = null;
+    let skillIsolationDirectory: string | null = null;
     const cleanupPaths = (): void => {
-      for (const path of [temporaryDirectory, teamMcpDirectory]) {
+      for (const path of [temporaryDirectory, teamMcpDirectory, skillIsolationDirectory]) {
         if (path === null) continue;
         try {
           rmSync(path, { recursive: true, force: true });
@@ -249,6 +256,7 @@ export class CodexRuntimeAdapter {
       multiRoot: boolean;
       primaryRootPresent: boolean;
       teamMcpProfile: CodexTeamMcpProfile | undefined;
+      skillIsolation: CodexSkillIsolation;
     };
     try {
       const workspace =
@@ -260,6 +268,13 @@ export class CodexRuntimeAdapter {
         primaryRoot?.path ??
         (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-')));
       const runtimeWorkspaceRoots = workspace.roots.map(({ path }) => path);
+      skillIsolationDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-skills-'));
+      const skillIsolation = prepareCodexSkillIsolation({
+        temporaryRoot: skillIsolationDirectory,
+        cwd,
+        runtimeWorkspaceRoots,
+        skills,
+      });
       let teamMcpProfile: CodexTeamMcpProfile | undefined;
       if (teamMcp !== undefined) {
         const nodeCommand = teamMcpNodeCommand();
@@ -278,6 +293,7 @@ export class CodexRuntimeAdapter {
         multiRoot: runtimeWorkspaceRoots.length > 1,
         primaryRootPresent: primaryRoot !== undefined,
         teamMcpProfile,
+        skillIsolation,
       };
     } catch {
       void releaseLocalImages();
@@ -288,7 +304,14 @@ export class CodexRuntimeAdapter {
       );
       return;
     }
-    const { cwd, runtimeWorkspaceRoots, multiRoot, primaryRootPresent, teamMcpProfile } = prepared;
+    const {
+      cwd,
+      runtimeWorkspaceRoots,
+      multiRoot,
+      primaryRootPresent,
+      teamMcpProfile,
+      skillIsolation,
+    } = prepared;
     // No Workspace means the cwd is a throwaway temp directory, so a write scope there would
     // produce edits the user can never see. Main already refuses to send anything but 'read-only'
     // in that case; this is the adapter refusing independently, so the two would have to fail
@@ -300,12 +323,15 @@ export class CodexRuntimeAdapter {
         resolveCodexCommand(this.command),
         [
           ...this.commandPrefixArgs,
-          ...buildCodexArgs(model, effort, effectiveScope, teamMcpProfile),
+          ...buildCodexArgs(model, effort, effectiveScope, teamMcpProfile, skillIsolation),
         ],
         {
           cwd,
           env: {
             ...minimalEnvironment(),
+            CODEX_HOME: skillIsolation.codexHome,
+            HOME: skillIsolation.isolatedUserHome,
+            USERPROFILE: skillIsolation.isolatedUserHome,
             ...(teamMcp === undefined
               ? {}
               : {
@@ -374,6 +400,8 @@ export class CodexRuntimeAdapter {
     let stageIndex = -1;
     const assistantMessageId = randomUUID();
     const agentMessageBoundary = new CodexAgentMessageBoundary();
+    let skillIsolationReady = false;
+    let skillIsolationVerificationPending = false;
     const send = (method: string, params: unknown): Promise<unknown> =>
       new Promise((resolve, reject) => {
         const id = nextRequestId++;
@@ -429,6 +457,40 @@ export class CodexRuntimeAdapter {
         }
         if (typeof message['method'] === 'string')
           diagnostics.recordNotification(message['method']);
+        if (
+          message['method'] === 'skills/changed' &&
+          skillIsolationReady &&
+          !skillIsolationVerificationPending
+        ) {
+          skillIsolationVerificationPending = true;
+          void send('skills/list', {
+            cwds: skillIsolation.validationCwds,
+            forceReload: true,
+          })
+            .then((response) =>
+              assertCodexSkillIsolation(
+                response,
+                skillIsolation.stagedSkills,
+                skillIsolation.validationCwds.length,
+              ),
+            )
+            .catch(() => {
+              if (failed || control.canceled) return;
+              failed = true;
+              failWithDiagnostic(
+                publicError(
+                  'RUNTIME_FAILED',
+                  'Codex CLIのSkill隔離を維持できなかったため、このTurnを停止しました。',
+                  false,
+                ),
+                'protocol_error',
+              );
+              void terminateCodexProcessTree(child);
+            })
+            .finally(() => {
+              skillIsolationVerificationPending = false;
+            });
+        }
         handleCodexNotification(
           message,
           emitRuntime,
@@ -470,6 +532,18 @@ export class CodexRuntimeAdapter {
         child.stdin.write(
           `${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`,
         );
+        await send('skills/extraRoots/set', {
+          extraRoots: [skillIsolation.selectedSkillsRoot],
+        });
+        assertCodexSkillIsolation(
+          await send('skills/list', {
+            cwds: skillIsolation.validationCwds,
+            forceReload: true,
+          }),
+          skillIsolation.stagedSkills,
+          skillIsolation.validationCwds.length,
+        );
+        skillIsolationReady = true;
         const threadResult = asRecord(
           await send('thread/start', {
             cwd,
@@ -489,7 +563,7 @@ export class CodexRuntimeAdapter {
           input: buildCodexTurnInput(
             serializedPayload ??
               buildCodexPrompt(input, contextFragments, teamMcp?.guidance, skills, projectItems),
-            skills,
+            skillIsolation.stagedSkills,
             localImages?.paths ?? [],
           ),
           ...(multiRoot ? { cwd, runtimeWorkspaceRoots } : {}),
@@ -858,11 +932,13 @@ export function buildCodexArgs(
   effort?: string,
   _writeScope: RuntimeWriteScope = 'read-only',
   teamMcp?: CodexTeamMcpProfile,
+  skillIsolation?: CodexSkillIsolation,
 ): string[] {
   return [
     'app-server',
     '--listen',
     'stdio://',
+    ...(skillIsolation === undefined ? [] : codexSkillIsolationArgs(skillIsolation)),
     // Stays "never" at every scope. `approval_policy` governs asking the *user* mid-turn, and
     // `codex exec` has no channel to ask on — verified: it is a one-shot stdin invocation, and
     // `on-request` in this mode simply stalls the tool rather than surfacing anything answerable.

@@ -7,19 +7,34 @@ describe('SecureLogger', () => {
     const logger = new SecureLogger((entry) => entries.push(entry));
     const canary = 'SPRINT_CODER_SECRET_CANARY_7f91c';
 
-    logger.error('Provider request failed', {
-      headers: {
-        Authorization: `Bearer ${canary}`,
-        'x-api-key': canary,
+    logger.error(
+      'Provider request failed',
+      {
+        headers: {
+          Authorization: `Bearer ${canary}`,
+          'x-api-key': canary,
+        },
+        requestBody: { access_token: canary, prompt: 'safe' },
+        url: `https://example.test/models?api_key=${canary}&page=1`,
+        error: new Error(`token=${canary}`),
       },
-      requestBody: { access_token: canary, prompt: 'safe' },
-      url: `https://example.test/models?api_key=${canary}&page=1`,
-      error: new Error(`token=${canary}`),
-    });
+      {
+        category: 'chat',
+        event: 'provider.request.failed',
+        taskId: 'task-1',
+        status: 'failed',
+      },
+    );
 
     const serialized = JSON.stringify(entries);
     expect(serialized).not.toContain(canary);
     expect(serialized).toContain('[REDACTED]');
     expect(serialized).toContain('safe');
+    expect(entries[0]).toMatchObject({
+      category: 'chat',
+      event: 'provider.request.failed',
+      taskId: 'task-1',
+      status: 'failed',
+    });
   });
 });

@@ -42,12 +42,7 @@ export function serializeCliExecutionPayload(input: {
   teamGuidance?: string;
   skills?: readonly RuntimeSkillInput[];
 }): SerializedExecutionPayload {
-  const skills = input.skills ?? [];
-  const skillInvocation =
-    input.kind === 'codex' && skills.length > 0
-      ? `${skills.map((skill) => `$${skill.name}`).join(' ')}\n\n`
-      : '';
-  const currentRequest = `${skillInvocation}${input.request}`;
+  const currentRequest = input.request;
   const remainingTeamGuidance =
     input.teamGuidance === undefined
       ? undefined

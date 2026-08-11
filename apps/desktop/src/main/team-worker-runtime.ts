@@ -5,6 +5,7 @@ import type {
   RuntimeKind,
   RuntimeWriteScope,
 } from '@sprint-coder/contracts';
+import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
 import { RuntimeHostClient } from './runtime-host';
 import {
   DeterministicTeamWorkerRuntime,
@@ -15,8 +16,13 @@ import {
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
 import type { PreparedContext } from './context-ledger';
-import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
-import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
+import {
+  runtimeWorkspaceSetFromLegacyPath,
+  type RuntimeTeamMcpOption,
+  type RuntimeWorkspaceSet,
+} from '../runtime-host/protocol';
+import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
 
 // Real Worker execution (Phase 7 follow-up: "Team must work without mocks"). Each dispatched
 // Worker task runs one ephemeral, read-only/no-tools turn on a production runtime (Claude/Codex)
@@ -312,11 +318,68 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     writeScope: RuntimeWriteScope,
   ): Promise<string> {
     const turnId = randomUUID();
-    if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, prompt, context))
-      throw new Error(`${choice.kind} Team Worker egress was denied`);
+    const toolCatalog = this.deps.catalogFor(choice.kind, workspacePath);
+    const promptToolCatalog: ToolCatalogSnapshot = isToolCatalogSnapshot(toolCatalog)
+      ? toolCatalog
+      : {
+          revision: 0,
+          providerId: choice.kind,
+          workspaceId: null,
+          entries: [],
+          digest: 'unavailable',
+        };
+    const normalizedWorkspace =
+      typeof runtimeWorkspace === 'string' || runtimeWorkspace === null
+        ? runtimeWorkspaceSetFromLegacyPath(runtimeWorkspace)
+        : runtimeWorkspace;
     const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId);
     if (input.worker.canDelegate === true && teamMcp === undefined)
       throw new Error('Manager Team MCP is unavailable');
+    const contextFragments = injectPromptGuidance(
+      context.fragments
+        .filter(({ source }) => choice.kind !== 'codex' || source !== 'skill')
+        .map((fragment) => ({
+          id: fragment.id,
+          source: fragment.source,
+          trust: fragment.trust,
+          authority:
+            fragment.source === 'system'
+              ? ('system' as const)
+              : fragment.source === 'goal' ||
+                  (fragment.source === 'history' && fragment.trust === 'user')
+                ? ('user' as const)
+                : ('none' as const),
+          content: fragment.content,
+        })),
+      compilePromptGuidance({
+        workspace: normalizedWorkspace,
+        toolCatalog: promptToolCatalog,
+        writeScope,
+        agent: {
+          role: 'subagent',
+          mode: writeScope === 'read-only' ? 'read-only' : 'write-capable',
+        },
+        teamMcpEnabled: teamMcp !== undefined,
+      }),
+    );
+    const serializedPayload = serializeCliExecutionPayload({
+      kind: choice.kind,
+      request: prompt,
+      contextFragments,
+      projectItems: context.projectItems.map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        authority: item.authority,
+        localOnly: item.localOnly,
+        sealedDigest: item.sealedDigest,
+        content: item.content,
+      })),
+      ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
+    });
+    if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, serializedPayload.text, context)) {
+      if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
+      throw new Error(`${choice.kind} Team Worker egress was denied`);
+    }
     const abort = (): void => {
       void this.stop(input.worker.id).catch(() => undefined);
     };
@@ -343,11 +406,14 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           prompt,
           runtimeWorkspace,
           choice.model,
-          this.deps.catalogFor(choice.kind, workspacePath) as never,
+          toolCatalog as never,
           context,
           teamMcp,
           undefined,
           writeScope,
+          [],
+          serializedPayload,
+          undefined,
         );
         const run = this.pending.get(turnId);
         if (run !== undefined) run.runtimeStarted = runtimeStarted;
@@ -572,6 +638,10 @@ export function buildInheritedWorkerContext(
     usageEvents: [],
     compacted: false,
   };
+}
+
+function isToolCatalogSnapshot(value: unknown): value is ToolCatalogSnapshot {
+  return verifyToolCatalogSnapshot(value as ToolCatalogSnapshot);
 }
 
 function flushDelta(run: PendingRun): void {

@@ -1905,10 +1905,20 @@ if (runsWithElectronAbi)
       expect(persistence.getSprintCoderPrePrompt()).toBe('');
       persistence.setSprintCoderPrePrompt('  既存設計を確認してから実装する。  ');
       const task = persistence.createTask('pre-prompt task');
-      const started = persistence.startTurn(task.id, '実装して');
+      const selectedSkill = {
+        selection: {
+          kind: 'chat' as const,
+          ref: { source: 'builtin' as const, skillId: 'test-product', digest: 'b'.repeat(64) },
+        },
+        name: 'Test Product',
+        description: 'Product test',
+        content: '---\nname: test-product\ndescription: Product test\n---\n\nPRODUCT_SKILL_BODY',
+        packagePath: '/tmp/sprint-coder-test-product',
+      };
+      const started = persistence.startTurn(task.id, '実装して', [selectedSkill]);
       const prepared = persistence.prepareContext(task.id, started.turnId);
 
-      expect(prepared.fragments[0]?.content).toContain('Sprint Coderの実行エージェント');
+      expect(prepared.fragments[0]?.content).toContain('Sprint Coder上で動作');
       expect(prepared.fragments[1]).toMatchObject({
         source: 'system',
         trust: 'system',
@@ -1916,11 +1926,28 @@ if (runsWithElectronAbi)
       expect(prepared.fragments[1]?.content).toContain('<sprint-coder-pre-prompt>');
       expect(prepared.fragments[1]?.content).toContain('既存設計を確認してから実装する。');
       expect(prepared.fragments[2]?.content).toBe('実装して');
+      expect(prepared.fragments[3]).toMatchObject({
+        source: 'skill',
+        content: selectedSkill.content,
+      });
       persistence.close();
 
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.getSprintCoderPrePrompt()).toBe('既存設計を確認してから実装する。');
       reopened.close();
+    });
+
+    it('keeps the same built-in Sprint Coder identity for a Team turn', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('team identity');
+      const started = persistence.startTurn(task.id, 'Teamで二人に分担して');
+      const prepared = persistence.prepareContext(task.id, started.turnId);
+
+      expect(started.teamTurn).toBe(true);
+      expect(prepared.fragments[0]).toMatchObject({ source: 'system', trust: 'system' });
+      expect(prepared.fragments[0]?.content).toContain('Sprint Coder上で動作');
+      expect(prepared.fragments.some(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID)).toBe(true);
+      persistence.close();
     });
 
     it('defaults Team models to all and persists a selected-model restriction across restart', () => {

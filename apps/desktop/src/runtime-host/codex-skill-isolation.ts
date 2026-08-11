@@ -1,0 +1,191 @@
+import {
+  chmodSync,
+  copyFileSync,
+  cpSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
+import { dirname, join, parse, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import type { RuntimeSkillInput } from './protocol';
+
+export type CodexSkillIsolation = Readonly<{
+  codexHome: string;
+  isolatedUserHome: string;
+  shellUserHome: string;
+  selectedSkillsRoot: string;
+  stagedSkills: readonly RuntimeSkillInput[];
+  disabledWorkspaceSkillPaths: readonly string[];
+  validationCwds: readonly string[];
+}>;
+
+export function prepareCodexSkillIsolation(input: {
+  temporaryRoot: string;
+  cwd: string;
+  runtimeWorkspaceRoots?: readonly string[];
+  skills: readonly RuntimeSkillInput[];
+  environment?: Readonly<NodeJS.ProcessEnv>;
+}): CodexSkillIsolation {
+  const environment = input.environment ?? process.env;
+  const isolatedUserHome = join(input.temporaryRoot, 'user-home');
+  const codexHome = join(isolatedUserHome, '.codex');
+  const selectedSkillsRoot = join(input.temporaryRoot, 'selected-skills');
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  mkdirSync(selectedSkillsRoot, { recursive: true, mode: 0o700 });
+  chmodSync(codexHome, 0o700);
+  chmodSync(selectedSkillsRoot, 0o700);
+  copyAuthentication(environment, codexHome);
+
+  const stagedSkills = input.skills.map((skill, index) => {
+    const sourceSkillFile = join(skill.path, 'SKILL.md');
+    if (!lstatSync(skill.path).isDirectory() || !lstatSync(sourceSkillFile).isFile())
+      throw new Error('Managed Skill revision is not a regular package');
+    const destination = join(selectedSkillsRoot, `selected-${index + 1}`);
+    cpSync(skill.path, destination, {
+      recursive: true,
+      dereference: false,
+      errorOnExist: true,
+      force: false,
+    });
+    return { name: skill.name, path: realpathSync(join(destination, 'SKILL.md')) };
+  });
+
+  const validationCwds = [
+    ...new Set(
+      input.runtimeWorkspaceRoots === undefined || input.runtimeWorkspaceRoots.length === 0
+        ? [input.cwd]
+        : input.runtimeWorkspaceRoots,
+    ),
+  ].sort();
+  return {
+    codexHome,
+    isolatedUserHome,
+    shellUserHome: environment['HOME'] ?? environment['USERPROFILE'] ?? homedir(),
+    selectedSkillsRoot,
+    stagedSkills,
+    disabledWorkspaceSkillPaths: discoverWorkspaceSkillPathsForRoots(validationCwds),
+    validationCwds,
+  };
+}
+
+export function codexSkillIsolationArgs(isolation: CodexSkillIsolation): string[] {
+  const rules = isolation.disabledWorkspaceSkillPaths
+    .map((path) => `{path=${JSON.stringify(path)},enabled=false}`)
+    .join(',');
+  return [
+    '--strict-config',
+    '-c',
+    'skills.bundled.enabled=false',
+    '-c',
+    'skills.include_instructions=false',
+    '-c',
+    `shell_environment_policy.set={HOME=${JSON.stringify(isolation.shellUserHome)},USERPROFILE=${JSON.stringify(isolation.shellUserHome)}}`,
+    ...(rules === '' ? [] : ['-c', `skills.config=[${rules}]`]),
+  ];
+}
+
+export function assertCodexSkillIsolation(
+  response: unknown,
+  expectedSkills: readonly RuntimeSkillInput[],
+  expectedCatalogCount = 1,
+): void {
+  const record = asRecord(response);
+  const data = record['data'];
+  if (!Array.isArray(data) || data.length !== expectedCatalogCount)
+    throw new Error('Codex Skill isolation returned an invalid catalog');
+  const expected = expectedSkills
+    .map((skill) => `${skill.name}\u0000${canonicalPath(skill.path)}`)
+    .sort();
+  for (const item of data) {
+    const entry = asRecord(item);
+    const errors = entry['errors'];
+    if (!Array.isArray(errors) || errors.length !== 0)
+      throw new Error('Codex Skill isolation catalog contains load errors');
+    const skills = entry['skills'];
+    if (!Array.isArray(skills)) throw new Error('Codex Skill isolation catalog is missing skills');
+    const enabled = skills
+      .map(asRecord)
+      .filter((skill) => skill['enabled'] === true)
+      .map((skill) => ({ name: skill['name'], path: skill['path'] }));
+    if (enabled.some((skill) => typeof skill.name !== 'string' || typeof skill.path !== 'string'))
+      throw new Error('Codex Skill isolation catalog contains invalid metadata');
+    const actual = enabled
+      .map((skill) => `${String(skill.name)}\u0000${canonicalPath(String(skill.path))}`)
+      .sort();
+    if (
+      actual.length !== expected.length ||
+      actual.some((value, index) => value !== expected[index])
+    )
+      throw new Error('Codex Skill isolation exposed an unselected Skill');
+  }
+}
+
+export function discoverWorkspaceSkillPaths(cwd: string): string[] {
+  const result: string[] = [];
+  let current = resolve(cwd);
+  const filesystemRoot = parse(current).root;
+  while (true) {
+    const skillsRoot = join(current, '.agents', 'skills');
+    try {
+      for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const skillFile = join(skillsRoot, entry.name, 'SKILL.md');
+        try {
+          if (statSync(skillFile).isFile()) result.push(resolve(skillFile));
+        } catch {
+          // A disappearing or unreadable candidate is rechecked by skills/list after startup.
+        }
+      }
+    } catch {
+      // This ancestor has no readable .agents/skills directory.
+    }
+    if (hasGitBoundary(current) || current === filesystemRoot) break;
+    current = dirname(current);
+  }
+  return [...new Set(result)].sort();
+}
+
+export function discoverWorkspaceSkillPathsForRoots(roots: readonly string[]): string[] {
+  return [...new Set(roots.flatMap((root) => discoverWorkspaceSkillPaths(root)))].sort();
+}
+
+function copyAuthentication(environment: Readonly<NodeJS.ProcessEnv>, codexHome: string): void {
+  const sourceHome =
+    environment['CODEX_HOME'] ??
+    join(environment['HOME'] ?? environment['USERPROFILE'] ?? '', '.codex');
+  const source = join(sourceHome, 'auth.json');
+  try {
+    if (!statSync(source).isFile()) return;
+    const destination = join(codexHome, 'auth.json');
+    copyFileSync(source, destination);
+    chmodSync(destination, 0o600);
+  } catch {
+    // Authentication failure is reported by app-server without exposing the source path.
+  }
+}
+
+function hasGitBoundary(directory: string): boolean {
+  try {
+    const stat = lstatSync(join(directory, '.git'));
+    return stat.isDirectory() || stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    throw new Error('Expected an object');
+  return value as Record<string, unknown>;
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}

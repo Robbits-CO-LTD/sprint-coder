@@ -93,6 +93,7 @@ import {
 import {
   clampCodexEffort,
   confirmFullAccessOnce,
+  contextFragmentsForRuntime,
   cancelRuntimeWithFinalCleanup,
   IpcRouter,
   invalidModelUserMessage,
@@ -126,6 +127,36 @@ import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
 import { requiresTeamWorkersInput } from './team-tools';
 import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
 import { secureLogger } from './secure-logger';
+import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
+
+describe('Codex selected Skill delivery', () => {
+  const fragments = [
+    {
+      id: 'system',
+      source: 'system' as const,
+      trust: 'system' as const,
+      authority: 'system' as const,
+      content: SPRINT_CODER_IDENTITY_PROMPT,
+    },
+    {
+      id: 'selected-skill',
+      source: 'skill' as const,
+      trust: 'user' as const,
+      authority: 'user' as const,
+      content: 'UNIQUE_SELECTED_SKILL_BODY',
+    },
+  ];
+
+  it('removes selected Skill bodies from Codex application context only', () => {
+    expect(contextFragmentsForRuntime('codex', fragments).map(({ id }) => id)).toEqual(['system']);
+    expect(contextFragmentsForRuntime('claude', fragments)).toEqual(fragments);
+    expect(contextFragmentsForRuntime('provider', fragments)).toEqual(fragments);
+    for (const runtime of ['codex', 'claude', 'provider'] as const)
+      expect(contextFragmentsForRuntime(runtime, fragments)[0]?.content).toBe(
+        SPRINT_CODER_IDENTITY_PROMPT,
+      );
+  });
+});
 
 describe('Main runtime failure diagnostics', () => {
   function createRuntimeFailureHarness(diagnosticId = 'diagnostic-main-protocol') {
@@ -151,6 +182,11 @@ describe('Main runtime failure diagnostics', () => {
       },
       canceledRuntimeTurns: new Set<string>(),
       turnRuntimes,
+      turnLogCategoryByTurn: new Map([['turn-protocol', 'chat']]),
+      turnLogStartedAtByTurn: new Map([['turn-protocol', Date.now() - 10]]),
+      turnLogRuntimeByTurn: new Map([
+        ['turn-protocol', { runtime: 'codex' as const, provider: 'openai' }],
+      ]),
       runtimeDiagnosticContextByTurn,
       attachmentCustodyByTurn: new Map(),
       persistence: {
@@ -204,6 +240,13 @@ describe('Main runtime failure diagnostics', () => {
     expect(log).toHaveBeenCalledWith(
       'Runtime failed',
       expect.objectContaining({ diagnosticId: 'diagnostic-main-protocol' }),
+      expect.objectContaining({
+        category: 'chat',
+        event: 'turn.runtime.failed',
+        taskId: 'task-protocol',
+        turnId: 'turn-protocol',
+        status: 'failed',
+      }),
     );
     expect(harness.finishAndAdvance).toHaveBeenCalledWith(
       'task-protocol',

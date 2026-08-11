@@ -397,6 +397,10 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(runtimeHostMock.starts[0]?.args[9]).toBe('workspace-write');
     expect(runtimeHostMock.starts[0]?.args[2]).toContain('Workspace書き込み: 隔離範囲内で可');
     expect(runtimeHostMock.starts[0]?.args[2]).toContain('隔離worktree: /isolated/worktree');
+    expect(runtimeHostMock.starts[0]?.args[11]).toMatchObject({
+      text: expect.stringContaining('実行主体: subagent / write-capable'),
+      digest: expect.any(String),
+    });
   });
 
   it('passes the complete isolated root set while deriving policy from its Primary root', async () => {

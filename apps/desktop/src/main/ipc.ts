@@ -205,6 +205,7 @@ import {
 } from './image-attachment-capability';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
+import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
 import type {
   PersistedTurnSkill,
   PersistenceClient,
@@ -253,6 +254,13 @@ import {
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 
+export function contextFragmentsForRuntime(
+  kind: 'codex' | 'claude' | 'provider',
+  fragments: readonly RuntimeContextFragment[],
+): RuntimeContextFragment[] {
+  return kind === 'codex' ? fragments.filter(({ source }) => source !== 'skill') : [...fragments];
+}
+
 /**
  * Cancellation is a durable state transition first and a runtime best-effort cleanup second. A
  * Runtime Host can disappear before it acknowledges stop; that must not strand the Turn in
@@ -280,10 +288,12 @@ import {
 } from './tool-broker';
 import type {
   RuntimeCanonicalEvent,
+  RuntimeContextFragment,
   RuntimeFailureDiagnostic,
   RuntimePreparedImageAttachments,
   RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
+
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure-diagnostics';
 import {
@@ -346,6 +356,11 @@ import {
   BUILTIN_IMPORT_SKILL_DIGEST,
   BUILTIN_IMPORT_SKILL_ID,
 } from './import-skill-builtin';
+import {
+  BUILTIN_SPRINT_CODER_PRODUCT_SKILL_CONTENT,
+  BUILTIN_SPRINT_CODER_PRODUCT_SKILL_DIGEST,
+  BUILTIN_SPRINT_CODER_PRODUCT_SKILL_ID,
+} from './sprint-coder-product-skill';
 import { SkillStore } from './skill-store';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import {
@@ -475,6 +490,12 @@ export class IpcRouter {
   private disposed = false;
   private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
+  private readonly turnLogCategoryByTurn = new Map<string, 'chat' | 'team'>();
+  private readonly turnLogStartedAtByTurn = new Map<string, number>();
+  private readonly turnLogRuntimeByTurn = new Map<
+    string,
+    Readonly<{ runtime: RuntimeKind; provider?: string }>
+  >();
   /** Structure-only inputs retained until durable Turn completion for protocol-error diagnostics. */
   private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
   /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
@@ -841,6 +862,18 @@ export class IpcRouter {
           this.persistence.getEffectiveWorkspaceRootIdentities(taskId),
         );
       },
+      undefined,
+      (event) =>
+        secureLogger.info('Team lifecycle event', undefined, {
+          category: 'team',
+          event: event.event,
+          taskId: event.taskId,
+          teamId: event.teamId,
+          ...(event.missionId === undefined ? {} : { missionId: event.missionId }),
+          ...(event.workerId === undefined ? {} : { workerId: event.workerId }),
+          ...(event.status === undefined ? {} : { status: event.status }),
+          ...(event.result === undefined ? {} : { result: event.result }),
+        }),
     );
     // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than
@@ -2849,6 +2882,11 @@ export class IpcRouter {
           BUILTIN_IMPORT_SKILL_CONTENT,
           BUILTIN_IMPORT_SKILL_DIGEST,
         ),
+        store.installBuiltin(
+          BUILTIN_SPRINT_CODER_PRODUCT_SKILL_ID,
+          BUILTIN_SPRINT_CODER_PRODUCT_SKILL_CONTENT,
+          BUILTIN_SPRINT_CODER_PRODUCT_SKILL_DIGEST,
+        ),
       ]);
       this.teamSkillReady = true;
     } catch {
@@ -3289,6 +3327,14 @@ export class IpcRouter {
   }
 
   private dispatchStarted(started: StartedTurn): void {
+    this.turnLogCategoryByTurn.set(started.turnId, started.teamTurn ? 'team' : 'chat');
+    this.turnLogStartedAtByTurn.set(started.turnId, Date.now());
+    this.turnLogRuntimeByTurn.set(started.turnId, {
+      runtime: started.runtimeKind,
+      ...(started.modelSelection.requestedProvider === null
+        ? {}
+        : { provider: started.modelSelection.requestedProvider }),
+    });
     this.rememberTaskTitleRequest(started);
     this.publish(started.event);
     for (const event of started.contextUsageEvents) this.publish(event);
@@ -3297,6 +3343,17 @@ export class IpcRouter {
 
   private dispatchQueueTransition(transition: QueueTransition): void {
     if (transition === null) return;
+    this.turnLogCategoryByTurn.set(
+      transition.started.turnId,
+      transition.started.teamTurn ? 'team' : 'chat',
+    );
+    this.turnLogStartedAtByTurn.set(transition.started.turnId, Date.now());
+    this.turnLogRuntimeByTurn.set(transition.started.turnId, {
+      runtime: transition.started.runtimeKind,
+      ...(transition.started.modelSelection.requestedProvider === null
+        ? {}
+        : { provider: transition.started.modelSelection.requestedProvider }),
+    });
     this.rememberTaskTitleRequest(transition.started);
     this.publish(transition.started.event);
     for (const event of transition.started.contextUsageEvents) this.publish(event);
@@ -3510,7 +3567,24 @@ export class IpcRouter {
       name: skill.selection.ref.skillId,
       path: skill.packagePath,
     }));
-    const runtimeContextFragments = context.fragments.map(toRuntimeContextFragment);
+    const runtimeWorkspaceSet = toRuntimeWorkspaceSet(started.workspaceSet);
+    const toolCatalogSnapshot = createEmptyToolCatalogSnapshot(kind, workspaceId);
+    const runtimeContextFragments = contextFragmentsForRuntime(
+      kind,
+      injectPromptGuidance(
+        context.fragments
+          // Codex receives selected Skills only through structured `type: skill` inputs. Keeping the
+          // same Skill body here would inject it twice and bypass the adapter's isolated catalog.
+          .map(toRuntimeContextFragment),
+        compilePromptGuidance({
+          workspace: runtimeWorkspaceSet,
+          toolCatalog: toolCatalogSnapshot,
+          writeScope,
+          skills: runtimeSkills,
+          teamMcpEnabled: teamMcp !== undefined,
+        }),
+      ),
+    );
     const serializedPayload = serializeCliExecutionPayload({
       kind,
       request: started.text,
@@ -3561,7 +3635,7 @@ export class IpcRouter {
           modelId: started.model,
           endpointTrust: 'trusted-remote',
           round: 1,
-          toolCatalogDigest: createEmptyToolCatalogSnapshot(kind, workspaceId).digest,
+          toolCatalogDigest: toolCatalogSnapshot.digest,
           ...(imageDispatch === undefined
             ? {}
             : {
@@ -3574,9 +3648,9 @@ export class IpcRouter {
             taskId,
             started.turnId,
             started.text,
-            toRuntimeWorkspaceSet(started.workspaceSet),
+            runtimeWorkspaceSet,
             started.model,
-            createEmptyToolCatalogSnapshot(kind, workspaceId),
+            toolCatalogSnapshot,
             context,
             // Keep the sealed Team guidance intact here: the Claude adapter promotes it with
             // --append-system-prompt. The serializer independently removes its duplicate from the
@@ -5263,14 +5337,31 @@ export class IpcRouter {
           });
         }
       }
-      secureLogger.error('Runtime failed', {
-        process: 'runtime-host',
-        runtimeKind: kind,
-        taskId,
-        turnId,
-        errorCode: error.code,
-        diagnosticId,
-      });
+      const logCategory = this.turnLogCategoryByTurn.get(turnId) ?? 'chat';
+      const logTeamId =
+        logCategory === 'team'
+          ? (this.teamCoordinator.get(taskId)?.team.id ?? undefined)
+          : undefined;
+      secureLogger.error(
+        'Runtime failed',
+        {
+          process: 'runtime-host',
+          runtimeKind: kind,
+          taskId,
+          turnId,
+          errorCode: error.code,
+          diagnosticId,
+        },
+        {
+          category: logCategory,
+          event: 'turn.runtime.failed',
+          taskId,
+          turnId,
+          ...(logTeamId === undefined ? {} : { teamId: logTeamId }),
+          status: 'failed',
+          result: error.code,
+        },
+      );
       this.pushRuntimeStatus({
         kind,
         state: 'failed',
@@ -5325,8 +5416,55 @@ export class IpcRouter {
 
   private publish(rawEvent: TurnEvent): void {
     const event = turnEventSchema.parse(rawEvent);
+    this.recordTurnDiagnosticEvent(event);
     for (const binding of this.ports) {
       if (binding.taskId === event.taskId) binding.port.postMessage(event);
+    }
+  }
+
+  private recordTurnDiagnosticEvent(event: TurnEvent): void {
+    let status: string;
+    switch (event.type) {
+      case 'turn.accepted':
+        status = 'accepted';
+        break;
+      case 'stage.changed':
+        status = event.stage;
+        break;
+      case 'turn.completed':
+        status = event.state;
+        break;
+      case 'queue.changed':
+        status = event.queued.length > 0 ? 'queued' : 'empty';
+        break;
+      default:
+        return;
+    }
+    const turnId = 'turnId' in event ? event.turnId : undefined;
+    const category =
+      turnId === undefined ? 'chat' : (this.turnLogCategoryByTurn.get(turnId) ?? 'chat');
+    const teamId =
+      category === 'team'
+        ? (this.teamCoordinator.get(event.taskId)?.team.id ?? undefined)
+        : undefined;
+    const startedAt = turnId === undefined ? undefined : this.turnLogStartedAtByTurn.get(turnId);
+    const runtime = turnId === undefined ? undefined : this.turnLogRuntimeByTurn.get(turnId);
+    secureLogger.info('Turn lifecycle event', undefined, {
+      category,
+      event: event.type,
+      taskId: event.taskId,
+      ...(turnId === undefined ? {} : { turnId }),
+      ...(teamId === undefined ? {} : { teamId }),
+      ...(runtime === undefined ? {} : runtime),
+      status,
+      ...(event.type === 'turn.completed' && startedAt !== undefined
+        ? { durationMs: Math.max(0, Date.now() - startedAt) }
+        : {}),
+    });
+    if (event.type === 'turn.completed' && turnId !== undefined) {
+      this.turnLogCategoryByTurn.delete(turnId);
+      this.turnLogStartedAtByTurn.delete(turnId);
+      this.turnLogRuntimeByTurn.delete(turnId);
     }
   }
 

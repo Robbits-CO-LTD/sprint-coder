@@ -14,7 +14,7 @@ Sprint Coderは、1対1のAIチャット、ワークスペース上のファイ�
 - **ワークスペースを安全に操作** — ファイル変更、差分、コマンド、承認履歴を画面上で追跡し、`Ask` / `Auto` / `Full` のAccess presetで実行範囲を制御します。
 - **ローカルに復元可能な履歴** — Task、メッセージ、Turn、Teamの状態を端末内へ保存し、再起動後も作業を再開できます。
 - **実行状況を可視化** — reasoning、進行stage、context使用量、Workerの活動、承認待ちをTask内で確認できます。
-- **Skill対応** — ローカルのSkillを読み込み、ChatやTeamへ追加できます。組み込みのSkill Creatorから新しいSkillの下書きも作成できます。
+- **Skill対応** — ローカルのSkillを読み込み、ChatやTeamへ追加できます。組み込みのSkill Creatorから新しいSkillの下書きも作成できます。Codex実行では、選択時に固定した管理コピーだけを一時的な隔離rootから渡し、Codex CLI側の未選択Skillは利用しません。隔離を確認できないCLIではTurnを開始しません。
 
 ## 対応するRuntime / Provider
 
@@ -72,14 +72,30 @@ Local-firstは、Task履歴、設定、実行状態を端末内で管理する�
 
 Sprint Coderは、起動失敗、Main processの未処理エラー、RendererやElectron子processの異常終了などをローカルのJSON Linesログへ保存します。通常の保存場所は次のとおりです。
 
-| OS                          | ログフォルダ                                                                      |
-| --------------------------- | --------------------------------------------------------------------------------- |
-| macOS                       | `~/Library/Application Support/Sprint Coder/logs/`                                |
-| Windows                     | `%APPDATA%\Sprint Coder\logs\`                                                    |
-| Linux                       | `$XDG_CONFIG_HOME/Sprint Coder/logs/`（未設定時は`~/.config/Sprint Coder/logs/`） |
-| ソースからのdevelopment起動 | リポジトリ直下の`.vite-user-data/logs/`                                           |
+| OS      | ログフォルダ                       |
+| ------- | ---------------------------------- |
+| macOS   | `~/.sprintcoder/logs/`             |
+| Windows | `%USERPROFILE%\.sprintcoder\logs\` |
+| Linux   | `~/.sprintcoder/logs/`             |
 
-現在のログは`sprint-coder.log`、直前のログは`sprint-coder.previous.log`です。現在のログが5MBに達すると1世代だけローテーションします。既知のcredential形式やsecret項目は保存前に秘匿化しますが、第三者へ共有する前には内容を確認してください。
+ログは用途別に分かれます。
+
+```text
+.sprintcoder/logs/
+├── system/system.jsonl
+├── chat/<taskId>.jsonl
+└── team/<teamId>.jsonl
+```
+
+各streamは5MBに達すると`<stream>.previous.jsonl`へ1世代ローテーションします。`SPRINT_CODER_USER_DATA_DIR`を指定したdevelopment/E2E起動では、実ユーザーのログと混ざらないよう`<override>/logs/`へ保存します。
+
+ログにはtimestamp、level、event、status、関連IDなどの診断metadataだけを記録し、prompt、response、Teamメッセージ本文、環境変数全体は保存しません。既知のcredential形式やsecret項目は保存前に秘匿化しますが、第三者へ共有する前には内容を確認してください。
+
+## Sprint Coder製品知識Skill
+
+内蔵の`sprint-coder-product` Skillは、Sprint Coderの用語、ChatとTeamの使い分け、OS別保存場所、設定、安全な不具合調査をAIが説明するための選択可能な製品知識です。Skill本文には対応するデスクトップversionを埋め込み、version更新時にdigestも更新します。ログ保存先などの重要仕様はREADMEと自動テストで同期し、食い違う場合は現在の画面とREADMEを優先します。
+
+短い製品identityだけはSkill選択やユーザー設定に依存せず、通常ChatとTeamのsystem contextへ常に含まれます。詳細な製品仕様は毎Turnへ埋め込まず、必要なときに`sprint-coder-product`を選択して参照します。
 
 ## 開発
 

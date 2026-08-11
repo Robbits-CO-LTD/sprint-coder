@@ -86,6 +86,15 @@ export type TeamExecutionSubmission = Readonly<{
   state: TeamExecutionState;
 }>;
 export type TeamExecutionAccess = 'read-only' | 'workspace-write';
+export type TeamDiagnosticEvent = Readonly<{
+  event: string;
+  taskId: string;
+  teamId: string;
+  missionId?: string;
+  workerId?: string;
+  status?: string;
+  result?: string;
+}>;
 export type TeamContextOwner = Readonly<{
   type: 'turn' | 'team_execution';
   id: string;
@@ -270,6 +279,7 @@ export class TeamCoordinator {
     private readonly worktreeManager?: WorkerWorktreeManager,
     private readonly verifyWorkspace?: (taskId: string) => Promise<void>,
     integrationScheduler?: TeamIntegrationScheduler,
+    private readonly diagnostic?: (event: TeamDiagnosticEvent) => void,
   ) {
     this.integrationScheduler = integrationScheduler ?? new TeamIntegrationScheduler();
     if (executionScheduler !== undefined) {
@@ -366,6 +376,14 @@ export class TeamCoordinator {
       event.type === 'completed' || event.type === 'failed' || event.type === 'canceled';
     const now = this.isoNow();
     if (event.type === 'heartbeat') return;
+    if (event.type !== 'outputDelta' && event.type !== 'reasoningPresence')
+      this.diagnostic?.({
+        event: `team.worker.${event.type}`,
+        taskId,
+        teamId,
+        workerId,
+        status: terminal ? event.type : 'running',
+      });
     const transient = this.transientWorkerActivity.get(workerId) ?? {
       liveOutput: '',
       reasoningActive: false,
@@ -568,6 +586,13 @@ export class TeamCoordinator {
         to: 'acked',
         now,
       });
+      this.diagnostic?.({
+        event: 'team.message.routed',
+        taskId,
+        teamId: team.id,
+        status: 'delivered',
+        result: 'acked',
+      });
       this.emit(taskId, team.id);
       return this.messageSummaryFromSnapshot(this.persistence.getTeamSnapshot(team.id), message.id);
     });
@@ -595,7 +620,15 @@ export class TeamCoordinator {
   ): Promise<WorkerSummary> {
     return this.enqueue(input.taskId, async () => {
       let team = this.persistence.getTeamByTask(input.taskId);
-      if (team === null) team = this.persistence.promoteTaskToTeam(input.taskId);
+      if (team === null) {
+        team = this.persistence.promoteTaskToTeam(input.taskId);
+        this.diagnostic?.({
+          event: 'team.created',
+          taskId: input.taskId,
+          teamId: team.id,
+          status: team.state,
+        });
+      }
       const before = this.persistence.getTeamSnapshot(team.id);
       const effectiveRequesterId = requesterAgentId ?? team.leaderAgentId;
       const requester = before.agents.find(({ id }) => id === effectiveRequesterId);
@@ -719,6 +752,13 @@ export class TeamCoordinator {
         if (latestBeforeReady.state === 'completed')
           team = this.persistence.reformCompletedTeam(team.id);
         current = this.persistence.transitionWorkerState(worker.id, 'ready');
+        this.diagnostic?.({
+          event: 'team.worker.ready',
+          taskId: input.taskId,
+          teamId: team.id,
+          workerId: worker.id,
+          status: 'ready',
+        });
         this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
         // spawnSlots is a concurrency lease, not cumulative usage. Keeping it committed after
         // startup permanently exhausts the global pool across otherwise completed Teams.
@@ -742,6 +782,13 @@ export class TeamCoordinator {
           .agents.find(({ id }) => id === worker.id);
         if (current !== undefined && ['invited', 'spawning'].includes(current.state))
           this.persistence.transitionWorkerState(worker.id, 'failed');
+        this.diagnostic?.({
+          event: 'team.worker.failed',
+          taskId: input.taskId,
+          teamId: team.id,
+          workerId: worker.id,
+          status: 'failed',
+        });
         this.emit(input.taskId, team.id);
         throw error;
       }
@@ -827,6 +874,13 @@ export class TeamCoordinator {
         ...(contextOwner === undefined ? {} : { contextOwner }),
       });
       this.persistence.transitionTeamMission(mission.id, 'running', this.isoNow());
+      this.diagnostic?.({
+        event: 'team.mission.started',
+        taskId: input.taskId,
+        teamId: team.id,
+        missionId: mission.id,
+        status: 'running',
+      });
       const first = mission.steps[0];
       if (first === undefined) throw new Error('Mission has no first step');
       this.persistence.transitionTeamExecution({
@@ -1110,6 +1164,13 @@ export class TeamCoordinator {
         to: 'queued',
         now,
         queueReason: 'global_concurrency',
+      });
+      this.diagnostic?.({
+        event: 'team.execution.queued',
+        taskId: input.taskId,
+        teamId: team.id,
+        workerId: worker.id,
+        status: 'queued',
       });
       this.scheduleExecution({
         taskId: input.taskId,
@@ -1650,6 +1711,15 @@ export class TeamCoordinator {
         });
         nextMissionExecutionId = checkpointResult.nextExecutionId;
         completedMission = checkpointResult.mission.state === 'completed';
+        if (completedMission)
+          this.diagnostic?.({
+            event: 'team.mission.completed',
+            taskId: input.taskId,
+            teamId: input.teamId,
+            missionId: checkpointResult.mission.id,
+            workerId: worker.id,
+            status: 'completed',
+          });
         if (missionWorktree !== null)
           await this.cleanupIntegratedMissionWorktree(missionWorktree, worker.id);
         if (executionIsolation !== null)
@@ -1723,6 +1793,17 @@ export class TeamCoordinator {
       if (nextMissionExecutionId !== null)
         this.schedulePersistedExecution(input.taskId, nextMissionExecutionId, 'initial');
       this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
+      this.diagnostic?.({
+        event:
+          completion.value.status === 'succeeded'
+            ? 'team.execution.completed'
+            : 'team.execution.failed',
+        taskId: input.taskId,
+        teamId: input.teamId,
+        workerId: worker.id,
+        status: completion.value.status === 'succeeded' ? 'completed' : 'failed',
+        result: completion.value.status,
+      });
       this.finalizeTeamIfWorkersTerminal(input.teamId);
       this.emit(input.taskId, input.teamId);
     } catch (error) {
@@ -2584,10 +2665,22 @@ export class TeamCoordinator {
       return;
     if (workers.some(({ state }) => state === 'failed')) {
       this.persistence.transitionTeamState(teamId, 'failed');
+      this.diagnostic?.({
+        event: 'team.failed',
+        taskId: snapshot.team.taskId,
+        teamId,
+        status: 'failed',
+      });
       return;
     }
     this.persistence.transitionTeamState(teamId, 'winding_down');
     this.persistence.transitionTeamState(teamId, 'completed');
+    this.diagnostic?.({
+      event: 'team.completed',
+      taskId: snapshot.team.taskId,
+      teamId,
+      status: 'completed',
+    });
   }
 
   private settleExecution(

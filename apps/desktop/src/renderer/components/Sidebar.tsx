@@ -8,6 +8,7 @@ import {
 import {
   Archive,
   ArchiveRestore,
+  Check,
   MoreHorizontal,
   Pin,
   PinOff,
@@ -17,6 +18,7 @@ import {
 } from './icons';
 import { useTaskBoundary } from './TaskBoundary';
 import type { ProjectSummary, TaskSummary } from '../types/sprint-coder';
+import type { TurnStatus } from '../store/appStore';
 import { ProjectEditorDialog } from './ProjectEditorDialog';
 
 const COLLAPSED_PROJECTS_KEY = 'sprint-coder:collapsed-projects';
@@ -694,6 +696,8 @@ function TaskRow({
   onToggleArchive,
 }: { task: TaskSummary } & RowProps) {
   const isActive = task.id === selectedTaskId;
+  const turnStatus = useAppStore((state) => state.turnByTask[task.id]?.status);
+  const activity = taskActivityState(turnStatus);
   return (
     <div className={`sb-row${isActive ? ' active' : ''}`} data-task-id={task.id} tabIndex={-1}>
       <button
@@ -705,6 +709,7 @@ function TaskRow({
       >
         {task.pinned && <Pin size={12} />}
         <span>{task.title || '無題のTask'}</span>
+        <TaskActivityIndicator activity={activity} />
         {task.hasConversation === false && <span className="sb-unstarted">未開始</span>}
       </button>
       {canManage && (
@@ -728,6 +733,37 @@ function TaskRow({
         </details>
       )}
     </div>
+  );
+}
+
+export type TaskActivityState = 'running' | 'completed' | null;
+
+export function taskActivityState(status: TurnStatus | undefined): TaskActivityState {
+  if (status === 'running' || status === 'canceling') return 'running';
+  if (status === 'completed') return 'completed';
+  return null;
+}
+
+export function TaskActivityIndicator({ activity }: { activity: TaskActivityState }) {
+  if (activity === null) return null;
+  if (activity === 'running')
+    return (
+      <span
+        className="sb-task-activity sb-task-activity--running"
+        role="status"
+        aria-label="実行中"
+        title="実行中"
+      />
+    );
+  return (
+    <span
+      className="sb-task-activity sb-task-activity--completed"
+      role="img"
+      aria-label="完了"
+      title="完了"
+    >
+      <Check size={13} />
+    </span>
   );
 }
 
