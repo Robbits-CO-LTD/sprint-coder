@@ -1317,6 +1317,23 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('seals Team capability for an explicit leader/worker role assignment on the first Turn', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('explicit team roles');
+      const started = persistence.startTurn(
+        task.id,
+        'Sprint Coderで現在選択しているモデルをリーダーにしてOllamaのローカルLLMをワーカーにした実装skillを構築して',
+      );
+
+      expect(started.teamTurn).toBe(true);
+      expect(
+        persistence
+          .prepareContext(task.id, started.turnId)
+          .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
+      persistence.close();
+    });
+
     it('keeps Team guidance on a short continuation after a failed Team turn', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('team retry');
