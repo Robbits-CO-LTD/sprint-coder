@@ -14,7 +14,7 @@ Sprint Coderは、1対1のAIチャット、ワークスペース上のファイ�
 - **ワークスペースを安全に操作** — ファイル変更、差分、コマンド、承認履歴を画面上で追跡し、`Ask` / `Auto` / `Full` のAccess presetで実行範囲を制御します。
 - **ローカルに復元可能な履歴** — Task、メッセージ、Turn、Teamの状態を端末内へ保存し、再起動後も作業を再開できます。
 - **実行状況を可視化** — reasoning、進行stage、context使用量、Workerの活動、承認待ちをTask内で確認できます。
-- **Skill対応** — ローカルのSkillを読み込み、ChatやTeamへ追加できます。組み込みのSkill Creatorから新しいSkillの下書きも作成できます。
+- **Skill対応** — ローカルのSkillを読み込み、ChatやTeamへ追加できます。組み込みのSkill Creatorから新しいSkillの下書きも作成できます。Codex実行では、選択時に固定した管理コピーだけを一時的な隔離rootから渡し、Codex CLI側の未選択Skillは利用しません。隔離を確認できないCLIではTurnを開始しません。
 
 ## 対応するRuntime / Provider
 
@@ -72,11 +72,11 @@ Local-firstは、Task履歴、設定、実行状態を端末内で管理する�
 
 Sprint Coderは、起動失敗、Main processの未処理エラー、RendererやElectron子processの異常終了などをローカルのJSON Linesログへ保存します。通常の保存場所は次のとおりです。
 
-| OS      | ログフォルダ                    |
-| ------- | ------------------------------- |
-| macOS   | `~/.sprintcoder/logs/`           |
+| OS      | ログフォルダ                       |
+| ------- | ---------------------------------- |
+| macOS   | `~/.sprintcoder/logs/`             |
 | Windows | `%USERPROFILE%\.sprintcoder\logs\` |
-| Linux   | `~/.sprintcoder/logs/`           |
+| Linux   | `~/.sprintcoder/logs/`             |
 
 ログは用途別に分かれます。
 

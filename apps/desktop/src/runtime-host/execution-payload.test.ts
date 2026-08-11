@@ -43,6 +43,7 @@ describe('shared CLI execution payload serializer', () => {
     );
     expect(codex.bytes.equals(Buffer.from(codex.text, 'utf8'))).toBe(true);
     expect(codex.digest).toBe(createHash('sha256').update(codex.bytes).digest('hex'));
+    expect(codex.text).not.toContain('$reviewer');
 
     const claude = serializeCliExecutionPayload({
       kind: 'claude',

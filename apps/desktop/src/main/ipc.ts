@@ -253,6 +253,13 @@ import {
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 
+export function contextFragmentsForRuntime(
+  kind: 'codex' | 'claude' | 'provider',
+  fragments: readonly RuntimeContextFragment[],
+): RuntimeContextFragment[] {
+  return kind === 'codex' ? fragments.filter(({ source }) => source !== 'skill') : [...fragments];
+}
+
 /**
  * Cancellation is a durable state transition first and a runtime best-effort cleanup second. A
  * Runtime Host can disappear before it acknowledges stop; that must not strand the Turn in
@@ -280,10 +287,12 @@ import {
 } from './tool-broker';
 import type {
   RuntimeCanonicalEvent,
+  RuntimeContextFragment,
   RuntimeFailureDiagnostic,
   RuntimePreparedImageAttachments,
   RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
+
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure-diagnostics';
 import {
@@ -3547,7 +3556,13 @@ export class IpcRouter {
       name: skill.selection.ref.skillId,
       path: skill.packagePath,
     }));
-    const runtimeContextFragments = context.fragments.map(toRuntimeContextFragment);
+    const runtimeContextFragments = contextFragmentsForRuntime(
+      kind,
+      context.fragments
+        // Codex receives selected Skills only through structured `type: skill` inputs. Keeping the
+        // same Skill body here would inject it twice and bypass the adapter's isolated catalog.
+        .map(toRuntimeContextFragment),
+    );
     const serializedPayload = serializeCliExecutionPayload({
       kind,
       request: started.text,

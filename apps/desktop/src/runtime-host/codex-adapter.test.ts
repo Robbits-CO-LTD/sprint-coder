@@ -42,6 +42,8 @@ describe('Codex runtime probe', () => {
         "createInterface({ input: process.stdin }).on('line', (line) => {",
         '  const message = JSON.parse(line);',
         "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ cwd: message.params.cwds[0], skills: [], errors: [] }] } });",
         "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
         "  if (message.method === 'turn/start') {",
         "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
@@ -154,6 +156,43 @@ describe('Codex runtime probe', () => {
     expect(diagnostics[0]).toMatchObject({ failureStage: 'protocol_error' });
   });
 
+  it('fails closed when the CLI does not support Skill isolation RPCs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-old-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'old-codex.mjs');
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+        "createInterface({ input: process.stdin }).on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'method not found' } });",
+        '});',
+      ].join('\n'),
+    );
+    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+    const failures: Array<{ code: string; retryable: boolean }> = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'old-cli-turn',
+        'request',
+        [],
+        () => undefined,
+        null,
+        'auto',
+        () => undefined,
+        (error) => failures.push(error),
+        () => resolve(),
+      );
+    });
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ code: 'RUNTIME_FAILED', retryable: true });
+  });
+
   it('completes without retaining stderr in a small workspace or the user home', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-success-codex-'));
     temporaryRoots.push(root);
@@ -167,6 +206,8 @@ describe('Codex runtime probe', () => {
         "createInterface({ input: process.stdin }).on('line', (line) => {",
         '  const message = JSON.parse(line);',
         "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ cwd: message.params.cwds[0], skills: [], errors: [] }] } });",
         "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
         "  if (message.method === 'turn/start') {",
         "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
@@ -408,6 +449,8 @@ describe('Codex runtime probe', () => {
           "rl.on('line', (line) => {",
           '  const message = JSON.parse(line);',
           "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'skills/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ cwd: message.params.cwds[0], skills: [], errors: [] }] } });",
           "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
           "  if (message.method === 'turn/start') {",
           "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
@@ -476,6 +519,8 @@ describe('Codex runtime probe', () => {
           "rl.on('line', (line) => {",
           '  const message = JSON.parse(line);',
           "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'skills/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ cwd: message.params.cwds[0], skills: [], errors: [] }] } });",
           "  if (message.method === 'thread/start') send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
           "  if (message.method === 'turn/start') for (let index = 0; index < 300; index += 1) send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { itemId: 'message-1', delta: 'x' } });",
           '});',
@@ -712,13 +757,13 @@ describe('Codex runtime probe', () => {
     );
   });
 
-  it('adds explicit $skill invocation text for structured Skill inputs', () => {
+  it('does not duplicate structured Skills as $skill invocation text', () => {
     expect(
       buildCodexPrompt('review this change', [], undefined, [
         { name: 'code-review', path: '/tmp/code-review' },
         { name: 'accessibility', path: '/tmp/accessibility' },
       ]),
-    ).toBe('$code-review $accessibility\n\nreview this change');
+    ).toBe('review this change');
   });
 
   // issue #6: there is no `--effort` flag, but `-c model_reasoning_effort=` works. The value is

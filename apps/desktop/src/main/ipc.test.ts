@@ -93,6 +93,7 @@ import {
 import {
   clampCodexEffort,
   confirmFullAccessOnce,
+  contextFragmentsForRuntime,
   cancelRuntimeWithFinalCleanup,
   IpcRouter,
   invalidModelUserMessage,
@@ -126,6 +127,31 @@ import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
 import { requiresTeamWorkersInput } from './team-tools';
 import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
 import { secureLogger } from './secure-logger';
+
+describe('Codex selected Skill delivery', () => {
+  const fragments = [
+    {
+      id: 'system',
+      source: 'system' as const,
+      trust: 'system' as const,
+      authority: 'system' as const,
+      content: 'system context',
+    },
+    {
+      id: 'selected-skill',
+      source: 'skill' as const,
+      trust: 'user' as const,
+      authority: 'user' as const,
+      content: 'UNIQUE_SELECTED_SKILL_BODY',
+    },
+  ];
+
+  it('removes selected Skill bodies from Codex application context only', () => {
+    expect(contextFragmentsForRuntime('codex', fragments).map(({ id }) => id)).toEqual(['system']);
+    expect(contextFragmentsForRuntime('claude', fragments)).toEqual(fragments);
+    expect(contextFragmentsForRuntime('provider', fragments)).toEqual(fragments);
+  });
+});
 
 describe('Main runtime failure diagnostics', () => {
   function createRuntimeFailureHarness(diagnosticId = 'diagnostic-main-protocol') {
