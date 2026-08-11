@@ -104,16 +104,23 @@ export function resolveRuntimeFailureDiagnostic({
   teamMcpEnabled,
   nowMs = Date.now(),
 }: ResolveRuntimeFailureDiagnosticInput): RuntimeFailureDiagnostic | undefined {
-  if (diagnostic !== undefined && diagnostic.runtimeKind === runtimeKind) return diagnostic;
+  if (
+    diagnostic !== undefined &&
+    diagnostic.runtimeKind === runtimeKind &&
+    diagnostic.reasonCode === undefined
+  )
+    return diagnostic;
   if (errorCode !== 'RUNTIME_PROTOCOL_ERROR') return undefined;
   const safeNow = safeEpochMilliseconds(nowMs, Date.now());
-  return new RuntimeFailureDiagnosticCollector(
+  const reasonCode = diagnostic?.runtimeKind === runtimeKind ? diagnostic.reasonCode : undefined;
+  const resolved = new RuntimeFailureDiagnosticCollector(
     runtimeKind,
     appVersion,
     null,
     teamMcpEnabled,
     safeEpochMilliseconds(startedAtMs, safeNow),
   ).snapshot('protocol_error', safeNow);
+  return reasonCode === undefined ? resolved : { ...resolved, reasonCode };
 }
 
 function safeEpochMilliseconds(value: number | undefined, fallback: number): number {

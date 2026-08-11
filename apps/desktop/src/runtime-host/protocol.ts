@@ -129,6 +129,21 @@ export type RuntimeFailureStage =
   | 'spawn_error'
   | 'abnormal_exit';
 
+export type RuntimeStartRejectionReasonCode =
+  | 'invalid_project_context_authority'
+  | 'invalid_payload_digest'
+  | 'invalid_runtime_start_envelope'
+  | 'runtime_instance_mismatch';
+
+export type RuntimeStartRejection = Readonly<{
+  reasonCode: RuntimeStartRejectionReasonCode;
+  itemKind?: 'instruction' | 'memory' | 'reference';
+  authority?: 'user' | 'none';
+}>;
+
+export type RuntimeProtocolFailureReasonCode =
+  RuntimeStartRejectionReasonCode | 'runtime_start_timeout';
+
 export const RECOGNIZED_CODEX_NOTIFICATION_NAMES = new Set([
   'turn/started',
   'item/agentMessage/delta',
@@ -157,6 +172,7 @@ export type RuntimeFailureDiagnostic = Readonly<{
   stderrObserved: boolean;
   stderrTruncated: boolean;
   recordedAt: string;
+  reasonCode?: RuntimeProtocolFailureReasonCode;
 }>;
 
 type EnvelopeBase = {
@@ -291,7 +307,75 @@ export type RuntimeToMainEnvelope =
       type: 'error';
       error: PublicError;
       diagnostic?: RuntimeFailureDiagnostic;
+      rejection?: RuntimeStartRejection;
     });
+
+export type CorrelatedRuntimeStartRejection = Readonly<{
+  taskId: string;
+  turnId: string;
+  operationId: string;
+  rejection: RuntimeStartRejection;
+}>;
+
+/** Extracts bounded correlation and allowlisted metadata without reflecting content-bearing data. */
+export function correlatedRuntimeStartRejection(
+  value: unknown,
+  expectedRuntimeInstanceId: string,
+): CorrelatedRuntimeStartRejection | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (record['type'] !== 'start' && record['type'] !== 'commit_images') return null;
+  const taskId = safeCorrelationId(record['taskId']);
+  const turnId = safeCorrelationId(record['turnId']);
+  const operationId = safeCorrelationId(record['operationId']);
+  if (taskId === null || turnId === null || operationId === null) return null;
+
+  if (record['runtimeInstanceId'] !== expectedRuntimeInstanceId)
+    return {
+      taskId,
+      turnId,
+      operationId,
+      rejection: { reasonCode: 'runtime_instance_mismatch' },
+    };
+  if (!isWithinStartRejectionInspectionBudget(record))
+    return {
+      taskId,
+      turnId,
+      operationId,
+      rejection: { reasonCode: 'invalid_runtime_start_envelope' },
+    };
+  if (isMainToRuntimeEnvelope(value)) return null;
+  const invalidAuthority = invalidProjectContextAuthority(record['projectItems']);
+  if (invalidAuthority !== null)
+    return {
+      taskId,
+      turnId,
+      operationId,
+      rejection: { reasonCode: 'invalid_project_context_authority', ...invalidAuthority },
+    };
+  if (!hasMatchingPayloadDigest(record))
+    return {
+      taskId,
+      turnId,
+      operationId,
+      rejection: { reasonCode: 'invalid_payload_digest' },
+    };
+  return {
+    taskId,
+    turnId,
+    operationId,
+    rejection: { reasonCode: 'invalid_runtime_start_envelope' },
+  };
+}
+
+function isWithinStartRejectionInspectionBudget(record: Record<string, unknown>): boolean {
+  const projectItems = record['projectItems'];
+  if (Array.isArray(projectItems) && projectItems.length > 256) return false;
+  const payload = record['payload'];
+  if (typeof payload !== 'string') return true;
+  // Check code-unit length first so a hostile multi-megabyte string is never traversed or hashed.
+  return payload.length <= 512 * 1024 && Buffer.byteLength(payload, 'utf8') <= 512 * 1024;
+}
 
 export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeEnvelope {
   if (!hasValidBase(value)) return false;
@@ -660,7 +744,10 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
     publicErrorSchema.safeParse(value.error).success &&
     (!('diagnostic' in value) ||
       value.diagnostic === undefined ||
-      isRuntimeFailureDiagnostic(value.diagnostic))
+      isRuntimeFailureDiagnostic(value.diagnostic)) &&
+    (!('rejection' in value) ||
+      value.rejection === undefined ||
+      isRuntimeStartRejection(value.rejection))
   );
 }
 
@@ -685,6 +772,7 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
         'stderrObserved',
         'stderrTruncated',
         'recordedAt',
+        'reasonCode',
       ].includes(key),
     ) &&
     record['version'] === 1 &&
@@ -736,6 +824,15 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
     record['unsupportedNotificationCount'] >= 0 &&
     typeof record['stderrObserved'] === 'boolean' &&
     typeof record['stderrTruncated'] === 'boolean' &&
+    (!('reasonCode' in record) ||
+      record['reasonCode'] === undefined ||
+      [
+        'invalid_project_context_authority',
+        'invalid_payload_digest',
+        'invalid_runtime_start_envelope',
+        'runtime_instance_mismatch',
+        'runtime_start_timeout',
+      ].includes(String(record['reasonCode']))) &&
     typeof record['recordedAt'] === 'string' &&
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(record['recordedAt']) &&
     Number.isFinite(Date.parse(record['recordedAt']));
@@ -745,6 +842,65 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
   } catch {
     return false;
   }
+}
+
+function safeCorrelationId(value: unknown): string | null {
+  return typeof value === 'string' &&
+    value.length >= 1 &&
+    value.length <= 128 &&
+    /^[0-9A-Za-z:._-]+$/.test(value)
+    ? value
+    : null;
+}
+
+function invalidProjectContextAuthority(value: unknown): {
+  itemKind: 'instruction' | 'memory' | 'reference';
+  authority: 'user' | 'none';
+} | null {
+  if (!Array.isArray(value)) return null;
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) continue;
+    const record = item as Record<string, unknown>;
+    const itemKind = record['kind'];
+    const authority = record['authority'];
+    if (
+      (itemKind === 'instruction' || itemKind === 'memory' || itemKind === 'reference') &&
+      (authority === 'user' || authority === 'none') &&
+      !hasValidProjectItemAuthority(itemKind, authority)
+    )
+      return { itemKind, authority };
+  }
+  return null;
+}
+
+function hasMatchingPayloadDigest(record: Record<string, unknown>): boolean {
+  return (
+    typeof record['payload'] === 'string' &&
+    isSha256(record['payloadDigest']) &&
+    createHash('sha256').update(Buffer.from(record['payload'], 'utf8')).digest('hex') ===
+      record['payloadDigest']
+  );
+}
+
+function isRuntimeStartRejection(value: unknown): value is RuntimeStartRejection {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).every((key) => ['reasonCode', 'itemKind', 'authority'].includes(key)) &&
+    [
+      'invalid_project_context_authority',
+      'invalid_payload_digest',
+      'invalid_runtime_start_envelope',
+      'runtime_instance_mismatch',
+    ].includes(String(record['reasonCode'])) &&
+    (!('itemKind' in record) ||
+      record['itemKind'] === undefined ||
+      ['instruction', 'memory', 'reference'].includes(String(record['itemKind']))) &&
+    (!('authority' in record) ||
+      record['authority'] === undefined ||
+      record['authority'] === 'user' ||
+      record['authority'] === 'none')
+  );
 }
 
 function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent {

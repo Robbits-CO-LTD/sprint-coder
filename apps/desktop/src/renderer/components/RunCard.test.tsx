@@ -15,6 +15,7 @@ describe('RunCard terminal status', () => {
   const terminalTurn: TurnRuntimeState = {
     turnId: 'turn-191',
     stage: 'synthesizing',
+    runtimeStarting: false,
     reachedStageIndex: 4,
     status: 'failed',
     startedAt: 0,
@@ -54,5 +55,21 @@ describe('RunCard terminal status', () => {
 
     expect(html).toContain('中断');
     expect(html).toContain('未完了');
+  });
+
+  it('distinguishes Runtime startup from model understanding', () => {
+    const html = renderRunCard({
+      ...terminalTurn,
+      stage: 'understanding',
+      reachedStageIndex: 0,
+      status: 'running',
+      runtimeStarting: true,
+      streamingMessageId: null,
+      streamingContent: '',
+    });
+
+    expect(html).toContain('起動中');
+    expect(html).toContain('Runtime起動待ち');
+    expect(html).not.toContain('ユーザーの依頼を理解中');
   });
 });

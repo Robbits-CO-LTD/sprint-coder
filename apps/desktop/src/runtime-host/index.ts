@@ -2,6 +2,7 @@ import { CodexRuntimeAdapter, probeCodex } from './codex-adapter';
 import { ClaudeRuntimeAdapter, probeClaude } from './claude-adapter';
 import {
   RUNTIME_PROTOCOL_VERSION,
+  correlatedRuntimeStartRejection,
   isMainToRuntimeEnvelope,
   type MainToRuntimeEnvelope,
   type RuntimeToMainEnvelope,
@@ -47,7 +48,23 @@ const heartbeat = setInterval(() => {
 heartbeat.unref();
 
 parentPort.on('message', ({ data }: Electron.MessageEvent) => {
-  if (!isMainToRuntimeEnvelope(data) || data.runtimeInstanceId !== runtimeInstanceId) return;
+  const rejected = correlatedRuntimeStartRejection(data, runtimeInstanceId);
+  if (rejected !== null) {
+    send(rejected.taskId, rejected.turnId, rejected.operationId, {
+      type: 'error',
+      error: {
+        code: 'RUNTIME_PROTOCOL_ERROR',
+        userMessage: 'Runtime HostがTurn開始入力を拒否しました。',
+        retryable: false,
+      },
+      rejection: rejected.rejection,
+    });
+    if (!activeTurns.has(rejected.turnId)) sequences.delete(rejected.turnId);
+    return;
+  }
+  if (!isMainToRuntimeEnvelope(data) || data.runtimeInstanceId !== runtimeInstanceId) {
+    return;
+  }
   if (data.type === 'hello') {
     void probeAndSendCapability(data.operationId);
   } else if (data.type === 'prepare_images') {
@@ -409,7 +426,10 @@ function send(
         | 'acceptedPayloadDigest'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'exit' }>, 'type' | 'code' | 'canceled'>
-    | Pick<Extract<RuntimeToMainEnvelope, { type: 'error' }>, 'type' | 'error' | 'diagnostic'>,
+    | Pick<
+        Extract<RuntimeToMainEnvelope, { type: 'error' }>,
+        'type' | 'error' | 'diagnostic' | 'rejection'
+      >,
 ): void {
   const seq = (sequences.get(turnId) ?? 0) + 1;
   sequences.set(turnId, seq);

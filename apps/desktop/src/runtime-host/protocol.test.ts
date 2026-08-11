@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from '@sprint-coder/domain';
 import {
   RUNTIME_PROTOCOL_VERSION,
+  correlatedRuntimeStartRejection,
   isMainToRuntimeEnvelope,
   isRuntimeToMainEnvelope,
 } from './protocol';
@@ -460,6 +461,64 @@ describe('Runtime Host protocol', () => {
         projectItems: [{ ...assistantMemory, kind: 'instruction' }],
       }),
     ).toBe(false);
+  });
+
+  it('classifies only bounded correlated start rejection metadata', () => {
+    const valid = startEnvelope();
+    expect(correlatedRuntimeStartRejection(valid, valid.runtimeInstanceId)).toBeNull();
+    const forged = {
+      ...valid,
+      projectItems: [
+        {
+          id: 'instruction-1',
+          kind: 'instruction',
+          authority: 'none',
+          localOnly: false,
+          sealedDigest: 'a'.repeat(64),
+          content: 'MEMORY_CANARY_182 /absolute/canary-182',
+        },
+      ],
+    };
+    const rejection = correlatedRuntimeStartRejection(forged, valid.runtimeInstanceId);
+    expect(rejection).toEqual({
+      taskId: valid.taskId,
+      turnId: valid.turnId,
+      operationId: valid.operationId,
+      rejection: {
+        reasonCode: 'invalid_project_context_authority',
+        itemKind: 'instruction',
+        authority: 'none',
+      },
+    });
+    expect(JSON.stringify(rejection)).not.toContain('MEMORY_CANARY_182');
+    expect(JSON.stringify(rejection)).not.toContain('/absolute/canary-182');
+    expect(
+      correlatedRuntimeStartRejection(
+        { ...valid, operationId: 'unsafe operation id', projectItems: forged.projectItems },
+        valid.runtimeInstanceId,
+      ),
+    ).toBeNull();
+    expect(
+      correlatedRuntimeStartRejection(
+        { ...valid, runtimeInstanceId: 'other-runtime' },
+        valid.runtimeInstanceId,
+      ),
+    ).toMatchObject({ rejection: { reasonCode: 'runtime_instance_mismatch' } });
+    expect(
+      correlatedRuntimeStartRejection({ ...valid, payload: 'tampered' }, valid.runtimeInstanceId),
+    ).toMatchObject({ rejection: { reasonCode: 'invalid_payload_digest' } });
+    expect(
+      correlatedRuntimeStartRejection(
+        { ...valid, payload: 'x'.repeat(512 * 1024 + 1) },
+        valid.runtimeInstanceId,
+      ),
+    ).toMatchObject({ rejection: { reasonCode: 'invalid_runtime_start_envelope' } });
+    expect(
+      correlatedRuntimeStartRejection(
+        { ...valid, projectItems: Array.from({ length: 257 }, () => null) },
+        valid.runtimeInstanceId,
+      ),
+    ).toMatchObject({ rejection: { reasonCode: 'invalid_runtime_start_envelope' } });
   });
 
   it('enforces combined Project protocol count and UTF-8 byte budgets', () => {

@@ -57,6 +57,8 @@ export type TurnStatus =
 export type TurnRuntimeState = {
   turnId: string;
   stage: TurnStage;
+  /** Transient only: true after Main accepts the Turn and before the Runtime emits its first stage. */
+  runtimeStarting: boolean;
   /** Highest stage index reached, clamped so it never decreases (issue #16). `stage` alone is not
    * enough: `waiting_approval` sits between `executing` and `synthesizing` in STAGE_ORDER, so a turn
    * that returns to `executing` for a later tool would make a stage-derived gauge walk backwards. */
@@ -577,6 +579,7 @@ export function handleTurnEvent(
             [taskId]: {
               turnId: ev.turnId,
               stage: 'understanding',
+              runtimeStarting: true,
               reachedStageIndex: 0,
               status: 'running',
               startedAt: Date.now(),
@@ -584,7 +587,7 @@ export function handleTurnEvent(
               streamingContent: '',
             },
           },
-          stageAnnouncement: STAGE_LABEL.understanding,
+          stageAnnouncement: 'Runtime起動待ち',
         };
       });
       break;
@@ -599,6 +602,7 @@ export function handleTurnEvent(
             [taskId]: {
               ...turn,
               stage: ev.stage,
+              runtimeStarting: false,
               reachedStageIndex: advanceStageIndex(turn.reachedStageIndex, ev.stage),
             },
           },
@@ -1404,6 +1408,7 @@ export const useAppStore = create<AppState>((set, get) => {
               ? {
                   turnId: activeTurn.turnId,
                   stage: activeTurn.stage,
+                  runtimeStarting: false,
                   // Restored from the snapshot's stage, which is the furthest this turn is known to
                   // have reached — earlier stage events are not replayed for a resumed turn.
                   reachedStageIndex: advanceStageIndex(0, activeTurn.stage),

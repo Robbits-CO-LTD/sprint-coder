@@ -15,6 +15,7 @@ import {
   type RuntimeCanonicalEvent,
   type RuntimeContextFragment,
   type RuntimeFailureDiagnostic,
+  type RuntimeProtocolFailureReasonCode,
   type RuntimeImageAttachmentManifestEntry,
   type RuntimePreparedImageAttachments,
   type RuntimeProjectContextItem,
@@ -45,6 +46,7 @@ type ActiveTurn = {
   payloadDigest: string;
   startAcceptanceDeadline: RuntimeStartAcceptanceDeadline;
   startFailed: boolean;
+  teamMcpEnabled: boolean;
 };
 export type RuntimeStopReceipt = Readonly<{
   turnId: string;
@@ -264,6 +266,7 @@ export class RuntimeHostClient {
       payloadDigest: payload.digest,
       startAcceptanceDeadline,
       startFailed: false,
+      teamMcpEnabled: teamMcp !== undefined,
     });
     startAcceptanceDeadline.start();
     const startPayload = {
@@ -665,7 +668,21 @@ export class RuntimeHostClient {
     } else if (raw.type === 'error') {
       active.startAcceptanceDeadline.stop();
       this.active.delete(raw.turnId);
-      if (!active.startFailed) this.onFailure(raw.taskId, raw.turnId, raw.error, raw.diagnostic);
+      if (!active.startFailed)
+        this.onFailure(
+          raw.taskId,
+          raw.turnId,
+          raw.error,
+          raw.diagnostic ??
+            (raw.rejection === undefined
+              ? undefined
+              : runtimeStartFailureDiagnostic(
+                  this.kind,
+                  raw.rejection.reasonCode,
+                  0,
+                  active.teamMcpEnabled,
+                )),
+        );
     } else if (raw.type === 'exit') {
       active.startAcceptanceDeadline.stop();
       if (raw.canceled) this.finishCancel(raw.turnId, false);
@@ -829,12 +846,22 @@ export class RuntimeHostClient {
     // valid cancel; if the host itself is wedged, cancel() restarts it after five seconds so an
     // already-spawned CLI process cannot become untracked.
     void this.cancel(taskId, turnId).catch(() => undefined);
-    this.onFailure(taskId, turnId, {
-      code: 'RUNTIME_PROTOCOL_ERROR',
-      userMessage:
-        'Runtime HostがTurnの開始を15秒以内に受理しませんでした。アプリを再起動してから再試行してください。',
-      retryable: true,
-    });
+    this.onFailure(
+      taskId,
+      turnId,
+      {
+        code: 'RUNTIME_PROTOCOL_ERROR',
+        userMessage:
+          'Runtime HostがTurnの開始を15秒以内に受理しませんでした。アプリを再起動してから再試行してください。',
+        retryable: true,
+      },
+      runtimeStartFailureDiagnostic(
+        this.kind,
+        'runtime_start_timeout',
+        RUNTIME_START_ACCEPTANCE_TIMEOUT_MS,
+        active.teamMcpEnabled,
+      ),
+    );
   }
 
   private post(message: MainToRuntimeEnvelope): void {
@@ -898,6 +925,34 @@ export class RuntimeHostClient {
       if (phase.receipt !== undefined) this.invalidImageReceipts.add(phase.receipt);
     this.imagePreparationByTurn.clear();
   }
+}
+
+function runtimeStartFailureDiagnostic(
+  runtimeKind: 'codex' | 'claude',
+  reasonCode: RuntimeProtocolFailureReasonCode,
+  elapsedMs: number,
+  teamMcpEnabled: boolean,
+): RuntimeFailureDiagnostic {
+  return {
+    version: 1,
+    diagnosticId: randomUUID(),
+    runtimeKind,
+    failureStage: 'protocol_error',
+    elapsedMs,
+    appVersion: 'unknown',
+    cliVersion: null,
+    teamMcp: {
+      enabled: teamMcpEnabled,
+      status: teamMcpEnabled ? 'configured' : 'not_configured',
+    },
+    lastRecognizedNotification: null,
+    lastReceivedNotification: null,
+    unsupportedNotificationCount: 0,
+    stderrObserved: false,
+    stderrTruncated: false,
+    recordedAt: new Date().toISOString(),
+    reasonCode,
+  };
 }
 
 export function toRuntimeContextFragment(
