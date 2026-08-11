@@ -106,7 +106,6 @@ import {
   providerModelsForBuiltin,
   requireExplicitProviderCommandApproval,
   requiredTeamWorkerFailure,
-  runRequiredTeamCompletion,
   shouldRetryProviderWithoutTools,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
@@ -616,38 +615,139 @@ describe('Provider Team completion and model errors', () => {
     });
   });
 
-  it.each(['Provider', 'CLI canonical'] as const)(
-    '%s completion settles diagnostic and explicit Team inputs symmetrically',
-    async () => {
-      const completed = vi.fn();
-      const failed = vi.fn();
-      const diagnosticInput =
-        'そもそもなぜsprint-coder-teamが使えないのか調査して。ログファイルを見て';
-      const explicitTeamInput = 'Teamで原因を調査して';
+  it('settles Provider completion through its real terminal adapter', async () => {
+    const finishAndAdvance = vi.fn();
+    const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
+    const publish = vi.fn();
+    const fakeRouter = {
+      teamCoordinator: { get: () => ({ workers: [] }) },
+      persistence: { recordTurnProviderUsage: vi.fn(), appendDelta },
+      mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+      turnRuntimes: new Map([['turn-191', 'provider']]),
+      finishAndAdvance,
+      publish,
+    };
+    const completeProviderTeamTurn = Reflect.get(
+      IpcRouter.prototype,
+      'completeProviderTeamTurn',
+    ) as (
+      this: typeof fakeRouter,
+      taskId: string,
+      turnId: string,
+      input: string,
+      messageId: string,
+      synthesizing: boolean,
+      usage: undefined,
+    ) => Promise<'completed' | 'failed'>;
 
-      expect(
-        await runRequiredTeamCompletion(requiresTeamWorkersInput(diagnosticInput), 0, {
-          completed,
-          failed,
-        }),
-      ).toBe('completed');
-      expect(completed).toHaveBeenCalledOnce();
-      expect(failed).not.toHaveBeenCalled();
+    const diagnosticInput =
+      'そもそもなぜsprint-coder-teamが使えないのか調査して。ログファイルを見て';
+    await expect(
+      completeProviderTeamTurn.call(
+        fakeRouter,
+        'task-191',
+        'turn-191',
+        diagnosticInput,
+        'message-191',
+        true,
+        undefined,
+      ),
+    ).resolves.toBe('completed');
+    expect(finishAndAdvance).toHaveBeenLastCalledWith('task-191', 'turn-191', 'completed');
+    expect(appendDelta).not.toHaveBeenCalled();
 
-      completed.mockClear();
-      expect(
-        await runRequiredTeamCompletion(requiresTeamWorkersInput(explicitTeamInput), 0, {
-          completed,
-          failed,
-        }),
-      ).toBe('failed');
-      expect(completed).not.toHaveBeenCalled();
-      expect(failed).toHaveBeenCalledWith(expect.objectContaining({ code: 'RUNTIME_FAILED' }));
-      expect(failed).not.toHaveBeenCalledWith(
-        expect.objectContaining({ code: 'RUNTIME_PROTOCOL_ERROR' }),
-      );
-    },
-  );
+    finishAndAdvance.mockClear();
+    await expect(
+      completeProviderTeamTurn.call(
+        fakeRouter,
+        'task-191',
+        'turn-191',
+        'Teamで原因を調査して',
+        'message-191',
+        true,
+        undefined,
+      ),
+    ).resolves.toBe('failed');
+    expect(appendDelta).toHaveBeenCalledWith(
+      'task-191',
+      'turn-191',
+      'message-191',
+      expect.stringContaining('Team MCP Workerが1名も作成されませんでした'),
+    );
+    expect(publish).toHaveBeenCalled();
+    expect(finishAndAdvance).toHaveBeenLastCalledWith('task-191', 'turn-191', 'failed');
+  });
+
+  it('settles CLI canonical completion through its real terminal adapter', async () => {
+    const finishAndAdvance = vi.fn();
+    const handleRuntimeFailure = vi.fn();
+    const teamRequiredTurns = new Set<string>();
+    const fakeRouter = {
+      teamRequiredTurns,
+      teamCoordinator: { get: () => ({ workers: [] }) },
+      resolvedModelByTurn: new Map<string, string>(),
+      finishAndAdvance,
+      handleRuntimeFailure,
+    };
+    const completeCanonicalTeamTurn = Reflect.get(
+      IpcRouter.prototype,
+      'completeCanonicalTeamTurn',
+    ) as (
+      this: typeof fakeRouter,
+      kind: 'codex' | 'claude',
+      taskId: string,
+      turnId: string,
+      resolvedModel: string | undefined,
+      finalText: string | undefined,
+    ) => Promise<'completed' | 'failed'>;
+
+    const diagnosticInput =
+      'そもそもなぜsprint-coder-teamが使えないのか調査して。ログファイルを見て';
+    expect(requiresTeamWorkersInput(diagnosticInput)).toBe(false);
+    await expect(
+      completeCanonicalTeamTurn.call(
+        fakeRouter,
+        'codex',
+        'task-191',
+        'turn-191',
+        'gpt-5.6-sol',
+        '調査結果',
+      ),
+    ).resolves.toBe('completed');
+    expect(finishAndAdvance).toHaveBeenLastCalledWith(
+      'task-191',
+      'turn-191',
+      'completed',
+      '調査結果',
+    );
+    expect(handleRuntimeFailure).not.toHaveBeenCalled();
+
+    finishAndAdvance.mockClear();
+    teamRequiredTurns.add('turn-191');
+    await expect(
+      completeCanonicalTeamTurn.call(
+        fakeRouter,
+        'codex',
+        'task-191',
+        'turn-191',
+        undefined,
+        '部分回答',
+      ),
+    ).resolves.toBe('failed');
+    expect(finishAndAdvance).not.toHaveBeenCalled();
+    expect(handleRuntimeFailure).toHaveBeenCalledWith(
+      'codex',
+      'task-191',
+      'turn-191',
+      expect.objectContaining({ code: 'RUNTIME_FAILED' }),
+    );
+    expect(handleRuntimeFailure).not.toHaveBeenCalledWith(
+      'codex',
+      'task-191',
+      'turn-191',
+      expect.objectContaining({ code: 'RUNTIME_PROTOCOL_ERROR' }),
+    );
+  });
 });
 
 describe('Provider workspace tool capability fallback', () => {
