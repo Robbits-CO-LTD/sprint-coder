@@ -18,6 +18,7 @@
 export const TEAM_MCP_TOOL_NAMES = [
   'project_memory_remember',
   'skill_draft_create',
+  'skill_import_read',
   'skill_import_install',
   'team_list_models',
   'team_record_model_research',
@@ -85,6 +86,24 @@ const TOOLS = [
         },
       },
       required: ['kind', 'skillId', 'files'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'skill_import_read',
+    description:
+      'Read one Skill from the selected Claude or Codex Skill root through Sprint Coder safe file validation before adapting it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cli: { type: 'string', enum: ['claude', 'codex'] },
+        skillId: {
+          type: 'string',
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$',
+          maxLength: 128,
+        },
+      },
+      required: ['cli', 'skillId'],
       additionalProperties: false,
     },
   },
@@ -487,7 +506,7 @@ function connectSocket() {
               ? capabilities && capabilities.projectMemory === true
               : tool.name === 'skill_draft_create'
                 ? capabilities && capabilities.skillDrafts === true
-                : tool.name === 'skill_import_install'
+                : tool.name === 'skill_import_read' || tool.name === 'skill_import_install'
                   ? capabilities && capabilities.skillImports === true
                 : capabilities && capabilities.teamTools === true,
           );

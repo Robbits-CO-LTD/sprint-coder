@@ -852,6 +852,22 @@ export class IpcRouter {
         this.skillSettings
           .installPrepared(skillDraftCreateInputSchema.parse(input))
           .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+      async (input) => {
+        const parsed = z
+          .object({
+            cli: z.enum(['claude', 'codex']),
+            skillId: z
+              .string()
+              .min(1)
+              .max(128)
+              .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+          })
+          .strict()
+          .parse(input);
+        return this.skillSettings
+          .readImportSource(parsed)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+      },
     );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
@@ -3719,7 +3735,7 @@ export class IpcRouter {
         ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
         : null,
       options.importSkillTurn
-        ? 'import-skillが選択されています。対象CLIと対象Skillがユーザー回答で一意に確定してから、元SkillをSprint Coder互換へ修正し、skill_import_installでインストール・有効化してください。skill_draft_createとteam_*ツールは使用しません。'
+        ? 'import-skillが選択されています。対象CLIと対象Skillがユーザー回答で一意に確定してから、skill_import_readで元Skillを安全に読み、Sprint Coder互換へ修正し、skill_import_installでインストール・有効化してください。skill_draft_createとteam_*ツールは使用しません。'
         : null,
       options.memoryTurn ? PROJECT_MEMORY_MCP_GUIDANCE : null,
     ]

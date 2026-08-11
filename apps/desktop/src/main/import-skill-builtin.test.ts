@@ -25,6 +25,7 @@ describe.skipIf(process.platform === 'win32')('builtin import-skill', () => {
     expect(await readFile(join(path, 'SKILL.md'), 'utf8')).toBe(BUILTIN_IMPORT_SKILL_CONTENT);
     expect(BUILTIN_IMPORT_SKILL_CONTENT).toContain('Claude と Codex のどちら');
     expect(BUILTIN_IMPORT_SKILL_CONTENT).toContain('どのSkillをimportしますか');
+    expect(BUILTIN_IMPORT_SKILL_CONTENT).toContain('skill_import_read');
     expect(BUILTIN_IMPORT_SKILL_CONTENT).toContain('skill_import_install');
     expect(JSON.parse(await readFile(join(path, 'manifest.json'), 'utf8'))).toMatchObject({
       source: 'builtin',

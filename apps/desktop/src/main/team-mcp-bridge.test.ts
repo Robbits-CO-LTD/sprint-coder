@@ -367,6 +367,43 @@ describe('TeamMcpBridge', () => {
     expect(installPreparedSkill).toHaveBeenCalledOnce();
   });
 
+  it('allows safe source reading only for a turn explicitly bound to import-skill', async () => {
+    const readImportSkillSource = vi.fn(async (input: unknown) => ({ files: [], input }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      readImportSkillSource,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-import', {
+      taskId: 'task-1',
+      token,
+      allowSkillImports: true,
+    });
+
+    const response = await roundTrip(socketPath as string, {
+      token,
+      tool: 'skill_import_read',
+      args: { cli: 'claude', skillId: 'writer' },
+    });
+
+    expect(JSON.parse(response.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { files: [] },
+    });
+    expect(readImportSkillSource).toHaveBeenCalledWith(
+      { cli: 'claude', skillId: 'writer' },
+      { taskId: 'task-1', turnId: 'turn-import' },
+    );
+  });
+
   it('allows Project memory candidates only for an explicitly eligible Leader turn', async () => {
     const queueCandidate = vi.fn(async () => ({ queued: true }));
     const bridge = new TeamMcpBridge(

@@ -104,6 +104,12 @@ export type CreatedSkillValidation = Readonly<{
   digest: string;
   files: readonly string[];
 }>;
+export type SkillRepairSource = Readonly<{
+  skillId: string;
+  digest: string;
+  files: readonly CreatedSkillFile[];
+  warnings: readonly string[];
+}>;
 
 type Snapshot = {
   name: string;
@@ -195,6 +201,31 @@ export class SkillStore {
       }
     }
     return candidates;
+  }
+
+  async readRepairSource(candidate: SkillCandidate): Promise<SkillRepairSource> {
+    if (!issuedCandidates.has(candidate) || !candidate.valid)
+      throw new SkillStoreError('INVALID_SKILL', 'Skill candidate is invalid or was not scanned');
+    const snapshot = await readRawSnapshot(candidate);
+    const files: CreatedSkillFile[] = [];
+    let totalBytes = 0;
+    for (const file of snapshot.files) {
+      const content = file.bytes.toString('utf8');
+      if (!Buffer.from(content, 'utf8').equals(file.bytes))
+        throw new SkillStoreError('INVALID_SKILL', `Skill file must be UTF-8: ${file.path}`);
+      if (containsCredential(content))
+        throw new SkillStoreError('INVALID_SKILL', `認証情報を含む可能性があります: ${file.path}`);
+      totalBytes += file.bytes.byteLength;
+      if (totalBytes > 700 * 1024)
+        throw new SkillStoreError('INVALID_SKILL', 'AI import用Skillは700 KiBを超えています');
+      files.push({ path: file.path, content });
+    }
+    return {
+      skillId: candidate.skillId,
+      digest: snapshot.digest,
+      files,
+      warnings: snapshot.warnings,
+    };
   }
 
   async listImported(): Promise<ImportedSkillSummary[]> {
@@ -823,6 +854,18 @@ async function materializeSkill(
 }
 
 async function readSnapshot(candidate: SkillCandidate): Promise<Snapshot> {
+  const snapshot = await readRawSnapshot(candidate);
+  const skillFile = snapshot.files.find((file) => file.path === 'SKILL.md');
+  if (skillFile === undefined) throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is required');
+  const { name, description } = parseFrontmatter(skillFile.bytes);
+  if (RESERVED_NAMES.has(candidate.skillId.toLowerCase()) || RESERVED_NAMES.has(name.toLowerCase()))
+    throw new SkillStoreError('INVALID_SKILL', 'Skill name conflicts with a reserved capability');
+  return { ...snapshot, name, description };
+}
+
+async function readRawSnapshot(
+  candidate: SkillCandidate,
+): Promise<Omit<Snapshot, 'name' | 'description'>> {
   const canonicalRoot = await realpath(candidate.sourceRoot).catch(() => '');
   const canonicalSource = await realpath(candidate.sourcePath).catch(() => '');
   if (
@@ -840,18 +883,12 @@ async function readSnapshot(candidate: SkillCandidate): Promise<Snapshot> {
   const warnings: string[] = [];
   let totalBytes = 0;
   await walk(canonicalSource, '', 0);
-  const skillFile = files.find((file) => file.path === 'SKILL.md');
-  if (skillFile === undefined) throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is required');
-  const { name, description } = parseFrontmatter(skillFile.bytes);
-  if (RESERVED_NAMES.has(candidate.skillId.toLowerCase()) || RESERVED_NAMES.has(name.toLowerCase()))
-    throw new SkillStoreError('INVALID_SKILL', 'Skill name conflicts with a reserved capability');
-
   files.sort((left, right) => left.path.localeCompare(right.path));
   const digest = createHash('sha256');
   for (const file of files) {
     digest.update(file.path).update('\0').update(file.bytes).update('\0');
   }
-  return { name, description, digest: digest.digest('hex'), files, warnings };
+  return { digest: digest.digest('hex'), files, warnings };
 
   async function walk(directory: string, relativeDirectory: string, depth: number): Promise<void> {
     if (depth > MAX_DEPTH)
