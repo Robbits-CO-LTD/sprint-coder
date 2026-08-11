@@ -2,7 +2,7 @@
 
 - 統合ブランチ: `codex/batch-20260811-planned`
 - ベース: `origin/main` (`33e021e`)
-- 統合済みHEAD: `bb15834`
+- Issue統合HEAD（本ノート追加前）: `bb15834`
 - リリース版: 未確定（この文書では版番号を付与しない）
 - mainへのマージ: Release PRの承認待ち
 
