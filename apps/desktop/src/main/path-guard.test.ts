@@ -336,6 +336,11 @@ describe('path guard', () => {
 
     const direct = await workspaceMutationBinding(workspace);
     const throughAlias = await workspaceMutationBinding(alias);
+    if (process.platform === 'win32') {
+      const first = workspace[0]!;
+      const caseVariant = `${first === first.toLowerCase() ? first.toUpperCase() : first.toLowerCase()}${workspace.slice(1)}`;
+      expect(await workspaceMutationBinding(caseVariant)).toEqual(direct);
+    }
     await writeFile(join(workspace, 'new-file.txt'), 'changes directory metadata');
     const afterContentChange = await workspaceMutationBinding(workspace);
     const renamed = join(root, 'renamed-workspace');
