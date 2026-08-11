@@ -1269,6 +1269,22 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('seals Team guidance when English team is separated from Japanese by spaces', () => {
+      const { persistence } = createPersistence();
+      for (const input of ['team 使える？', 'team　使える？']) {
+        const task = persistence.createTask(input);
+        const started = persistence.startTurn(task.id, input);
+        expect(started.teamTurn, input).toBe(true);
+        expect(
+          persistence
+            .prepareContext(task.id, started.turnId)
+            .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+          input,
+        ).toHaveLength(1);
+      }
+      persistence.close();
+    });
+
     it('routes /team with a request through Sprint Coder Team without treating /team alone as a Turn intent', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('slash team');
