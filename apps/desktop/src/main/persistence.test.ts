@@ -1317,6 +1317,23 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('seals Team capability for an explicit leader/worker role assignment on the first Turn', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('explicit team roles');
+      const started = persistence.startTurn(
+        task.id,
+        'Sprint Coderで現在選択しているモデルをリーダーにしてOllamaのローカルLLMをワーカーにした実装skillを構築して',
+      );
+
+      expect(started.teamTurn).toBe(true);
+      expect(
+        persistence
+          .prepareContext(task.id, started.turnId)
+          .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+      ).toHaveLength(1);
+      persistence.close();
+    });
+
     it('keeps Team guidance on a short continuation after a failed Team turn', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('team retry');
@@ -1689,6 +1706,7 @@ if (runsWithElectronAbi)
         stderrObserved: true,
         stderrTruncated: false,
         recordedAt: new Date().toISOString(),
+        reasonCode: 'invalid_project_context_authority',
       });
       persistence.close();
 
@@ -1700,6 +1718,7 @@ if (runsWithElectronAbi)
         turnId: failedTurn.turnId,
         failureStage: 'protocol_error',
         unsupportedNotificationCount: 1,
+        reasonCode: 'invalid_project_context_authority',
       });
       expect(persisted?.stderrObserved).toBe(true);
       expect(JSON.stringify(persisted)).not.toContain('abcdefghijkl');

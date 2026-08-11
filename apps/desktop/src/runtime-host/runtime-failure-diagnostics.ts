@@ -11,7 +11,7 @@ const STDERR_TAIL_MAX_BYTES = 8 * 1024;
 const UNSUPPORTED_NOTIFICATION = '[unsupported]';
 
 export class RuntimeFailureDiagnosticCollector {
-  private readonly startedAt = Date.now();
+  private readonly startedAt: number;
   private stderrBytes = 0;
   private stderrObserved = false;
   private stderrTruncated = false;
@@ -24,7 +24,11 @@ export class RuntimeFailureDiagnosticCollector {
     private readonly appVersion: string,
     private cliVersion: string | null,
     private readonly teamMcpEnabled: boolean,
-  ) {}
+    /** Unix epoch milliseconds. Invalid values safely degrade to the construction time. */
+    startedAtMs: number = Date.now(),
+  ) {
+    this.startedAt = safeEpochMilliseconds(startedAtMs, Date.now());
+  }
 
   setCliVersion(version: string | null): void {
     this.cliVersion = safeCliVersion(this.runtimeKind, version);
@@ -56,7 +60,7 @@ export class RuntimeFailureDiagnosticCollector {
       diagnosticId: randomUUID(),
       runtimeKind: this.runtimeKind,
       failureStage: stage,
-      elapsedMs: Math.max(0, Math.round(now - this.startedAt)),
+      elapsedMs: safeElapsedMilliseconds(this.startedAt, now),
       appVersion: boundedText(this.appVersion, 64) ?? 'unknown',
       cliVersion: safeCliVersion(this.runtimeKind, this.cliVersion),
       teamMcp: {
@@ -72,6 +76,61 @@ export class RuntimeFailureDiagnosticCollector {
     };
     return diagnostic;
   }
+}
+
+type ResolveRuntimeFailureDiagnosticInput = Readonly<{
+  errorCode: string;
+  diagnostic: RuntimeFailureDiagnostic | undefined;
+  runtimeKind: 'codex' | 'claude';
+  appVersion: string;
+  /** Unix epoch milliseconds captured when Main dispatched the Turn. */
+  startedAtMs: number | undefined;
+  teamMcpEnabled: boolean;
+  /** Unix epoch milliseconds used to make elapsed-time calculation deterministic in tests. */
+  nowMs?: number;
+}>;
+
+/**
+ * Keeps adapter diagnostics intact and creates a structure-only fallback for a missing protocol
+ * diagnostic. Raw errors, messages, prompts, tool arguments, environment values, and paths are
+ * deliberately absent from this API so Main cannot accidentally persist them.
+ */
+export function resolveRuntimeFailureDiagnostic({
+  errorCode,
+  diagnostic,
+  runtimeKind,
+  appVersion,
+  startedAtMs,
+  teamMcpEnabled,
+  nowMs = Date.now(),
+}: ResolveRuntimeFailureDiagnosticInput): RuntimeFailureDiagnostic | undefined {
+  if (
+    diagnostic !== undefined &&
+    diagnostic.runtimeKind === runtimeKind &&
+    diagnostic.reasonCode === undefined
+  )
+    return diagnostic;
+  if (errorCode !== 'RUNTIME_PROTOCOL_ERROR') return undefined;
+  const safeNow = safeEpochMilliseconds(nowMs, Date.now());
+  const reasonCode = diagnostic?.runtimeKind === runtimeKind ? diagnostic.reasonCode : undefined;
+  const resolved = new RuntimeFailureDiagnosticCollector(
+    runtimeKind,
+    appVersion,
+    null,
+    teamMcpEnabled,
+    safeEpochMilliseconds(startedAtMs, safeNow),
+  ).snapshot('protocol_error', safeNow);
+  return reasonCode === undefined ? resolved : { ...resolved, reasonCode };
+}
+
+function safeEpochMilliseconds(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+function safeElapsedMilliseconds(startedAtMs: number, nowMs: number): number {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) return 0;
+  const elapsed = nowMs - startedAtMs;
+  return Number.isSafeInteger(elapsed) ? Math.max(0, elapsed) : 0;
 }
 
 function boundedText(value: string | null, maxLength: number): string | null {

@@ -57,6 +57,8 @@ export type TurnStatus =
 export type TurnRuntimeState = {
   turnId: string;
   stage: TurnStage;
+  /** Transient only: true after Main accepts the Turn and before the Runtime emits its first stage. */
+  runtimeStarting: boolean;
   /** Highest stage index reached, clamped so it never decreases (issue #16). `stage` alone is not
    * enough: `waiting_approval` sits between `executing` and `synthesizing` in STAGE_ORDER, so a turn
    * that returns to `executing` for a later tool would make a stage-derived gauge walk backwards. */
@@ -69,6 +71,11 @@ export type TurnRuntimeState = {
   streamingMessageId: string | null;
   streamingContent: string;
 };
+
+export type StopAndSendResult = Readonly<{
+  completed: boolean;
+  draftRestored: boolean;
+}>;
 
 export type WorkspaceInfo = { path: string; name: string };
 
@@ -171,6 +178,9 @@ type AppState = {
   lastSeqByTask: Record<string, number>;
   sendingByTask: Record<string, boolean>;
   draftByTask: Record<string, string>;
+  // Optimistic send recovery owns a value only while its captured revision is still current.
+  // Every user mutation and recovery advances the revision, so value-level ABA cannot roll back it.
+  draftRevisionByTask: Record<string, number | undefined>;
   draftAttachmentsByTask: Record<string, ImageAttachmentMetadata[] | undefined>;
   attachmentCapabilityByTask: Record<string, ImageAttachmentCapability | undefined>;
   attachmentRequestRevisionByTask: Record<string, number | undefined>;
@@ -180,6 +190,8 @@ type AppState = {
   skillCatalog: SkillCatalogItem[];
   skillCatalogRevision: string | null;
   skillSelectionByTask: Record<string, TurnSkillSelection[] | undefined>;
+  // Same ownership invariant as drafts; includes asynchronous selection-persistence rollback.
+  skillSelectionRevisionByTask: Record<string, number | undefined>;
   skillDraftsByTask: Record<string, { turnId: string; draft: SkillDraft }[]>;
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   permissionByTask: Record<string, PermissionSettings | undefined>;
@@ -309,10 +321,18 @@ type AppState = {
     skills?: readonly TurnSkillSelection[],
     attachmentIds?: readonly string[],
   ): Promise<void>;
-  queueMessage(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
+  queueMessage(
+    taskId: string,
+    text: string,
+    skills?: readonly TurnSkillSelection[],
+  ): Promise<boolean>;
   steerMessage(taskId: string, text: string, expectedTurnId: string): Promise<void>;
-  stopAndSend(taskId: string, text: string, skills?: readonly TurnSkillSelection[]): Promise<void>;
-  cancelActiveTurn(taskId: string): Promise<void>;
+  stopAndSend(
+    taskId: string,
+    text: string,
+    skills?: readonly TurnSkillSelection[],
+  ): Promise<StopAndSendResult>;
+  cancelActiveTurn(taskId: string): Promise<boolean>;
   showToast(message: string): void;
   dismissToast(): void;
 };
@@ -577,6 +597,7 @@ export function handleTurnEvent(
             [taskId]: {
               turnId: ev.turnId,
               stage: 'understanding',
+              runtimeStarting: true,
               reachedStageIndex: 0,
               status: 'running',
               startedAt: Date.now(),
@@ -584,7 +605,7 @@ export function handleTurnEvent(
               streamingContent: '',
             },
           },
-          stageAnnouncement: STAGE_LABEL.understanding,
+          stageAnnouncement: 'Runtime起動待ち',
         };
       });
       break;
@@ -599,6 +620,7 @@ export function handleTurnEvent(
             [taskId]: {
               ...turn,
               stage: ev.stage,
+              runtimeStarting: false,
               reachedStageIndex: advanceStageIndex(turn.reachedStageIndex, ev.stage),
             },
           },
@@ -843,6 +865,7 @@ export const useAppStore = create<AppState>((set, get) => {
     lastSeqByTask: {},
     sendingByTask: {},
     draftByTask: {},
+    draftRevisionByTask: {},
     draftAttachmentsByTask: {},
     attachmentCapabilityByTask: {},
     attachmentRequestRevisionByTask: {},
@@ -852,6 +875,7 @@ export const useAppStore = create<AppState>((set, get) => {
     skillCatalog: [],
     skillCatalogRevision: null,
     skillSelectionByTask: {},
+    skillSelectionRevisionByTask: {},
     skillDraftsByTask: {},
     workspaceByTask: {},
     permissionByTask: {},
@@ -1404,6 +1428,7 @@ export const useAppStore = create<AppState>((set, get) => {
               ? {
                   turnId: activeTurn.turnId,
                   stage: activeTurn.stage,
+                  runtimeStarting: false,
                   // Restored from the snapshot's stage, which is the furthest this turn is known to
                   // have reached — earlier stage events are not replayed for a resumed turn.
                   reachedStageIndex: advanceStageIndex(0, activeTurn.stage),
@@ -1873,7 +1898,13 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     setDraft(taskId: string, text: string) {
-      set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: text } }));
+      set((state) => ({
+        draftByTask: { ...state.draftByTask, [taskId]: text },
+        draftRevisionByTask: {
+          ...state.draftRevisionByTask,
+          [taskId]: (state.draftRevisionByTask[taskId] ?? 0) + 1,
+        },
+      }));
       persistDraftDebounced(taskId, text);
     },
 
@@ -1999,18 +2030,35 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async setSkillSelection(taskId: string, skills: TurnSkillSelection[]) {
       const previous = get().skillSelectionByTask[taskId] ?? [];
-      set((state) => ({
-        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [...skills] },
-      }));
+      let selectionRevision = 0;
+      set((state) => {
+        selectionRevision = (state.skillSelectionRevisionByTask[taskId] ?? 0) + 1;
+        return {
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [...skills] },
+          skillSelectionRevisionByTask: {
+            ...state.skillSelectionRevisionByTask,
+            [taskId]: selectionRevision,
+          },
+        };
+      });
       if (!window.sprintCoder || typeof window.sprintCoder.skills?.setDraftSelection !== 'function')
         return;
       try {
         await window.sprintCoder.skills.setDraftSelection(taskId, [...skills]);
       } catch (err) {
-        set((state) => ({
-          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: previous },
-          error: describeError(err),
-        }));
+        set((state) => {
+          if (state.skillSelectionRevisionByTask[taskId] !== selectionRevision) {
+            return { error: describeError(err) };
+          }
+          return {
+            skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: previous },
+            skillSelectionRevisionByTask: {
+              ...state.skillSelectionRevisionByTask,
+              [taskId]: selectionRevision + 1,
+            },
+            error: describeError(err),
+          };
+        });
       }
     },
 
@@ -2150,34 +2198,58 @@ export const useAppStore = create<AppState>((set, get) => {
     async queueMessage(taskId: string, text: string, skills) {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.queue !== 'function')
-        return;
+        return false;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
-      set((state) => ({
-        draftByTask: { ...state.draftByTask, [taskId]: '' },
-        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
-      }));
+      let selectionRevision = 0;
+      let draftRevision = 0;
+      set((state) => {
+        selectionRevision = (state.skillSelectionRevisionByTask[taskId] ?? 0) + 1;
+        draftRevision = (state.draftRevisionByTask[taskId] ?? 0) + 1;
+        return {
+          draftByTask: { ...state.draftByTask, [taskId]: '' },
+          draftRevisionByTask: { ...state.draftRevisionByTask, [taskId]: draftRevision },
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+          skillSelectionRevisionByTask: {
+            ...state.skillSelectionRevisionByTask,
+            [taskId]: selectionRevision,
+          },
+        };
+      });
       persistDraftDebounced(taskId, '');
       persistSkillDraftSelection(taskId, []);
       try {
         await window.sprintCoder.turns.queue({ taskId, text: trimmed, skills: selectedSkills });
         // queue.changed (delivered via subscription) reconciles the compact queued list.
+        return true;
       } catch (err) {
         let restoredDraft = false;
+        let restoredSkills = false;
         set((state) => {
-          restoredDraft = (state.draftByTask[taskId] ?? '') === '';
+          restoredDraft = state.draftRevisionByTask[taskId] === draftRevision;
+          restoredSkills = state.skillSelectionRevisionByTask[taskId] === selectionRevision;
           return {
             draftByTask: restoredDraft
               ? { ...state.draftByTask, [taskId]: trimmed }
               : state.draftByTask,
+            draftRevisionByTask: restoredDraft
+              ? { ...state.draftRevisionByTask, [taskId]: draftRevision + 1 }
+              : state.draftRevisionByTask,
             skillSelectionByTask: {
               ...state.skillSelectionByTask,
-              [taskId]: selectedSkills,
+              [taskId]: restoredSkills ? selectedSkills : state.skillSelectionByTask[taskId],
             },
+            skillSelectionRevisionByTask: restoredSkills
+              ? {
+                  ...state.skillSelectionRevisionByTask,
+                  [taskId]: selectionRevision + 1,
+                }
+              : state.skillSelectionRevisionByTask,
             error: describeError(err),
           };
         });
         if (restoredDraft) persistDraftDebounced(taskId, trimmed);
-        persistSkillDraftSelection(taskId, selectedSkills);
+        if (restoredSkills) persistSkillDraftSelection(taskId, selectedSkills);
+        return false;
       }
     },
 
@@ -2222,12 +2294,31 @@ export const useAppStore = create<AppState>((set, get) => {
         !window.sprintCoder ||
         typeof window.sprintCoder.turns.stopAndSend !== 'function'
       )
-        return;
+        return { completed: false, draftRestored: false };
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
-      set((state) => ({
-        draftByTask: { ...state.draftByTask, [taskId]: '' },
-        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
-      }));
+      const activeTurn = get().turnByTask[taskId];
+      let selectionRevision = 0;
+      let draftRevision = 0;
+      set((state) => {
+        selectionRevision = (state.skillSelectionRevisionByTask[taskId] ?? 0) + 1;
+        draftRevision = (state.draftRevisionByTask[taskId] ?? 0) + 1;
+        return {
+          draftByTask: { ...state.draftByTask, [taskId]: '' },
+          draftRevisionByTask: { ...state.draftRevisionByTask, [taskId]: draftRevision },
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+          skillSelectionRevisionByTask: {
+            ...state.skillSelectionRevisionByTask,
+            [taskId]: selectionRevision,
+          },
+          turnByTask:
+            activeTurn?.status === 'running'
+              ? {
+                  ...state.turnByTask,
+                  [taskId]: { ...activeTurn, status: 'canceling' },
+                }
+              : state.turnByTask,
+        };
+      });
       persistDraftDebounced(taskId, '');
       persistSkillDraftSelection(taskId, []);
       try {
@@ -2236,37 +2327,75 @@ export const useAppStore = create<AppState>((set, get) => {
           text: trimmed,
           skills: selectedSkills,
         });
+        return { completed: true, draftRestored: false };
       } catch (err) {
         let restoredDraft = false;
+        let restoredSkills = false;
         set((state) => {
-          restoredDraft = (state.draftByTask[taskId] ?? '') === '';
+          restoredDraft = state.draftRevisionByTask[taskId] === draftRevision;
+          restoredSkills = state.skillSelectionRevisionByTask[taskId] === selectionRevision;
+          const currentTurn = state.turnByTask[taskId];
+          const restoreTurn =
+            activeTurn?.status === 'running' &&
+            currentTurn?.turnId === activeTurn.turnId &&
+            currentTurn.status === 'canceling';
           return {
             draftByTask: restoredDraft
               ? { ...state.draftByTask, [taskId]: trimmed }
               : state.draftByTask,
+            draftRevisionByTask: restoredDraft
+              ? { ...state.draftRevisionByTask, [taskId]: draftRevision + 1 }
+              : state.draftRevisionByTask,
             skillSelectionByTask: {
               ...state.skillSelectionByTask,
-              [taskId]: selectedSkills,
+              [taskId]: restoredSkills ? selectedSkills : state.skillSelectionByTask[taskId],
             },
+            skillSelectionRevisionByTask: restoredSkills
+              ? {
+                  ...state.skillSelectionRevisionByTask,
+                  [taskId]: selectionRevision + 1,
+                }
+              : state.skillSelectionRevisionByTask,
+            turnByTask: restoreTurn
+              ? {
+                  ...state.turnByTask,
+                  [taskId]: { ...currentTurn, status: 'running' },
+                }
+              : state.turnByTask,
             error: describeError(err),
           };
         });
         if (restoredDraft) persistDraftDebounced(taskId, trimmed);
-        persistSkillDraftSelection(taskId, selectedSkills);
+        if (restoredSkills) persistSkillDraftSelection(taskId, selectedSkills);
+        return { completed: false, draftRestored: restoredDraft };
       }
     },
 
     async cancelActiveTurn(taskId: string) {
       const turn = get().turnByTask[taskId];
-      if (!turn || turn.status !== 'running' || !window.sprintCoder) return;
+      if (!turn || turn.status !== 'running' || !window.sprintCoder) return false;
       set((state) => ({
         turnByTask: { ...state.turnByTask, [taskId]: { ...turn, status: 'canceling' } },
       }));
       try {
         await window.sprintCoder.turns.cancel({ taskId, turnId: turn.turnId });
         // turn.completed(state:'canceled') will arrive via subscription and finalize.
+        return true;
       } catch (err) {
-        set({ error: describeError(err) });
+        set((state) => {
+          const current = state.turnByTask[taskId];
+          const shouldRestore = current?.turnId === turn.turnId && current.status === 'canceling';
+          return {
+            turnByTask: shouldRestore
+              ? {
+                  ...state.turnByTask,
+                  [taskId]: { ...current, status: 'running' },
+                }
+              : state.turnByTask,
+            error: describeError(err),
+          };
+        });
+        return false;
       }
     },
 

@@ -1110,21 +1110,43 @@ const TEAM_INTENT =
 const TEAM_COMPOUND_EXECUTION_INTENT =
   /チーム(?:編成|作成)(?=(?:して|し|する|を?お願い|してください|してほしい))/i;
 const TEAM_RELATION_INTENT =
-  /チーム(?:の)?(?:メンバー|リーダー)|チームの(?:会話|挨拶|メッセージ|報告|担当|役割)/i;
+  /チーム(?:の)?(?:メンバー|リーダー)|チームの(?:会話|挨拶|メッセージ|報告|担当|役割)|(?:^|[^a-zA-Z])team\s+(?:skill|mcp)\b/i;
 const TEAM_CONSULTATION_ENDING =
   /(?:できますか|できる(?:の)?|可能ですか|可能(?:なの)?|教えて|説明して|とは)[。.!！?？]*$/i;
 const TEAM_WORKER_EXECUTION_ACTION =
-  /(?:(?:雇って|雇用して|採用して|作成して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|挨拶して|会話させて|分担して|進めて)(?:ください|ほしい)?|(?:編集|実装|実行|作業|調査|検証|監査|レビュー|採用|雇用)?(?:を)?お願い(?:します)?)$/i;
+  /(?:(?:雇って|雇用して|採用して|作成して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|挨拶して|会話させて|分担して|進めて|コードを書いて)(?:ください|ほしい)?|(?:編集|実装|実行|作業|調査|検証|監査|レビュー|採用|雇用)?(?:を)?お願い(?:します)?)$/i;
+const TEAM_EXECUTION_MARKER =
+  /^\s*\/team(?=\s+\S)|チーム(?:で|を|に|内で|(?:内の|の)?(?:メンバー|担当|リーダー)(?:で|に))|(?:^|[^a-zA-Z])team(?:で|を)|(?:^|[^a-zA-Z])team\s+(?:skill|mcp)(?:\s*を使って|で)|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:り|名|人)|(?:worker|agent|ワーカー|担当|メンバー|リーダー)[^。.!！?？\r\n]{0,40}(?:雇って|雇用して|採用して)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)(?:名|人)(?:(?:体制|構成)?で|を?雇)/i;
+const TEAM_ROLE_ASSIGNMENT_EXECUTION_ACTION =
+  /(?:雇って|雇用して|採用して|作成して|構築して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|分担して|進めて)(?:ください|ほしい)?[。.!！?？]*$/i;
+const TEAM_ROLE_ASSIGNMENT_NEGATION =
+  /割り当て(?:ない|ず)|(?:リーダー|\bleader\b|ワーカー|\bworker\b)[^。.!！?？\r\n]{0,60}(?:にしない|にせず|にして(?:は)?(?:いけない|ならない)|へ変更しない|を変更しない|変えない|使わない|禁止)|^\s*(?:please\s+)?(?:(?:don't|do not|never|shouldn't|should not|mustn't|must not)\s+(?:use|set|assign|make)|(?:use|set|assign|make)\s+neither)\b|\b(?:don't|do not|never|shouldn't|should not|mustn't|must not)\s+(?:use|set|assign|make)\b[^.!?\r\n]{0,80}\b(?:leader|worker)\b|\bnot\s+as\s+(?:the\s+)?(?:leader|worker)\b|\bwithout\s+(?:using|setting|assigning|making)\b[^.!?\r\n]{0,80}\b(?:leader|worker)\b|(?:^|[,;—-])\s*(?:actually\s*[,;—-]?\s*)?(?:don['’]t|do not)[.!]?\s*$/i;
+const TEAM_QUOTED_ROLE_ASSIGNMENT =
+  /(?:[「『“"'`][^」』”"'`\r\n]{0,240}(?:リーダー|\bleader\b)[^」』”"'`\r\n]{0,240}(?:ワーカー|\bworker\b)[^」』”"'`\r\n]{0,240}[」』”"'`]|[「『“"'`][^」』”"'`\r\n]{0,240}(?:ワーカー|\bworker\b)[^」』”"'`\r\n]{0,240}(?:リーダー|\bleader\b)[^」』”"'`\r\n]{0,240}[」』”"'`])/i;
+const TEAM_ROLE_ASSIGNMENT_MODEL =
+  '(?:codex|claude|ollama|現在(?:選択中|選択している)のモデル|ローカルLLM)';
+const TEAM_JAPANESE_ROLE_ASSIGNMENT_FOLLOWUP = `(?:${TEAM_ROLE_ASSIGNMENT_MODEL}|リーダー|ワーカー|実装|構築|作業|調査|検証|レビュー|機能|skill|スキル)`;
+const TEAM_JAPANESE_ROLE_ASSIGNMENT_ACTION = `(?:(?:へ|に)変更(?:して|した)?|にして|にした)(?=$|[、,。.!！?？\\r\\n]|${TEAM_JAPANESE_ROLE_ASSIGNMENT_FOLLOWUP}|\\s+${TEAM_JAPANESE_ROLE_ASSIGNMENT_FOLLOWUP})`;
+const TEAM_ENGLISH_ROLE_ASSIGNMENT_MODEL =
+  '(?:codex|claude|ollama|(?:the\\s+)?current(?:ly selected)?\\s+model|(?:the\\s+)?local\\s+llm)';
+const TEAM_ENGLISH_ROLE_ASSIGNMENT_REQUEST = new RegExp(
+  `^\\s*(?:please\\s+)?(?:use|set|assign|make)\\s+(?:${TEAM_ENGLISH_ROLE_ASSIGNMENT_MODEL}\\s+(?:as\\s+)?(?:the\\s+)?leader\\s+(?:and|,)\\s+${TEAM_ENGLISH_ROLE_ASSIGNMENT_MODEL}\\s+(?:as\\s+)?(?:the\\s+)?worker|${TEAM_ENGLISH_ROLE_ASSIGNMENT_MODEL}\\s+(?:as\\s+)?(?:the\\s+)?worker\\s+(?:and|,)\\s+${TEAM_ENGLISH_ROLE_ASSIGNMENT_MODEL}\\s+(?:as\\s+)?(?:the\\s+)?leader)\\s*,?\\s*(?:to|and|then)\\s+(?:implement|build|create|execute|investigate|review|work on)\\b[^.!?\\r\\n]{0,160}[.!]?\\s*$`,
+  'i',
+);
+const TEAM_JAPANESE_PAIRED_ROLE_ASSIGNMENT = new RegExp(
+  `(?:リーダーを${TEAM_ROLE_ASSIGNMENT_MODEL}[、,]\\s*ワーカーを${TEAM_ROLE_ASSIGNMENT_MODEL}${TEAM_JAPANESE_ROLE_ASSIGNMENT_ACTION}|ワーカーを${TEAM_ROLE_ASSIGNMENT_MODEL}[、,]\\s*リーダーを${TEAM_ROLE_ASSIGNMENT_MODEL}${TEAM_JAPANESE_ROLE_ASSIGNMENT_ACTION}|${TEAM_ROLE_ASSIGNMENT_MODEL}をリーダー[、,]\\s*${TEAM_ROLE_ASSIGNMENT_MODEL}をワーカー${TEAM_JAPANESE_ROLE_ASSIGNMENT_ACTION}|${TEAM_ROLE_ASSIGNMENT_MODEL}をワーカー[、,]\\s*${TEAM_ROLE_ASSIGNMENT_MODEL}をリーダー${TEAM_JAPANESE_ROLE_ASSIGNMENT_ACTION})`,
+  'i',
+);
 
 // A failed/canceled Team turn is commonly resumed with a short instruction that no longer repeats
 // the word "Team". Keep this deliberately narrow: ordinary follow-up questions must not silently
 // gain team capabilities just because an older turn once used them.
 const TEAM_CONTINUATION =
   /^(?:continue|resume|retry|続けて|続行|再開|再試行|リトライ)(?:してください|して|お願い)?[。.!！]?$/i;
-const TEAM_MEMBER_CHANGE_TARGET = /worker|agent|担当|メンバー/i;
+const TEAM_MEMBER_CHANGE_TARGET = /\bworker\b|\bagent\b|ワーカー|担当|メンバー|リーダー/i;
 const TEAM_MEMBER_MODEL_TARGET = /codex|claude|ollama/gi;
 const TEAM_MEMBER_CHANGE_ACTION =
-  /にして|へ変更|を変更|変えて|入れ替|交代|nisite|kaete|change|switch|replace/i;
+  /(?:にして|にした|(?:へ|を)変更(?:して|した)?|変えて|入れ替(?:えて)?|交代)(?=$|[、,。.!！?？\r\n])|(?:codex|claude|ollama)nisite(?=$|[、,。.!！?？\r\n])|\b(?:nisite|kaete|change|switch|replace)\b/i;
 const EXISTING_TEAM_MEMBER_REFERENCE =
   /(?:\b(?:worker|agent)\b|担当|メンバー|リーダー)(?:同士(?:で|の)?|たち(?:と|で|に|へ|から|の|を)?|達(?:と|で|に|へ|から|の|を)?|と|で|に|へ|から|の|を)/i;
 const EXISTING_TEAM_INTERACTION =
@@ -1138,7 +1160,36 @@ export function isTeamScenarioInput(input: string): boolean {
   return (
     TEAM_INTENT.test(input) ||
     TEAM_COMPOUND_EXECUTION_INTENT.test(input) ||
-    TEAM_RELATION_INTENT.test(input)
+    TEAM_RELATION_INTENT.test(input) ||
+    isExplicitTeamRoleAssignmentInput(input)
+  );
+}
+
+function hasAssignedTeamRole(input: string, role: 'leader' | 'worker'): boolean {
+  const japaneseRole = role === 'leader' ? 'リーダー' : 'ワーカー';
+  const modelBeforeRole = new RegExp(
+    `[^、,。.!！?？\\r\\n]{1,40}(?:を|は)${japaneseRole}${TEAM_JAPANESE_ROLE_ASSIGNMENT_ACTION}`,
+    'i',
+  );
+  const roleBeforeModel = new RegExp(
+    `${japaneseRole}(?:を|には)[^、,。.!！?？\\r\\n]{1,40}${TEAM_JAPANESE_ROLE_ASSIGNMENT_ACTION}`,
+    'i',
+  );
+  return modelBeforeRole.test(input) || roleBeforeModel.test(input);
+}
+
+function isExplicitTeamRoleAssignmentInput(input: string): boolean {
+  const trimmed = input.trim();
+  const hasJapaneseExecution = TEAM_ROLE_ASSIGNMENT_EXECUTION_ACTION.test(trimmed);
+  const hasEnglishExecution = TEAM_ENGLISH_ROLE_ASSIGNMENT_REQUEST.test(trimmed);
+  const hasBothJapaneseRoles =
+    (hasAssignedTeamRole(trimmed, 'leader') && hasAssignedTeamRole(trimmed, 'worker')) ||
+    TEAM_JAPANESE_PAIRED_ROLE_ASSIGNMENT.test(trimmed);
+  return (
+    ((hasBothJapaneseRoles && hasJapaneseExecution) || hasEnglishExecution) &&
+    !TEAM_ROLE_ASSIGNMENT_NEGATION.test(trimmed) &&
+    !TEAM_QUOTED_ROLE_ASSIGNMENT.test(trimmed) &&
+    !TEAM_CONSULTATION_ENDING.test(trimmed)
   );
 }
 
@@ -1146,10 +1197,12 @@ export function isTeamScenarioInput(input: string): boolean {
 export function requiresTeamWorkersInput(input: string): boolean {
   const trimmed = input.trim();
   if (!isTeamScenarioInput(trimmed)) return false;
+  if (isExplicitTeamRoleAssignmentInput(trimmed)) return true;
+  if (TEAM_COMPOUND_EXECUTION_INTENT.test(trimmed)) return true;
   const hasExplicitExecutionClause = trimmed
     .split(/[、,。.!！?？\r\n]+/)
     .some((clause) => TEAM_WORKER_EXECUTION_ACTION.test(clause.trim()));
-  return hasExplicitExecutionClause || !TEAM_CONSULTATION_ENDING.test(trimmed);
+  return TEAM_EXECUTION_MARKER.test(trimmed) && hasExplicitExecutionClause;
 }
 
 export function isTeamScenarioFixtureInput(input: string): boolean {
@@ -1159,6 +1212,7 @@ export function isTeamScenarioFixtureInput(input: string): boolean {
 export function isTeamContinuationInput(input: string): boolean {
   const trimmed = input.trim();
   if (TEAM_CONTINUATION.test(trimmed)) return true;
+  if (TEAM_CONSULTATION_ENDING.test(trimmed)) return false;
   if (!TEAM_MEMBER_CHANGE_ACTION.test(trimmed)) return false;
   if (TEAM_MEMBER_CHANGE_TARGET.test(trimmed)) return true;
   const namedModels = new Set(

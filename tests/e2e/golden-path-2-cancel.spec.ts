@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import {
   closeApp,
+  completeSetupForFeatureTest,
   createUserDataDir,
   firstWindow,
   launchApp,
@@ -26,6 +27,7 @@ test.describe('golden path 2: cancel mid-stream keeps the partial answer', () =>
   test('stopping a running turn keeps the partial answer and shows a canceled state', async () => {
     app = await launchApp(userDataDir);
     const page: Page = await firstWindow(app);
+    await completeSetupForFeatureTest(page);
 
     await page.getByTestId('sidebar-new-task-button').click();
     const textarea = page.getByTestId('composer-textarea');
@@ -43,7 +45,12 @@ test.describe('golden path 2: cancel mid-stream keeps the partial answer', () =>
     const partialTextAtStop = await streamingBubble.textContent();
     expect(partialTextAtStop?.length ?? 0).toBeGreaterThan(0);
 
-    await page.getByTestId('run-card-stop-button').click();
+    // The empty running Composer replaces its send arrow with the native stop control. This is
+    // intentionally a separate entry point from RunCard's existing stop button.
+    const composerStop = page.getByTestId('composer-send-button');
+    await expect(composerStop).toHaveAttribute('aria-label', '実行を停止');
+    await expect(composerStop).not.toBeDisabled();
+    await composerStop.click();
 
     // Status transitions to a "canceled" terminal state (中止).
     await expect(runCard).toHaveAttribute('data-run-status', 'canceled', { timeout: 15_000 });

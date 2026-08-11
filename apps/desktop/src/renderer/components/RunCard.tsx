@@ -36,7 +36,9 @@ export function RunCard({
   variant?: 'main' | 'node';
 }) {
   const isActive = turn.status === 'running' || turn.status === 'canceling';
-  const isWorking = turn.status === 'running' && turn.stage !== 'waiting_approval';
+  const runtimeStarting = turn.status === 'running' && turn.runtimeStarting;
+  const isWorking =
+    turn.status === 'running' && !runtimeStarting && turn.stage !== 'waiting_approval';
   const [now, setNow] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(false);
   const panelId = useId();
@@ -70,10 +72,20 @@ export function RunCard({
   // `waiting_approval` replaces the label outright: the turn is stopped waiting for the user, and
   // calling that "思考中" would blame the model for the user's turn.
   const teamProgress = isActive ? teamRunProgress(team) : null;
-  const label =
-    teamProgress?.label ??
-    (isActive && turn.stage === 'waiting_approval' ? '承認待ち' : TITLE_BY_STATUS[turn.status]);
-  const stageLabel = teamProgress?.detail ?? STAGE_LABEL[turn.stage];
+  const label = runtimeStarting
+    ? '起動中'
+    : (teamProgress?.label ??
+      (isActive && turn.stage === 'waiting_approval' ? '承認待ち' : TITLE_BY_STATUS[turn.status]));
+  const stageLabel = runtimeStarting
+    ? 'Runtime起動待ち'
+    : (teamProgress?.detail ??
+      (isActive
+        ? STAGE_LABEL[turn.stage]
+        : turn.status === 'completed'
+          ? '回答完了'
+          : turn.streamingContent.trim() === ''
+            ? '未完了'
+            : '部分回答'));
 
   return (
     <div

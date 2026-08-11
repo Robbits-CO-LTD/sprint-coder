@@ -1,6 +1,13 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
+import {
+  closeApp,
+  completeSetupForFeatureTest,
+  createUserDataDir,
+  firstWindow,
+  launchApp,
+  removeUserDataDir,
+} from './helpers';
 import { formatViolations, runAxeSerious, stopAxeServer } from './a11y-helpers';
 
 // Phase 7 accessibility gate (tasks/IMPLEMENTATION_PLAN.md §10.3): axe-core pass over the real
@@ -24,6 +31,7 @@ test.describe('axe: no serious/critical violations', () => {
   test('chat view (empty + populated)', async () => {
     app = await launchApp(userDataDir);
     const page: Page = await firstWindow(app);
+    await completeSetupForFeatureTest(page);
     await page.getByTestId('sidebar-new-task-button').click();
     await expect(page.getByTestId('composer-textarea')).toBeVisible();
 
@@ -33,6 +41,15 @@ test.describe('axe: no serious/critical violations', () => {
     const textarea = page.getByTestId('composer-textarea');
     await textarea.fill('axeチェック用のメッセージ');
     await textarea.press('Enter');
+    await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'running');
+    await textarea.fill('割り込み操作のaxeチェック');
+    await expect(page.getByTestId('composer-interrupt-button')).toHaveAccessibleName(
+      '割り込んで送信',
+    );
+
+    const runningComposerViolations = await runAxeSerious(page, ['.composer']);
+    expect(runningComposerViolations, formatViolations(runningComposerViolations)).toEqual([]);
+    await textarea.fill('');
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
       timeout: 20_000,
     });
@@ -50,6 +67,7 @@ test.describe('axe: no serious/critical violations', () => {
     try {
       dialogApp = await launchApp(dir);
       const page: Page = await firstWindow(dialogApp);
+      await completeSetupForFeatureTest(page);
       await page.getByTestId('sidebar-new-task-button').click();
       await page.getByTestId('sidebar-settings-button').click();
       await expect(page.getByTestId('settings-dialog')).toBeVisible();
@@ -75,6 +93,7 @@ test.describe('axe: no serious/critical violations', () => {
     try {
       approvalApp = await launchApp(dir);
       const page = await firstWindow(approvalApp);
+      await completeSetupForFeatureTest(page);
       await page.getByTestId('sidebar-new-task-button').click();
       const textarea = page.getByTestId('composer-textarea');
       await textarea.fill('承認テストをしてください');
@@ -95,6 +114,7 @@ test.describe('axe: no serious/critical violations', () => {
     try {
       canvasApp = await launchApp(dir);
       const page = await firstWindow(canvasApp);
+      await completeSetupForFeatureTest(page);
       await page.getByTestId('sidebar-new-task-button').click();
       await page.getByTestId('team-toggle').click();
       await expect(page.getByTestId('team-list')).toBeVisible();
@@ -104,7 +124,6 @@ test.describe('axe: no serious/critical violations', () => {
       await composer.press('Enter');
       await expect(page.getByTestId('team-worker')).toHaveCount(3, { timeout: 20_000 });
       for (let i = 0; i < 3; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
         await expect(page.getByTestId('team-worker').nth(i).locator('.team-status')).toHaveText(
           'done',
           { timeout: 20_000 },
