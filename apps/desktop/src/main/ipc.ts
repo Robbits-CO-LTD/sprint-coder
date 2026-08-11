@@ -439,6 +439,10 @@ export function teamGuidance(
   return sections.join('\n\n');
 }
 
+export function leaderMcpCapabilities(teamTurn: boolean): { allowTeamTools: boolean } {
+  return { allowTeamTools: teamTurn };
+}
+
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
 type ActiveRuntimeKind = RuntimeKind | 'provider';
@@ -3730,7 +3734,7 @@ export class IpcRouter {
       ...(options.importSkillTurn ? { allowSkillImports: true } : {}),
       ...(options.importSkillTurn ? { skillImportUserText: options.skillImportUserText } : {}),
       ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
-      allowTeamTools: options.teamTurn,
+      ...leaderMcpCapabilities(options.teamTurn),
     });
     const guidance = [
       options.teamTurn

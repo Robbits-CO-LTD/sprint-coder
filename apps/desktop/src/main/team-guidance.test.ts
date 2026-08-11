@@ -122,6 +122,60 @@ describe('builtin Team skill', () => {
       expect(isTeamScenarioInput(input), input).toBe(false);
   });
 
+  it('recognizes explicit leader/worker role assignments without activating explanations', () => {
+    const executions = [
+      'Sprint Coderで現在選択しているモデルをリーダーにしてOllamaのローカルLLMをワーカーにした実装skillを構築して',
+      'Use Codex as the leader and Ollama as the worker to implement this feature',
+      'リーダーをCodex、ワーカーをOllamaへ変更して作業を進めて',
+      'Codexをリーダー、Ollamaをワーカーにして実装して',
+      'Make Codex the leader and Ollama the worker and implement this feature',
+      'Use Codex as the leader and Ollama as the worker to implement this without adding dependencies',
+      'Use Codex as the leader and Ollama as the worker to implement this and never modify tests',
+      'Set Codex as the leader and Ollama as the worker, then implement this feature',
+      'Make Codex the leader and Ollama the worker, then implement this feature',
+    ];
+    const consultations = [
+      'リーダーとワーカーの違いを説明して',
+      'リーダーにする方法とワーカーにする方法を説明して',
+      'リーダーモデルとワーカーモデルを比較して',
+      'リーダーとワーカーの設定について相談したい',
+      'リーダーとワーカーを割り当てずに説明して',
+      'リーダーをCodexにしてワーカーをOllamaにしないで実装して',
+      'リーダーについて説明し、ワーカーをOllamaへ変更して実装して',
+      'リーダー候補を比較し、ワーカーをOllamaにして実装して',
+      "Don't use Codex as the leader or Ollama as the worker; review this plan",
+      'Never use Codex as the leader and Ollama as the worker; implement it yourself',
+      "Codex shouldn't be used as the leader and Ollama as the worker; review this plan",
+      'Review the sentence “Use Codex as the leader and Ollama as the worker to implement this feature” for grammar',
+      '次の文「CodexをリーダーにしてOllamaをワーカーにした機能を実装して」を添削して',
+      'Codexをリーダーにしてはいけない、Ollamaをワーカーにして実装して',
+      'リーダーをCodexと比較し、ワーカーをOllamaと比較し、実装して',
+      'リーダーをCodexと比較し、ワーカーをOllamaにして実装して',
+      'リーダーをCodexと対比し、ワーカーをOllamaにして実装して',
+      'リーダーをCodexと評価し、ワーカーをOllamaにして実装して',
+      "Use the sentence 'Codex as the leader and Ollama as the worker' and review its grammar",
+      'Use the sentence Codex as the leader and Ollama as the worker and review its grammar',
+      'Use this sentence as an example: Codex as the leader and Ollama as the worker and review its grammar',
+      'Use the following text: Codex as the leader and Ollama as the worker and review it',
+      'Use Codex as the leader but do not use Ollama as the worker and implement this feature',
+      'Use Codex not as the leader and Ollama not as the worker and implement this feature',
+      'Codexをリーダーにしたくない、Ollamaをワーカーにして実装して',
+      'Codexをリーダーにしてほしくない、Ollamaをワーカーにして実装して',
+      'Codexをリーダーにして欲しくない、Ollamaをワーカーにして実装して',
+      'Codexをリーダーへ変更して欲しくない、Ollamaをワーカーにして実装して',
+      'Use Codex as the leader and Ollama as the worker to implement this, or would another setup be better?',
+      'Use Codex as the leader and Ollama as the worker to implement this—actually, don’t.',
+    ];
+    for (const input of executions) {
+      expect(isTeamScenarioInput(input), input).toBe(true);
+      expect(requiresTeamWorkersInput(input), input).toBe(true);
+    }
+    for (const input of consultations) {
+      expect(isTeamScenarioInput(input), input).toBe(false);
+      expect(requiresTeamWorkersInput(input), input).toBe(false);
+    }
+  });
+
   it('separates Team consultation from requests that must create Workers', () => {
     expect(isTeamScenarioInput('teamで並列編集できますか？')).toBe(true);
     expect(requiresTeamWorkersInput('teamで並列編集できますか？')).toBe(false);
@@ -160,6 +214,8 @@ describe('builtin Team skill', () => {
       'モデルを変更して',
       '使用モデルをClaudeにして',
       'Codexに変更して',
+      'ワーカーをOllamaにした理由を説明して',
+      'workerのtechnisiteを説明して',
     ])
       expect(isTeamContinuationInput(input), input).toBe(false);
   });
