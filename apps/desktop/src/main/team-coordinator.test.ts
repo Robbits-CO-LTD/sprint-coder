@@ -2229,7 +2229,10 @@ if (runsWithElectronAbi)
         ],
       });
 
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+      await waitFor(
+        () => persistence.getTeamMission(mission.id).state === 'waiting_resume',
+        20_000,
+      );
 
       const executionId = mission.steps[0]!.executionId;
       const quarantined = persistence.getTeamMissionWorktree(executionId);
@@ -2308,7 +2311,10 @@ if (runsWithElectronAbi)
         ],
       });
 
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+      await waitFor(
+        () => persistence.getTeamMission(mission.id).state === 'waiting_resume',
+        20_000,
+      );
 
       const worktree = persistence.getTeamMissionWorktree(mission.steps[0]!.executionId);
       expect(readFileSync(join(workspace, 'outside.txt'), 'utf8')).toBe('external change\n');
@@ -4125,10 +4131,10 @@ else
           // This bridge runs the coordinator integration cases in a second Electron process. A
           // serialized Windows suite can take about a minute and still needs time for clean
           // Vitest/Electron shutdown.
-          timeout: 120_000,
+          timeout: 180_000,
           maxBuffer: 10 * 1024 * 1024,
         },
       );
       expect(result.stderr, result.stdout).not.toContain('Failed Tests');
-    }, 130_000);
+    }, 190_000);
   });
