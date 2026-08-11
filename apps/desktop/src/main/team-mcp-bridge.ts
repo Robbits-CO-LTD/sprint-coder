@@ -132,6 +132,7 @@ export type TeamMcpRegistration = Readonly<{
   accessCeiling?: 'read-only' | 'workspace-write';
   requireModelResearch?: boolean;
   allowSkillDrafts?: boolean;
+  allowSkillImports?: boolean;
   allowProjectMemory?: boolean;
   allowTeamTools?: boolean;
   contextOwner?: { type: 'turn' | 'team_execution'; id: string };
@@ -172,6 +173,10 @@ export class TeamMcpBridge {
       context: { taskId: string; turnId: string },
     ) => Promise<unknown>,
     private readonly queueProjectMemoryCandidate?: (
+      input: unknown,
+      context: { taskId: string; turnId: string },
+    ) => Promise<unknown>,
+    private readonly installPreparedSkill?: (
       input: unknown,
       context: { taskId: string; turnId: string },
     ) => Promise<unknown>,
@@ -384,6 +389,7 @@ export class TeamMcpBridge {
           capabilities: {
             projectMemory: registration.allowProjectMemory === true,
             skillDrafts: registration.allowSkillDrafts === true,
+            skillImports: registration.allowSkillImports === true,
             teamTools: registration.allowTeamTools !== false,
           },
         },
@@ -399,6 +405,8 @@ export class TeamMcpBridge {
           ? await this.executeProjectMemoryTool(turnId, registration, request.args)
           : request.tool === 'skill_draft_create'
             ? await this.executeSkillDraftTool(turnId, registration, request.args)
+            : request.tool === 'skill_import_install'
+              ? await this.executeSkillImportTool(turnId, registration, request.args)
             : registration.allowTeamTools === false
               ? (() => {
                   throw new Error('Team tools are not available for this Turn');
@@ -479,6 +487,20 @@ export class TeamMcpBridge {
     )
       throw new Error('skill_draft_create is not available for this Turn');
     return this.createSkillDraft(input, { taskId: registration.taskId, turnId });
+  }
+
+  private async executeSkillImportTool(
+    turnId: string,
+    registration: Registered,
+    input: unknown,
+  ): Promise<unknown> {
+    if (
+      registration.allowSkillImports !== true ||
+      registration.requesterAgentId !== undefined ||
+      this.installPreparedSkill === undefined
+    )
+      throw new Error('skill_import_install is not available for this Turn');
+    return this.installPreparedSkill(input, { taskId: registration.taskId, turnId });
   }
 
   private async executeProjectMemoryTool(

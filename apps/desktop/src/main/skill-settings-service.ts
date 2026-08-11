@@ -269,6 +269,31 @@ export class SkillSettingsService {
     };
   }
 
+  async installPrepared(input: SkillDraftCreateInput): Promise<SkillCatalogItem> {
+    const validation = (await this.getStore()).validateCreatedSkill(input.skillId, input.files);
+    if (validation.kind !== input.kind)
+      throw new SkillSettingsError(
+        'INVALID_SKILL',
+        input.kind === 'team'
+          ? 'Team Skillにはteam/blueprint.jsonが必要です'
+          : 'Chat SkillへTeam Blueprintを含めることはできません',
+      );
+    const installed = await (await this.getStore()).installCreatedSkill(input.skillId, input.files);
+    return {
+      ref: {
+        skillId: installed.skillId,
+        source: installed.source,
+        digest: installed.digest,
+      },
+      kind: installed.kind,
+      name: installed.name,
+      description: installed.description,
+      enabled: installed.enabled,
+      removable: installed.removable,
+      exportable: installed.exportable,
+    };
+  }
+
   async discardDraft(draftId: string): Promise<void> {
     const exists =
       this.drafts.has(draftId) || (await this.listDrafts()).some(({ id }) => id === draftId);

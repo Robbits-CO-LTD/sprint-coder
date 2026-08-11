@@ -21,8 +21,14 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_DEPTH = 8;
 const SKILL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
-const BUILTIN_SKILL_IDS = new Set(['sprint-coder-team', 'skill-creator']);
-const RESERVED_NAMES = new Set(['sprint-coder-team', 'skill-creator', 'team', 'team-hub']);
+const BUILTIN_SKILL_IDS = new Set(['sprint-coder-team', 'skill-creator', 'import-skill']);
+const RESERVED_NAMES = new Set([
+  'sprint-coder-team',
+  'skill-creator',
+  'import-skill',
+  'team',
+  'team-hub',
+]);
 const WINDOWS_RESERVED_BASENAMES = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 const SECRET_FILE_NAMES = new Set([
   '.env',
@@ -638,8 +644,10 @@ export class SkillStore {
 
   async listSelectable(): Promise<SelectableSkill[]> {
     const items: SelectableSkill[] = [];
-    const builtin = await this.readSelectableAt('builtin', 'skill-creator', true);
-    if (builtin !== null) items.push(builtin);
+    for (const skillId of ['skill-creator', 'import-skill'] as const) {
+      const builtin = await this.readSelectableAt('builtin', skillId, true);
+      if (builtin !== null) items.push(builtin);
+    }
     for (const imported of await this.listImported()) {
       const source = imported.provider;
       const item = await this.readSelectableAt(source, imported.skillId, imported.manifest.enabled);

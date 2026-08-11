@@ -320,6 +320,53 @@ describe('TeamMcpBridge', () => {
     expect(createSkillDraft).toHaveBeenCalledOnce();
   });
 
+  it('allows prepared Skill installation only for a turn explicitly bound to import-skill', async () => {
+    const installPreparedSkill = vi.fn(async (input: unknown) => ({
+      enabled: true,
+      input,
+    }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      installPreparedSkill,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const deniedToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-denied', { taskId: 'task-1', token: deniedToken });
+    const denied = await roundTrip(socketPath as string, {
+      token: deniedToken,
+      tool: 'skill_import_install',
+      args: { kind: 'chat', skillId: 'writer', files: [] },
+    });
+    expect(JSON.parse(denied.lines[0] as string)).toMatchObject({ ok: false });
+
+    const allowedToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-allowed', {
+      taskId: 'task-1',
+      token: allowedToken,
+      allowSkillImports: true,
+    });
+    const allowed = await roundTrip(socketPath as string, {
+      token: allowedToken,
+      tool: 'skill_import_install',
+      args: {
+        kind: 'chat',
+        skillId: 'writer',
+        files: [{ path: 'SKILL.md', content: 'prepared' }],
+      },
+    });
+    expect(JSON.parse(allowed.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { enabled: true },
+    });
+    expect(installPreparedSkill).toHaveBeenCalledOnce();
+  });
+
   it('allows Project memory candidates only for an explicitly eligible Leader turn', async () => {
     const queueCandidate = vi.fn(async () => ({ queued: true }));
     const bridge = new TeamMcpBridge(

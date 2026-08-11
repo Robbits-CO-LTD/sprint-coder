@@ -18,6 +18,7 @@
 export const TEAM_MCP_TOOL_NAMES = [
   'project_memory_remember',
   'skill_draft_create',
+  'skill_import_install',
   'team_list_models',
   'team_record_model_research',
   'team_hire_worker',
@@ -59,6 +60,38 @@ const TOOLS = [
     name: 'skill_draft_create',
     description:
       'Create a validated, managed Skill Draft for user review. This never installs the Skill. Include SKILL.md and optional official package files; Team Skills must include team/blueprint.json.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['chat', 'team'] },
+        skillId: {
+          type: 'string',
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$',
+          maxLength: 128,
+        },
+        files: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 256,
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', minLength: 1, maxLength: 500 },
+              content: { type: 'string', maxLength: 1048576 },
+            },
+            required: ['path', 'content'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['kind', 'skillId', 'files'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'skill_import_install',
+    description:
+      'Validate, install, and enable one AI-prepared Sprint Coder Skill after the user explicitly selected its source CLI and source Skill.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -454,6 +487,8 @@ function connectSocket() {
               ? capabilities && capabilities.projectMemory === true
               : tool.name === 'skill_draft_create'
                 ? capabilities && capabilities.skillDrafts === true
+                : tool.name === 'skill_import_install'
+                  ? capabilities && capabilities.skillImports === true
                 : capabilities && capabilities.teamTools === true,
           );
           resolve(s);
