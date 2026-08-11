@@ -14,6 +14,7 @@ import squirrelStartup from 'electron-squirrel-startup';
 import { readdirSync } from 'node:fs';
 import { lstat, mkdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
@@ -33,7 +34,7 @@ import {
   type NativeMutationPackagedLoadEvidence,
 } from './native-mutation-platform-gate';
 import { secureLogger, writeSecureLogEntry } from './secure-logger';
-import { combineLogSinks, createPersistentLog } from './persistent-log';
+import { combineLogSinks, createPersistentLog, resolveDiagnosticLogRoot } from './persistent-log';
 import {
   installUpdateWithFallback,
   startAutoUpdate,
@@ -138,7 +139,11 @@ if (squirrelStartup || !hasLock) {
     })
     .catch((error: unknown) => {
       // Fatal initialization failure must be visible, never silently swallowed (Slice 1.1).
-      secureLogger.error('Sprint Coder initialization failed', { process: 'main', error });
+      secureLogger.error(
+        'Sprint Coder initialization failed',
+        { process: 'main', error },
+        { event: 'system.initialization.failed', status: 'failed' },
+      );
       dialog.showErrorBox(
         'Sprint Coder の起動に失敗しました',
         error instanceof Error ? `${error.message}\n\n${error.stack ?? ''}` : String(error),
@@ -149,47 +154,76 @@ if (squirrelStartup || !hasLock) {
 
 function initializePersistentDiagnostics(): void {
   try {
-    const persistentLog = createPersistentLog(join(app.getPath('userData'), 'logs'));
+    const persistentLog = createPersistentLog(
+      resolveDiagnosticLogRoot({
+        homeDirectory: homedir(),
+        userDataOverride,
+        platform: process.platform,
+      }),
+    );
     secureLogger.setSink(combineLogSinks(persistentLog.sink, writeSecureLogEntry));
-    secureLogger.info('Persistent diagnostic logging initialized', {
-      process: 'main',
-      version: app.getVersion(),
-      platform: process.platform,
-      architecture: process.arch,
-      packaged: app.isPackaged,
-    });
+    secureLogger.info(
+      'Persistent diagnostic logging initialized',
+      {
+        process: 'main',
+        version: app.getVersion(),
+        platform: process.platform,
+        architecture: process.arch,
+        packaged: app.isPackaged,
+      },
+      { event: 'system.logging.initialized', status: 'completed' },
+    );
   } catch (error) {
-    secureLogger.error('Persistent diagnostic logging could not be initialized', error);
+    secureLogger.error('Persistent diagnostic logging could not be initialized', error, {
+      event: 'system.logging.initialization_failed',
+      status: 'failed',
+    });
   }
 
   process.on('uncaughtException', (error) => {
-    secureLogger.error('Uncaught exception in Main process', { process: 'main', error });
+    secureLogger.error(
+      'Uncaught exception in Main process',
+      { process: 'main', error },
+      { event: 'system.process.uncaught_exception', status: 'failed' },
+    );
     app.exit(1);
   });
   process.on('unhandledRejection', (reason) => {
-    secureLogger.error('Unhandled promise rejection in Main process', {
-      process: 'main',
-      reason,
-    });
+    secureLogger.error(
+      'Unhandled promise rejection in Main process',
+      {
+        process: 'main',
+        reason,
+      },
+      { event: 'system.process.unhandled_rejection', status: 'failed' },
+    );
   });
 
   app.on('render-process-gone', (_event, _webContents, details) => {
     if (details.reason === 'clean-exit') return;
-    secureLogger.error('Renderer process exited unexpectedly', {
-      process: 'renderer',
-      reason: details.reason,
-      exitCode: details.exitCode,
-    });
+    secureLogger.error(
+      'Renderer process exited unexpectedly',
+      {
+        process: 'renderer',
+        reason: details.reason,
+        exitCode: details.exitCode,
+      },
+      { event: 'system.renderer.exited', status: 'failed', result: details.reason },
+    );
   });
   app.on('child-process-gone', (_event, details) => {
     if (details.reason === 'clean-exit') return;
-    secureLogger.error('Electron child process exited unexpectedly', {
-      process: details.type,
-      reason: details.reason,
-      exitCode: details.exitCode,
-      serviceName: details.serviceName,
-      name: details.name,
-    });
+    secureLogger.error(
+      'Electron child process exited unexpectedly',
+      {
+        process: details.type,
+        reason: details.reason,
+        exitCode: details.exitCode,
+        serviceName: details.serviceName,
+        name: details.name,
+      },
+      { event: 'system.child_process.exited', status: 'failed', result: details.reason },
+    );
   });
 }
 
@@ -202,9 +236,17 @@ app.on('before-quit', (event) => {
   if (shutdownInFlight) return;
   shutdownInFlight = true;
   void (async () => {
+    secureLogger.info('Sprint Coder shutdown started', undefined, {
+      event: 'system.shutdown.started',
+      status: 'running',
+    });
     try {
       await disposeApplicationResources();
     } finally {
+      secureLogger.info('Sprint Coder shutdown completed', undefined, {
+        event: 'system.shutdown.completed',
+        status: 'completed',
+      });
       shutdownCommitted = true;
       // The original quit event was canceled while async Runtime/MCP cleanup drained. Calling
       // app.quit() again from that canceled lifecycle can leave a headless Electron main process

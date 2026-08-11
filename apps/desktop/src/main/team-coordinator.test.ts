@@ -20,6 +20,7 @@ import {
   captureGitWorkspaceFingerprint,
   executeWithWatchdog,
   priorConversationForAgent,
+  type TeamDiagnosticEvent,
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
   type WorkerRuntimeResult,
@@ -671,6 +672,54 @@ describe('Mission workspace fingerprint', () => {
 
 if (runsWithElectronAbi)
   describe('TeamCoordinator', () => {
+    it('emits metadata-only lifecycle diagnostics for Team work', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Diagnostic Team');
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'diagnostic worker',
+        objective: 'verify lifecycle metadata',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'sensitive instruction must not enter diagnostics',
+        doneCriteria: ['return a result'],
+      });
+
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+      );
+
+      expect(diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ event: 'team.created', taskId: task.id }),
+          expect.objectContaining({ event: 'team.worker.ready', workerId: worker.id }),
+          expect.objectContaining({ event: 'team.execution.queued', workerId: worker.id }),
+          expect.objectContaining({ event: 'team.execution.completed', workerId: worker.id }),
+        ]),
+      );
+      expect(JSON.stringify(diagnostics)).not.toContain('sensitive instruction');
+      persistence.close();
+    });
+
     it('never redelivers a timed-out Worker before its previous runtime stop is confirmed', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Confirmed timeout stop');

@@ -1,10 +1,37 @@
 import { redactSecrets } from './secret-redactor';
 
 export type SecureLogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type SecureLogCategory = 'system' | 'chat' | 'team';
+export type SecureLogMetadata = Readonly<{
+  category?: SecureLogCategory;
+  event?: string;
+  taskId?: string;
+  turnId?: string;
+  teamId?: string;
+  missionId?: string;
+  workerId?: string;
+  runtime?: string;
+  provider?: string;
+  status?: string;
+  result?: string;
+  durationMs?: number;
+}>;
 export type SecureLogEntry = Readonly<{
   timestamp: string;
   level: SecureLogLevel;
+  category: SecureLogCategory;
+  event: string;
   message: string;
+  taskId?: string;
+  turnId?: string;
+  teamId?: string;
+  missionId?: string;
+  workerId?: string;
+  runtime?: string;
+  provider?: string;
+  status?: string;
+  result?: string;
+  durationMs?: number;
   context?: unknown;
 }>;
 export type SecureLogSink = (entry: SecureLogEntry) => void;
@@ -21,27 +48,45 @@ export class SecureLogger {
     this.sink = sink;
   }
 
-  debug(message: string, context?: unknown): void {
-    this.write('debug', message, context);
+  debug(message: string, context?: unknown, metadata?: SecureLogMetadata): void {
+    this.write('debug', message, context, metadata);
   }
 
-  info(message: string, context?: unknown): void {
-    this.write('info', message, context);
+  info(message: string, context?: unknown, metadata?: SecureLogMetadata): void {
+    this.write('info', message, context, metadata);
   }
 
-  warn(message: string, context?: unknown): void {
-    this.write('warn', message, context);
+  warn(message: string, context?: unknown, metadata?: SecureLogMetadata): void {
+    this.write('warn', message, context, metadata);
   }
 
-  error(message: string, context?: unknown): void {
-    this.write('error', message, context);
+  error(message: string, context?: unknown, metadata?: SecureLogMetadata): void {
+    this.write('error', message, context, metadata);
   }
 
-  private write(level: SecureLogLevel, message: string, context?: unknown): void {
+  private write(
+    level: SecureLogLevel,
+    message: string,
+    context?: unknown,
+    metadata: SecureLogMetadata = {},
+  ): void {
+    const safeMetadata = redactLogValue(metadata) as SecureLogMetadata;
     this.sink({
       timestamp: new Date().toISOString(),
       level,
+      category: safeMetadata.category ?? 'system',
+      event: safeMetadata.event ?? 'diagnostic',
       message: redactLogString(message),
+      ...(safeMetadata.taskId === undefined ? {} : { taskId: safeMetadata.taskId }),
+      ...(safeMetadata.turnId === undefined ? {} : { turnId: safeMetadata.turnId }),
+      ...(safeMetadata.teamId === undefined ? {} : { teamId: safeMetadata.teamId }),
+      ...(safeMetadata.missionId === undefined ? {} : { missionId: safeMetadata.missionId }),
+      ...(safeMetadata.workerId === undefined ? {} : { workerId: safeMetadata.workerId }),
+      ...(safeMetadata.runtime === undefined ? {} : { runtime: safeMetadata.runtime }),
+      ...(safeMetadata.provider === undefined ? {} : { provider: safeMetadata.provider }),
+      ...(safeMetadata.status === undefined ? {} : { status: safeMetadata.status }),
+      ...(safeMetadata.result === undefined ? {} : { result: safeMetadata.result }),
+      ...(safeMetadata.durationMs === undefined ? {} : { durationMs: safeMetadata.durationMs }),
       ...(context === undefined ? {} : { context: redactLogValue(context) }),
     });
   }

@@ -72,14 +72,24 @@ Local-firstは、Task履歴、設定、実行状態を端末内で管理する�
 
 Sprint Coderは、起動失敗、Main processの未処理エラー、RendererやElectron子processの異常終了などをローカルのJSON Linesログへ保存します。通常の保存場所は次のとおりです。
 
-| OS                          | ログフォルダ                                                                      |
-| --------------------------- | --------------------------------------------------------------------------------- |
-| macOS                       | `~/Library/Application Support/Sprint Coder/logs/`                                |
-| Windows                     | `%APPDATA%\Sprint Coder\logs\`                                                    |
-| Linux                       | `$XDG_CONFIG_HOME/Sprint Coder/logs/`（未設定時は`~/.config/Sprint Coder/logs/`） |
-| ソースからのdevelopment起動 | リポジトリ直下の`.vite-user-data/logs/`                                           |
+| OS      | ログフォルダ                    |
+| ------- | ------------------------------- |
+| macOS   | `~/.sprintcoder/logs/`           |
+| Windows | `%USERPROFILE%\.sprintcoder\logs\` |
+| Linux   | `~/.sprintcoder/logs/`           |
 
-現在のログは`sprint-coder.log`、直前のログは`sprint-coder.previous.log`です。現在のログが5MBに達すると1世代だけローテーションします。既知のcredential形式やsecret項目は保存前に秘匿化しますが、第三者へ共有する前には内容を確認してください。
+ログは用途別に分かれます。
+
+```text
+.sprintcoder/logs/
+├── system/system.jsonl
+├── chat/<taskId>.jsonl
+└── team/<teamId>.jsonl
+```
+
+各streamは5MBに達すると`<stream>.previous.jsonl`へ1世代ローテーションします。`SPRINT_CODER_USER_DATA_DIR`を指定したdevelopment/E2E起動では、実ユーザーのログと混ざらないよう`<override>/logs/`へ保存します。
+
+ログにはtimestamp、level、event、status、関連IDなどの診断metadataだけを記録し、prompt、response、Teamメッセージ本文、環境変数全体は保存しません。既知のcredential形式やsecret項目は保存前に秘匿化しますが、第三者へ共有する前には内容を確認してください。
 
 ## 開発
 

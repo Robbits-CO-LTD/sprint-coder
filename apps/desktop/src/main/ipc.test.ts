@@ -151,6 +151,11 @@ describe('Main runtime failure diagnostics', () => {
       },
       canceledRuntimeTurns: new Set<string>(),
       turnRuntimes,
+      turnLogCategoryByTurn: new Map([['turn-protocol', 'chat']]),
+      turnLogStartedAtByTurn: new Map([['turn-protocol', Date.now() - 10]]),
+      turnLogRuntimeByTurn: new Map([
+        ['turn-protocol', { runtime: 'codex' as const, provider: 'openai' }],
+      ]),
       runtimeDiagnosticContextByTurn,
       attachmentCustodyByTurn: new Map(),
       persistence: {
@@ -204,6 +209,13 @@ describe('Main runtime failure diagnostics', () => {
     expect(log).toHaveBeenCalledWith(
       'Runtime failed',
       expect.objectContaining({ diagnosticId: 'diagnostic-main-protocol' }),
+      expect.objectContaining({
+        category: 'chat',
+        event: 'turn.runtime.failed',
+        taskId: 'task-protocol',
+        turnId: 'turn-protocol',
+        status: 'failed',
+      }),
     );
     expect(harness.finishAndAdvance).toHaveBeenCalledWith(
       'task-protocol',

@@ -475,6 +475,12 @@ export class IpcRouter {
   private disposed = false;
   private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
+  private readonly turnLogCategoryByTurn = new Map<string, 'chat' | 'team'>();
+  private readonly turnLogStartedAtByTurn = new Map<string, number>();
+  private readonly turnLogRuntimeByTurn = new Map<
+    string,
+    Readonly<{ runtime: RuntimeKind; provider?: string }>
+  >();
   /** Structure-only inputs retained until durable Turn completion for protocol-error diagnostics. */
   private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
   /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
@@ -841,6 +847,18 @@ export class IpcRouter {
           this.persistence.getEffectiveWorkspaceRootIdentities(taskId),
         );
       },
+      undefined,
+      (event) =>
+        secureLogger.info('Team lifecycle event', undefined, {
+          category: 'team',
+          event: event.event,
+          taskId: event.taskId,
+          teamId: event.teamId,
+          ...(event.missionId === undefined ? {} : { missionId: event.missionId }),
+          ...(event.workerId === undefined ? {} : { workerId: event.workerId }),
+          ...(event.status === undefined ? {} : { status: event.status }),
+          ...(event.result === undefined ? {} : { result: event.result }),
+        }),
     );
     // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than
@@ -3289,6 +3307,14 @@ export class IpcRouter {
   }
 
   private dispatchStarted(started: StartedTurn): void {
+    this.turnLogCategoryByTurn.set(started.turnId, started.teamTurn ? 'team' : 'chat');
+    this.turnLogStartedAtByTurn.set(started.turnId, Date.now());
+    this.turnLogRuntimeByTurn.set(started.turnId, {
+      runtime: started.runtimeKind,
+      ...(started.modelSelection.requestedProvider === null
+        ? {}
+        : { provider: started.modelSelection.requestedProvider }),
+    });
     this.rememberTaskTitleRequest(started);
     this.publish(started.event);
     for (const event of started.contextUsageEvents) this.publish(event);
@@ -3297,6 +3323,17 @@ export class IpcRouter {
 
   private dispatchQueueTransition(transition: QueueTransition): void {
     if (transition === null) return;
+    this.turnLogCategoryByTurn.set(
+      transition.started.turnId,
+      transition.started.teamTurn ? 'team' : 'chat',
+    );
+    this.turnLogStartedAtByTurn.set(transition.started.turnId, Date.now());
+    this.turnLogRuntimeByTurn.set(transition.started.turnId, {
+      runtime: transition.started.runtimeKind,
+      ...(transition.started.modelSelection.requestedProvider === null
+        ? {}
+        : { provider: transition.started.modelSelection.requestedProvider }),
+    });
     this.rememberTaskTitleRequest(transition.started);
     this.publish(transition.started.event);
     for (const event of transition.started.contextUsageEvents) this.publish(event);
@@ -5263,14 +5300,31 @@ export class IpcRouter {
           });
         }
       }
-      secureLogger.error('Runtime failed', {
-        process: 'runtime-host',
-        runtimeKind: kind,
-        taskId,
-        turnId,
-        errorCode: error.code,
-        diagnosticId,
-      });
+      const logCategory = this.turnLogCategoryByTurn.get(turnId) ?? 'chat';
+      const logTeamId =
+        logCategory === 'team'
+          ? (this.teamCoordinator.get(taskId)?.team.id ?? undefined)
+          : undefined;
+      secureLogger.error(
+        'Runtime failed',
+        {
+          process: 'runtime-host',
+          runtimeKind: kind,
+          taskId,
+          turnId,
+          errorCode: error.code,
+          diagnosticId,
+        },
+        {
+          category: logCategory,
+          event: 'turn.runtime.failed',
+          taskId,
+          turnId,
+          ...(logTeamId === undefined ? {} : { teamId: logTeamId }),
+          status: 'failed',
+          result: error.code,
+        },
+      );
       this.pushRuntimeStatus({
         kind,
         state: 'failed',
@@ -5325,8 +5379,55 @@ export class IpcRouter {
 
   private publish(rawEvent: TurnEvent): void {
     const event = turnEventSchema.parse(rawEvent);
+    this.recordTurnDiagnosticEvent(event);
     for (const binding of this.ports) {
       if (binding.taskId === event.taskId) binding.port.postMessage(event);
+    }
+  }
+
+  private recordTurnDiagnosticEvent(event: TurnEvent): void {
+    let status: string;
+    switch (event.type) {
+      case 'turn.accepted':
+        status = 'accepted';
+        break;
+      case 'stage.changed':
+        status = event.stage;
+        break;
+      case 'turn.completed':
+        status = event.state;
+        break;
+      case 'queue.changed':
+        status = event.queued.length > 0 ? 'queued' : 'empty';
+        break;
+      default:
+        return;
+    }
+    const turnId = 'turnId' in event ? event.turnId : undefined;
+    const category =
+      turnId === undefined ? 'chat' : (this.turnLogCategoryByTurn.get(turnId) ?? 'chat');
+    const teamId =
+      category === 'team'
+        ? (this.teamCoordinator.get(event.taskId)?.team.id ?? undefined)
+        : undefined;
+    const startedAt = turnId === undefined ? undefined : this.turnLogStartedAtByTurn.get(turnId);
+    const runtime = turnId === undefined ? undefined : this.turnLogRuntimeByTurn.get(turnId);
+    secureLogger.info('Turn lifecycle event', undefined, {
+      category,
+      event: event.type,
+      taskId: event.taskId,
+      ...(turnId === undefined ? {} : { turnId }),
+      ...(teamId === undefined ? {} : { teamId }),
+      ...(runtime === undefined ? {} : runtime),
+      status,
+      ...(event.type === 'turn.completed' && startedAt !== undefined
+        ? { durationMs: Math.max(0, Date.now() - startedAt) }
+        : {}),
+    });
+    if (event.type === 'turn.completed' && turnId !== undefined) {
+      this.turnLogCategoryByTurn.delete(turnId);
+      this.turnLogStartedAtByTurn.delete(turnId);
+      this.turnLogRuntimeByTurn.delete(turnId);
     }
   }
 

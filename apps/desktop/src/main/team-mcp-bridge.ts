@@ -246,7 +246,10 @@ export class TeamMcpBridge {
       this.startPromise = null;
       // A bridge that fails to start is a soft failure: callers (ipc.ts) treat a null socketPath
       // as "fall back to the mock leader path" rather than crashing turn dispatch.
-      secureLogger.error('Team MCP bridge failed to start', error);
+      secureLogger.error('Team MCP bridge failed to start', error, {
+        event: 'system.team_mcp.start_failed',
+        status: 'failed',
+      });
       return null as unknown as string;
     });
     return this.startPromise;
@@ -450,8 +453,21 @@ export class TeamMcpBridge {
     }
     const [turnId, registration] = found;
     try {
-      if (process.env['SPRINT_CODER_TEAM_MCP_TRACE'] === '1')
-        secureLogger.debug('Team MCP tool received', { tool: request.tool });
+      if (process.env['SPRINT_CODER_TEAM_MCP_TRACE'] === '1') {
+        const teamId = this.coordinator.get(registration.taskId)?.team.id;
+        secureLogger.debug(
+          'Team MCP tool received',
+          { tool: request.tool },
+          {
+            category: 'team',
+            event: 'team.tool.received',
+            taskId: registration.taskId,
+            turnId,
+            ...(teamId === undefined ? {} : { teamId }),
+            status: 'received',
+          },
+        );
+      }
       const result =
         request.tool === 'project_memory_remember'
           ? await this.executeProjectMemoryTool(turnId, registration, request.args)
