@@ -1362,6 +1362,34 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.sb-task-activity {
+  flex: none;
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+}
+.sb-task-activity--running {
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--accent-line-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+.sb-task-activity--completed {
+  color: var(--success);
+}
+.sb-task-activity--completed .icon {
+  display: block;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sb-task-activity--running {
+    animation: none;
+    border-color: var(--accent);
+  }
+}
 .sb-unstarted {
   flex: none;
   padding: 1px 4px;
