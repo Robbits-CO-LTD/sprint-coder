@@ -4765,22 +4765,14 @@ export class IpcRouter {
       }
       if (!finished)
         throw new Error(`Provider Leader exceeded ${MAX_PROVIDER_LEADER_ROUNDS} provider rounds`);
-      if (
-        shouldFailRequiredTeamTurn(
-          requiresTeamWorkersInput(started.text),
-          this.teamCoordinator
-            .get(taskId)
-            ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped')
-            .length ?? 0,
-        )
-      )
-        throw new Error('Team MCP Worker was required but no Worker was created');
-      if (aggregateUsage !== undefined)
-        this.persistence.recordTurnProviderUsage(taskId, started.turnId, aggregateUsage);
-      await this.mailbox.run(taskId, () => {
-        if (this.turnRuntimes.get(started.turnId) === 'provider')
-          this.finishAndAdvance(taskId, started.turnId, 'completed');
-      });
+      await this.completeProviderTeamTurn(
+        taskId,
+        started.turnId,
+        started.text,
+        messageId,
+        synthesizing,
+        aggregateUsage,
+      );
     } catch (error) {
       if (error instanceof ProviderStreamTimeoutError) {
         if (runtime !== undefined)
@@ -4817,6 +4809,53 @@ export class IpcRouter {
     }
   }
 
+  private async completeProviderTeamTurn(
+    taskId: string,
+    turnId: string,
+    input: string,
+    messageId: string,
+    synthesizing: boolean,
+    aggregateUsage: NormalizedProviderUsage | undefined,
+  ): Promise<'completed' | 'failed'> {
+    return runRequiredTeamCompletion(
+      requiresTeamWorkersInput(input),
+      this.teamCoordinator
+        .get(taskId)
+        ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped').length ?? 0,
+      {
+        completed: async () => {
+          if (aggregateUsage !== undefined)
+            this.persistence.recordTurnProviderUsage(taskId, turnId, aggregateUsage);
+          await this.mailbox.run(taskId, () => {
+            if (this.turnRuntimes.get(turnId) === 'provider')
+              this.finishAndAdvance(taskId, turnId, 'completed');
+          });
+        },
+        failed: async (error) => {
+          secureLogger.warn('Provider Team policy requirement was not satisfied', {
+            process: 'main',
+            runtimeKind: 'provider',
+            taskId,
+            turnId,
+            errorCode: error.code,
+          });
+          await this.mailbox.run(taskId, () => {
+            if (this.turnRuntimes.get(turnId) !== 'provider') return;
+            this.publish(
+              this.persistence.appendDelta(
+                taskId,
+                turnId,
+                messageId,
+                `${synthesizing ? '\n\n' : ''}${error.userMessage}`,
+              ),
+            );
+            this.finishAndAdvance(taskId, turnId, 'failed');
+          });
+        },
+      },
+    );
+  }
+
   private applyProviderTurnEvent(
     taskId: string,
     turnId: string,
@@ -4845,7 +4884,7 @@ export class IpcRouter {
     runtimeEvent: RuntimeCanonicalEvent,
   ): void {
     void this.mailbox
-      .run(taskId, () => {
+      .run(taskId, async () => {
         if (this.canceledRuntimeTurns.has(turnId)) return;
         if (this.turnRuntimes.get(turnId) !== kind) return;
         if (runtimeEvent.type === 'heartbeat') return;
@@ -4873,26 +4912,13 @@ export class IpcRouter {
           });
         else if (runtimeEvent.type === 'operation') return;
         else {
-          if (
-            shouldFailRequiredTeamTurn(
-              this.teamRequiredTurns.has(turnId),
-              this.teamCoordinator
-                .get(taskId)
-                ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped')
-                .length ?? 0,
-            )
-          ) {
-            this.handleRuntimeFailure(kind, taskId, turnId, {
-              code: 'RUNTIME_PROTOCOL_ERROR',
-              userMessage:
-                'Team MCP Workerが1名も作成されませんでした。外部のsubagent機能へfallbackせず終了します。',
-              retryable: true,
-            });
-            return;
-          }
-          if (runtimeEvent.resolvedModel !== undefined)
-            this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
-          this.finishAndAdvance(taskId, turnId, 'completed', runtimeEvent.finalText);
+          await this.completeCanonicalTeamTurn(
+            kind,
+            taskId,
+            turnId,
+            runtimeEvent.resolvedModel,
+            runtimeEvent.finalText,
+          );
         }
       })
       .catch((error: unknown) => {
@@ -4905,6 +4931,28 @@ export class IpcRouter {
         });
         this.handleRuntimeFailure(kind, taskId, turnId, runtimeProtocolError());
       });
+  }
+
+  private completeCanonicalTeamTurn(
+    kind: 'codex' | 'claude',
+    taskId: string,
+    turnId: string,
+    resolvedModel: string | undefined,
+    finalText: string | undefined,
+  ): Promise<'completed' | 'failed'> {
+    return runRequiredTeamCompletion(
+      this.teamRequiredTurns.has(turnId),
+      this.teamCoordinator
+        .get(taskId)
+        ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped').length ?? 0,
+      {
+        completed: () => {
+          if (resolvedModel !== undefined) this.resolvedModelByTurn.set(turnId, resolvedModel);
+          this.finishAndAdvance(taskId, turnId, 'completed', finalText);
+        },
+        failed: (error) => this.handleRuntimeFailure(kind, taskId, turnId, error),
+      },
+    );
   }
 
   /**
@@ -5417,6 +5465,37 @@ export function shouldBlockProviderLeaderCompletion(
 export function shouldFailRequiredTeamTurn(teamRequired: boolean, workerCount: number): boolean {
   return teamRequired && workerCount === 0;
 }
+
+export function requiredTeamWorkerFailure(
+  teamRequired: boolean,
+  workerCount: number,
+): PublicError | null {
+  if (!shouldFailRequiredTeamTurn(teamRequired, workerCount)) return null;
+  return {
+    code: 'RUNTIME_FAILED',
+    userMessage:
+      'Team MCP Workerが1名も作成されませんでした。外部のsubagent機能へfallbackせず終了します。',
+    retryable: true,
+  };
+}
+
+export async function runRequiredTeamCompletion(
+  teamRequired: boolean,
+  workerCount: number,
+  handlers: {
+    completed: () => void | Promise<void>;
+    failed: (error: PublicError) => void | Promise<void>;
+  },
+): Promise<'completed' | 'failed'> {
+  const failure = requiredTeamWorkerFailure(teamRequired, workerCount);
+  if (failure === null) {
+    await handlers.completed();
+    return 'completed';
+  }
+  await handlers.failed(failure);
+  return 'failed';
+}
+
 /**
  * A Codex reasoning level the selected model does not advertise.
  *

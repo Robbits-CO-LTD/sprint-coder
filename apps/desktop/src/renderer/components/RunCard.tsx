@@ -73,7 +73,15 @@ export function RunCard({
   const label =
     teamProgress?.label ??
     (isActive && turn.stage === 'waiting_approval' ? '承認待ち' : TITLE_BY_STATUS[turn.status]);
-  const stageLabel = teamProgress?.detail ?? STAGE_LABEL[turn.stage];
+  const stageLabel =
+    teamProgress?.detail ??
+    (isActive
+      ? STAGE_LABEL[turn.stage]
+      : turn.status === 'completed'
+        ? '回答完了'
+        : turn.streamingContent.trim() === ''
+          ? '未完了'
+          : '部分回答');
 
   return (
     <div
