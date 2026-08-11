@@ -133,6 +133,7 @@ export type TeamMcpRegistration = Readonly<{
   requireModelResearch?: boolean;
   allowSkillDrafts?: boolean;
   allowSkillImports?: boolean;
+  skillImportUserText?: string;
   allowProjectMemory?: boolean;
   allowTeamTools?: boolean;
   contextOwner?: { type: 'turn' | 'team_execution'; id: string };
@@ -143,6 +144,7 @@ type Registered = TeamMcpRegistration & {
   waitCursor: number;
   modelCatalogQueried: boolean;
   researchedModels: Set<string>;
+  authorizedSkillImport?: { cli: 'claude' | 'codex'; skillId: string; digest: string };
 };
 
 function modelSelectionKey(selection: {
@@ -151,6 +153,48 @@ function modelSelectionKey(selection: {
   requestedModel: string | null;
 }): string {
   return `${selection.connectionId ?? ''}\0${selection.requestedProvider ?? ''}\0${selection.requestedModel ?? ''}`;
+}
+
+type SkillImportSource = { cli: 'claude' | 'codex'; skillId: string };
+
+function parseSkillImportReadInput(input: unknown): SkillImportSource {
+  if (typeof input !== 'object' || input === null) throw new Error('invalid skill import source');
+  const value = input as { cli?: unknown; skillId?: unknown };
+  if (
+    (value.cli !== 'claude' && value.cli !== 'codex') ||
+    typeof value.skillId !== 'string' ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value.skillId)
+  )
+    throw new Error('invalid skill import source');
+  return { cli: value.cli, skillId: value.skillId };
+}
+
+function parseSkillImportSource(input: unknown): SkillImportSource & { digest: string } {
+  if (typeof input !== 'object' || input === null) throw new Error('invalid skill import source');
+  const source = (input as { source?: unknown }).source;
+  const parsed = parseSkillImportReadInput(source);
+  const digest = (source as { digest?: unknown }).digest;
+  if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest))
+    throw new Error('invalid skill import source digest');
+  return { ...parsed, digest };
+}
+
+function userConfirmedSkillImport(text: string | undefined, source: SkillImportSource): boolean {
+  if (text === undefined) return false;
+  const normalized = text.toLocaleLowerCase('en-US');
+  const selectedCli = source.cli;
+  const otherCli = selectedCli === 'claude' ? 'codex' : 'claude';
+  if (!normalized.includes(selectedCli) || normalized.includes(otherCli)) return false;
+  const escaped = source.skillId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^a-z0-9._-])${escaped}(?:$|[^a-z0-9._-])`, 'i').test(text);
+}
+
+function readDigest(result: unknown): string {
+  if (typeof result !== 'object' || result === null) throw new Error('invalid skill import result');
+  const digest = (result as { digest?: unknown }).digest;
+  if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest))
+    throw new Error('invalid skill import result digest');
+  return digest;
 }
 
 export class TeamMcpBridge {
@@ -508,6 +552,14 @@ export class TeamMcpBridge {
       this.installPreparedSkill === undefined
     )
       throw new Error('skill_import_install is not available for this Turn');
+    const source = parseSkillImportSource(input);
+    if (
+      registration.authorizedSkillImport === undefined ||
+      source.cli !== registration.authorizedSkillImport.cli ||
+      source.skillId !== registration.authorizedSkillImport.skillId ||
+      source.digest !== registration.authorizedSkillImport.digest
+    )
+      throw new Error('skill_import_install source was not authorized by skill_import_read');
     return this.installPreparedSkill(input, { taskId: registration.taskId, turnId });
   }
 
@@ -522,7 +574,16 @@ export class TeamMcpBridge {
       this.readImportSkillSource === undefined
     )
       throw new Error('skill_import_read is not available for this Turn');
-    return this.readImportSkillSource(input, { taskId: registration.taskId, turnId });
+    const source = parseSkillImportReadInput(input);
+    if (!userConfirmedSkillImport(registration.skillImportUserText, source))
+      throw new Error('skill_import_read requires the user to name the CLI and Skill together');
+    const result = await this.readImportSkillSource(input, {
+      taskId: registration.taskId,
+      turnId,
+    });
+    const digest = readDigest(result);
+    registration.authorizedSkillImport = { ...source, digest };
+    return result;
   }
 
   private async executeProjectMemoryTool(

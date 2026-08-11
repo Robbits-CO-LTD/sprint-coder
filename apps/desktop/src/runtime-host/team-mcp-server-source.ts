@@ -114,6 +114,20 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
+        source: {
+          type: 'object',
+          properties: {
+            cli: { type: 'string', enum: ['claude', 'codex'] },
+            skillId: {
+              type: 'string',
+              pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$',
+              maxLength: 128,
+            },
+            digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          },
+          required: ['cli', 'skillId', 'digest'],
+          additionalProperties: false,
+        },
         kind: { type: 'string', enum: ['chat', 'team'] },
         skillId: {
           type: 'string',
@@ -135,7 +149,7 @@ const TOOLS = [
           },
         },
       },
-      required: ['kind', 'skillId', 'files'],
+      required: ['source', 'kind', 'skillId', 'files'],
       additionalProperties: false,
     },
   },

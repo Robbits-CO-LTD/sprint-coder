@@ -850,7 +850,13 @@ export class IpcRouter {
       async (input, context) => this.queueProjectMemoryCandidate(input, context),
       async (input) =>
         this.skillSettings
-          .installPrepared(skillDraftCreateInputSchema.parse(input))
+          .installPrepared(
+            skillDraftCreateInputSchema.parse(
+              typeof input === 'object' && input !== null
+                ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'source'))
+                : input,
+            ),
+          )
           .catch((error) => Promise.reject(skillSettingsPublicError(error))),
       async (input) => {
         const parsed = z
@@ -3407,6 +3413,7 @@ export class IpcRouter {
         teamTurn,
         skillCreatorTurn,
         importSkillTurn,
+        skillImportUserText: started.text,
         memoryTurn,
       });
       if (teamMcp === undefined && (teamTurn || skillCreatorTurn || importSkillTurn)) {
@@ -3705,6 +3712,7 @@ export class IpcRouter {
       teamTurn: boolean;
       skillCreatorTurn: boolean;
       importSkillTurn: boolean;
+      skillImportUserText: string;
       memoryTurn: boolean;
     },
   ): RuntimeTeamMcpOption | undefined {
@@ -3720,6 +3728,7 @@ export class IpcRouter {
       requireModelResearch,
       ...(options.skillCreatorTurn ? { allowSkillDrafts: true } : {}),
       ...(options.importSkillTurn ? { allowSkillImports: true } : {}),
+      ...(options.importSkillTurn ? { skillImportUserText: options.skillImportUserText } : {}),
       ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
       allowTeamTools: options.teamTurn,
     });
