@@ -145,6 +145,7 @@ type Registered = TeamMcpRegistration & {
   modelCatalogQueried: boolean;
   researchedModels: Set<string>;
   authorizedSkillImport?: { cli: 'claude' | 'codex'; skillId: string; digest: string };
+  skillImportReadStarted: boolean;
 };
 
 function modelSelectionKey(selection: {
@@ -181,12 +182,14 @@ function parseSkillImportSource(input: unknown): SkillImportSource & { digest: s
 
 function userConfirmedSkillImport(text: string | undefined, source: SkillImportSource): boolean {
   if (text === undefined) return false;
-  const normalized = text.toLocaleLowerCase('en-US');
-  const selectedCli = source.cli;
-  const otherCli = selectedCli === 'claude' ? 'codex' : 'claude';
-  if (!normalized.includes(selectedCli) || normalized.includes(otherCli)) return false;
-  const escaped = source.skillId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[^a-z0-9._-])${escaped}(?:$|[^a-z0-9._-])`, 'i').test(text);
+  const match = /^IMPORT_SKILL\s+(claude|codex)\s+([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})\s*$/i.exec(
+    text,
+  );
+  return (
+    match !== null &&
+    match[1]?.toLocaleLowerCase('en-US') === source.cli &&
+    match[2] === source.skillId
+  );
 }
 
 function readDigest(result: unknown): string {
@@ -346,6 +349,7 @@ export class TeamMcpBridge {
       waitCursor: registration.initialWaitCursor ?? 0,
       modelCatalogQueried: false,
       researchedModels: new Set(),
+      skillImportReadStarted: false,
     });
   }
 
@@ -560,6 +564,7 @@ export class TeamMcpBridge {
       source.digest !== registration.authorizedSkillImport.digest
     )
       throw new Error('skill_import_install source was not authorized by skill_import_read');
+    delete registration.authorizedSkillImport;
     return this.installPreparedSkill(input, { taskId: registration.taskId, turnId });
   }
 
@@ -577,6 +582,9 @@ export class TeamMcpBridge {
     const source = parseSkillImportReadInput(input);
     if (!userConfirmedSkillImport(registration.skillImportUserText, source))
       throw new Error('skill_import_read requires the user to name the CLI and Skill together');
+    if (registration.skillImportReadStarted)
+      throw new Error('skill_import_read authorization was already consumed for this Turn');
+    registration.skillImportReadStarted = true;
     const result = await this.readImportSkillSource(input, {
       taskId: registration.taskId,
       turnId,

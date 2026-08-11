@@ -12,8 +12,8 @@ description: Claude CLIまたはCodex CLIにある既存Skillを、AIがSprint C
 
 元Skillを変更せず、Sprint Coderの管理領域へ互換コピーを作成して有効化する。
 
-1. 対象AI CLIとSkillが同じユーザーメッセージ内で明示されていなければ、「import元のAI CLIは Claude と Codex のどちらですか？また、どのSkillをimportしますか？Skill名またはフォルダパスを教えてください」と質問して終了する。
-2. 回答されたCLIとSkillを復唱し、その組み合わせ以外を対象にしない。
+1. 現在のユーザーメッセージ全体が確認形式「IMPORT_SKILL <claude|codex> <Skill ID>」でなければ、「import元のAI CLIは Claude と Codex のどちらですか？また、どのSkillをimportしますか？確認のため IMPORT_SKILL claude skill-name の形式で返信してください」と質問して終了する。絶対パスが回答された場合は安全なSkill IDへ直した確認形式を提示し、ユーザー自身の再返信を待つ。
+2. 確認形式のCLIとSkillを復唱し、その組み合わせ以外を対象にしない。否定、追加指示、ClaudeとCodexの併記を確認として扱わない。
 3. ユーザー回答からSkill IDを確定し、skill_import_readを一度呼ぶ。Claudeは ~/.claude/skills、Codexは ~/.codex/skills と ~/.agents/skills の順でMain側が安全に探索する。絶対パスが指定された場合もbasenameをSkill IDとして渡し、選択されたCLIのskills配下以外を直接読み取らない。
 4. skill_import_readが返した全ファイルと警告を確認する。シンボリックリンク、秘密情報、256ファイル超、UTF-8テキスト合計700 KiB超はツールが拒否するため、回避せず理由を報告する。
 5. 元の意図と手順を維持しつつSprint Coder互換へ仕上げる。必ずSKILL.mdを含め、frontmatterはnameとdescriptionだけにする。Skill IDは英数字で始まる英数字・ピリオド・アンダースコア・ハイフンだけにする。Claude/Codex固有の存在しないツール名やパスは、Sprint Coderで実行可能な手順へ置き換える。不要なメタデータやキャッシュは除外する。

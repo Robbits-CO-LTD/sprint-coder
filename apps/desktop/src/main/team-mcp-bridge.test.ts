@@ -353,7 +353,7 @@ describe('TeamMcpBridge', () => {
       taskId: 'task-1',
       token: allowedToken,
       allowSkillImports: true,
-      skillImportUserText: 'Claude の writer をimportしてください',
+      skillImportUserText: 'IMPORT_SKILL claude writer',
     });
     const read = await roundTrip(socketPath as string, {
       token: allowedToken,
@@ -386,6 +386,17 @@ describe('TeamMcpBridge', () => {
       ok: true,
       result: { enabled: true },
     });
+    const repeated = await roundTrip(socketPath as string, {
+      token: allowedToken,
+      tool: 'skill_import_install',
+      args: {
+        source: { cli: 'claude', skillId: 'writer', digest },
+        kind: 'chat',
+        skillId: 'another-writer',
+        files: [{ path: 'SKILL.md', content: 'another prepared skill' }],
+      },
+    });
+    expect(JSON.parse(repeated.lines[0] as string)).toMatchObject({ ok: false });
     expect(installPreparedSkill).toHaveBeenCalledOnce();
   });
 
@@ -412,7 +423,7 @@ describe('TeamMcpBridge', () => {
       taskId: 'task-1',
       token,
       allowSkillImports: true,
-      skillImportUserText: 'Claude: writer',
+      skillImportUserText: 'IMPORT_SKILL claude writer',
     });
 
     const response = await roundTrip(socketPath as string, {
@@ -429,6 +440,13 @@ describe('TeamMcpBridge', () => {
       { cli: 'claude', skillId: 'writer' },
       { taskId: 'task-1', turnId: 'turn-import' },
     );
+    const repeated = await roundTrip(socketPath as string, {
+      token,
+      tool: 'skill_import_read',
+      args: { cli: 'claude', skillId: 'writer' },
+    });
+    expect(JSON.parse(repeated.lines[0] as string)).toMatchObject({ ok: false });
+    expect(readImportSkillSource).toHaveBeenCalledOnce();
   });
 
   it('rejects Skill source access when the current user message is ambiguous', async () => {
@@ -450,7 +468,7 @@ describe('TeamMcpBridge', () => {
       taskId: 'task-1',
       token,
       allowSkillImports: true,
-      skillImportUserText: 'Claude or Codex からSkillをimportしたい',
+      skillImportUserText: 'Claude の skill は import しないで',
     });
 
     const response = await roundTrip(socketPath as string, {
