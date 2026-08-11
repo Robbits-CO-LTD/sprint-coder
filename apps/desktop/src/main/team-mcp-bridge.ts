@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { secureLogger } from './secure-logger';
+import { parseSkillImportConfirmation } from './import-skill-builtin';
 
 // macOS's sockaddr_un.sun_path is 104 bytes (Linux allows 108); staying comfortably under that
 // keeps bind() from failing on long app-data paths (a real, previously-hit failure mode on this
@@ -182,13 +183,11 @@ function parseSkillImportSource(input: unknown): SkillImportSource & { digest: s
 
 function userConfirmedSkillImport(text: string | undefined, source: SkillImportSource): boolean {
   if (text === undefined) return false;
-  const match = /^IMPORT_SKILL\s+(claude|codex)\s+([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})\s*$/i.exec(
-    text,
-  );
+  const confirmation = parseSkillImportConfirmation(text);
   return (
-    match !== null &&
-    match[1]?.toLocaleLowerCase('en-US') === source.cli &&
-    match[2] === source.skillId
+    confirmation !== null &&
+    confirmation.cli === source.cli &&
+    confirmation.skillId === source.skillId
   );
 }
 

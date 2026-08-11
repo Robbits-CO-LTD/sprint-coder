@@ -190,6 +190,7 @@ import {
   type RuntimeKind,
   type TaskSummary,
   type TurnEvent,
+  type TurnSkillSelection,
 } from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
 import {
@@ -355,6 +356,7 @@ import {
   BUILTIN_IMPORT_SKILL_CONTENT,
   BUILTIN_IMPORT_SKILL_DIGEST,
   BUILTIN_IMPORT_SKILL_ID,
+  bindBuiltinImportSkillForTurn,
 } from './import-skill-builtin';
 import {
   BUILTIN_SPRINT_CODER_PRODUCT_SKILL_CONTENT,
@@ -1984,9 +1986,9 @@ export class IpcRouter {
       goalStartInputSchema,
       goalRunResultSchema,
       async (input, event, envelope) => {
-        const skills = await this.skillSettings
-          .resolveSelections(input.skills)
-          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        const skills = await this.resolveTurnSkills(input.objective, input.skills).catch((error) =>
+          Promise.reject(skillSettingsPublicError(error)),
+        );
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -2566,9 +2568,9 @@ export class IpcRouter {
       turnStartInputSchema,
       turnStartResultSchema,
       async (input, event, envelope) => {
-        const skills = await this.skillSettings
-          .resolveSelections(input.skills)
-          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        const skills = await this.resolveTurnSkills(input.text, input.skills).catch((error) =>
+          Promise.reject(skillSettingsPublicError(error)),
+        );
         let attachmentCapability:
           | Readonly<{
               snapshot: ImageAttachmentRuntimeSnapshot;
@@ -2637,9 +2639,9 @@ export class IpcRouter {
       turnQueueInputSchema,
       turnQueueResultSchema,
       async (input, event, envelope) => {
-        const skills = await this.skillSettings
-          .resolveSelections(input.skills)
-          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        const skills = await this.resolveTurnSkills(input.text, input.skills).catch((error) =>
+          Promise.reject(skillSettingsPublicError(error)),
+        );
         let queueEvent: TurnEvent | undefined;
         const result = this.runMutation(
           event,
@@ -2690,9 +2692,9 @@ export class IpcRouter {
       turnStopAndSendInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
-        const skills = await this.skillSettings
-          .resolveSelections(input.skills)
-          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        const skills = await this.resolveTurnSkills(input.text, input.skills).catch((error) =>
+          Promise.reject(skillSettingsPublicError(error)),
+        );
         const principal = principalFor(event);
         const hash = requestHash(envelope.payload);
         const cached = this.persistence.getOperationResult<void>(
@@ -3693,6 +3695,13 @@ export class IpcRouter {
       });
       return;
     }
+  }
+
+  private resolveTurnSkills(
+    text: string,
+    selections: readonly TurnSkillSelection[],
+  ): Promise<PersistedTurnSkill[]> {
+    return this.skillSettings.resolveSelections(bindBuiltinImportSkillForTurn(text, selections));
   }
 
   private async prepareTurnImageAttachments(

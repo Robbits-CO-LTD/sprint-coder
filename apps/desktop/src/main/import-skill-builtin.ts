@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import type { TurnSkillSelection } from '@sprint-coder/contracts';
 import { SkillStore } from './skill-store';
 
 export const BUILTIN_IMPORT_SKILL_ID = 'import-skill';
@@ -26,6 +27,45 @@ description: Claude CLIまたはCodex CLIにある既存Skillを、AIがSprint C
 export const BUILTIN_IMPORT_SKILL_DIGEST = createHash('sha256')
   .update(BUILTIN_IMPORT_SKILL_CONTENT)
   .digest('hex');
+
+export type SkillImportConfirmation = Readonly<{
+  cli: 'claude' | 'codex';
+  skillId: string;
+}>;
+
+export function parseSkillImportConfirmation(text: string): SkillImportConfirmation | null {
+  if (text.includes('\n') || text.includes('\r')) return null;
+  const match = /^IMPORT_SKILL (claude|codex) ([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})$/i.exec(text);
+  if (match === null || match[1] === undefined || match[2] === undefined) return null;
+  return {
+    cli: match[1].toLocaleLowerCase('en-US') as 'claude' | 'codex',
+    skillId: match[2],
+  };
+}
+
+export function bindBuiltinImportSkillForTurn(
+  text: string,
+  selections: readonly TurnSkillSelection[],
+): TurnSkillSelection[] {
+  if (
+    parseSkillImportConfirmation(text) === null ||
+    selections.some(
+      ({ ref }) => ref.source === 'builtin' && ref.skillId === BUILTIN_IMPORT_SKILL_ID,
+    )
+  )
+    return [...selections];
+  return [
+    ...selections,
+    {
+      kind: 'chat',
+      ref: {
+        source: 'builtin',
+        skillId: BUILTIN_IMPORT_SKILL_ID,
+        digest: BUILTIN_IMPORT_SKILL_DIGEST,
+      },
+    },
+  ];
+}
 
 export async function installBuiltinImportSkill(homePath: string): Promise<void> {
   const store = await SkillStore.open({ rootPath: join(homePath, '.sprintcoder', 'skills') });
