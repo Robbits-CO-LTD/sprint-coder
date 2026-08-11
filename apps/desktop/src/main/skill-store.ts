@@ -1004,7 +1004,15 @@ function normalizeDraftFilePath(path: string): string {
 function containsCredential(content: string): boolean {
   return [
     /\bAuthorization\s*:\s*(?:Bearer|Basic)\s+\S+/iu,
-    /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[:=]\s*["']?[A-Za-z0-9_./+-]{16,}/iu,
+    /\bCookie\s*:\s*[^\r\n]{8,}/iu,
+    /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/u,
+    /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
+    /\bgh[pousr]_[A-Za-z0-9]{20,}\b/u,
+    /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
+    /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/u,
+    /\bAIza[A-Za-z0-9_-]{35}\b/u,
+    /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis):\/\/[^\s/:@]+:[^\s/@]+@/iu,
+    /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|secret[_-]?key)["']?\s*[:=]\s*["']?[^\s"']{8,}/iu,
     /\bsk-[A-Za-z0-9_-]{16,}\b/u,
   ].some((pattern) => pattern.test(content));
 }

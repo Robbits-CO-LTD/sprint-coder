@@ -117,6 +117,31 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     ]);
   });
 
+  it('rejects common credential formats before exposing source text for AI repair', async () => {
+    const root = await tempRoot();
+    const source = join(root, 'skills');
+    const credentials = [
+      '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----',
+      'aws_access_key_id=AKIA1234567890ABCDEF',
+      'token=ghp_1234567890abcdefghijklmnop',
+      'Cookie: session=1234567890abcdef',
+      'DATABASE_URL=postgresql://admin:supersecret@example.com/app',
+      '{"password":"correct-horse-battery-staple"}',
+    ];
+    const store = await SkillStore.open({ rootPath: join(root, 'store') });
+
+    for (const [index, credential] of credentials.entries()) {
+      const { path } = await fixture(source, `unsafe-${index}`);
+      await writeFile(join(path, 'reference.txt'), credential);
+    }
+    const candidates = await store.scanSources({ claudePath: source });
+
+    for (const candidate of candidates)
+      await expect(store.readRepairSource(candidate)).rejects.toMatchObject({
+        code: 'INVALID_SKILL',
+      });
+  });
+
   it('rejects symlinks, missing SKILL.md, invalid frontmatter, and reserved names', async () => {
     const root = await tempRoot();
     const source = join(root, 'skills');
