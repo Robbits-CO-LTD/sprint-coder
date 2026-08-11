@@ -184,6 +184,49 @@ describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
     });
   });
 
+  it('installs and enables an AI-prepared imported Skill without a Draft', async () => {
+    const root = await home();
+    const service = new SkillSettingsService({ homePath: root });
+    const installed = await service.installPrepared({
+      kind: 'chat',
+      skillId: 'imported-writer',
+      files: [
+        {
+          path: 'SKILL.md',
+          content:
+            '---\nname: Imported Writer\ndescription: Writes with Sprint Coder\n---\n\n# Writer\n',
+        },
+      ],
+    });
+
+    expect(installed).toMatchObject({
+      enabled: true,
+      kind: 'chat',
+      ref: { source: 'created', skillId: 'imported-writer' },
+    });
+    expect((await service.listCatalog()).items).toContainEqual(installed);
+    expect(await service.listDrafts()).toEqual([]);
+  });
+
+  it('reads invalid-frontmatter source text from the selected CLI root for AI repair', async () => {
+    const root = await home();
+    const path = await skill(root, 'claude', 'legacy-writer');
+    await writeFile(
+      join(path, 'SKILL.md'),
+      '---\nname: Legacy Writer\ndescription: Legacy\nallowed-tools: Read\n---\n\n# Legacy\n',
+    );
+    const service = new SkillSettingsService({ homePath: root });
+
+    const source = await service.readImportSource({ cli: 'claude', skillId: 'legacy-writer' });
+
+    expect(source).toMatchObject({
+      cli: 'claude',
+      skillId: 'legacy-writer',
+      files: [{ path: 'SKILL.md', content: expect.stringContaining('allowed-tools: Read') }],
+    });
+    expect(source.digest).toMatch(/^[a-f0-9]{64}$/);
+  });
+
   it('rejects credentials and a Team Draft without a valid Blueprint', async () => {
     const root = await home();
     const service = new SkillSettingsService({ homePath: root });

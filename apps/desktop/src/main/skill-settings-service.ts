@@ -269,6 +269,61 @@ export class SkillSettingsService {
     };
   }
 
+  async installPrepared(input: SkillDraftCreateInput): Promise<SkillCatalogItem> {
+    const validation = (await this.getStore()).validateCreatedSkill(input.skillId, input.files);
+    if (validation.kind !== input.kind)
+      throw new SkillSettingsError(
+        'INVALID_SKILL',
+        input.kind === 'team'
+          ? 'Team Skillにはteam/blueprint.jsonが必要です'
+          : 'Chat SkillへTeam Blueprintを含めることはできません',
+      );
+    const installed = await (await this.getStore()).installCreatedSkill(input.skillId, input.files);
+    return {
+      ref: {
+        skillId: installed.skillId,
+        source: installed.source,
+        digest: installed.digest,
+      },
+      kind: installed.kind,
+      name: installed.name,
+      description: installed.description,
+      enabled: installed.enabled,
+      removable: installed.removable,
+      exportable: installed.exportable,
+    };
+  }
+
+  async readImportSource(input: { cli: 'claude' | 'codex'; skillId: string }): Promise<{
+    cli: 'claude' | 'codex';
+    skillId: string;
+    digest: string;
+    files: readonly { path: string; content: string }[];
+    warnings: readonly string[];
+  }> {
+    const store = await this.getStore();
+    const roots =
+      input.cli === 'claude'
+        ? [{ claudePath: join(this.input.homePath, '.claude', 'skills') }]
+        : [
+            { agentsPath: join(this.input.homePath, '.codex', 'skills') },
+            { agentsPath: join(this.input.homePath, '.agents', 'skills') },
+          ];
+    for (const root of roots) {
+      const candidate = (await store.scanSources(root)).find(
+        (item) => item.skillId === input.skillId,
+      );
+      if (candidate === undefined) continue;
+      if (!candidate.valid)
+        throw new SkillSettingsError('INVALID_SKILL', candidate.problems[0] ?? 'Skillが無効です');
+      const source = await store
+        .readRepairSource(candidate)
+        .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+      return { cli: input.cli, ...source };
+    }
+    throw new SkillSettingsError('NOT_FOUND', '指定されたCLIにSkillが見つかりません');
+  }
+
   async discardDraft(draftId: string): Promise<void> {
     const exists =
       this.drafts.has(draftId) || (await this.listDrafts()).some(({ id }) => id === draftId);

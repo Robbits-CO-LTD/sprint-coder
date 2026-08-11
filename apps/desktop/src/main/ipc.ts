@@ -340,6 +340,11 @@ import {
   BUILTIN_SKILL_CREATOR_DIGEST,
   BUILTIN_SKILL_CREATOR_ID,
 } from './skill-creator-builtin';
+import {
+  BUILTIN_IMPORT_SKILL_CONTENT,
+  BUILTIN_IMPORT_SKILL_DIGEST,
+  BUILTIN_IMPORT_SKILL_ID,
+} from './import-skill-builtin';
 import { SkillStore } from './skill-store';
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import {
@@ -843,6 +848,32 @@ export class IpcRouter {
         return draft;
       },
       async (input, context) => this.queueProjectMemoryCandidate(input, context),
+      async (input) =>
+        this.skillSettings
+          .installPrepared(
+            skillDraftCreateInputSchema.parse(
+              typeof input === 'object' && input !== null
+                ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'source'))
+                : input,
+            ),
+          )
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+      async (input) => {
+        const parsed = z
+          .object({
+            cli: z.enum(['claude', 'codex']),
+            skillId: z
+              .string()
+              .min(1)
+              .max(128)
+              .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+          })
+          .strict()
+          .parse(input);
+        return this.skillSettings
+          .readImportSource(parsed)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+      },
     );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
@@ -2801,6 +2832,11 @@ export class IpcRouter {
           BUILTIN_SKILL_CREATOR_CONTENT,
           BUILTIN_SKILL_CREATOR_DIGEST,
         ),
+        store.installBuiltin(
+          BUILTIN_IMPORT_SKILL_ID,
+          BUILTIN_IMPORT_SKILL_CONTENT,
+          BUILTIN_IMPORT_SKILL_DIGEST,
+        ),
       ]);
       this.teamSkillReady = true;
     } catch {
@@ -3354,11 +3390,15 @@ export class IpcRouter {
       ({ selection }) =>
         selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
     );
+    const importSkillTurn = started.skills.some(
+      ({ selection }) =>
+        selection.ref.source === 'builtin' && selection.ref.skillId === 'import-skill',
+    );
     const memoryTurn = this.persistence.getTask(taskId).projectId !== null;
     const wantsLeaderMcp =
       process.env['SPRINT_CODER_LEADER_MCP'] !== '0' &&
       kind !== 'mock' &&
-      (teamTurn || skillCreatorTurn || memoryTurn);
+      (teamTurn || skillCreatorTurn || importSkillTurn || memoryTurn);
     if (teamTurn && wantsLeaderMcp && !this.teamSkillReady) {
       this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
         code: 'RUNTIME_FAILED',
@@ -3372,9 +3412,11 @@ export class IpcRouter {
       teamMcp = this.registerLeaderMcp(started.turnId, taskId, {
         teamTurn,
         skillCreatorTurn,
+        importSkillTurn,
+        skillImportUserText: started.text,
         memoryTurn,
       });
-      if (teamMcp === undefined && (teamTurn || skillCreatorTurn)) {
+      if (teamMcp === undefined && (teamTurn || skillCreatorTurn || importSkillTurn)) {
         this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
           code: 'RUNTIME_FAILED',
           userMessage: 'Team MCPへ接続できないためTeamを開始できません。',
@@ -3666,7 +3708,13 @@ export class IpcRouter {
   private registerLeaderMcp(
     turnId: string,
     taskId: string,
-    options: { teamTurn: boolean; skillCreatorTurn: boolean; memoryTurn: boolean },
+    options: {
+      teamTurn: boolean;
+      skillCreatorTurn: boolean;
+      importSkillTurn: boolean;
+      skillImportUserText: string;
+      memoryTurn: boolean;
+    },
   ): RuntimeTeamMcpOption | undefined {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
@@ -3679,6 +3727,8 @@ export class IpcRouter {
       initialWaitCursor: this.teamCoordinator.latestTeamMessageSeq(taskId),
       requireModelResearch,
       ...(options.skillCreatorTurn ? { allowSkillDrafts: true } : {}),
+      ...(options.importSkillTurn ? { allowSkillImports: true } : {}),
+      ...(options.importSkillTurn ? { skillImportUserText: options.skillImportUserText } : {}),
       ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
       allowTeamTools: options.teamTurn,
     });
@@ -3692,6 +3742,9 @@ export class IpcRouter {
         : null,
       options.skillCreatorTurn
         ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
+        : null,
+      options.importSkillTurn
+        ? 'import-skillが選択されています。対象CLIと対象Skillがユーザー回答で一意に確定してから、skill_import_readで元Skillを安全に読み、Sprint Coder互換へ修正し、skill_import_installでインストール・有効化してください。skill_draft_createとteam_*ツールは使用しません。'
         : null,
       options.memoryTurn ? PROJECT_MEMORY_MCP_GUIDANCE : null,
     ]

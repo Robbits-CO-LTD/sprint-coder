@@ -45,6 +45,7 @@ async function startHarness(
     capabilities?: {
       projectMemory: boolean;
       skillDrafts: boolean;
+      skillImports: boolean;
       teamTools: boolean;
     };
   } = {},
@@ -94,6 +95,7 @@ async function startHarness(
                 capabilities: options.capabilities ?? {
                   projectMemory: true,
                   skillDrafts: true,
+                  skillImports: true,
                   teamTools: true,
                 },
               },
@@ -289,7 +291,12 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
 
   it('lists only Project memory for a non-Team Project turn', async () => {
     const harness = await startHarness({
-      capabilities: { projectMemory: true, skillDrafts: false, teamTools: false },
+      capabilities: {
+        projectMemory: true,
+        skillDrafts: false,
+        skillImports: false,
+        teamTools: false,
+      },
     });
     harness.send({ jsonrpc: '2.0', id: 11, method: 'tools/list' });
     const listReply = await harness.nextMessage();

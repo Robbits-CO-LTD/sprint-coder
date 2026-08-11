@@ -21,8 +21,14 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_DEPTH = 8;
 const SKILL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
-const BUILTIN_SKILL_IDS = new Set(['sprint-coder-team', 'skill-creator']);
-const RESERVED_NAMES = new Set(['sprint-coder-team', 'skill-creator', 'team', 'team-hub']);
+const BUILTIN_SKILL_IDS = new Set(['sprint-coder-team', 'skill-creator', 'import-skill']);
+const RESERVED_NAMES = new Set([
+  'sprint-coder-team',
+  'skill-creator',
+  'import-skill',
+  'team',
+  'team-hub',
+]);
 const WINDOWS_RESERVED_BASENAMES = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 const SECRET_FILE_NAMES = new Set([
   '.env',
@@ -97,6 +103,12 @@ export type CreatedSkillValidation = Readonly<{
   kind: SkillKind;
   digest: string;
   files: readonly string[];
+}>;
+export type SkillRepairSource = Readonly<{
+  skillId: string;
+  digest: string;
+  files: readonly CreatedSkillFile[];
+  warnings: readonly string[];
 }>;
 
 type Snapshot = {
@@ -189,6 +201,31 @@ export class SkillStore {
       }
     }
     return candidates;
+  }
+
+  async readRepairSource(candidate: SkillCandidate): Promise<SkillRepairSource> {
+    if (!issuedCandidates.has(candidate) || !candidate.valid)
+      throw new SkillStoreError('INVALID_SKILL', 'Skill candidate is invalid or was not scanned');
+    const snapshot = await readRawSnapshot(candidate);
+    const files: CreatedSkillFile[] = [];
+    let totalBytes = 0;
+    for (const file of snapshot.files) {
+      const content = file.bytes.toString('utf8');
+      if (!Buffer.from(content, 'utf8').equals(file.bytes))
+        throw new SkillStoreError('INVALID_SKILL', `Skill file must be UTF-8: ${file.path}`);
+      if (containsCredential(content))
+        throw new SkillStoreError('INVALID_SKILL', `認証情報を含む可能性があります: ${file.path}`);
+      totalBytes += file.bytes.byteLength;
+      if (totalBytes > 700 * 1024)
+        throw new SkillStoreError('INVALID_SKILL', 'AI import用Skillは700 KiBを超えています');
+      files.push({ path: file.path, content });
+    }
+    return {
+      skillId: candidate.skillId,
+      digest: snapshot.digest,
+      files,
+      warnings: snapshot.warnings,
+    };
   }
 
   async listImported(): Promise<ImportedSkillSummary[]> {
@@ -638,8 +675,10 @@ export class SkillStore {
 
   async listSelectable(): Promise<SelectableSkill[]> {
     const items: SelectableSkill[] = [];
-    const builtin = await this.readSelectableAt('builtin', 'skill-creator', true);
-    if (builtin !== null) items.push(builtin);
+    for (const skillId of ['skill-creator', 'import-skill'] as const) {
+      const builtin = await this.readSelectableAt('builtin', skillId, true);
+      if (builtin !== null) items.push(builtin);
+    }
     for (const imported of await this.listImported()) {
       const source = imported.provider;
       const item = await this.readSelectableAt(source, imported.skillId, imported.manifest.enabled);
@@ -815,6 +854,18 @@ async function materializeSkill(
 }
 
 async function readSnapshot(candidate: SkillCandidate): Promise<Snapshot> {
+  const snapshot = await readRawSnapshot(candidate);
+  const skillFile = snapshot.files.find((file) => file.path === 'SKILL.md');
+  if (skillFile === undefined) throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is required');
+  const { name, description } = parseFrontmatter(skillFile.bytes);
+  if (RESERVED_NAMES.has(candidate.skillId.toLowerCase()) || RESERVED_NAMES.has(name.toLowerCase()))
+    throw new SkillStoreError('INVALID_SKILL', 'Skill name conflicts with a reserved capability');
+  return { ...snapshot, name, description };
+}
+
+async function readRawSnapshot(
+  candidate: SkillCandidate,
+): Promise<Omit<Snapshot, 'name' | 'description'>> {
   const canonicalRoot = await realpath(candidate.sourceRoot).catch(() => '');
   const canonicalSource = await realpath(candidate.sourcePath).catch(() => '');
   if (
@@ -832,18 +883,12 @@ async function readSnapshot(candidate: SkillCandidate): Promise<Snapshot> {
   const warnings: string[] = [];
   let totalBytes = 0;
   await walk(canonicalSource, '', 0);
-  const skillFile = files.find((file) => file.path === 'SKILL.md');
-  if (skillFile === undefined) throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is required');
-  const { name, description } = parseFrontmatter(skillFile.bytes);
-  if (RESERVED_NAMES.has(candidate.skillId.toLowerCase()) || RESERVED_NAMES.has(name.toLowerCase()))
-    throw new SkillStoreError('INVALID_SKILL', 'Skill name conflicts with a reserved capability');
-
   files.sort((left, right) => left.path.localeCompare(right.path));
   const digest = createHash('sha256');
   for (const file of files) {
     digest.update(file.path).update('\0').update(file.bytes).update('\0');
   }
-  return { name, description, digest: digest.digest('hex'), files, warnings };
+  return { digest: digest.digest('hex'), files, warnings };
 
   async function walk(directory: string, relativeDirectory: string, depth: number): Promise<void> {
     if (depth > MAX_DEPTH)
@@ -959,7 +1004,15 @@ function normalizeDraftFilePath(path: string): string {
 function containsCredential(content: string): boolean {
   return [
     /\bAuthorization\s*:\s*(?:Bearer|Basic)\s+\S+/iu,
-    /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[:=]\s*["']?[A-Za-z0-9_./+-]{16,}/iu,
+    /\bCookie\s*:\s*[^\r\n]{8,}/iu,
+    /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/u,
+    /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
+    /\bgh[pousr]_[A-Za-z0-9]{20,}\b/u,
+    /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
+    /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/u,
+    /\bAIza[A-Za-z0-9_-]{35}\b/u,
+    /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis):\/\/[^\s/:@]+:[^\s/@]+@/iu,
+    /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|secret[_-]?key)["']?\s*[:=]\s*["']?[^\s"']{8,}/iu,
     /\bsk-[A-Za-z0-9_-]{16,}\b/u,
   ].some((pattern) => pattern.test(content));
 }

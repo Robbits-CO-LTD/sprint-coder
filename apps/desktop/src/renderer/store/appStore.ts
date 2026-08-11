@@ -476,6 +476,7 @@ function subscribeToTask(
       return;
     }
     handleTurnEvent(taskId, ev, apply);
+    if (ev.type === 'turn.completed') void get().loadSkills();
   };
   currentUnsubscribe =
     afterSeq !== undefined
