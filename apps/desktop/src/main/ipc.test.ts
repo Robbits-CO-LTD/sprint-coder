@@ -106,6 +106,7 @@ import {
   providerModelsForBuiltin,
   requireExplicitProviderCommandApproval,
   requiredTeamWorkerFailure,
+  runRequiredTeamCompletion,
   shouldRetryProviderWithoutTools,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
@@ -123,6 +124,7 @@ import {
   type ImageAttachmentRuntimeSnapshot,
 } from './image-attachment-capability';
 import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
+import { requiresTeamWorkersInput } from './team-tools';
 
 describe('built-in subscription model capabilities', () => {
   it('pages fallback candidates within the catalog limit and preserves the allowlist', () => {
@@ -613,6 +615,39 @@ describe('Provider Team completion and model errors', () => {
       retryable: true,
     });
   });
+
+  it.each(['Provider', 'CLI canonical'] as const)(
+    '%s completion settles diagnostic and explicit Team inputs symmetrically',
+    async () => {
+      const completed = vi.fn();
+      const failed = vi.fn();
+      const diagnosticInput =
+        'そもそもなぜsprint-coder-teamが使えないのか調査して。ログファイルを見て';
+      const explicitTeamInput = 'Teamで原因を調査して';
+
+      expect(
+        await runRequiredTeamCompletion(requiresTeamWorkersInput(diagnosticInput), 0, {
+          completed,
+          failed,
+        }),
+      ).toBe('completed');
+      expect(completed).toHaveBeenCalledOnce();
+      expect(failed).not.toHaveBeenCalled();
+
+      completed.mockClear();
+      expect(
+        await runRequiredTeamCompletion(requiresTeamWorkersInput(explicitTeamInput), 0, {
+          completed,
+          failed,
+        }),
+      ).toBe('failed');
+      expect(completed).not.toHaveBeenCalled();
+      expect(failed).toHaveBeenCalledWith(expect.objectContaining({ code: 'RUNTIME_FAILED' }));
+      expect(failed).not.toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'RUNTIME_PROTOCOL_ERROR' }),
+      );
+    },
+  );
 });
 
 describe('Provider workspace tool capability fallback', () => {

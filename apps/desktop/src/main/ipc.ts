@@ -4765,41 +4765,44 @@ export class IpcRouter {
       }
       if (!finished)
         throw new Error(`Provider Leader exceeded ${MAX_PROVIDER_LEADER_ROUNDS} provider rounds`);
-      const requiredTeamFailure = requiredTeamWorkerFailure(
+      await runRequiredTeamCompletion(
         requiresTeamWorkersInput(started.text),
         this.teamCoordinator
           .get(taskId)
           ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped').length ??
           0,
-      );
-      if (requiredTeamFailure !== null) {
-        secureLogger.warn('Provider Team policy requirement was not satisfied', {
-          process: 'main',
-          runtimeKind: 'provider',
-          taskId,
-          turnId: started.turnId,
-          errorCode: requiredTeamFailure.code,
-        });
-        await this.mailbox.run(taskId, () => {
-          if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
-          this.publish(
-            this.persistence.appendDelta(
+        {
+          completed: async () => {
+            if (aggregateUsage !== undefined)
+              this.persistence.recordTurnProviderUsage(taskId, started.turnId, aggregateUsage);
+            await this.mailbox.run(taskId, () => {
+              if (this.turnRuntimes.get(started.turnId) === 'provider')
+                this.finishAndAdvance(taskId, started.turnId, 'completed');
+            });
+          },
+          failed: async (error) => {
+            secureLogger.warn('Provider Team policy requirement was not satisfied', {
+              process: 'main',
+              runtimeKind: 'provider',
               taskId,
-              started.turnId,
-              messageId,
-              `${synthesizing ? '\n\n' : ''}${requiredTeamFailure.userMessage}`,
-            ),
-          );
-          this.finishAndAdvance(taskId, started.turnId, 'failed');
-        });
-        return;
-      }
-      if (aggregateUsage !== undefined)
-        this.persistence.recordTurnProviderUsage(taskId, started.turnId, aggregateUsage);
-      await this.mailbox.run(taskId, () => {
-        if (this.turnRuntimes.get(started.turnId) === 'provider')
-          this.finishAndAdvance(taskId, started.turnId, 'completed');
-      });
+              turnId: started.turnId,
+              errorCode: error.code,
+            });
+            await this.mailbox.run(taskId, () => {
+              if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+              this.publish(
+                this.persistence.appendDelta(
+                  taskId,
+                  started.turnId,
+                  messageId,
+                  `${synthesizing ? '\n\n' : ''}${error.userMessage}`,
+                ),
+              );
+              this.finishAndAdvance(taskId, started.turnId, 'failed');
+            });
+          },
+        },
+      );
     } catch (error) {
       if (error instanceof ProviderStreamTimeoutError) {
         if (runtime !== undefined)
@@ -4864,7 +4867,7 @@ export class IpcRouter {
     runtimeEvent: RuntimeCanonicalEvent,
   ): void {
     void this.mailbox
-      .run(taskId, () => {
+      .run(taskId, async () => {
         if (this.canceledRuntimeTurns.has(turnId)) return;
         if (this.turnRuntimes.get(turnId) !== kind) return;
         if (runtimeEvent.type === 'heartbeat') return;
@@ -4892,20 +4895,21 @@ export class IpcRouter {
           });
         else if (runtimeEvent.type === 'operation') return;
         else {
-          const requiredTeamFailure = requiredTeamWorkerFailure(
+          await runRequiredTeamCompletion(
             this.teamRequiredTurns.has(turnId),
             this.teamCoordinator
               .get(taskId)
               ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped')
               .length ?? 0,
+            {
+              completed: () => {
+                if (runtimeEvent.resolvedModel !== undefined)
+                  this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
+                this.finishAndAdvance(taskId, turnId, 'completed', runtimeEvent.finalText);
+              },
+              failed: (error) => this.handleRuntimeFailure(kind, taskId, turnId, error),
+            },
           );
-          if (requiredTeamFailure !== null) {
-            this.handleRuntimeFailure(kind, taskId, turnId, requiredTeamFailure);
-            return;
-          }
-          if (runtimeEvent.resolvedModel !== undefined)
-            this.resolvedModelByTurn.set(turnId, runtimeEvent.resolvedModel);
-          this.finishAndAdvance(taskId, turnId, 'completed', runtimeEvent.finalText);
         }
       })
       .catch((error: unknown) => {
@@ -5443,6 +5447,24 @@ export function requiredTeamWorkerFailure(
     retryable: true,
   };
 }
+
+export async function runRequiredTeamCompletion(
+  teamRequired: boolean,
+  workerCount: number,
+  handlers: {
+    completed: () => void | Promise<void>;
+    failed: (error: PublicError) => void | Promise<void>;
+  },
+): Promise<'completed' | 'failed'> {
+  const failure = requiredTeamWorkerFailure(teamRequired, workerCount);
+  if (failure === null) {
+    await handlers.completed();
+    return 'completed';
+  }
+  await handlers.failed(failure);
+  return 'failed';
+}
+
 /**
  * A Codex reasoning level the selected model does not advertise.
  *

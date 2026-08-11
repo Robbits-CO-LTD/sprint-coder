@@ -35,6 +35,18 @@ describe('RunCard terminal status', () => {
   it('settles a failed Turn without content as incomplete', () => {
     const html = renderRunCard({
       ...terminalTurn,
+      streamingMessageId: null,
+      streamingContent: '',
+    });
+
+    expect(html).toContain('失敗');
+    expect(html).toContain('未完了');
+    expect(html).not.toContain('回答をまとめ中');
+  });
+
+  it('settles an interrupted Turn without content as incomplete', () => {
+    const html = renderRunCard({
+      ...terminalTurn,
       status: 'interrupted',
       streamingMessageId: null,
       streamingContent: '',
@@ -42,6 +54,5 @@ describe('RunCard terminal status', () => {
 
     expect(html).toContain('中断');
     expect(html).toContain('未完了');
-    expect(html).not.toContain('回答をまとめ中');
   });
 });
