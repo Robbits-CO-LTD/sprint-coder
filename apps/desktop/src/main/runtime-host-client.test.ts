@@ -50,6 +50,11 @@ describe('RuntimeHostClient start acknowledgement', () => {
     await vi.advanceTimersByTimeAsync(15_000);
     expect(failed).toHaveBeenCalledOnce();
     expect(failed.mock.calls[0]?.[2]).toMatchObject({ code: 'RUNTIME_PROTOCOL_ERROR' });
+    expect(failed.mock.calls[0]?.[3]).toMatchObject({
+      failureStage: 'protocol_error',
+      runtimeKind: 'codex',
+      reasonCode: 'runtime_start_timeout',
+    });
     expect(child.messages.map(messageType)).toEqual(['hello', 'start', 'cancel']);
 
     await vi.advanceTimersByTimeAsync(5_000);
@@ -57,6 +62,128 @@ describe('RuntimeHostClient start acknowledgement', () => {
     expect(failed).toHaveBeenCalledOnce();
     client.dispose();
   });
+
+  it.each(['codex', 'claude'] as const)(
+    'fails a rejected %s start once and ignores late or duplicate terminal responses',
+    async (runtimeKind) => {
+      vi.useFakeTimers();
+      const failed = vi.fn();
+      const client = new RuntimeHostClient(vi.fn(), failed, undefined, undefined, runtimeKind);
+      const child = children[0]!;
+      child.emit('spawn');
+
+      client.start(
+        'task-reject',
+        'turn-reject',
+        'PROMPT_CANARY_182 TOKEN_CANARY_182 ENV_CANARY_182 CREDENTIAL_CANARY_182',
+        null,
+        'auto',
+        emptyCatalog(),
+      );
+      await Promise.resolve();
+      const start = child.messages.find((message) => messageType(message) === 'start') as Record<
+        string,
+        unknown
+      >;
+      const rejected = {
+        protocolVersion: start['protocolVersion'],
+        runtimeInstanceId: start['runtimeInstanceId'],
+        taskId: start['taskId'],
+        turnId: start['turnId'],
+        operationId: start['operationId'],
+        seq: 1,
+        type: 'error',
+        error: {
+          code: 'RUNTIME_PROTOCOL_ERROR',
+          userMessage: 'Runtime HostがTurn開始入力を拒否しました。',
+          retryable: false,
+        },
+        rejection: {
+          reasonCode: 'invalid_project_context_authority',
+          itemKind: 'instruction',
+          authority: 'none',
+        },
+      };
+
+      child.emit('message', rejected);
+      child.emit('message', rejected);
+      child.emit('message', { ...rejected, seq: 2, type: 'exit', code: 1, canceled: false });
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(failed).toHaveBeenCalledOnce();
+      expect(failed.mock.calls[0]?.[3]).toMatchObject({
+        failureStage: 'protocol_error',
+        runtimeKind,
+        reasonCode: 'invalid_project_context_authority',
+      });
+      const diagnosticJson = JSON.stringify(failed.mock.calls[0]?.[3]);
+      for (const canary of [
+        'PROMPT_CANARY_182',
+        'TOKEN_CANARY_182',
+        'ENV_CANARY_182',
+        'CREDENTIAL_CANARY_182',
+      ])
+        expect(diagnosticJson).not.toContain(canary);
+      client.dispose();
+    },
+  );
+
+  it.each(['codex', 'claude'] as const)(
+    'posts assistant and user Memory as valid %s starts without authority upgrades',
+    async (runtimeKind) => {
+      const failed = vi.fn();
+      const client = new RuntimeHostClient(vi.fn(), failed, undefined, undefined, runtimeKind);
+      const child = children[0]!;
+      child.emit('spawn');
+      const projectItems = [
+        {
+          id: 'assistant-memory',
+          kind: 'memory' as const,
+          authority: 'none' as const,
+          localOnly: false,
+          content: 'assistant memory',
+          sealedDigest: 'a'.repeat(64),
+          sourceTaskId: null,
+          sourceTurnId: null,
+          sourceReferenceId: null,
+          capturedAt: '2026-08-11T00:00:00.000Z',
+        },
+        {
+          id: 'user-memory',
+          kind: 'memory' as const,
+          authority: 'user' as const,
+          localOnly: false,
+          content: 'user memory',
+          sealedDigest: 'b'.repeat(64),
+          sourceTaskId: null,
+          sourceTurnId: null,
+          sourceReferenceId: null,
+          capturedAt: '2026-08-11T00:00:00.000Z',
+        },
+      ];
+
+      expect(
+        client.start('task-memory', 'turn-memory', 'hello', null, 'auto', emptyCatalog(), {
+          fragments: [],
+          projectItems,
+          projectSnapshotDigest: 'c'.repeat(64),
+          usageEvents: [],
+          compacted: false,
+        }),
+      ).toBe(true);
+      await Promise.resolve();
+
+      const start = child.messages.find((message) => messageType(message) === 'start') as {
+        projectItems: typeof projectItems;
+      };
+      expect(start.projectItems.map(({ kind, authority }) => ({ kind, authority }))).toEqual([
+        { kind: 'memory', authority: 'none' },
+        { kind: 'memory', authority: 'user' },
+      ]);
+      expect(failed).not.toHaveBeenCalled();
+      client.dispose();
+    },
+  );
 
   it('clears the deadline after a matching started acknowledgement', async () => {
     vi.useFakeTimers();

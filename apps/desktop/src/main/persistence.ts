@@ -9972,6 +9972,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       stderrObserved: diagnostic.stderrObserved,
       stderrTruncated: diagnostic.stderrTruncated,
       recordedAt: new Date().toISOString(),
+      ...(diagnostic.reasonCode === undefined ? {} : { reasonCode: diagnostic.reasonCode }),
     };
     const serialized = JSON.stringify(safeDiagnostic);
     if (Buffer.byteLength(serialized, 'utf8') > RUNTIME_DIAGNOSTIC_MAX_BYTES)

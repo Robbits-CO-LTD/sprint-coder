@@ -98,6 +98,55 @@ afterAll(() => {
 });
 
 describe('Runtime Host image two-phase state machine', () => {
+  it('returns a bounded rejection for a correlated invalid start without reflecting content', async () => {
+    await import('./index');
+    const invalid = {
+      ...startEnvelope('operation-invalid-authority', 'turn-invalid-authority'),
+      type: 'start',
+      input: 'PROMPT_CANARY_182',
+      projectItems: [
+        {
+          id: 'memory-canary-182',
+          kind: 'instruction',
+          authority: 'none',
+          localOnly: false,
+          sealedDigest: 'c'.repeat(64),
+          content:
+            'MEMORY_CANARY_182 TOKEN_CANARY_182 ENV_CANARY_182 CREDENTIAL_CANARY_182 /absolute/canary-182',
+        },
+      ],
+    };
+
+    hostMock.receive(invalid);
+
+    await vi.waitFor(() =>
+      expect(
+        hostMock.messages.some(
+          (message) =>
+            isRecord(message) &&
+            message['type'] === 'error' &&
+            message['operationId'] === 'operation-invalid-authority' &&
+            isRecord(message['rejection']) &&
+            message['rejection']['reasonCode'] === 'invalid_project_context_authority',
+        ),
+      ).toBe(true),
+    );
+    const serialized = JSON.stringify(
+      hostMock.messages.filter(
+        (message) => isRecord(message) && message['operationId'] === 'operation-invalid-authority',
+      ),
+    );
+    for (const canary of [
+      'PROMPT_CANARY_182',
+      'MEMORY_CANARY_182',
+      'TOKEN_CANARY_182',
+      'ENV_CANARY_182',
+      'CREDENTIAL_CANARY_182',
+      '/absolute/canary-182',
+    ])
+      expect(serialized).not.toContain(canary);
+  });
+
   it('prepares once, rejects a mismatched commit, and re-verifies before an exact commit', async () => {
     await import('./index');
     const manifest = [

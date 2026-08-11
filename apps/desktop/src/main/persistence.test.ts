@@ -1706,6 +1706,7 @@ if (runsWithElectronAbi)
         stderrObserved: true,
         stderrTruncated: false,
         recordedAt: new Date().toISOString(),
+        reasonCode: 'invalid_project_context_authority',
       });
       persistence.close();
 
@@ -1717,6 +1718,7 @@ if (runsWithElectronAbi)
         turnId: failedTurn.turnId,
         failureStage: 'protocol_error',
         unsupportedNotificationCount: 1,
+        reasonCode: 'invalid_project_context_authority',
       });
       expect(persisted?.stderrObserved).toBe(true);
       expect(JSON.stringify(persisted)).not.toContain('abcdefghijkl');
