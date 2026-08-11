@@ -32,7 +32,8 @@ import {
   evaluateNativeMutationPlatformGate,
   type NativeMutationPackagedLoadEvidence,
 } from './native-mutation-platform-gate';
-import { secureLogger } from './secure-logger';
+import { secureLogger, writeSecureLogEntry } from './secure-logger';
+import { combineLogSinks, createPersistentLog } from './persistent-log';
 import {
   installUpdateWithFallback,
   startAutoUpdate,
@@ -87,6 +88,8 @@ const hasLock = !squirrelStartup && app.requestSingleInstanceLock();
 if (squirrelStartup || !hasLock) {
   app.quit();
 } else {
+  initializePersistentDiagnostics();
+
   app.on('second-instance', () => {
     showMainWindow();
   });
@@ -135,12 +138,59 @@ if (squirrelStartup || !hasLock) {
     })
     .catch((error: unknown) => {
       // Fatal initialization failure must be visible, never silently swallowed (Slice 1.1).
+      secureLogger.error('Sprint Coder initialization failed', { process: 'main', error });
       dialog.showErrorBox(
         'Sprint Coder の起動に失敗しました',
         error instanceof Error ? `${error.message}\n\n${error.stack ?? ''}` : String(error),
       );
       app.exit(1);
     });
+}
+
+function initializePersistentDiagnostics(): void {
+  try {
+    const persistentLog = createPersistentLog(join(app.getPath('userData'), 'logs'));
+    secureLogger.setSink(combineLogSinks(persistentLog.sink, writeSecureLogEntry));
+    secureLogger.info('Persistent diagnostic logging initialized', {
+      process: 'main',
+      version: app.getVersion(),
+      platform: process.platform,
+      architecture: process.arch,
+      packaged: app.isPackaged,
+    });
+  } catch (error) {
+    secureLogger.error('Persistent diagnostic logging could not be initialized', error);
+  }
+
+  process.on('uncaughtException', (error) => {
+    secureLogger.error('Uncaught exception in Main process', { process: 'main', error });
+    app.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    secureLogger.error('Unhandled promise rejection in Main process', {
+      process: 'main',
+      reason,
+    });
+  });
+
+  app.on('render-process-gone', (_event, _webContents, details) => {
+    if (details.reason === 'clean-exit') return;
+    secureLogger.error('Renderer process exited unexpectedly', {
+      process: 'renderer',
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
+  });
+  app.on('child-process-gone', (_event, details) => {
+    if (details.reason === 'clean-exit') return;
+    secureLogger.error('Electron child process exited unexpectedly', {
+      process: details.type,
+      reason: details.reason,
+      exitCode: details.exitCode,
+      serviceName: details.serviceName,
+      name: details.name,
+    });
+  });
 }
 
 app.on('window-all-closed', () => {

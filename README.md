@@ -68,6 +68,19 @@ Local-firstは、Task履歴、設定、実行状態を端末内で管理する�
 
 セキュリティ設計と確認項目は[Security Checklist](docs/SECURITY_CHECKLIST.md)を参照してください。
 
+## エラー調査用ログ
+
+Sprint Coderは、起動失敗、Main processの未処理エラー、RendererやElectron子processの異常終了などをローカルのJSON Linesログへ保存します。通常の保存場所は次のとおりです。
+
+| OS                          | ログフォルダ                                                                      |
+| --------------------------- | --------------------------------------------------------------------------------- |
+| macOS                       | `~/Library/Application Support/Sprint Coder/logs/`                                |
+| Windows                     | `%APPDATA%\Sprint Coder\logs\`                                                    |
+| Linux                       | `$XDG_CONFIG_HOME/Sprint Coder/logs/`（未設定時は`~/.config/Sprint Coder/logs/`） |
+| ソースからのdevelopment起動 | リポジトリ直下の`.vite-user-data/logs/`                                           |
+
+現在のログは`sprint-coder.log`、直前のログは`sprint-coder.previous.log`です。現在のログが5MBに達すると1世代だけローテーションします。既知のcredential形式やsecret項目は保存前に秘匿化しますが、第三者へ共有する前には内容を確認してください。
+
 ## 開発
 
 ```bash

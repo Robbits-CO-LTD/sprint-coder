@@ -15,7 +15,11 @@ const SECRET_QUERY_KEY =
   /^(?:api[-_]?key|key|token|access[-_]?token|refresh[-_]?token|authorization|auth|signature|sig|secret)$/i;
 
 export class SecureLogger {
-  constructor(private readonly sink: SecureLogSink = writeSecureLogEntry) {}
+  constructor(private sink: SecureLogSink = writeSecureLogEntry) {}
+
+  setSink(sink: SecureLogSink): void {
+    this.sink = sink;
+  }
 
   debug(message: string, context?: unknown): void {
     this.write('debug', message, context);
@@ -87,7 +91,7 @@ function redactLogString(value: string): string {
   }
 }
 
-function writeSecureLogEntry(entry: SecureLogEntry): void {
+export function writeSecureLogEntry(entry: SecureLogEntry): void {
   const line = `${JSON.stringify(entry)}\n`;
   if (entry.level === 'error' || entry.level === 'warn') process.stderr.write(line);
   else process.stdout.write(line);

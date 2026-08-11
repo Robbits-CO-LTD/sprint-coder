@@ -2948,7 +2948,15 @@ export class IpcRouter {
           const value = outputSchema.parse(await handler(envelope.payload, event, envelope));
           return { ok: true, requestId: envelope.requestId, value };
         } catch (error) {
-          return { ok: false, requestId: fallbackRequestId, error: toPublicError(error) };
+          const publicError = toPublicError(error);
+          if (publicError.code === 'INTERNAL_ERROR')
+            secureLogger.error('IPC request failed unexpectedly', {
+              process: 'main',
+              channel,
+              requestId: fallbackRequestId,
+              error,
+            });
+          return { ok: false, requestId: fallbackRequestId, error: publicError };
         }
       },
     );
@@ -5109,10 +5117,25 @@ export class IpcRouter {
             turnId,
             diagnostic,
           ).diagnosticId;
-        } catch {
+        } catch (diagnosticError) {
           // A diagnostic must never prevent the Turn itself from reaching a terminal state.
+          secureLogger.error('Runtime failure diagnostic could not be persisted', {
+            process: 'main',
+            runtimeKind: kind,
+            taskId,
+            turnId,
+            error: diagnosticError,
+          });
         }
       }
+      secureLogger.error('Runtime failed', {
+        process: 'runtime-host',
+        runtimeKind: kind,
+        taskId,
+        turnId,
+        errorCode: error.code,
+        diagnosticId,
+      });
       this.pushRuntimeStatus({
         kind,
         state: 'failed',
