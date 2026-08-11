@@ -3580,6 +3580,8 @@ export class IpcRouter {
           workspace: runtimeWorkspaceSet,
           toolCatalog: toolCatalogSnapshot,
           writeScope,
+          skills: runtimeSkills,
+          teamMcpEnabled: teamMcp !== undefined,
         }),
       ),
     );

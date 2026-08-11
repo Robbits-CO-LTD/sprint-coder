@@ -223,6 +223,8 @@ export class RuntimeHostClient {
               toolCatalog: toolCatalogSnapshot,
               ...(writeScope === undefined ? {} : { writeScope }),
               ...(promptAgent === undefined ? {} : { agent: promptAgent }),
+              skills,
+              teamMcpEnabled: teamMcp !== undefined,
             }),
           )
         : rawContextFragments;

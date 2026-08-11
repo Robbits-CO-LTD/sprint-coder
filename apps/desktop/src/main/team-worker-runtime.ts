@@ -332,6 +332,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       typeof runtimeWorkspace === 'string' || runtimeWorkspace === null
         ? runtimeWorkspaceSetFromLegacyPath(runtimeWorkspace)
         : runtimeWorkspace;
+    const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId);
+    if (input.worker.canDelegate === true && teamMcp === undefined)
+      throw new Error('Manager Team MCP is unavailable');
     const contextFragments = injectPromptGuidance(
       context.fragments
         .filter(({ source }) => choice.kind !== 'codex' || source !== 'skill')
@@ -356,11 +359,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           role: 'subagent',
           mode: writeScope === 'read-only' ? 'read-only' : 'write-capable',
         },
+        teamMcpEnabled: teamMcp !== undefined,
       }),
     );
-    const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId);
-    if (input.worker.canDelegate === true && teamMcp === undefined)
-      throw new Error('Manager Team MCP is unavailable');
     const serializedPayload = serializeCliExecutionPayload({
       kind: choice.kind,
       request: prompt,

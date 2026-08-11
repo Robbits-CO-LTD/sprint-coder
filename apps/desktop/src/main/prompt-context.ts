@@ -46,6 +46,8 @@ export type CanonicalPromptContext = Readonly<{
     kind: string;
     sideEffect: string;
   }>[];
+  skills: readonly string[];
+  integrations: readonly string[];
 }>;
 
 export type CompiledPromptGuidance = Readonly<{
@@ -64,6 +66,8 @@ export function compilePromptGuidance(input: {
   shell?: string | null;
   workspaceRules?: readonly PromptWorkspaceRule[];
   vcs?: PromptEnvironment['vcs'];
+  skills?: readonly Readonly<{ name: string }>[];
+  teamMcpEnabled?: boolean;
 }): CompiledPromptGuidance {
   const requestedAgent = input.agent ?? {
     role: 'primary',
@@ -101,7 +105,7 @@ export function compilePromptGuidance(input: {
         input.shell === undefined
           ? (process.env.SHELL ?? process.env.COMSPEC ?? null)
           : input.shell,
-      currentDate: (input.now ?? new Date()).toISOString().slice(0, 10),
+      currentDate: localDate(input.now ?? new Date()),
       workingDirectory:
         input.workspace.roots.find(({ rootId }) => rootId === input.workspace.primaryRootId)
           ?.path ?? null,
@@ -114,6 +118,8 @@ export function compilePromptGuidance(input: {
       (left, right) => left.depth - right.depth || left.path.localeCompare(right.path),
     ),
     tools,
+    skills: [...new Set((input.skills ?? []).map(({ name }) => name))].sort(),
+    integrations: input.teamMcpEnabled === true ? ['sprint-coder-team-mcp'] : [],
   };
   const content = renderPromptGuidance(context);
   return Object.freeze({ context, content, digest: digestCanonical(context) });
@@ -251,5 +257,21 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
       );
     lines.push('一覧にないツールを利用可能だと仮定しない。');
   }
+  if (context.skills.length > 0) {
+    lines.push('', 'このTurnで明示的に選択されたSkill:');
+    for (const skill of context.skills) lines.push(`- ${skill}`);
+    lines.push('未選択のSkillを利用可能だと仮定しない。');
+  }
+  if (context.integrations.length > 0) {
+    lines.push('', 'このTurnで接続済みの統合:');
+    for (const integration of context.integrations) lines.push(`- ${integration}`);
+  }
   return lines.join('\n');
+}
+
+function localDate(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }

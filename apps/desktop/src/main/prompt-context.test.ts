@@ -63,6 +63,8 @@ describe('prompt context compiler', () => {
       vcs: [],
     });
     expect(withoutTools.content).not.toContain('実在が確認されたツール');
+    expect(withoutTools.content).not.toContain('明示的に選択されたSkill');
+    expect(withoutTools.content).not.toContain('接続済みの統合');
 
     const withCeiling = compilePromptGuidance({
       workspace,
@@ -79,6 +81,23 @@ describe('prompt context compiler', () => {
     expect(withCeiling.context.tools.map(({ name }) => name)).toEqual(['read_file']);
     expect(withCeiling.content).toContain('親にない能力やツールを子が持つものとして扱わない');
     expect(withCeiling.content).not.toContain('write_file');
+  });
+
+  it('includes only explicitly selected Skills and connected integrations', () => {
+    const compiled = compilePromptGuidance({
+      workspace,
+      toolCatalog: catalog([]),
+      workspaceRules: [],
+      vcs: [],
+      skills: [{ name: 'release' }, { name: 'release' }],
+      teamMcpEnabled: true,
+      now: new Date(2026, 7, 11, 0, 5),
+    });
+    expect(compiled.context.skills).toEqual(['release']);
+    expect(compiled.context.integrations).toEqual(['sprint-coder-team-mcp']);
+    expect(compiled.content).toContain('このTurnで明示的に選択されたSkill:');
+    expect(compiled.content).toContain('このTurnで接続済みの統合:');
+    expect(compiled.context.environment.currentDate).toBe('2026-08-11');
   });
 
   it('injects the canonical guidance once as system authority', () => {
