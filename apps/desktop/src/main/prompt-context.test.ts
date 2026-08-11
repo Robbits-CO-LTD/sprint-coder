@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import {
@@ -16,7 +17,7 @@ const workspace: RuntimeWorkspaceSet = {
 
 describe('prompt context compiler', () => {
   it('discovers the repository AGENTS.md as a scoped workspace rule', () => {
-    const root = process.cwd();
+    const root = fileURLToPath(new URL('../../../../', import.meta.url)).replace(/\/$/u, '');
     const rules = discoverWorkspaceRules({
       primaryRootId: 'repo',
       digest: 'repo',

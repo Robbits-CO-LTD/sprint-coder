@@ -206,7 +206,9 @@ describe('RuntimeHostClient start acknowledgement', () => {
       operationId: start['operationId'],
       seq: 1,
       type: 'started',
-      acceptedContextFragmentIds: [],
+      acceptedContextFragmentIds: (start['contextFragments'] as Array<{ id: string }>).map(
+        ({ id }) => id,
+      ),
       acceptedProjectItemIds: [],
       acceptedProjectSnapshotDigest: null,
       acceptedPayloadDigest: start['payloadDigest'],
