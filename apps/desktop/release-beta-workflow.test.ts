@@ -8,12 +8,21 @@ const workflow = readFileSync(
 );
 
 describe('release signing and notarization', () => {
-  it('starts platform builds after metadata while keeping draft publication behind every gate', () => {
-    expect(workflow).toMatch(/  make:\n(?:.|\n)*?    needs: metadata/);
+  it('parallelizes validation while keeping signed builds and draft publication behind every gate', () => {
     expect(workflow).toContain(
-      'needs: [metadata, validate-quality, validate-package-tests, validate-desktop-tests, make]',
+      'needs: [metadata, validate-quality, validate-package-tests, validate-desktop-tests]',
     );
+    expect(workflow).toMatch(/ {2}make:\n(?:.|\n)*? {4}needs: release-validation/);
+    expect(workflow).toContain('needs: [metadata, release-validation, make]');
     expect(workflow).toContain('shard: [1/3, 2/3, 3/3]');
+  });
+
+  it('always rebuilds distributable native binaries instead of consuming CI caches', () => {
+    const makeJob = workflow.slice(workflow.indexOf('\n  make:'), workflow.indexOf('\n  release:'));
+
+    expect(makeJob).toContain('npx --yes @electron/rebuild -f -w better-sqlite3');
+    expect(makeJob).toContain('npm run build:native-safe-fs');
+    expect(makeJob).not.toContain('actions/cache');
   });
 
   it('accepts stable and beta tags while keeping releases as drafts', () => {
@@ -91,7 +100,9 @@ describe('release signing and notarization', () => {
   });
 
   it('resumes partial draft uploads by replacing the complete validated asset set', () => {
-    const draftCheck = workflow.indexOf("Release is not a draft; refusing to replace published assets.");
+    const draftCheck = workflow.indexOf(
+      'Release is not a draft; refusing to replace published assets.',
+    );
     const tagCheck = workflow.indexOf(
       'Release tag targets ${tag_commit}, expected ${expected_commit}.',
     );
@@ -117,9 +128,7 @@ describe('release signing and notarization', () => {
   });
 
   it('refuses to turn an existing published release back into a draft', () => {
-    const publishedGuard = workflow.indexOf(
-      'Release is already published; refusing to modify it.',
-    );
+    const publishedGuard = workflow.indexOf('Release is already published; refusing to modify it.');
     const existingReleaseEdit = workflow.indexOf('gh release edit "${RELEASE_TAG}"');
 
     expect(publishedGuard).toBeGreaterThan(-1);

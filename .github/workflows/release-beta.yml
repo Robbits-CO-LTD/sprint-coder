@@ -163,11 +163,20 @@ jobs:
         working-directory: apps/desktop
         run: npx vitest run --shard=${{ matrix.shard }}
 
+  release-validation:
+    name: Validate release
+    needs: [metadata, validate-quality, validate-package-tests, validate-desktop-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verify release validation gates
+        run: echo 'All release validation gates passed.'
+
   make:
     name: Make ${{ matrix.label }}
-    # Start platform builds as soon as cheap tag metadata is valid. Publishing still waits for
-    # every quality and test gate below, so parallelism does not weaken release safety.
-    needs: metadata
+    # Signing, notarization, and distributable native binaries begin only after every validation
+    # gate passes. The validation gates themselves run in parallel above.
+    needs: release-validation
     strategy:
       fail-fast: false
       matrix:
@@ -223,29 +232,11 @@ jobs:
         env:
           ELECTRON_RUN_AS_NODE: '1'
 
-      # CI on the same release commit has already produced these platform-specific binaries in
-      # the common case. A cache miss still performs the exact release rebuild as before.
-      - name: Restore better-sqlite3 Electron ABI binary
-        id: better-sqlite-cache
-        uses: actions/cache@v6
-        with:
-          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
-          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
-
       - name: Rebuild native modules for Electron ABI
-        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
         working-directory: apps/desktop
         run: npx --yes @electron/rebuild -f -w better-sqlite3
 
-      - name: Restore NativeSafeFs Electron ABI binary
-        id: native-safe-fs-cache
-        uses: actions/cache@v6
-        with:
-          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
-          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
-
       - name: Build NativeSafeFs for Electron ABI
-        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
         run: npm run build:native-safe-fs
 
       - name: Prepare temporary macOS signing credentials
@@ -420,7 +411,7 @@ jobs:
 
   release:
     name: Prepare draft release
-    needs: [metadata, validate-quality, validate-package-tests, validate-desktop-tests, make]
+    needs: [metadata, release-validation, make]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
