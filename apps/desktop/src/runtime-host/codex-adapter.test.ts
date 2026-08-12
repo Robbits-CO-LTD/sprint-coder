@@ -81,7 +81,7 @@ describe('Codex runtime probe', () => {
       failureStage: 'abnormal_exit',
       cliVersion: 'codex-cli 1.0.0',
       lastRecognizedNotification: 'turn/started',
-      lastReceivedNotification: '[unsupported]',
+      lastReceivedNotification: 'future/unsupported',
       unsupportedNotificationCount: 1,
     });
     expect(diagnostics[0]?.stderrObserved).toBe(true);
@@ -578,7 +578,7 @@ describe('Codex runtime probe', () => {
       'codex-win32-x64',
       'vendor',
       'x86_64-pc-windows-msvc',
-      'codex',
+      'bin',
       'codex.exe',
     );
     await mkdir(join(executable, '..'), { recursive: true });
@@ -601,7 +601,7 @@ describe('Codex runtime probe', () => {
       'codex-win32-x64',
       'vendor',
       'x86_64-pc-windows-msvc',
-      'codex',
+      'bin',
       'codex.exe',
     );
     const desktopExecutable = join(

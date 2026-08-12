@@ -10041,6 +10041,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       ...(diagnostic.capabilityMismatch === undefined
         ? {}
         : { capabilityMismatch: diagnostic.capabilityMismatch }),
+      ...(diagnostic.cliResolution === undefined
+        ? {}
+        : { cliResolution: diagnostic.cliResolution }),
       teamMcp: diagnostic.teamMcp,
       lastRecognizedNotification: diagnostic.lastRecognizedNotification,
       lastReceivedNotification: diagnostic.lastReceivedNotification,
