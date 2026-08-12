@@ -60,4 +60,15 @@ describe('immutable ExecutionSpec', () => {
     expect(executionSpecDigest(first)).toBe(executionSpecDigest(reordered));
     expect(executionSpecDigest(first)).not.toBe(executionSpecDigest(changed));
   });
+
+  it('accepts the Windows ProgramFiles(x86) discovery key without widening key syntax', () => {
+    const spec = createExecutionSpec({
+      ...base,
+      envDelta: { 'PROGRAMFILES(X86)': 'C:\\Program Files (x86)' },
+    });
+    expect(spec.envDelta).toEqual({ 'PROGRAMFILES(X86)': 'C:\\Program Files (x86)' });
+    expect(() =>
+      createExecutionSpec({ ...base, envDelta: { 'PROGRAMFILES(ARM64)': 'unsafe' } }),
+    ).toThrow('environment key is invalid');
+  });
 });
