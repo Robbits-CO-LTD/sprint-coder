@@ -66,7 +66,7 @@ describe('persistent diagnostic log', () => {
     });
 
     const chatPath = join(root, 'chat', 'task-1.jsonl');
-    const teamPath = join(root, 'team', 'team-1.jsonl');
+    const teamPath = join(root, 'team', 'team-team-1.jsonl');
     const chatContents = readFileSync(chatPath, 'utf8');
     expect(chatContents).not.toContain('SPRINT_CODER_SECRET_CANARY');
     expect(JSON.parse(chatContents)).toMatchObject({
@@ -106,6 +106,38 @@ describe('persistent diagnostic log', () => {
 
     expect(readFileSync(join(root, 'chat', 'unknown.jsonl'), 'utf8')).toContain('turn.unknown');
     expect(readFileSync(join(root, 'team', 'unknown.jsonl'), 'utf8')).toContain('team.unknown');
+  });
+
+  it('separates Team streams by Team, then Task, without namespace collisions', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sprint-coder-log-'));
+    const logger = new SecureLogger(createPersistentLog(root).sink);
+
+    logger.error('Team-bound failure', undefined, {
+      category: 'team',
+      event: 'turn.runtime.failed',
+      taskId: 'same-id',
+      teamId: 'same-id',
+    });
+    logger.error('Task-only failure A', undefined, {
+      category: 'team',
+      event: 'turn.runtime.failed',
+      taskId: 'same-id',
+    });
+    logger.error('Task-only failure B', undefined, {
+      category: 'team',
+      event: 'turn.runtime.failed',
+      taskId: 'other-task',
+    });
+
+    expect(readFileSync(join(root, 'team', 'team-same-id.jsonl'), 'utf8')).toContain(
+      'Team-bound failure',
+    );
+    expect(readFileSync(join(root, 'team', 'task-same-id.jsonl'), 'utf8')).toContain(
+      'Task-only failure A',
+    );
+    expect(readFileSync(join(root, 'team', 'task-other-task.jsonl'), 'utf8')).toContain(
+      'Task-only failure B',
+    );
   });
 
   it('keeps one previous file per stream when the size limit is reached', () => {
