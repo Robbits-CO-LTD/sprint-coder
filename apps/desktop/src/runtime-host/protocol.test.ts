@@ -41,6 +41,30 @@ function startEnvelope() {
 }
 
 describe('Runtime Host protocol', () => {
+  it('accepts only a non-empty unique canonical Team MCP tool subset', () => {
+    const valid = {
+      ...startEnvelope(),
+      teamMcp: {
+        socketPath: '/tmp/team.sock',
+        token: '1234567890abcdef',
+        guidance: 'team',
+        toolNames: ['team_hire_worker'],
+      },
+    };
+    expect(isMainToRuntimeEnvelope(valid)).toBe(true);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        teamMcp: { ...valid.teamMcp, toolNames: ['team_hire_worker', 'team_hire_worker'] },
+      }),
+    ).toBe(false);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        teamMcp: { ...valid.teamMcp, toolNames: ['unknown_tool'] },
+      }),
+    ).toBe(false);
+  });
   it.runIf(process.platform === 'win32')(
     'keeps legacy Workspace identity stable across drive-letter casing',
     () => {
@@ -316,6 +340,10 @@ describe('Runtime Host protocol', () => {
         elapsedMs: 123,
         appVersion: '0.2.1',
         cliVersion: 'codex 1.0.0',
+        capabilityMismatch: {
+          missingTools: ['mcp__team__team_hire_worker'],
+          unexpectedTools: ['mcp__team__skill_draft_create'],
+        },
         teamMcp: { enabled: false, status: 'not_configured' },
         lastRecognizedNotification: 'turn/started',
         lastReceivedNotification: '[unsupported]',
@@ -327,6 +355,15 @@ describe('Runtime Host protocol', () => {
     };
 
     expect(isRuntimeToMainEnvelope(error)).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: {
+          ...error.diagnostic,
+          capabilityMismatch: { missingTools: ['/Users/alice'], unexpectedTools: [] },
+        },
+      }),
+    ).toBe(false);
     expect(
       isRuntimeToMainEnvelope({
         ...error,

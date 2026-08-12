@@ -184,6 +184,18 @@ describe('RuntimeFailureDiagnosticCollector', () => {
     expect(diagnostic.stderrTruncated).toBe(true);
   });
 
+  it('retains only safe bounded capability differences', () => {
+    const collector = new RuntimeFailureDiagnosticCollector('claude', '0.2.1', null, true);
+    collector.recordCapabilityMismatch(
+      ['mcp__team__team_hire_worker', '/Users/private'],
+      ['mcp__team__skill_draft_create', 'token=value'],
+    );
+    expect(collector.snapshot('protocol_error').capabilityMismatch).toEqual({
+      missingTools: ['mcp__team__team_hire_worker'],
+      unexpectedTools: ['mcp__team__skill_draft_create'],
+    });
+  });
+
   it('drops untrusted CLI versions and unsupported notification names', () => {
     const collector = new RuntimeFailureDiagnosticCollector(
       'codex',

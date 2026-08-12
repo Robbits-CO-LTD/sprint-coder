@@ -34,7 +34,8 @@ import type {
 import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
 import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from './probe-budget';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
-import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
+import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
+import type { TeamMcpToolName } from './team-mcp-tool-contract';
 import { terminateRuntimeProcessTree } from './process-tree';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
@@ -242,7 +243,14 @@ export class ClaudeRuntimeAdapter {
       (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-')));
     const runtimeWorkspaceRoots = workspace.roots.map(({ path }) => path);
     let teamMcpDirectory: string | null = null;
-    let teamMcpArgs: { configPath: string; guidance: string; enableWebSearch: boolean } | undefined;
+    let teamMcpArgs:
+      | {
+          configPath: string;
+          guidance: string;
+          toolNames: readonly TeamMcpToolName[];
+          enableWebSearch: boolean;
+        }
+      | undefined;
     if (teamMcp !== undefined) {
       let nodeCommand: string;
       try {
@@ -284,6 +292,7 @@ export class ClaudeRuntimeAdapter {
       teamMcpArgs = {
         configPath,
         guidance: teamMcp.guidance,
+        toolNames: teamMcp.toolNames,
         enableWebSearch: teamMcp.enableWebSearch === true,
       };
     }
@@ -293,7 +302,7 @@ export class ClaudeRuntimeAdapter {
     const normalizer = new ClaudeJsonlNormalizer(
       claudeExpectedCapabilities(
         effectiveScope,
-        teamMcp !== undefined,
+        teamMcp?.toolNames,
         teamMcp?.enableWebSearch === true,
       ),
     );
@@ -348,6 +357,8 @@ export class ClaudeRuntimeAdapter {
         }
       } catch (error) {
         failed = true;
+        if (error instanceof ClaudeCapabilityViolationError)
+          diagnostics.recordCapabilityMismatch(error.missingTools, error.unexpectedTools);
         failWithDiagnostic(claudeOutputErrorToPublicError(error), 'protocol_error');
         void terminateProcessTree(child);
       }
@@ -464,7 +475,7 @@ const TEAM_MCP_SERVER_NAME = 'team';
 
 function claudeExpectedCapabilities(
   writeScope: RuntimeWriteScope,
-  teamMcpEnabled: boolean,
+  teamMcpToolNames: readonly TeamMcpToolName[] | undefined,
   enableWebSearch: boolean,
 ): ClaudeExpectedCapabilities {
   const configuredTools = CLAUDE_TOOLS_BY_SCOPE[writeScope];
@@ -474,11 +485,11 @@ function claudeExpectedCapabilities(
       : [...configuredTools, 'WebSearch'];
   return {
     builtInTools,
-    ...(teamMcpEnabled
+    ...(teamMcpToolNames !== undefined
       ? {
           teamMcp: {
             serverName: TEAM_MCP_SERVER_NAME,
-            toolNames: TEAM_MCP_TOOL_NAMES.map((name) => `mcp__${TEAM_MCP_SERVER_NAME}__${name}`),
+            toolNames: teamMcpToolNames.map((name) => `mcp__${TEAM_MCP_SERVER_NAME}__${name}`),
           },
         }
       : {}),
@@ -557,7 +568,12 @@ const CLAUDE_PERMISSION_MODE_BY_SCOPE: Record<RuntimeWriteScope, string> = {
 
 export function buildClaudeArgs(
   model: string,
-  teamMcp?: { configPath: string; guidance: string; enableWebSearch?: boolean },
+  teamMcp?: {
+    configPath: string;
+    guidance: string;
+    toolNames: readonly TeamMcpToolName[];
+    enableWebSearch?: boolean;
+  },
   effort?: string,
   writeScope: RuntimeWriteScope = 'read-only',
   workspaceRoots: readonly string[] = [],
@@ -596,7 +612,10 @@ export function buildClaudeArgs(
           '--mcp-config',
           teamMcp.configPath,
           '--allowedTools',
-          teamMcp.enableWebSearch === true ? 'mcp__team__*,WebSearch' : 'mcp__team__*',
+          [
+            ...teamMcp.toolNames.map((name) => `mcp__team__${name}`),
+            ...(teamMcp.enableWebSearch === true ? ['WebSearch'] : []),
+          ].join(','),
           '--append-system-prompt',
           teamMcp.guidance,
         ]),

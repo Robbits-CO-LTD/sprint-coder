@@ -18,6 +18,7 @@ export class RuntimeFailureDiagnosticCollector {
   private lastReceivedNotification: string | null = null;
   private lastRecognizedNotification: string | null = null;
   private unsupportedNotificationCount = 0;
+  private capabilityMismatch: RuntimeFailureDiagnostic['capabilityMismatch'];
 
   constructor(
     private readonly runtimeKind: 'codex' | 'claude',
@@ -54,6 +55,18 @@ export class RuntimeFailureDiagnosticCollector {
     if (this.stderrBytes > STDERR_TAIL_MAX_BYTES) this.stderrTruncated = true;
   }
 
+  recordCapabilityMismatch(
+    missingTools: readonly string[],
+    unexpectedTools: readonly string[],
+  ): void {
+    const safe = (names: readonly string[]): string[] =>
+      names.filter((name) => /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u.test(name)).slice(0, 32);
+    this.capabilityMismatch = {
+      missingTools: safe(missingTools),
+      unexpectedTools: safe(unexpectedTools),
+    };
+  }
+
   snapshot(stage: RuntimeFailureStage, now = Date.now()): RuntimeFailureDiagnostic {
     const diagnostic: RuntimeFailureDiagnostic = {
       version: 1,
@@ -63,6 +76,9 @@ export class RuntimeFailureDiagnosticCollector {
       elapsedMs: safeElapsedMilliseconds(this.startedAt, now),
       appVersion: boundedText(this.appVersion, 64) ?? 'unknown',
       cliVersion: safeCliVersion(this.runtimeKind, this.cliVersion),
+      ...(this.capabilityMismatch === undefined
+        ? {}
+        : { capabilityMismatch: this.capabilityMismatch }),
       teamMcp: {
         enabled: this.teamMcpEnabled,
         status: this.teamMcpEnabled ? 'configured' : 'not_configured',

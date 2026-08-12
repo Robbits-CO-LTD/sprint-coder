@@ -18,7 +18,7 @@ import {
   terminateCodexProcessTree,
   isUnsupportedMultiRootError,
 } from './codex-adapter';
-import { TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
+import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 import type { RuntimeFailureDiagnostic } from './protocol';
 
 const temporaryRoots: string[] = [];
@@ -731,11 +731,14 @@ describe('Codex runtime probe', () => {
     const args = buildCodexArgs('auto', undefined, 'read-only', {
       command: 'node',
       scriptPath: '/tmp/team-mcp-server.cjs',
+      toolNames: TEAM_CORE_MCP_TOOL_NAMES,
     });
     expect(args).toContain('mcp_servers.team.command="node"');
     expect(args).toContain('mcp_servers.team.args=["/tmp/team-mcp-server.cjs"]');
     expect(args).toContain('mcp_servers.team.enabled=true');
-    expect(args).toContain(`mcp_servers.team.enabled_tools=${JSON.stringify(TEAM_MCP_TOOL_NAMES)}`);
+    expect(args).toContain(
+      `mcp_servers.team.enabled_tools=${JSON.stringify(TEAM_CORE_MCP_TOOL_NAMES)}`,
+    );
     expect(args).toContain('mcp_servers.team.default_tools_approval_mode="approve"');
     expect(args).toContain('mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]');
     expect(args).toContain('features.tool_search_always_defer_mcp_tools=false');
@@ -744,7 +747,11 @@ describe('Codex runtime probe', () => {
   });
 
   it('enables live Web search only for an explicitly research-enabled Team turn', () => {
-    const base = { command: 'node', scriptPath: '/tmp/team-mcp-server.cjs' };
+    const base = {
+      command: 'node',
+      scriptPath: '/tmp/team-mcp-server.cjs',
+      toolNames: TEAM_CORE_MCP_TOOL_NAMES,
+    };
     expect(buildCodexArgs('auto', undefined, 'read-only', base)).not.toContain('web_search="live"');
     expect(
       buildCodexArgs('auto', undefined, 'read-only', { ...base, enableWebSearch: true }),

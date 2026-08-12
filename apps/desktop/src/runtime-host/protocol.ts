@@ -14,8 +14,9 @@ import { basename, dirname, isAbsolute, normalize, sep } from 'node:path';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
+import { TEAM_MCP_TOOL_NAMES, type TeamMcpToolName } from './team-mcp-tool-contract';
 
-export const RUNTIME_PROTOCOL_VERSION = 8;
+export const RUNTIME_PROTOCOL_VERSION = 9;
 
 export type RuntimeImageAttachmentManifestEntry = Readonly<{
   id: string;
@@ -117,6 +118,8 @@ export type RuntimeTeamMcpOption = Readonly<{
   socketPath: string;
   token: string;
   guidance: string;
+  /** Exact, Main-authorized tools exposed by this Turn's bridge registration. */
+  toolNames: readonly TeamMcpToolName[];
   /** Enables the Runtime's native live-Web search only for a Leader/Manager that must research
    * candidate models before hiring. Omitted/false preserves the existing no-Web Team profile. */
   enableWebSearch?: boolean;
@@ -164,6 +167,10 @@ export type RuntimeFailureDiagnostic = Readonly<{
   elapsedMs: number;
   appVersion: string;
   cliVersion: string | null;
+  capabilityMismatch?: Readonly<{
+    missingTools: readonly string[];
+    unexpectedTools: readonly string[];
+  }>;
   teamMcp: Readonly<{
     enabled: boolean;
     status: 'configured' | 'not_configured';
@@ -563,6 +570,13 @@ function isRuntimeTeamMcpOption(value: unknown): value is RuntimeTeamMcpOption {
     record['token'].length <= 256 &&
     typeof record['guidance'] === 'string' &&
     record['guidance'].length <= 20_000 &&
+    Array.isArray(record['toolNames']) &&
+    record['toolNames'].length > 0 &&
+    record['toolNames'].length <= TEAM_MCP_TOOL_NAMES.length &&
+    new Set(record['toolNames']).size === record['toolNames'].length &&
+    record['toolNames'].every(
+      (name) => typeof name === 'string' && TEAM_MCP_TOOL_NAMES.includes(name as TeamMcpToolName),
+    ) &&
     (record['enableWebSearch'] === undefined || typeof record['enableWebSearch'] === 'boolean')
   );
 }
@@ -767,6 +781,7 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
         'elapsedMs',
         'appVersion',
         'cliVersion',
+        'capabilityMismatch',
         'teamMcp',
         'lastRecognizedNotification',
         'lastReceivedNotification',
@@ -807,6 +822,9 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
           : /^(?:claude-code )?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \(Claude Code\))?$/.test(
               record['cliVersion'],
             )))) &&
+    (!('capabilityMismatch' in record) ||
+      record['capabilityMismatch'] === undefined ||
+      isCapabilityMismatch(record['capabilityMismatch'])) &&
     typeof teamMcp === 'object' &&
     teamMcp !== null &&
     Object.keys(teamMcp).every((key) => key === 'enabled' || key === 'status') &&
@@ -844,6 +862,22 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
   } catch {
     return false;
   }
+}
+
+function isCapabilityMismatch(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const safeList = (candidate: unknown): boolean =>
+    Array.isArray(candidate) &&
+    candidate.length <= 32 &&
+    candidate.every(
+      (name) => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u.test(name),
+    );
+  return (
+    Object.keys(record).every((key) => ['missingTools', 'unexpectedTools'].includes(key)) &&
+    safeList(record['missingTools']) &&
+    safeList(record['unexpectedTools'])
+  );
 }
 
 function safeCorrelationId(value: unknown): string | null {

@@ -35,7 +35,8 @@ import type {
 import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
 import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from './probe-budget';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
-import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
+import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
+import type { TeamMcpToolName } from './team-mcp-tool-contract';
 import { terminateRuntimeProcessTree } from './process-tree';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
@@ -284,6 +285,7 @@ export class CodexRuntimeAdapter {
         teamMcpProfile = {
           command: nodeCommand,
           scriptPath,
+          toolNames: teamMcp.toolNames,
           enableWebSearch: teamMcp.enableWebSearch === true,
         };
       }
@@ -897,6 +899,7 @@ export function buildCodexPrompt(
 export type CodexTeamMcpProfile = Readonly<{
   command: string;
   scriptPath: string;
+  toolNames: readonly TeamMcpToolName[];
   enableWebSearch?: boolean;
 }>;
 
@@ -962,7 +965,7 @@ export function buildCodexArgs(
           '-c',
           'mcp_servers.team.enabled=true',
           '-c',
-          `mcp_servers.team.enabled_tools=${JSON.stringify(TEAM_MCP_TOOL_NAMES)}`,
+          `mcp_servers.team.enabled_tools=${JSON.stringify(teamMcp.toolNames)}`,
           '-c',
           'mcp_servers.team.default_tools_approval_mode="approve"',
           '-c',

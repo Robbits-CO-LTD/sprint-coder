@@ -19,7 +19,15 @@ export class ClaudeRateLimitError extends ClaudeOutputError {
 // should make this structurally impossible, but the normalizer independently verifies the CLI's
 // own reported capabilities before trusting anything else in the stream, mirroring how the Codex
 // normalizer treats an unexpected approval request as a fatal profile violation.
-export class ClaudeCapabilityViolationError extends Error {}
+export class ClaudeCapabilityViolationError extends Error {
+  constructor(
+    message: string,
+    readonly missingTools: readonly string[] = [],
+    readonly unexpectedTools: readonly string[] = [],
+  ) {
+    super(message);
+  }
+}
 
 // What the CLI's own session-init report is allowed to show. The built-in set is exact for the
 // read-only/workspace-write profiles and intentionally open for Claude's `--tools default` full
@@ -358,10 +366,17 @@ function assertExpectedCapabilities(
       : reportedTeamServer?.['name'] === expected.teamMcp.serverName &&
         (reportedTeamServer['status'] === 'connected' ||
           reportedTeamServer['status'] === 'pending');
-  if (!toolsMatch || !serversMatch)
+  if (!toolsMatch || !serversMatch) {
+    const comparisonExpected = expectedExactTools ?? expectedMcpTools;
+    const comparisonReported = expectedExactTools === null ? reportedMcpTools : reportedTools;
+    const missingTools = [...comparisonExpected].filter((name) => !comparisonReported.has(name));
+    const unexpectedTools = [...comparisonReported].filter((name) => !comparisonExpected.has(name));
     throw new ClaudeCapabilityViolationError(
       'Claude session reported unexpected tool or MCP capability',
+      missingTools,
+      unexpectedTools,
     );
+  }
 }
 
 function readNumber(value: Record<string, unknown>, key: string): number | null {
