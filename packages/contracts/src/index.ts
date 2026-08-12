@@ -2370,6 +2370,23 @@ export const claudeEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max
 export type ClaudeEffort = z.infer<typeof claudeEffortSchema>;
 export const runtimeReadinessSchema = z.enum(['ready', 'authentication_required', 'unavailable']);
 export type RuntimeReadiness = z.infer<typeof runtimeReadinessSchema>;
+export const modelFallbackNoticeSchema = z
+  .object({
+    changes: z
+      .array(
+        z
+          .object({
+            runtimeKind: z.enum(['codex', 'claude']),
+            migratedCount: z.number().int().min(0).max(1_000_000),
+            resetCount: z.number().int().min(0).max(1_000_000),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(2),
+  })
+  .strict();
+export type ModelFallbackNotice = z.infer<typeof modelFallbackNoticeSchema>;
 export const runtimeSettingsSchema = z
   .object({
     kind: runtimeKindSchema,
@@ -2396,6 +2413,7 @@ export const runtimeSettingsSchema = z
     // resolves its model inside the CLI, so there is no advertised set to choose from and the
     // CLI's own per-model default is left to apply.
     codexEffort: z.union([effortOptionSchema.shape.id, z.literal('')]),
+    modelFallbackNotice: modelFallbackNoticeSchema.nullable(),
   })
   .strict();
 export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;

@@ -1033,6 +1033,13 @@ export interface SprintCoderApi {
       /** Codex reasoning level, already clamped by Main to the selected model's advertised set.
        * '' means no override (the `auto` model sentinel, or a model publishing no set). */
       codexEffort: string;
+      modelFallbackNotice: {
+        changes: Array<{
+          runtimeKind: 'codex' | 'claude';
+          migratedCount: number;
+          resetCount: number;
+        }>;
+      } | null;
     }>;
     setRuntime(kind: RuntimeKind, taskId?: string): Promise<void>;
     setModel(model: string, taskId?: string): Promise<void>;

@@ -8,6 +8,7 @@ import {
   commandSummarySchema,
   executionResolutionSchema,
   modelSelectionSchema,
+  modelFallbackNoticeSchema,
   normalizedProviderUsageSchema,
   providerConnectionSchema,
   projectSummarySchema,
@@ -32,6 +33,7 @@ import {
   type ContextUsage,
   type ExecutionResolution,
   type ModelSelection,
+  type ModelFallbackNotice,
   type NormalizedProviderUsage,
   type ProviderConnection,
   type ProjectReference,
@@ -4171,6 +4173,11 @@ export interface PersistenceClient {
   setRuntime(kind: RuntimeKind): void;
   getModel(): string;
   setModel(model: string): void;
+  reconcileBuiltinModelCatalog(
+    kind: Extract<RuntimeKind, 'codex' | 'claude'>,
+    availableModelIds: readonly string[],
+  ): void;
+  takeModelFallbackNotice(): ModelFallbackNotice | null;
   getEffort(): ClaudeEffort;
   setEffort(effort: ClaudeEffort): void;
   getCodexEffort(): string;
@@ -4521,23 +4528,29 @@ function modelSettingsKey(kind: RuntimeKind): string {
 }
 
 /**
- * Claude catalog ids that were retired, mapped to their replacement.
+ * Built-in catalog ids that were retired, mapped to their replacement.
  *
  * `opus` used to be the id for the top Claude tier. It resolves to claude-opus-4-8 on CLI
  * 2.1.218, so the curated catalog now pins `claude-opus-5` explicitly (see the probe log in
- * runtime-host/claude-adapter.ts). Remapping on read is what makes an existing preference follow:
- * ipc.ts's settings read already falls back to 'auto' for an id that is no longer in the catalog,
- * but that only corrects what the picker *displays* — `startTurnInTransaction` reads `getModel()`
- * directly, so without this the UI would say "Auto" while the run still passed `--model opus` and
- * got claude-opus-4-8.
+ * runtime-host/claude-adapter.ts). A mapping is applied only by catalog reconciliation and only
+ * when the replacement is present. Unknown ids become Auto in the same DB transaction, keeping
+ * the picker and `startTurnInTransaction` on one canonical value.
  *
  * Keyed by Runtime kind because the settings row is shared between Codex and mock; an `opus` id
  * only ever means the Claude alias.
  */
 const RETIRED_MODEL_IDS: Readonly<Partial<Record<RuntimeKind, Readonly<Record<string, string>>>>> =
   {
+    codex: {
+      'gpt-5.2-codex': 'gpt-5.4',
+      'gpt-5.3-codex': 'gpt-5.4',
+    },
     claude: { opus: 'claude-opus-5' },
   };
+
+function modelFallbackNoticeKey(kind: Extract<RuntimeKind, 'codex' | 'claude'>): string {
+  return `runtime.${kind}.model-fallback-notice`;
+}
 
 const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = [
   'low',
@@ -10105,8 +10118,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const row = this.db
       .prepare('SELECT value FROM settings WHERE key = ?')
       .get(modelSettingsKey(kind)) as { value: string } | undefined;
-    const stored = row?.value ?? 'auto';
-    return RETIRED_MODEL_IDS[kind]?.[stored] ?? stored;
+    return row?.value ?? 'auto';
   }
 
   setModel(model: string): void {
@@ -10116,6 +10128,123 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(modelSettingsKey(this.getRuntime()), model, new Date().toISOString());
+  }
+
+  reconcileBuiltinModelCatalog(
+    kind: Extract<RuntimeKind, 'codex' | 'claude'>,
+    availableModelIds: readonly string[],
+  ): void {
+    const available = new Set(availableModelIds);
+    // A successful catalog always contains Auto plus at least one executable model. Treat a
+    // smaller result as a retrieval failure and preserve every saved preference unchanged.
+    if (!available.has('auto') || available.size < 2) return;
+    const connectionId =
+      kind === 'claude' ? BUILTIN_CLAUDE_CONNECTION_ID : BUILTIN_CODEX_CONNECTION_ID;
+    const provider = kind === 'claude' ? 'anthropic' : 'openai';
+    const normalize = (stored: string): { model: string; migrated: boolean } => {
+      if (available.has(stored)) return { model: stored, migrated: false };
+      const replacement = RETIRED_MODEL_IDS[kind]?.[stored];
+      return replacement !== undefined && available.has(replacement)
+        ? { model: replacement, migrated: true }
+        : { model: 'auto', migrated: false };
+    };
+    this.db.transaction(() => {
+      let migratedCount = 0;
+      let resetCount = 0;
+      const now = new Date().toISOString();
+      const globalRow = this.db
+        .prepare('SELECT value FROM settings WHERE key = ?')
+        .get(modelSettingsKey(kind)) as { value: string } | undefined;
+      if (globalRow !== undefined) {
+        const normalized = normalize(globalRow.value);
+        if (normalized.model !== globalRow.value) {
+          this.db
+            .prepare('UPDATE settings SET value = ?, updated_at = ? WHERE key = ?')
+            .run(normalized.model, now, modelSettingsKey(kind));
+          if (normalized.migrated) migratedCount += 1;
+          else resetCount += 1;
+        }
+      }
+      const tasks = this.db
+        .prepare(
+          `SELECT id, requested_model FROM tasks
+           WHERE connection_id = ? AND requested_provider = ? AND requested_model IS NOT NULL`,
+        )
+        .all(connectionId, provider) as Array<{ id: string; requested_model: string }>;
+      for (const task of tasks) {
+        const normalized = normalize(task.requested_model);
+        if (normalized.model === task.requested_model) continue;
+        this.setTaskModelSelection(task.id, modelSelectionForRuntime(kind, normalized.model));
+        if (normalized.migrated) migratedCount += 1;
+        else resetCount += 1;
+      }
+      if (migratedCount === 0 && resetCount === 0) return;
+      const noticeKey = modelFallbackNoticeKey(kind);
+      const pending = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(noticeKey) as
+        { value: string } | undefined;
+      let previous = { migratedCount: 0, resetCount: 0 };
+      try {
+        const parsed = JSON.parse(pending?.value ?? '') as Record<string, unknown>;
+        if (
+          Number.isSafeInteger(parsed['migratedCount']) &&
+          Number(parsed['migratedCount']) >= 0 &&
+          Number(parsed['migratedCount']) <= 1_000_000 &&
+          Number.isSafeInteger(parsed['resetCount']) &&
+          Number(parsed['resetCount']) >= 0 &&
+          Number(parsed['resetCount']) <= 1_000_000
+        )
+          previous = {
+            migratedCount: Number(parsed['migratedCount']),
+            resetCount: Number(parsed['resetCount']),
+          };
+      } catch {
+        // A malformed notice never blocks model repair; it is replaced with bounded safe counts.
+      }
+      this.db
+        .prepare(
+          `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(
+          noticeKey,
+          JSON.stringify({
+            migratedCount: Math.min(1_000_000, previous.migratedCount + migratedCount),
+            resetCount: Math.min(1_000_000, previous.resetCount + resetCount),
+          }),
+          now,
+        );
+    })();
+  }
+
+  takeModelFallbackNotice(): ModelFallbackNotice | null {
+    return this.db.transaction(() => {
+      const changes: ModelFallbackNotice['changes'] = [];
+      for (const runtimeKind of ['codex', 'claude'] as const) {
+        const key = modelFallbackNoticeKey(runtimeKind);
+        const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
+          { value: string } | undefined;
+        if (row === undefined) continue;
+        try {
+          const parsed = JSON.parse(row.value) as Record<string, unknown>;
+          const migratedCount = Number(parsed['migratedCount']);
+          const resetCount = Number(parsed['resetCount']);
+          if (
+            Number.isSafeInteger(migratedCount) &&
+            migratedCount >= 0 &&
+            migratedCount <= 1_000_000 &&
+            Number.isSafeInteger(resetCount) &&
+            resetCount >= 0 &&
+            resetCount <= 1_000_000 &&
+            migratedCount + resetCount > 0
+          )
+            changes.push({ runtimeKind, migratedCount, resetCount });
+        } catch {
+          // Delete malformed internal notices without exposing their contents.
+        }
+        this.db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+      }
+      return changes.length === 0 ? null : modelFallbackNoticeSchema.parse({ changes });
+    })();
   }
 
   // Claude-only reasoning effort (see the ADR amendment). Unlike `model`, this is a single global

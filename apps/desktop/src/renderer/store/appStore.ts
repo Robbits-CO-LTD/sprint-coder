@@ -1022,9 +1022,23 @@ export const useAppStore = create<AppState>((set, get) => {
       const taskId = get().selectedTaskId;
       try {
         const runtime = await window.sprintCoder.settings.getRuntime(taskId ?? undefined);
+        const { modelFallbackNotice, ...runtimeState } = runtime;
+        if (modelFallbackNotice !== null) {
+          const migrated = modelFallbackNotice.changes.reduce(
+            (total, change) => total + change.migratedCount,
+            0,
+          );
+          const reset = modelFallbackNotice.changes.reduce(
+            (total, change) => total + change.resetCount,
+            0,
+          );
+          get().showToast(
+            `保存済みモデルを最新カタログに合わせて更新しました（置換 ${migrated}件、Autoへ戻した ${reset}件）。`,
+          );
+        }
         // A slow answer for a Task the user has already left would overwrite the newer one.
         if (get().selectedTaskId !== taskId) return;
-        set({ runtime });
+        set({ runtime: runtimeState });
       } catch {
         // Non-fatal: keep the last-known (or default) runtime state.
       }
