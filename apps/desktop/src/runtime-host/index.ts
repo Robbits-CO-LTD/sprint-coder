@@ -14,13 +14,18 @@ import {
   reverifyPreparedRuntimeImages,
   type PreparedRuntimeImages,
 } from './image-attachment-preparer';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // A single Runtime Host UtilityProcess hosts exactly one adapter kind, selected at spawn time by
 // Main (see RuntimeHostClient) via --runtime-kind. Defaults to 'codex' so any pre-existing spawn
 // call site that omits the flag keeps its original behavior.
 const runtimeKind = readRuntimeKind();
 const runtimeInstanceId = readRuntimeInstanceId();
-const adapter = runtimeKind === 'claude' ? new ClaudeRuntimeAdapter() : new CodexRuntimeAdapter();
+const adapter =
+  runtimeKind === 'claude'
+    ? new ClaudeRuntimeAdapter()
+    : new CodexRuntimeAdapter(undefined, undefined, undefined, readCodexIsolationRoot());
 const sequences = new Map<string, number>();
 const activeTurns = new Map<string, { taskId: string; operationId: string }>();
 const preparedTurns = new Map<
@@ -297,6 +302,7 @@ function startAdapter(
       data.projectItems,
       data.payload,
       localImages,
+      data.codexConfigPolicy,
     );
   } catch {
     activeTurns.delete(data.turnId);
@@ -463,4 +469,12 @@ function readRuntimeKind(): 'codex' | 'claude' {
   const index = process.argv.indexOf('--runtime-kind');
   const value = index < 0 ? undefined : process.argv[index + 1];
   return value === 'claude' ? 'claude' : 'codex';
+}
+
+function readCodexIsolationRoot(): string {
+  const index = process.argv.indexOf('--codex-isolation-root');
+  const value = index < 0 ? undefined : process.argv[index + 1];
+  return value === undefined || value.length === 0
+    ? join(tmpdir(), 'sprint-coder-codex-isolated-tests')
+    : value;
 }

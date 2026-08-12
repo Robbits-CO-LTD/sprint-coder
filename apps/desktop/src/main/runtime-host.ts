@@ -1,5 +1,6 @@
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CodexModelOption, PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
@@ -13,6 +14,7 @@ import {
   isRuntimeToMainEnvelope,
   type MainToRuntimeEnvelope,
   type RuntimeCanonicalEvent,
+  type RuntimeCodexConfigPolicy,
   type RuntimeContextFragment,
   type RuntimeFailureDiagnostic,
   type RuntimeProtocolFailureReasonCode,
@@ -149,6 +151,10 @@ export class RuntimeHostClient {
     private readonly prepareContext?: PrepareContext,
     private readonly onContextAccepted?: ContextAccepted,
     private readonly kind: 'codex' | 'claude' = 'codex',
+    private readonly codexIsolationRoot = join(tmpdir(), 'sprint-coder-codex-isolated-tests'),
+    private readonly codexConfigPolicyForTurn: () => RuntimeCodexConfigPolicy = () => ({
+      inheritUserConfig: false,
+    }),
   ) {
     this.launch();
   }
@@ -301,6 +307,7 @@ export class RuntimeHostClient {
       payload: Buffer.from(payload.bytes).toString('utf8'),
       payloadDigest: payload.digest,
       skills: [...skills],
+      codexConfigPolicy: this.codexConfigPolicyForTurn(),
       toolCatalogSnapshot,
       // Runtime adapters need the complete sealed guidance. Claude places it in its system prompt;
       // serializeCliExecutionPayload only removes the duplicate from the user payload.
@@ -513,7 +520,14 @@ export class RuntimeHostClient {
     try {
       child = utilityProcess.fork(
         join(__dirname, 'runtime-host.js'),
-        ['--runtime-instance-id', instanceId, '--runtime-kind', this.kind],
+        [
+          '--runtime-instance-id',
+          instanceId,
+          '--runtime-kind',
+          this.kind,
+          '--codex-isolation-root',
+          this.codexIsolationRoot,
+        ],
         {
           serviceName:
             this.kind === 'claude'

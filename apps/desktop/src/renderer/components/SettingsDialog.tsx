@@ -202,6 +202,7 @@ export function LegacyBody({
           {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item, which
               is exactly where a user who cannot select a Runtime will not look. */}
           <CliDetectionGroup />
+          <CodexUserConfigSetting active={open} />
           <SprintCoderPrePromptSetting active={open} />
           <TeamModelRestrictionSetting active={open} />
           <TeamModelSelectionGuidanceSetting active={open} />
@@ -317,6 +318,7 @@ export function WorkspaceBody({
             </WorkspacePage>
 
             <WorkspacePage {...page('advanced')} active={current === 'advanced'}>
+              <CodexUserConfigSetting active={open} />
               <SprintCoderPrePromptSetting active={open} />
               {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item,
                   which is exactly where a user who cannot select a Runtime will not look. */}
@@ -1502,9 +1504,100 @@ function SprintCoderPrePromptSetting({ active }: { active: boolean }) {
 }
 
 // Global Team setting: whether a Leader/Manager researches the Web before hiring Workers. Kept in
-// this file rather than the store because it is a persisted backend value with no renderer-side
-// consumer — the canonical answer lives in Main, so the dialog reads it fresh on every open instead
-// of caching a copy that can silently drift.
+// Persisted backend-only controls live here rather than in the app store. Main remains canonical,
+// so each dialog open reads a fresh value and response generations prevent a slow read from
+// overwriting a later save.
+function CodexUserConfigSetting({ active }: { active: boolean }) {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const generation = useRef(0);
+  const inFlight = useRef(false);
+
+  useEffect(() => {
+    if (!active) return;
+    const api = codexUserConfigApi();
+    if (api === null) return;
+    const request = ++generation.current;
+    void api
+      .getCodexUserConfig()
+      .then((value) => {
+        if (request === generation.current) {
+          setError(null);
+          setEnabled(value.enabled);
+        }
+      })
+      .catch(() => {
+        if (request === generation.current)
+          setError('Codexユーザーconfig設定を読み込めませんでした。');
+      });
+    return () => {
+      if (request === generation.current) generation.current += 1;
+      inFlight.current = false;
+    };
+  }, [active]);
+
+  async function save(next: boolean): Promise<void> {
+    const api = codexUserConfigApi();
+    if (api === null || inFlight.current) return;
+    const request = ++generation.current;
+    inFlight.current = true;
+    const previous = enabled;
+    setEnabled(next);
+    setSaving(true);
+    setError(null);
+    try {
+      await api.setCodexUserConfig({ enabled: next });
+      if (request !== generation.current) return;
+    } catch {
+      if (request !== generation.current) return;
+      setEnabled(previous);
+      setError('設定を保存できませんでした。直前の値に戻しました。');
+    } finally {
+      if (request === generation.current) {
+        inFlight.current = false;
+        setSaving(false);
+      }
+    }
+  }
+
+  const unavailable = codexUserConfigApi() === null;
+  return (
+    <fieldset className="settings-group" aria-busy={enabled === null && !unavailable}>
+      <legend>Codexユーザー設定</legend>
+      <label className={`settings-skill-row${unavailable ? ' disabled' : ''}`}>
+        <input
+          type="checkbox"
+          checked={enabled ?? false}
+          disabled={unavailable || enabled === null || saving}
+          aria-describedby="settings-codex-user-config-hint"
+          onChange={(event) => void save(event.target.checked)}
+        />
+        <span>
+          <strong>ユーザーconfig・MCPをTurnへ引き継ぐ</strong>
+          <small>{enabled === true ? 'ON · Turn開始時に隔離コピー' : 'OFF · 既定の隔離実行'}</small>
+        </span>
+      </label>
+      <p className="settings-hint" id="settings-codex-user-config-hint">
+        既定はOFFです。ONではTurn開始時のconfig.tomlを専用homeへコピーします。元の設定やSkillは変更しません。
+        ユーザーMCPはSprint CoderのTool Broker管理外であり、権限・監査ポリシーは適用されません。
+      </p>
+      {error !== null && <p role="alert">{error}</p>}
+    </fieldset>
+  );
+}
+
+function codexUserConfigApi(): NonNullable<Window['sprintCoder']>['settings'] | null {
+  const settings = typeof window === 'undefined' ? undefined : window.sprintCoder?.settings;
+  if (
+    settings === undefined ||
+    typeof settings.getCodexUserConfig !== 'function' ||
+    typeof settings.setCodexUserConfig !== 'function'
+  )
+    return null;
+  return settings;
+}
+
 function TeamResearchSetting({ active }: { active: boolean }) {
   const [api] = useState(researchApi);
   const [canonical, setCanonical] = useState<boolean | null>(null);

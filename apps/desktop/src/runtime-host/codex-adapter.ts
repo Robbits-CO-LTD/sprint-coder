@@ -4,6 +4,7 @@ import {
   accessSync,
   constants,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -24,6 +25,7 @@ import type {
 } from '@sprint-coder/contracts';
 import type {
   RuntimeCanonicalEvent,
+  RuntimeCodexConfigPolicy,
   RuntimeContextFragment,
   RuntimeFailureDiagnostic,
   RuntimeFailureStage,
@@ -54,8 +56,9 @@ import {
   type CliCommandCandidate,
 } from './cli-command-resolution';
 import {
-  assertCodexSkillIsolation,
+  CodexUserConfigSnapshotError,
   codexSkillIsolationArgs,
+  enforceCodexSkillIsolation,
   prepareCodexSkillIsolation,
   type CodexSkillIsolation,
 } from './codex-skill-isolation';
@@ -178,6 +181,7 @@ export class CodexRuntimeAdapter {
     private readonly timeoutMs = 10 * 60_000,
     private readonly command = 'codex',
     private readonly commandPrefixArgs: readonly string[] = [],
+    private readonly isolationRoot = tmpdir(),
   ) {}
 
   setCliVersion(version: string | null): void {
@@ -208,6 +212,7 @@ export class CodexRuntimeAdapter {
     projectItems: readonly RuntimeProjectContextItem[] = [],
     serializedPayload?: string,
     localImages?: CodexLocalImagePreparation,
+    codexConfigPolicy: RuntimeCodexConfigPolicy = { inheritUserConfig: false },
   ): void {
     let localImageReleasePromise: Promise<void> | null = null;
     const releaseLocalImages = (): Promise<void> => {
@@ -262,12 +267,14 @@ export class CodexRuntimeAdapter {
         primaryRoot?.path ??
         (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-')));
       const runtimeWorkspaceRoots = workspace.roots.map(({ path }) => path);
-      skillIsolationDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-skills-'));
+      mkdirSync(this.isolationRoot, { recursive: true, mode: 0o700 });
+      skillIsolationDirectory = mkdtempSync(join(this.isolationRoot, 'turn-'));
       const skillIsolation = prepareCodexSkillIsolation({
         temporaryRoot: skillIsolationDirectory,
         cwd,
         runtimeWorkspaceRoots,
         skills,
+        configPolicy: codexConfigPolicy,
       });
       let teamMcpProfile: CodexTeamMcpProfile | undefined;
       if (teamMcp !== undefined) {
@@ -290,11 +297,23 @@ export class CodexRuntimeAdapter {
         teamMcpProfile,
         skillIsolation,
       };
-    } catch {
+      diagnostics.recordCodexIsolation({
+        userConfigSnapshot: skillIsolation.userConfigSnapshot,
+        selectedSkillCount: skillIsolation.stagedSkills.length,
+        disabledUnexpectedSkillCount: 0,
+        verified: false,
+      });
+    } catch (error) {
       void releaseLocalImages();
       cleanupPaths();
       failWithDiagnostic(
-        publicError('RUNTIME_FAILED', 'Codex app-serverを準備できませんでした。', false),
+        publicError(
+          'RUNTIME_FAILED',
+          error instanceof CodexUserConfigSnapshotError
+            ? 'Codexユーザーconfig.tomlを隔離環境へ読み込めませんでした。設定を確認してください。'
+            : 'Codex app-serverを準備できませんでした。',
+          false,
+        ),
         'startup_error',
       );
       return;
@@ -458,17 +477,15 @@ export class CodexRuntimeAdapter {
           !skillIsolationVerificationPending
         ) {
           skillIsolationVerificationPending = true;
-          void send('skills/list', {
-            cwds: skillIsolation.validationCwds,
-            forceReload: true,
-          })
-            .then((response) =>
-              assertCodexSkillIsolation(
-                response,
-                skillIsolation.stagedSkills,
-                skillIsolation.validationCwds.length,
-              ),
-            )
+          void enforceCodexSkillIsolation(send, skillIsolation)
+            .then((disabledUnexpectedSkills) => {
+              diagnostics.recordCodexIsolation({
+                userConfigSnapshot: skillIsolation.userConfigSnapshot,
+                selectedSkillCount: skillIsolation.stagedSkills.length,
+                disabledUnexpectedSkillCount: disabledUnexpectedSkills.length,
+                verified: true,
+              });
+            })
             .catch(() => {
               if (failed || control.canceled) return;
               failed = true;
@@ -530,14 +547,13 @@ export class CodexRuntimeAdapter {
         await send('skills/extraRoots/set', {
           extraRoots: [skillIsolation.selectedSkillsRoot],
         });
-        assertCodexSkillIsolation(
-          await send('skills/list', {
-            cwds: skillIsolation.validationCwds,
-            forceReload: true,
-          }),
-          skillIsolation.stagedSkills,
-          skillIsolation.validationCwds.length,
-        );
+        const disabledUnexpectedSkills = await enforceCodexSkillIsolation(send, skillIsolation);
+        diagnostics.recordCodexIsolation({
+          userConfigSnapshot: skillIsolation.userConfigSnapshot,
+          selectedSkillCount: skillIsolation.stagedSkills.length,
+          disabledUnexpectedSkillCount: disabledUnexpectedSkills.length,
+          verified: true,
+        });
         skillIsolationReady = true;
         const threadResult = asRecord(
           await send('thread/start', {
@@ -581,7 +597,13 @@ export class CodexRuntimeAdapter {
                 'このCodex CLIは複数フォルダに対応していません。Codexを更新してから再試行してください。',
                 false,
               )
-            : publicError('RUNTIME_FAILED', 'Codex app-serverを開始できませんでした。', true),
+            : publicError(
+                'RUNTIME_FAILED',
+                codexConfigPolicy.inheritUserConfig
+                  ? 'Codexユーザーconfig.tomlを含む隔離環境を開始できませんでした。configを確認してください。'
+                  : 'Codex app-serverを開始できませんでした。',
+                true,
+              ),
           'startup_error',
         );
         void terminateCodexProcessTree(child);

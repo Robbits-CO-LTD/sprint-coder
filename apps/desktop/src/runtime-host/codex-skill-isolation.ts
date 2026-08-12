@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import type { RuntimeSkillInput } from './protocol';
+import type { RuntimeCodexConfigPolicy, RuntimeSkillInput } from './protocol';
 import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
 
 export type CodexSkillIsolation = Readonly<{
@@ -21,13 +21,22 @@ export type CodexSkillIsolation = Readonly<{
   stagedSkills: readonly RuntimeSkillInput[];
   disabledWorkspaceSkillPaths: readonly string[];
   validationCwds: readonly string[];
+  userConfigSnapshot: 'disabled' | 'missing' | 'copied';
 }>;
+
+export class CodexUserConfigSnapshotError extends Error {
+  constructor() {
+    super('Codex user config snapshot failed');
+    this.name = 'CodexUserConfigSnapshotError';
+  }
+}
 
 export function prepareCodexSkillIsolation(input: {
   temporaryRoot: string;
   cwd: string;
   runtimeWorkspaceRoots?: readonly string[];
   skills: readonly RuntimeSkillInput[];
+  configPolicy?: RuntimeCodexConfigPolicy;
   environment?: Readonly<NodeJS.ProcessEnv>;
 }): CodexSkillIsolation {
   const environment = input.environment ?? process.env;
@@ -39,6 +48,11 @@ export function prepareCodexSkillIsolation(input: {
   chmodSync(codexHome, 0o700);
   chmodSync(selectedSkillsRoot, 0o700);
   copyAuthentication(environment, codexHome);
+  const userConfigSnapshot = snapshotUserConfig(
+    environment,
+    codexHome,
+    input.configPolicy?.inheritUserConfig === true,
+  );
 
   const stagedSkills = input.skills.map((skill, index) => {
     const sourceSkillFile = join(skill.path, 'SKILL.md');
@@ -69,6 +83,7 @@ export function prepareCodexSkillIsolation(input: {
     stagedSkills,
     disabledWorkspaceSkillPaths: discoverWorkspaceSkillPathsForRoots(validationCwds),
     validationCwds,
+    userConfigSnapshot,
   };
 }
 
@@ -93,13 +108,65 @@ export function assertCodexSkillIsolation(
   expectedSkills: readonly RuntimeSkillInput[],
   expectedCatalogCount = 1,
 ): void {
+  const catalog = readCodexSkillCatalog(response, expectedCatalogCount);
+  const expected = expectedSkillIdentities(expectedSkills);
+  for (const enabled of catalog) {
+    const actual = enabled.map(({ name, path }) => `${name}\u0000${canonicalPath(path)}`).sort();
+    if (
+      actual.length !== expected.length ||
+      actual.some((value, index) => value !== expected[index])
+    )
+      throw new Error('Codex Skill isolation exposed an unselected Skill');
+  }
+}
+
+export function unexpectedCodexSkillPaths(
+  response: unknown,
+  expectedSkills: readonly RuntimeSkillInput[],
+  expectedCatalogCount = 1,
+): string[] {
+  const expectedPaths = new Set(expectedSkills.map(({ path }) => canonicalPath(path)));
+  return [
+    ...new Set(
+      readCodexSkillCatalog(response, expectedCatalogCount)
+        .flat()
+        .filter(({ path }) => !expectedPaths.has(canonicalPath(path)))
+        .map(({ path }) => canonicalizeExistingPath(path)),
+    ),
+  ].sort();
+}
+
+export async function enforceCodexSkillIsolation(
+  send: (method: string, params: unknown) => Promise<unknown>,
+  isolation: CodexSkillIsolation,
+): Promise<readonly string[]> {
+  const list = (): Promise<unknown> =>
+    send('skills/list', { cwds: isolation.validationCwds, forceReload: true });
+  const first = await list();
+  const unexpected = unexpectedCodexSkillPaths(
+    first,
+    isolation.stagedSkills,
+    isolation.validationCwds.length,
+  );
+  for (const path of unexpected) await send('skills/config/write', { path, enabled: false });
+  const verified = unexpected.length === 0 ? first : await list();
+  assertCodexSkillIsolation(verified, isolation.stagedSkills, isolation.validationCwds.length);
+  return unexpected;
+}
+
+function expectedSkillIdentities(expectedSkills: readonly RuntimeSkillInput[]): string[] {
+  return expectedSkills.map((skill) => `${skill.name}\u0000${canonicalPath(skill.path)}`).sort();
+}
+
+function readCodexSkillCatalog(
+  response: unknown,
+  expectedCatalogCount: number,
+): Array<Array<{ name: string; path: string }>> {
   const record = asRecord(response);
   const data = record['data'];
   if (!Array.isArray(data) || data.length !== expectedCatalogCount)
     throw new Error('Codex Skill isolation returned an invalid catalog');
-  const expected = expectedSkills
-    .map((skill) => `${skill.name}\u0000${canonicalPath(skill.path)}`)
-    .sort();
+  const catalog: Array<Array<{ name: string; path: string }>> = [];
   for (const item of data) {
     const entry = asRecord(item);
     const errors = entry['errors'];
@@ -113,15 +180,9 @@ export function assertCodexSkillIsolation(
       .map((skill) => ({ name: skill['name'], path: skill['path'] }));
     if (enabled.some((skill) => typeof skill.name !== 'string' || typeof skill.path !== 'string'))
       throw new Error('Codex Skill isolation catalog contains invalid metadata');
-    const actual = enabled
-      .map((skill) => `${String(skill.name)}\u0000${canonicalPath(String(skill.path))}`)
-      .sort();
-    if (
-      actual.length !== expected.length ||
-      actual.some((value, index) => value !== expected[index])
-    )
-      throw new Error('Codex Skill isolation exposed an unselected Skill');
+    catalog.push(enabled.map(({ name, path }) => ({ name: String(name), path: String(path) })));
   }
+  return catalog;
 }
 
 export function discoverWorkspaceSkillPaths(cwd: string): string[] {
@@ -165,6 +226,31 @@ function copyAuthentication(environment: Readonly<NodeJS.ProcessEnv>, codexHome:
     chmodSync(destination, 0o600);
   } catch {
     // Authentication failure is reported by app-server without exposing the source path.
+  }
+}
+
+function snapshotUserConfig(
+  environment: Readonly<NodeJS.ProcessEnv>,
+  codexHome: string,
+  enabled: boolean,
+): CodexSkillIsolation['userConfigSnapshot'] {
+  if (!enabled) return 'disabled';
+  const sourceHome =
+    environment['CODEX_HOME'] ??
+    join(environment['HOME'] ?? environment['USERPROFILE'] ?? '', '.codex');
+  const source = join(sourceHome, 'config.toml');
+  try {
+    const metadata = lstatSync(source);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 1024 * 1024)
+      throw new CodexUserConfigSnapshotError();
+    const destination = join(codexHome, 'config.toml');
+    copyFileSync(source, destination);
+    chmodSync(destination, 0o600);
+    return 'copied';
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+    if (error instanceof CodexUserConfigSnapshotError) throw error;
+    throw new CodexUserConfigSnapshotError();
   }
 }
 
