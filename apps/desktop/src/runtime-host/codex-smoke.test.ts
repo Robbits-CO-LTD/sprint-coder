@@ -15,6 +15,29 @@ import type { RuntimeCanonicalEvent } from './protocol';
 // and spends real usage/quota). Run explicitly with:
 //   SPRINT_CODER_CODEX_SMOKE=1 npx vitest run src/runtime-host/codex-smoke.test.ts
 const enabled = process.env['SPRINT_CODER_CODEX_SMOKE'] === '1';
+type CodexProbe = Awaited<ReturnType<typeof probeCodex>>;
+
+let probePromise: ReturnType<typeof probeCodex> | undefined;
+
+function getCodexProbe(): ReturnType<typeof probeCodex> {
+  probePromise ??= probeCodex();
+  return probePromise;
+}
+
+function createCodexAdapter(probe: CodexProbe): CodexRuntimeAdapter {
+  if (probe.cli === undefined || !probe.cli.capabilities.includes('strict_config'))
+    throw new Error('real Codex smoke requires a resolved CLI with strict_config');
+  const adapter = new CodexRuntimeAdapter();
+  adapter.setCliVersion(probe.version ?? null);
+  adapter.setCliResolution(probe.cli);
+  return adapter;
+}
+
+async function createProbedCodexAdapter(): Promise<CodexRuntimeAdapter> {
+  const probe = await getCodexProbe();
+  expect(probe.available).toBe(true);
+  return createCodexAdapter(probe);
+}
 
 function liveCodexProcessCount(): number {
   try {
@@ -38,13 +61,14 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
   });
 
   it('probes the real CLI as available', async () => {
-    const probe = await probeCodex();
+    const probe = await getCodexProbe();
     expect(probe.available).toBe(true);
+    expect(probe.cli?.capabilities).toContain('strict_config');
     console.log('[codex-smoke] probe:', probe);
   });
 
   it('streams stages and deltas and completes with a real short turn, then cancel leaves no child process', async () => {
-    const adapter = new CodexRuntimeAdapter();
+    const adapter = await createProbedCodexAdapter();
     const events: RuntimeCanonicalEvent[] = [];
     const failures: PublicError[] = [];
     let exitInfo: { code: number; canceled: boolean } | null = null;
@@ -86,7 +110,7 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
   it('emits progress for a real Codex dynamic shell tool', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-operation-'));
     cleanupDirs.push(workspace);
-    const adapter = new CodexRuntimeAdapter();
+    const adapter = await createProbedCodexAdapter();
     const events: RuntimeCanonicalEvent[] = [];
     const failures: PublicError[] = [];
 
@@ -119,7 +143,7 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
     const primary = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-primary-'));
     const secondary = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-secondary-'));
     cleanupDirs.push(primary, secondary);
-    const adapter = new CodexRuntimeAdapter();
+    const adapter = await createProbedCodexAdapter();
     const failures: PublicError[] = [];
 
     await new Promise<void>((resolve) => {
@@ -156,7 +180,7 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
   // Deliberately does NOT parse any path out of the agent's message: doing so is the vulnerability
   // this design exists to avoid, so the test must not demonstrate it working either.
   it('generates an image and makes it findable from the thread id alone', async () => {
-    const adapter = new CodexRuntimeAdapter();
+    const adapter = await createProbedCodexAdapter();
     const events: RuntimeCanonicalEvent[] = [];
     const failures: PublicError[] = [];
 
@@ -204,7 +228,7 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
   // a deliberate out-of-set level failing proves the check discriminates rather than passing
   // vacuously.
   it('runs every level the selected model advertises, and fails on one it does not', async () => {
-    const probe = await probeCodex();
+    const probe = await getCodexProbe();
     expect(probe.available).toBe(true);
     const found = probe.models.find(({ efforts }) => (efforts?.length ?? 0) > 0);
     if (found === undefined) throw new Error('no cached Codex model advertises reasoning levels');
@@ -218,7 +242,7 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
     );
 
     async function runWith(effort: string): Promise<PublicError[]> {
-      const adapter = new CodexRuntimeAdapter();
+      const adapter = createCodexAdapter(probe);
       const failures: PublicError[] = [];
       await new Promise<void>((resolve) => {
         adapter.start(
@@ -257,7 +281,7 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
     cleanupDirs.push(workspace);
     const escapeTarget = join(tmpdir(), `sprint-coder-codex-sandbox-escape-${Date.now()}.txt`);
 
-    const adapter = new CodexRuntimeAdapter();
+    const adapter = await createProbedCodexAdapter();
     const failures: PublicError[] = [];
     let exitInfo: { code: number; canceled: boolean } | null = null;
 
@@ -292,7 +316,7 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
 
   it('kills the process tree on cancel mid-turn, leaving no orphan codex process', async () => {
     const baseline = liveCodexProcessCount();
-    const adapter = new CodexRuntimeAdapter();
+    const adapter = await createProbedCodexAdapter();
     let exitInfo: { code: number; canceled: boolean } | null = null;
 
     const settled = new Promise<void>((resolve) => {
