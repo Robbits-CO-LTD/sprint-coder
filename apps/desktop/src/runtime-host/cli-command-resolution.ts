@@ -140,7 +140,10 @@ async function probeVersion(
   return result?.code === 0 &&
     version !== '' &&
     version.length <= 128 &&
-    !/[\u0000-\u001f\u007f]/u.test(version)
+    ![...version].some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    })
     ? version
     : null;
 }
