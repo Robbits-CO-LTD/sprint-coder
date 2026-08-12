@@ -42,6 +42,7 @@ import {
 } from './persistence';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
 import { BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
+import { modelSelectionForRuntime } from './connection-identity';
 import {
   EditSagaCrashError,
   EditSagaExecutor,
@@ -1826,7 +1827,7 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
-    it('remaps a retired Claude model id so an old preference does not pin an older model', () => {
+    it('migrates a retired Claude model only when its replacement exists in the latest catalog', () => {
       // issue #7: `opus` was the catalog id for the top Claude tier, but on CLI 2.1.218 that
       // alias resolves to claude-opus-4-8, so the catalog pins claude-opus-5 explicitly. A
       // preference stored before that change has to follow — ipc.ts's unknown-model fallback only
@@ -1834,6 +1835,10 @@ if (runsWithElectronAbi)
       const { persistence, path } = createPersistence();
       persistence.setRuntime('claude');
       persistence.setModel('opus');
+      expect(persistence.getModel()).toBe('opus');
+      persistence.reconcileBuiltinModelCatalog('claude', ['auto']);
+      expect(persistence.getModel()).toBe('opus');
+      persistence.reconcileBuiltinModelCatalog('claude', ['auto', 'claude-opus-5']);
       expect(persistence.getModel()).toBe('claude-opus-5');
       persistence.close();
 
@@ -1845,6 +1850,50 @@ if (runsWithElectronAbi)
         model: 'claude-opus-5',
       });
       reopened.close();
+    });
+
+    it('atomically normalizes global and Task Codex selections and reports the reason once', () => {
+      const { persistence } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.3-codex');
+      const retiredTask = persistence.createTask('retired');
+      const vanishedTask = persistence.createTask('vanished');
+      persistence.setTaskModelSelection(
+        retiredTask.id,
+        modelSelectionForRuntime('codex', 'gpt-5.3-codex'),
+      );
+      persistence.setTaskModelSelection(
+        vanishedTask.id,
+        modelSelectionForRuntime('codex', 'removed-without-replacement'),
+      );
+
+      persistence.reconcileBuiltinModelCatalog('codex', ['auto']);
+      expect(persistence.getModel()).toBe('gpt-5.3-codex');
+      expect(persistence.getTaskModelSelection(vanishedTask.id)).toEqual(
+        modelSelectionForRuntime('codex', 'removed-without-replacement'),
+      );
+
+      persistence.reconcileBuiltinModelCatalog('codex', ['auto', 'gpt-5.4']);
+
+      expect(persistence.getModel()).toBe('gpt-5.4');
+      expect(persistence.getTaskModelSelection(retiredTask.id)).toEqual(
+        modelSelectionForRuntime('codex', 'gpt-5.4'),
+      );
+      expect(persistence.getTaskLeader(retiredTask.id).modelSelection).toEqual(
+        modelSelectionForRuntime('codex', 'gpt-5.4'),
+      );
+      expect(persistence.getTaskModelSelection(vanishedTask.id)).toEqual(
+        modelSelectionForRuntime('codex', 'auto'),
+      );
+      expect(persistence.startTurn(retiredTask.id, 'use normalized model')).toMatchObject({
+        runtimeKind: 'codex',
+        model: 'gpt-5.4',
+      });
+      expect(persistence.takeModelFallbackNotice()).toEqual({
+        changes: [{ runtimeKind: 'codex', migratedCount: 2, resetCount: 1 }],
+      });
+      expect(persistence.takeModelFallbackNotice()).toBeNull();
+      persistence.close();
     });
 
     it('leaves a Codex model named like a retired Claude id alone', () => {

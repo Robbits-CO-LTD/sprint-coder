@@ -1123,6 +1123,8 @@ export class IpcRouter {
           this.codexRuntime.probe(),
           this.claudeRuntime.probe(),
         ]);
+        this.reconcileBuiltinCapability('codex', codexCapability);
+        this.reconcileBuiltinCapability('claude', claudeCapability);
         const taskSelection =
           input.taskId === undefined ? null : this.persistence.getTaskModelSelection(input.taskId);
         const taskRuntime =
@@ -1153,6 +1155,7 @@ export class IpcRouter {
             codexCapability.models,
             kind === 'claude' ? 'auto' : storedModel,
           ),
+          modelFallbackNotice: this.persistence.takeModelFallbackNotice(),
         };
       },
     );
@@ -2599,6 +2602,7 @@ export class IpcRouter {
       turnStartInputSchema,
       turnStartResultSchema,
       async (input, event, envelope) => {
+        await this.reconcileTaskBuiltinModel(input.taskId);
         const skills = await this.resolveTurnSkills(input.text, input.skills).catch((error) =>
           Promise.reject(skillSettingsPublicError(error)),
         );
@@ -4000,6 +4004,8 @@ export class IpcRouter {
       this.claudeRuntime.probe(),
     ]);
     const checkedAt = new Date().toISOString();
+    this.reconcileBuiltinCapability('codex', codexCapability);
+    this.reconcileBuiltinCapability('claude', claudeCapability);
     const externalResults = await Promise.allSettled(
       this.providerConnections
         .list()
@@ -4049,6 +4055,31 @@ export class IpcRouter {
       ],
       new Set(['builtin:codex-cli', 'builtin:claude-cli']),
     );
+  }
+
+  private reconcileBuiltinCapability(
+    kind: 'codex' | 'claude',
+    capability: Awaited<ReturnType<RuntimeHostClient['probe']>>,
+  ): void {
+    if (capability.readiness !== 'ready' || capability.models.length < 2) return;
+    this.persistence.reconcileBuiltinModelCatalog(
+      kind,
+      capability.models.map(({ id }) => id),
+    );
+  }
+
+  private async reconcileTaskBuiltinModel(taskId: string): Promise<void> {
+    const selection = this.persistence.getTaskModelSelection(taskId);
+    const runtime = selection === null ? null : builtinRuntimeForModelSelection(selection);
+    if (selection !== null && runtime === null) return;
+    const selectedKind = runtime?.runtimeKind ?? this.persistence.getRuntime();
+    if (selectedKind !== 'codex' && selectedKind !== 'claude') return;
+    try {
+      const capability = await this.runtimeFor(selectedKind).probe();
+      this.reconcileBuiltinCapability(selectedKind, capability);
+    } catch {
+      // Catalog retrieval failure alone never mutates or blocks a previously saved selection.
+    }
   }
 
   private async listTeamModelCandidates(

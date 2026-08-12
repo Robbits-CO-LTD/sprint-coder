@@ -1078,6 +1078,7 @@ describe('public contracts', () => {
         ],
         effort: 'medium',
         codexEffort: 'high',
+        modelFallbackNotice: null,
       }),
     ).toMatchObject({
       kind: 'codex',
@@ -1086,6 +1087,22 @@ describe('public contracts', () => {
       codexEffort: 'high',
     });
     expect(() => claudeEffortSchema.parse('bogus')).toThrow();
+    expect(
+      runtimeSettingsSchema.parse({
+        kind: 'codex',
+        codexAvailable: true,
+        codexReadiness: 'ready',
+        claudeAvailable: false,
+        claudeReadiness: 'unavailable',
+        model: 'auto',
+        models: [],
+        effort: 'medium',
+        codexEffort: '',
+        modelFallbackNotice: {
+          changes: [{ runtimeKind: 'codex', migratedCount: 1, resetCount: 2 }],
+        },
+      }).modelFallbackNotice,
+    ).not.toBeNull();
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'])
       expect(claudeEffortSchema.parse(effort)).toBe(effort);
     for (const code of ['STEER_UNSUPPORTED', 'USER_CANCELED', 'RUNTIME_RATE_LIMIT'] as const)
