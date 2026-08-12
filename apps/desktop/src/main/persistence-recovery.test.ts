@@ -1,5 +1,14 @@
 import Database from 'better-sqlite3';
-import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -57,6 +66,11 @@ if (runsWithElectronAbi)
       migrated.close();
       writer.close();
       expect(existsSync(`${path}.pre-migration.bak`)).toBe(true);
+      expect(
+        readdirSync(join(path, '..')).filter((name) =>
+          name.startsWith('sprint-coder.db.pre-migration.bak.tmp-'),
+        ),
+      ).toEqual([]);
 
       writeFileSync(path, 'not a sqlite database — simulated post-migration corruption');
       const recovered = new SqlitePersistenceClient(path);
@@ -106,6 +120,54 @@ if (runsWithElectronAbi)
         corruptFileMovedTo: null,
       });
       client.close();
+    });
+
+    it('recovers only regular orphan validation files owned by this database path', () => {
+      const path = tempDatabasePath();
+      const directory = join(path, '..');
+      const orphanId = 'bb30b928-2838-4af9-ba36-42fe2cda9d0d';
+      const orphan = `${path}.pre-migration.bak.tmp-${orphanId}`;
+      const orphanWal = `${orphan}-wal`;
+      const orphanShm = `${orphan}-shm`;
+      const similar = `${path}.pre-migration.bak.tmp-not-a-uuid`;
+      const otherDatabase = join(
+        directory,
+        `other.db.pre-migration.bak.tmp-${orphanId}`,
+      );
+      const symlink = `${path}.pre-migration.bak.tmp-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
+      const symlinkTarget = join(directory, 'must-survive');
+      for (const file of [orphan, orphanWal, orphanShm, similar, otherDatabase, symlinkTarget])
+        writeFileSync(file, file);
+      symlinkSync(symlinkTarget, symlink);
+
+      const client = new SqlitePersistenceClient(path);
+      client.close();
+
+      for (const file of [orphan, orphanWal, orphanShm]) expect(existsSync(file)).toBe(false);
+      for (const file of [similar, otherDatabase, symlink, symlinkTarget])
+        expect(existsSync(file)).toBe(true);
+    });
+
+    it('removes the validation database and sidecars when backup rotation fails', () => {
+      const path = tempDatabasePath();
+      const seeded = new SqlitePersistenceClient(path);
+      seeded.close();
+      const pending = new Database(path);
+      pending.exec(`
+        DROP TABLE runtime_failure_diagnostics;
+        DELETE FROM schema_migrations WHERE version = 69;
+      `);
+      pending.close();
+      // A directory cannot be removed by the file-only rotation operation, forcing the failure
+      // after the validation snapshot has been opened and checked.
+      mkdirSync(`${path}.pre-migration.bak.previous`);
+
+      expect(() => new SqlitePersistenceClient(path)).toThrow();
+      expect(
+        readdirSync(join(path, '..')).filter((name) =>
+          name.startsWith('sprint-coder.db.pre-migration.bak.tmp-'),
+        ),
+      ).toEqual([]);
     });
   });
 
