@@ -83,7 +83,7 @@ export async function probeFirstCapableCliCommand(
     ({ source }) => source === 'desktop-direct' || source === 'desktop-versioned',
   );
   const userLocal = unique.filter(({ source }) => source === 'user-local');
-  const admissible =
+  const preferred =
     explicit.length > 0
       ? explicit.slice(0, 1)
       : kind === 'codex' && desktop.length > 0
@@ -91,8 +91,21 @@ export async function probeFirstCapableCliCommand(
         : kind === 'claude' && userLocal.length > 0
           ? userLocal.slice(0, 1)
           : unique.slice(0, 1);
+  const selected = await probeAndSelect(preferred, probe);
+  if (selected !== null || kind !== 'codex' || explicit.length > 0 || desktop.length === 0)
+    return selected;
+  const fallback = unique.filter(
+    ({ source }) => source !== 'desktop-direct' && source !== 'desktop-versioned',
+  );
+  return probeAndSelect(fallback.slice(0, 1), probe);
+}
+
+async function probeAndSelect(
+  candidates: readonly CliCommandCandidate[],
+  probe: (candidate: CliCommandCandidate) => Promise<ResolvedCliCommand | null>,
+): Promise<ResolvedCliCommand | null> {
   const resolved: ResolvedCliCommand[] = [];
-  for (const candidate of admissible) {
+  for (const candidate of candidates) {
     const candidateResolution = await probe(candidate);
     if (candidateResolution !== null) resolved.push(candidateResolution);
   }
@@ -189,12 +202,20 @@ async function probeRequiredCapabilities(
       timeoutMs,
       8 * 1024,
     );
-    return result?.code === 0 ? ['version_probe', 'app_server'] : null;
+    if (result?.code !== 0) return null;
+    const capabilities = capabilitiesFromCodexAppServerHelp(result.output);
+    return capabilities.length === 3 ? capabilities : null;
   }
   const result = await probeCommand(executable, ['--help'], environment, timeoutMs, 64 * 1024);
   if (result?.code !== 0) return null;
   const capabilities = capabilitiesFromClaudeHelp(result.output);
   return capabilities.length === 6 ? capabilities : null;
+}
+
+export function capabilitiesFromCodexAppServerHelp(help: string): string[] {
+  const capabilities = ['version_probe', 'app_server'];
+  if (/(?:^|\s)--strict-config(?:[=\s,]|$)/mu.test(help)) capabilities.push('strict_config');
+  return capabilities;
 }
 
 export function capabilitiesFromClaudeHelp(help: string): string[] {

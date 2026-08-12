@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  capabilitiesFromCodexAppServerHelp,
   capabilitiesFromClaudeHelp,
   compatibilityFor,
   environmentValue,
@@ -92,6 +93,39 @@ describe('CLI command selection', () => {
     ]);
   });
 
+  it('falls back after every Codex Desktop candidate fails a required capability probe', async () => {
+    const attempted: string[] = [];
+    const fallback = candidate({
+      executable: 'C:\\npm\\codex.exe',
+      source: 'npm',
+      version: 'codex-cli 0.144.4',
+      compatibility: 'verified',
+      capabilities: ['version_probe', 'app_server', 'strict_config'],
+    });
+    const selected = await probeFirstCapableCliCommand(
+      'codex',
+      [
+        { executable: 'C:\\OpenAI\\Codex\\bin\\codex.exe', source: 'desktop-direct' },
+        {
+          executable: 'C:\\OpenAI\\Codex\\bin\\0.130.0-alpha.5\\codex.exe',
+          source: 'desktop-versioned',
+        },
+        { executable: fallback.executable, source: fallback.source },
+      ],
+      async (value) => {
+        attempted.push(value.executable);
+        return value.source === 'npm' ? fallback : null;
+      },
+    );
+
+    expect(selected).toBe(fallback);
+    expect(attempted).toEqual([
+      'C:\\OpenAI\\Codex\\bin\\codex.exe',
+      'C:\\OpenAI\\Codex\\bin\\0.130.0-alpha.5\\codex.exe',
+      fallback.executable,
+    ]);
+  });
+
   it('rejects an unsupported first-win PATH binary without probing later fallbacks', async () => {
     const attempted: string[] = [];
     const selected = await probeFirstCapableCliCommand(
@@ -149,5 +183,17 @@ describe('CLI command selection', () => {
     expect(capabilitiesFromClaudeHelp(complete.replace('--strict-mcp-config', ''))).not.toContain(
       'strict_mcp_config',
     );
+  });
+
+  it('requires the strict Codex config flag used by every isolated Turn', () => {
+    expect(capabilitiesFromCodexAppServerHelp('Options:\n  --strict-config\n  --stdio')).toEqual([
+      'version_probe',
+      'app_server',
+      'strict_config',
+    ]);
+    expect(capabilitiesFromCodexAppServerHelp('Options:\n  --stdio')).toEqual([
+      'version_probe',
+      'app_server',
+    ]);
   });
 });
