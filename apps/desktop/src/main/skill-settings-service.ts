@@ -233,9 +233,7 @@ export class SkillSettingsService {
     if (includeBuiltinTeamSkill) {
       const team = this.contextCatalogEntries.find(
         ({ source, skillId, digest }) =>
-          source === 'builtin' &&
-          skillId === 'sprint-coder-team' &&
-          digest !== null,
+          source === 'builtin' && skillId === 'sprint-coder-team' && digest !== null,
       );
       if (team !== undefined && team.digest !== null)
         effectiveSelections.push({

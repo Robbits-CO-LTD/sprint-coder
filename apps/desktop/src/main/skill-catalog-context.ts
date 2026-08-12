@@ -25,7 +25,8 @@ export function buildSkillCatalogContext(
     selections.map(({ ref }) => `${ref.source}\u0000${ref.skillId}\u0000${ref.digest}`),
   );
   const deduplicated = new Map<string, SkillCatalogSnapshotEntry>();
-  for (const entry of sourceEntries) deduplicated.set(`${entry.source}\u0000${entry.skillId}`, entry);
+  for (const entry of sourceEntries)
+    deduplicated.set(`${entry.source}\u0000${entry.skillId}`, entry);
   const entries = [...deduplicated.values()].sort(
     (left, right) =>
       SOURCE_ORDER[left.source] - SOURCE_ORDER[right.source] ||

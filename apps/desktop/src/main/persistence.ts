@@ -4697,10 +4697,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private readonly contextLedger: ContextLedger;
   private nativeMutationAuthorityDisabled = false;
   private skillCatalogContextProvider:
-    | ((
-        selections: readonly TurnSkillSelection[],
-        includeBuiltinTeamSkill: boolean,
-      ) => string)
+    | ((selections: readonly TurnSkillSelection[], includeBuiltinTeamSkill: boolean) => string)
     | null = null;
   readonly recoveryReport: DatabaseRecoveryReport;
   private startupInterruptedTurns = 0;

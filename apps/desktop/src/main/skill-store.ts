@@ -769,7 +769,9 @@ export class SkillStore {
     const createdRoot = join(this.rootPath, 'created');
     for (const skillId of (await readdir(createdRoot)).sort()) {
       if (!SKILL_ID.test(skillId) || skillId.startsWith('.')) continue;
-      const enabled = !(await pathExists(join(createdRoot, skillId, '.disabled')).catch(() => true));
+      const enabled = !(await pathExists(join(createdRoot, skillId, '.disabled')).catch(
+        () => true,
+      ));
       await capture('created', skillId, enabled);
     }
     return entries;

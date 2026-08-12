@@ -53,7 +53,7 @@ describe('Skill catalog context', () => {
     const parsed = JSON.parse(buildSkillCatalogContext(many, [])) as Record<string, unknown>;
     expect(parsed['count']).toBe(70);
     expect(parsed['descriptionMode']).not.toBe('full');
-    expect((parsed['items'] as unknown[])).toHaveLength(70);
+    expect(parsed['items'] as unknown[]).toHaveLength(70);
 
     expect(() =>
       buildSkillCatalogContext(
