@@ -8,6 +8,14 @@ const workflow = readFileSync(
 );
 
 describe('release signing and notarization', () => {
+  it('starts platform builds after metadata while keeping draft publication behind every gate', () => {
+    expect(workflow).toMatch(/  make:\n(?:.|\n)*?    needs: metadata/);
+    expect(workflow).toContain(
+      'needs: [metadata, validate-quality, validate-package-tests, validate-desktop-tests, make]',
+    );
+    expect(workflow).toContain('shard: [1/3, 2/3, 3/3]');
+  });
+
   it('accepts stable and beta tags while keeping releases as drafts', () => {
     expect(workflow).toContain("- 'v*.*.*'");
     expect(workflow).toContain("prerelease='false'");
