@@ -1,5 +1,13 @@
 import Database from 'better-sqlite3';
-import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+} from 'node:fs';
 import { basename, dirname, isAbsolute, relative, sep } from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
@@ -4618,6 +4626,45 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
   return report;
 }
 
+const UUID_FILE_COMPONENT = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+
+function removeValidationSnapshotFiles(temporaryPath: string): void {
+  let firstFailure: unknown;
+  for (const candidate of [temporaryPath, `${temporaryPath}-wal`, `${temporaryPath}-shm`]) {
+    try {
+      rmSync(candidate, { force: true });
+    } catch (error) {
+      firstFailure ??= error;
+    }
+  }
+  if (firstFailure !== undefined) throw firstFailure;
+}
+
+/** Remove only abandoned validation databases owned by this database path. */
+function removeOrphanedPreMigrationValidationFiles(databasePath: string): void {
+  const directory = dirname(databasePath);
+  const ownedPrefix = `${basename(databasePath)}.pre-migration.bak.tmp-`;
+  const ownedSuffix = new RegExp(`^${UUID_FILE_COMPONENT}(?:-(?:wal|shm))?$`, 'i');
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    // Dirent.isFile() deliberately excludes symlinks, directories, sockets, and other unknown
+    // entries. A similar-looking file must never become an authority to traverse or remove it.
+    if (
+      !entry.isFile() ||
+      !entry.name.startsWith(ownedPrefix) ||
+      !ownedSuffix.test(entry.name.slice(ownedPrefix.length))
+    )
+      continue;
+    const candidate = `${directory}${sep}${entry.name}`;
+    // Re-check at deletion time so a symlink observed after readdir is still preserved.
+    try {
+      if (!lstatSync(candidate).isFile()) continue;
+    } catch {
+      continue;
+    }
+    rmSync(candidate, { force: true });
+  }
+}
+
 export class SqlitePersistenceClient implements PersistenceClient {
   private readonly db: Database.Database;
   private readonly contextLedger: ContextLedger;
@@ -4640,6 +4687,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ) => void = () => undefined,
   ) {
     mkdirSync(dirname(databasePath), { recursive: true });
+    removeOrphanedPreMigrationValidationFiles(databasePath);
     this.recoveryReport = recoverDatabaseIfCorrupt(databasePath);
     this.db = new Database(databasePath);
     try {
@@ -4959,17 +5007,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
       result.log !== 0
     )
       throw new Error('Could not checkpoint database before migration backup');
+    let snapshot: Database.Database | null = null;
+    const closeSnapshot = (): void => {
+      const handle = snapshot;
+      snapshot = null;
+      handle?.close();
+    };
     try {
       copyFileSync(databasePath, temporaryPath);
-      const snapshot = new Database(temporaryPath, { readonly: true, fileMustExist: true });
-      try {
-        const rows = snapshot.pragma('quick_check') as { quick_check?: string }[] | string[];
-        const first = rows[0];
-        const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
-        if (verdict !== 'ok') throw new Error('Pre-migration backup failed integrity check');
-      } finally {
-        snapshot.close();
-      }
+      snapshot = new Database(temporaryPath, { readonly: true, fileMustExist: true });
+      const rows = snapshot.pragma('quick_check') as { quick_check?: string }[] | string[];
+      const first = rows[0];
+      const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
+      if (verdict !== 'ok') throw new Error('Pre-migration backup failed integrity check');
+      // Windows cannot rotate an open SQLite file, so close before installing the snapshot while
+      // retaining the outer finally as the failure-path owner.
+      closeSnapshot();
       rmSync(previousPath, { force: true });
       if (existsSync(backupPath)) renameSync(backupPath, previousPath);
       try {
@@ -4981,7 +5034,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
       }
       rmSync(previousPath, { force: true });
     } finally {
-      rmSync(temporaryPath, { force: true });
+      try {
+        closeSnapshot();
+      } finally {
+        removeValidationSnapshotFiles(temporaryPath);
+      }
     }
   }
 
