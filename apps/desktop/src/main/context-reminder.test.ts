@@ -156,6 +156,24 @@ describe('ContextLedger reminder injection', () => {
     );
   });
 
+  it('reserves space for Turn-scoped context before deciding whether to compact history', () => {
+    const state: ContextLedgerState = {
+      goal: null,
+      messages: Array.from({ length: 3 }, (_unused, index) => ({
+        id: `m-${index}`,
+        author: 'user' as const,
+        content: 'x'.repeat(15_000),
+        createdAt: '2026-01-01T00:00:00.000Z',
+        fragmentId: `f-${index}`,
+        supersededByCompactionId: null,
+      })),
+      compactions: [],
+      background: [],
+    };
+    expect(ledgerWith(state).prepare('task-1', 'turn-without-reserve').compacted).toBe(false);
+    expect(ledgerWith(state).prepare('task-1', 'turn-with-reserve', 20_000).compacted).toBe(true);
+  });
+
   it('adds nothing when no live state source was supplied', () => {
     const prepared = ledgerWith(bulkyState(), null).prepare('task-1', 'turn-1');
     expect(prepared.compacted).toBe(true);

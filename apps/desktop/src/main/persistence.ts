@@ -14000,8 +14000,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     taskId: string,
     turnId: string,
     includeBuiltinTeamSkill = false,
+    reservedTokens = 0,
   ): PreparedContext {
-    const prepared = this.contextLedger.prepare(taskId, turnId);
     const prePrompt = this.getSprintCoderPrePrompt();
     const prePromptContent = sprintCoderPrePromptContent(prePrompt);
     const prePromptFragment: ContextFragment | null =
@@ -14045,6 +14045,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
         messageId: null,
       });
     }
+    const prepared = this.contextLedger.prepare(
+      taskId,
+      turnId,
+      reservedTokens +
+        (prePromptFragment?.tokenEstimate ?? 0) +
+        skillFragments.reduce((total, fragment) => total + fragment.tokenEstimate, 0),
+    );
     if (skillFragments.length === 0 && prePromptFragment === null) return prepared;
     const [systemFragment, ...remainingFragments] = prepared.fragments;
     const fragments = [
@@ -14625,21 +14632,27 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const event = this.appendEvent({ type: 'turn.accepted', taskId, turnId, userMessage });
     this.db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(now, taskId);
     const renamedTask = this.autoNameTaskInTransaction(taskId, text, now);
-    const prepared = this.assembleContextInTransaction(taskId, turnId, shouldSealBuiltinTeamSkill);
+    const catalogTokenEstimate =
+      skillCatalogContent === undefined ? 0 : estimateTokens(skillCatalogContent);
+    const prepared = this.assembleContextInTransaction(
+      taskId,
+      turnId,
+      shouldSealBuiltinTeamSkill,
+      catalogTokenEstimate,
+    );
     if (skillCatalogContent !== undefined) {
-      const tokenEstimate = estimateTokens(skillCatalogContent);
       const existingTokens = prepared.fragments.reduce(
         (total, fragment) => total + fragment.tokenEstimate,
         0,
       );
-      if (existingTokens + tokenEstimate > CONTEXT_HARD_CAP_TOKENS)
+      if (existingTokens + catalogTokenEstimate > CONTEXT_HARD_CAP_TOKENS)
         throw new Error('Skill catalog does not fit within the Turn context limit');
       prepared.fragments.push({
         id: `turn:${turnId}:skill-catalog`,
         taskId,
         source: 'background',
-        trust: 'assistant',
-        tokenEstimate,
+        trust: 'user',
+        tokenEstimate: catalogTokenEstimate,
         content: skillCatalogContent,
         createdAt: now,
         messageId: null,

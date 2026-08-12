@@ -90,7 +90,7 @@ export class ContextLedger {
     private readonly liveState: LiveStateSource | null = null,
   ) {}
 
-  prepare(taskId: string, turnId: string): PreparedContext {
+  prepare(taskId: string, turnId: string, reservedTokens = 0): PreparedContext {
     const state = this.storage.loadContextLedgerState(taskId, turnId);
     const now = new Date().toISOString();
     const persisted: PersistedFragment[] = [];
@@ -132,7 +132,14 @@ export class ContextLedger {
     const usageEvents = [
       this.storage.recordContextUsage(taskId, turnId, aggregateContextUsage(before)),
     ];
-    const superseded = selectHistoryForCompaction(activeHistory);
+    const nonHistoryTokens = before
+      .filter((fragment) => fragment.source !== 'history')
+      .reduce((total, fragment) => total + fragment.tokenEstimate, 0);
+    const historyBudget = Math.max(
+      0,
+      CONTEXT_HARD_CAP_TOKENS - Math.max(0, reservedTokens) - nonHistoryTokens,
+    );
+    const superseded = selectHistoryForCompaction(activeHistory, historyBudget);
     if (superseded.length === 0)
       return {
         fragments: before,

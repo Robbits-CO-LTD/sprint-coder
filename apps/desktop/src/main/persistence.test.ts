@@ -1202,7 +1202,7 @@ if (runsWithElectronAbi)
       const sealed = persistence
         .prepareContext(task.id, first.turnId)
         .fragments.find(({ id }) => id.endsWith(':skill-catalog'));
-      expect(sealed).toMatchObject({ source: 'background', trust: 'assistant', content: catalog });
+      expect(sealed).toMatchObject({ source: 'background', trust: 'user', content: catalog });
       catalog = JSON.stringify({
         schema: 'sprint-coder.skill-catalog.v1',
         authority: 'none',

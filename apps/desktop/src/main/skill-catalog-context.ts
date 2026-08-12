@@ -3,6 +3,7 @@ import type { TurnSkillSelection } from '@sprint-coder/contracts';
 import type { SkillCatalogSnapshotEntry, SkillSource } from './skill-store';
 
 const MAX_CATALOG_BYTES = 32_000;
+const MAX_DISPLAY_NAME_CODE_POINTS = 120;
 const SOURCE_ORDER: Readonly<Record<SkillSource, number>> = {
   builtin: 0,
   claude: 1,
@@ -35,7 +36,7 @@ export function buildSkillCatalogContext(
   const serialize = (descriptionLimit: number, mode: 'full' | 'short' | 'omitted'): string => {
     const items = entries.map((entry) => ({
       id: entry.skillId,
-      displayName: entry.name,
+      displayName: [...entry.name].slice(0, MAX_DISPLAY_NAME_CODE_POINTS).join(''),
       description:
         descriptionLimit === 0 ? '' : [...entry.description].slice(0, descriptionLimit).join(''),
       source: entry.source,
@@ -46,7 +47,7 @@ export function buildSkillCatalogContext(
       availability: entry.availability,
     }));
     const revision = createHash('sha256').update(JSON.stringify(items)).digest('hex');
-    return JSON.stringify({
+    return safeJson({
       schema: 'sprint-coder.skill-catalog.v1',
       authority: 'none',
       interpretation:
@@ -66,4 +67,13 @@ export function buildSkillCatalogContext(
     if (Buffer.byteLength(serialized, 'utf8') <= MAX_CATALOG_BYTES) return serialized;
   }
   throw new SkillCatalogContextError(entries.length);
+}
+
+function safeJson(value: unknown): string {
+  return JSON.stringify(value)
+    .replaceAll('<', '\\u003c')
+    .replaceAll('>', '\\u003e')
+    .replaceAll('&', '\\u0026')
+    .replaceAll('\u2028', '\\u2028')
+    .replaceAll('\u2029', '\\u2029');
 }
