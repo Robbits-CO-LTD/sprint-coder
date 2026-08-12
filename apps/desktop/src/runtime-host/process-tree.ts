@@ -87,6 +87,7 @@ function signalWindowsTree(
   spawn('taskkill', ['/pid', String(pid), '/t', ...(signal === 'SIGKILL' ? ['/f'] : [])], {
     env: environment,
     stdio: 'ignore',
+    windowsHide: true,
   });
 }
 

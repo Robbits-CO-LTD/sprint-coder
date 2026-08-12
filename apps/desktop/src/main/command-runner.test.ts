@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
+  buildControlledEnvironment,
   executionSpecPathGuard,
   prepareExecutionSpec,
   waitForOutcomeOrTerminationFailure,
@@ -37,6 +38,44 @@ async function workspace(): Promise<string> {
 const executionIt = it;
 
 describe('CommandRunner', () => {
+  it('inherits Windows command-discovery and user paths case-insensitively but excludes secrets', () => {
+    const environment = buildControlledEnvironment('win32', {
+      Path: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
+      UserProfile: 'C:\\Users\\example',
+      AppData: 'C:\\Users\\example\\AppData\\Roaming',
+      localappdata: 'C:\\Users\\example\\AppData\\Local',
+      ProgramFiles: 'C:\\Program Files',
+      OPENAI_API_KEY: 'must-not-cross',
+      AWS_SECRET_ACCESS_KEY: 'must-not-cross',
+    });
+
+    expect(environment).toMatchObject({
+      PATH: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
+      HOME: 'C:\\Users\\example',
+      USERPROFILE: 'C:\\Users\\example',
+      APPDATA: 'C:\\Users\\example\\AppData\\Roaming',
+      LOCALAPPDATA: 'C:\\Users\\example\\AppData\\Local',
+      PROGRAMFILES: 'C:\\Program Files',
+    });
+    expect(environment).not.toHaveProperty('OPENAI_API_KEY');
+    expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
+  });
+
+  it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
+    const environment = buildControlledEnvironment('darwin', {
+      PATH: '/private/custom/bin',
+      HOME: '/Users/example',
+      APPDATA: '/private/appdata',
+      OPENAI_API_KEY: 'must-not-cross',
+      LANG: 'ja_JP.UTF-8',
+    });
+
+    expect(environment).toEqual({
+      LANG: 'ja_JP.UTF-8',
+      PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    });
+  });
+
   it('surfaces termination failure without waiting for a process close that may never arrive', async () => {
     const neverCloses = new Promise<never>(() => undefined);
     const terminationFailure = Promise.reject(
@@ -353,7 +392,7 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
-    'preserves PATH resolution for commands started by an approved executable',
+    'resolves git, node, and npm from the real Windows PATH used by direct API tools',
     async () => {
       const root = await workspace();
       const spec = await prepareExecutionSpec({
@@ -361,7 +400,7 @@ describe('CommandRunner', () => {
         executable: process.execPath,
         argv: [
           '-e',
-          "const result=require('node:child_process').spawnSync('where.exe',['where.exe'],{encoding:'utf8'}); process.stdout.write(result.stdout ?? ''); process.exit(result.status ?? 1)",
+          "const cp=require('node:child_process'); for (const name of ['git.exe','node.exe','npm.cmd']) { const result=cp.spawnSync('where.exe',[name],{encoding:'utf8'}); if (result.status !== 0) process.exit(result.status ?? 1); process.stdout.write(result.stdout ?? ''); }",
         ],
       });
       let output = '';
@@ -373,7 +412,9 @@ describe('CommandRunner', () => {
           },
         }),
       ).resolves.toMatchObject({ exitCode: 0 });
-      expect(output.toLowerCase()).toContain('where.exe');
+      expect(output.toLowerCase()).toContain('git.exe');
+      expect(output.toLowerCase()).toContain('node.exe');
+      expect(output.toLowerCase()).toContain('npm');
     },
   );
 
