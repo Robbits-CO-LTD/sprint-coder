@@ -17,6 +17,7 @@ import {
   executionResolutionSchema,
   modelSelectionSchema,
   modelFallbackNoticeSchema,
+  updateHealthSchema,
   normalizedProviderUsageSchema,
   providerConnectionSchema,
   projectSummarySchema,
@@ -42,6 +43,8 @@ import {
   type ExecutionResolution,
   type ModelSelection,
   type ModelFallbackNotice,
+  type UpdateErrorCategory,
+  type UpdateHealth,
   type NormalizedProviderUsage,
   type ProviderConnection,
   type ProjectReference,
@@ -4186,6 +4189,9 @@ export interface PersistenceClient {
     availableModelIds: readonly string[],
   ): void;
   takeModelFallbackNotice(): ModelFallbackNotice | null;
+  getUpdateHealth(): UpdateHealth;
+  recordUpdateCheckSuccess(at: string): UpdateHealth;
+  recordUpdateCheckFailure(at: string, category: UpdateErrorCategory): UpdateHealth;
   getEffort(): ClaudeEffort;
   setEffort(effort: ClaudeEffort): void;
   getCodexEffort(): string;
@@ -4558,6 +4564,21 @@ const RETIRED_MODEL_IDS: Readonly<Partial<Record<RuntimeKind, Readonly<Record<st
 
 function modelFallbackNoticeKey(kind: Extract<RuntimeKind, 'codex' | 'claude'>): string {
   return `runtime.${kind}.model-fallback-notice`;
+}
+
+function defaultUpdateHealth(): UpdateHealth {
+  return {
+    successfulChecks: 0,
+    failedChecks: 0,
+    consecutiveFailures: 0,
+    lastSuccessAt: null,
+    lastFailureAt: null,
+    lastErrorCategory: null,
+  };
+}
+
+function incrementBounded(value: number): number {
+  return Math.min(Number.MAX_SAFE_INTEGER, value + 1);
 }
 
 const CLAUDE_EFFORT_VALUES: readonly ClaudeEffort[] = [
@@ -10302,6 +10323,52 @@ export class SqlitePersistenceClient implements PersistenceClient {
         this.db.prepare('DELETE FROM settings WHERE key = ?').run(key);
       }
       return changes.length === 0 ? null : modelFallbackNoticeSchema.parse({ changes });
+    })();
+  }
+
+  getUpdateHealth(): UpdateHealth {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'update.health'")
+      .get() as { value: string } | undefined;
+    if (row === undefined) return defaultUpdateHealth();
+    try {
+      const parsed = updateHealthSchema.safeParse(JSON.parse(row.value) as unknown);
+      return parsed.success ? parsed.data : defaultUpdateHealth();
+    } catch {
+      return defaultUpdateHealth();
+    }
+  }
+
+  recordUpdateCheckSuccess(at: string): UpdateHealth {
+    return this.updateHealth((current) => ({
+      ...current,
+      successfulChecks: incrementBounded(current.successfulChecks),
+      consecutiveFailures: 0,
+      lastSuccessAt: at,
+      lastErrorCategory: null,
+    }));
+  }
+
+  recordUpdateCheckFailure(at: string, category: UpdateErrorCategory): UpdateHealth {
+    return this.updateHealth((current) => ({
+      ...current,
+      failedChecks: incrementBounded(current.failedChecks),
+      consecutiveFailures: incrementBounded(current.consecutiveFailures),
+      lastFailureAt: at,
+      lastErrorCategory: category,
+    }));
+  }
+
+  private updateHealth(change: (current: UpdateHealth) => UpdateHealth): UpdateHealth {
+    return this.db.transaction(() => {
+      const next = updateHealthSchema.parse(change(this.getUpdateHealth()));
+      this.db
+        .prepare(
+          `INSERT INTO settings(key, value, updated_at) VALUES ('update.health', ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(JSON.stringify(next), new Date().toISOString());
+      return next;
     })();
   }
 

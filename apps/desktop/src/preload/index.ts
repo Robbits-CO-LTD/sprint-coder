@@ -85,6 +85,7 @@ import {
   skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
+  updateHealthSchema,
   runtimeFailureDiagnosticQuerySchema,
   runtimeFailureDiagnosticExportSchema,
   fileChangeRecordSchema,
@@ -567,6 +568,19 @@ const api: SprintCoderApi = {
         runtimeFailureDiagnosticExportSchema,
         input,
       ),
+  },
+  updates: {
+    subscribeHealth: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        const parsed = updateHealthSchema.safeParse(raw);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.updateHealthEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.updateHealthEvent, handler);
+    },
+    retry: () => ipcRenderer.send(IPC_CHANNELS.updateRetry),
+    openManualUpdate: () => ipcRenderer.send(IPC_CHANNELS.updateOpenManual),
+    openUpdateLog: () => ipcRenderer.send(IPC_CHANNELS.updateOpenLog),
   },
   fileEdits: {
     // Push-only, mirroring `reasoning` above: the frame carries its own taskId/turnId and the store

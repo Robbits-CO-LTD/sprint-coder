@@ -25,6 +25,7 @@ import type {
   DatabaseRecovery,
   RuntimeKind,
   RuntimeStatus,
+  UpdateHealth,
   ProjectSummary,
   ProjectFolder,
   ProjectFolderInput,
@@ -240,6 +241,8 @@ type AppState = {
   projectMultiFolderUx: boolean;
   /** Latest Runtime process liveness, pushed by main. Null until the first transition. */
   runtimeStatus: RuntimeStatus | null;
+  /** Persisted updater health. Raw updater errors and local paths never cross into Renderer. */
+  updateHealth: UpdateHealth | null;
 
   /** Latest stage/turn-completion announcement text for the aria-live region (NFR-A11Y-03). */
   stageAnnouncement: string;
@@ -344,6 +347,7 @@ type AppState = {
 let reasoningUnsubscribe: (() => void) | null = null;
 let fileEditUnsubscribe: (() => void) | null = null;
 let taskUpdateUnsubscribe: (() => void) | null = null;
+let updateHealthUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
 let projectRefreshToken = 0;
@@ -912,6 +916,7 @@ export const useAppStore = create<AppState>((set, get) => {
     settingsWorkspaceV2: true,
     projectMultiFolderUx: true,
     runtimeStatus: null,
+    updateHealth: null,
     stageAnnouncement: '',
     toast: null,
 
@@ -979,6 +984,24 @@ export const useAppStore = create<AppState>((set, get) => {
         });
       // Startup recovery outcome and Runtime liveness both feed the SurfaceFooter (issue #9).
       // Both are best-effort: an older backend simply leaves the footer's quiet default in place.
+      const applyUpdateHealth = (updateHealth: UpdateHealth): void => {
+        const previous = get().updateHealth;
+        set({ updateHealth });
+        if (
+          updateHealth.consecutiveFailures > 0 &&
+          previous?.failedChecks !== updateHealth.failedChecks
+        )
+          get().showToast(
+            updateHealth.consecutiveFailures >= 3
+              ? '自動更新が3回以上連続で失敗しています。設定の「詳細」から手動更新・再試行・ログ確認を行えます。'
+              : '自動更新に失敗しました。設定の「詳細」から再試行できます。',
+          );
+        else if (
+          updateHealth.consecutiveFailures === 0 &&
+          (previous?.consecutiveFailures ?? 0) > 0
+        )
+          get().dismissToast();
+      };
       if (typeof window.sprintCoder.app?.getInfo === 'function')
         void window.sprintCoder.app
           .getInfo()
@@ -989,10 +1012,15 @@ export const useAppStore = create<AppState>((set, get) => {
               settingsWorkspaceV2: info.settingsWorkspaceV2 ?? true,
               projectMultiFolderUx: info.projectMultiFolderUx ?? true,
             });
+            if (info.updateHealth !== undefined) applyUpdateHealth(info.updateHealth);
           })
           .catch(() => undefined);
       if (typeof window.sprintCoder.runtime?.subscribeStatus === 'function')
         window.sprintCoder.runtime.subscribeStatus((runtimeStatus) => set({ runtimeStatus }));
+      updateHealthUnsubscribe?.();
+      updateHealthUnsubscribe = null;
+      if (typeof window.sprintCoder.updates?.subscribeHealth === 'function')
+        updateHealthUnsubscribe = window.sprintCoder.updates.subscribeHealth(applyUpdateHealth);
       try {
         const tasks = await window.sprintCoder.tasks.list();
         set({ tasks, loadingTasks: false, initialized: true });

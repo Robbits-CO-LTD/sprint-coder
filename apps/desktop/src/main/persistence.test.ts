@@ -1939,6 +1939,35 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('persists bounded update health and clears consecutive failures after success', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getUpdateHealth()).toEqual({
+        successfulChecks: 0,
+        failedChecks: 0,
+        consecutiveFailures: 0,
+        lastSuccessAt: null,
+        lastFailureAt: null,
+        lastErrorCategory: null,
+      });
+      persistence.recordUpdateCheckFailure('2026-08-12T01:00:00.000Z', 'decryption');
+      persistence.recordUpdateCheckFailure('2026-08-12T02:00:00.000Z', 'network');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getUpdateHealth()).toMatchObject({
+        failedChecks: 2,
+        consecutiveFailures: 2,
+        lastErrorCategory: 'network',
+      });
+      expect(reopened.recordUpdateCheckSuccess('2026-08-12T03:00:00.000Z')).toMatchObject({
+        successfulChecks: 1,
+        failedChecks: 2,
+        consecutiveFailures: 0,
+        lastErrorCategory: null,
+      });
+      reopened.close();
+    });
+
     it('keeps the Claude effort setting independent of the active Runtime kind (unlike model)', () => {
       const { persistence } = createPersistence();
       persistence.setEffort('xhigh');

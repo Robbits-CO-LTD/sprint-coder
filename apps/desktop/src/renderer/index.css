@@ -6645,6 +6645,24 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-secondary);
 }
 
+.settings-update-health.attention {
+  padding: 12px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-md);
+  background: var(--danger-wash);
+}
+
+.settings-update-warning {
+  color: var(--danger);
+  margin: 0;
+}
+
+.settings-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .settings-group {
   display: flex;
   flex-direction: column;

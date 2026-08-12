@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AutoUpdateOptions } from './auto-update';
 import {
+  classifyUpdateError,
   installUpdateWithFallback,
   selectUpdateRelease,
   startAutoUpdate,
@@ -193,10 +194,13 @@ describe('startAutoUpdate', () => {
       executablePath:
         'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
       macAutoUpdateEligible: false,
+      recordSuccess: vi.fn(),
+      recordFailure: vi.fn(),
     } as unknown as AutoUpdateOptions;
 
     const controller = startAutoUpdate(options);
     await vi.waitFor(() => expect(checkForUpdates).toHaveBeenCalledOnce());
+    expect(options.recordSuccess).toHaveBeenCalledOnce();
     expect(setFeedURL).toHaveBeenCalledWith({
       url: 'https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.0.1-beta.5',
     });
@@ -206,6 +210,9 @@ describe('startAutoUpdate', () => {
     expect(showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Sprint Coder 0.0.1-beta.5 を適用できます。' }),
     );
+    events.emit('error', new Error('active Squirrel error'));
+    events.emit('error', new Error('duplicate active Squirrel error'));
+    expect(options.recordFailure).toHaveBeenCalledWith('updater');
     controller.stop();
     expect(events.listenerCount('update-downloaded')).toBe(0);
     expect(events.listenerCount('error')).toBe(1);
@@ -213,6 +220,21 @@ describe('startAutoUpdate', () => {
     expect(options.logger.warn).toHaveBeenCalledWith(
       'Automatic updater reported an error',
       expect.any(Error),
+    );
+    expect(options.recordFailure).toHaveBeenCalledOnce();
+  });
+
+  it('classifies updater failures without exposing their raw text to the health contract', () => {
+    expect(
+      classifyUpdateError(
+        new Error(
+          'C:\\Users\\alice\\AppData\\Local\\SprintCoder: CryptUnprotectData failed for token',
+        ),
+      ),
+    ).toBe('decryption');
+    expect(classifyUpdateError(new Error('fetch failed: ECONNRESET'))).toBe('network');
+    expect(classifyUpdateError(new Error('GitHub Releases request failed with HTTP 503'))).toBe(
+      'release_feed',
     );
   });
 
