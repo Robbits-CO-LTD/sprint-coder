@@ -1203,6 +1203,12 @@ if (runsWithElectronAbi)
         .prepareContext(task.id, first.turnId)
         .fragments.find(({ id }) => id.endsWith(':skill-catalog'));
       expect(sealed).toMatchObject({ source: 'background', trust: 'user', content: catalog });
+      const finalUsage = first.contextUsageEvents.at(-1);
+      expect(finalUsage?.type).toBe('context.usage');
+      if (finalUsage?.type === 'context.usage')
+        expect(
+          finalUsage.usage.fragments.find(({ source }) => source === 'background')?.tokens,
+        ).toBe(Math.ceil([...catalog].length / 3));
       catalog = JSON.stringify({
         schema: 'sprint-coder.skill-catalog.v1',
         authority: 'none',
