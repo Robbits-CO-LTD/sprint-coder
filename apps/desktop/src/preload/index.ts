@@ -66,6 +66,8 @@ import {
   runtimeSetInputSchema,
   runtimeSettingsGetInputSchema,
   runtimeSettingsSchema,
+  codexUserConfigSettingsSchema,
+  codexUserConfigSettingsSetInputSchema,
   sprintCoderPrePromptSchema,
   sprintCoderPrePromptSetInputSchema,
   skillCandidateInputSchema,
@@ -648,6 +650,20 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.settingsSetCodexEffort, runtimeCodexEffortSetInputSchema, z.undefined(), {
         effort,
       }),
+    getCodexUserConfig: () =>
+      invoke(
+        IPC_CHANNELS.settingsGetCodexUserConfig,
+        emptyPayloadSchema,
+        codexUserConfigSettingsSchema,
+        {},
+      ),
+    setCodexUserConfig: (input) =>
+      invoke(
+        IPC_CHANNELS.settingsSetCodexUserConfig,
+        codexUserConfigSettingsSetInputSchema,
+        z.undefined(),
+        input,
+      ),
     getTeamModelResearch: () =>
       invoke(
         IPC_CHANNELS.settingsGetTeamModelResearch,

@@ -110,6 +110,10 @@ export type RuntimeSkillInput = Readonly<{
   path: string;
 }>;
 
+export type RuntimeCodexConfigPolicy = Readonly<{
+  inheritUserConfig: boolean;
+}>;
+
 /** Additive, optional per-turn addendum: when present, the Codex/Claude adapter wires the real Leader
  * up to team-mcp-bridge.ts (via an ephemeral MCP stdio server) instead of running the plain
  * no-tools profile. `socketPath`/`token` name the bridge connection; `guidance` is appended to the
@@ -180,6 +184,12 @@ export type RuntimeFailureDiagnostic = Readonly<{
   unsupportedNotificationCount: number;
   stderrObserved: boolean;
   stderrTruncated: boolean;
+  codexIsolation?: Readonly<{
+    userConfigSnapshot: 'disabled' | 'missing' | 'copied';
+    selectedSkillCount: number;
+    disabledUnexpectedSkillCount: number;
+    verified: boolean;
+  }>;
   recordedAt: string;
   reasonCode?: RuntimeProtocolFailureReasonCode;
 }>;
@@ -256,6 +266,7 @@ type RuntimeStartRequest = {
   payload: string;
   payloadDigest: string;
   skills?: RuntimeSkillInput[];
+  codexConfigPolicy?: RuntimeCodexConfigPolicy;
   toolCatalogSnapshot: ToolCatalogSnapshot;
   teamMcp?: RuntimeTeamMcpOption;
 };
@@ -427,9 +438,22 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     createHash('sha256').update(Buffer.from(value.payload, 'utf8')).digest('hex') ===
       value.payloadDigest &&
     (!('skills' in value) || value.skills === undefined || isRuntimeSkillInputs(value.skills)) &&
+    (!('codexConfigPolicy' in value) ||
+      value.codexConfigPolicy === undefined ||
+      isRuntimeCodexConfigPolicy(value.codexConfigPolicy)) &&
     'toolCatalogSnapshot' in value &&
     isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot) &&
     (!('teamMcp' in value) || value.teamMcp === undefined || isRuntimeTeamMcpOption(value.teamMcp))
+  );
+}
+
+function isRuntimeCodexConfigPolicy(value: unknown): value is RuntimeCodexConfigPolicy {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 1 &&
+    typeof (value as Record<string, unknown>)['inheritUserConfig'] === 'boolean'
   );
 }
 
@@ -788,6 +812,7 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
         'unsupportedNotificationCount',
         'stderrObserved',
         'stderrTruncated',
+        'codexIsolation',
         'recordedAt',
         'reasonCode',
       ].includes(key),
@@ -844,6 +869,9 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
     record['unsupportedNotificationCount'] >= 0 &&
     typeof record['stderrObserved'] === 'boolean' &&
     typeof record['stderrTruncated'] === 'boolean' &&
+    (!('codexIsolation' in record) ||
+      record['codexIsolation'] === undefined ||
+      isCodexIsolationDiagnostic(record['codexIsolation'])) &&
     (!('reasonCode' in record) ||
       record['reasonCode'] === undefined ||
       [
@@ -877,6 +905,29 @@ function isCapabilityMismatch(value: unknown): boolean {
     Object.keys(record).every((key) => ['missingTools', 'unexpectedTools'].includes(key)) &&
     safeList(record['missingTools']) &&
     safeList(record['unexpectedTools'])
+  );
+}
+
+function isCodexIsolationDiagnostic(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).every((key) =>
+      [
+        'userConfigSnapshot',
+        'selectedSkillCount',
+        'disabledUnexpectedSkillCount',
+        'verified',
+      ].includes(key),
+    ) &&
+    ['disabled', 'missing', 'copied'].includes(String(record['userConfigSnapshot'])) &&
+    Number.isSafeInteger(record['selectedSkillCount']) &&
+    Number(record['selectedSkillCount']) >= 0 &&
+    Number(record['selectedSkillCount']) <= 6 &&
+    Number.isSafeInteger(record['disabledUnexpectedSkillCount']) &&
+    Number(record['disabledUnexpectedSkillCount']) >= 0 &&
+    Number(record['disabledUnexpectedSkillCount']) <= 10_000 &&
+    typeof record['verified'] === 'boolean'
   );
 }
 

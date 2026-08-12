@@ -155,6 +155,28 @@ describe('Runtime Host protocol', () => {
     ).toBe(false);
   });
 
+  it('accepts only a boolean Codex config policy snapshot', () => {
+    const valid = startEnvelope();
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        codexConfigPolicy: { inheritUserConfig: true },
+      }),
+    ).toBe(true);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        codexConfigPolicy: { inheritUserConfig: 'true' },
+      }),
+    ).toBe(false);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        codexConfigPolicy: { inheritUserConfig: false, unexpected: true },
+      }),
+    ).toBe(false);
+  });
+
   it('rejects a valid non-empty catalog while the production Codex host is no-tools', () => {
     const valid = startEnvelope();
     const nonEmpty = {
@@ -364,6 +386,20 @@ describe('Runtime Host protocol', () => {
         },
       }),
     ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...error,
+        diagnostic: {
+          ...error.diagnostic,
+          codexIsolation: {
+            userConfigSnapshot: 'copied',
+            selectedSkillCount: 2,
+            disabledUnexpectedSkillCount: 3,
+            verified: true,
+          },
+        },
+      }),
+    ).toBe(true);
     expect(
       isRuntimeToMainEnvelope({
         ...error,

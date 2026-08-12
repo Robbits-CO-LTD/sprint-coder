@@ -2414,6 +2414,13 @@ export const teamModelResearchSettingsSchema = z
   .strict();
 export type TeamModelResearchSettings = z.infer<typeof teamModelResearchSettingsSchema>;
 export const teamModelResearchSettingsSetInputSchema = teamModelResearchSettingsSchema;
+export const codexUserConfigSettingsSchema = z
+  .object({
+    enabled: z.boolean(),
+  })
+  .strict();
+export type CodexUserConfigSettings = z.infer<typeof codexUserConfigSettingsSchema>;
+export const codexUserConfigSettingsSetInputSchema = codexUserConfigSettingsSchema;
 export const teamModelSelectionGuidanceSchema = z
   .object({
     guidance: z.string().max(4000),
@@ -3222,6 +3229,8 @@ export interface SprintCoderApi {
     /** Codex reasoning level. Rejects a level the selected model does not advertise (see
      * `effortOptionSchema`) — Codex fails the whole turn on an unsupported one. */
     setCodexEffort(effort: string): Promise<void>;
+    getCodexUserConfig(): Promise<CodexUserConfigSettings>;
+    setCodexUserConfig(input: CodexUserConfigSettings): Promise<void>;
     getTeamModelResearch(): Promise<TeamModelResearchSettings>;
     setTeamModelResearch(input: TeamModelResearchSettings): Promise<void>;
     getTeamModelSelectionGuidance(): Promise<TeamModelSelectionGuidance>;
@@ -3415,6 +3424,8 @@ export const IPC_CHANNELS = {
   filesSave: 'sprint-coder:files:save',
   imagesRead: 'sprint-coder:images:read',
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
+  settingsGetCodexUserConfig: 'sprint-coder:settings:get-codex-user-config',
+  settingsSetCodexUserConfig: 'sprint-coder:settings:set-codex-user-config',
   settingsGetTeamModelResearch: 'sprint-coder:settings:get-team-model-research',
   settingsSetTeamModelResearch: 'sprint-coder:settings:set-team-model-research',
   settingsGetTeamModelSelectionGuidance: 'sprint-coder:settings:get-team-model-selection-guidance',

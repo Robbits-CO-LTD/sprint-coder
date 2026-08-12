@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import type { RuntimeSkillInput } from './protocol';
+import type { RuntimeCodexConfigPolicy, RuntimeSkillInput } from './protocol';
 import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
 
 export type CodexSkillIsolation = Readonly<{
@@ -21,13 +21,22 @@ export type CodexSkillIsolation = Readonly<{
   stagedSkills: readonly RuntimeSkillInput[];
   disabledWorkspaceSkillPaths: readonly string[];
   validationCwds: readonly string[];
+  userConfigSnapshot: 'disabled' | 'missing' | 'copied';
 }>;
+
+export class CodexUserConfigSnapshotError extends Error {
+  constructor() {
+    super('Codex user config snapshot failed');
+    this.name = 'CodexUserConfigSnapshotError';
+  }
+}
 
 export function prepareCodexSkillIsolation(input: {
   temporaryRoot: string;
   cwd: string;
   runtimeWorkspaceRoots?: readonly string[];
   skills: readonly RuntimeSkillInput[];
+  configPolicy?: RuntimeCodexConfigPolicy;
   environment?: Readonly<NodeJS.ProcessEnv>;
 }): CodexSkillIsolation {
   const environment = input.environment ?? process.env;
@@ -39,6 +48,11 @@ export function prepareCodexSkillIsolation(input: {
   chmodSync(codexHome, 0o700);
   chmodSync(selectedSkillsRoot, 0o700);
   copyAuthentication(environment, codexHome);
+  const userConfigSnapshot = snapshotUserConfig(
+    environment,
+    codexHome,
+    input.configPolicy?.inheritUserConfig === true,
+  );
 
   const stagedSkills = input.skills.map((skill, index) => {
     const sourceSkillFile = join(skill.path, 'SKILL.md');
@@ -69,6 +83,7 @@ export function prepareCodexSkillIsolation(input: {
     stagedSkills,
     disabledWorkspaceSkillPaths: discoverWorkspaceSkillPathsForRoots(validationCwds),
     validationCwds,
+    userConfigSnapshot,
   };
 }
 
@@ -211,6 +226,31 @@ function copyAuthentication(environment: Readonly<NodeJS.ProcessEnv>, codexHome:
     chmodSync(destination, 0o600);
   } catch {
     // Authentication failure is reported by app-server without exposing the source path.
+  }
+}
+
+function snapshotUserConfig(
+  environment: Readonly<NodeJS.ProcessEnv>,
+  codexHome: string,
+  enabled: boolean,
+): CodexSkillIsolation['userConfigSnapshot'] {
+  if (!enabled) return 'disabled';
+  const sourceHome =
+    environment['CODEX_HOME'] ??
+    join(environment['HOME'] ?? environment['USERPROFILE'] ?? '', '.codex');
+  const source = join(sourceHome, 'config.toml');
+  try {
+    const metadata = lstatSync(source);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 1024 * 1024)
+      throw new CodexUserConfigSnapshotError();
+    const destination = join(codexHome, 'config.toml');
+    copyFileSync(source, destination);
+    chmodSync(destination, 0o600);
+    return 'copied';
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+    if (error instanceof CodexUserConfigSnapshotError) throw error;
+    throw new CodexUserConfigSnapshotError();
   }
 }
 

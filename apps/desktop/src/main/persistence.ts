@@ -4175,6 +4175,8 @@ export interface PersistenceClient {
   setEffort(effort: ClaudeEffort): void;
   getCodexEffort(): string;
   setCodexEffort(effort: string): void;
+  getCodexUserConfigEnabled(): boolean;
+  setCodexUserConfigEnabled(enabled: boolean): void;
   hasAcknowledgedFullAccessRisk(): boolean;
   acknowledgeFullAccessRisk(): void;
   getTeamModelResearchBeforeHiring(): boolean;
@@ -9975,6 +9977,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       unsupportedNotificationCount: diagnostic.unsupportedNotificationCount,
       stderrObserved: diagnostic.stderrObserved,
       stderrTruncated: diagnostic.stderrTruncated,
+      ...(diagnostic.codexIsolation === undefined
+        ? {}
+        : { codexIsolation: diagnostic.codexIsolation }),
       recordedAt: new Date().toISOString(),
       ...(diagnostic.reasonCode === undefined ? {} : { reasonCode: diagnostic.reasonCode }),
     };
@@ -10153,6 +10158,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(effort, new Date().toISOString());
+  }
+
+  getCodexUserConfigEnabled(): boolean {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'runtime.codex.user-config-enabled'")
+      .get() as { value: string } | undefined;
+    return row?.value === '1';
+  }
+
+  setCodexUserConfigEnabled(enabled: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('runtime.codex.user-config-enabled', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(enabled ? '1' : '0', new Date().toISOString());
   }
 
   hasAcknowledgedFullAccessRisk(): boolean {

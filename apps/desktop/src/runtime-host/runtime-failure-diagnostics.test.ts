@@ -154,6 +154,23 @@ describe('RuntimeFailureDiagnosticCollector', () => {
     expect(JSON.stringify(diagnostic)).not.toContain('\u001b');
   });
 
+  it('records only bounded Codex isolation outcomes without paths or config contents', () => {
+    const collector = new RuntimeFailureDiagnosticCollector('codex', '0.2.1', null, false);
+    collector.recordCodexIsolation({
+      userConfigSnapshot: 'copied',
+      selectedSkillCount: 2,
+      disabledUnexpectedSkillCount: 3,
+      verified: true,
+    });
+
+    expect(collector.snapshot('startup_error').codexIsolation).toEqual({
+      userConfigSnapshot: 'copied',
+      selectedSkillCount: 2,
+      disabledUnexpectedSkillCount: 3,
+      verified: true,
+    });
+  });
+
   it('removes Windows home paths including spaces', () => {
     const collector = new RuntimeFailureDiagnosticCollector('codex', '0.2.1', null, false);
     collector.recordStderr('failed at C:\\Users\\Jane Doe\\project\\file.ts\n');

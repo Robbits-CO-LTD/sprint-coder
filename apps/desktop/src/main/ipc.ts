@@ -99,6 +99,8 @@ import {
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeSettingsSchema,
+  codexUserConfigSettingsSchema,
+  codexUserConfigSettingsSetInputSchema,
   sprintCoderPrePromptSchema,
   sprintCoderPrePromptSetInputSchema,
   teamModelResearchSettingsSchema,
@@ -772,6 +774,7 @@ export class IpcRouter {
           : this.registerWorkerMcp(turnId, worker.taskId, worker.id, executionId),
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
       codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
+      codexUserConfigEnabled: () => this.persistence.getCodexUserConfigEnabled(),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
     });
     this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
@@ -1012,6 +1015,7 @@ export class IpcRouter {
       },
       'codex',
       join(app.getPath('userData'), 'codex-isolated'),
+      () => ({ inheritUserConfig: this.persistence.getCodexUserConfigEnabled() }),
     );
     this.claudeRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -1149,6 +1153,21 @@ export class IpcRouter {
           ),
         };
       },
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetCodexUserConfig,
+      emptyPayloadSchema,
+      codexUserConfigSettingsSchema,
+      () => ({ enabled: this.persistence.getCodexUserConfigEnabled() }),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetCodexUserConfig,
+      codexUserConfigSettingsSetInputSchema,
+      z.undefined(),
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetCodexUserConfig, () =>
+          this.persistence.setCodexUserConfigEnabled(input.enabled),
+        ).value,
     );
     this.handle(
       IPC_CHANNELS.settingsGetTeamModelResearch,

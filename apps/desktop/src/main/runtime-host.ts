@@ -14,6 +14,7 @@ import {
   isRuntimeToMainEnvelope,
   type MainToRuntimeEnvelope,
   type RuntimeCanonicalEvent,
+  type RuntimeCodexConfigPolicy,
   type RuntimeContextFragment,
   type RuntimeFailureDiagnostic,
   type RuntimeProtocolFailureReasonCode,
@@ -149,6 +150,9 @@ export class RuntimeHostClient {
     private readonly onContextAccepted?: ContextAccepted,
     private readonly kind: 'codex' | 'claude' = 'codex',
     private readonly codexIsolationRoot = join(tmpdir(), 'sprint-coder-codex-isolated-tests'),
+    private readonly codexConfigPolicyForTurn: () => RuntimeCodexConfigPolicy = () => ({
+      inheritUserConfig: false,
+    }),
   ) {
     this.launch();
   }
@@ -301,6 +305,7 @@ export class RuntimeHostClient {
       payload: Buffer.from(payload.bytes).toString('utf8'),
       payloadDigest: payload.digest,
       skills: [...skills],
+      codexConfigPolicy: this.codexConfigPolicyForTurn(),
       toolCatalogSnapshot,
       // Runtime adapters need the complete sealed guidance. Claude places it in its system prompt;
       // serializeCliExecutionPayload only removes the duplicate from the user payload.

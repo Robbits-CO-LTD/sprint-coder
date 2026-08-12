@@ -1721,6 +1721,12 @@ if (runsWithElectronAbi)
         unsupportedNotificationCount: 1,
         stderrObserved: true,
         stderrTruncated: false,
+        codexIsolation: {
+          userConfigSnapshot: 'copied',
+          selectedSkillCount: 2,
+          disabledUnexpectedSkillCount: 1,
+          verified: true,
+        },
         recordedAt: new Date().toISOString(),
         reasonCode: 'invalid_project_context_authority',
       });
@@ -1735,6 +1741,12 @@ if (runsWithElectronAbi)
         failureStage: 'protocol_error',
         unsupportedNotificationCount: 1,
         reasonCode: 'invalid_project_context_authority',
+        codexIsolation: {
+          userConfigSnapshot: 'copied',
+          selectedSkillCount: 2,
+          disabledUnexpectedSkillCount: 1,
+          verified: true,
+        },
       });
       expect(persisted?.stderrObserved).toBe(true);
       expect(JSON.stringify(persisted)).not.toContain('abcdefghijkl');
@@ -1898,6 +1910,20 @@ if (runsWithElectronAbi)
       expect(reopened.getTeamModelResearchBeforeHiring()).toBe(true);
       reopened.setTeamModelResearchBeforeHiring(false);
       expect(reopened.getTeamModelResearchBeforeHiring()).toBe(false);
+
+      reopened.close();
+    });
+
+    it('defaults Codex user config inheritance off and persists explicit opt-in', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getCodexUserConfigEnabled()).toBe(false);
+      persistence.setCodexUserConfigEnabled(true);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getCodexUserConfigEnabled()).toBe(true);
+      reopened.setCodexUserConfigEnabled(false);
+      expect(reopened.getCodexUserConfigEnabled()).toBe(false);
       reopened.close();
     });
 

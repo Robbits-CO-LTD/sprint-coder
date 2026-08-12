@@ -19,6 +19,7 @@ export class RuntimeFailureDiagnosticCollector {
   private lastRecognizedNotification: string | null = null;
   private unsupportedNotificationCount = 0;
   private capabilityMismatch: RuntimeFailureDiagnostic['capabilityMismatch'];
+  private codexIsolation: RuntimeFailureDiagnostic['codexIsolation'];
 
   constructor(
     private readonly runtimeKind: 'codex' | 'claude',
@@ -67,6 +68,11 @@ export class RuntimeFailureDiagnosticCollector {
     };
   }
 
+  recordCodexIsolation(input: NonNullable<RuntimeFailureDiagnostic['codexIsolation']>): void {
+    if (this.runtimeKind !== 'codex') return;
+    this.codexIsolation = Object.freeze({ ...input });
+  }
+
   snapshot(stage: RuntimeFailureStage, now = Date.now()): RuntimeFailureDiagnostic {
     const diagnostic: RuntimeFailureDiagnostic = {
       version: 1,
@@ -88,6 +94,7 @@ export class RuntimeFailureDiagnosticCollector {
       unsupportedNotificationCount: this.unsupportedNotificationCount,
       stderrObserved: this.stderrObserved,
       stderrTruncated: this.stderrTruncated,
+      ...(this.codexIsolation === undefined ? {} : { codexIsolation: this.codexIsolation }),
       recordedAt: new Date(now).toISOString(),
     };
     return diagnostic;

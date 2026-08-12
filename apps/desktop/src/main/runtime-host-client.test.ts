@@ -63,6 +63,37 @@ describe('RuntimeHostClient start acknowledgement', () => {
     client.dispose();
   });
 
+  it('seals the current Codex user-config opt-in into each start envelope', async () => {
+    let enabled = false;
+    const client = new RuntimeHostClient(
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      'codex',
+      undefined,
+      () => ({ inheritUserConfig: enabled }),
+    );
+    const child = children[0]!;
+    child.emit('spawn');
+
+    client.start('task-policy', 'turn-policy', 'hello', null, 'auto', emptyCatalog());
+    await Promise.resolve();
+    const first = child.messages.find((message) => messageType(message) === 'start') as Record<
+      string,
+      unknown
+    >;
+    expect(first['codexConfigPolicy']).toEqual({ inheritUserConfig: false });
+    enabled = true;
+    client.start('task-policy', 'turn-policy-2', 'hello', null, 'auto', emptyCatalog());
+    await Promise.resolve();
+    const starts = child.messages.filter((message) => messageType(message) === 'start') as Array<
+      Record<string, unknown>
+    >;
+    expect(starts[1]?.['codexConfigPolicy']).toEqual({ inheritUserConfig: true });
+    client.dispose();
+  });
+
   it.each(['codex', 'claude'] as const)(
     'fails a rejected %s start once and ignores late or duplicate terminal responses',
     async (runtimeKind) => {

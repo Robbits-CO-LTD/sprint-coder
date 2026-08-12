@@ -302,6 +302,7 @@ function startAdapter(
       data.projectItems,
       data.payload,
       localImages,
+      data.codexConfigPolicy,
     );
   } catch {
     activeTurns.delete(data.turnId);

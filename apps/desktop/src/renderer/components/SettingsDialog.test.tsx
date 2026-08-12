@@ -32,6 +32,8 @@ function stubBridge(): void {
     sprintCoder: {
       settings: {
         getRuntime: () => Promise.resolve(),
+        getCodexUserConfig: () => Promise.resolve({ enabled: false }),
+        setCodexUserConfig: () => Promise.resolve(),
         getTeamModelResearch: () => Promise.resolve({ researchBeforeHiring: false }),
         setTeamModelResearch: () => Promise.resolve(),
         getTeamModelSelectionGuidance: () => Promise.resolve({ guidance: '' }),
@@ -79,6 +81,7 @@ describe('which body the flag selects', () => {
     expect(html).toContain('data-testid="settings-model"');
     expect(html).toContain('data-testid="settings-effort"');
     expect(html).toContain('data-testid="settings-cli-codex"');
+    expect(html).toContain('ユーザーMCPはSprint CoderのTool Broker管理外');
     expect(html).toContain('data-testid="settings-team-research"');
     expect(html).toContain('data-testid="settings-team-defaults"');
     expect(html).toContain('data-testid="settings-team-models"');
