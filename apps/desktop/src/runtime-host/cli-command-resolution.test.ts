@@ -3,6 +3,7 @@ import {
   capabilitiesFromClaudeHelp,
   compatibilityFor,
   environmentValue,
+  isSafeCliVersionText,
   probeFirstCapableCliCommand,
   selectResolvedCliCommand,
 } from './cli-command-resolution';
@@ -114,6 +115,14 @@ describe('CLI command selection', () => {
     expect(compatibilityFor('codex', 'codex-cli 0.130.0-alpha.5')).toBe('untested');
     expect(compatibilityFor('claude', '2.1.218 (Claude Code)')).toBe('verified');
     expect(compatibilityFor('claude', '2.1.169 (Claude Code)')).toBe('unsupported');
+  });
+
+  it('accepts only version text and rejects stdout that contains a user path', () => {
+    expect(isSafeCliVersionText('codex', 'codex-cli 0.144.4')).toBe(true);
+    expect(isSafeCliVersionText('claude', '2.1.218 (Claude Code)')).toBe(true);
+    expect(
+      isSafeCliVersionText('codex', 'codex-cli 0.144.4 warn /Users/alice/.codex/config.toml'),
+    ).toBe(false);
   });
 
   it('reads Windows environment keys case-insensitively without widening other platforms', () => {

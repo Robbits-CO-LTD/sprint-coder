@@ -49,7 +49,12 @@ export async function probeCliCommandCandidates(input: {
   timeoutMs: number;
 }): Promise<ResolvedCliCommand | null> {
   return probeFirstCapableCliCommand(input.kind, input.candidates, async (candidate) => {
-    const version = await probeVersion(candidate.executable, input.environment, input.timeoutMs);
+    const version = await probeVersion(
+      input.kind,
+      candidate.executable,
+      input.environment,
+      input.timeoutMs,
+    );
     if (version === null) return null;
     const capabilities = await probeRequiredCapabilities(
       input.kind,
@@ -151,21 +156,23 @@ function deduplicateCandidates(candidates: readonly CliCommandCandidate[]): CliC
 }
 
 async function probeVersion(
+  kind: 'codex' | 'claude',
   executable: string,
   environment: Readonly<NodeJS.ProcessEnv>,
   timeoutMs: number,
 ): Promise<string | null> {
   const result = await probeCommand(executable, ['--version'], environment, timeoutMs, 512);
-  const version = result?.output.trim() ?? '';
-  return result?.code === 0 &&
-    version !== '' &&
-    version.length <= 128 &&
-    ![...version].some((character) => {
-      const code = character.charCodeAt(0);
-      return code < 32 || code === 127;
-    })
-    ? version
-    : null;
+  const version = result?.stdout.trim() ?? '';
+  return result?.code === 0 && isSafeCliVersionText(kind, version) ? version : null;
+}
+
+export function isSafeCliVersionText(kind: 'codex' | 'claude', version: string): boolean {
+  if (version === '' || version.length > 128) return false;
+  const pattern =
+    kind === 'codex'
+      ? /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u
+      : /^(?:claude-code )?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \(Claude Code\))?$/u;
+  return pattern.test(version);
 }
 
 async function probeRequiredCapabilities(
@@ -212,10 +219,11 @@ function probeCommand(
   environment: Readonly<NodeJS.ProcessEnv>,
   timeoutMs: number,
   outputLimit: number,
-): Promise<{ code: number | null; output: string } | null> {
+): Promise<{ code: number | null; output: string; stdout: string } | null> {
   return new Promise((resolve) => {
     let settled = false;
     const chunks: Buffer[] = [];
+    const stdoutChunks: Buffer[] = [];
     let outputBytes = 0;
     let child;
     try {
@@ -234,23 +242,30 @@ function probeCommand(
       finish(null);
     }, timeoutMs);
     timer.unref?.();
-    const finish = (value: { code: number | null; output: string } | null): void => {
+    const finish = (
+      value: { code: number | null; output: string; stdout: string } | null,
+    ): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve(value);
     };
-    const collect = (chunk: Buffer): void => {
+    const collect = (chunk: Buffer, stdout: boolean): void => {
       if (outputBytes >= outputLimit) return;
       const accepted = chunk.subarray(0, outputLimit - outputBytes);
       chunks.push(accepted);
+      if (stdout) stdoutChunks.push(accepted);
       outputBytes += accepted.byteLength;
     };
-    child.stdout.on('data', collect);
-    child.stderr.on('data', collect);
+    child.stdout.on('data', (chunk: Buffer) => collect(chunk, true));
+    child.stderr.on('data', (chunk: Buffer) => collect(chunk, false));
     child.once('error', () => finish(null));
     child.once('exit', (code) => {
-      finish({ code, output: Buffer.concat(chunks).toString('utf8') });
+      finish({
+        code,
+        output: Buffer.concat(chunks).toString('utf8'),
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+      });
     });
   });
 }
