@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type {
   ModelSelection,
+  ResolvedCliCommand,
   SkillCatalogItem,
   SkillDraft,
   TurnSkillSelection,
@@ -85,6 +86,8 @@ export type RuntimeState = {
   codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
   claudeAvailable: boolean;
   claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
+  codexCli: ResolvedCliCommand | null;
+  claudeCli: ResolvedCliCommand | null;
   model: string;
   models: CodexModelOption[];
   effort: ClaudeEffort;
@@ -899,6 +902,8 @@ export const useAppStore = create<AppState>((set, get) => {
       codexReadiness: 'unavailable',
       claudeAvailable: false,
       claudeReadiness: 'unavailable',
+      codexCli: null,
+      claudeCli: null,
       model: 'auto',
       models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
       effort: 'medium',
