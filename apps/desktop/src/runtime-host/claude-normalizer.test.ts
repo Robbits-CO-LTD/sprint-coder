@@ -164,6 +164,52 @@ describe('ClaudeJsonlNormalizer', () => {
     ).not.toThrow();
   });
 
+  it.each([
+    ['memory', ['mcp__team__project_memory_remember']],
+    ['skill creator', ['mcp__team__skill_draft_create']],
+    ['skill import', ['mcp__team__skill_import_read', 'mcp__team__skill_import_install']],
+  ])('accepts the exact %s MCP subset', (_kind, toolNames) => {
+    const normalizer = new ClaudeJsonlNormalizer({
+      builtInTools: ['Read', 'Glob', 'Grep'],
+      teamMcp: { serverName: 'team', toolNames },
+    });
+    expect(() =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'system',
+          subtype: 'init',
+          tools: ['Glob', 'Grep', 'Read', ...toolNames],
+          mcp_servers: [{ name: 'team', status: 'connected' }],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('reports bounded missing and unexpected tool differences on exact-match failure', () => {
+    const expected = ['mcp__team__team_hire_worker'];
+    const normalizer = new ClaudeJsonlNormalizer({
+      builtInTools: ['Read'],
+      teamMcp: { serverName: 'team', toolNames: expected },
+    });
+    try {
+      normalizer.push(
+        JSON.stringify({
+          type: 'system',
+          subtype: 'init',
+          tools: ['Read', 'mcp__team__skill_draft_create'],
+          mcp_servers: [{ name: 'team', status: 'connected' }],
+        }),
+      );
+      throw new Error('expected capability violation');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ClaudeCapabilityViolationError);
+      expect(error).toMatchObject({
+        missingTools: expected,
+        unexpectedTools: ['mcp__team__skill_draft_create'],
+      });
+    }
+  });
+
   it('accepts the real Claude CLI Team MCP initialization while the configured server is pending', () => {
     const normalizer = new ClaudeJsonlNormalizer({
       builtInTools: ['Read', 'Glob', 'Grep'],

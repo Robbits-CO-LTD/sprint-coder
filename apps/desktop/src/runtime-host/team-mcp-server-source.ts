@@ -15,27 +15,7 @@
 //    TEAM_BRIDGE_SOCKET, authenticating with TEAM_BRIDGE_TOKEN. It never talks to
 //    TeamCoordinator/persistence directly and holds no taskId of its own — the bridge is the only
 //    thing that knows which Task/turn this socket connection belongs to.
-export const TEAM_MCP_TOOL_NAMES = [
-  'project_memory_remember',
-  'skill_draft_create',
-  'skill_import_read',
-  'skill_import_install',
-  'team_list_models',
-  'team_record_model_research',
-  'team_hire_worker',
-  'team_assign_task',
-  'team_assign_mission',
-  'team_resume_mission',
-  'team_steer_execution',
-  'team_cancel_execution',
-  'team_get_status',
-  'team_wait_events',
-  'team_send_to_worker',
-  'team_send_message',
-  'team_read_messages',
-  'team_wait_reports',
-  'team_stop_worker',
-] as const;
+export { TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
 export const TEAM_MCP_SERVER_SOURCE = `'use strict';
 const net = require('net');

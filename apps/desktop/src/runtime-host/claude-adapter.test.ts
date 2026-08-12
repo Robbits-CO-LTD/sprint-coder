@@ -10,6 +10,7 @@ import {
   resolveClaudeCommand,
 } from './claude-adapter';
 import { ClaudeRateLimitError } from './claude-normalizer';
+import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
 const temporaryRoots: string[] = [];
 
@@ -177,14 +178,24 @@ describe('Claude runtime probe', () => {
   it('enables native WebSearch only for an explicitly research-enabled Team turn', () => {
     const withoutResearch = buildClaudeArgs(
       'auto',
-      { configPath: '/tmp/team.json', guidance: 'team', enableWebSearch: false },
+      {
+        configPath: '/tmp/team.json',
+        guidance: 'team',
+        toolNames: TEAM_CORE_MCP_TOOL_NAMES,
+        enableWebSearch: false,
+      },
       undefined,
       'read-only',
       ['/tmp/ws'],
     );
     const withResearch = buildClaudeArgs(
       'auto',
-      { configPath: '/tmp/team.json', guidance: 'team', enableWebSearch: true },
+      {
+        configPath: '/tmp/team.json',
+        guidance: 'team',
+        toolNames: TEAM_CORE_MCP_TOOL_NAMES,
+        enableWebSearch: true,
+      },
       undefined,
       'read-only',
       ['/tmp/ws'],
@@ -192,6 +203,13 @@ describe('Claude runtime probe', () => {
     expect(withoutResearch[withoutResearch.indexOf('--tools') + 1]).not.toContain('WebSearch');
     expect(withoutResearch[withoutResearch.indexOf('--allowedTools') + 1]).not.toContain(
       'WebSearch',
+    );
+    expect(withoutResearch[withoutResearch.indexOf('--allowedTools') + 1]).toContain(
+      'mcp__team__team_hire_worker',
+    );
+    expect(withoutResearch[withoutResearch.indexOf('--allowedTools') + 1]).not.toContain('*');
+    expect(withoutResearch[withoutResearch.indexOf('--allowedTools') + 1]).not.toContain(
+      'skill_draft_create',
     );
     expect(withResearch[withResearch.indexOf('--tools') + 1]).toContain('WebSearch');
     expect(withResearch[withResearch.indexOf('--allowedTools') + 1]).toContain('WebSearch');
@@ -201,7 +219,12 @@ describe('Claude runtime probe', () => {
     const guidance = 'sealed Team guidance\nManager-only guidance';
     const args = buildClaudeArgs(
       'auto',
-      { configPath: '/tmp/team.json', guidance, enableWebSearch: false },
+      {
+        configPath: '/tmp/team.json',
+        guidance,
+        toolNames: TEAM_CORE_MCP_TOOL_NAMES,
+        enableWebSearch: false,
+      },
       undefined,
       'read-only',
       ['/tmp/ws'],

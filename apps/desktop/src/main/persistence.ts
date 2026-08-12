@@ -9966,6 +9966,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       elapsedMs: diagnostic.elapsedMs,
       appVersion: diagnostic.appVersion,
       cliVersion: diagnostic.cliVersion,
+      ...(diagnostic.capabilityMismatch === undefined
+        ? {}
+        : { capabilityMismatch: diagnostic.capabilityMismatch }),
       ...(diagnostic.cliResolution === undefined
         ? {}
         : { cliResolution: diagnostic.cliResolution }),

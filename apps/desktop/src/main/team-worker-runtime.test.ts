@@ -97,6 +97,8 @@ import {
   TeamRuntimeAvailabilityTracker,
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
+import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
+import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract';
 
 afterEach(() => {
   runtimeHostMock.failures.clear();
@@ -152,7 +154,7 @@ const envelope: TeamEnvelope = {
 
 function runtime(
   overrides: {
-    teamMcpFor?: () => { socketPath: string; token: string; guidance: string } | undefined;
+    teamMcpFor?: () => RuntimeTeamMcpOption | undefined;
     releaseTeamMcp?: (turnId: string) => void;
     contextFor?: TeamWorkerRuntimeDeps['contextFor'];
     writeScopeFor?: TeamWorkerRuntimeDeps['writeScopeFor'];
@@ -200,6 +202,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       socketPath: '/tmp/team.sock',
       token: 'manager-token',
       guidance: 'manager guidance',
+      toolNames: TEAM_CORE_MCP_TOOL_NAMES,
     }));
     const releaseTeamMcp = vi.fn();
     const subject = runtime({
@@ -275,6 +278,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
         socketPath: '/tmp/team.sock',
         token: 'manager-token',
         guidance: 'manager guidance',
+        toolNames: TEAM_CORE_MCP_TOOL_NAMES,
       }),
       selectRuntimes: () => [
         { kind: 'claude', model: 'claude-sonnet-5' },
@@ -644,6 +648,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       socketPath: '/tmp/team.sock',
       token: 'manager-token',
       guidance: 'manager guidance',
+      toolNames: TEAM_CORE_MCP_TOOL_NAMES,
     }));
     const subject = runtime({ teamMcpFor, releaseTeamMcp });
 
@@ -663,6 +668,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       socketPath: '/tmp/team.sock',
       token: 'manager-token',
       guidance: 'manager guidance',
+      toolNames: TEAM_CORE_MCP_TOOL_NAMES,
     });
     expect(releaseTeamMcp).toHaveBeenCalledWith(expect.any(String));
   });

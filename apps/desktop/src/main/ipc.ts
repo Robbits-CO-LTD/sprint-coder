@@ -365,7 +365,12 @@ import {
   BUILTIN_SPRINT_CODER_PRODUCT_SKILL_ID,
 } from './sprint-coder-product-skill';
 import { SkillStore } from './skill-store';
-import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
+import {
+  TeamMcpBridge,
+  defaultSocketPathFactory,
+  type TeamMcpRegistration,
+} from './team-mcp-bridge';
+import { teamMcpToolNamesForCapabilities } from '../runtime-host/team-mcp-tool-contract';
 import {
   PROJECT_MEMORY_MCP_GUIDANCE,
   PROJECT_MEMORY_PROVIDER_TOOL,
@@ -3825,7 +3830,7 @@ export class IpcRouter {
     if (socketPath === null) return undefined;
     const token = TeamMcpBridge.generateToken();
     const requireModelResearch = this.persistence.getTeamModelResearchBeforeHiring();
-    this.teamMcpBridge.register(turnId, {
+    const registration: TeamMcpRegistration = {
       taskId,
       token,
       contextOwner: { type: 'turn', id: turnId },
@@ -3836,7 +3841,8 @@ export class IpcRouter {
       ...(options.importSkillTurn ? { skillImportUserText: options.skillImportUserText } : {}),
       ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
       ...leaderMcpCapabilities(options.teamTurn),
-    });
+    };
+    this.teamMcpBridge.register(turnId, registration);
     const guidance = [
       options.teamTurn
         ? teamGuidance(
@@ -3859,6 +3865,7 @@ export class IpcRouter {
       socketPath,
       token,
       guidance,
+      toolNames: teamMcpToolNamesForCapabilities(registration),
       enableWebSearch: options.teamTurn && requireModelResearch,
     };
   }
@@ -3909,7 +3916,7 @@ export class IpcRouter {
     if (socketPath === null) return undefined;
     const token = TeamMcpBridge.generateToken();
     const requireModelResearch = this.persistence.getTeamModelResearchBeforeHiring();
-    this.teamMcpBridge.register(turnId, {
+    const registration: TeamMcpRegistration = {
       taskId,
       token,
       requesterAgentId,
@@ -3922,10 +3929,12 @@ export class IpcRouter {
         ? {}
         : { contextOwner: { type: 'team_execution' as const, id: executionId } }),
       requireModelResearch,
-    });
+    };
+    this.teamMcpBridge.register(turnId, registration);
     return {
       socketPath,
       token,
+      toolNames: teamMcpToolNamesForCapabilities(registration),
       guidance: teamGuidance(
         MANAGER_MCP_SYSTEM_PROMPT,
         requireModelResearch,
@@ -3944,7 +3953,7 @@ export class IpcRouter {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
     const token = TeamMcpBridge.generateToken();
-    this.teamMcpBridge.register(turnId, {
+    const registration: TeamMcpRegistration = {
       taskId,
       token,
       requesterAgentId,
@@ -3952,8 +3961,14 @@ export class IpcRouter {
       ...(executionId === undefined
         ? {}
         : { contextOwner: { type: 'team_execution' as const, id: executionId } }),
-    });
-    return { socketPath, token, guidance: WORKER_MCP_SYSTEM_PROMPT };
+    };
+    this.teamMcpBridge.register(turnId, registration);
+    return {
+      socketPath,
+      token,
+      guidance: WORKER_MCP_SYSTEM_PROMPT,
+      toolNames: teamMcpToolNamesForCapabilities(registration),
+    };
   }
 
   private async refreshModelCatalog(): Promise<void> {
