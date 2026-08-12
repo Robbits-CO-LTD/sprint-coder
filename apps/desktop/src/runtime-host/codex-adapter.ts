@@ -417,6 +417,8 @@ export class CodexRuntimeAdapter {
     const agentMessageBoundary = new CodexAgentMessageBoundary();
     let skillIsolationReady = false;
     let skillIsolationVerificationPending = false;
+    let teamDynamicTools: readonly CodexDynamicToolSpec[] = [];
+    let activeThreadId: string | null = null;
     const send = (method: string, params: unknown): Promise<unknown> =>
       new Promise((resolve, reject) => {
         const id = nextRequestId++;
@@ -467,6 +469,45 @@ export class CodexRuntimeAdapter {
           (typeof message['id'] === 'number' || typeof message['id'] === 'string') &&
           typeof message['method'] === 'string'
         ) {
+          if (message['method'] === 'item/tool/call' && teamMcp !== undefined) {
+            const responseId = message['id'];
+            void (async () => {
+              const canRespond = (): boolean =>
+                !failed &&
+                !control.canceled &&
+                !child.stdin.destroyed &&
+                !child.stdin.writableEnded &&
+                this.active.get(turnId) === control;
+              try {
+                const params = asRecord(message['params']);
+                const tool = requiredString(params['tool'], 'dynamic tool name');
+                const threadId = requiredString(params['threadId'], 'dynamic tool thread id');
+                requiredString(params['turnId'], 'dynamic tool turn id');
+                requiredString(params['callId'], 'dynamic tool call id');
+                if (
+                  params['namespace'] !== null ||
+                  threadId !== activeThreadId ||
+                  !teamMcp.toolNames.includes(tool as TeamMcpToolName)
+                )
+                  throw new Error('Unexpected dynamic Team tool');
+                const result = await send('mcpServer/tool/call', {
+                  server: 'team',
+                  threadId,
+                  tool,
+                  arguments: params['arguments'],
+                });
+                if (!canRespond()) return;
+                sendResponse(responseId, codexDynamicToolResponseFromMcp(result));
+              } catch {
+                if (!canRespond()) return;
+                sendResponse(responseId, {
+                  success: false,
+                  contentItems: [{ type: 'inputText', text: 'Team tool failed.' }],
+                });
+              }
+            })();
+            return;
+          }
           respondToCodexRequest(message['method'], message['id'], sendResponse);
           return;
         }
@@ -540,11 +581,28 @@ export class CodexRuntimeAdapter {
             title: 'Sprint Coder',
             version: desktopPackage.version,
           },
-          capabilities: multiRoot ? { experimentalApi: true } : {},
+          // Multi-root and client-hosted dynamic Team tools are both gated by the app-server's
+          // experimentalApi client capability. The latter is required even though dynamicTools is
+          // present in the generated v2 schema.
+          capabilities: codexInitializeCapabilities(multiRoot, teamMcp !== undefined),
         });
         child.stdin.write(
           `${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`,
         );
+        if (teamMcp !== undefined) {
+          // Force Codex to initialize and inventory the pinned per-turn MCP before committing the
+          // thread's model-visible tool snapshot. Without this request a short Team turn can reach
+          // the model before the ephemeral server has been recognized.
+          const inventoryResponse = await send('mcpServerStatus/list', {
+            cursor: null,
+            detail: 'toolsAndAuthOnly',
+            limit: 100,
+            threadId: null,
+          });
+          const inventory = validateCodexTeamMcpInventory(inventoryResponse, teamMcp.toolNames);
+          if (!inventory.ok) throw new CodexTeamMcpUnavailableError();
+          teamDynamicTools = buildCodexTeamDynamicTools(inventoryResponse, teamMcp.toolNames);
+        }
         await send('skills/extraRoots/set', {
           extraRoots: [skillIsolation.selectedSkillsRoot],
         });
@@ -563,11 +621,13 @@ export class CodexRuntimeAdapter {
             approvalPolicy: 'never',
             sandbox: CODEX_SANDBOX_BY_SCOPE[effectiveScope],
             ephemeral: true,
+            ...(teamMcp === undefined ? {} : { dynamicTools: teamDynamicTools }),
             ...(model === 'auto' ? {} : { model }),
           }),
         );
         const thread = asRecord(threadResult['thread']);
         const threadId = requiredString(thread['id'], 'thread id');
+        activeThreadId = threadId;
         emitRuntime({ type: 'thread', threadId });
         await localImages?.beforeTurnStart();
         await send('turn/start', {
@@ -600,10 +660,12 @@ export class CodexRuntimeAdapter {
               )
             : publicError(
                 'RUNTIME_FAILED',
-                codexConfigPolicy.inheritUserConfig
-                  ? 'Codexユーザーconfig.tomlを含む隔離環境を開始できませんでした。configを確認してください。'
-                  : 'Codex app-serverを開始できませんでした。',
-                true,
+                error instanceof CodexTeamMcpUnavailableError
+                  ? 'CodexがSprint Coder Team MCPの必須ツールを確認できないため、Turn開始前に停止しました。'
+                  : codexConfigPolicy.inheritUserConfig
+                    ? 'Codexユーザーconfig.tomlを含む隔離環境を開始できませんでした。configを確認してください。'
+                    : 'Codex app-serverを開始できませんでした。',
+                !(error instanceof CodexTeamMcpUnavailableError),
               ),
           'startup_error',
         );
@@ -919,6 +981,98 @@ export type CodexTeamMcpProfile = Readonly<{
   enableWebSearch?: boolean;
 }>;
 
+export type CodexTeamMcpInventoryValidation = Readonly<{
+  ok: boolean;
+  serverFound: boolean;
+  missingTools: readonly string[];
+}>;
+
+export type CodexDynamicToolSpec = Readonly<{
+  type: 'function';
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  deferLoading: false;
+}>;
+
+export function codexInitializeCapabilities(
+  multiRoot: boolean,
+  teamMcpEnabled: boolean,
+): Record<string, boolean> {
+  return multiRoot || teamMcpEnabled ? { experimentalApi: true } : {};
+}
+
+export function validateCodexTeamMcpInventory(
+  response: unknown,
+  expectedTools: readonly TeamMcpToolName[],
+): CodexTeamMcpInventoryValidation {
+  const data = asRecord(response)['data'];
+  const servers = Array.isArray(data) ? data : [];
+  const team = servers.find((entry) => asRecord(entry)['name'] === 'team');
+  if (team === undefined)
+    return { ok: false, serverFound: false, missingTools: [...expectedTools] };
+  const tools = asRecord(asRecord(team)['tools']);
+  const missingTools = expectedTools.filter((name) => !(name in tools));
+  return { ok: missingTools.length === 0, serverFound: true, missingTools };
+}
+
+export function buildCodexTeamDynamicTools(
+  response: unknown,
+  expectedTools: readonly TeamMcpToolName[],
+): CodexDynamicToolSpec[] {
+  const data = asRecord(response)['data'];
+  const servers = Array.isArray(data) ? data : [];
+  const team = servers.find((entry) => asRecord(entry)['name'] === 'team');
+  if (team === undefined) return [];
+  const tools = asRecord(asRecord(team)['tools']);
+  return expectedTools.map((name) => {
+    const tool = asRecord(tools[name]);
+    return {
+      type: 'function',
+      name,
+      description:
+        typeof tool['description'] === 'string'
+          ? tool['description']
+          : `Sprint Coder Team tool ${name}`,
+      inputSchema: tool['inputSchema'] ?? { type: 'object' },
+      deferLoading: false,
+    };
+  });
+}
+
+export function codexDynamicToolResponseFromMcp(response: unknown): {
+  success: boolean;
+  contentItems: { type: 'inputText'; text: string }[];
+} {
+  const result = asRecord(response);
+  if (result['isError'] === true)
+    return {
+      success: false,
+      contentItems: [{ type: 'inputText', text: 'Team tool failed.' }],
+    };
+  const content = Array.isArray(result['content']) ? result['content'] : [];
+  const text = content
+    .map((item) => asRecord(item))
+    .filter((item) => item['type'] === 'text' && typeof item['text'] === 'string')
+    .map((item) => item['text'] as string)
+    .join('\n')
+    .slice(0, 1024 * 1024);
+  return {
+    success: true,
+    contentItems: [
+      {
+        type: 'inputText',
+        text:
+          text !== ''
+            ? text
+            : JSON.stringify(result['structuredContent'] ?? { ok: true }).slice(0, 1024 * 1024),
+      },
+    ],
+  };
+}
+
+class CodexTeamMcpUnavailableError extends Error {}
+
 /**
  * The Access preset's write scope as a Codex sandbox mode.
  *
@@ -988,11 +1142,10 @@ export function buildCodexArgs(
           'mcp_servers.team.startup_timeout_sec=10',
           '-c',
           'mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]',
-          // Codex normally defers MCP tools behind tool_search. Sprint Coder's reserved Team
-          // capability must be directly callable: the embedded Skill names the exact tools and
-          // must fail closed rather than drifting into an unrelated native subagent feature.
-          '-c',
-          'features.tool_search_always_defer_mcp_tools=false',
+          // Current Codex versions removed the former tool_search_always_defer_mcp_tools escape
+          // hatch. Team turns inventory this pinned server and expose only the expected tools as
+          // non-deferred dynamic tools. Do not pass the removed feature override: --strict-config
+          // must remain valid across supported CLIs.
           ...(teamMcp.enableWebSearch === true ? ['-c', 'web_search="live"'] : []),
         ]),
     ...(effort === undefined || effort === '' ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
