@@ -146,8 +146,18 @@ export function combineLogSinks(...sinks: readonly SecureLogSink[]): SecureLogSi
 
 function streamIdFor(entry: Pick<SecureLogEntry, 'category' | 'taskId' | 'teamId'>): string {
   if (entry.category === 'system') return 'system';
-  const candidate = entry.category === 'chat' ? entry.taskId : entry.teamId;
-  return candidate !== undefined && SAFE_STREAM_ID.test(candidate) ? candidate : 'unknown';
+  if (entry.category === 'chat')
+    return entry.taskId !== undefined && SAFE_STREAM_ID.test(entry.taskId)
+      ? entry.taskId
+      : 'unknown';
+  // Team logs prefer their durable Team identity, but failures can arrive before a Team exists or
+  // after it has been discarded. Preserve those by Task rather than pooling unrelated failures in
+  // unknown.jsonl. Explicit namespaces prevent a Team id from colliding with a Task fallback.
+  if (entry.teamId !== undefined && SAFE_STREAM_ID.test(entry.teamId))
+    return `team-${entry.teamId}`;
+  if (entry.taskId !== undefined && SAFE_STREAM_ID.test(entry.taskId))
+    return `task-${entry.taskId}`;
+  return 'unknown';
 }
 
 function previousPathFor(filePath: string): string {
