@@ -94,9 +94,15 @@ export class RuntimeFailureDiagnosticCollector {
 
 function safeCliResolution(cli: ResolvedCliCommand): ResolvedCliCommand {
   const home = homedir();
+  const comparisonExecutable =
+    process.platform === 'win32' ? cli.executable.toLowerCase() : cli.executable;
+  const comparisonHome = process.platform === 'win32' ? home.toLowerCase() : home;
+  const homeSuffix = cli.executable.slice(home.length);
   const executable =
-    home !== '' && cli.executable.startsWith(home)
-      ? `<home>${cli.executable.slice(home.length)}`
+    home !== '' &&
+    comparisonExecutable.startsWith(comparisonHome) &&
+    (homeSuffix === '' || homeSuffix.startsWith('/') || homeSuffix.startsWith('\\'))
+      ? `<home>${homeSuffix}`
       : cli.executable;
   return {
     source: cli.source,
