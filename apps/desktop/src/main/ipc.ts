@@ -771,6 +771,7 @@ export class IpcRouter {
           ? this.registerManagerMcp(turnId, worker.taskId, worker.id, executionId)
           : this.registerWorkerMcp(turnId, worker.taskId, worker.id, executionId),
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
+      codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
     });
     this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
@@ -1010,6 +1011,7 @@ export class IpcRouter {
         void this.releaseTurnAttachmentCustody(turnId);
       },
       'codex',
+      join(app.getPath('userData'), 'codex-isolated'),
     );
     this.claudeRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -1020,6 +1022,7 @@ export class IpcRouter {
       (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
         this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       'claude',
+      join(app.getPath('userData'), 'codex-isolated'),
     );
     this.taskTitleRuntimes = new TaskTitleRuntimePool(
       (kind) =>
@@ -1029,6 +1032,7 @@ export class IpcRouter {
           undefined,
           undefined,
           kind,
+          join(app.getPath('userData'), 'codex-isolated'),
         ),
     );
   }

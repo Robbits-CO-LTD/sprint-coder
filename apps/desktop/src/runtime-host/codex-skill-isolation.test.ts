@@ -8,6 +8,7 @@ import {
   codexSkillIsolationArgs,
   discoverWorkspaceSkillPaths,
   discoverWorkspaceSkillPathsForRoots,
+  enforceCodexSkillIsolation,
   prepareCodexSkillIsolation,
 } from './codex-skill-isolation';
 
@@ -113,6 +114,63 @@ describe('Codex Skill isolation', () => {
         expected,
       ),
     ).toThrow('unselected Skill');
+  });
+
+  it('disables leaked nested Skills by path, reloads, and verifies the selected set', async () => {
+    const root = await temporaryRoot();
+    const selected = join(root, 'selected', 'SKILL.md');
+    const leaked = join(root, 'agents', 'nested', 'repo', 'skills', 'leaked', 'SKILL.md');
+    await mkdir(join(root, 'selected'), { recursive: true });
+    await mkdir(join(root, 'agents', 'nested', 'repo', 'skills', 'leaked'), { recursive: true });
+    await writeFile(selected, '---\nname: selected\ndescription: selected\n---\n');
+    await writeFile(leaked, '---\nname: leaked\ndescription: leaked\n---\n');
+    const responses = [
+      {
+        data: [
+          {
+            skills: [
+              { name: 'selected', path: selected, enabled: true },
+              { name: 'leaked', path: leaked, enabled: true },
+            ],
+            errors: [],
+          },
+        ],
+      },
+      {
+        data: [
+          {
+            skills: [
+              { name: 'selected', path: selected, enabled: true },
+              { name: 'leaked', path: leaked, enabled: false },
+            ],
+            errors: [],
+          },
+        ],
+      },
+    ];
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const disabled = await enforceCodexSkillIsolation(
+      async (method, params) => {
+        calls.push({ method, params });
+        return method === 'skills/list' ? responses.shift() : { effectiveEnabled: false };
+      },
+      {
+        codexHome: join(root, 'home', '.codex'),
+        isolatedUserHome: join(root, 'home'),
+        shellUserHome: root,
+        selectedSkillsRoot: join(root, 'selected-skills'),
+        stagedSkills: [{ name: 'selected', path: selected }],
+        disabledWorkspaceSkillPaths: [],
+        validationCwds: [root],
+      },
+    );
+
+    expect(disabled).toEqual([await realpath(leaked)]);
+    expect(calls).toEqual([
+      { method: 'skills/list', params: { cwds: [root], forceReload: true } },
+      { method: 'skills/config/write', params: { path: await realpath(leaked), enabled: false } },
+      { method: 'skills/list', params: { cwds: [root], forceReload: true } },
+    ]);
   });
 
   it.runIf(process.platform === 'win32')(

@@ -1,5 +1,6 @@
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CodexModelOption, PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
@@ -147,6 +148,7 @@ export class RuntimeHostClient {
     private readonly prepareContext?: PrepareContext,
     private readonly onContextAccepted?: ContextAccepted,
     private readonly kind: 'codex' | 'claude' = 'codex',
+    private readonly codexIsolationRoot = join(tmpdir(), 'sprint-coder-codex-isolated-tests'),
   ) {
     this.launch();
   }
@@ -511,7 +513,14 @@ export class RuntimeHostClient {
     try {
       child = utilityProcess.fork(
         join(__dirname, 'runtime-host.js'),
-        ['--runtime-instance-id', instanceId, '--runtime-kind', this.kind],
+        [
+          '--runtime-instance-id',
+          instanceId,
+          '--runtime-kind',
+          this.kind,
+          '--codex-isolation-root',
+          this.codexIsolationRoot,
+        ],
         {
           serviceName:
             this.kind === 'claude'

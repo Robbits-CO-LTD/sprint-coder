@@ -4,6 +4,7 @@ import {
   accessSync,
   constants,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -48,8 +49,8 @@ import {
 } from './runtime-progress-deadline';
 import { RuntimeFailureDiagnosticCollector } from './runtime-failure-diagnostics';
 import {
-  assertCodexSkillIsolation,
   codexSkillIsolationArgs,
+  enforceCodexSkillIsolation,
   prepareCodexSkillIsolation,
   type CodexSkillIsolation,
 } from './codex-skill-isolation';
@@ -190,6 +191,7 @@ export class CodexRuntimeAdapter {
     private readonly timeoutMs = 10 * 60_000,
     private readonly command = 'codex',
     private readonly commandPrefixArgs: readonly string[] = [],
+    private readonly isolationRoot = tmpdir(),
   ) {}
 
   setCliVersion(version: string | null): void {
@@ -269,7 +271,8 @@ export class CodexRuntimeAdapter {
         primaryRoot?.path ??
         (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-')));
       const runtimeWorkspaceRoots = workspace.roots.map(({ path }) => path);
-      skillIsolationDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-skills-'));
+      mkdirSync(this.isolationRoot, { recursive: true, mode: 0o700 });
+      skillIsolationDirectory = mkdtempSync(join(this.isolationRoot, 'turn-'));
       const skillIsolation = prepareCodexSkillIsolation({
         temporaryRoot: skillIsolationDirectory,
         cwd,
@@ -465,17 +468,7 @@ export class CodexRuntimeAdapter {
           !skillIsolationVerificationPending
         ) {
           skillIsolationVerificationPending = true;
-          void send('skills/list', {
-            cwds: skillIsolation.validationCwds,
-            forceReload: true,
-          })
-            .then((response) =>
-              assertCodexSkillIsolation(
-                response,
-                skillIsolation.stagedSkills,
-                skillIsolation.validationCwds.length,
-              ),
-            )
+          void enforceCodexSkillIsolation(send, skillIsolation)
             .catch(() => {
               if (failed || control.canceled) return;
               failed = true;
@@ -537,14 +530,7 @@ export class CodexRuntimeAdapter {
         await send('skills/extraRoots/set', {
           extraRoots: [skillIsolation.selectedSkillsRoot],
         });
-        assertCodexSkillIsolation(
-          await send('skills/list', {
-            cwds: skillIsolation.validationCwds,
-            forceReload: true,
-          }),
-          skillIsolation.stagedSkills,
-          skillIsolation.validationCwds.length,
-        );
+        await enforceCodexSkillIsolation(send, skillIsolation);
         skillIsolationReady = true;
         const threadResult = asRecord(
           await send('thread/start', {

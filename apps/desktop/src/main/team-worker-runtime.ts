@@ -77,6 +77,7 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     executionId?: string,
   ) => RuntimeTeamMcpOption | undefined;
   releaseTeamMcp?: (turnId: string) => void;
+  codexIsolationRoot?: string;
   /** Explicit development/test opt-in. Production callers leave this false. */
   allowSimulation?: boolean;
 }>;
@@ -181,6 +182,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       undefined,
       undefined,
       kind,
+      this.deps.codexIsolationRoot,
     );
     this.clients.set(kind, created);
     return created;

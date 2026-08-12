@@ -93,13 +93,65 @@ export function assertCodexSkillIsolation(
   expectedSkills: readonly RuntimeSkillInput[],
   expectedCatalogCount = 1,
 ): void {
+  const catalog = readCodexSkillCatalog(response, expectedCatalogCount);
+  const expected = expectedSkillIdentities(expectedSkills);
+  for (const enabled of catalog) {
+    const actual = enabled.map(({ name, path }) => `${name}\u0000${canonicalPath(path)}`).sort();
+    if (
+      actual.length !== expected.length ||
+      actual.some((value, index) => value !== expected[index])
+    )
+      throw new Error('Codex Skill isolation exposed an unselected Skill');
+  }
+}
+
+export function unexpectedCodexSkillPaths(
+  response: unknown,
+  expectedSkills: readonly RuntimeSkillInput[],
+  expectedCatalogCount = 1,
+): string[] {
+  const expectedPaths = new Set(expectedSkills.map(({ path }) => canonicalPath(path)));
+  return [
+    ...new Set(
+      readCodexSkillCatalog(response, expectedCatalogCount)
+        .flat()
+        .filter(({ path }) => !expectedPaths.has(canonicalPath(path)))
+        .map(({ path }) => canonicalizeExistingPath(path)),
+    ),
+  ].sort();
+}
+
+export async function enforceCodexSkillIsolation(
+  send: (method: string, params: unknown) => Promise<unknown>,
+  isolation: CodexSkillIsolation,
+): Promise<readonly string[]> {
+  const list = (): Promise<unknown> =>
+    send('skills/list', { cwds: isolation.validationCwds, forceReload: true });
+  const first = await list();
+  const unexpected = unexpectedCodexSkillPaths(
+    first,
+    isolation.stagedSkills,
+    isolation.validationCwds.length,
+  );
+  for (const path of unexpected) await send('skills/config/write', { path, enabled: false });
+  const verified = unexpected.length === 0 ? first : await list();
+  assertCodexSkillIsolation(verified, isolation.stagedSkills, isolation.validationCwds.length);
+  return unexpected;
+}
+
+function expectedSkillIdentities(expectedSkills: readonly RuntimeSkillInput[]): string[] {
+  return expectedSkills.map((skill) => `${skill.name}\u0000${canonicalPath(skill.path)}`).sort();
+}
+
+function readCodexSkillCatalog(
+  response: unknown,
+  expectedCatalogCount: number,
+): Array<Array<{ name: string; path: string }>> {
   const record = asRecord(response);
   const data = record['data'];
   if (!Array.isArray(data) || data.length !== expectedCatalogCount)
     throw new Error('Codex Skill isolation returned an invalid catalog');
-  const expected = expectedSkills
-    .map((skill) => `${skill.name}\u0000${canonicalPath(skill.path)}`)
-    .sort();
+  const catalog: Array<Array<{ name: string; path: string }>> = [];
   for (const item of data) {
     const entry = asRecord(item);
     const errors = entry['errors'];
@@ -113,15 +165,9 @@ export function assertCodexSkillIsolation(
       .map((skill) => ({ name: skill['name'], path: skill['path'] }));
     if (enabled.some((skill) => typeof skill.name !== 'string' || typeof skill.path !== 'string'))
       throw new Error('Codex Skill isolation catalog contains invalid metadata');
-    const actual = enabled
-      .map((skill) => `${String(skill.name)}\u0000${canonicalPath(String(skill.path))}`)
-      .sort();
-    if (
-      actual.length !== expected.length ||
-      actual.some((value, index) => value !== expected[index])
-    )
-      throw new Error('Codex Skill isolation exposed an unselected Skill');
+    catalog.push(enabled.map(({ name, path }) => ({ name: String(name), path: String(path) })));
   }
+  return catalog;
 }
 
 export function discoverWorkspaceSkillPaths(cwd: string): string[] {
