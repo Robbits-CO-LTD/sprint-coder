@@ -130,10 +130,7 @@ if (runsWithElectronAbi)
       const orphanWal = `${orphan}-wal`;
       const orphanShm = `${orphan}-shm`;
       const similar = `${path}.pre-migration.bak.tmp-not-a-uuid`;
-      const otherDatabase = join(
-        directory,
-        `other.db.pre-migration.bak.tmp-${orphanId}`,
-      );
+      const otherDatabase = join(directory, `other.db.pre-migration.bak.tmp-${orphanId}`);
       const symlink = `${path}.pre-migration.bak.tmp-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
       const symlinkTarget = join(directory, 'must-survive');
       for (const file of [orphan, orphanWal, orphanShm, similar, otherDatabase, symlinkTarget])
