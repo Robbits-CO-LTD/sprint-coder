@@ -11,6 +11,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SkillStore, SkillStoreError, type SkillProvider } from './skill-store';
 import { verifyWindowsPathAcl, verifyWindowsPaths } from './windows-acl';
@@ -42,6 +43,39 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform === 'win32')('SkillStore', () => {
+  it('snapshots all builtin identities and retains invalid installed entries', async () => {
+    const root = await tempRoot();
+    const storeRoot = join(root, 'store');
+    const store = await SkillStore.open({ rootPath: storeRoot });
+    for (const skillId of [
+      'sprint-coder-team',
+      'sprint-coder-product',
+      'skill-creator',
+      'import-skill',
+    ]) {
+      const content = `---\nname: ${skillId}\ndescription: Builtin ${skillId}\n---\nBody\n`;
+      await store.installBuiltin(
+        skillId,
+        content,
+        createHash('sha256').update(content).digest('hex'),
+      );
+    }
+    await mkdir(join(storeRoot, 'created', 'broken-skill'));
+    await writeFile(join(storeRoot, 'created', 'broken-skill', 'SKILL.md'), 'not frontmatter');
+
+    const catalog = await store.listCatalogSnapshotEntries();
+    expect(catalog.slice(0, 4).map(({ skillId }) => skillId)).toEqual([
+      'sprint-coder-team',
+      'sprint-coder-product',
+      'skill-creator',
+      'import-skill',
+    ]);
+    expect(catalog.find(({ skillId }) => skillId === 'broken-skill')).toMatchObject({
+      enabled: false,
+      availability: 'invalid',
+    });
+  });
+
   it('creates a private store and detects either, both, or neither source', async () => {
     const root = await tempRoot();
     const claude = join(root, '.claude', 'skills');

@@ -156,10 +156,20 @@ describe('Codex selected Skill delivery', () => {
       authority: 'user' as const,
       content: 'UNIQUE_SELECTED_SKILL_BODY',
     },
+    {
+      id: 'skill-catalog',
+      source: 'background' as const,
+      trust: 'assistant' as const,
+      authority: 'none' as const,
+      content: '{"schema":"sprint-coder.skill-catalog.v1","authority":"none"}',
+    },
   ];
 
   it('removes selected Skill bodies from Codex application context only', () => {
-    expect(contextFragmentsForRuntime('codex', fragments).map(({ id }) => id)).toEqual(['system']);
+    expect(contextFragmentsForRuntime('codex', fragments).map(({ id }) => id)).toEqual([
+      'system',
+      'skill-catalog',
+    ]);
     expect(contextFragmentsForRuntime('claude', fragments)).toEqual(fragments);
     expect(contextFragmentsForRuntime('provider', fragments)).toEqual(fragments);
     for (const runtime of ['codex', 'claude', 'provider'] as const)

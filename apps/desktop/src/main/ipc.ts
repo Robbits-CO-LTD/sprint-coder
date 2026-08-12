@@ -698,6 +698,9 @@ export class IpcRouter {
     this.skillSettings = new SkillSettingsService({
       homePath: process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'),
     });
+    this.persistence.setSkillCatalogContextProvider?.((selections, includeBuiltinTeamSkill) =>
+      this.skillSettings.contextCatalogForTurn(selections, includeBuiltinTeamSkill),
+    );
     const cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
       // Real worker execution is opt-in when the selected chat runtime is mock. Availability and
       // quota failures may use another policy-allowed real AI; permission failures remain explicit,
@@ -2924,6 +2927,7 @@ export class IpcRouter {
           BUILTIN_SPRINT_CODER_PRODUCT_SKILL_DIGEST,
         ),
       ]);
+      await this.skillSettings.refreshContextCatalog();
       this.teamSkillReady = true;
     } catch {
       this.teamSkillReady = false;
