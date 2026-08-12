@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { homedir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import {
   RUNTIME_DIAGNOSTIC_MAX_BYTES,
@@ -125,8 +126,31 @@ describe('resolveRuntimeFailureDiagnostic', () => {
   });
 });
 
+describe('RuntimeFailureDiagnosticCollector CLI resolution', () => {
+  it('redacts the user home while retaining compatibility metadata', () => {
+    const collector = new RuntimeFailureDiagnosticCollector('codex', '0.2.3', null, false);
+    collector.setCliResolution({
+      source: 'npm',
+      executable: `${homedir()}/.npm/bin/codex`,
+      version: '0.144.4',
+      compatibility: 'verified',
+      capabilities: ['app-server'],
+    });
+
+    const diagnostic = collector.snapshot('spawn_error');
+    expect(diagnostic.cliResolution).toEqual({
+      source: 'npm',
+      executable: '<home>/.npm/bin/codex',
+      version: '0.144.4',
+      compatibility: 'verified',
+      capabilities: ['app-server'],
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(homedir());
+  });
+});
+
 describe('RuntimeFailureDiagnosticCollector', () => {
-  it('records recognized notifications and counts unsupported names without retaining them', () => {
+  it('records bounded protocol method names while counting unsupported notifications', () => {
     const collector = new RuntimeFailureDiagnosticCollector('codex', '0.2.1', 'codex 1.2.3', true);
     collector.recordNotification('turn/started');
     collector.recordNotification('future/unknown');
@@ -137,7 +161,7 @@ describe('RuntimeFailureDiagnosticCollector', () => {
       cliVersion: 'codex 1.2.3',
       teamMcp: { enabled: true, status: 'configured' },
       lastRecognizedNotification: 'turn/started',
-      lastReceivedNotification: '[unsupported]',
+      lastReceivedNotification: 'future/unknown',
       unsupportedNotificationCount: 1,
     });
   });
@@ -200,6 +224,18 @@ describe('RuntimeFailureDiagnosticCollector', () => {
 
     collector.setCliVersion('codex sk-proj-secret-value');
     expect(collector.snapshot('protocol_error').cliVersion).toBeNull();
+  });
+
+  it('does not retain nested sensitive namespaces or Windows paths as notification names', () => {
+    const collector = new RuntimeFailureDiagnosticCollector('codex', '0.2.1', null, false);
+    collector.recordNotification('remote/user/alice');
+    expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
+    collector.recordNotification('C:/Users/Alice/private');
+    expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
+    collector.recordNotification('session/eyJhbGciOiJIUzI1NiJ9.abc-def_ghi');
+    expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
+    collector.recordNotification('home/alice/ssh/idRsa');
+    expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
   });
 
   it('accepts only the documented Claude version shape', () => {

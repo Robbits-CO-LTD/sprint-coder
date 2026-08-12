@@ -418,8 +418,36 @@ function ModelGroup() {
       {selectedModel !== undefined && selectedModel.description !== '' && (
         <p className="settings-hint">{selectedModel.description}</p>
       )}
+      <CliCompatibilityNotice />
     </div>
   );
+}
+
+function CliCompatibilityNotice() {
+  const runtime = useAppStore((s) => s.runtime);
+  const cli =
+    runtime.kind === 'codex'
+      ? runtime.codexCli
+      : runtime.kind === 'claude'
+        ? runtime.claudeCli
+        : null;
+  const text = cliCompatibilityText(cli);
+  if (text === null) return null;
+  return (
+    <p className="settings-hint" data-testid="settings-cli-compatibility-warning">
+      {text}
+    </p>
+  );
+}
+
+export function cliCompatibilityText(
+  cli: { version: string; compatibility: string } | null,
+): string | null {
+  if (cli === null || cli.compatibility === 'verified' || cli.compatibility === 'compatible')
+    return null;
+  return cli.compatibility === 'unsupported'
+    ? `${cli.version} は検証済み範囲より古いため、一部機能を利用できない可能性があります。`
+    : `${cli.version} は未検証のCLIです。実行パスと互換状態は診断情報に記録されます。`;
 }
 
 function EffortGroup() {
@@ -613,7 +641,7 @@ function DiagnosticsGroup() {
         )}
       </div>
       <p className="settings-hint">
-        診断には依頼・回答・推論・ツール引数・認証情報・絶対パスを含めません。
+        診断には依頼・回答・推論・ツール引数・認証情報・ユーザーホームの実パスを含めません。
       </p>
     </div>
   );
