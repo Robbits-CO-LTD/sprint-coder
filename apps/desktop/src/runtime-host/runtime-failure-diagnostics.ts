@@ -11,9 +11,9 @@ import {
 export const RUNTIME_DIAGNOSTIC_MAX_BYTES = 16 * 1024;
 const STDERR_TAIL_MAX_BYTES = 8 * 1024;
 const UNSUPPORTED_NOTIFICATION = '[unsupported]';
-const SAFE_NOTIFICATION_METHOD = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/u;
+const SAFE_NOTIFICATION_METHOD = /^[A-Za-z][A-Za-z0-9]{0,23}(?:\/[A-Za-z][A-Za-z0-9]{0,23}){1,3}$/u;
 const SENSITIVE_NOTIFICATION_NAMESPACE =
-  /(?:^|[/:])(?:auth|credential|private|request|secret|token|users?)(?:[/:]|$)/iu;
+  /(?:^|\/)(?:auth|credential|home|private|request|secret|ssh|token|users?)(?:\/|$)/iu;
 const WINDOWS_DRIVE_PATH = /^[A-Za-z]:[\\/]/u;
 
 export class RuntimeFailureDiagnosticCollector {

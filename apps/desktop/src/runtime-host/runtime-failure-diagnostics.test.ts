@@ -232,6 +232,10 @@ describe('RuntimeFailureDiagnosticCollector', () => {
     expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
     collector.recordNotification('C:/Users/Alice/private');
     expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
+    collector.recordNotification('session/eyJhbGciOiJIUzI1NiJ9.abc-def_ghi');
+    expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
+    collector.recordNotification('home/alice/ssh/idRsa');
+    expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
   });
 
   it('accepts only the documented Claude version shape', () => {
