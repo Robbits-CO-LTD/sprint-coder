@@ -30,6 +30,7 @@ import type {
   RuntimeFailureDiagnostic,
   RuntimeFailureStage,
   RuntimeProjectContextItem,
+  ResolvedCliCommand,
   RuntimeSkillInput,
   RuntimeTeamMcpOption,
   RuntimeWorkspaceSet,
@@ -49,6 +50,11 @@ import {
   type RuntimeProgressTimeoutPhase,
 } from './runtime-progress-deadline';
 import { RuntimeFailureDiagnosticCollector } from './runtime-failure-diagnostics';
+import {
+  environmentValue,
+  probeCliCommandCandidates,
+  type CliCommandCandidate,
+} from './cli-command-resolution';
 import {
   CodexUserConfigSnapshotError,
   codexSkillIsolationArgs,
@@ -76,6 +82,7 @@ export type CodexProbe = {
   available: boolean;
   readiness: 'ready' | 'authentication_required' | 'unavailable';
   version?: string;
+  cli?: ResolvedCliCommand;
   models: CodexModelOption[];
 };
 
@@ -137,39 +144,18 @@ export async function probeCodex(
       models: E2E_CODEX_MODELS,
     };
   }
-  const availability = await new Promise<Omit<CodexProbe, 'models' | 'readiness'>>((resolve) => {
-    let settled = false;
-    const child = spawn(resolveCodexCommand(command), ['--version'], {
-      env: minimalEnvironment(),
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-    });
-    const chunks: Buffer[] = [];
-    child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const finish = (result: Omit<CodexProbe, 'models' | 'readiness'>): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    child.once('error', () => finish({ available: false }));
-    child.once('exit', (code) => {
-      const version = Buffer.concat(chunks).toString('utf8').trim();
-      finish(
-        code === 0
-          ? { available: true, ...(version === '' ? {} : { version }) }
-          : { available: false },
-      );
-    });
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish({ available: false });
-    }, RUNTIME_VERSION_PROBE_TIMEOUT_MS);
+  const cli = await probeCliCommandCandidates({
+    kind: 'codex',
+    candidates: resolveCodexCommandCandidates(command, environment),
+    environment: minimalEnvironment(environment),
+    timeoutMs: RUNTIME_VERSION_PROBE_TIMEOUT_MS,
   });
+  const availability: Omit<CodexProbe, 'models' | 'readiness'> =
+    cli === null ? { available: false } : { available: true, version: cli.version, cli };
   const authentication = availability.available
     ? await probeCliAuthentication(
         'codex',
-        resolveCodexCommand(command),
+        cli!.executable,
         ['login', 'status'],
         minimalEnvironment(environment),
         RUNTIME_AUTH_PROBE_TIMEOUT_MS,
@@ -189,6 +175,7 @@ export async function probeCodex(
 export class CodexRuntimeAdapter {
   private readonly active = new Map<string, ActiveProcess>();
   private cliVersion: string | null = null;
+  private cli: ResolvedCliCommand | null = null;
 
   constructor(
     private readonly timeoutMs = 10 * 60_000,
@@ -199,6 +186,10 @@ export class CodexRuntimeAdapter {
 
   setCliVersion(version: string | null): void {
     this.cliVersion = version;
+  }
+
+  setCliResolution(cli: ResolvedCliCommand | null): void {
+    this.cli = cli;
   }
 
   start(
@@ -242,6 +233,7 @@ export class CodexRuntimeAdapter {
       this.cliVersion,
       teamMcp !== undefined,
     );
+    diagnostics.setCliResolution(this.cli);
     const failWithDiagnostic = (error: PublicError, stage: RuntimeFailureStage): void =>
       fail(error, diagnostics.snapshot(stage));
     let temporaryDirectory: string | null = null;
@@ -342,7 +334,7 @@ export class CodexRuntimeAdapter {
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(
-        resolveCodexCommand(this.command),
+        this.cli?.executable ?? resolveCodexCommand(this.command),
         [
           ...this.commandPrefixArgs,
           ...buildCodexArgs(model, effort, effectiveScope, teamMcpProfile, skillIsolation),
@@ -1135,7 +1127,38 @@ export function resolveCodexCommand(
   architecture: NodeJS.Architecture = process.arch,
   localAppData: string | null | undefined = process.env['LOCALAPPDATA'],
 ): string {
-  if (command !== 'codex') return command;
+  return (
+    resolveCodexCommandCandidates(
+      command,
+      {
+        PATH: searchPath,
+        APPDATA: appData ?? undefined,
+        HOME: userHome,
+        USERPROFILE: userHome,
+        LOCALAPPDATA: localAppData ?? undefined,
+        PROCESSOR_ARCHITECTURE: architecture,
+      },
+      platform,
+      architecture,
+    )[0]?.executable ?? command
+  );
+}
+
+export function resolveCodexCommandCandidates(
+  command: string,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+  platform: NodeJS.Platform = process.platform,
+  architecture: NodeJS.Architecture = process.arch,
+): CliCommandCandidate[] {
+  if (command !== 'codex') return [{ executable: command, source: 'explicit' }];
+  const searchPath = environmentValue(environment, 'PATH', platform);
+  const appData = environmentValue(environment, 'APPDATA', platform);
+  const userHome =
+    environmentValue(environment, 'HOME', platform) ??
+    environmentValue(environment, 'USERPROFILE', platform) ??
+    homedir();
+  const localAppData = environmentValue(environment, 'LOCALAPPDATA', platform);
+  const candidates: CliCommandCandidate[] = [];
   if (platform === 'darwin') {
     const roots = [
       ...(searchPath ?? '').split(delimiter).filter((entry) => entry.length > 0),
@@ -1149,16 +1172,18 @@ export function resolveCodexCommand(
         // Native installers expose the CLI through a symlink in ~/.local/bin, so follow it.
         if (!statSync(candidate).isFile()) continue;
         accessSync(candidate, constants.X_OK);
-        return candidate;
+        candidates.push({
+          executable: candidate,
+          source: root === join(userHome, '.local', 'bin') ? 'user-local' : 'path',
+        });
       } catch {
         // Continue through the macOS locations a Finder-launched app does not inherit in PATH.
       }
     }
-    return command;
+    return candidates.length === 0 ? [{ executable: command, source: 'fallback' }] : candidates;
   }
-  if (platform !== 'win32') return command;
-  const desktopCommand = resolveCodexDesktopCommand(localAppData);
-  if (desktopCommand !== null) return desktopCommand;
+  if (platform !== 'win32') return [{ executable: command, source: 'fallback' }];
+  candidates.push(...resolveCodexDesktopCandidates(localAppData));
   const packageArchitecture = architecture === 'arm64' ? 'arm64' : 'x64';
   const targetTriple =
     architecture === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
@@ -1183,24 +1208,39 @@ export function resolveCodexCommand(
         `codex-win32-${packageArchitecture}`,
         'vendor',
         targetTriple,
-        'codex',
+        'bin',
         'codex.exe',
       ),
     ]) {
       try {
-        if (lstatSync(candidate).isFile()) return candidate;
+        if (lstatSync(candidate).isFile())
+          candidates.push({
+            executable: candidate,
+            source: candidate.includes(`${join('node_modules', '@openai', 'codex')}`)
+              ? 'npm'
+              : 'path',
+          });
       } catch {
         // Continue searching Windows npm's native package locations.
       }
     }
   }
-  return command;
+  return candidates;
 }
 
-function resolveCodexDesktopCommand(localAppData: string | null | undefined): string | null {
-  if (localAppData == null) return null;
+function resolveCodexDesktopCandidates(
+  localAppData: string | null | undefined,
+): CliCommandCandidate[] {
+  if (localAppData == null) return [];
   const binDirectory = join(localAppData, 'OpenAI', 'Codex', 'bin');
+  const result: CliCommandCandidate[] = [];
   try {
+    const direct = join(binDirectory, 'codex.exe');
+    try {
+      if (lstatSync(direct).isFile()) result.push({ executable: direct, source: 'desktop-direct' });
+    } catch {
+      // Continue with versioned desktop directories.
+    }
     const candidates = readdirSync(binDirectory, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => join(binDirectory, entry.name, 'codex.exe'))
@@ -1211,10 +1251,16 @@ function resolveCodexDesktopCommand(localAppData: string | null | undefined): st
           return false;
         }
       })
-      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
-    return candidates[0] ?? null;
+      .sort();
+    result.push(
+      ...candidates.map((executable) => ({
+        executable,
+        source: 'desktop-versioned' as const,
+      })),
+    );
+    return result;
   } catch {
-    return null;
+    return result;
   }
 }
 

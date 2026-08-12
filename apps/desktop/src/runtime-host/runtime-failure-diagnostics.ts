@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { homedir } from 'node:os';
 import {
   RECOGNIZED_CODEX_NOTIFICATION_NAMES,
+  type ResolvedCliCommand,
   type RuntimeFailureDiagnostic,
   type RuntimeFailureStage,
 } from './protocol';
@@ -9,6 +11,10 @@ import {
 export const RUNTIME_DIAGNOSTIC_MAX_BYTES = 16 * 1024;
 const STDERR_TAIL_MAX_BYTES = 8 * 1024;
 const UNSUPPORTED_NOTIFICATION = '[unsupported]';
+const SAFE_NOTIFICATION_METHOD = /^[A-Za-z][A-Za-z0-9]{0,23}(?:\/[A-Za-z][A-Za-z0-9]{0,23}){1,3}$/u;
+const SENSITIVE_NOTIFICATION_NAMESPACE =
+  /(?:^|\/)(?:auth|credential|home|private|request|secret|ssh|token|users?)(?:\/|$)/iu;
+const WINDOWS_DRIVE_PATH = /^[A-Za-z]:[\\/]/u;
 
 export class RuntimeFailureDiagnosticCollector {
   private readonly startedAt: number;
@@ -20,6 +26,7 @@ export class RuntimeFailureDiagnosticCollector {
   private unsupportedNotificationCount = 0;
   private capabilityMismatch: RuntimeFailureDiagnostic['capabilityMismatch'];
   private codexIsolation: RuntimeFailureDiagnostic['codexIsolation'];
+  private cliResolution: ResolvedCliCommand | null = null;
 
   constructor(
     private readonly runtimeKind: 'codex' | 'claude',
@@ -36,15 +43,24 @@ export class RuntimeFailureDiagnosticCollector {
     this.cliVersion = safeCliVersion(this.runtimeKind, version);
   }
 
+  setCliResolution(cli: ResolvedCliCommand | null): void {
+    this.cliResolution = cli === null ? null : safeCliResolution(cli);
+  }
+
   recordNotification(method: string): void {
     if (this.runtimeKind === 'codex' && RECOGNIZED_CODEX_NOTIFICATION_NAMES.has(method)) {
       this.lastReceivedNotification = method;
       this.lastRecognizedNotification = method;
       return;
     }
-    // Notification methods are supplied by the child process. Unknown values may contain user
-    // content, paths, or credentials, so only their count and a constant marker cross the boundary.
-    this.lastReceivedNotification = UNSUPPORTED_NOTIFICATION;
+    // Preserve a bounded protocol method for diagnosis, but collapse anything content-bearing,
+    // path-like, or malformed to a constant marker before it crosses the Runtime boundary.
+    this.lastReceivedNotification =
+      SAFE_NOTIFICATION_METHOD.test(method) &&
+      !SENSITIVE_NOTIFICATION_NAMESPACE.test(method) &&
+      !WINDOWS_DRIVE_PATH.test(method)
+        ? method
+        : UNSUPPORTED_NOTIFICATION;
     this.unsupportedNotificationCount += 1;
   }
 
@@ -85,6 +101,7 @@ export class RuntimeFailureDiagnosticCollector {
       ...(this.capabilityMismatch === undefined
         ? {}
         : { capabilityMismatch: this.capabilityMismatch }),
+      ...(this.cliResolution === null ? {} : { cliResolution: this.cliResolution }),
       teamMcp: {
         enabled: this.teamMcpEnabled,
         status: this.teamMcpEnabled ? 'configured' : 'not_configured',
@@ -99,6 +116,27 @@ export class RuntimeFailureDiagnosticCollector {
     };
     return diagnostic;
   }
+}
+
+function safeCliResolution(cli: ResolvedCliCommand): ResolvedCliCommand {
+  const home = homedir();
+  const comparisonExecutable =
+    process.platform === 'win32' ? cli.executable.toLowerCase() : cli.executable;
+  const comparisonHome = process.platform === 'win32' ? home.toLowerCase() : home;
+  const homeSuffix = cli.executable.slice(home.length);
+  const executable =
+    home !== '' &&
+    comparisonExecutable.startsWith(comparisonHome) &&
+    (homeSuffix === '' || homeSuffix.startsWith('/') || homeSuffix.startsWith('\\'))
+      ? `<home>${homeSuffix}`
+      : cli.executable;
+  return {
+    source: cli.source,
+    executable: executable.slice(0, 2_048),
+    version: cli.version.slice(0, 128),
+    compatibility: cli.compatibility,
+    capabilities: cli.capabilities.slice(0, 32),
+  };
 }
 
 type ResolveRuntimeFailureDiagnosticInput = Readonly<{

@@ -2387,6 +2387,24 @@ export const modelFallbackNoticeSchema = z
   })
   .strict();
 export type ModelFallbackNotice = z.infer<typeof modelFallbackNoticeSchema>;
+export const resolvedCliCommandSchema = z
+  .object({
+    source: z.enum([
+      'explicit',
+      'path',
+      'user-local',
+      'npm',
+      'desktop-direct',
+      'desktop-versioned',
+      'fallback',
+    ]),
+    executable: z.string().min(1).max(2_048),
+    version: z.string().min(1).max(128),
+    compatibility: z.enum(['verified', 'compatible', 'untested', 'unsupported']),
+    capabilities: z.array(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/u)).max(32),
+  })
+  .strict();
+export type ResolvedCliCommand = z.infer<typeof resolvedCliCommandSchema>;
 export const runtimeSettingsSchema = z
   .object({
     kind: runtimeKindSchema,
@@ -2397,6 +2415,8 @@ export const runtimeSettingsSchema = z
     // Runtime kind's own capability list (Codex's or Claude's), per the Main-side probe.
     claudeAvailable: z.boolean(),
     claudeReadiness: runtimeReadinessSchema,
+    codexCli: resolvedCliCommandSchema.nullable().default(null),
+    claudeCli: resolvedCliCommandSchema.nullable().default(null),
     model: codexModelIdSchema,
     models: z.array(codexModelOptionSchema).max(32),
     // Additive field for the Claude effort control. Persisted under the single
