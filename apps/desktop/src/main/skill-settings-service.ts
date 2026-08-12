@@ -18,7 +18,9 @@ import {
   type SkillCandidate,
   type SkillImportPreview,
   type ResolvedSkillPackage,
+  type SkillCatalogSnapshotEntry,
 } from './skill-store';
+import { buildSkillCatalogContext, SkillCatalogContextError } from './skill-catalog-context';
 
 const PREVIEW_TTL_MS = 5 * 60 * 1_000;
 const MAX_PREVIEWS = 64;
@@ -44,6 +46,7 @@ export class SkillSettingsService {
   private readonly previews = new Map<string, PreviewRecord>();
   private readonly drafts = new Map<string, SkillDraft>();
   private store: Promise<SkillStore> | null = null;
+  private contextCatalogEntries: readonly SkillCatalogSnapshotEntry[] = [];
 
   constructor(
     private readonly input: {
@@ -148,6 +151,7 @@ export class SkillSettingsService {
     if (currentPreview.digest !== record.digest)
       throw new SkillSettingsError('SOURCE_CHANGED', 'Skillがプレビュー後に変更されました');
     const result = await (await this.getStore()).importSkill(currentPreview);
+    await this.refreshContextCatalog();
     return {
       provider: record.provider,
       skillId: record.skillId,
@@ -163,6 +167,7 @@ export class SkillSettingsService {
     if (currentPreview.digest !== record.digest)
       throw new SkillSettingsError('SOURCE_CHANGED', 'Skillがプレビュー後に変更されました');
     const result = await (await this.getStore()).updateSkill(currentPreview);
+    await this.refreshContextCatalog();
     return {
       provider: record.provider,
       skillId: record.skillId,
@@ -173,18 +178,22 @@ export class SkillSettingsService {
 
   async setEnabled(provider: SkillProvider, skillId: string, enabled: boolean): Promise<void> {
     await (await this.getStore()).setEnabled(provider, skillId, enabled);
+    await this.refreshContextCatalog();
   }
 
   async remove(provider: SkillProvider, skillId: string): Promise<void> {
     await (await this.getStore()).removeImported(provider, skillId);
+    await this.refreshContextCatalog();
   }
 
   async removeCreated(skillId: string, digest: string): Promise<void> {
     await (await this.getStore()).removeCreated(skillId, digest);
+    await this.refreshContextCatalog();
   }
 
   async setCreatedEnabled(skillId: string, digest: string, enabled: boolean): Promise<void> {
     await (await this.getStore()).setCreatedEnabled(skillId, digest, enabled);
+    await this.refreshContextCatalog();
   }
 
   async exportCreated(skillId: string, digest: string, destinationParent: string): Promise<string> {
@@ -206,7 +215,60 @@ export class SkillSettingsService {
       exportable: item.exportable,
     }));
     const revision = createHash('sha256').update(JSON.stringify(items)).digest('hex');
+    await this.refreshContextCatalog();
     return { revision, items };
+  }
+
+  async refreshContextCatalog(): Promise<void> {
+    this.contextCatalogEntries = await (await this.getStore()).listCatalogSnapshotEntries();
+  }
+
+  markContextCatalogUnavailable(): void {
+    this.contextCatalogEntries = [
+      'sprint-coder-team',
+      'sprint-coder-product',
+      'skill-creator',
+      'import-skill',
+    ].map((skillId) => ({
+      source: 'builtin' as const,
+      skillId,
+      kind: null,
+      digest: null,
+      name: skillId,
+      description: '',
+      enabled: false,
+      availability: 'invalid' as const,
+    }));
+  }
+
+  contextCatalogForTurn(
+    selections: readonly TurnSkillSelection[],
+    includeBuiltinTeamSkill: boolean,
+  ): string {
+    if (this.contextCatalogEntries.length === 0)
+      throw new SkillSettingsError('NOT_FOUND', 'SkillカタログをTurn開始前に取得できません');
+    const effectiveSelections = [...selections];
+    if (includeBuiltinTeamSkill) {
+      const team = this.contextCatalogEntries.find(
+        ({ source, skillId, digest }) =>
+          source === 'builtin' && skillId === 'sprint-coder-team' && digest !== null,
+      );
+      if (team !== undefined && team.digest !== null)
+        effectiveSelections.push({
+          kind: 'team',
+          ref: { source: 'builtin', skillId: team.skillId, digest: team.digest },
+        });
+    }
+    try {
+      return buildSkillCatalogContext(this.contextCatalogEntries, effectiveSelections);
+    } catch (error) {
+      if (error instanceof SkillCatalogContextError)
+        throw new SkillSettingsError(
+          'INVALID_SKILL',
+          `Skillカタログの識別情報がTurn上限を超えています（${error.itemCount}件）`,
+        );
+      throw error;
+    }
   }
 
   async listDrafts(): Promise<SkillDraft[]> {
@@ -254,6 +316,7 @@ export class SkillSettingsService {
     const installed = await (await this.getStore()).installCreatedSkill(draft.skillId, draft.files);
     await (await this.getStore()).removeCreatedDraft(draftId);
     this.drafts.delete(draftId);
+    await this.refreshContextCatalog();
     return {
       ref: {
         skillId: installed.skillId,
@@ -279,6 +342,7 @@ export class SkillSettingsService {
           : 'Chat SkillへTeam Blueprintを含めることはできません',
       );
     const installed = await (await this.getStore()).installCreatedSkill(input.skillId, input.files);
+    await this.refreshContextCatalog();
     return {
       ref: {
         skillId: installed.skillId,

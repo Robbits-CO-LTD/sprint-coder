@@ -1187,6 +1187,50 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('seals the Skill catalog once and reuses it for every read of the same Turn', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('catalog seal');
+      let catalog = JSON.stringify({
+        schema: 'sprint-coder.skill-catalog.v1',
+        authority: 'none',
+        revision: 'first',
+        items: [{ id: 'skill-a', enabled: true, selected: false }],
+      });
+      persistence.setSkillCatalogContextProvider(() => catalog);
+
+      const first = persistence.startTurn(task.id, 'first');
+      const sealed = persistence
+        .prepareContext(task.id, first.turnId)
+        .fragments.find(({ id }) => id.endsWith(':skill-catalog'));
+      expect(sealed).toMatchObject({ source: 'background', trust: 'assistant', content: catalog });
+      const finalUsage = first.contextUsageEvents.at(-1);
+      expect(finalUsage?.type).toBe('context.usage');
+      if (finalUsage?.type === 'context.usage')
+        expect(
+          finalUsage.usage.fragments.find(({ source }) => source === 'background')?.tokens,
+        ).toBe(Math.ceil([...catalog].length / 3));
+      catalog = JSON.stringify({
+        schema: 'sprint-coder.skill-catalog.v1',
+        authority: 'none',
+        revision: 'second',
+        items: [{ id: 'skill-b', enabled: false, selected: false }],
+      });
+      expect(
+        persistence
+          .prepareContext(task.id, first.turnId)
+          .fragments.find(({ id }) => id.endsWith(':skill-catalog'))?.content,
+      ).toContain('"revision":"first"');
+
+      persistence.cancelTurn(task.id, first.turnId);
+      const second = persistence.startTurn(task.id, 'second');
+      expect(
+        persistence
+          .prepareContext(task.id, second.turnId)
+          .fragments.find(({ id }) => id.endsWith(':skill-catalog'))?.content,
+      ).toContain('"revision":"second"');
+      persistence.close();
+    });
+
     it('registers safe references, seals them, and blocks source Task movement until removal', () => {
       const { persistence, path } = createPersistence();
       const project = persistence.createProject('References');

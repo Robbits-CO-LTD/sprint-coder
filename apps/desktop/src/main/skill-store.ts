@@ -96,6 +96,16 @@ export type SelectableSkill = Readonly<{
   removable: boolean;
   exportable: boolean;
 }>;
+export type SkillCatalogSnapshotEntry = Readonly<{
+  source: SkillSource;
+  skillId: string;
+  kind: SkillKind | null;
+  digest: string | null;
+  name: string;
+  description: string;
+  enabled: boolean;
+  availability: 'available' | 'disabled' | 'invalid';
+}>;
 export type ResolvedSkillPackage = SelectableSkill &
   Readonly<{
     content: string;
@@ -706,6 +716,65 @@ export class SkillStore {
         left.name.localeCompare(right.name) ||
         left.source.localeCompare(right.source),
     );
+  }
+
+  async listCatalogSnapshotEntries(): Promise<SkillCatalogSnapshotEntry[]> {
+    const entries: SkillCatalogSnapshotEntry[] = [];
+    const capture = async (
+      source: SkillSource,
+      skillId: string,
+      enabled: boolean,
+    ): Promise<void> => {
+      try {
+        const item = await this.readSelectableAt(source, skillId, enabled);
+        if (item === null) throw new Error('Skill identity is incomplete');
+        entries.push({
+          source,
+          skillId,
+          kind: item.kind,
+          digest: item.digest,
+          name: item.name,
+          description: item.description,
+          enabled: item.enabled,
+          availability: item.enabled ? 'available' : 'disabled',
+        });
+      } catch {
+        entries.push({
+          source,
+          skillId,
+          kind: null,
+          digest: null,
+          name: skillId,
+          description: '',
+          enabled: false,
+          availability: 'invalid',
+        });
+      }
+    };
+    for (const skillId of [
+      'sprint-coder-team',
+      'sprint-coder-product',
+      'skill-creator',
+      'import-skill',
+    ] as const)
+      await capture('builtin', skillId, true);
+    for (const provider of ['claude', 'agents'] as const) {
+      const root = join(this.rootPath, 'imported', provider);
+      for (const skillId of (await readdir(root)).sort()) {
+        if (!SKILL_ID.test(skillId) || skillId.startsWith('.')) continue;
+        const manifest = await readExistingManifest(join(root, skillId)).catch(() => null);
+        await capture(provider, skillId, manifest?.enabled ?? false);
+      }
+    }
+    const createdRoot = join(this.rootPath, 'created');
+    for (const skillId of (await readdir(createdRoot)).sort()) {
+      if (!SKILL_ID.test(skillId) || skillId.startsWith('.')) continue;
+      const enabled = !(await pathExists(join(createdRoot, skillId, '.disabled')).catch(
+        () => true,
+      ));
+      await capture('created', skillId, enabled);
+    }
+    return entries;
   }
 
   async resolveSelectable(

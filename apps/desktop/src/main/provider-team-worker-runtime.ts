@@ -184,10 +184,15 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         role:
           fragment.source === 'system'
             ? ('system' as const)
-            : fragment.trust === 'assistant'
-              ? ('assistant' as const)
-              : ('user' as const),
-        content: `[継承コンテキスト:${fragment.source}]\n${fragment.content}`,
+            : fragment.source === 'background'
+              ? ('user' as const)
+              : fragment.trust === 'assistant'
+                ? ('assistant' as const)
+                : ('user' as const),
+        content:
+          fragment.source === 'background'
+            ? `[継承コンテキスト:untrusted-background]\n${JSON.stringify({ data: fragment.content })}`
+            : `[継承コンテキスト:${fragment.source}]\n${fragment.content}`,
       })),
       { role: 'user', content: prompt },
     ];

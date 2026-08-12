@@ -3692,6 +3692,12 @@ export type TeamSnapshot = Readonly<{
 export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
 
 export interface PersistenceClient {
+  setSkillCatalogContextProvider?(
+    provider: (
+      selections: readonly TurnSkillSelection[],
+      includeBuiltinTeamSkill: boolean,
+    ) => string,
+  ): void;
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
   createProviderConnection(connection: ProviderConnection): ProviderConnection;
@@ -4690,6 +4696,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private readonly db: Database.Database;
   private readonly contextLedger: ContextLedger;
   private nativeMutationAuthorityDisabled = false;
+  private skillCatalogContextProvider:
+    | ((selections: readonly TurnSkillSelection[], includeBuiltinTeamSkill: boolean) => string)
+    | null = null;
   readonly recoveryReport: DatabaseRecoveryReport;
   private startupInterruptedTurns = 0;
 
@@ -4733,6 +4742,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
       }
       throw error;
     }
+  }
+
+  setSkillCatalogContextProvider(
+    provider: (
+      selections: readonly TurnSkillSelection[],
+      includeBuiltinTeamSkill: boolean,
+    ) => string,
+  ): void {
+    this.skillCatalogContextProvider = provider;
   }
 
   /**
@@ -13985,8 +14003,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     taskId: string,
     turnId: string,
     includeBuiltinTeamSkill = false,
+    reservedTokens = 0,
   ): PreparedContext {
-    const prepared = this.contextLedger.prepare(taskId, turnId);
     const prePrompt = this.getSprintCoderPrePrompt();
     const prePromptContent = sprintCoderPrePromptContent(prePrompt);
     const prePromptFragment: ContextFragment | null =
@@ -14030,6 +14048,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
         messageId: null,
       });
     }
+    const prepared = this.contextLedger.prepare(
+      taskId,
+      turnId,
+      reservedTokens +
+        (prePromptFragment?.tokenEstimate ?? 0) +
+        skillFragments.reduce((total, fragment) => total + fragment.tokenEstimate, 0),
+    );
     if (skillFragments.length === 0 && prePromptFragment === null) return prepared;
     const [systemFragment, ...remainingFragments] = prepared.fragments;
     const fragments = [
@@ -14530,6 +14555,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
       (isTeamContinuationInput(text) && this.latestTurnIncludedBuiltinTeamSkill(taskId)) ||
       (isExistingTeamFollowupInput(text) &&
         (this.latestTurnIncludedBuiltinTeamSkill(taskId) || this.getTeamByTask(taskId) !== null));
+    const skillCatalogContent = this.skillCatalogContextProvider?.(
+      parsedSkills.map(({ selection }) => selection),
+      shouldSealBuiltinTeamSkill,
+    );
     const userMessage = chatMessageSchema.parse({
       id: randomUUID(),
       taskId,
@@ -14606,7 +14635,32 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const event = this.appendEvent({ type: 'turn.accepted', taskId, turnId, userMessage });
     this.db.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(now, taskId);
     const renamedTask = this.autoNameTaskInTransaction(taskId, text, now);
-    const prepared = this.assembleContextInTransaction(taskId, turnId, shouldSealBuiltinTeamSkill);
+    const catalogTokenEstimate =
+      skillCatalogContent === undefined ? 0 : estimateTokens(skillCatalogContent);
+    const prepared = this.assembleContextInTransaction(
+      taskId,
+      turnId,
+      shouldSealBuiltinTeamSkill,
+      catalogTokenEstimate,
+    );
+    if (skillCatalogContent !== undefined) {
+      const existingTokens = prepared.fragments.reduce(
+        (total, fragment) => total + fragment.tokenEstimate,
+        0,
+      );
+      if (existingTokens + catalogTokenEstimate > CONTEXT_HARD_CAP_TOKENS)
+        throw new Error('Skill catalog does not fit within the Turn context limit');
+      prepared.fragments.push({
+        id: `turn:${turnId}:skill-catalog`,
+        taskId,
+        source: 'background',
+        trust: 'assistant',
+        tokenEstimate: catalogTokenEstimate,
+        content: skillCatalogContent,
+        createdAt: now,
+        messageId: null,
+      });
+    }
     const seal = this.createContextSealInTransaction('turn', turnId, taskId, prepared);
     const workspaceSet = this.sealTurnWorkspaceSet(taskId, turnId);
     return {
