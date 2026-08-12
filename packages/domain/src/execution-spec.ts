@@ -19,6 +19,7 @@ export type ExecutionSpecInput = Omit<ExecutionSpec, 'version' | 'commandBytesHa
 
 const DIGEST = /^[a-f0-9]{64}$/;
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const WINDOWS_PROGRAM_FILES_X86_KEY = /^PROGRAMFILES\(X86\)$/i;
 
 export function createExecutionSpec(input: ExecutionSpecInput): ExecutionSpec {
   validateText(input.absoluteExecutable, 'absolute executable', 32_768);
@@ -36,7 +37,8 @@ export function createExecutionSpec(input: ExecutionSpecInput): ExecutionSpec {
 
   const envDelta: Record<string, string> = {};
   for (const key of Object.keys(input.envDelta).sort()) {
-    if (!ENV_KEY.test(key)) throw new Error('ExecutionSpec environment key is invalid');
+    if (!ENV_KEY.test(key) && !WINDOWS_PROGRAM_FILES_X86_KEY.test(key))
+      throw new Error('ExecutionSpec environment key is invalid');
     const value = input.envDelta[key];
     if (value === undefined) throw new Error('ExecutionSpec environment value is missing');
     validateText(value, 'environment value', 1_000_000, true);
