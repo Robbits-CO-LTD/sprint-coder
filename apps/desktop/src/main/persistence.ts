@@ -10326,9 +10326,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   getUpdateHealth(): UpdateHealth {
-    const row = this.db
-      .prepare("SELECT value FROM settings WHERE key = 'update.health'")
-      .get() as { value: string } | undefined;
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = 'update.health'").get() as
+      { value: string } | undefined;
     if (row === undefined) return defaultUpdateHealth();
     try {
       const parsed = updateHealthSchema.safeParse(JSON.parse(row.value) as unknown);

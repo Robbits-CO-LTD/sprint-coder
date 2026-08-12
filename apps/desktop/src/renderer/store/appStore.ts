@@ -996,10 +996,7 @@ export const useAppStore = create<AppState>((set, get) => {
               ? '自動更新が3回以上連続で失敗しています。設定の「詳細」から手動更新・再試行・ログ確認を行えます。'
               : '自動更新に失敗しました。設定の「詳細」から再試行できます。',
           );
-        else if (
-          updateHealth.consecutiveFailures === 0 &&
-          (previous?.consecutiveFailures ?? 0) > 0
-        )
+        else if (updateHealth.consecutiveFailures === 0 && (previous?.consecutiveFailures ?? 0) > 0)
           get().dismissToast();
       };
       if (typeof window.sprintCoder.app?.getInfo === 'function')
