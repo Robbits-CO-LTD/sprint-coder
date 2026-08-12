@@ -27,11 +27,11 @@ type ParsedVersion = Readonly<{
 
 const SOURCE_PRIORITY: Readonly<Record<ResolvedCliCommand['source'], number>> = {
   explicit: 0,
-  path: 1,
-  'user-local': 2,
-  npm: 3,
-  'desktop-direct': 4,
-  'desktop-versioned': 5,
+  'desktop-direct': 1,
+  'desktop-versioned': 2,
+  'user-local': 3,
+  path: 4,
+  npm: 5,
   fallback: 6,
 };
 
@@ -48,7 +48,7 @@ export async function probeCliCommandCandidates(input: {
   environment: Readonly<NodeJS.ProcessEnv>;
   timeoutMs: number;
 }): Promise<ResolvedCliCommand | null> {
-  return probeFirstCapableCliCommand(input.candidates, async (candidate) => {
+  return probeFirstCapableCliCommand(input.kind, input.candidates, async (candidate) => {
     const version = await probeVersion(candidate.executable, input.environment, input.timeoutMs);
     if (version === null) return null;
     const capabilities = await probeRequiredCapabilities(
@@ -68,37 +68,52 @@ export async function probeCliCommandCandidates(input: {
 }
 
 export async function probeFirstCapableCliCommand(
+  kind: 'codex' | 'claude',
   candidates: readonly CliCommandCandidate[],
   probe: (candidate: CliCommandCandidate) => Promise<ResolvedCliCommand | null>,
 ): Promise<ResolvedCliCommand | null> {
-  const ordered = deduplicateCandidates(candidates).sort(
-    (left, right) => SOURCE_PRIORITY[left.source] - SOURCE_PRIORITY[right.source],
+  const unique = deduplicateCandidates(candidates);
+  const explicit = unique.filter(({ source }) => source === 'explicit');
+  const desktop = unique.filter(
+    ({ source }) => source === 'desktop-direct' || source === 'desktop-versioned',
   );
-  for (const candidate of ordered) {
-    const resolved = await probe(candidate);
-    if (resolved !== null) return resolved;
+  const userLocal = unique.filter(({ source }) => source === 'user-local');
+  const admissible =
+    explicit.length > 0
+      ? explicit.slice(0, 1)
+      : kind === 'codex' && desktop.length > 0
+        ? desktop
+        : kind === 'claude' && userLocal.length > 0
+          ? userLocal.slice(0, 1)
+          : unique.slice(0, 1);
+  const resolved: ResolvedCliCommand[] = [];
+  for (const candidate of admissible) {
+    const candidateResolution = await probe(candidate);
+    if (candidateResolution !== null) resolved.push(candidateResolution);
   }
-  return null;
+  return selectResolvedCliCommand(resolved);
 }
 
 export function selectResolvedCliCommand(
   candidates: readonly ResolvedCliCommand[],
 ): ResolvedCliCommand | null {
   return (
-    [...candidates].sort((left, right) => {
-      const source = SOURCE_PRIORITY[left.source] - SOURCE_PRIORITY[right.source];
-      if (source !== 0) return source;
-      const compatibility =
-        COMPATIBILITY_PRIORITY[left.compatibility] - COMPATIBILITY_PRIORITY[right.compatibility];
-      if (compatibility !== 0) return compatibility;
-      const leftVersion = parseVersion(left.version);
-      const rightVersion = parseVersion(right.version);
-      if (leftVersion !== null && rightVersion !== null) {
-        const version = compareVersion(rightVersion, leftVersion);
-        if (version !== 0) return version;
-      }
-      return left.executable.localeCompare(right.executable);
-    })[0] ?? null
+    [...candidates]
+      .filter(({ compatibility }) => compatibility !== 'unsupported')
+      .sort((left, right) => {
+        const source = SOURCE_PRIORITY[left.source] - SOURCE_PRIORITY[right.source];
+        if (source !== 0) return source;
+        const compatibility =
+          COMPATIBILITY_PRIORITY[left.compatibility] - COMPATIBILITY_PRIORITY[right.compatibility];
+        if (compatibility !== 0) return compatibility;
+        const leftVersion = parseVersion(left.version);
+        const rightVersion = parseVersion(right.version);
+        if (leftVersion !== null && rightVersion !== null) {
+          const version = compareVersion(rightVersion, leftVersion);
+          if (version !== 0) return version;
+        }
+        return left.executable.localeCompare(right.executable);
+      })[0] ?? null
   );
 }
 
