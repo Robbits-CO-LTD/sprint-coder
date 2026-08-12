@@ -27,6 +27,7 @@ import type {
   RuntimeFailureDiagnostic,
   RuntimeFailureStage,
   RuntimeProjectContextItem,
+  ResolvedCliCommand,
   RuntimeSkillInput,
   RuntimeTeamMcpOption,
   RuntimeWorkspaceSet,
@@ -45,6 +46,11 @@ import {
   type RuntimeProgressTimeoutPhase,
 } from './runtime-progress-deadline';
 import { RuntimeFailureDiagnosticCollector } from './runtime-failure-diagnostics';
+import {
+  environmentValue,
+  probeCliCommandCandidates,
+  type CliCommandCandidate,
+} from './cli-command-resolution';
 
 type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
@@ -58,6 +64,7 @@ export type ClaudeProbe = {
   available: boolean;
   readiness: 'ready' | 'authentication_required' | 'unavailable';
   version?: string;
+  cli?: ResolvedCliCommand;
   models: CodexModelOption[];
 };
 
@@ -143,39 +150,18 @@ export async function probeClaude(
   if (environment['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1') {
     return { available: true, readiness: 'ready', version: 'e2e-fixture', models: CLAUDE_MODELS };
   }
-  const availability = await new Promise<Omit<ClaudeProbe, 'models' | 'readiness'>>((resolve) => {
-    let settled = false;
-    const resolvedCommand = resolveClaudeCommand(command);
-    const child = spawn(resolvedCommand, ['--version'], {
-      env: minimalEnvironment(),
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const chunks: Buffer[] = [];
-    child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const finish = (result: Omit<ClaudeProbe, 'models' | 'readiness'>): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    child.once('error', () => finish({ available: false }));
-    child.once('exit', (code) => {
-      const version = Buffer.concat(chunks).toString('utf8').trim();
-      finish(
-        code === 0
-          ? { available: true, ...(version === '' ? {} : { version }) }
-          : { available: false },
-      );
-    });
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish({ available: false });
-    }, RUNTIME_VERSION_PROBE_TIMEOUT_MS);
+  const cli = await probeCliCommandCandidates({
+    kind: 'claude',
+    candidates: resolveClaudeCommandCandidates(command, environment),
+    environment: minimalEnvironment(environment),
+    timeoutMs: RUNTIME_VERSION_PROBE_TIMEOUT_MS,
   });
+  const availability: Omit<ClaudeProbe, 'models' | 'readiness'> =
+    cli === null ? { available: false } : { available: true, version: cli.version, cli };
   const authentication = availability.available
     ? await probeCliAuthentication(
         'claude',
-        resolveClaudeCommand(command),
+        cli!.executable,
         ['auth', 'status', '--json'],
         minimalEnvironment(environment),
         RUNTIME_AUTH_PROBE_TIMEOUT_MS,
@@ -195,11 +181,16 @@ export async function probeClaude(
 export class ClaudeRuntimeAdapter {
   private readonly active = new Map<string, ActiveProcess>();
   private cliVersion: string | null = null;
+  private cli: ResolvedCliCommand | null = null;
 
   constructor(private readonly timeoutMs = 10 * 60_000) {}
 
   setCliVersion(version: string | null): void {
     this.cliVersion = version;
+  }
+
+  setCliResolution(cli: ResolvedCliCommand | null): void {
+    this.cli = cli;
   }
 
   start(
@@ -229,6 +220,7 @@ export class ClaudeRuntimeAdapter {
       this.cliVersion,
       teamMcp !== undefined,
     );
+    diagnostics.setCliResolution(this.cli);
     const failWithDiagnostic = (error: PublicError, stage: RuntimeFailureStage): void =>
       fail(error, diagnostics.snapshot(stage));
     let temporaryDirectory: string | null = null;
@@ -298,7 +290,7 @@ export class ClaudeRuntimeAdapter {
       ),
     );
     const child = spawn(
-      resolveClaudeCommand('claude'),
+      this.cli?.executable ?? resolveClaudeCommand('claude'),
       buildClaudeArgs(model, teamMcpArgs, effort, effectiveScope, runtimeWorkspaceRoots),
       {
         cwd,
@@ -612,7 +604,33 @@ export function resolveClaudeCommand(
   appData: string | null | undefined = process.env['APPDATA'],
   userHome: string = homedir(),
 ): string {
-  if (command !== 'claude') return command;
+  return (
+    resolveClaudeCommandCandidates(
+      command,
+      {
+        PATH: searchPath,
+        APPDATA: appData ?? undefined,
+        HOME: userHome,
+        USERPROFILE: userHome,
+      },
+      platform,
+    )[0]?.executable ?? command
+  );
+}
+
+export function resolveClaudeCommandCandidates(
+  command: string,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+  platform: NodeJS.Platform = process.platform,
+): CliCommandCandidate[] {
+  if (command !== 'claude') return [{ executable: command, source: 'explicit' }];
+  const searchPath = environmentValue(environment, 'PATH', platform);
+  const appData = environmentValue(environment, 'APPDATA', platform);
+  const userHome =
+    environmentValue(environment, 'HOME', platform) ??
+    environmentValue(environment, 'USERPROFILE', platform) ??
+    homedir();
+  const candidates: CliCommandCandidate[] = [];
   if (platform === 'darwin') {
     const roots = [
       ...(searchPath ?? '').split(delimiter).filter((entry) => entry.length > 0),
@@ -626,14 +644,17 @@ export function resolveClaudeCommand(
         // Claude's native installer exposes the versioned binary through this user-local symlink.
         if (!statSync(candidate).isFile()) continue;
         accessSync(candidate, constants.X_OK);
-        return candidate;
+        candidates.push({
+          executable: candidate,
+          source: root === join(userHome, '.local', 'bin') ? 'user-local' : 'path',
+        });
       } catch {
         // Continue through the macOS locations a Finder-launched app does not inherit in PATH.
       }
     }
-    return command;
+    return candidates.length === 0 ? [{ executable: command, source: 'fallback' }] : candidates;
   }
-  if (platform !== 'win32') return command;
+  if (platform !== 'win32') return [{ executable: command, source: 'fallback' }];
   const roots = [
     ...(searchPath ?? '')
       .split(delimiter)
@@ -642,19 +663,32 @@ export function resolveClaudeCommand(
     ...(appData == null ? [] : [join(appData, 'npm')]),
     join(userHome, 'AppData', 'Roaming', 'npm'),
   ];
+  const userLocal = join(userHome, '.local', 'bin', 'claude.exe');
+  try {
+    if (lstatSync(userLocal).isFile())
+      candidates.push({ executable: userLocal, source: 'user-local' });
+  } catch {
+    // Continue through PATH and npm locations.
+  }
   for (const root of new Set(roots)) {
     for (const candidate of [
       join(root, 'claude.exe'),
       join(root, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
     ]) {
       try {
-        if (lstatSync(candidate).isFile()) return candidate;
+        if (lstatSync(candidate).isFile())
+          candidates.push({
+            executable: candidate,
+            source: candidate.includes(`${join('node_modules', '@anthropic-ai', 'claude-code')}`)
+              ? 'npm'
+              : 'path',
+          });
       } catch {
         // Continue searching the same locations Windows uses for npm global executables.
       }
     }
   }
-  return command;
+  return candidates;
 }
 
 function minimalEnvironment(source: Readonly<NodeJS.ProcessEnv> = process.env): NodeJS.ProcessEnv {

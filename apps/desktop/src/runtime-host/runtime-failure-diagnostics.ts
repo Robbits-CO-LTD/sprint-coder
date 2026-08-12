@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { homedir } from 'node:os';
 import {
   RECOGNIZED_CODEX_NOTIFICATION_NAMES,
+  type ResolvedCliCommand,
   type RuntimeFailureDiagnostic,
   type RuntimeFailureStage,
 } from './protocol';
@@ -9,6 +11,9 @@ import {
 export const RUNTIME_DIAGNOSTIC_MAX_BYTES = 16 * 1024;
 const STDERR_TAIL_MAX_BYTES = 8 * 1024;
 const UNSUPPORTED_NOTIFICATION = '[unsupported]';
+const SAFE_NOTIFICATION_METHOD = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/u;
+const SENSITIVE_NOTIFICATION_NAMESPACE =
+  /^(?:auth|credential|private|request|secret|token|user)(?:[/:]|$)/iu;
 
 export class RuntimeFailureDiagnosticCollector {
   private readonly startedAt: number;
@@ -18,6 +23,7 @@ export class RuntimeFailureDiagnosticCollector {
   private lastReceivedNotification: string | null = null;
   private lastRecognizedNotification: string | null = null;
   private unsupportedNotificationCount = 0;
+  private cliResolution: ResolvedCliCommand | null = null;
 
   constructor(
     private readonly runtimeKind: 'codex' | 'claude',
@@ -34,15 +40,22 @@ export class RuntimeFailureDiagnosticCollector {
     this.cliVersion = safeCliVersion(this.runtimeKind, version);
   }
 
+  setCliResolution(cli: ResolvedCliCommand | null): void {
+    this.cliResolution = cli === null ? null : safeCliResolution(cli);
+  }
+
   recordNotification(method: string): void {
     if (this.runtimeKind === 'codex' && RECOGNIZED_CODEX_NOTIFICATION_NAMES.has(method)) {
       this.lastReceivedNotification = method;
       this.lastRecognizedNotification = method;
       return;
     }
-    // Notification methods are supplied by the child process. Unknown values may contain user
-    // content, paths, or credentials, so only their count and a constant marker cross the boundary.
-    this.lastReceivedNotification = UNSUPPORTED_NOTIFICATION;
+    // Preserve a bounded protocol method for diagnosis, but collapse anything content-bearing,
+    // path-like, or malformed to a constant marker before it crosses the Runtime boundary.
+    this.lastReceivedNotification =
+      SAFE_NOTIFICATION_METHOD.test(method) && !SENSITIVE_NOTIFICATION_NAMESPACE.test(method)
+        ? method
+        : UNSUPPORTED_NOTIFICATION;
     this.unsupportedNotificationCount += 1;
   }
 
@@ -63,6 +76,7 @@ export class RuntimeFailureDiagnosticCollector {
       elapsedMs: safeElapsedMilliseconds(this.startedAt, now),
       appVersion: boundedText(this.appVersion, 64) ?? 'unknown',
       cliVersion: safeCliVersion(this.runtimeKind, this.cliVersion),
+      ...(this.cliResolution === null ? {} : { cliResolution: this.cliResolution }),
       teamMcp: {
         enabled: this.teamMcpEnabled,
         status: this.teamMcpEnabled ? 'configured' : 'not_configured',
@@ -76,6 +90,21 @@ export class RuntimeFailureDiagnosticCollector {
     };
     return diagnostic;
   }
+}
+
+function safeCliResolution(cli: ResolvedCliCommand): ResolvedCliCommand {
+  const home = homedir();
+  const executable =
+    home !== '' && cli.executable.startsWith(home)
+      ? `<home>${cli.executable.slice(home.length)}`
+      : cli.executable;
+  return {
+    source: cli.source,
+    executable: executable.slice(0, 2_048),
+    version: cli.version.slice(0, 128),
+    compatibility: cli.compatibility,
+    capabilities: cli.capabilities.slice(0, 32),
+  };
 }
 
 type ResolveRuntimeFailureDiagnosticInput = Readonly<{

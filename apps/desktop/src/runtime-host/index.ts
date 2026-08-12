@@ -357,8 +357,14 @@ function terminateImagePreparationForTurn(turnId: string): void {
 
 async function probeAndSendCapability(operationId: string): Promise<void> {
   const probe = await (runtimeKind === 'claude' ? probeClaude() : probeCodex());
-  if (adapter instanceof CodexRuntimeAdapter) adapter.setCliVersion(probe.version ?? null);
-  if (adapter instanceof ClaudeRuntimeAdapter) adapter.setCliVersion(probe.version ?? null);
+  if (adapter instanceof CodexRuntimeAdapter) {
+    adapter.setCliVersion(probe.version ?? null);
+    adapter.setCliResolution(probe.cli ?? null);
+  }
+  if (adapter instanceof ClaudeRuntimeAdapter) {
+    adapter.setCliVersion(probe.version ?? null);
+    adapter.setCliResolution(probe.cli ?? null);
+  }
   send('', '', operationId, {
     type: 'hello',
     ...(runtimeKind === 'claude'
@@ -370,12 +376,14 @@ async function probeAndSendCapability(operationId: string): Promise<void> {
           claudeReadiness: probe.readiness,
           claudeModels: probe.models,
           ...(probe.version === undefined ? {} : { claudeVersion: probe.version }),
+          ...(probe.cli === undefined ? {} : { claudeCli: probe.cli }),
         }
       : {
           codexAvailable: probe.available,
           codexReadiness: probe.readiness,
           codexModels: probe.models,
           ...(probe.version === undefined ? {} : { codexVersion: probe.version }),
+          ...(probe.cli === undefined ? {} : { codexCli: probe.cli }),
           claudeAvailable: false,
           claudeReadiness: 'unavailable',
           claudeModels: [],
