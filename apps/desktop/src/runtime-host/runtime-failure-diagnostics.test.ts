@@ -226,6 +226,14 @@ describe('RuntimeFailureDiagnosticCollector', () => {
     expect(collector.snapshot('protocol_error').cliVersion).toBeNull();
   });
 
+  it('does not retain nested sensitive namespaces or Windows paths as notification names', () => {
+    const collector = new RuntimeFailureDiagnosticCollector('codex', '0.2.1', null, false);
+    collector.recordNotification('remote/user/alice');
+    expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
+    collector.recordNotification('C:/Users/Alice/private');
+    expect(collector.snapshot('protocol_error').lastReceivedNotification).toBe('[unsupported]');
+  });
+
   it('accepts only the documented Claude version shape', () => {
     const collector = new RuntimeFailureDiagnosticCollector(
       'claude',

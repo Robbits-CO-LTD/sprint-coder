@@ -137,7 +137,12 @@ async function probeVersion(
 ): Promise<string | null> {
   const result = await probeCommand(executable, ['--version'], environment, timeoutMs, 512);
   const version = result?.output.trim() ?? '';
-  return result?.code === 0 && version !== '' ? version.slice(0, 128) : null;
+  return result?.code === 0 &&
+    version !== '' &&
+    version.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/u.test(version)
+    ? version
+    : null;
 }
 
 async function probeRequiredCapabilities(

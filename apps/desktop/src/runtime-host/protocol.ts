@@ -882,9 +882,10 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
       record['lastReceivedNotification'] === '[unsupported]' ||
       (typeof record['lastReceivedNotification'] === 'string' &&
         /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/u.test(record['lastReceivedNotification']) &&
-        !/^(?:auth|credential|private|request|secret|token|user)(?:[/:]|$)/iu.test(
+        !/(?:^|[/:])(?:auth|credential|private|request|secret|token|users?)(?:[/:]|$)/iu.test(
           record['lastReceivedNotification'],
-        ))) &&
+        ) &&
+        !/^[A-Za-z]:[\\/]/u.test(record['lastReceivedNotification']))) &&
     typeof record['unsupportedNotificationCount'] === 'number' &&
     Number.isSafeInteger(record['unsupportedNotificationCount']) &&
     record['unsupportedNotificationCount'] >= 0 &&

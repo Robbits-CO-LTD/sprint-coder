@@ -13,7 +13,8 @@ const STDERR_TAIL_MAX_BYTES = 8 * 1024;
 const UNSUPPORTED_NOTIFICATION = '[unsupported]';
 const SAFE_NOTIFICATION_METHOD = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/u;
 const SENSITIVE_NOTIFICATION_NAMESPACE =
-  /^(?:auth|credential|private|request|secret|token|user)(?:[/:]|$)/iu;
+  /(?:^|[/:])(?:auth|credential|private|request|secret|token|users?)(?:[/:]|$)/iu;
+const WINDOWS_DRIVE_PATH = /^[A-Za-z]:[\\/]/u;
 
 export class RuntimeFailureDiagnosticCollector {
   private readonly startedAt: number;
@@ -53,7 +54,9 @@ export class RuntimeFailureDiagnosticCollector {
     // Preserve a bounded protocol method for diagnosis, but collapse anything content-bearing,
     // path-like, or malformed to a constant marker before it crosses the Runtime boundary.
     this.lastReceivedNotification =
-      SAFE_NOTIFICATION_METHOD.test(method) && !SENSITIVE_NOTIFICATION_NAMESPACE.test(method)
+      SAFE_NOTIFICATION_METHOD.test(method) &&
+      !SENSITIVE_NOTIFICATION_NAMESPACE.test(method) &&
+      !WINDOWS_DRIVE_PATH.test(method)
         ? method
         : UNSUPPORTED_NOTIFICATION;
     this.unsupportedNotificationCount += 1;
