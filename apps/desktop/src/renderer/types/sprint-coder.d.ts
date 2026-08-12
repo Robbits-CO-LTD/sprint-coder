@@ -1043,6 +1043,8 @@ export interface SprintCoderApi {
       codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
       claudeAvailable: boolean;
       claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
+      codexCli: import('@sprint-coder/contracts').ResolvedCliCommand | null;
+      claudeCli: import('@sprint-coder/contracts').ResolvedCliCommand | null;
       model: string;
       models: CodexModelOption[];
       effort: ClaudeEffort;
