@@ -3,7 +3,7 @@ import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_pro
 import { createReadStream, readFileSync } from 'node:fs';
 import { stat, realpath } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
-import { delimiter, isAbsolute } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
 import {
   createExecutionSpec,
@@ -879,8 +879,11 @@ function buildEnvironment(delta: Readonly<Record<string, string>>): NodeJS.Proce
   return Object.fromEntries(Object.entries(delta));
 }
 
-function buildControlledEnvironment(): Readonly<Record<string, string>> {
-  const allowed = [
+export function buildControlledEnvironment(
+  platform: NodeJS.Platform = process.platform,
+  source: Readonly<NodeJS.ProcessEnv> = process.env,
+): Readonly<Record<string, string>> {
+  const commonAllowed = [
     'LANG',
     'LC_ALL',
     'LC_CTYPE',
@@ -892,15 +895,39 @@ function buildControlledEnvironment(): Readonly<Record<string, string>> {
     'COMSPEC',
     'PATHEXT',
   ];
+  const windowsAllowed = [
+    'PATH',
+    'HOME',
+    'USERPROFILE',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'PROGRAMFILES',
+    'PROGRAMFILES(X86)',
+    'PROGRAMW6432',
+    'SYSTEMDRIVE',
+    'NUMBER_OF_PROCESSORS',
+    'PSMODULEPATH',
+  ];
   const environment: Record<string, string> = {};
-  for (const key of allowed) {
-    const value = process.env[key];
+  const sourceByCaseInsensitiveKey = new Map(
+    Object.entries(source).map(([key, value]) => [key.toUpperCase(), value]),
+  );
+  for (const key of platform === 'win32' ? [...commonAllowed, ...windowsAllowed] : commonAllowed) {
+    const value =
+      platform === 'win32' ? sourceByCaseInsensitiveKey.get(key.toUpperCase()) : source[key];
     if (value !== undefined) environment[key] = value;
   }
-  environment['PATH'] =
-    process.platform === 'win32'
-      ? ['C:\\Windows\\System32', 'C:\\Windows'].join(delimiter)
-      : ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(delimiter);
+  if (platform === 'win32') {
+    environment['PATH'] ??= ['C:\\Windows\\System32', 'C:\\Windows'].join(';');
+    const home = environment['HOME'];
+    const userProfile = environment['USERPROFILE'];
+    if (home === undefined && userProfile !== undefined) environment['HOME'] = userProfile;
+    if (userProfile === undefined && home !== undefined) environment['USERPROFILE'] = home;
+  } else {
+    environment['PATH'] = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
+  }
   return environment;
 }
 

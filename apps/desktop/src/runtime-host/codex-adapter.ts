@@ -142,6 +142,7 @@ export async function probeCodex(
     const child = spawn(resolveCodexCommand(command), ['--version'], {
       env: minimalEnvironment(),
       stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
     });
     const chunks: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -362,6 +363,7 @@ export class CodexRuntimeAdapter {
           },
           detached: process.platform !== 'win32',
           stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
         },
       );
     } catch {

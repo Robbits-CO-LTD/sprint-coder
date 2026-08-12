@@ -40,6 +40,7 @@ export async function probeCliAuthentication(
     const child = spawn(command, args, {
       env: environment,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     const append = (chunk: Buffer): void => {
       if (Buffer.byteLength(output, 'utf8') >= MAX_PROBE_OUTPUT_BYTES) return;
