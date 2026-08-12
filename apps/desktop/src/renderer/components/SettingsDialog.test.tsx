@@ -6,6 +6,7 @@ import {
   SettingsDialog,
   WorkspaceBody,
   availabilityOf,
+  cliCompatibilityText,
   integerOptions,
   recoveryText,
   runtimeStatusText,
@@ -154,6 +155,21 @@ describe('CLI detection status', () => {
       reason: 'Codexはインストール済みですが、ログインが必要です',
     });
   });
+
+  it('warns for untested and unsupported CLI versions without warning for verified ones', () => {
+    expect(
+      cliCompatibilityText({ version: 'codex-cli 0.144.4', compatibility: 'verified' }),
+    ).toBeNull();
+    expect(
+      cliCompatibilityText({
+        version: 'codex-cli 0.147.0-alpha.6.6',
+        compatibility: 'untested',
+      }),
+    ).toContain('未検証のCLI');
+    expect(
+      cliCompatibilityText({ version: 'claude-code 2.1.100', compatibility: 'unsupported' }),
+    ).toContain('検証済み範囲より古い');
+  });
 });
 
 describe('the Team defaults form', () => {
@@ -187,7 +203,7 @@ describe('the read-only lines in 詳細', () => {
     expect(versionText('v1.2.3')).toBe('v1.2.3');
     expect(workspace()).toContain('data-testid="settings-diagnostic-version"');
     expect(workspace()).toContain('data-testid="settings-copy-runtime-diagnostic"');
-    expect(workspace()).toContain('認証情報・絶対パスを含めません');
+    expect(workspace()).toContain('認証情報・ユーザーホームの実パスを含めません');
   });
 
   it('names the Runtime and its state, and carries the backend message when there is one', () => {

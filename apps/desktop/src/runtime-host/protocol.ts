@@ -163,6 +163,21 @@ export const RECOGNIZED_CODEX_NOTIFICATION_NAMES = new Set([
   'turn/completed',
 ]);
 
+export type ResolvedCliCommand = Readonly<{
+  source:
+    | 'explicit'
+    | 'path'
+    | 'user-local'
+    | 'npm'
+    | 'desktop-direct'
+    | 'desktop-versioned'
+    | 'fallback';
+  executable: string;
+  version: string;
+  compatibility: 'verified' | 'compatible' | 'untested' | 'unsupported';
+  capabilities: readonly string[];
+}>;
+
 export type RuntimeFailureDiagnostic = Readonly<{
   version: 1;
   diagnosticId: string;
@@ -175,6 +190,7 @@ export type RuntimeFailureDiagnostic = Readonly<{
     missingTools: readonly string[];
     unexpectedTools: readonly string[];
   }>;
+  cliResolution?: ResolvedCliCommand;
   teamMcp: Readonly<{
     enabled: boolean;
     status: 'configured' | 'not_configured';
@@ -295,6 +311,7 @@ export type RuntimeToMainEnvelope =
       codexAvailable: boolean;
       codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
       codexVersion?: string;
+      codexCli?: ResolvedCliCommand;
       codexModels: CodexModelOption[];
       // Additive fields for the Claude CLI runtime (Slice 3.4). A given Runtime Host process
       // only ever hosts one adapter kind, so exactly one provider's fields are meaningful per
@@ -304,6 +321,7 @@ export type RuntimeToMainEnvelope =
       claudeAvailable: boolean;
       claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
       claudeVersion?: string;
+      claudeCli?: ResolvedCliCommand;
       claudeModels: CodexModelOption[];
     })
   | (EnvelopeBase & {
@@ -717,6 +735,7 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
         value.codexReadiness as string,
       ) &&
       (!('codexVersion' in value) || typeof value.codexVersion === 'string') &&
+      (!('codexCli' in value) || isResolvedCliCommand(value.codexCli)) &&
       'codexModels' in value &&
       Array.isArray(value.codexModels) &&
       value.codexModels.length <= 32 &&
@@ -728,6 +747,7 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
         value.claudeReadiness as string,
       ) &&
       (!('claudeVersion' in value) || typeof value.claudeVersion === 'string') &&
+      (!('claudeCli' in value) || isResolvedCliCommand(value.claudeCli)) &&
       'claudeModels' in value &&
       Array.isArray(value.claudeModels) &&
       value.claudeModels.length <= 32 &&
@@ -791,6 +811,43 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
   );
 }
 
+function isResolvedCliCommand(value: unknown): value is ResolvedCliCommand {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).every((key) =>
+      ['source', 'executable', 'version', 'compatibility', 'capabilities'].includes(key),
+    ) &&
+    [
+      'explicit',
+      'path',
+      'user-local',
+      'npm',
+      'desktop-direct',
+      'desktop-versioned',
+      'fallback',
+    ].includes(String(record['source'])) &&
+    typeof record['executable'] === 'string' &&
+    record['executable'].length > 0 &&
+    record['executable'].length <= 2_048 &&
+    [...record['executable']].every((character) => {
+      const code = character.charCodeAt(0);
+      return code >= 32 && code !== 127;
+    }) &&
+    typeof record['version'] === 'string' &&
+    record['version'].length > 0 &&
+    record['version'].length <= 128 &&
+    ['verified', 'compatible', 'untested', 'unsupported'].includes(
+      String(record['compatibility']),
+    ) &&
+    Array.isArray(record['capabilities']) &&
+    record['capabilities'].length <= 32 &&
+    record['capabilities'].every(
+      (capability) => typeof capability === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(capability),
+    )
+  );
+}
+
 export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFailureDiagnostic {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
@@ -806,6 +863,7 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
         'appVersion',
         'cliVersion',
         'capabilityMismatch',
+        'cliResolution',
         'teamMcp',
         'lastRecognizedNotification',
         'lastReceivedNotification',
@@ -850,6 +908,9 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
     (!('capabilityMismatch' in record) ||
       record['capabilityMismatch'] === undefined ||
       isCapabilityMismatch(record['capabilityMismatch'])) &&
+    (!('cliResolution' in record) ||
+      record['cliResolution'] === undefined ||
+      isResolvedCliCommand(record['cliResolution'])) &&
     typeof teamMcp === 'object' &&
     teamMcp !== null &&
     Object.keys(teamMcp).every((key) => key === 'enabled' || key === 'status') &&
@@ -863,7 +924,11 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
     (record['lastReceivedNotification'] === null ||
       record['lastReceivedNotification'] === '[unsupported]' ||
       (typeof record['lastReceivedNotification'] === 'string' &&
-        RECOGNIZED_CODEX_NOTIFICATION_NAMES.has(record['lastReceivedNotification']))) &&
+        /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/u.test(record['lastReceivedNotification']) &&
+        !/(?:^|[/:])(?:auth|credential|private|request|secret|token|users?)(?:[/:]|$)/iu.test(
+          record['lastReceivedNotification'],
+        ) &&
+        !/^[A-Za-z]:[\\/]/u.test(record['lastReceivedNotification']))) &&
     typeof record['unsupportedNotificationCount'] === 'number' &&
     Number.isSafeInteger(record['unsupportedNotificationCount']) &&
     record['unsupportedNotificationCount'] >= 0 &&

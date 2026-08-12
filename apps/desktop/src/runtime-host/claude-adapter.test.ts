@@ -90,6 +90,16 @@ describe('Claude runtime probe', () => {
     expect(resolveClaudeCommand('claude', 'win32', '', null, home)).toBe(executable);
   });
 
+  it('finds the Windows native installer under the user-local bin directory', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-native-home-'));
+    temporaryRoots.push(home);
+    const executable = join(home, '.local', 'bin', 'claude.exe');
+    await mkdir(join(executable, '..'), { recursive: true });
+    await writeFile(executable, '');
+
+    expect(resolveClaudeCommand('claude', 'win32', '', null, home)).toBe(executable);
+  });
+
   it('degrades to unavailable when the CLI cannot be spawned', async () => {
     await expect(probeClaude('__sprint_coder_claude_cli_does_not_exist__')).resolves.toEqual({
       available: false,
