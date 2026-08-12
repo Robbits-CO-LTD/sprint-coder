@@ -19,6 +19,7 @@ import {
   type RuntimeImageAttachmentManifestEntry,
   type RuntimePreparedImageAttachments,
   type RuntimeProjectContextItem,
+  type ResolvedCliCommand,
   type RuntimeSkillInput,
   type RuntimeTeamMcpOption,
   type RuntimeWorkspaceSet,
@@ -103,6 +104,7 @@ export type RuntimeCapabilityReport = {
   available: boolean;
   readiness: 'ready' | 'authentication_required' | 'unavailable';
   models: readonly CodexModelOption[];
+  cli?: ResolvedCliCommand;
 };
 type RuntimeCapabilityState = Readonly<{
   report: RuntimeCapabilityReport;
@@ -556,11 +558,13 @@ export class RuntimeHostClient {
               available: raw.claudeAvailable,
               readiness: raw.claudeReadiness,
               models: raw.claudeModels,
+              ...(raw.claudeCli === undefined ? {} : { cli: raw.claudeCli }),
             }
           : {
               available: raw.codexAvailable,
               readiness: raw.codexReadiness,
               models: raw.codexModels,
+              ...(raw.codexCli === undefined ? {} : { cli: raw.codexCli }),
             };
       this.recordCapabilityState(instanceId, report);
       this.resolveProbe?.(report);
