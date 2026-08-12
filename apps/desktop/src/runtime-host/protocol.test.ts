@@ -327,11 +327,24 @@ describe('Runtime Host protocol', () => {
       claudeAvailable: true,
       claudeReadiness: 'ready',
       claudeVersion: '2.1.218',
+      claudeCli: {
+        source: 'user-local',
+        executable: '/Users/test/.local/bin/claude',
+        version: '2.1.218 (Claude Code)',
+        compatibility: 'verified',
+        capabilities: ['version_probe', 'strict_mcp_config'],
+      },
       claudeModels: [{ id: 'auto', displayName: 'Auto', description: '' }],
     };
     expect(isRuntimeToMainEnvelope(hello)).toBe(true);
     expect(isRuntimeToMainEnvelope({ ...hello, claudeAvailable: 'yes' })).toBe(false);
     expect(isRuntimeToMainEnvelope({ ...hello, claudeModels: undefined })).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...hello,
+        claudeCli: { ...hello.claudeCli, capabilities: ['invalid-capability'] },
+      }),
+    ).toBe(false);
   });
 
   it('validates the additive optional Claude effort field on start envelopes', () => {
@@ -365,6 +378,13 @@ describe('Runtime Host protocol', () => {
         capabilityMismatch: {
           missingTools: ['mcp__team__team_hire_worker'],
           unexpectedTools: ['mcp__team__skill_draft_create'],
+        },
+        cliResolution: {
+          source: 'npm',
+          executable: '<home>/.npm/bin/codex',
+          version: 'codex 1.0.0',
+          compatibility: 'compatible',
+          capabilities: ['version_probe', 'app_server'],
         },
         teamMcp: { enabled: false, status: 'not_configured' },
         lastRecognizedNotification: 'turn/started',
