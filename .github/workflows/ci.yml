@@ -28,8 +28,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           # The PR classifier compares the real base and head commits. A complete checkout avoids
-          # silently selecting the fast lane when a long-lived PR's base commit is outside a
-          # shallow clone.
+          # silently selecting the fast lane when a long-lived PR's base is outside a shallow clone.
           fetch-depth: 0
 
       - name: Select fast or full platform coverage
@@ -45,14 +44,10 @@ jobs:
           full_matrix=true
           if [[ "${EVENT_NAME}" == 'pull_request' ]]; then
             full_matrix=false
-            # Treat renames as a delete + add so moving an OS-sensitive file out of a protected
-            # path cannot hide the risky source path from the classifier.
             changed_files="$(git diff --no-renames --name-only "${BASE_SHA}" "${HEAD_SHA}")"
             printf '%s\n' "${changed_files}"
 
-            # Renderer, styling, docs, and pure package changes use the fast lane. Changes that
-            # can alter native ABI, Electron startup, filesystem/process behavior, packaging, or
-            # the CI contract itself retain the Linux + Windows platform matrix.
+            # Native, process, packaging, E2E, dependency, and CI changes retain full OS coverage.
             if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-native-safe-fs\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|native-safe-fs/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
               full_matrix=true
             fi
@@ -62,9 +57,50 @@ jobs:
           echo "Selected full matrix: ${full_matrix}"
 
   quality:
-    # Preserve the existing Linux check name for repository rules while moving slow native and
-    # packaged-app checks to the conditional platform matrix.
+    name: quality (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - label: typecheck
+            command: typecheck
+          - label: lint
+            command: lint
+          - label: format
+            command: format:check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ${{ matrix.label }}
+        run: npm run ${{ matrix.command }}
+
+  quality-result:
+    # Preserve the existing required check name while the three quality gates run in parallel.
     name: build (ubuntu-latest)
+    if: always()
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verify quality gates
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+        run: test "${QUALITY_RESULT}" = 'success'
+
+  package-tests:
+    name: package tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -80,21 +116,66 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Format check
-        run: npm run format:check
+      - name: Test contracts and domain packages
+        run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
 
   test-macos:
-    # macOS currently completes the full suite in about two minutes, so it is the always-on test
-    # lane. It gives every PR complete Vitest coverage while Linux/Windows focus on their platform
-    # boundaries only when relevant.
-    name: build (macos-latest)
+    name: macOS test shard ${{ matrix.shard }}
     needs: classify
+    runs-on: macos-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: [1/3, 2/3, 3/3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Restore better-sqlite3 Electron ABI binary
+        id: better-sqlite-cache
+        uses: actions/cache@v6
+        with:
+          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
+          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
+
+      - name: Rebuild better-sqlite3 for Electron ABI
+        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
+        working-directory: apps/desktop
+        run: npx --yes @electron/rebuild -f -w better-sqlite3
+
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@v6
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
+
+      - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-safe-fs
+
+      - name: Test desktop shard ${{ matrix.shard }}
+        working-directory: apps/desktop
+        run: npx vitest run --shard=${{ matrix.shard }}
+
+  package-macos:
+    # Fast PRs still prove the production Forge boundary, independently from test shards.
+    name: macOS production package smoke
+    needs: classify
+    if: github.event_name == 'pull_request' && needs.classify.outputs.full_matrix != 'true'
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -136,21 +217,14 @@ jobs:
         if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
         run: npm run build:native-safe-fs
 
-      - name: Test
-        run: npm run test
-
-      # The full lane proves packaged startup on Linux. Keep a production Forge boundary in the
-      # fast lane too, reusing this job's installed dependencies and cached native binaries.
-      - name: Production package smoke (fast lane)
-        if: needs.classify.outputs.full_matrix != 'true'
+      - name: Production package smoke
         working-directory: apps/desktop
         run: npx electron-forge package
         env:
-          # This is a non-release package used only to prove the production bundle boundary.
           SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
 
   windows-smoke:
-    name: build (windows-2022, smoke)
+    name: Windows focused smoke
     needs: classify
     if: github.event_name == 'pull_request' && needs.classify.outputs.full_matrix != 'true'
     runs-on: windows-2022
@@ -178,8 +252,6 @@ jobs:
             throw 'Windows process identity query warm-up failed'
           }
 
-      # These specs exercise named pipes, process teardown, ACLs, watchers, and atomic file
-      # replacement without paying for the Electron ABI rebuild required by the full suite.
       - name: Test Windows platform boundaries
         working-directory: apps/desktop
         run: >-
@@ -194,27 +266,22 @@ jobs:
           src/runtime-host/team-mcp-node-command.test.ts
           --maxWorkers=1
 
-  platform:
-    name: build (${{ matrix.label }})
+  platform-tests:
+    name: ${{ matrix.label }} test shard ${{ matrix.shard }}
     needs: classify
     if: needs.classify.outputs.full_matrix == 'true'
-    timeout-minutes: 45
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
+        os: [ubuntu-latest, windows-2022]
+        shard: [1/3, 2/3, 3/3]
         include:
           - os: ubuntu-latest
-            label: ubuntu-latest, full
-          # The Electron node-gyp revision in the lockfile supports Visual Studio through 2022.
-          # Keep Windows on the supported image until that dependency is updated. Vitest stays on
-          # one worker for process stability, with files split across independent runners.
+            label: Linux
           - os: windows-2022
-            label: windows-2022, shard 1/2
-            windows_shard: 1/2
-          - os: windows-2022
-            label: windows-2022, shard 2/2
-            windows_shard: 2/2
-    runs-on: ${{ matrix.os }}
+            label: Windows
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -228,15 +295,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Electron 43 downloads its platform binary on first use. Install it once before workers can
-      # race to extract the same archive into node_modules/electron/dist.
       - name: Install Electron binary
         run: node node_modules/electron/install.js
-
-      - name: Verify Electron binary
-        run: node node_modules/electron/cli.js -p "process.versions.electron"
-        env:
-          ELECTRON_RUN_AS_NODE: '1'
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
@@ -272,61 +332,194 @@ jobs:
             throw 'Windows process identity query warm-up failed'
           }
 
-      - name: Test
-        if: runner.os != 'Windows'
-        run: npm run test
+      - name: Test desktop shard ${{ matrix.shard }} on Linux
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: npx vitest run --shard=${{ matrix.shard }}
 
-      - name: Test Windows shard ${{ matrix.windows_shard }}
+      - name: Test desktop shard ${{ matrix.shard }} on Windows
         if: runner.os == 'Windows'
         working-directory: apps/desktop
-        run: npx vitest run --shard=${{ matrix.windows_shard }}
+        run: npx vitest run --shard=${{ matrix.shard }} --maxWorkers=1
 
-      - name: Provision Inno Setup
-        if: runner.os == 'Windows' && matrix.windows_shard == '1/2'
-        shell: pwsh
-        run: ./apps/desktop/scripts/ensure-inno-setup.ps1
-
-      - name: Make Windows wizard installer
-        if: runner.os == 'Windows' && matrix.windows_shard == '1/2'
+  package-linux:
+    name: Linux packaged startup smoke
+    needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+      - name: Restore better-sqlite3 Electron ABI binary
+        id: better-sqlite-cache
+        uses: actions/cache@v6
+        with:
+          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
+          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
+      - name: Rebuild better-sqlite3 for Electron ABI
+        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
         working-directory: apps/desktop
-        run: npx electron-forge make --platform=win32 --arch=x64
-
-      - name: Verify Windows wizard artifact
-        if: runner.os == 'Windows' && matrix.windows_shard == '1/2'
-        shell: pwsh
-        run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1
-
-      - name: Packaged startup smoke (Linux)
-        if: runner.os == 'Linux'
+        run: npx --yes @electron/rebuild -f -w better-sqlite3
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@v6
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
+      - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-safe-fs
+      - name: Packaged startup smoke
         run: xvfb-run -a npx playwright test tests/e2e/keyboard-smoke.spec.ts
         env:
           SPRINT_CODER_E2E_MODE: packaged
 
-      - name: Dev-mode E2E auto-start smoke (Windows)
-        if: runner.os == 'Windows' && matrix.windows_shard == '1/2'
+  package-windows:
+    name: Windows installer smoke
+    needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+      - name: Restore better-sqlite3 Electron ABI binary
+        id: better-sqlite-cache
+        uses: actions/cache@v6
+        with:
+          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
+          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
+      - name: Rebuild better-sqlite3 for Electron ABI
+        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
+        working-directory: apps/desktop
+        run: npx --yes @electron/rebuild -f -w better-sqlite3
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@v6
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
+      - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-safe-fs
+      - name: Provision Inno Setup
+        shell: pwsh
+        run: ./apps/desktop/scripts/ensure-inno-setup.ps1
+      - name: Make Windows wizard installer
+        working-directory: apps/desktop
+        run: npx electron-forge make --platform=win32 --arch=x64
+      - name: Verify Windows wizard artifact
+        shell: pwsh
+        run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1
+
+  e2e-windows:
+    name: Windows dev-mode E2E smoke
+    needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+      - name: Restore better-sqlite3 Electron ABI binary
+        id: better-sqlite-cache
+        uses: actions/cache@v6
+        with:
+          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
+          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
+      - name: Rebuild better-sqlite3 for Electron ABI
+        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
+        working-directory: apps/desktop
+        run: npx --yes @electron/rebuild -f -w better-sqlite3
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@v6
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
+      - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-safe-fs
+      - name: Dev-mode E2E auto-start smoke
         run: npx playwright test tests/e2e/keyboard-smoke.spec.ts
         env:
           SPRINT_CODER_E2E_MODE: dev
 
-  # Preserve the existing aggregate check name. It succeeds through either the focused PR smoke
-  # or the full platform matrix, so repository rules do not need conditional required checks.
-  windows-result:
-    name: build (windows-2022)
+  macos-result:
+    name: build (macos-latest)
     if: always()
-    needs: [classify, windows-smoke, platform]
+    needs: [classify, package-tests, test-macos, package-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Verify selected Windows coverage
+      - name: Verify macOS and package coverage
         shell: bash
         env:
           FULL_MATRIX: ${{ needs.classify.outputs.full_matrix }}
-          PLATFORM_RESULT: ${{ needs.platform.result }}
+          PACKAGE_TEST_RESULT: ${{ needs.package-tests.result }}
+          MACOS_TEST_RESULT: ${{ needs.test-macos.result }}
+          MACOS_PACKAGE_RESULT: ${{ needs.package-macos.result }}
+        run: |
+          set -euo pipefail
+          test "${PACKAGE_TEST_RESULT}" = 'success'
+          test "${MACOS_TEST_RESULT}" = 'success'
+          if [[ "${FULL_MATRIX}" == 'true' ]]; then
+            test "${MACOS_PACKAGE_RESULT}" = 'skipped'
+          else
+            test "${MACOS_PACKAGE_RESULT}" = 'success'
+          fi
+
+  windows-result:
+    name: build (windows-2022)
+    if: always()
+    needs: [classify, windows-smoke, platform-tests, package-linux, package-windows, e2e-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verify selected platform coverage
+        shell: bash
+        env:
+          FULL_MATRIX: ${{ needs.classify.outputs.full_matrix }}
           SMOKE_RESULT: ${{ needs.windows-smoke.result }}
+          TEST_RESULT: ${{ needs.platform-tests.result }}
+          LINUX_PACKAGE_RESULT: ${{ needs.package-linux.result }}
+          WINDOWS_PACKAGE_RESULT: ${{ needs.package-windows.result }}
+          WINDOWS_E2E_RESULT: ${{ needs.e2e-windows.result }}
         run: |
           set -euo pipefail
           if [[ "${FULL_MATRIX}" == 'true' ]]; then
-            test "${PLATFORM_RESULT}" = 'success'
+            test "${TEST_RESULT}" = 'success'
+            test "${LINUX_PACKAGE_RESULT}" = 'success'
+            test "${WINDOWS_PACKAGE_RESULT}" = 'success'
+            test "${WINDOWS_E2E_RESULT}" = 'success'
           else
             test "${SMOKE_RESULT}" = 'success'
           fi
@@ -334,14 +527,14 @@ jobs:
   required:
     name: CI required
     if: always()
-    needs: [quality, test-macos, windows-result]
+    needs: [quality-result, macos-result, windows-result]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Verify required checks
         env:
-          QUALITY_RESULT: ${{ needs.quality.result }}
-          MACOS_RESULT: ${{ needs.test-macos.result }}
+          QUALITY_RESULT: ${{ needs.quality-result.result }}
+          MACOS_RESULT: ${{ needs.macos-result.result }}
           WINDOWS_RESULT: ${{ needs.windows-result.result }}
         run: |
           test "${QUALITY_RESULT}" = 'success'

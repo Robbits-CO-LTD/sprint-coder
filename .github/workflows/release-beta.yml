@@ -13,8 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate:
-    name: Validate release
+  metadata:
+    name: Validate release metadata
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -60,15 +60,6 @@ jobs:
             exit 1
           fi
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22.23.2
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
       - name: Verify embedded client version
         shell: bash
         run: |
@@ -82,31 +73,110 @@ jobs:
           }
           NODE
 
+  validate-quality:
+    name: Validate ${{ matrix.label }}
+    needs: metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - label: typecheck
+            command: typecheck
+          - label: lint
+            command: lint
+          - label: format
+            command: format:check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.2
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run ${{ matrix.label }}
+        run: npm run ${{ matrix.command }}
+
+  validate-package-tests:
+    name: Validate package tests
+    needs: metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.2
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Test contracts and domain packages
+        run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
+
+  validate-desktop-tests:
+    name: Validate desktop test shard ${{ matrix.shard }}
+    needs: metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: [1/3, 2/3, 3/3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.2
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
       - name: Install Electron binary
         run: node node_modules/electron/install.js
-
-      - name: Rebuild native modules for Electron ABI
+      - name: Restore better-sqlite3 Electron ABI binary
+        id: better-sqlite-cache
+        uses: actions/cache@v6
+        with:
+          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
+          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
+      - name: Rebuild better-sqlite3 for Electron ABI
+        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
         working-directory: apps/desktop
         run: npx --yes @electron/rebuild -f -w better-sqlite3
-
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@v6
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
       - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
         run: npm run build:native-safe-fs
+      - name: Test desktop shard ${{ matrix.shard }}
+        working-directory: apps/desktop
+        run: npx vitest run --shard=${{ matrix.shard }}
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Format check
-        run: npm run format:check
-
-      - name: Test
-        run: npm run test
+  release-validation:
+    name: Validate release
+    needs: [metadata, validate-quality, validate-package-tests, validate-desktop-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verify release validation gates
+        run: echo 'All release validation gates passed.'
 
   make:
     name: Make ${{ matrix.label }}
-    needs: validate
+    # Signing, notarization, and distributable native binaries begin only after every validation
+    # gate passes. The validation gates themselves run in parallel above.
+    needs: release-validation
     strategy:
       fail-fast: false
       matrix:
@@ -341,7 +411,7 @@ jobs:
 
   release:
     name: Prepare draft release
-    needs: [validate, make]
+    needs: [metadata, release-validation, make]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -361,9 +431,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
         run: |
           set -euo pipefail
           assets=()
