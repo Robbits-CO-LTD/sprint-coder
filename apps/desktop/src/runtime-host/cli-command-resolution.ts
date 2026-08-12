@@ -58,11 +58,18 @@ export async function probeCliCommandCandidates(input: {
           input.timeoutMs,
         );
         if (version === null) return null;
+        const capabilities = await probeRequiredCapabilities(
+          input.kind,
+          candidate.executable,
+          input.environment,
+          input.timeoutMs,
+        );
+        if (capabilities === null) return null;
         return {
           ...candidate,
           version,
           compatibility: compatibilityFor(input.kind, version),
-          capabilities: ['version_probe'],
+          capabilities,
         } satisfies ResolvedCliCommand;
       }),
     )
@@ -123,21 +130,72 @@ function deduplicateCandidates(candidates: readonly CliCommandCandidate[]): CliC
   return result;
 }
 
-function probeVersion(
+async function probeVersion(
   executable: string,
   environment: Readonly<NodeJS.ProcessEnv>,
   timeoutMs: number,
 ): Promise<string | null> {
+  const result = await probeCommand(executable, ['--version'], environment, timeoutMs, 512);
+  const version = result?.output.trim() ?? '';
+  return result?.code === 0 && version !== '' ? version.slice(0, 128) : null;
+}
+
+async function probeRequiredCapabilities(
+  kind: 'codex' | 'claude',
+  executable: string,
+  environment: Readonly<NodeJS.ProcessEnv>,
+  timeoutMs: number,
+): Promise<string[] | null> {
+  if (kind === 'codex') {
+    const result = await probeCommand(
+      executable,
+      ['app-server', '--help'],
+      environment,
+      timeoutMs,
+      8 * 1024,
+    );
+    return result?.code === 0 ? ['version_probe', 'app_server'] : null;
+  }
+  const result = await probeCommand(executable, ['--help'], environment, timeoutMs, 64 * 1024);
+  if (result?.code !== 0) return null;
+  const capabilities = capabilitiesFromClaudeHelp(result.output);
+  return capabilities.length === 6 ? capabilities : null;
+}
+
+export function capabilitiesFromClaudeHelp(help: string): string[] {
+  const required = [
+    ['--output-format', 'stream_json'],
+    ['--include-partial-messages', 'partial_messages'],
+    ['--strict-mcp-config', 'strict_mcp_config'],
+    ['--safe-mode', 'safe_mode'],
+    ['--no-session-persistence', 'no_session_persistence'],
+  ] as const;
+  return [
+    'version_probe',
+    ...required
+      .filter(([flag]) => new RegExp(`(?:^|\\s)${flag}(?:[=\\s,]|$)`, 'mu').test(help))
+      .map(([, capability]) => capability),
+  ];
+}
+
+function probeCommand(
+  executable: string,
+  args: readonly string[],
+  environment: Readonly<NodeJS.ProcessEnv>,
+  timeoutMs: number,
+  outputLimit: number,
+): Promise<{ code: number | null; output: string } | null> {
   return new Promise((resolve) => {
     let settled = false;
     const chunks: Buffer[] = [];
+    let outputBytes = 0;
     let child;
     try {
-      child = spawn(executable, ['--version'], {
+      child = spawn(executable, args, {
         env: { ...environment },
         shell: false,
         windowsHide: true,
-        stdio: ['ignore', 'pipe', 'ignore'],
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch {
       resolve(null);
@@ -148,19 +206,23 @@ function probeVersion(
       finish(null);
     }, timeoutMs);
     timer.unref?.();
-    const finish = (value: string | null): void => {
+    const finish = (value: { code: number | null; output: string } | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve(value);
     };
-    child.stdout.on('data', (chunk: Buffer) => {
-      if (chunks.reduce((total, item) => total + item.byteLength, 0) < 512) chunks.push(chunk);
-    });
+    const collect = (chunk: Buffer): void => {
+      if (outputBytes >= outputLimit) return;
+      const accepted = chunk.subarray(0, outputLimit - outputBytes);
+      chunks.push(accepted);
+      outputBytes += accepted.byteLength;
+    };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
     child.once('error', () => finish(null));
     child.once('exit', (code) => {
-      const version = Buffer.concat(chunks).toString('utf8').trim();
-      finish(code === 0 && version !== '' ? version.slice(0, 128) : null);
+      finish({ code, output: Buffer.concat(chunks).toString('utf8') });
     });
   });
 }

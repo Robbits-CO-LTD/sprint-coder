@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  capabilitiesFromClaudeHelp,
   compatibilityFor,
   environmentValue,
   selectResolvedCliCommand,
@@ -48,5 +49,26 @@ describe('CLI command selection', () => {
   it('reads Windows environment keys case-insensitively without widening other platforms', () => {
     expect(environmentValue({ Path: 'C:\\Tools' }, 'PATH', 'win32')).toBe('C:\\Tools');
     expect(environmentValue({ Path: '/tools' }, 'PATH', 'darwin')).toBeUndefined();
+  });
+
+  it('requires every Claude flag used by the isolated runtime profile', () => {
+    const complete = [
+      '--output-format stream-json',
+      '--include-partial-messages',
+      '--strict-mcp-config',
+      '--safe-mode',
+      '--no-session-persistence',
+    ].join('\n');
+    expect(capabilitiesFromClaudeHelp(complete)).toEqual([
+      'version_probe',
+      'stream_json',
+      'partial_messages',
+      'strict_mcp_config',
+      'safe_mode',
+      'no_session_persistence',
+    ]);
+    expect(capabilitiesFromClaudeHelp(complete.replace('--strict-mcp-config', ''))).not.toContain(
+      'strict_mcp_config',
+    );
   });
 });
