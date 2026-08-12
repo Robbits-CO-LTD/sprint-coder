@@ -200,13 +200,14 @@ describe('startAutoUpdate', () => {
 
     const controller = startAutoUpdate(options);
     await vi.waitFor(() => expect(checkForUpdates).toHaveBeenCalledOnce());
-    expect(options.recordSuccess).toHaveBeenCalledOnce();
+    expect(options.recordSuccess).not.toHaveBeenCalled();
     expect(setFeedURL).toHaveBeenCalledWith({
       url: 'https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.0.1-beta.5',
     });
 
     events.emit('update-downloaded');
     await vi.waitFor(() => expect(restartToInstall).toHaveBeenCalledOnce());
+    expect(options.recordSuccess).toHaveBeenCalledOnce();
     expect(showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Sprint Coder 0.0.1-beta.5 を適用できます。' }),
     );
@@ -222,6 +223,50 @@ describe('startAutoUpdate', () => {
       expect.any(Error),
     );
     expect(options.recordFailure).toHaveBeenCalledOnce();
+  });
+
+  it('does not reset persistent failure health when only the download start succeeds', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter();
+    const recordSuccess = vi.fn();
+    const recordFailure = vi.fn();
+    const checkForUpdates = vi.fn(async () => null);
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL: vi.fn(),
+        checkForUpdates,
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: { showMessageBox: vi.fn() } as unknown as AutoUpdateOptions['dialog'],
+      fetch: vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [release('v0.0.1-beta.5')],
+      })),
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      restartToInstall: vi.fn(),
+      currentVersion: '0.0.1-beta.4',
+      isPackaged: true,
+      platform: 'win32',
+      architecture: 'x64',
+      executablePath:
+        'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.0.1-beta.4\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
+      recordSuccess,
+      recordFailure,
+    });
+
+    await vi.waitFor(() => expect(checkForUpdates).toHaveBeenCalledTimes(1));
+    events.emit('error', new Error('download failed'));
+    await controller.checkNow();
+    events.emit('error', new Error('download failed again'));
+    await controller.checkNow();
+    events.emit('error', new Error('download failed a third time'));
+
+    expect(recordSuccess).not.toHaveBeenCalled();
+    expect(recordFailure).toHaveBeenCalledTimes(3);
+    controller.stop();
   });
 
   it('classifies updater failures without exposing their raw text to the health contract', () => {

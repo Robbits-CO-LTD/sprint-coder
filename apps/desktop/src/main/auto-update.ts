@@ -191,7 +191,6 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
       );
       await options.updater.checkForUpdates();
       if (stopped) return;
-      recordSuccess();
       options.logger.info('Automatic update download started', { version: release.version });
     } catch (error) {
       recordFailure(error);
@@ -207,6 +206,7 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
   };
   const onUpdateDownloaded = (): void => {
     if (stopped || promptShown) return;
+    recordSuccess();
     promptShown = true;
     clearInterval(timer);
     void options.dialog
