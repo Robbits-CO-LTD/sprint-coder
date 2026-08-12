@@ -4653,8 +4653,7 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
   return report;
 }
 
-const UUID_FILE_COMPONENT =
-  '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+const UUID_FILE_COMPONENT = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 
 function removeValidationSnapshotFiles(temporaryPath: string): void {
   let firstFailure: unknown;
@@ -10348,9 +10347,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   getUpdateHealth(): UpdateHealth {
-    const row = this.db
-      .prepare("SELECT value FROM settings WHERE key = 'update.health'")
-      .get() as { value: string } | undefined;
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = 'update.health'").get() as
+      { value: string } | undefined;
     if (row === undefined) return defaultUpdateHealth();
     try {
       const parsed = updateHealthSchema.safeParse(JSON.parse(row.value) as unknown);

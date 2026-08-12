@@ -519,13 +519,7 @@ export type UpdateHealth = {
   lastSuccessAt: string | null;
   lastFailureAt: string | null;
   lastErrorCategory:
-    | 'network'
-    | 'release_feed'
-    | 'decryption'
-    | 'filesystem'
-    | 'updater'
-    | 'unknown'
-    | null;
+    'network' | 'release_feed' | 'decryption' | 'filesystem' | 'updater' | 'unknown' | null;
 };
 export type EffortOption = { id: string; description: string };
 export type CodexModelOption = {
