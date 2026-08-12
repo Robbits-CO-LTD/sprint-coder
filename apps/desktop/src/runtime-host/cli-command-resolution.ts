@@ -48,33 +48,37 @@ export async function probeCliCommandCandidates(input: {
   environment: Readonly<NodeJS.ProcessEnv>;
   timeoutMs: number;
 }): Promise<ResolvedCliCommand | null> {
-  const unique = deduplicateCandidates(input.candidates);
-  const probed = (
-    await Promise.all(
-      unique.map(async (candidate): Promise<ResolvedCliCommand | null> => {
-        const version = await probeVersion(
-          candidate.executable,
-          input.environment,
-          input.timeoutMs,
-        );
-        if (version === null) return null;
-        const capabilities = await probeRequiredCapabilities(
-          input.kind,
-          candidate.executable,
-          input.environment,
-          input.timeoutMs,
-        );
-        if (capabilities === null) return null;
-        return {
-          ...candidate,
-          version,
-          compatibility: compatibilityFor(input.kind, version),
-          capabilities,
-        } satisfies ResolvedCliCommand;
-      }),
-    )
-  ).filter((candidate): candidate is ResolvedCliCommand => candidate !== null);
-  return selectResolvedCliCommand(probed);
+  return probeFirstCapableCliCommand(input.candidates, async (candidate) => {
+    const version = await probeVersion(candidate.executable, input.environment, input.timeoutMs);
+    if (version === null) return null;
+    const capabilities = await probeRequiredCapabilities(
+      input.kind,
+      candidate.executable,
+      input.environment,
+      input.timeoutMs,
+    );
+    if (capabilities === null) return null;
+    return {
+      ...candidate,
+      version,
+      compatibility: compatibilityFor(input.kind, version),
+      capabilities,
+    } satisfies ResolvedCliCommand;
+  });
+}
+
+export async function probeFirstCapableCliCommand(
+  candidates: readonly CliCommandCandidate[],
+  probe: (candidate: CliCommandCandidate) => Promise<ResolvedCliCommand | null>,
+): Promise<ResolvedCliCommand | null> {
+  const ordered = deduplicateCandidates(candidates).sort(
+    (left, right) => SOURCE_PRIORITY[left.source] - SOURCE_PRIORITY[right.source],
+  );
+  for (const candidate of ordered) {
+    const resolved = await probe(candidate);
+    if (resolved !== null) return resolved;
+  }
+  return null;
 }
 
 export function selectResolvedCliCommand(
@@ -82,6 +86,8 @@ export function selectResolvedCliCommand(
 ): ResolvedCliCommand | null {
   return (
     [...candidates].sort((left, right) => {
+      const source = SOURCE_PRIORITY[left.source] - SOURCE_PRIORITY[right.source];
+      if (source !== 0) return source;
       const compatibility =
         COMPATIBILITY_PRIORITY[left.compatibility] - COMPATIBILITY_PRIORITY[right.compatibility];
       if (compatibility !== 0) return compatibility;
@@ -91,8 +97,7 @@ export function selectResolvedCliCommand(
         const version = compareVersion(rightVersion, leftVersion);
         if (version !== 0) return version;
       }
-      const source = SOURCE_PRIORITY[left.source] - SOURCE_PRIORITY[right.source];
-      return source !== 0 ? source : left.executable.localeCompare(right.executable);
+      return left.executable.localeCompare(right.executable);
     })[0] ?? null
   );
 }

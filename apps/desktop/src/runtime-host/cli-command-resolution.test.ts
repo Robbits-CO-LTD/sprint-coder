@@ -3,6 +3,7 @@ import {
   capabilitiesFromClaudeHelp,
   compatibilityFor,
   environmentValue,
+  probeFirstCapableCliCommand,
   selectResolvedCliCommand,
 } from './cli-command-resolution';
 import type { ResolvedCliCommand } from './protocol';
@@ -19,11 +20,11 @@ function candidate(
 }
 
 describe('CLI command selection', () => {
-  it('prefers a compatible stable npm Codex over a newer untested desktop alpha', () => {
+  it('keeps the preferred installation source ahead of later compatibility fallbacks', () => {
     const selected = selectResolvedCliCommand([
       candidate({
-        executable: 'C:\\OpenAI\\Codex\\bin\\hash\\codex.exe',
-        source: 'desktop-versioned',
+        executable: 'C:\\TrustedPath\\codex.exe',
+        source: 'path',
         version: 'codex-cli 0.147.0-alpha.6.6',
         compatibility: compatibilityFor('codex', 'codex-cli 0.147.0-alpha.6.6'),
       }),
@@ -35,8 +36,28 @@ describe('CLI command selection', () => {
       }),
     ]);
 
-    expect(selected?.executable).toBe('C:\\npm\\codex.exe');
-    expect(selected?.compatibility).toBe('compatible');
+    expect(selected?.executable).toBe('C:\\TrustedPath\\codex.exe');
+    expect(selected?.compatibility).toBe('untested');
+  });
+
+  it('does not execute a later candidate after the preferred candidate passes its probes', async () => {
+    const attempted: string[] = [];
+    const preferred = candidate({ executable: 'C:\\trusted\\codex.exe', version: '0.144.4' });
+    const selected = await probeFirstCapableCliCommand(
+      [
+        { executable: preferred.executable, source: 'path' },
+        { executable: 'C:\\user-writable\\codex.exe', source: 'npm' },
+      ],
+      async (value) => {
+        attempted.push(value.executable);
+        if (value.executable !== preferred.executable)
+          throw new Error('later candidate must not execute');
+        return preferred;
+      },
+    );
+
+    expect(selected).toBe(preferred);
+    expect(attempted).toEqual([preferred.executable]);
   });
 
   it('classifies the documented probe versions without treating prereleases as verified', () => {
