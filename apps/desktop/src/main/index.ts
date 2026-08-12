@@ -7,6 +7,7 @@ import {
   net,
   protocol,
   session,
+  shell,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
 } from 'electron';
@@ -15,7 +16,7 @@ import { readdirSync } from 'node:fs';
 import { lstat, mkdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { extname, join, relative, resolve, sep } from 'node:path';
+import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
 import { loadNativeSafeFs, nativeSafeFsAddonLocation, type NativeSafeFs } from './native-safe-fs';
@@ -40,6 +41,7 @@ import {
   startAutoUpdate,
   type AutoUpdateController,
 } from './auto-update';
+import { IPC_CHANNELS, updateHealthSchema, type UpdateHealth } from '@sprint-coder/contracts';
 import {
   applyWindowControl,
   isWindowControlAction,
@@ -75,6 +77,24 @@ ipcMain.on(WINDOW_CONTROL_CHANNELS.action, (event, action: unknown) => {
 ipcMain.handle(WINDOW_CONTROL_CHANNELS.getMaximized, (event) => {
   const window = trustedWindowControlTarget(event);
   return window?.isMaximized() ?? false;
+});
+ipcMain.on(IPC_CHANNELS.updateRetry, (event) => {
+  if (trustedMainWindowTarget(event) === null) return;
+  void autoUpdateController?.checkNow();
+});
+ipcMain.on(IPC_CHANNELS.updateOpenManual, (event) => {
+  if (trustedMainWindowTarget(event) === null) return;
+  void shell
+    .openExternal('https://github.com/Robbits-CO-LTD/sprint-coder/releases/latest')
+    .catch((error) => secureLogger.warn('Manual update page could not be opened', error));
+});
+ipcMain.on(IPC_CHANNELS.updateOpenLog, (event) => {
+  if (trustedMainWindowTarget(event) === null) return;
+  const logPath =
+    process.platform === 'win32'
+      ? join(dirname(dirname(process.execPath)), 'Squirrel-Update.log')
+      : join(app.getPath('userData'), 'logs');
+  shell.showItemInFolder(logPath);
 });
 
 const userDataOverride = process.env['SPRINT_CODER_USER_DATA_DIR'];
@@ -121,6 +141,7 @@ if (squirrelStartup || !hasLock) {
       await router.initialize();
       router.register();
       await loadRenderer(mainWindow);
+      publishUpdateHealth(persistence.getUpdateHealth());
       autoUpdateController = startAutoUpdate({
         updater: autoUpdater,
         dialog,
@@ -135,6 +156,12 @@ if (squirrelStartup || !hasLock) {
         architecture: process.arch,
         executablePath: process.execPath,
         macAutoUpdateEligible: __SPRINT_CODER_MAC_AUTO_UPDATE_ELIGIBLE__,
+        recordSuccess: () =>
+          publishUpdateHealth(persistence!.recordUpdateCheckSuccess(new Date().toISOString())),
+        recordFailure: (category) =>
+          publishUpdateHealth(
+            persistence!.recordUpdateCheckFailure(new Date().toISOString(), category),
+          ),
       });
     })
     .catch((error: unknown) => {
@@ -354,6 +381,25 @@ function trustedWindowControlTarget(
   )
     return null;
   return window;
+}
+
+function trustedMainWindowTarget(event: IpcMainEvent | IpcMainInvokeEvent): BrowserWindow | null {
+  const window = mainWindow;
+  if (
+    window === null ||
+    window.isDestroyed() ||
+    event.sender !== window.webContents ||
+    event.senderFrame !== window.webContents.mainFrame
+  )
+    return null;
+  return window;
+}
+
+function publishUpdateHealth(health: UpdateHealth): void {
+  const safe = updateHealthSchema.parse(health);
+  const window = mainWindow;
+  if (window === null || window.isDestroyed() || window.webContents.isDestroyed()) return;
+  window.webContents.send(IPC_CHANNELS.updateHealthEvent, safe);
 }
 
 function showMainWindow(): void {

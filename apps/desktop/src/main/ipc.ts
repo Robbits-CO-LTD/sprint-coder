@@ -1050,6 +1050,7 @@ export class IpcRouter {
       // Startup recovery outcome (issue #9). Already computed before the window existed — this is
       // just the first path that ever carried it to the renderer.
       recovery: this.persistence.getStartupRecovery(),
+      updateHealth: this.persistence.getUpdateHealth(),
     }));
     this.handle(
       IPC_CHANNELS.runtimeFailureDiagnosticGet,

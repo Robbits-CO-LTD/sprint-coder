@@ -1146,9 +1146,10 @@ describe('isTrustedIpcSender', () => {
 
 // Mirrors ipc.ts `register()`'s `this.handle(IPC_CHANNELS.x, xInputSchema, ...)` /
 // `this.handleMutation(IPC_CHANNELS.x, xInputSchema, ...)` calls exactly. teamsEvent, turnsPort and
-// tasksUpdated, reasoningEvent, fileEditEvent and runtimeStatusEvent are push-only (webContents.send / MessagePort transfer) — they
-// are never bound to an ipcMain.handle input schema, so they are deliberately excluded and
-// asserted absent below.
+// tasksUpdated, reasoningEvent, fileEditEvent and runtimeStatusEvent are push-only
+// (webContents.send / MessagePort transfer). The update action channels are authenticated
+// ipcMain.on messages in index.ts. None are bound to an ipcMain.handle envelope schema, so they are
+// deliberately excluded and asserted absent below.
 const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.appGetInfo]: emptyPayloadSchema,
   [IPC_CHANNELS.runtimeFailureDiagnosticGet]: runtimeFailureDiagnosticQuerySchema,
@@ -1282,6 +1283,10 @@ const PUSH_ONLY_CHANNELS = new Set<string>([
   IPC_CHANNELS.reasoningEvent,
   IPC_CHANNELS.fileEditEvent,
   IPC_CHANNELS.runtimeStatusEvent,
+  IPC_CHANNELS.updateHealthEvent,
+  IPC_CHANNELS.updateRetry,
+  IPC_CHANNELS.updateOpenManual,
+  IPC_CHANNELS.updateOpenLog,
 ]);
 
 describe('IPC channel registry stays in sync with the adversarial fuzz table', () => {

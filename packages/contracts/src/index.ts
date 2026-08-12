@@ -2387,6 +2387,26 @@ export const modelFallbackNoticeSchema = z
   })
   .strict();
 export type ModelFallbackNotice = z.infer<typeof modelFallbackNoticeSchema>;
+export const updateErrorCategorySchema = z.enum([
+  'network',
+  'release_feed',
+  'decryption',
+  'filesystem',
+  'updater',
+  'unknown',
+]);
+export type UpdateErrorCategory = z.infer<typeof updateErrorCategorySchema>;
+export const updateHealthSchema = z
+  .object({
+    successfulChecks: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    failedChecks: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    consecutiveFailures: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    lastSuccessAt: z.string().datetime().nullable(),
+    lastFailureAt: z.string().datetime().nullable(),
+    lastErrorCategory: updateErrorCategorySchema.nullable(),
+  })
+  .strict();
+export type UpdateHealth = z.infer<typeof updateHealthSchema>;
 export const resolvedCliCommandSchema = z
   .object({
     source: z.enum([
@@ -3034,6 +3054,7 @@ export const appInfoSchema = z
     version: z.string(),
     platform: z.string(),
     recovery: databaseRecoverySchema,
+    updateHealth: updateHealthSchema,
     settingsWorkspaceV2: z.boolean().optional(),
     projectMultiFolderUx: z.boolean().optional(),
   })
@@ -3234,6 +3255,12 @@ export interface SprintCoderApi {
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
     /** Returns a redacted JSON diagnostic for the latest failed Turn or a diagnostic id. */
     getFailureDiagnostic(input: { taskId: string; diagnosticId?: string }): Promise<string | null>;
+  };
+  updates: {
+    subscribeHealth(listener: (health: UpdateHealth) => void): () => void;
+    retry(): void;
+    openManualUpdate(): void;
+    openUpdateLog(): void;
   };
   files: {
     /** Every edit recorded for this Task, oldest first. Read on select rather than replayed through
@@ -3453,6 +3480,11 @@ export const IPC_CHANNELS = {
   reasoningEvent: 'sprint-coder:turns:reasoning',
   fileEditEvent: 'sprint-coder:turns:file-edit',
   runtimeStatusEvent: 'sprint-coder:runtime:status',
+  /** Push-only update health contains classifications, never raw updater errors or paths. */
+  updateHealthEvent: 'sprint-coder:update:health',
+  updateRetry: 'sprint-coder:update:retry',
+  updateOpenManual: 'sprint-coder:update:open-manual',
+  updateOpenLog: 'sprint-coder:update:open-log',
   runtimeFailureDiagnosticGet: 'sprint-coder:runtime:failure-diagnostic:get',
   imagesList: 'sprint-coder:images:list',
   filesList: 'sprint-coder:files:list',

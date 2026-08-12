@@ -512,6 +512,15 @@ export type RuntimeStatus = {
   errorCode: string | null;
   userMessage: string | null;
 };
+export type UpdateHealth = {
+  successfulChecks: number;
+  failedChecks: number;
+  consecutiveFailures: number;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastErrorCategory:
+    'network' | 'release_feed' | 'decryption' | 'filesystem' | 'updater' | 'unknown' | null;
+};
 export type EffortOption = { id: string; description: string };
 export type CodexModelOption = {
   id: string;
@@ -808,6 +817,7 @@ export interface SprintCoderApi {
       version: string;
       platform: string;
       recovery: DatabaseRecovery;
+      updateHealth: UpdateHealth;
       settingsWorkspaceV2?: boolean;
       projectMultiFolderUx?: boolean;
     }>;
@@ -823,6 +833,12 @@ export interface SprintCoderApi {
   runtime: {
     subscribeStatus(listener: (status: RuntimeStatus) => void): () => void;
     getFailureDiagnostic(input: { taskId: string; diagnosticId?: string }): Promise<string | null>;
+  };
+  updates: {
+    subscribeHealth(listener: (health: UpdateHealth) => void): () => void;
+    retry(): void;
+    openManualUpdate(): void;
+    openUpdateLog(): void;
   };
   tasks: {
     list(): Promise<TaskSummary[]>;

@@ -25,6 +25,7 @@ import {
   projectUpdateInputSchema,
   publicErrorSchema,
   runtimeSettingsSchema,
+  updateHealthSchema,
   codexUserConfigSettingsSchema,
   teamModelResearchSettingsSchema,
   teamModelRestrictionSchema,
@@ -1105,6 +1106,26 @@ describe('public contracts', () => {
     ).not.toBeNull();
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'])
       expect(claudeEffortSchema.parse(effort)).toBe(effort);
+    expect(
+      updateHealthSchema.parse({
+        successfulChecks: 2,
+        failedChecks: 3,
+        consecutiveFailures: 3,
+        lastSuccessAt: '2026-08-12T00:00:00.000Z',
+        lastFailureAt: '2026-08-12T01:00:00.000Z',
+        lastErrorCategory: 'decryption',
+      }).lastErrorCategory,
+    ).toBe('decryption');
+    expect(() =>
+      updateHealthSchema.parse({
+        successfulChecks: 0,
+        failedChecks: 1,
+        consecutiveFailures: 1,
+        lastSuccessAt: null,
+        lastFailureAt: 'C:\\Users\\alice\\Squirrel-Update.log',
+        lastErrorCategory: 'CryptUnprotectData failed',
+      }),
+    ).toThrow();
     for (const code of ['STEER_UNSUPPORTED', 'USER_CANCELED', 'RUNTIME_RATE_LIMIT'] as const)
       expect(
         publicErrorSchema.parse({

@@ -202,6 +202,7 @@ export function LegacyBody({
           {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item, which
               is exactly where a user who cannot select a Runtime will not look. */}
           <CliDetectionGroup />
+          <UpdateHealthGroup />
           <CodexUserConfigSetting active={open} />
           <SprintCoderPrePromptSetting active={open} />
           <TeamModelRestrictionSetting active={open} />
@@ -323,6 +324,7 @@ export function WorkspaceBody({
               {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item,
                   which is exactly where a user who cannot select a Runtime will not look. */}
               <CliDetectionGroup />
+              <UpdateHealthGroup />
               <DiagnosticsGroup />
               <LicenseGroup />
             </WorkspacePage>
@@ -532,6 +534,68 @@ function CliDetectionGroup() {
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+const UPDATE_ERROR_LABEL = {
+  network: 'ネットワーク',
+  release_feed: '更新情報',
+  decryption: 'OSの復号処理',
+  filesystem: 'ファイル操作',
+  updater: '更新プログラム',
+  unknown: '不明',
+} as const;
+
+function UpdateHealthGroup() {
+  const health = useAppStore((s) => s.updateHealth);
+  if (health === null) return null;
+  const failing = health.consecutiveFailures > 0;
+  const attention = health.consecutiveFailures >= 3;
+  return (
+    <div
+      className={`settings-group settings-update-health${attention ? ' attention' : ''}`}
+      data-testid="settings-update-health"
+      role="status"
+    >
+      <span className="settings-field-label">自動更新</span>
+      <p className={failing ? 'settings-update-warning' : 'settings-hint'}>
+        {failing
+          ? `自動更新が連続 ${health.consecutiveFailures} 回失敗しています（${
+              health.lastErrorCategory === null
+                ? '不明'
+                : UPDATE_ERROR_LABEL[health.lastErrorCategory]
+            }）。`
+          : '自動更新は正常です。'}
+      </p>
+      <p className="settings-hint">
+        成功 {health.successfulChecks}回 / 失敗 {health.failedChecks}回
+      </p>
+      {failing && (
+        <div className="settings-update-actions">
+          <button
+            type="button"
+            className={attention ? 'settings-primary-button' : 'settings-secondary-button'}
+            onClick={() => window.sprintCoder?.updates?.retry()}
+          >
+            今すぐ再試行
+          </button>
+          <button
+            type="button"
+            className="settings-secondary-button"
+            onClick={() => window.sprintCoder?.updates?.openManualUpdate()}
+          >
+            手動更新を開く
+          </button>
+          <button
+            type="button"
+            className="settings-secondary-button"
+            onClick={() => window.sprintCoder?.updates?.openUpdateLog()}
+          >
+            更新ログを確認
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import type { AutoUpdater, Dialog } from 'electron';
+import type { UpdateErrorCategory } from '@sprint-coder/contracts';
 
 const GITHUB_REPOSITORY = 'Robbits-CO-LTD/sprint-coder';
 const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=20`;
@@ -66,6 +67,8 @@ export type AutoUpdateOptions = Readonly<{
   executablePath: string;
   macAutoUpdateEligible: boolean;
   checkIntervalMs?: number;
+  recordSuccess?: () => void;
+  recordFailure?: (category: UpdateErrorCategory) => void;
 }>;
 
 export type AutoUpdateController = Readonly<{
@@ -108,6 +111,23 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
   let checking = false;
   let promptShown = false;
   let targetVersion: string | null = null;
+  let failureRecordedForAttempt = false;
+  const recordFailure = (error: unknown): void => {
+    if (failureRecordedForAttempt) return;
+    failureRecordedForAttempt = true;
+    try {
+      options.recordFailure?.(classifyUpdateError(error));
+    } catch (recordError) {
+      options.logger.warn('Automatic update health could not be recorded', recordError);
+    }
+  };
+  const recordSuccess = (): void => {
+    try {
+      options.recordSuccess?.();
+    } catch (recordError) {
+      options.logger.warn('Automatic update health could not be recorded', recordError);
+    }
+  };
 
   const getActiveTurns = async (): Promise<readonly UpdateActiveTurn[]> =>
     options.getActiveTurns === undefined ? [] : options.getActiveTurns();
@@ -152,10 +172,12 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
   const checkNow = async (): Promise<void> => {
     if (stopped || checking) return;
     checking = true;
+    failureRecordedForAttempt = false;
     try {
       const release = await discoverUpdate(options);
       if (stopped) return;
       if (release === null) {
+        recordSuccess();
         options.logger.debug('No automatic update is available', {
           currentVersion: options.currentVersion,
         });
@@ -168,8 +190,10 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
           : { url: release.feedUrl },
       );
       await options.updater.checkForUpdates();
+      if (stopped) return;
       options.logger.info('Automatic update download started', { version: release.version });
     } catch (error) {
+      recordFailure(error);
       options.logger.warn('Automatic update check failed', error);
     } finally {
       checking = false;
@@ -177,10 +201,12 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
   };
 
   const onUpdaterError = (error: Error): void => {
+    if (!stopped) recordFailure(error);
     options.logger.warn('Automatic updater reported an error', error);
   };
   const onUpdateDownloaded = (): void => {
     if (stopped || promptShown) return;
+    recordSuccess();
     promptShown = true;
     clearInterval(timer);
     void options.dialog
@@ -226,6 +252,42 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
       options.updater.removeListener('update-downloaded', onUpdateDownloaded);
     },
   };
+}
+
+export function classifyUpdateError(error: unknown): UpdateErrorCategory {
+  const message = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes('cryptunprotectdata') ||
+    normalized.includes('dpapi') ||
+    normalized.includes('decrypt') ||
+    normalized.includes('暗号化を解除')
+  )
+    return 'decryption';
+  if (
+    normalized.includes('eacces') ||
+    normalized.includes('eperm') ||
+    normalized.includes('enoent') ||
+    normalized.includes('filesystem') ||
+    normalized.includes('file system')
+  )
+    return 'filesystem';
+  if (
+    normalized.includes('http ') ||
+    normalized.includes('release') ||
+    normalized.includes('feed') ||
+    normalized.includes('manifest')
+  )
+    return 'release_feed';
+  if (
+    normalized.includes('fetch') ||
+    normalized.includes('network') ||
+    normalized.includes('timed out') ||
+    /\be(?:conn|host|net|pipe)/.test(normalized)
+  )
+    return 'network';
+  if (error instanceof Error) return 'updater';
+  return 'unknown';
 }
 
 function delay(milliseconds: number): Promise<void> {
