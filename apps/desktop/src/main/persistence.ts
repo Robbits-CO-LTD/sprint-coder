@@ -14651,7 +14651,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         id: `turn:${turnId}:skill-catalog`,
         taskId,
         source: 'background',
-        trust: 'user',
+        trust: 'assistant',
         tokenEstimate: catalogTokenEstimate,
         content: skillCatalogContent,
         createdAt: now,

@@ -1202,7 +1202,7 @@ if (runsWithElectronAbi)
       const sealed = persistence
         .prepareContext(task.id, first.turnId)
         .fragments.find(({ id }) => id.endsWith(':skill-catalog'));
-      expect(sealed).toMatchObject({ source: 'background', trust: 'user', content: catalog });
+      expect(sealed).toMatchObject({ source: 'background', trust: 'assistant', content: catalog });
       const finalUsage = first.contextUsageEvents.at(-1);
       expect(finalUsage?.type).toBe('context.usage');
       if (finalUsage?.type === 'context.usage')

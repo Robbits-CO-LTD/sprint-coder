@@ -27,6 +27,28 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
+  it('provides an explicit minimal catalog when the Skill Store is unavailable at startup', async () => {
+    const service = new SkillSettingsService({ homePath: await home() });
+    service.markContextCatalogUnavailable();
+
+    const catalog = JSON.parse(service.contextCatalogForTurn([], false)) as {
+      count: number;
+      items: Array<{ id: string; enabled: boolean; availability: string }>;
+    };
+    expect(catalog.count).toBe(4);
+    expect(catalog.items.map(({ id }) => id)).toEqual([
+      'import-skill',
+      'skill-creator',
+      'sprint-coder-product',
+      'sprint-coder-team',
+    ]);
+    expect(catalog.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ enabled: false, availability: 'invalid' }),
+      ]),
+    );
+  });
+
   it('scans fixed provider roots and reports imported state', async () => {
     const root = await home();
     await skill(root, 'claude', 'writer');

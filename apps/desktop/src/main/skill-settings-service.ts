@@ -223,6 +223,24 @@ export class SkillSettingsService {
     this.contextCatalogEntries = await (await this.getStore()).listCatalogSnapshotEntries();
   }
 
+  markContextCatalogUnavailable(): void {
+    this.contextCatalogEntries = [
+      'sprint-coder-team',
+      'sprint-coder-product',
+      'skill-creator',
+      'import-skill',
+    ].map((skillId) => ({
+      source: 'builtin' as const,
+      skillId,
+      kind: null,
+      digest: null,
+      name: skillId,
+      description: '',
+      enabled: false,
+      availability: 'invalid' as const,
+    }));
+  }
+
   contextCatalogForTurn(
     selections: readonly TurnSkillSelection[],
     includeBuiltinTeamSkill: boolean,
