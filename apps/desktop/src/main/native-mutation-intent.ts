@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 
 const MAX_NATIVE_MUTATION_FILE_BYTES = 1024 * 1024;
 
-export type NativeMutationIntentKind = 'add' | 'update' | 'delete' | 'rename';
+export type NativeMutationIntentKind = 'add' | 'mkdir' | 'update' | 'delete' | 'rename';
 export type NativeMutationDirection = 'forward' | 'compensation';
 export type NativeMutationIntentState =
   | 'planned'
@@ -17,13 +17,31 @@ export type NativeMutationIntentState =
 export type NativeMutationEndpointExpectation =
   Readonly<{ state: 'absent' }> | NativeMutationRevision;
 
-export type NativeMutationRevision = Readonly<{
+export type NativeMutationFileRevision = Readonly<{
   state: 'present';
+  entryKind?: never;
   identityDigest: string;
   contentHash: string;
   size: number;
   mode: number;
   nlink: 1;
+}>;
+
+export type NativeMutationDirectoryRevision = Readonly<{
+  state: 'present';
+  entryKind: 'directory';
+  identityDigest: string;
+  contentHash?: never;
+  size?: never;
+  mode?: never;
+  nlink?: never;
+}>;
+
+export type NativeMutationRevision = NativeMutationFileRevision | NativeMutationDirectoryRevision;
+
+export type NativeMutationDirectoryOwnership = Readonly<{
+  markerLeafName: string;
+  token: string;
 }>;
 
 export type NativeMutationArtifactBinding = Readonly<{
@@ -61,6 +79,7 @@ export type NativeMutationIntentSeed = Readonly<{
   expectedSource: NativeMutationEndpointExpectation;
   expectedDestination: NativeMutationEndpointExpectation;
   artifact: NativeMutationArtifactBinding | null;
+  directoryOwnership: NativeMutationDirectoryOwnership | null;
   createdAt: string;
   seedDigest: string;
 }>;
@@ -88,7 +107,7 @@ export type NativeMutationIntentSnapshot = NativeMutationIntentSeed &
 
 export type NativeMutationIntentSeedInput = Omit<
   NativeMutationIntentSeed,
-  'version' | 'seedDigest'
+  'version' | 'seedDigest' | 'directoryOwnership'
 >;
 
 export type NativeMutationIntentTransition =
@@ -103,7 +122,12 @@ export function deriveNativeMutationEffectKind(
   originalKind: NativeMutationIntentKind,
   direction: NativeMutationDirection,
 ): NativeMutationIntentKind {
-  if (direction === 'forward' || originalKind === 'update' || originalKind === 'rename')
+  if (
+    direction === 'forward' ||
+    originalKind === 'mkdir' ||
+    originalKind === 'update' ||
+    originalKind === 'rename'
+  )
     return originalKind;
   return originalKind === 'add' ? 'delete' : 'add';
 }
@@ -162,13 +186,18 @@ export class InMemoryNativeMutationIntentStore {
 export function createNativeMutationIntentSeed(
   input: NativeMutationIntentSeedInput,
 ): NativeMutationIntentSeed {
-  const facts = {
+  const base = {
     version: 1 as const,
     ...input,
     sourceSegments: Object.freeze([...input.sourceSegments]),
     destinationSegments:
       input.destinationSegments === null ? null : Object.freeze([...input.destinationSegments]),
   };
+  const directoryOwnership =
+    input.kind === 'mkdir' && input.direction === 'forward'
+      ? directoryOwnershipBinding(base)
+      : null;
+  const facts = { ...base, directoryOwnership };
   validateSeedFacts(facts);
   return freezeSeed({ ...facts, seedDigest: digest(seedDigestFacts(facts)) });
 }
@@ -190,6 +219,7 @@ export function transitionNativeMutationIntent(
       throw new Error('Invalid Native mutation auxiliary observation transition');
     validateRevision(transition.auxObservation);
     if (
+      transition.auxObservation.entryKind === 'directory' ||
       transition.auxObservation.contentHash !== staging.expectedContentHash ||
       transition.auxObservation.size !== staging.expectedSize ||
       transition.auxObservation.mode !== staging.expectedMode ||
@@ -234,7 +264,8 @@ export function transitionNativeMutationIntent(
     return nextSnapshot(current, { state: 'cleanup_pending' }, updatedAt);
   }
   if (transition.state === 'completed') {
-    const cleanupRequired = current.temp !== null || current.tombstone !== null;
+    const cleanupRequired =
+      current.temp !== null || current.tombstone !== null || current.directoryOwnership !== null;
     if (
       current.state !== 'effect_observed' &&
       !(cleanupRequired && current.state === 'cleanup_pending')
@@ -280,6 +311,7 @@ export function parseNativeMutationIntentSnapshot(value: unknown): NativeMutatio
     'expectedSource',
     'expectedDestination',
     'artifact',
+    'directoryOwnership',
     'createdAt',
     'seedDigest',
     'intentDigest',
@@ -346,7 +378,8 @@ export function parseNativeMutationIntentSnapshot(value: unknown): NativeMutatio
     snapshot.effectObservation === null
   )
     throw new Error('Native mutation intent is missing its effect observation');
-  const cleanupRequired = snapshot.temp !== null || snapshot.tombstone !== null;
+  const cleanupRequired =
+    snapshot.temp !== null || snapshot.tombstone !== null || snapshot.directoryOwnership !== null;
   if (
     (snapshot.state === 'completed' && cleanupRequired) !==
       (snapshot.cleanupObservation?.state === 'absent') ||
@@ -378,6 +411,7 @@ export function parseNativeMutationIntentSeed(value: unknown): NativeMutationInt
     expectedSource: value['expectedSource'],
     expectedDestination: value['expectedDestination'],
     artifact: value['artifact'],
+    directoryOwnership: value['directoryOwnership'],
     createdAt: value['createdAt'],
     seedDigest: value['seedDigest'],
   } as NativeMutationIntentSeed;
@@ -411,11 +445,9 @@ export function createNativeMutationIntentSnapshot(
           role: 'tombstone' as const,
           parentSegments,
           leafName: `.sprint-coder-tomb-${nonce}`,
-          expectedContentHash:
-            seed.expectedSource.state === 'present' ? seed.expectedSource.contentHash : '',
-          expectedSize: seed.expectedSource.state === 'present' ? seed.expectedSource.size : 0,
-          expectedMode:
-            seed.expectedSource.state === 'present' ? seed.expectedSource.mode : 0o100600,
+          expectedContentHash: nativeFileRevision(seed.expectedSource).contentHash,
+          expectedSize: nativeFileRevision(seed.expectedSource).size,
+          expectedMode: nativeFileRevision(seed.expectedSource).mode,
           expectedIdentityDigest:
             seed.expectedSource.state === 'present' ? seed.expectedSource.identityDigest : null,
         })
@@ -478,6 +510,7 @@ function assertImmutableIntent(
     'expectedSource',
     'expectedDestination',
     'artifact',
+    'directoryOwnership',
     'createdAt',
     'seedDigest',
     'intentDigest',
@@ -514,7 +547,7 @@ function validateSeedFacts(
     value.ordinal < 1 ||
     value.ordinal > 100 ||
     !['forward', 'compensation'].includes(value.direction) ||
-    !['add', 'update', 'delete', 'rename'].includes(value.kind) ||
+    !['add', 'mkdir', 'update', 'delete', 'rename'].includes(value.kind) ||
     !isDigest(value.operationDigest) ||
     !isDigest(value.workspaceKey) ||
     !isDigest(value.rootIdentityDigest) ||
@@ -530,23 +563,47 @@ function validateSeedFacts(
   validateExpectation(value.expectedSource);
   validateExpectation(value.expectedDestination);
   if (value.artifact !== null) validateArtifact(value.artifact);
+  validateDirectoryOwnership(value.directoryOwnership);
+  if (value.kind === 'mkdir' && value.direction === 'forward') {
+    const {
+      directoryOwnership: _ownership,
+      seedDigest: _seedDigest,
+      ...base
+    } = value as NativeMutationIntentSeed;
+    if (
+      JSON.stringify(value.directoryOwnership) !== JSON.stringify(directoryOwnershipBinding(base))
+    )
+      throw new Error('Native mutation directory ownership seal changed');
+  }
   const validShape =
     value.kind === 'add'
       ? value.expectedSource.state === 'absent' &&
         value.destinationSegments === null &&
-        value.artifact !== null
-      : value.kind === 'update'
-        ? value.expectedSource.state === 'present' &&
+        value.artifact !== null &&
+        value.directoryOwnership === null
+      : value.kind === 'mkdir'
+        ? value.expectedSource.state === (value.direction === 'forward' ? 'absent' : 'present') &&
+          (value.direction !== 'compensation' ||
+            (value.expectedSource.state === 'present' &&
+              value.expectedSource.entryKind === 'directory')) &&
           value.destinationSegments === null &&
-          value.artifact !== null
-        : value.kind === 'delete'
+          value.artifact === null &&
+          (value.direction === 'forward') === (value.directoryOwnership !== null)
+        : value.kind === 'update'
           ? value.expectedSource.state === 'present' &&
             value.destinationSegments === null &&
-            value.artifact === null
-          : value.expectedSource.state === 'present' &&
-            value.destinationSegments !== null &&
-            value.expectedDestination.state === 'absent' &&
-            value.artifact === null;
+            value.artifact !== null &&
+            value.directoryOwnership === null
+          : value.kind === 'delete'
+            ? value.expectedSource.state === 'present' &&
+              value.destinationSegments === null &&
+              value.artifact === null &&
+              value.directoryOwnership === null
+            : value.expectedSource.state === 'present' &&
+              value.destinationSegments !== null &&
+              value.expectedDestination.state === 'absent' &&
+              value.artifact === null &&
+              value.directoryOwnership === null;
   if (!validShape) throw new Error('Invalid Native mutation operation shape');
 }
 
@@ -612,6 +669,12 @@ function validateExpectation(value: NativeMutationEndpointExpectation) {
 
 function validateRevision(value: NativeMutationRevision) {
   if (!isRecord(value)) throw new Error('Invalid Native mutation revision observation');
+  if (value.entryKind === 'directory') {
+    assertExactKeys(value, ['state', 'entryKind', 'identityDigest']);
+    if (value.state !== 'present' || !isDigest(value.identityDigest))
+      throw new Error('Invalid Native mutation directory observation');
+    return;
+  }
   assertExactKeys(value, ['state', 'identityDigest', 'contentHash', 'size', 'mode', 'nlink']);
   if (
     value.state !== 'present' ||
@@ -625,6 +688,24 @@ function validateRevision(value: NativeMutationRevision) {
     value.nlink !== 1
   )
     throw new Error('Invalid Native mutation revision observation');
+}
+
+function validateDirectoryOwnership(value: NativeMutationDirectoryOwnership | null) {
+  if (value === null) return;
+  if (!isRecord(value)) throw new Error('Invalid Native mutation directory ownership');
+  assertExactKeys(value, ['markerLeafName', 'token']);
+  if (
+    !/^\.sprint-coder-mkdir-[a-f0-9]{32}$/.test(value.markerLeafName) ||
+    !isDigest(value.token) ||
+    value.markerLeafName !== `.sprint-coder-mkdir-${value.token.slice(0, 32)}`
+  )
+    throw new Error('Invalid Native mutation directory ownership');
+}
+
+function nativeFileRevision(value: NativeMutationEndpointExpectation): NativeMutationFileRevision {
+  if (value.state !== 'present' || value.entryKind === 'directory')
+    throw new Error('Native mutation expected a file revision');
+  return value;
 }
 
 function validateAbsent(value: Readonly<{ state: 'absent' }>) {
@@ -656,18 +737,27 @@ function validateEffectSemantics(
         exact(observation.source, intent.auxObservation) &&
         exact(observation.destination, absent) &&
         exact(observation.auxiliary, absent)
-      : intent.kind === 'update'
-        ? intent.auxObservation !== null &&
-          exact(observation.source, intent.auxObservation) &&
-          exact(observation.destination, absent) &&
-          exact(observation.auxiliary, intent.expectedSource)
-        : intent.kind === 'delete'
-          ? exact(observation.source, absent) &&
+      : intent.kind === 'mkdir'
+        ? intent.direction === 'forward'
+          ? observation.source.state === 'present' &&
+            observation.source.entryKind === 'directory' &&
+            exact(observation.destination, absent) &&
+            exact(observation.auxiliary, absent)
+          : exact(observation.source, absent) &&
+            exact(observation.destination, absent) &&
+            exact(observation.auxiliary, absent)
+        : intent.kind === 'update'
+          ? intent.auxObservation !== null &&
+            exact(observation.source, intent.auxObservation) &&
             exact(observation.destination, absent) &&
             exact(observation.auxiliary, intent.expectedSource)
-          : exact(observation.source, absent) &&
-            exact(observation.destination, intent.expectedSource) &&
-            exact(observation.auxiliary, absent);
+          : intent.kind === 'delete'
+            ? exact(observation.source, absent) &&
+              exact(observation.destination, absent) &&
+              exact(observation.auxiliary, intent.expectedSource)
+            : exact(observation.source, absent) &&
+              exact(observation.destination, intent.expectedSource) &&
+              exact(observation.auxiliary, absent);
   if (!valid)
     throw new Error('Native mutation effect observation does not match the sealed intent');
 }
@@ -715,6 +805,8 @@ function freezeSeed(seed: NativeMutationIntentSeed): NativeMutationIntentSeed {
     expectedSource: Object.freeze({ ...seed.expectedSource }),
     expectedDestination: Object.freeze({ ...seed.expectedDestination }),
     artifact: seed.artifact === null ? null : Object.freeze({ ...seed.artifact }),
+    directoryOwnership:
+      seed.directoryOwnership === null ? null : Object.freeze({ ...seed.directoryOwnership }),
   });
 }
 
@@ -761,6 +853,18 @@ function seedDigestFacts(
     ...stable
   } = seed as NativeMutationIntentSeed;
   return stable;
+}
+
+function directoryOwnershipBinding(
+  seed: Omit<NativeMutationIntentSeedInput, 'createdAt'> &
+    Pick<NativeMutationIntentSeedInput, 'createdAt'> & { version: 1 },
+): NativeMutationDirectoryOwnership {
+  const { createdAt: _createdAt, ...stable } = seed;
+  const token = digest(['native-mkdir-ownership-v1', stable]);
+  return Object.freeze({
+    markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`,
+    token,
+  });
 }
 
 function intentDigestFacts(

@@ -14,9 +14,9 @@ import {
 import squirrelStartup from 'electron-squirrel-startup';
 import { readdirSync } from 'node:fs';
 import { lstat, mkdir } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { dirname, extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
 import { loadNativeSafeFs, nativeSafeFsAddonLocation, type NativeSafeFs } from './native-safe-fs';
@@ -27,9 +27,8 @@ import { NativeSafeFsEditEffectBoundary } from './native-safe-fs-edit-boundary';
 import { MutationLeaseStaleError } from './mutation-lease';
 import type { MutationLeaseToken } from './mutation-lease';
 import { FileRevisionRegistry } from './file-revision';
-import type { WorkspacePatchDeps } from './workspace-patch-tool';
+import { executeWorkspaceCreateDirectory, type WorkspacePatchDeps } from './workspace-patch-tool';
 import type { NativeSafeFsSession } from './native-safe-fs';
-import { isIssuedPathGuard, revalidatePathGuard } from './path-guard';
 import {
   evaluateNativeMutationPlatformGate,
   type NativeMutationPackagedLoadEvidence,
@@ -534,47 +533,22 @@ async function wireEditSagaRecovery(
       turnRootMutationBindingsFor: (turnId) => persistence.getTurnWorkspaceMutationBindings(turnId),
       revisions: new FileRevisionRegistry(),
       apply: (request) => executor.apply(request),
-      createDirectory: async ({ taskId, turnId, rootId, path, guard }) => {
-        if (
-          !isIssuedPathGuard(guard) ||
-          guard.operation !== 'write' ||
-          guard.targetIdentity !== null
-        )
-          throw new Error('create_directory requires an issued missing-target write guard');
-        await revalidatePathGuard(guard);
-        const binding = persistence.getTurnWorkspaceMutationBindings(turnId).get(rootId);
-        if (binding === undefined) throw new MutationLeaseStaleError();
-        const sagaId = randomUUID();
-        const now = new Date();
-        const token = persistence.acquireMutationLease({
-          rootId,
-          workspaceKey: binding.workspaceKey,
-          rootIdentityDigest: binding.rootIdentityDigest,
-          holderInstanceId: 'provider-mkdir',
-          taskId,
-          turnId,
-          sagaId,
-          purpose: 'forward',
-          policyEpoch: persistence.getPermissionPolicy(taskId).policyEpoch,
-          intentDigest: createHash('sha256')
-            .update(JSON.stringify(['provider-mkdir-v1', rootId, path]))
-            .digest('hex'),
-          now: now.toISOString(),
-          expiresAt: new Date(now.getTime() + 60_000).toISOString(),
-        });
-        try {
-          const session = await resolveSession(token);
-          const relativePath = relative(guard.workspacePath, guard.resolvedPath);
-          const segments = relativePath.split(sep).filter(Boolean);
-          await nativeSafeFs.createDirectory(session, segments);
-        } finally {
-          try {
-            await closeLeaseSession(token);
-          } finally {
-            persistence.releaseMutationLease(token, new Date().toISOString());
-          }
-        }
-      },
+      createDirectory: ({ taskId, turnId, rootId, path, guard }) =>
+        executeWorkspaceCreateDirectory(
+          { rootId, path },
+          { taskId, turnId },
+          {
+            turnWorkspaceSetFor: (candidateTaskId, candidateTurnId) =>
+              persistence.readTurnWorkspaceSetForTask(candidateTaskId, candidateTurnId),
+            turnRootMutationBindingsFor: (candidateTurnId) =>
+              persistence.getTurnWorkspaceMutationBindings(candidateTurnId),
+            revisions: new FileRevisionRegistry(),
+            apply: (request) => executor.apply(request),
+            policyEpochFor: (candidateTaskId) =>
+              persistence.getPermissionPolicy(candidateTaskId).policyEpoch,
+          },
+          guard,
+        ),
       policyEpochFor: (taskId) => persistence.getPermissionPolicy(taskId).policyEpoch,
     };
   } catch (error) {

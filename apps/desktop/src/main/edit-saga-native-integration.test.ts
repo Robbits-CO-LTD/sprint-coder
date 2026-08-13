@@ -280,6 +280,172 @@ async function expectMissing(path: string): Promise<void> {
 
 if (runsWithElectronAbi) {
   describe.skipIf(process.platform === 'win32')('EditSagaExecutor native integration', () => {
+    it('creates a directory through the durable Saga and leaves no ownership marker', async () => {
+      const env = await fixture('mkdir');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const directoryPath = join(env.workspace, 'provider-directory');
+      const operations: readonly PreparedPatchOperation[] = Object.freeze([
+        Object.freeze({
+          kind: 'mkdir' as const,
+          path: 'provider-directory',
+          canonicalPath: directoryPath,
+          destination: null,
+          canonicalDestination: null,
+          revisionTokenId: null,
+          preRevision: null,
+          preImage: null,
+          postImage: null,
+          preHash: null,
+          postHash: null,
+        }),
+      ]);
+      const facts = { version: 1 as const, policyEpoch: 0, operations };
+      const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-instance'),
+      );
+      const result = await executor.apply(
+        buildRequest({
+          id: 'saga-mkdir',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'op-mkdir',
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        }),
+      );
+
+      expect(result).toMatchObject({ state: 'committed', artifactCleanupPending: false });
+      expect((await lstat(directoryPath)).isDirectory()).toBe(true);
+      await expect(
+        readFile(join(directoryPath, '.sprint-coder-mkdir-placeholder')),
+      ).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(persistence.getNativeMutationIntent('nmi-forward-1-saga-mkdir')).toMatchObject({
+        kind: 'mkdir',
+        state: 'completed',
+        directoryOwnership: { token: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      });
+      await Promise.all([...sessions.values()].map((session) => native.closeSession(session)));
+      persistence.close();
+    });
+
+    it('converges a restart after mkdir completed before the Saga journal update', async () => {
+      const env = await fixture('mkdir-restart');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const firstSessions = makeResolveSession(native, env);
+      const directoryPath = join(env.workspace, 'restart-directory');
+      const operations: readonly PreparedPatchOperation[] = Object.freeze([
+        Object.freeze({
+          kind: 'mkdir' as const,
+          path: 'restart-directory',
+          canonicalPath: directoryPath,
+          destination: null,
+          canonicalDestination: null,
+          revisionTokenId: null,
+          preRevision: null,
+          preImage: null,
+          postImage: null,
+          preHash: null,
+          postHash: null,
+        }),
+      ]);
+      const facts = { version: 1 as const, policyEpoch: 0, operations };
+      const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const boundary = new NativeSafeFsEditEffectBoundary({
+        native,
+        journal: persistence,
+        artifacts,
+        resolveSession: firstSessions.resolveSession,
+      });
+      const crash: EditSagaFaultInjector = {
+        hit(point) {
+          if (point.kind === 'afterEffectBeforeJournal')
+            throw new EditSagaCrashError('mkdir crash');
+        },
+      };
+      const request = buildRequest({
+        id: 'saga-mkdir-restart',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-mkdir-restart',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+      await expect(
+        new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          boundary,
+          artifacts,
+          crash,
+          new SqliteEditSagaLeaseGuard(persistence, 'mkdir-crash-1'),
+        ).apply(request),
+      ).rejects.toBeInstanceOf(EditSagaCrashError);
+      expect(persistence.getEditSaga(request.id).steps[0]).toMatchObject({
+        state: 'effect_pending',
+      });
+      await Promise.all(
+        [...firstSessions.sessions.values()].map((session) => native.closeSession(session)),
+      );
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+      reopened.initializeMutationRecovery('mkdir-crash-2', new Date().toISOString());
+      const secondSessions = makeResolveSession(native, env);
+      const reopenedArtifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const recovered = await new EditSagaExecutor(
+        new PersistenceEditSagaStore(reopened),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: reopened,
+          artifacts: reopenedArtifacts,
+          resolveSession: secondSessions.resolveSession,
+        }),
+        reopenedArtifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(reopened, 'mkdir-crash-2'),
+      ).recover(request.id);
+      expect(recovered.state).toBe('committed');
+      expect((await lstat(directoryPath)).isDirectory()).toBe(true);
+      await Promise.all(
+        [...secondSessions.sessions.values()].map((session) => native.closeSession(session)),
+      );
+      reopened.close();
+    });
+
     it('applies add+update+rename+delete atomically through the real native boundary', async () => {
       const env = await fixture('forward');
       const native = loadNativeSafeFs({

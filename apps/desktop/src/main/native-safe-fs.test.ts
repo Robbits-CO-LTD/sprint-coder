@@ -201,7 +201,7 @@ function nativeIntent(input: {
   const expectedMode =
     input.kind === 'add'
       ? 0o100600
-      : input.expectedSource.state === 'present'
+      : input.expectedSource.state === 'present' && input.expectedSource.entryKind !== 'directory'
         ? input.expectedSource.mode
         : 0o100600;
   return createNativeMutationIntentSnapshot(
@@ -521,23 +521,43 @@ describe('NativeSafeFs authority boundary', () => {
       await symlink(outside, join(input.workspace, 'escape'));
       const boundary = fixtureBoundary(input);
       const session = await boundary.openSession({ ...input, fence: '32' });
+      const ownershipToken = 'a'.repeat(64);
+      const ownership = {
+        markerLeafName: `.sprint-coder-mkdir-${ownershipToken.slice(0, 32)}`,
+        token: ownershipToken,
+      };
 
       await expect(boundary.observeDirectory(session, ['parent', 'child'])).resolves.toEqual({
         state: 'absent',
       });
-      const created = await boundary.createDirectory(session, ['parent', 'child']);
+      const created = await boundary.createDirectory(session, ['parent', 'child'], ownership);
       expect(created).toMatchObject({ state: 'present', identityDigest: expect.any(String) });
       expect((await lstat(join(input.workspace, 'parent', 'child'))).isDirectory()).toBe(true);
       await expect(boundary.observeDirectory(session, ['parent', 'child'])).resolves.toEqual(
         created,
       );
-      await expect(boundary.createDirectory(session, ['parent', 'child'])).rejects.toMatchObject({
+      await expect(
+        boundary.inspectDirectoryOwnership(session, ['parent', 'child'], ownership),
+      ).resolves.toEqual(created);
+      const markerPath = join(input.workspace, 'parent', 'child', ownership.markerLeafName);
+      await writeFile(markerPath, 'b'.repeat(64));
+      await expect(
+        boundary.inspectDirectoryOwnership(session, ['parent', 'child'], ownership),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await writeFile(markerPath, ownership.token);
+      await expect(
+        boundary.createDirectory(session, ['parent', 'child'], ownership),
+      ).rejects.toMatchObject({
         code: 'UNSAFE_PATH',
       } satisfies Partial<NativeSafeFsError>);
-      await expect(boundary.createDirectory(session, ['escape', 'child'])).rejects.toMatchObject({
+      await expect(
+        boundary.createDirectory(session, ['escape', 'child'], ownership),
+      ).rejects.toMatchObject({
         code: 'UNSAFE_PATH',
       } satisfies Partial<NativeSafeFsError>);
-      await expect(boundary.createDirectory(session, ['..', 'child'])).rejects.toMatchObject({
+      await expect(
+        boundary.createDirectory(session, ['..', 'child'], ownership),
+      ).rejects.toMatchObject({
         code: 'INVALID_INPUT',
       } satisfies Partial<NativeSafeFsError>);
       await writeFile(join(input.workspace, 'parent', 'child', 'kept.txt'), 'kept');
@@ -548,6 +568,12 @@ describe('NativeSafeFs authority boundary', () => {
       await expect(
         boundary.removeDirectory(session, ['parent', 'child'], '0'.repeat(64)),
       ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await boundary.cleanupDirectoryOwnership(
+        session,
+        ['parent', 'child'],
+        created.identityDigest,
+        ownership,
+      );
       await rmdir(join(input.workspace, 'parent', 'child'));
       await mkdir(join(input.workspace, 'parent', 'child'));
       await expect(
@@ -559,10 +585,24 @@ describe('NativeSafeFs authority boundary', () => {
         throw new Error('replacement directory was not observed');
       }
       expect(replacement.identityDigest).not.toBe(created.identityDigest);
-      await boundary.removeDirectory(session, ['parent', 'child'], replacement.identityDigest);
+      await expect(
+        boundary.removeDirectory(session, ['parent', 'child'], replacement.identityDigest),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await rmdir(join(input.workspace, 'parent', 'child'));
       await expect(boundary.observeDirectory(session, ['parent', 'child'])).resolves.toEqual({
         state: 'absent',
       });
+      const detachedWorkspace = join(input.root, 'detached-workspace');
+      await rename(input.workspace, detachedWorkspace);
+      await mkdir(input.workspace);
+      await mkdir(join(input.workspace, 'parent'));
+      await expect(
+        boundary.createDirectory(session, ['parent', 'detached-child'], ownership),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      expect(existsSync(join(detachedWorkspace, 'parent', 'detached-child'))).toBe(false);
+      expect(existsSync(join(input.workspace, 'parent', 'detached-child'))).toBe(false);
+      await rm(input.workspace, { recursive: true });
+      await rename(detachedWorkspace, input.workspace);
       await boundary.closeSession(session);
     });
 

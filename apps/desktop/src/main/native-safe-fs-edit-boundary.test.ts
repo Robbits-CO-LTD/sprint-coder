@@ -54,6 +54,9 @@ class FakeNative {
   afterObserve: (() => void) | null = null;
   private assertCount = 0;
   nextObserve: NativeMutationEffectObservation | null = null;
+  directoryIdentity: string | null = null;
+  crashAfterCreate = false;
+  crashAfterCleanup = false;
 
   assertSession(): void {
     this.assertCount += 1;
@@ -112,6 +115,36 @@ class FakeNative {
     this.calls.push('cleanup');
     return ABSENT;
   }
+
+  async observeDirectory() {
+    return this.directoryIdentity === null
+      ? ({ state: 'absent' } as const)
+      : ({ state: 'present', identityDigest: this.directoryIdentity } as const);
+  }
+  async inspectDirectoryOwnership() {
+    this.calls.push('inspect-directory');
+    return this.observeDirectory();
+  }
+  async createDirectory() {
+    this.calls.push('mkdir');
+    this.directoryIdentity = 'd'.repeat(64);
+    if (this.crashAfterCreate) {
+      this.crashAfterCreate = false;
+      throw new Error('simulated process crash after mkdir');
+    }
+    return { state: 'present' as const, identityDigest: this.directoryIdentity };
+  }
+  async cleanupDirectoryOwnership() {
+    this.calls.push('cleanup-directory-marker');
+    if (this.crashAfterCleanup) {
+      this.crashAfterCleanup = false;
+      throw new Error('simulated process crash after marker cleanup');
+    }
+  }
+  async removeDirectory() {
+    this.calls.push('rmdir');
+    this.directoryIdentity = null;
+  }
 }
 
 // In-memory journal that reuses the real intent state machine (transition validation,
@@ -124,6 +157,11 @@ class FakeJournal {
 
   getMutationWorkspacePath(): string | null {
     return WORKSPACE;
+  }
+  getNativeMutationIntent(id: string): NativeMutationIntentSnapshot {
+    const intent = this.intents.get(id);
+    if (intent === undefined) throw new Error('intent missing');
+    return intent;
   }
   prepareNativeMutationIntent(
     seed: NativeMutationIntentSeed,
@@ -176,16 +214,19 @@ function sealedRevision(value: string, identity: string) {
   });
 }
 
-function singlePlan(kind: 'add' | 'update' | 'delete' | 'rename'): PreparedStructuredPatch {
-  const pre = kind === 'add' ? null : 'BEFORE';
-  const post = kind === 'delete' ? null : kind === 'rename' ? 'BEFORE' : 'AFTER';
+function singlePlan(
+  kind: 'add' | 'mkdir' | 'update' | 'delete' | 'rename',
+): PreparedStructuredPatch {
+  const pre = kind === 'add' || kind === 'mkdir' ? null : 'BEFORE';
+  const post =
+    kind === 'mkdir' || kind === 'delete' ? null : kind === 'rename' ? 'BEFORE' : 'AFTER';
   const operation = Object.freeze({
     kind,
     path: `src/${kind}.ts`,
     canonicalPath: `${WORKSPACE}/src/${kind}.ts`,
     destination: kind === 'rename' ? 'src/moved.ts' : null,
     canonicalDestination: kind === 'rename' ? `${WORKSPACE}/src/moved.ts` : null,
-    revisionTokenId: kind === 'add' ? null : `token-${kind}`,
+    revisionTokenId: kind === 'add' || kind === 'mkdir' ? null : `token-${kind}`,
     preRevision: pre === null ? null : sealedRevision(pre, 'd'),
     preImage: pre,
     postImage: post,
@@ -274,6 +315,54 @@ function presentObservation(contentHash: string, size: number): OperationObserva
 }
 
 describe('NativeSafeFsEditEffectBoundary', () => {
+  it('routes mkdir through the sealed directory lifecycle and converges an effect_pending retry', async () => {
+    const native = new FakeNative();
+    const journal = new FakeJournal();
+    const artifacts = new MemoryArtifacts();
+    const saga = await stageSaga(singlePlan('mkdir'), artifacts);
+    const boundary = new NativeSafeFsEditEffectBoundary({
+      native,
+      journal,
+      artifacts,
+      resolveSession: async () => session(),
+      now: (() => {
+        let tick = 0;
+        return () => new Date(Date.parse('2026-07-23T00:00:00.000Z') + tick++).toISOString();
+      })(),
+    });
+
+    native.crashAfterCreate = true;
+    await expect(boundary.apply(saga.steps[0]!, lease())).rejects.toThrow(
+      'simulated process crash',
+    );
+    expect([...journal.intents.values()][0]).toMatchObject({ state: 'effect_pending' });
+    native.crashAfterCleanup = true;
+    await expect(boundary.apply(saga.steps[0]!, lease())).rejects.toThrow(
+      'simulated process crash after marker cleanup',
+    );
+    expect([...journal.intents.values()][0]).toMatchObject({ state: 'cleanup_pending' });
+    const first = await boundary.apply(saga.steps[0]!, lease());
+    expect(first.source).toMatchObject({
+      state: 'present',
+      revision: { entryKind: 'directory', identityDigest: 'd'.repeat(64) },
+    });
+    expect(native.calls).toEqual([
+      'assert',
+      'inspect-directory',
+      'mkdir',
+      'assert',
+      'inspect-directory',
+      'assert',
+      'cleanup-directory-marker',
+      'assert',
+      'cleanup-directory-marker',
+    ]);
+    const second = await boundary.apply(saga.steps[0]!, lease());
+    expect(second).toEqual(first);
+    expect(native.calls).toHaveLength(9);
+    expect([...journal.intents.values()][0]).toMatchObject({ state: 'completed' });
+  });
+
   it.each(['add', 'update', 'delete', 'rename'] as const)(
     'drives the journaled native effect lifecycle for a %s effect',
     async (kind) => {
@@ -297,7 +386,7 @@ describe('NativeSafeFsEditEffectBoundary', () => {
       if (kind === 'delete') expect(primary.state).toBe('absent');
       else {
         expect(primary.state).toBe('present');
-        if (primary.state === 'present')
+        if (primary.state === 'present' && primary.revision.entryKind !== 'directory')
           expect(primary.revision.contentHash).toBe(saga.steps[0]!.operation.postHash);
       }
     },
@@ -431,7 +520,7 @@ describe('NativeSafeFsEditEffectBoundary', () => {
     const intent = [...journal.intents.values()][0]!;
     expect(intent).toMatchObject({ direction: 'compensation', state: 'completed' });
     expect(restored.source.state).toBe('present');
-    if (restored.source.state === 'present')
+    if (restored.source.state === 'present' && restored.source.revision.entryKind !== 'directory')
       expect(restored.source.revision.contentHash).toBe(step.operation.preHash);
   });
 });

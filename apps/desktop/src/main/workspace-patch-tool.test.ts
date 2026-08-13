@@ -6,6 +6,7 @@ import { FileRevisionRegistry } from './file-revision';
 import {
   executeWorkspacePatch,
   executeWorkspaceCreateFile,
+  executeWorkspaceCreateDirectory,
   WorkspacePatchRejection,
   WORKSPACE_PATCH_TOOL,
   type WorkspacePatchDeps,
@@ -49,6 +50,13 @@ async function harness(content = SOURCE) {
     targetPath: 'src/new.txt',
     operation: 'write',
   });
+  const createDirectoryGuard = await createPathGuard({
+    rootId: 'root-a',
+    workspacePath: workspace,
+    expectedRootIdentityDigest: identity.rootIdentityDigest,
+    targetPath: 'src/new-directory',
+    operation: 'write',
+  });
   const applied: EditSagaApplyRequest[] = [];
   const deps: WorkspacePatchDeps = {
     turnWorkspaceSetFor: () => ({
@@ -74,7 +82,16 @@ async function harness(content = SOURCE) {
       return { id: request.id, state: 'committed' } as unknown as EditSagaSnapshot;
     },
   };
-  return { workspace, identity, deps, applied, patchWriteGuard, patchReadGuard, createGuard };
+  return {
+    workspace,
+    identity,
+    deps,
+    applied,
+    patchWriteGuard,
+    patchReadGuard,
+    createGuard,
+    createDirectoryGuard,
+  };
 }
 
 describe('the agent edit tool', () => {
@@ -137,6 +154,31 @@ describe('the agent edit tool', () => {
       postImage: 'new file\n',
     });
     await expect(readFile(join(workspace, 'src', 'new.txt'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('plans mkdir as a distinct durable Saga operation', async () => {
+    const { workspace, deps, applied, createDirectoryGuard } = await harness();
+    const result = await executeWorkspaceCreateDirectory(
+      { path: 'src/new-directory' },
+      context,
+      deps,
+      createDirectoryGuard,
+    );
+
+    expect(result).toMatchObject({
+      path: 'src/new-directory',
+      state: 'committed',
+      kind: 'mkdir',
+    });
+    expect(applied[0]?.plan.operations[0]).toMatchObject({
+      kind: 'mkdir',
+      path: 'src/new-directory',
+      preImage: null,
+      postImage: null,
+    });
+    await expect(readFile(join(workspace, 'src', 'new-directory'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
   });

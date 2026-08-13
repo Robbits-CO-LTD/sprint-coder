@@ -30,11 +30,19 @@ export type EditSagaState =
 export type EditSagaStepState =
   'pending' | 'effect_pending' | 'effect_observed' | 'compensation_pending' | 'restored';
 
-export type RevisionObservation = Readonly<{
+export type FileRevisionObservation = Readonly<{
+  entryKind?: never;
   identityDigest: string;
   contentHash: string;
   size: number;
 }>;
+export type DirectoryRevisionObservation = Readonly<{
+  entryKind: 'directory';
+  identityDigest: string;
+  contentHash?: never;
+  size?: never;
+}>;
+export type RevisionObservation = FileRevisionObservation | DirectoryRevisionObservation;
 export type EndpointObservation =
   Readonly<{ state: 'absent' }> | Readonly<{ state: 'present'; revision: RevisionObservation }>;
 export type OperationObservation = Readonly<{
@@ -590,9 +598,7 @@ export class EditSagaExecutor {
       return this.cleanupArtifacts(this.transitionTerminal(saga, 'restored', []));
     }
     if (saga.state === 'applying')
-      return this.runWithLease(saga, 'recovery', (lease) =>
-        this.compensate(id, 'interrupted during apply', lease),
-      );
+      return this.runWithLease(saga, 'recovery', (lease) => this.resumeApplying(id, lease));
     if (saga.state === 'compensating')
       return this.runWithLease(saga, 'recovery', (lease) =>
         this.compensate(id, 'resume compensation', lease),
@@ -738,6 +744,37 @@ export class EditSagaExecutor {
       if (error instanceof EditSagaCrashError) throw error;
       return this.compensate(id, errorMessage(error), lease);
     }
+  }
+
+  private async resumeApplying(id: string, lease: unknown | null): Promise<EditSagaSnapshot> {
+    let saga = this.store.get(id);
+    if (
+      saga.steps.length !== 1 ||
+      saga.steps[0]?.state !== 'effect_pending' ||
+      saga.steps[0].operation.kind !== 'mkdir'
+    )
+      return this.compensate(id, 'interrupted during apply', lease);
+    for (const step of saga.steps) {
+      if (step.state !== 'effect_pending' || step.operation.kind !== 'mkdir') continue;
+      await this.assertLease(lease, saga);
+      const observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
+      if (observed.state !== 'post')
+        return this.compensate(id, 'interrupted during mkdir apply', lease);
+      validatePostObservation(step, observed.observation);
+      saga = this.updateStep(
+        saga,
+        step.ordinal,
+        (current) => ({
+          ...current,
+          state: 'effect_observed',
+          postObservation: observed.observation,
+        }),
+        'applying',
+      );
+    }
+    if (saga.steps.some((step) => step.state === 'effect_pending'))
+      return this.compensate(id, 'interrupted during apply', lease);
+    return this.runForward(id, lease);
   }
 
   private async compensate(
@@ -972,7 +1009,7 @@ function buildDiff(saga: EditSagaSnapshot): readonly TurnDiffEntry[] {
         postHash: step.operation.postHash,
         provenance: 'agent_edit' as const,
         status: 'applied' as const,
-        actualHash: primaryRevision(step.operation.kind, step.postObservation)?.contentHash ?? null,
+        actualHash: revisionContentHash(primaryRevision(step.operation.kind, step.postObservation)),
       }),
     ),
   );
@@ -1091,7 +1128,7 @@ function buildResidualDiff(
       ? Object.freeze({
           ...entry,
           status: 'external_drift' as const,
-          actualHash: primaryRevision(entry.kind, observed)?.contentHash ?? null,
+          actualHash: revisionContentHash(primaryRevision(entry.kind, observed)),
         })
       : entry,
   );
@@ -1131,7 +1168,14 @@ function validateOperationObservation(
   let expectedSource: EndpointObservation;
   let expectedDestination: EndpointObservation = absent;
   if (phase === 'pre') expectedSource = artifactEndpoint(operation.preArtifact);
-  else if (operation.kind === 'rename') {
+  else if (operation.kind === 'mkdir') {
+    if (
+      observation.source.state !== 'present' ||
+      observation.source.revision.entryKind !== 'directory'
+    )
+      throw new Error('Edit mkdir observation is not a directory');
+    expectedSource = observation.source;
+  } else if (operation.kind === 'rename') {
     expectedSource = absent;
     expectedDestination = artifactEndpoint(operation.postArtifact);
   } else expectedSource = artifactEndpoint(operation.postArtifact);
@@ -1144,8 +1188,10 @@ function assertEndpointMatches(actual: EndpointObservation, expected: EndpointOb
   if (
     actual.state === 'present' &&
     expected.state === 'present' &&
-    (actual.revision.contentHash !== expected.revision.contentHash ||
-      actual.revision.size !== expected.revision.size)
+    (actual.revision.entryKind === 'directory' || expected.revision.entryKind === 'directory'
+      ? actual.revision.entryKind !== expected.revision.entryKind
+      : actual.revision.contentHash !== expected.revision.contentHash ||
+        actual.revision.size !== expected.revision.size)
   )
     throw new Error('Edit observation does not match the sealed artifact');
 }
@@ -1173,8 +1219,14 @@ function sameEndpointObservation(left: EndpointObservation, right: EndpointObser
   return left.state === 'absent' || right.state === 'absent'
     ? left.state === right.state
     : left.revision.identityDigest === right.revision.identityDigest &&
-        left.revision.contentHash === right.revision.contentHash &&
-        left.revision.size === right.revision.size;
+        (left.revision.entryKind === 'directory' || right.revision.entryKind === 'directory'
+          ? left.revision.entryKind === right.revision.entryKind
+          : left.revision.contentHash === right.revision.contentHash &&
+            left.revision.size === right.revision.size);
+}
+
+function revisionContentHash(revision: RevisionObservation | null): string | null {
+  return revision === null || revision.entryKind === 'directory' ? null : revision.contentHash;
 }
 
 function withoutRevision(snapshot: EditSagaSnapshot): Omit<EditSagaSnapshot, 'revision'> {
@@ -1452,7 +1504,7 @@ function validatePersistedStep(value: EditSagaStep | undefined, ordinal: number)
     value.ordinal !== ordinal ||
     !editSagaStepStates.includes(value.state) ||
     !isRecord(value.operation) ||
-    !['add', 'update', 'delete', 'rename'].includes(value.operation.kind) ||
+    !['add', 'mkdir', 'update', 'delete', 'rename'].includes(value.operation.kind) ||
     !isString(value.operation.path, 4_096) ||
     !isString(value.operation.canonicalPath, 32_768) ||
     (value.operation.destination !== null && !isString(value.operation.destination, 4_096)) ||
@@ -1504,32 +1556,41 @@ function validatePersistedStep(value: EditSagaStep | undefined, ordinal: number)
         operation.postHash !== null &&
         operation.destination === null &&
         operation.canonicalDestination === null
-      : operation.kind === 'update'
-        ? operation.revisionTokenId !== null &&
-          operation.preRevision !== null &&
-          operation.preArtifact !== null &&
-          operation.preHash !== null &&
-          operation.postArtifact !== null &&
-          operation.postHash !== null &&
+      : operation.kind === 'mkdir'
+        ? operation.revisionTokenId === null &&
+          operation.preRevision === null &&
+          operation.preArtifact === null &&
+          operation.preHash === null &&
+          operation.postArtifact === null &&
+          operation.postHash === null &&
           operation.destination === null &&
           operation.canonicalDestination === null
-        : operation.kind === 'delete'
+        : operation.kind === 'update'
           ? operation.revisionTokenId !== null &&
-            operation.preRevision !== null &&
-            operation.preArtifact !== null &&
-            operation.preHash !== null &&
-            operation.postArtifact === null &&
-            operation.postHash === null &&
-            operation.destination === null &&
-            operation.canonicalDestination === null
-          : operation.revisionTokenId !== null &&
             operation.preRevision !== null &&
             operation.preArtifact !== null &&
             operation.preHash !== null &&
             operation.postArtifact !== null &&
             operation.postHash !== null &&
-            operation.destination !== null &&
-            operation.canonicalDestination !== null;
+            operation.destination === null &&
+            operation.canonicalDestination === null
+          : operation.kind === 'delete'
+            ? operation.revisionTokenId !== null &&
+              operation.preRevision !== null &&
+              operation.preArtifact !== null &&
+              operation.preHash !== null &&
+              operation.postArtifact === null &&
+              operation.postHash === null &&
+              operation.destination === null &&
+              operation.canonicalDestination === null
+            : operation.revisionTokenId !== null &&
+              operation.preRevision !== null &&
+              operation.preArtifact !== null &&
+              operation.preHash !== null &&
+              operation.postArtifact !== null &&
+              operation.postHash !== null &&
+              operation.destination !== null &&
+              operation.canonicalDestination !== null;
   if (!validShape) throw new Error('Invalid persisted Edit operation shape');
   validateOptionalObservation(value.postObservation);
   validateOptionalObservation(value.restoredObservation);
@@ -1605,7 +1666,7 @@ function validatePersistedDiff(value: TurnDiffEntry): void {
   if (
     !Number.isSafeInteger(value.ordinal) ||
     value.ordinal < 1 ||
-    !['add', 'update', 'delete', 'rename'].includes(value.kind) ||
+    !['add', 'mkdir', 'update', 'delete', 'rename'].includes(value.kind) ||
     !isString(value.path, 4_096) ||
     (value.destination !== null && !isString(value.destination, 4_096)) ||
     (value.preHash !== null && !isDigest(value.preHash)) ||
@@ -1634,14 +1695,23 @@ function validateEndpointObservation(value: EndpointObservation): void {
   if (
     value.state !== 'present' ||
     !isRecord(value.revision) ||
-    !isString(value.revision.identityDigest, 500) ||
+    !isString(value.revision.identityDigest, 500)
+  )
+    throw new Error('Invalid persisted revision observation');
+  assertExactKeys(value, ['state', 'revision']);
+  if (value.revision.entryKind === 'directory') {
+    assertExactKeys(value.revision, ['entryKind', 'identityDigest']);
+    if (!isDigest(value.revision.identityDigest))
+      throw new Error('Invalid persisted directory revision observation');
+    return;
+  }
+  if (
     !isDigest(value.revision.contentHash) ||
     !Number.isSafeInteger(value.revision.size) ||
     value.revision.size < 0 ||
     value.revision.size > 1_048_576
   )
     throw new Error('Invalid persisted revision observation');
-  assertExactKeys(value, ['state', 'revision']);
   assertExactKeys(value.revision, ['identityDigest', 'contentHash', 'size']);
 }
 

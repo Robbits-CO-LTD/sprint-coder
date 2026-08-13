@@ -93,7 +93,19 @@ export interface NativeSafeFs {
   createDirectory(
     session: NativeSafeFsSession,
     pathSegments: readonly string[],
+    ownership: Readonly<{ markerLeafName: string; token: string }>,
   ): Promise<NativeDirectoryRevision>;
+  inspectDirectoryOwnership(
+    session: NativeSafeFsSession,
+    pathSegments: readonly string[],
+    ownership: Readonly<{ markerLeafName: string; token: string }>,
+  ): Promise<NativeDirectoryObservation>;
+  cleanupDirectoryOwnership(
+    session: NativeSafeFsSession,
+    pathSegments: readonly string[],
+    expectedIdentityDigest: string,
+    ownership: Readonly<{ markerLeafName: string; token: string }>,
+  ): Promise<void>;
   removeDirectory(
     session: NativeSafeFsSession,
     pathSegments: readonly string[],
@@ -150,6 +162,13 @@ type RawCleanupInput = RawJournalBinding &
     expectedAuxiliary: NativeMutationIntentSnapshot['expectedSource'];
   }>;
 
+type RawDirectoryOwnershipInput = Readonly<{
+  sessionId: string;
+  pathSegments: readonly string[];
+  markerLeafName: string;
+  ownershipToken: string;
+}>;
+
 type RawAddon = Readonly<{
   probe(): unknown;
   openSession(input: NativeSafeFsOpenInput): Promise<unknown>;
@@ -159,7 +178,11 @@ type RawAddon = Readonly<{
   applyIntentEffect(input: RawEffectInput): Promise<unknown>;
   cleanupIntentAuxiliary(input: RawCleanupInput): Promise<unknown>;
   observeDirectory(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
-  createDirectory(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
+  createDirectory(input: RawDirectoryOwnershipInput): unknown;
+  inspectDirectoryOwnership(input: RawDirectoryOwnershipInput): unknown;
+  cleanupDirectoryOwnership(
+    input: RawDirectoryOwnershipInput & { expectedIdentityDigest: string },
+  ): unknown;
   removeDirectory(input: {
     sessionId: string;
     pathSegments: readonly string[];
@@ -444,18 +467,63 @@ export function loadNativeSafeFs(
     async createDirectory(
       session: NativeSafeFsSession,
       pathSegments: readonly string[],
+      ownership: Readonly<{ markerLeafName: string; token: string }>,
     ): Promise<NativeDirectoryRevision> {
       assertIssuedSession(issuedSessions, session);
       validateDirectoryPathSegments(pathSegments);
+      validateDirectoryOwnership(ownership);
       try {
         const revision = await addon!.createDirectory(
-          Object.freeze({ sessionId: session.id, pathSegments: Object.freeze([...pathSegments]) }),
+          directoryOwnershipInput(session, pathSegments, ownership),
         );
         assertIssuedSession(issuedSessions, session);
         const parsed = parseDirectoryObservation(revision);
         if (parsed.state !== 'present')
           throw new NativeSafeFsError('NATIVE_FAILURE', 'NativeSafeFs mkdir identity is missing');
         return parsed;
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    async inspectDirectoryOwnership(
+      session: NativeSafeFsSession,
+      pathSegments: readonly string[],
+      ownership: Readonly<{ markerLeafName: string; token: string }>,
+    ): Promise<NativeDirectoryObservation> {
+      assertIssuedSession(issuedSessions, session);
+      validateDirectoryPathSegments(pathSegments);
+      validateDirectoryOwnership(ownership);
+      try {
+        const result = await addon!.inspectDirectoryOwnership(
+          directoryOwnershipInput(session, pathSegments, ownership),
+        );
+        assertIssuedSession(issuedSessions, session);
+        return parseDirectoryObservation(result);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    async cleanupDirectoryOwnership(
+      session: NativeSafeFsSession,
+      pathSegments: readonly string[],
+      expectedIdentityDigest: string,
+      ownership: Readonly<{ markerLeafName: string; token: string }>,
+    ): Promise<void> {
+      assertIssuedSession(issuedSessions, session);
+      validateDirectoryPathSegments(pathSegments);
+      validateDirectoryOwnership(ownership);
+      if (!/^[a-f0-9]{64}$/.test(expectedIdentityDigest))
+        throw new NativeSafeFsError('INVALID_INPUT', 'Invalid directory identity digest');
+      try {
+        await addon!.cleanupDirectoryOwnership(
+          Object.freeze({
+            ...directoryOwnershipInput(session, pathSegments, ownership),
+            expectedIdentityDigest,
+          }),
+        );
+        assertIssuedSession(issuedSessions, session);
       } catch (error) {
         throw mapNativeError(error);
       }
@@ -512,6 +580,8 @@ function validateRawAddon(value: unknown): RawAddon {
     typeof (value as Partial<RawAddon>).cleanupIntentAuxiliary !== 'function' ||
     typeof (value as Partial<RawAddon>).observeDirectory !== 'function' ||
     typeof (value as Partial<RawAddon>).createDirectory !== 'function' ||
+    typeof (value as Partial<RawAddon>).inspectDirectoryOwnership !== 'function' ||
+    typeof (value as Partial<RawAddon>).cleanupDirectoryOwnership !== 'function' ||
     typeof (value as Partial<RawAddon>).removeDirectory !== 'function' ||
     typeof (value as Partial<RawAddon>).closeSession !== 'function'
   )
@@ -534,6 +604,30 @@ function validateDirectoryPathSegments(pathSegments: readonly string[]): void {
     )
   )
     throw new NativeSafeFsError('INVALID_INPUT', 'Invalid NativeSafeFs directory path');
+}
+
+function validateDirectoryOwnership(
+  ownership: Readonly<{ markerLeafName: string; token: string }>,
+) {
+  if (
+    !/^\.sprint-coder-mkdir-[a-f0-9]{32}$/.test(ownership.markerLeafName) ||
+    !/^[a-f0-9]{64}$/.test(ownership.token) ||
+    ownership.markerLeafName !== `.sprint-coder-mkdir-${ownership.token.slice(0, 32)}`
+  )
+    throw new NativeSafeFsError('INVALID_INPUT', 'Invalid directory ownership seal');
+}
+
+function directoryOwnershipInput(
+  session: NativeSafeFsSession,
+  pathSegments: readonly string[],
+  ownership: Readonly<{ markerLeafName: string; token: string }>,
+): RawDirectoryOwnershipInput {
+  return Object.freeze({
+    sessionId: session.id,
+    pathSegments: Object.freeze([...pathSegments]),
+    markerLeafName: ownership.markerLeafName,
+    ownershipToken: ownership.token,
+  });
 }
 
 function parseDirectoryObservation(value: unknown): NativeDirectoryObservation {

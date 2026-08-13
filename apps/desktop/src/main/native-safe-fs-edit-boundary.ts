@@ -1,4 +1,8 @@
-import type { NativeSafeFs, NativeSafeFsSession } from './native-safe-fs';
+import type {
+  NativeDirectoryObservation,
+  NativeSafeFs,
+  NativeSafeFsSession,
+} from './native-safe-fs';
 import type {
   EditArtifactRepository,
   EditEffectBoundary,
@@ -44,6 +48,7 @@ export interface NativeMutationJournal {
     transition: NativeMutationIntentTransition,
     coordinator?: NativeMutationSagaCoordinator,
   ): NativeMutationIntentSnapshot;
+  getNativeMutationIntent?(id: string): NativeMutationIntentSnapshot;
 }
 
 // Only the bounded edit primitives are ever exposed to the boundary; the raw addon
@@ -55,7 +60,17 @@ export type NativeSafeFsEffectPort = Pick<
   | 'stageIntentArtifact'
   | 'applyIntentEffect'
   | 'cleanupIntentAuxiliary'
->;
+> &
+  Partial<
+    Pick<
+      NativeSafeFs,
+      | 'observeDirectory'
+      | 'createDirectory'
+      | 'inspectDirectoryOwnership'
+      | 'cleanupDirectoryOwnership'
+      | 'removeDirectory'
+    >
+  >;
 
 export type NativeSafeFsEditBoundaryOptions = Readonly<{
   native: NativeSafeFsEffectPort;
@@ -109,6 +124,38 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     const resolveToken = asMutationLeaseResolver(lease);
     const session = await this.resolveSession(resolveToken());
     const token = resolveToken();
+    if (step.operation.kind === 'mkdir') {
+      const id = this.intentId(resolveToken().sagaId, step.ordinal, 'forward');
+      let intent: NativeMutationIntentSnapshot | null = null;
+      try {
+        intent = this.journal.getNativeMutationIntent?.(id) ?? null;
+      } catch {
+        // No durable native intent means the mkdir effect was never authorized.
+      }
+      if (intent?.effectObservation !== null && intent?.effectObservation !== undefined) {
+        const observed = await this.native.observeDirectory!(session, intent.sourceSegments);
+        const expected = intent.effectObservation.source;
+        const observation = directorySagaObservation(observed);
+        if (
+          observed.state === 'present' &&
+          expected.state === 'present' &&
+          expected.entryKind === 'directory' &&
+          observed.identityDigest === expected.identityDigest
+        )
+          return { state: 'post', observation };
+        return { state: 'drift', observation };
+      }
+      const seed = this.buildSeed(step, token, session, 'forward');
+      const owned = await this.native.inspectDirectoryOwnership!(
+        session,
+        seed.sourceSegments,
+        seed.directoryOwnership!,
+      );
+      const observation = directorySagaObservation(owned);
+      return owned.state === 'absent'
+        ? { state: 'pre', observation }
+        : { state: 'post', observation };
+    }
     const intent = createNativeMutationIntentSnapshot(
       this.buildSeed(step, token, session, 'forward'),
       randomBytes(16).toString('hex'),
@@ -134,6 +181,8 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       this.now(),
       'edit-saga-executor',
     );
+    if (step.operation.kind === 'mkdir')
+      return this.runDirectoryIntent(intent, resolveToken, session);
     this.assertSession(session, resolveToken());
     await this.native.observeIntent(session, intent);
     if (intent.temp !== null) {
@@ -168,6 +217,89 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       });
     }
     return toSagaObservation(direction, step.operation.kind, effectObservation);
+  }
+
+  private async runDirectoryIntent(
+    initial: NativeMutationIntentSnapshot,
+    resolveToken: () => MutationLeaseToken,
+    session: NativeSafeFsSession,
+  ): Promise<OperationObservation> {
+    let intent = initial;
+    if (intent.state === 'completed' && intent.effectObservation !== null)
+      return toSagaObservation(intent.direction, 'mkdir', intent.effectObservation);
+    if (intent.state === 'planned')
+      intent = this.transition(intent, resolveToken, session, { state: 'effect_pending' });
+    if (intent.state === 'effect_pending') {
+      this.assertSession(session, resolveToken());
+      let effectObservation: NativeMutationEffectObservation;
+      if (intent.direction === 'forward') {
+        const ownership = intent.directoryOwnership!;
+        let observed = await this.native.inspectDirectoryOwnership!(
+          session,
+          intent.sourceSegments,
+          ownership,
+        );
+        if (observed.state === 'absent')
+          observed = await this.native.createDirectory!(session, intent.sourceSegments, ownership);
+        effectObservation = {
+          source: {
+            state: 'present',
+            entryKind: 'directory',
+            identityDigest: observed.identityDigest,
+          },
+          destination: { state: 'absent' },
+          auxiliary: { state: 'absent' },
+        };
+      } else {
+        if (
+          intent.expectedSource.state !== 'present' ||
+          intent.expectedSource.entryKind !== 'directory'
+        )
+          throw new MutationLeaseStaleError();
+        await this.native.removeDirectory!(
+          session,
+          intent.sourceSegments,
+          intent.expectedSource.identityDigest,
+        );
+        effectObservation = {
+          source: { state: 'absent' },
+          destination: { state: 'absent' },
+          auxiliary: { state: 'absent' },
+        };
+      }
+      intent = this.transition(intent, resolveToken, session, {
+        state: 'effect_observed',
+        effectObservation,
+      });
+    }
+    if (
+      intent.direction === 'forward' &&
+      (intent.state === 'effect_observed' || intent.state === 'cleanup_pending')
+    ) {
+      const source = intent.effectObservation?.source;
+      if (source?.state !== 'present' || source.entryKind !== 'directory')
+        throw new MutationLeaseStaleError();
+      if (intent.state === 'effect_observed')
+        intent = this.transition(intent, resolveToken, session, { state: 'cleanup_pending' });
+      this.assertSession(session, resolveToken());
+      await this.native.cleanupDirectoryOwnership!(
+        session,
+        intent.sourceSegments,
+        source.identityDigest,
+        intent.directoryOwnership!,
+      );
+      intent = this.transition(intent, resolveToken, session, {
+        state: 'completed',
+        cleanupObservation: { state: 'absent' },
+      });
+    } else if (intent.state === 'effect_observed') {
+      intent = this.transition(intent, resolveToken, session, {
+        state: 'completed',
+        cleanupObservation: null,
+      });
+    }
+    if (intent.effectObservation === null) throw new MutationLeaseStaleError();
+    return toSagaObservation(intent.direction, 'mkdir', intent.effectObservation);
   }
 
   private transition(
@@ -272,17 +404,35 @@ function toSagaObservation(
     : { source, destination };
 }
 
+function directorySagaObservation(value: NativeDirectoryObservation): OperationObservation {
+  return {
+    source:
+      value.state === 'absent'
+        ? { state: 'absent' }
+        : {
+            state: 'present',
+            revision: { entryKind: 'directory', identityDigest: value.identityDigest },
+          },
+    destination: { state: 'absent' },
+  };
+}
+
 function toEndpointObservation(value: NativeMutationEndpointExpectation): EndpointObservation {
   return value.state === 'absent'
     ? { state: 'absent' }
-    : {
-        state: 'present',
-        revision: {
-          identityDigest: value.identityDigest,
-          contentHash: value.contentHash,
-          size: value.size,
-        },
-      };
+    : value.entryKind === 'directory'
+      ? {
+          state: 'present',
+          revision: { entryKind: 'directory', identityDigest: value.identityDigest },
+        }
+      : {
+          state: 'present',
+          revision: {
+            identityDigest: value.identityDigest,
+            contentHash: value.contentHash,
+            size: value.size,
+          },
+        };
 }
 
 function matchesPhase(
@@ -291,6 +441,14 @@ function matchesPhase(
   phase: 'pre' | 'post',
 ): boolean {
   const operation = step.operation;
+  if (operation.kind === 'mkdir')
+    return (
+      observation.destination.state === 'absent' &&
+      (phase === 'pre'
+        ? observation.source.state === 'absent'
+        : observation.source.state === 'present' &&
+          observation.source.revision.entryKind === 'directory')
+    );
   const sourceArtifact =
     phase === 'pre'
       ? operation.preArtifact
@@ -312,6 +470,7 @@ function endpointMatchesArtifact(
   return expected === null
     ? actual.state === 'absent'
     : actual.state === 'present' &&
+        actual.revision.entryKind !== 'directory' &&
         actual.revision.contentHash === expected.contentHash &&
         actual.revision.size === expected.size;
 }
