@@ -53,6 +53,12 @@ export type NativeSafeFsSession = Readonly<{
   rootIno: string;
 }>;
 
+export type NativeMutationRecoveryExecutionBinding = Readonly<{
+  intentDigest: string;
+  leaseFence: string;
+  nativeSessionId: string;
+}>;
+
 export type NativeSafeFsOpenInput = Readonly<{
   rootId: string;
   workspacePath: string;
@@ -73,19 +79,23 @@ export interface NativeSafeFs {
   observeIntent(
     session: NativeSafeFsSession,
     intent: NativeMutationIntentSnapshot,
+    recoveryBinding?: NativeMutationRecoveryExecutionBinding,
   ): Promise<NativeMutationEffectObservation>;
   stageIntentArtifact(
     session: NativeSafeFsSession,
     intent: NativeMutationIntentSnapshot,
     bytes: Buffer,
+    recoveryBinding?: NativeMutationRecoveryExecutionBinding,
   ): Promise<NativeMutationRevision>;
   applyIntentEffect(
     session: NativeSafeFsSession,
     intent: NativeMutationIntentSnapshot,
+    recoveryBinding?: NativeMutationRecoveryExecutionBinding,
   ): Promise<NativeMutationEffectObservation>;
   cleanupIntentAuxiliary(
     session: NativeSafeFsSession,
     intent: NativeMutationIntentSnapshot,
+    recoveryBinding?: NativeMutationRecoveryExecutionBinding,
   ): Promise<Readonly<{ state: 'absent' }>>;
   observeDirectory(
     session: NativeSafeFsSession,
@@ -325,10 +335,11 @@ export function loadNativeSafeFs(
     async observeIntent(
       session: NativeSafeFsSession,
       intent: NativeMutationIntentSnapshot,
+      recoveryBinding?: NativeMutationRecoveryExecutionBinding,
     ): Promise<NativeMutationEffectObservation> {
       assertIssuedSession(issuedSessions, session);
       const parsed = parseNativeMutationIntentSnapshot(intent);
-      assertIntentSession(parsed, session);
+      assertIntentSession(parsed, session, recoveryBinding);
       const auxiliary = parsed.temp ?? parsed.tombstone;
       try {
         const observation = await addon!.observeIntent(
@@ -353,10 +364,11 @@ export function loadNativeSafeFs(
       session: NativeSafeFsSession,
       intent: NativeMutationIntentSnapshot,
       bytes: Buffer,
+      recoveryBinding?: NativeMutationRecoveryExecutionBinding,
     ): Promise<NativeMutationRevision> {
       assertIssuedSession(issuedSessions, session);
       const parsed = parseNativeMutationIntentSnapshot(intent);
-      assertIntentSession(parsed, session);
+      assertIntentSession(parsed, session, recoveryBinding);
       if (parsed.state !== 'aux_pending' || parsed.temp === null || parsed.artifact === null)
         throw new NativeSafeFsError(
           'INVALID_INPUT',
@@ -386,10 +398,11 @@ export function loadNativeSafeFs(
     async applyIntentEffect(
       session: NativeSafeFsSession,
       intent: NativeMutationIntentSnapshot,
+      recoveryBinding?: NativeMutationRecoveryExecutionBinding,
     ): Promise<NativeMutationEffectObservation> {
       assertIssuedSession(issuedSessions, session);
       const parsed = parseNativeMutationIntentSnapshot(intent);
-      assertIntentSession(parsed, session);
+      assertIntentSession(parsed, session, recoveryBinding);
       if (parsed.state !== 'effect_pending')
         throw new NativeSafeFsError(
           'INVALID_INPUT',
@@ -426,10 +439,11 @@ export function loadNativeSafeFs(
     async cleanupIntentAuxiliary(
       session: NativeSafeFsSession,
       intent: NativeMutationIntentSnapshot,
+      recoveryBinding?: NativeMutationRecoveryExecutionBinding,
     ): Promise<Readonly<{ state: 'absent' }>> {
       assertIssuedSession(issuedSessions, session);
       const parsed = parseNativeMutationIntentSnapshot(intent);
-      assertIntentSession(parsed, session);
+      assertIntentSession(parsed, session, recoveryBinding);
       const auxiliary = parsed.temp ?? parsed.tombstone;
       if (
         parsed.state !== 'cleanup_pending' ||
@@ -694,12 +708,14 @@ function assertIssuedSession(
 function assertIntentSession(
   intent: NativeMutationIntentSnapshot,
   session: NativeSafeFsSession,
+  recoveryBinding?: NativeMutationRecoveryExecutionBinding,
 ): void {
-  if (
-    intent.workspaceKey !== session.workspaceKey ||
-    intent.leaseFence !== session.fence ||
-    intent.nativeSessionId !== session.id
-  )
+  const executionMatches =
+    (intent.leaseFence === session.fence && intent.nativeSessionId === session.id) ||
+    (recoveryBinding?.intentDigest === intent.intentDigest &&
+      recoveryBinding.leaseFence === session.fence &&
+      recoveryBinding.nativeSessionId === session.id);
+  if (intent.workspaceKey !== session.workspaceKey || !executionMatches)
     throw new NativeSafeFsError('STALE_SESSION', 'Native mutation intent session is stale');
 }
 

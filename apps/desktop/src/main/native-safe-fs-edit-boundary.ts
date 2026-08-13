@@ -1,5 +1,6 @@
 import type {
   NativeDirectoryObservation,
+  NativeMutationRecoveryExecutionBinding,
   NativeSafeFs,
   NativeSafeFsSession,
 } from './native-safe-fs';
@@ -15,6 +16,7 @@ import {
   createNativeMutationIntentSeed,
   createNativeMutationIntentSnapshot,
   nativeMutationDirectoryOwnership,
+  transitionNativeMutationIntent,
   type NativeMutationDirection,
   type NativeMutationEffectObservation,
   type NativeMutationEndpointExpectation,
@@ -56,7 +58,7 @@ export interface NativeMutationJournal {
     lease: MutationLeaseToken,
     nativeSessionId: string,
     now: string,
-  ): unknown;
+  ): NativeMutationRecoveryExecutionBinding;
 }
 
 // Only the bounded edit primitives are ever exposed to the boundary; the raw addon
@@ -134,7 +136,6 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     direction: 'forward' | 'compensation',
     lease: unknown | null,
   ): Promise<OperationObservation> {
-    if (step.operation.kind !== 'mkdir') throw new MutationLeaseStaleError();
     return this.runIntent(step, asMutationLeaseResolver(lease), direction);
   }
 
@@ -195,6 +196,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     const token = resolveToken();
     const id = this.intentId(token.sagaId, step.ordinal, direction);
     let intent: NativeMutationIntentSnapshot | null = null;
+    let recoveryBinding: NativeMutationRecoveryExecutionBinding | undefined;
     try {
       intent = this.journal.getNativeMutationIntent?.(id) ?? null;
     } catch {
@@ -216,7 +218,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
         this.journal.bindNativeMutationIntentRecovery === undefined
       )
         throw new MutationLeaseStaleError();
-      this.journal.bindNativeMutationIntentRecovery(
+      recoveryBinding = this.journal.bindNativeMutationIntentRecovery(
         intent.id,
         intent.revision,
         token,
@@ -226,40 +228,74 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     }
     if (step.operation.kind === 'mkdir')
       return this.runDirectoryIntent(intent, resolveToken, session);
-    this.assertSession(session, resolveToken());
-    await this.native.observeIntent(session, intent);
-    if (intent.temp !== null) {
-      intent = this.transition(intent, resolveToken, session, { state: 'aux_pending' });
-      const bytes = await this.artifacts.read(stagingArtifact(step, direction));
+    if (intent.state === 'completed' && intent.effectObservation !== null)
+      return toSagaObservation(direction, step.operation.kind, intent.effectObservation);
+    if (intent.state === 'recovery_required') throw new MutationLeaseStaleError();
+    if (intent.state === 'planned') {
       this.assertSession(session, resolveToken());
-      const auxObservation = await this.native.stageIntentArtifact(session, intent, bytes);
+      await this.native.observeIntent(session, intent, recoveryBinding);
+    }
+    if (intent.state === 'planned' && intent.temp !== null)
+      intent = this.transition(intent, resolveToken, session, { state: 'aux_pending' });
+    if (intent.state === 'aux_pending') {
+      this.assertSession(session, resolveToken());
+      const observed = await this.native.observeIntent(session, intent, recoveryBinding);
+      if (!matchesPreEffectEndpoints(intent, observed))
+        return this.requireRecovery(intent, resolveToken, session, 'auxiliary_endpoint_drift');
+      let auxObservation: NativeMutationEndpointExpectation;
+      if (observed.auxiliary.state === 'present') auxObservation = observed.auxiliary;
+      else {
+        const bytes = await this.artifacts.read(stagingArtifact(step, direction));
+        this.assertSession(session, resolveToken());
+        auxObservation = await this.native.stageIntentArtifact(
+          session,
+          intent,
+          bytes,
+          recoveryBinding,
+        );
+      }
+      if (auxObservation.state !== 'present' || auxObservation.entryKind === 'directory')
+        return this.requireRecovery(intent, resolveToken, session, 'auxiliary_identity_drift');
+      if (!isSealedAuxiliary(intent, auxObservation))
+        return this.requireRecovery(intent, resolveToken, session, 'auxiliary_identity_drift');
       intent = this.transition(intent, resolveToken, session, {
         state: 'aux_observed',
         auxObservation,
       });
     }
-    intent = this.transition(intent, resolveToken, session, { state: 'effect_pending' });
-    this.assertSession(session, resolveToken());
-    const effectObservation = await this.native.applyIntentEffect(session, intent);
-    intent = this.transition(intent, resolveToken, session, {
-      state: 'effect_observed',
-      effectObservation,
-    });
-    if (intent.temp !== null || intent.tombstone !== null) {
-      intent = this.transition(intent, resolveToken, session, { state: 'cleanup_pending' });
+    if (intent.state === 'planned' || intent.state === 'aux_observed')
+      intent = this.transition(intent, resolveToken, session, { state: 'effect_pending' });
+    if (intent.state === 'effect_pending') {
       this.assertSession(session, resolveToken());
-      await this.native.cleanupIntentAuxiliary(session, intent);
-      this.transition(intent, resolveToken, session, {
+      const observed = await this.native.observeIntent(session, intent, recoveryBinding);
+      let effectObservation: NativeMutationEffectObservation;
+      if (isSealedPostEffect(intent, observed)) effectObservation = observed;
+      else if (matchesPreEffectObservation(intent, observed)) {
+        this.assertSession(session, resolveToken());
+        effectObservation = await this.native.applyIntentEffect(session, intent, recoveryBinding);
+      } else return this.requireRecovery(intent, resolveToken, session, 'effect_observation_drift');
+      intent = this.transition(intent, resolveToken, session, {
+        state: 'effect_observed',
+        effectObservation,
+      });
+    }
+    if (intent.temp !== null || intent.tombstone !== null) {
+      if (intent.state === 'effect_observed')
+        intent = this.transition(intent, resolveToken, session, { state: 'cleanup_pending' });
+      this.assertSession(session, resolveToken());
+      await this.native.cleanupIntentAuxiliary(session, intent, recoveryBinding);
+      intent = this.transition(intent, resolveToken, session, {
         state: 'completed',
         cleanupObservation: { state: 'absent' },
       });
-    } else {
-      this.transition(intent, resolveToken, session, {
+    } else if (intent.state === 'effect_observed') {
+      intent = this.transition(intent, resolveToken, session, {
         state: 'completed',
         cleanupObservation: null,
       });
     }
-    return toSagaObservation(direction, step.operation.kind, effectObservation);
+    if (intent.effectObservation === null) throw new MutationLeaseStaleError();
+    return toSagaObservation(direction, step.operation.kind, intent.effectObservation);
   }
 
   private async runDirectoryIntent(
@@ -380,6 +416,16 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     );
   }
 
+  private requireRecovery(
+    intent: NativeMutationIntentSnapshot,
+    resolveToken: () => MutationLeaseToken,
+    session: NativeSafeFsSession,
+    recoveryReason: string,
+  ): never {
+    this.transition(intent, resolveToken, session, { state: 'recovery_required', recoveryReason });
+    throw new MutationLeaseStaleError();
+  }
+
   private assertSession(session: NativeSafeFsSession, token: MutationLeaseToken): void {
     const expectedRootId = token.rootId ?? 'legacy-primary';
     if (
@@ -434,6 +480,66 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       createdAt: this.now(),
     });
   }
+}
+
+function matchesPreEffectEndpoints(
+  intent: NativeMutationIntentSnapshot,
+  observation: NativeMutationEffectObservation,
+): boolean {
+  return (
+    sameEndpoint(observation.source, intent.expectedSource) &&
+    sameEndpoint(observation.destination, intent.expectedDestination)
+  );
+}
+
+function matchesPreEffectObservation(
+  intent: NativeMutationIntentSnapshot,
+  observation: NativeMutationEffectObservation,
+): boolean {
+  const expectedAuxiliary =
+    intent.temp === null ? { state: 'absent' as const } : intent.auxObservation;
+  return (
+    matchesPreEffectEndpoints(intent, observation) &&
+    expectedAuxiliary !== null &&
+    sameEndpoint(observation.auxiliary, expectedAuxiliary)
+  );
+}
+
+function isSealedPostEffect(
+  intent: NativeMutationIntentSnapshot,
+  observation: NativeMutationEffectObservation,
+): boolean {
+  try {
+    transitionNativeMutationIntent(intent, {
+      state: 'effect_observed',
+      effectObservation: observation,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSealedAuxiliary(
+  intent: NativeMutationIntentSnapshot,
+  observation: Exclude<NativeMutationEndpointExpectation, Readonly<{ state: 'absent' }>>,
+): boolean {
+  try {
+    transitionNativeMutationIntent(intent, {
+      state: 'aux_observed',
+      auxObservation: observation,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sameEndpoint(
+  actual: NativeMutationEndpointExpectation,
+  expected: NativeMutationEndpointExpectation,
+): boolean {
+  return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
 function stagingArtifact(step: EditSagaStep, direction: NativeMutationDirection) {

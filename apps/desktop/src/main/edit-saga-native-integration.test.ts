@@ -29,6 +29,7 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import { loadNativeSafeFs, nativeSafeFsAddonPath } from './native-safe-fs';
 import type { NativeSafeFs, NativeSafeFsSession } from './native-safe-fs';
 import { NativeSafeFsEditEffectBoundary } from './native-safe-fs-edit-boundary';
+import { reconcileStartupNativeMutations } from './native-mutation-recovery';
 import {
   EditSagaCrashError,
   EditSagaExecutor,
@@ -248,6 +249,38 @@ async function buildFullPatch(
     digest: structuredPatchDigest(facts),
   });
   return { plan, paths };
+}
+
+async function buildUpdatePatch(workspace: string) {
+  const path = join(workspace, 'restart-update.txt');
+  await writeFile(path, 'UPDATE_BEFORE', { mode: 0o600 });
+  const operation = Object.freeze({
+    kind: 'update' as const,
+    path: 'restart-update.txt',
+    canonicalPath: path,
+    destination: null,
+    canonicalDestination: null,
+    revisionTokenId: 'token-restart-update',
+    preRevision: await fileRevision(path),
+    preImage: 'UPDATE_BEFORE',
+    postImage: 'UPDATE_AFTER',
+    preHash: hash('UPDATE_BEFORE'),
+    postHash: hash('UPDATE_AFTER'),
+  });
+  const facts = { version: 1 as const, policyEpoch: 0, operations: Object.freeze([operation]) };
+  return { path, plan: Object.freeze({ ...facts, digest: structuredPatchDigest(facts) }) };
+}
+
+function crashAfterNativeCall(native: NativeSafeFs, method: keyof NativeSafeFs): NativeSafeFs {
+  const value = native[method];
+  if (typeof value !== 'function') throw new Error('Native crash checkpoint is not callable');
+  return Object.freeze({
+    ...native,
+    [method]: async (...args: unknown[]) => {
+      await Reflect.apply(value, native, args);
+      throw new EditSagaCrashError(`simulated process crash after ${String(method)}`);
+    },
+  }) as NativeSafeFs;
 }
 
 async function preparePersistence(env: Fixture) {
@@ -550,6 +583,109 @@ if (runsWithElectronAbi) {
       for (const session of sessions.values()) await native.closeSession(session);
       persistence.close();
     });
+
+    it.each([
+      ['stageIntentArtifact', 'aux_pending'],
+      ['applyIntentEffect', 'effect_pending'],
+      ['cleanupIntentAuxiliary', 'cleanup_pending'],
+    ] as const)(
+      'restarts from a persisted %s crash without repeating the logical update',
+      async (crashMethod, expectedState) => {
+        const env = await fixture(`intent-${expectedState}`);
+        const native = loadNativeSafeFs({
+          addonPath: nativeSafeFsAddonPath(),
+          lockDirectoryPath: env.locks,
+        });
+        const firstSessions = makeResolveSession(native, env);
+        const { path, plan } = await buildUpdatePatch(env.workspace);
+        const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+          await preparePersistence(env);
+        const artifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const request = buildRequest({
+          id: `saga-${expectedState}`,
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: `op-${expectedState}`,
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        });
+        await expect(
+          new EditSagaExecutor(
+            new PersistenceEditSagaStore(persistence),
+            new NativeSafeFsEditEffectBoundary({
+              native: crashAfterNativeCall(native, crashMethod),
+              journal: persistence,
+              artifacts,
+              resolveSession: firstSessions.resolveSession,
+            }),
+            artifacts,
+            undefined,
+            new SqliteEditSagaLeaseGuard(persistence, `instance-${expectedState}-1`),
+          ).apply(request),
+        ).rejects.toBeInstanceOf(EditSagaCrashError);
+        expect(
+          persistence.getNativeMutationIntent(`nmi-forward-1-saga-${expectedState}`),
+        ).toMatchObject({ state: expectedState });
+        await Promise.all(
+          [...firstSessions.sessions.values()].map((session) => native.closeSession(session)),
+        );
+        persistence.close();
+
+        const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+        const startupQuarantines = reopened.initializeMutationRecovery(
+          `instance-${expectedState}-2`,
+          new Date().toISOString(),
+        );
+        const secondSessions = makeResolveSession(native, env);
+        const reopenedArtifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const releasedFences = new Map<string, number>();
+        const executor = new EditSagaExecutor(
+          new PersistenceEditSagaStore(reopened),
+          new NativeSafeFsEditEffectBoundary({
+            native,
+            journal: reopened,
+            artifacts: reopenedArtifacts,
+            resolveSession: secondSessions.resolveSession,
+          }),
+          reopenedArtifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(
+            reopened,
+            `instance-${expectedState}-2`,
+            undefined,
+            undefined,
+            async (lease) => {
+              const active = secondSessions.sessions.get(lease.fence);
+              if (active !== undefined) await native.closeSession(active);
+              releasedFences.set(lease.workspaceKey, lease.fence);
+            },
+          ),
+        );
+        await reconcileStartupNativeMutations({
+          journal: reopened,
+          recoverSaga: (sagaId) => executor.recover(sagaId),
+          reconcileEditSagas: () => executor.reconcileAll(),
+          startupQuarantines,
+          releasedFences,
+          now: () => new Date().toISOString(),
+        });
+
+        await expect(readFile(path, 'utf8')).resolves.toBe('UPDATE_AFTER');
+        expect(reopened.getEditSaga(request.id)).toMatchObject({ state: 'committed' });
+        expect(
+          reopened.getNativeMutationIntent(`nmi-forward-1-saga-${expectedState}`),
+        ).toMatchObject({ state: 'completed' });
+        expect(reopened.listRecoverableNativeMutationIntents()).toEqual([]);
+        reopened.close();
+      },
+    );
 
     it('compensates every applied step back to its pre-image when finalize fails deterministically', async () => {
       const env = await fixture('compensate');

@@ -73,7 +73,11 @@ class FakeNative {
     this.afterObserve?.();
     this.afterObserve = null;
     return (
-      this.nextObserve ?? { source: intent.expectedSource, destination: ABSENT, auxiliary: ABSENT }
+      this.nextObserve ?? {
+        source: intent.expectedSource,
+        destination: intent.expectedDestination,
+        auxiliary: intent.auxObservation ?? ABSENT,
+      }
     );
   }
 
@@ -194,6 +198,19 @@ class FakeJournal {
     this.intents.set(id, next);
     return next;
   }
+  bindNativeMutationIntentRecovery(
+    id: string,
+    _expectedRevision: number,
+    lease: MutationLeaseToken,
+    nativeSessionId: string,
+  ) {
+    const intent = this.getNativeMutationIntent(id);
+    return Object.freeze({
+      intentDigest: intent.intentDigest,
+      leaseFence: String(lease.fence),
+      nativeSessionId,
+    });
+  }
 
   private assertLease(lease: MutationLeaseToken): void {
     this.leaseRevisions.push(lease.revision);
@@ -299,6 +316,14 @@ function session(): NativeSafeFsSession {
   });
 }
 
+function recoveryLease(): MutationLeaseToken {
+  return Object.freeze({ ...lease(), purpose: 'recovery', leaseId: 'lease-recovery', fence: 8 });
+}
+
+function recoverySession(): NativeSafeFsSession {
+  return Object.freeze({ ...session(), id: '7'.repeat(32), fence: '8' });
+}
+
 function makeBoundary(native: FakeNative, journal: FakeJournal, artifacts: MemoryArtifacts) {
   let clock = Date.parse('2026-07-23T00:00:10.000Z');
   return new NativeSafeFsEditEffectBoundary({
@@ -379,10 +404,23 @@ describe('NativeSafeFsEditEffectBoundary', () => {
 
       const expectedCalls =
         kind === 'add' || kind === 'update'
-          ? ['assert', 'observe', 'assert', 'stage', 'assert', 'apply', 'assert', 'cleanup']
+          ? [
+              'assert',
+              'observe',
+              'assert',
+              'observe',
+              'assert',
+              'stage',
+              'assert',
+              'observe',
+              'assert',
+              'apply',
+              'assert',
+              'cleanup',
+            ]
           : kind === 'delete'
-            ? ['assert', 'observe', 'assert', 'apply', 'assert', 'cleanup']
-            : ['assert', 'observe', 'assert', 'apply'];
+            ? ['assert', 'observe', 'assert', 'observe', 'assert', 'apply', 'assert', 'cleanup']
+            : ['assert', 'observe', 'assert', 'observe', 'assert', 'apply'];
       expect(native.calls).toEqual(expectedCalls);
       expect([...journal.intents.values()][0]).toMatchObject({ state: 'completed' });
       const primary = kind === 'rename' ? observation.destination : observation.source;
@@ -395,9 +433,141 @@ describe('NativeSafeFsEditEffectBoundary', () => {
     },
   );
 
+  it.each([
+    'planned',
+    'aux_pending',
+    'aux_observed',
+    'effect_pending',
+    'effect_observed',
+    'cleanup_pending',
+  ] as const)('resumes a sealed update intent monotonically from %s', async (state) => {
+    const artifacts = new MemoryArtifacts();
+    const saga = await stageSaga(singlePlan('update'), artifacts);
+    const journal = new FakeJournal();
+    const firstNative = new FakeNative();
+    firstNative.failAssertOn = 1;
+    await expect(
+      makeBoundary(firstNative, journal, artifacts).apply(saga.steps[0]!, lease()),
+    ).rejects.toBeInstanceOf(NativeSafeFsError);
+    let intent = [...journal.intents.values()][0]!;
+    const transition = (value: NativeMutationIntentTransition) => {
+      intent = transitionNativeMutationIntent(
+        intent,
+        value,
+        new Date(Date.parse(intent.updatedAt) + 1).toISOString(),
+      );
+      journal.intents.set(intent.id, intent);
+    };
+    if (state !== 'planned') transition({ state: 'aux_pending' });
+    if (!['planned', 'aux_pending'].includes(state)) {
+      transition({
+        state: 'aux_observed',
+        auxObservation: {
+          state: 'present',
+          identityDigest: '9'.repeat(64),
+          contentHash: intent.temp!.expectedContentHash,
+          size: intent.temp!.expectedSize,
+          mode: intent.temp!.expectedMode,
+          nlink: 1,
+        },
+      });
+    }
+    if (['effect_pending', 'effect_observed', 'cleanup_pending'].includes(state))
+      transition({ state: 'effect_pending' });
+    if (['effect_observed', 'cleanup_pending'].includes(state))
+      transition({
+        state: 'effect_observed',
+        effectObservation: {
+          source: intent.auxObservation!,
+          destination: ABSENT,
+          auxiliary: intent.expectedSource,
+        },
+      });
+    if (state === 'cleanup_pending') transition({ state: 'cleanup_pending' });
+
+    const native = new FakeNative();
+    const boundary = new NativeSafeFsEditEffectBoundary({
+      native,
+      journal,
+      artifacts,
+      resolveSession: async () => recoverySession(),
+      now: (() => {
+        let clock = Date.parse('2026-07-23T00:01:00.000Z');
+        return () => new Date((clock += 1)).toISOString();
+      })(),
+    });
+
+    await expect(
+      boundary.resume!(saga.steps[0]!, 'forward', recoveryLease()),
+    ).resolves.toBeDefined();
+    expect([...journal.intents.values()][0]).toMatchObject({ state: 'completed' });
+    expect(native.calls.filter((call) => call === 'stage')).toHaveLength(
+      state === 'planned' || state === 'aux_pending' ? 1 : 0,
+    );
+    expect(native.calls.filter((call) => call === 'apply')).toHaveLength(
+      ['planned', 'aux_pending', 'aux_observed', 'effect_pending'].includes(state) ? 1 : 0,
+    );
+    expect(native.calls.filter((call) => call === 'cleanup')).toHaveLength(1);
+  });
+
+  it('durably requires recovery when an effect_pending restart observes external drift', async () => {
+    const artifacts = new MemoryArtifacts();
+    const saga = await stageSaga(singlePlan('update'), artifacts);
+    const journal = new FakeJournal();
+    const firstNative = new FakeNative();
+    firstNative.failAssertOn = 1;
+    await expect(
+      makeBoundary(firstNative, journal, artifacts).apply(saga.steps[0]!, lease()),
+    ).rejects.toBeInstanceOf(NativeSafeFsError);
+    let intent = [...journal.intents.values()][0]!;
+    const transition = (value: NativeMutationIntentTransition) => {
+      intent = transitionNativeMutationIntent(
+        intent,
+        value,
+        new Date(Date.parse(intent.updatedAt) + 1).toISOString(),
+      );
+      journal.intents.set(intent.id, intent);
+    };
+    transition({ state: 'aux_pending' });
+    transition({
+      state: 'aux_observed',
+      auxObservation: {
+        state: 'present',
+        identityDigest: '9'.repeat(64),
+        contentHash: intent.temp!.expectedContentHash,
+        size: intent.temp!.expectedSize,
+        mode: intent.temp!.expectedMode,
+        nlink: 1,
+      },
+    });
+    transition({ state: 'effect_pending' });
+    const native = new FakeNative();
+    native.nextObserve = {
+      source: presentEndpoint(hash('EXTERNAL'), 8),
+      destination: ABSENT,
+      auxiliary: ABSENT,
+    };
+    const boundary = new NativeSafeFsEditEffectBoundary({
+      native,
+      journal,
+      artifacts,
+      resolveSession: async () => recoverySession(),
+      now: () => '2026-07-23T00:02:00.000Z',
+    });
+
+    await expect(
+      boundary.resume(saga.steps[0]!, 'forward', recoveryLease()),
+    ).rejects.toBeInstanceOf(MutationLeaseStaleError);
+    expect(journal.getNativeMutationIntent(intent.id)).toMatchObject({
+      state: 'recovery_required',
+      recoveryReason: 'effect_observation_drift',
+    });
+    expect(native.calls).not.toContain('apply');
+  });
+
   it('reasserts the live session before every native effect and fails closed', async () => {
     const native = new FakeNative();
-    native.failAssertOn = 3; // just before applyIntentEffect on an update
+    native.failAssertOn = 5; // just before applyIntentEffect on an update
     const journal = new FakeJournal();
     const artifacts = new MemoryArtifacts();
     const saga = await stageSaga(singlePlan('update'), artifacts);
@@ -405,7 +575,17 @@ describe('NativeSafeFsEditEffectBoundary', () => {
 
     await expect(boundary.apply(saga.steps[0]!, lease())).rejects.toBeInstanceOf(NativeSafeFsError);
     // The effect never entered the addon and the intent stayed durably pending.
-    expect(native.calls).toEqual(['assert', 'observe', 'assert', 'stage', 'assert']);
+    expect(native.calls).toEqual([
+      'assert',
+      'observe',
+      'assert',
+      'observe',
+      'assert',
+      'stage',
+      'assert',
+      'observe',
+      'assert',
+    ]);
     expect([...journal.intents.values()][0]).toMatchObject({ state: 'effect_pending' });
   });
 
@@ -514,7 +694,11 @@ describe('NativeSafeFsEditEffectBoundary', () => {
       'assert',
       'observe',
       'assert',
+      'observe',
+      'assert',
       'stage',
+      'assert',
+      'observe',
       'assert',
       'apply',
       'assert',

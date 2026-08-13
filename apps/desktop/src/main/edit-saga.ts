@@ -753,24 +753,20 @@ export class EditSagaExecutor {
 
   private async resumeApplying(id: string, lease: unknown | null): Promise<EditSagaSnapshot> {
     let saga = this.store.get(id);
-    if (
-      saga.steps.length !== 1 ||
-      saga.steps[0]?.state !== 'effect_pending' ||
-      saga.steps[0].operation.kind !== 'mkdir'
-    )
+    if (saga.steps.filter((step) => step.state === 'effect_pending').length !== 1)
       return this.compensate(id, 'interrupted during apply', lease);
     for (const step of saga.steps) {
-      if (step.state !== 'effect_pending' || step.operation.kind !== 'mkdir') continue;
+      if (step.state !== 'effect_pending') continue;
       await this.assertLease(lease, saga);
       let observation: OperationObservation;
       if (this.boundary.resume !== undefined) {
         observation = await this.boundary.resume(step, 'forward', this.leaseAccess(lease, saga));
-      } else {
+      } else if (step.operation.kind === 'mkdir') {
         const observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
         if (observed.state !== 'post')
           return this.compensate(id, 'interrupted during mkdir apply', lease);
         observation = observed.observation;
-      }
+      } else return this.compensate(id, 'interrupted during apply', lease);
       validatePostObservation(step, observation);
       saga = this.updateStep(
         saga,
@@ -805,7 +801,7 @@ export class EditSagaExecutor {
       let step = stepAt(saga, original.ordinal);
       if (step.state === 'pending' || step.state === 'restored') continue;
       if (step.state === 'effect_pending') {
-        if (step.operation.kind === 'mkdir' && this.boundary.resume !== undefined) {
+        if (this.boundary.resume !== undefined) {
           try {
             await this.assertLease(lease, saga);
             const observation = await this.boundary.resume(
@@ -867,7 +863,7 @@ export class EditSagaExecutor {
       }
 
       if (step.state === 'compensation_pending') {
-        if (step.operation.kind === 'mkdir' && this.boundary.resume !== undefined) {
+        if (this.boundary.resume !== undefined) {
           try {
             await this.assertLease(lease, saga);
             const restored = await this.boundary.resume(
