@@ -23,7 +23,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { loadNativeSafeFs, nativeSafeFsAddonPath } from './native-safe-fs';
@@ -53,7 +53,10 @@ import { workspaceMutationBinding } from './path-guard';
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 const cleanup: string[] = [];
 
-afterEach(async () => {
+// Keep fixture roots alive for the whole process. NativeSafeFs fences by the sealed
+// dev/inode workspace identity; deleting each tmpfs fixture after a test lets Linux
+// reuse the inode for the next test while the addon correctly retains the old fence.
+afterAll(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
