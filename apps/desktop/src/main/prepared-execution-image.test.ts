@@ -3,7 +3,33 @@ import {
   containsUnsafeElfLoaderPath,
   containsRelativeMachOLoaderPath,
   hasUnsafeWindowsDllImport,
+  sealedExecutableIdentityDigest,
 } from './prepared-execution-image';
+
+const identity = (digest: string) => ({
+  canonicalPath: '/approved/image',
+  dev: '1',
+  ino: '2',
+  size: 1,
+  mtimeMs: 1,
+  ctimeMs: 1,
+  mtimeNs: '1000000',
+  ctimeNs: '1000000',
+  mode: 0o755,
+  digest,
+});
+
+describe('sealedExecutableIdentityDigest', () => {
+  it('binds side-by-side dependency digests into the approved execution identity', () => {
+    const base = identity('a'.repeat(64));
+    expect(sealedExecutableIdentityDigest(base)).not.toBe(
+      sealedExecutableIdentityDigest({
+        ...base,
+        dependencies: [{ ...identity('b'.repeat(64)), canonicalPath: '/approved/helper.dll' }],
+      }),
+    );
+  });
+});
 
 describe('containsRelativeMachOLoaderPath', () => {
   it.each(['@loader_path/libX.dylib', '@executable_path/../lib/libX.dylib', '@rpath/libX.dylib'])(
@@ -81,15 +107,20 @@ describe('containsUnsafeElfLoaderPath', () => {
   it('allows an ELF image without RPATH or RUNPATH', () => {
     expect(containsUnsafeElfLoaderPath(elfWithRunpath())).toBe(false);
   });
+
+  it('rejects PT_INTERP and DT_NEEDED even without a search path', () => {
+    expect(containsUnsafeElfLoaderPath(elfWithRunpath(undefined, 'interpreter'))).toBe(true);
+    expect(containsUnsafeElfLoaderPath(elfWithRunpath(undefined, 'needed'))).toBe(true);
+  });
 });
 
-function elfWithRunpath(runpath?: string): Buffer {
+function elfWithRunpath(runpath?: string, dynamicInput?: 'interpreter' | 'needed'): Buffer {
   const bytes = Buffer.alloc(0x400);
   bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
   bytes.writeBigUInt64LE(64n, 32);
   bytes.writeUInt16LE(64, 52);
   bytes.writeUInt16LE(56, 54);
-  bytes.writeUInt16LE(2, 56);
+  bytes.writeUInt16LE(dynamicInput === 'interpreter' ? 3 : 2, 56);
   // PT_LOAD maps the complete file at virtual address 0x400000.
   bytes.writeUInt32LE(1, 64);
   bytes.writeBigUInt64LE(0n, 72);
@@ -99,10 +130,21 @@ function elfWithRunpath(runpath?: string): Buffer {
   bytes.writeUInt32LE(2, 120);
   bytes.writeBigUInt64LE(0x200n, 128);
   bytes.writeBigUInt64LE(0x40_0200n, 136);
-  bytes.writeBigUInt64LE(BigInt(runpath === undefined ? 48 : 64), 152);
+  bytes.writeBigUInt64LE(BigInt(runpath === undefined && dynamicInput !== 'needed' ? 48 : 64), 152);
+  if (dynamicInput === 'interpreter') {
+    bytes.writeUInt32LE(3, 176);
+    bytes.writeBigUInt64LE(0x340n, 184);
+    bytes.writeBigUInt64LE(0x40_0340n, 192);
+    bytes.writeBigUInt64LE(16n, 208);
+  }
   writeElfDynamic(bytes, 0x200, 5, 0x40_0300); // DT_STRTAB
   writeElfDynamic(bytes, 0x210, 10, 128); // DT_STRSZ
   let terminator = 0x220;
+  if (dynamicInput === 'needed') {
+    writeElfDynamic(bytes, 0x220, 1, 1); // DT_NEEDED
+    bytes.write('\0libpayload.so\0', 0x300, 'utf8');
+    terminator = 0x230;
+  }
   if (runpath !== undefined) {
     writeElfDynamic(bytes, 0x220, 29, 1); // DT_RUNPATH
     bytes.write(`\0${runpath}\0`, 0x300, 'utf8');
