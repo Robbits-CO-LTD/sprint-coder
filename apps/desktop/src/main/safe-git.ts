@@ -1,5 +1,4 @@
 import { execFile, execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { devNull } from 'node:os';
 
 export type SafeGitResult = Readonly<{ stdout: string; stderr: string }>;
 
@@ -45,7 +44,7 @@ export function safeGitEnvironment(
   if (source['PATH'] !== undefined) env['PATH'] = source['PATH'];
   if (source['HOME'] !== undefined) env['HOME'] = source['HOME'];
   if (source['SYSTEMROOT'] !== undefined) env['SYSTEMROOT'] = source['SYSTEMROOT'];
-  const nullConfig = platform === 'win32' ? 'NUL' : devNull;
+  const nullConfig = platform === 'win32' ? 'NUL' : '/dev/null';
   env['GIT_CONFIG_GLOBAL'] = nullConfig;
   env['GIT_CONFIG_SYSTEM'] = nullConfig;
   env['GIT_TERMINAL_PROMPT'] = '0';
