@@ -246,6 +246,35 @@ describe('TeamMcpBridge', () => {
     expect(coordinator.stopWorker).toHaveBeenCalledWith('task-1', 'worker-1');
   });
 
+  it('rejects a leaf Worker that calls hire directly through the bridge', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-worker', {
+      taskId: 'task-1',
+      token,
+      requesterAgentId: 'worker-1',
+      role: 'worker',
+      allowedTools: ['team_send_message', 'team_get_status'],
+    });
+
+    const { lines, closed } = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_hire_worker',
+      args: { role: 'unauthorized', objective: 'escalate privileges' },
+    });
+
+    expect(closed).toBe(false);
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      ok: false,
+      error: 'Tool is not allowed for this Team MCP role',
+    });
+    expect(coordinator.hireWorker).not.toHaveBeenCalled();
+    expect(coordinator.hireWorkerAs).not.toHaveBeenCalled();
+  });
+
   it('starts a new Turn report wait after the messages that already existed at registration', async () => {
     const listWorkerReports = vi.fn(
       () =>
@@ -686,7 +715,7 @@ describe('TeamMcpBridge', () => {
     expect(coordinator.hireWorker).not.toHaveBeenCalled();
   });
 
-  it('reports a coordinator/tool error as {ok:false} rather than crashing the connection', async () => {
+  it('reports an unregistered tool as {ok:false} rather than crashing the connection', async () => {
     const coordinator = fakeCoordinator();
     const bridge = new TeamMcpBridge(coordinator, testSocketPath());
     bridges.push(bridge);
@@ -702,7 +731,7 @@ describe('TeamMcpBridge', () => {
     expect(closed).toBe(false);
     const response = JSON.parse(lines[0] as string) as { ok: false; error: string };
     expect(response.ok).toBe(false);
-    expect(response.error).toContain('Unknown team tool');
+    expect(response.error).toContain('Tool is not allowed');
   });
 
   it('ensureStarted is idempotent and returns the same socket across calls', async () => {

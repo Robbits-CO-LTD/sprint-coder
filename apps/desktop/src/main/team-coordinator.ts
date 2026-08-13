@@ -26,6 +26,7 @@ import { realpath as fsRealpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import {
   assertEnvelopeMatchesClaims,
+  assertDelegationAllowed,
   assertTeamMessageRate,
   buildTeamEnvelope,
   TEAM_MESSAGE_RATE_LIMIT,
@@ -649,6 +650,15 @@ export class TeamCoordinator {
             requiresRehire: true,
           },
         );
+      if (requesterAgentId !== null)
+        assertDelegationAllowed({
+          requester,
+          requestedChildCanDelegate: childManagerPolicy !== null,
+          directChildCount: before.agents.filter(
+            ({ parentAgentId }) => parentAgentId === requester.id,
+          ).length,
+          teamPolicy: team.policy,
+        });
       const blueprint = this.pinnedBlueprint(input.taskId, team.id);
       if (blueprint !== null) {
         this.assertBlueprintHire(blueprint, before, requester, input, childManagerPolicy);

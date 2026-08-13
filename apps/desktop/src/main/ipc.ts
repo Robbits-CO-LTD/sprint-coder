@@ -377,7 +377,12 @@ import {
   defaultSocketPathFactory,
   type TeamMcpRegistration,
 } from './team-mcp-bridge';
-import { teamMcpToolNamesForCapabilities } from '../runtime-host/team-mcp-tool-contract';
+import {
+  TEAM_CORE_MCP_TOOL_NAMES,
+  WORKER_TEAM_MCP_TOOL_NAMES,
+  teamMcpToolNamesForCapabilities,
+  type TeamMcpToolCapabilities,
+} from '../runtime-host/team-mcp-tool-contract';
 import {
   PROJECT_MEMORY_MCP_GUIDANCE,
   PROJECT_MEMORY_PROVIDER_TOOL,
@@ -477,8 +482,11 @@ export function teamGuidance(
   return sections.join('\n\n');
 }
 
-export function leaderMcpCapabilities(teamTurn: boolean): { allowTeamTools: boolean } {
-  return { allowTeamTools: teamTurn };
+export function leaderMcpCapabilities(teamTurn: boolean): TeamMcpToolCapabilities {
+  return {
+    role: 'leader',
+    allowTeamTools: teamTurn,
+  };
 }
 
 type InvokeEvent = IpcMainInvokeEvent;
@@ -3939,7 +3947,7 @@ export class IpcRouter {
     if (socketPath === null) return undefined;
     const token = TeamMcpBridge.generateToken();
     const requireModelResearch = this.persistence.getTeamModelResearchBeforeHiring();
-    const registration: TeamMcpRegistration = {
+    const baseRegistration: TeamMcpRegistration = {
       taskId,
       token,
       contextOwner: { type: 'turn', id: turnId },
@@ -3950,6 +3958,10 @@ export class IpcRouter {
       ...(options.importSkillTurn ? { skillImportUserText: options.skillImportUserText } : {}),
       ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
       ...leaderMcpCapabilities(options.teamTurn),
+    };
+    const registration: TeamMcpRegistration = {
+      ...baseRegistration,
+      allowedTools: teamMcpToolNamesForCapabilities(baseRegistration),
     };
     this.teamMcpBridge.register(turnId, registration);
     const guidance = [
@@ -4028,6 +4040,9 @@ export class IpcRouter {
     const registration: TeamMcpRegistration = {
       taskId,
       token,
+      role: 'manager',
+      allowTeamTools: true,
+      allowedTools: TEAM_CORE_MCP_TOOL_NAMES,
       requesterAgentId,
       accessCeiling:
         executionId === undefined
@@ -4065,6 +4080,9 @@ export class IpcRouter {
     const registration: TeamMcpRegistration = {
       taskId,
       token,
+      role: 'worker',
+      allowTeamTools: true,
+      allowedTools: WORKER_TEAM_MCP_TOOL_NAMES,
       requesterAgentId,
       initialWaitCursor: this.teamCoordinator.latestTeamMessageSeq(taskId),
       ...(executionId === undefined
