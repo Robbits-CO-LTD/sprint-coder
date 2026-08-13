@@ -229,29 +229,42 @@ describe('CommandRunner', () => {
     'cooperatively cancels then terminates a stubborn process tree after the grace period',
     async () => {
       const root = await workspace();
+      const dispatchMarker = join(root, 'dispatches.txt');
       const controller = new AbortController();
       const spec = await prepareExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
           '-e',
-          "const child=require('node:child_process').spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); console.log('ready'); setInterval(()=>{},1000)\"],{stdio:['ignore','pipe','ignore']}); child.stdout.once('data',()=>console.log(JSON.stringify({parent:process.pid,child:child.pid}))); setInterval(()=>{},1000)",
+          `require('node:fs').writeFileSync(${JSON.stringify(dispatchMarker)}, String(process.pid) + '\\n', { flag: 'a' }); const child=require('node:child_process').spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{}); console.log('ready'); setInterval(()=>{},1000)"],{stdio:['ignore','pipe','ignore']}); child.stdout.once('data',()=>console.log(JSON.stringify({parent:process.pid,child:child.pid}))); setInterval(()=>{},1000)`,
         ],
         cwd: '.',
       });
       const runner = new CommandRunner({ cancelGraceMs: 30 });
-      let output = '';
+      const chunks: CommandOutputChunk[] = [];
       const running = runner.run(spec, {
         signal: controller.signal,
         onChunk: (chunk) => {
-          output += chunk.text;
-          if (output.includes('"child"')) controller.abort();
+          chunks.push(chunk);
+          if (chunks.some(({ text }) => text.includes('"child"'))) controller.abort();
         },
       });
 
       await expect(running).resolves.toMatchObject({ canceled: true, termination: 'forced' });
       expect(runner.activeCount).toBe(0);
-      const pids = JSON.parse(output.trim()) as { parent: number; child: number };
+      const stdout = chunks
+        .filter(({ stream }) => stream === 'stdout')
+        .map(({ text }) => text)
+        .join('');
+      const stderr = chunks
+        .filter(({ stream }) => stream === 'stderr')
+        .map(({ text }) => text)
+        .join('');
+      const dispatches = (await readFile(dispatchMarker, 'utf8')).trim().split('\n');
+      expect(dispatches).toHaveLength(1);
+      expect(stdout.trim().split('\n')).toHaveLength(1);
+      expect(stderr).toBe('');
+      const pids = JSON.parse(stdout.trim()) as { parent: number; child: number };
       await expectProcessDead(pids.parent);
       await expectProcessDead(pids.child);
     },

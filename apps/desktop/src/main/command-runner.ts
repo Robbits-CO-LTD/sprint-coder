@@ -75,7 +75,9 @@ const POSIX_COMMAND_WRAPPER = String.raw`
 trap '' TERM
 (trap - TERM; exec "$@" 3>&-) &
 target_pid=$!
-wait "$target_pid"
+# Linux shells may diagnose a signal-terminated asynchronous job from wait on the shell's
+# stderr. That supervisor-owned diagnostic must not contaminate the requested command's stderr.
+wait "$target_pid" 2>/dev/null
 status=$?
 if [ "$status" -ge 128 ]; then
   signal=$(kill -l $((status - 128)) 2>/dev/null || printf 'UNKNOWN')
