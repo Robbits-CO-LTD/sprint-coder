@@ -17,7 +17,7 @@ type SafeGitOptions = Readonly<{
 const FILTER_CONFIG_KEY = /^filter\.(.+)\.(?:clean|smudge|process|required)$/iu;
 const MERGE_DRIVER_CONFIG_KEY = /^merge\.(.+)\.driver$/iu;
 const SAFE_CONFIG_SUBSECTION = /^[a-zA-Z0-9._-]+$/u;
-const CONFIG_LIST_ARGS = ['config', '--local', '--no-includes', '--name-only', '--list'] as const;
+const CONFIG_LIST_ARGS = ['config', '--no-includes', '--name-only', '--list'] as const;
 const ALLOWED_COMMANDS = new Set([
   'add',
   'branch',

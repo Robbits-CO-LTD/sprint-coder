@@ -72,6 +72,7 @@ describe('safe Git boundary', () => {
     const markers = {
       fsmonitor: join(root, 'fsmonitor.marker'),
       filter: join(root, 'filter.marker'),
+      worktreeFilter: join(root, 'worktree-filter.marker'),
       externalDiff: join(root, 'external-diff.marker'),
       textconv: join(root, 'textconv.marker'),
       pager: join(root, 'pager.marker'),
@@ -80,8 +81,12 @@ describe('safe Git boundary', () => {
     expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
     rawGit(repo, ['config', 'user.name', 'Test']);
     rawGit(repo, ['config', 'user.email', 'test@example.invalid']);
-    writeFileSync(join(repo, '.gitattributes'), 'tracked.txt filter=evil diff=evil\n');
+    writeFileSync(
+      join(repo, '.gitattributes'),
+      'tracked.txt filter=evil diff=evil\nworktree.txt filter=worktreeonly\n',
+    );
     writeFileSync(join(repo, 'tracked.txt'), 'initial\n');
+    writeFileSync(join(repo, 'worktree.txt'), 'initial\n');
     rawGit(repo, ['add', '.']);
     rawGit(repo, [
       '-c',
@@ -99,7 +104,10 @@ describe('safe Git boundary', () => {
       const command = `node ${JSON.stringify(script)}`;
       if (key === 'fsmonitor') rawGit(repo, ['config', 'core.fsmonitor', command]);
       else if (key === 'filter') rawGit(repo, ['config', 'filter.evil.clean', command]);
-      else if (key === 'externalDiff') rawGit(repo, ['config', 'diff.external', command]);
+      else if (key === 'worktreeFilter') {
+        rawGit(repo, ['config', 'extensions.worktreeConfig', 'true']);
+        rawGit(repo, ['config', '--worktree', 'filter.worktreeonly.clean', command]);
+      } else if (key === 'externalDiff') rawGit(repo, ['config', 'diff.external', command]);
       else if (key === 'textconv') rawGit(repo, ['config', 'diff.evil.textconv', command]);
       else if (key === 'pager') {
         rawGit(repo, ['config', 'core.pager', command]);
@@ -110,9 +118,10 @@ describe('safe Git boundary', () => {
     writeFileSync(hook, `#!/bin/sh\nnode ${JSON.stringify(join(root, 'hook.cjs'))}\n`);
     chmodSync(hook, 0o755);
     writeFileSync(join(repo, 'tracked.txt'), 'changed\n');
+    writeFileSync(join(repo, 'worktree.txt'), 'changed\n');
 
     expect(safeGitExecFileSync(repo, ['status', '--porcelain'], limits()).trim()).toBe(
-      'M tracked.txt',
+      ['M tracked.txt', ' M worktree.txt'].join('\n'),
     );
     expect(safeGitExecFileSync(repo, ['diff', '--binary'], limits())).toContain('+changed');
     expect(safeGitExecFileSync(repo, ['hash-object', '--', 'tracked.txt'], limits())).toMatch(
