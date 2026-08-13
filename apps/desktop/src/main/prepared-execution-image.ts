@@ -109,14 +109,13 @@ export async function prepareExecutionImage(
     const digest = sha256(heldBytes);
     const trustedMacPath =
       process.platform === 'darwin' && (await isRootOwnedSystemExecutable(expected.canonicalPath));
-    // macOS has no fexecve/execveat equivalent and rejects executing an O_RDONLY
-    // descriptor through /dev/fd. Launch the private prepared path there while
-    // retaining the verified handle for the lifetime of the child. Linux can
-    // execute the inherited descriptor directly through procfs.
-    const descriptor = process.platform === 'linux' ? sealedDescriptor : held?.fd;
+    // Linux exposes the sealed memfd through the Main process so descendants that reuse
+    // process.execPath still resolve an immutable image. macOS has no equivalent and only permits
+    // root-owned, non-writable system images (or descriptor-fed scripts) below.
+    const descriptor = process.platform === 'linux' ? undefined : held?.fd;
     const baseLaunchPath =
       process.platform === 'linux'
-        ? '/proc/self/fd/6'
+        ? `/proc/${process.pid}/fd/${sealedDescriptor}`
         : trustedMacPath
           ? expected.canonicalPath
           : destination;
@@ -147,7 +146,7 @@ export async function prepareExecutionImage(
       shebang === undefined
         ? undefined
         : process.platform === 'linux'
-          ? `/proc/self/fd/${6 + interpreter!.descriptors.length}`
+          ? baseLaunchPath
           : `/dev/fd/${6 + interpreter!.descriptors.length}`;
     const descriptors =
       interpreter === undefined
