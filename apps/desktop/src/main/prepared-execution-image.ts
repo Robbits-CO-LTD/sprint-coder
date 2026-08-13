@@ -5,7 +5,6 @@ import {
   mkdir,
   mkdtemp,
   open,
-  readdir,
   realpath,
   rm,
   stat,
@@ -96,11 +95,6 @@ export async function prepareExecutionImage(
       }
     }
     assertDigestAndSize(heldBytes, expected);
-    if (
-      process.platform === 'darwin' &&
-      heldBytes.includes(Buffer.from('@loader_path/../lib', 'utf8'))
-    )
-      await copyStableLoaderDirectory(expected.canonicalPath, directory);
     const digest = sha256(heldBytes);
     const trustedMacPath =
       process.platform === 'darwin' && (await isRootOwnedSystemExecutable(expected.canonicalPath));
@@ -108,17 +102,24 @@ export async function prepareExecutionImage(
     // descriptor through /dev/fd. Launch the private prepared path there while
     // retaining the verified handle for the lifetime of the child. Linux can
     // execute the inherited descriptor directly through procfs.
-    const descriptor = process.platform === 'linux' ? held?.fd : undefined;
-    const baseLaunchPath = trustedMacPath
-      ? expected.canonicalPath
-      : descriptor === undefined
-        ? destination
-        : '/proc/self/fd/6';
+    const descriptor = process.platform === 'win32' ? undefined : held?.fd;
+    const baseLaunchPath =
+      process.platform === 'linux'
+        ? '/proc/self/fd/6'
+        : trustedMacPath
+          ? expected.canonicalPath
+          : destination;
     const baseDescriptors = descriptor === undefined ? [] : [descriptor];
     const shebang =
       process.platform === 'win32' || (expected.mode & 0o111) === 0
         ? undefined
         : parseShebang(heldBytes);
+    if (
+      process.platform === 'darwin' &&
+      shebang === undefined &&
+      heldBytes.includes(Buffer.from('@loader_path/../lib', 'utf8'))
+    )
+      throw new Error('macOS loader-relative native execution images are unsupported');
     if (shebang !== undefined && !allowScript)
       throw new Error('Nested shebang interpreters are unsupported');
     const interpreter =
@@ -130,17 +131,31 @@ export async function prepareExecutionImage(
         ? undefined
         : process.platform === 'linux'
           ? `/proc/self/fd/${6 + interpreter!.descriptors.length}`
-          : destination;
+          : `/dev/fd/${6 + interpreter!.descriptors.length}`;
     const descriptors =
       interpreter === undefined
         ? baseDescriptors
         : [...interpreter.descriptors, ...(descriptor === undefined ? [] : [descriptor])];
+    const canonicalInterpreter = shebang === undefined ? undefined : await realpath(shebang.path);
+    const shellScript =
+      canonicalInterpreter !== undefined &&
+      ['/bin/sh', '/bin/bash', '/bin/zsh', '/usr/bin/sh', '/usr/bin/bash', '/usr/bin/zsh'].includes(
+        canonicalInterpreter,
+      );
     return Object.freeze({
       launchPath: interpreter?.launchPath ?? baseLaunchPath,
       argvPrefix:
         interpreter === undefined
           ? Object.freeze([])
-          : Object.freeze([...shebang!.arguments, scriptArgument!]),
+          : shellScript
+            ? Object.freeze([
+                ...shebang!.arguments,
+                '-c',
+                'sprint_coder_script=$1; shift; . "$sprint_coder_script"',
+                expected.canonicalPath,
+                scriptArgument!,
+              ])
+            : Object.freeze([...shebang!.arguments, scriptArgument!]),
       descriptors: Object.freeze(descriptors),
       digest,
       identity: sha256(
@@ -190,13 +205,20 @@ function parseShebang(
   const line = bytes.subarray(2, newline).toString('utf8').trim();
   const fields = line.split(/\s+/u);
   const path = fields.shift();
-  if (path === undefined || !path.startsWith('/') || path === '/usr/bin/env' || fields.length > 1)
+  if (
+    path === undefined ||
+    !path.startsWith('/') ||
+    path.split('/').at(-1) === 'env' ||
+    fields.length > 1
+  )
     throw new Error('Unsupported shebang interpreter');
   return Object.freeze({ path, arguments: Object.freeze(fields) });
 }
 
 async function sealExecutablePath(path: string): Promise<SealedExecutableIdentity> {
   const canonicalPath = await realpath(path);
+  if (canonicalPath.split('/').at(-1) === 'env')
+    throw new Error('Dynamic shebang interpreters are unsupported');
   const noFollow = constants.O_NOFOLLOW;
   if (noFollow === undefined) throw new Error('O_NOFOLLOW is unavailable');
   const source = await open(canonicalPath, constants.O_RDONLY | noFollow);
@@ -240,36 +262,6 @@ async function isRootOwnedSystemExecutable(path: string): Promise<boolean> {
     const parent = dirname(current);
     if (parent === current) return true;
     current = parent;
-  }
-}
-
-async function copyStableLoaderDirectory(sourceExecutable: string, destinationRoot: string) {
-  const sourceDirectory = join(dirname(dirname(sourceExecutable)), 'lib');
-  const destinationDirectory = join(destinationRoot, 'lib');
-  const entries = await readdir(sourceDirectory, { withFileTypes: true });
-  if (entries.length > 128) throw new Error('Prepared loader directory is too large');
-  await mkdir(destinationDirectory, { mode: 0o700 });
-  let totalBytes = 0;
-  for (const entry of entries) {
-    if (!entry.isFile()) throw new Error('Prepared loader dependency is not a regular file');
-    const sourcePath = join(sourceDirectory, entry.name);
-    const source = await open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const before = await source.stat({ bigint: true });
-      if (!before.isFile() || before.nlink !== 1n)
-        throw new Error('Prepared loader dependency is not unique');
-      const bytes = await source.readFile();
-      const after = await source.stat({ bigint: true });
-      if (!sameStats(before, after)) throw new Error('Prepared loader dependency changed');
-      totalBytes += bytes.byteLength;
-      if (totalBytes > MAX_EXECUTION_IMAGE_BYTES)
-        throw new Error('Prepared loader directory exceeds the size limit');
-      const targetPath = join(destinationDirectory, entry.name);
-      await writeFile(targetPath, bytes, { flag: 'wx', mode: Number(before.mode) & 0o777 });
-      await chmod(targetPath, Number(before.mode) & 0o777);
-    } finally {
-      await source.close();
-    }
   }
 }
 

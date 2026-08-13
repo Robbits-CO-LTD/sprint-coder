@@ -8,7 +8,6 @@ import {
   link,
   mkdir,
   mkdtemp,
-  readdir,
   readFile,
   realpath,
   rename,
@@ -16,7 +15,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
@@ -897,21 +896,14 @@ describe('CommandRunner', () => {
     async () => {
       const root = await workspace();
       const bin = join(root, 'bin');
-      const interpreter = join(bin, 'node');
+      const interpreter = process.platform === 'linux' ? join(bin, 'sh') : '/bin/sh';
       await mkdir(bin);
-      await copyFile(process.execPath, interpreter);
-      if (process.platform === 'darwin') {
-        const sourceLib = join(dirname(dirname(process.execPath)), 'lib');
-        const targetLib = join(root, 'lib');
-        await mkdir(targetLib);
-        const dependency = (await readdir(sourceLib, { withFileTypes: true })).find(
-          (entry) => entry.isFile() && /^libnode.*\.dylib$/u.test(entry.name),
-        );
-        if (dependency !== undefined)
-          await copyFile(join(sourceLib, dependency.name), join(targetLib, dependency.name));
-      }
-      const executable = join(root, 'command.js');
-      await writeFile(executable, `#!${interpreter}\nconsole.log('approved-interpreter');\n`);
+      if (process.platform === 'linux') await copyFile('/bin/sh', interpreter);
+      const executable = join(root, 'command.sh');
+      await writeFile(
+        executable,
+        `#!${interpreter}\nprintf 'approved-interpreter:%s\\n' "$(dirname "$0")"\nsleep 0.2\n`,
+      );
       await chmod(executable, 0o700);
       const spec = await prepareExecutionSpec({
         workspacePath: root,
@@ -920,21 +912,46 @@ describe('CommandRunner', () => {
         cwd: '.',
       });
       let output = '';
+      let debugOutput = '';
 
       const result = await new CommandRunner().run(spec, {
         beforeSpawn: () => {
-          renameSync(interpreter, `${interpreter}.approved`);
-          writeFileSync(interpreter, 'attacker');
+          if (process.platform === 'linux') {
+            renameSync(interpreter, `${interpreter}.approved`);
+            writeFileSync(interpreter, 'attacker');
+          }
         },
         onChunk: (chunk) => {
           output += chunk.text;
+          debugOutput += `${chunk.stream}:${chunk.text}`;
         },
       });
 
-      expect(result.exitCode).toBe(0);
-      expect(output).toBe('approved-interpreter\n');
+      expect(result.exitCode, debugOutput).toBe(0);
+      expect(output).toBe(`approved-interpreter:${await realpath(root)}\n`);
     },
     30_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects env shebang aliases before dynamic PATH resolution',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'dynamic.sh');
+      await writeFile(executable, '#!/bin/env node\nconsole.log("unsafe")\n');
+      await chmod(executable, 0o700);
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: [],
+        cwd: '.',
+      });
+
+      await expect(new CommandRunner().run(spec)).rejects.toMatchObject({
+        code: 'EXECUTION_IDENTITY_CHANGED',
+        message: expect.stringMatching(/shebang/i),
+      });
+    },
   );
 
   it.runIf(process.platform === 'win32')(
