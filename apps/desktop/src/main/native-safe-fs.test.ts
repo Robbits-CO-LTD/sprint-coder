@@ -124,6 +124,28 @@ async function childDirectoryOutcome(input: {
   return result.stdout;
 }
 
+async function childDirectoryCleanupOutcome(input: {
+  addonPath: string;
+  session: NativeSafeFsOpenInput;
+  payload: Record<string, unknown>;
+  env?: NodeJS.ProcessEnv;
+}): Promise<string> {
+  const source = [
+    'const addon = require(process.argv[1]);',
+    'addon.openSession(JSON.parse(process.argv[2])).then((session) => {',
+    '  try { addon.cleanupDirectoryRemoval({ ...JSON.parse(process.argv[3]), sessionId: session.id });',
+    "    process.stdout.write('COMPLETED');",
+    '  } catch (error) { process.stdout.write(String(error.code)); }',
+    '});',
+  ].join('\n');
+  const result = await execFileAsync(
+    process.execPath,
+    ['-e', source, input.addonPath, JSON.stringify(input.session), JSON.stringify(input.payload)],
+    { env: { ...process.env, ...input.env } },
+  );
+  return result.stdout;
+}
+
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -747,6 +769,11 @@ describe('NativeSafeFs authority boundary', () => {
           ),
         ).resolves.toBeUndefined();
         await boundary.closeSession(session);
+        const privateQuarantine = join(
+          input.root,
+          `.sprint-coder-directory-quarantine-${input.workspaceKey.slice(0, 32)}`,
+        );
+        expect(existsSync(privateQuarantine)).toBe(true);
         await expect(
           childDirectoryCrash({
             addonPath,
@@ -775,6 +802,165 @@ describe('NativeSafeFs authority boundary', () => {
           ),
         ).resolves.toBeUndefined();
         await boundary.closeSession(session);
+      },
+    );
+
+    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()))(
+      'refuses a private quarantine substitution at the final delete check',
+      async () => {
+        const input = await fixture();
+        await mkdir(join(input.workspace, 'parent'));
+        const addonPath = nativeSafeFsTestAddonPath();
+        const boundary = fixtureBoundary(input, addonPath);
+        const token = 'f'.repeat(64);
+        const ownership = {
+          markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`,
+          token,
+        };
+        const session = await boundary.openSession({ ...input, fence: '731' });
+        const created = await boundary.createDirectory(
+          session,
+          ['parent', 'swap-delete'],
+          ownership,
+        );
+        await boundary.cleanupDirectoryOwnership(
+          session,
+          ['parent', 'swap-delete'],
+          created.identityDigest,
+          ownership,
+        );
+        await boundary.removeDirectory(session, ['parent', 'swap-delete'], created.identityDigest);
+        await boundary.closeSession(session);
+        await expect(
+          childDirectoryCleanupOutcome({
+            addonPath,
+            session: { ...input, fence: '732' },
+            payload: {
+              pathSegments: ['parent', 'swap-delete'],
+              expectedIdentityDigest: created.identityDigest,
+            },
+            env: { SPRINT_CODER_NATIVE_SAFE_FS_SUBSTITUTE_PRIVATE_DELETE: '1' },
+          }),
+        ).resolves.toBe('UNSAFE_PATH');
+        expect(existsSync(join(input.workspace, 'parent', 'swap-delete'))).toBe(false);
+        const privateQuarantine = join(
+          input.root,
+          `.sprint-coder-directory-quarantine-${input.workspaceKey.slice(0, 32)}`,
+        );
+        const privateLeaf = `.sprint-coder-rmdir-delete-${created.identityDigest.slice(0, 32)}`;
+        expect(existsSync(join(privateQuarantine, privateLeaf))).toBe(true);
+        expect(existsSync(join(privateQuarantine, `${privateLeaf}-held`))).toBe(true);
+      },
+    );
+
+    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()) || !existsSync('/dev/shm'))(
+      'cleans an owned directory when the app lock directory is on another filesystem',
+      async () => {
+        const input = await fixture();
+        const crossFilesystemLocks = await mkdtemp('/dev/shm/sprint-coder-native-locks-');
+        cleanup.push(crossFilesystemLocks);
+        await chmod(crossFilesystemLocks, 0o700);
+        const workspaceStats = await lstat(input.workspace, { bigint: true });
+        const lockStats = await lstat(crossFilesystemLocks, { bigint: true });
+        expect(lockStats.dev).not.toBe(workspaceStats.dev);
+        const crossFilesystemInput = {
+          ...input,
+          locks: crossFilesystemLocks,
+          lockDirectoryPath: crossFilesystemLocks,
+        };
+        await mkdir(join(input.workspace, 'parent'));
+        const boundary = fixtureBoundary(crossFilesystemInput, nativeSafeFsTestAddonPath());
+        const token = 'e'.repeat(64);
+        const ownership = {
+          markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`,
+          token,
+        };
+        const session = await boundary.openSession({ ...crossFilesystemInput, fence: '741' });
+        const created = await boundary.createDirectory(
+          session,
+          ['parent', 'cross-filesystem-cleanup'],
+          ownership,
+        );
+        await boundary.cleanupDirectoryOwnership(
+          session,
+          ['parent', 'cross-filesystem-cleanup'],
+          created.identityDigest,
+          ownership,
+        );
+        await boundary.removeDirectory(
+          session,
+          ['parent', 'cross-filesystem-cleanup'],
+          created.identityDigest,
+        );
+        await expect(
+          boundary.cleanupDirectoryRemoval(
+            session,
+            ['parent', 'cross-filesystem-cleanup'],
+            created.identityDigest,
+          ),
+        ).resolves.toBeUndefined();
+        expect(existsSync(join(input.workspace, 'parent', 'cross-filesystem-cleanup'))).toBe(false);
+        await boundary.closeSession(session);
+      },
+    );
+
+    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()))(
+      'refuses mkdir before any effect when the workspace authority parent is unavailable',
+      async () => {
+        const input = await fixture();
+        await mkdir(join(input.workspace, 'parent'));
+        await expect(
+          childDirectoryOutcome({
+            addonPath: nativeSafeFsTestAddonPath(),
+            session: { ...input, fence: '751' },
+            payload: {
+              pathSegments: ['parent', 'unsupported-authority'],
+              markerLeafName: `.sprint-coder-mkdir-${'a'.repeat(32)}`,
+              ownershipToken: 'a'.repeat(64),
+            },
+            env: { SPRINT_CODER_NATIVE_SAFE_FS_AUTHORITY_UNAVAILABLE: '1' },
+          }),
+        ).resolves.toBe('UNSUPPORTED_PLATFORM');
+        expect(existsSync(join(input.workspace, 'parent', 'unsupported-authority'))).toBe(false);
+        expect(
+          existsSync(
+            join(input.workspace, 'parent', `.sprint-coder-mkdir-stage-${'a'.repeat(32)}`),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()))(
+      'refuses a mount-root mkdir without creating an authority or workspace artifact',
+      async () => {
+        const input = await fixture();
+        await mkdir(join(input.workspace, 'parent'));
+        await expect(
+          childDirectoryOutcome({
+            addonPath: nativeSafeFsTestAddonPath(),
+            session: { ...input, fence: '752' },
+            payload: {
+              pathSegments: ['parent', 'mount-root-unsupported'],
+              markerLeafName: `.sprint-coder-mkdir-${'b'.repeat(32)}`,
+              ownershipToken: 'b'.repeat(64),
+            },
+            env: { SPRINT_CODER_NATIVE_SAFE_FS_AUTHORITY_CROSS_FILESYSTEM: '1' },
+          }),
+        ).resolves.toBe('UNSUPPORTED_PLATFORM');
+        expect(
+          existsSync(
+            join(
+              input.root,
+              `.sprint-coder-directory-quarantine-${input.workspaceKey.slice(0, 32)}`,
+            ),
+          ),
+        ).toBe(false);
+        expect(existsSync(join(input.workspace, 'parent', 'mount-root-unsupported'))).toBe(false);
+        expect(
+          existsSync(
+            join(input.workspace, 'parent', `.sprint-coder-mkdir-stage-${'b'.repeat(32)}`),
+          ),
+        ).toBe(false);
       },
     );
 

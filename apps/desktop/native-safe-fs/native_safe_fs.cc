@@ -2430,6 +2430,101 @@ bool DirectoryIsEmpty(int directory_fd) {
   return empty;
 }
 
+bool SameDirectoryObject(const struct stat& first, const struct stat& second);
+
+bool RemovePinnedDirectory(int parent_fd, const std::string& leaf, int directory_fd) {
+  struct stat descriptor_stat {};
+  struct stat namespace_stat {};
+  if (fstat(directory_fd, &descriptor_stat) != 0 ||
+      fstatat(parent_fd, leaf.c_str(), &namespace_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
+      !SameDirectoryObject(descriptor_stat, namespace_stat)) {
+    errno = ESTALE;
+    return false;
+  }
+  return unlinkat(parent_fd, leaf.c_str(), AT_REMOVEDIR) == 0;
+}
+
+int OpenPrivateDirectoryQuarantine(int root_fd, const std::string& workspace_path,
+                                   const std::string& workspace_key, NativeFailure* failure) {
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+  const char* authority_unavailable =
+      std::getenv("SPRINT_CODER_NATIVE_SAFE_FS_AUTHORITY_UNAVAILABLE");
+  if (authority_unavailable != nullptr && std::string(authority_unavailable) == "1") {
+    *failure = {"UNSUPPORTED_PLATFORM",
+                "Workspace filesystem cannot host a durable directory authority"};
+    return -1;
+  }
+#endif
+  const size_t separator = workspace_path.find_last_of('/');
+  if (separator == std::string::npos || separator + 1 >= workspace_path.size()) {
+    *failure = {"UNSUPPORTED_PLATFORM",
+                "Workspace root has no same-filesystem authority parent"};
+    return -1;
+  }
+  const std::string workspace_leaf = workspace_path.substr(separator + 1);
+  int authority_parent_fd = openat(root_fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  struct stat root_stat {};
+  struct stat authority_parent_stat {};
+  struct stat workspace_namespace_stat {};
+  if (authority_parent_fd < 0 || fstat(root_fd, &root_stat) != 0 ||
+      fstat(authority_parent_fd, &authority_parent_stat) != 0 ||
+      fstatat(authority_parent_fd, workspace_leaf.c_str(), &workspace_namespace_stat,
+              AT_SYMLINK_NOFOLLOW) != 0 ||
+      !SameDirectoryObject(root_stat, workspace_namespace_stat)) {
+    CloseFd(&authority_parent_fd);
+    *failure = {"UNSAFE_PATH", "Workspace authority parent changed"};
+    return -1;
+  }
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+  const char* authority_cross_filesystem =
+      std::getenv("SPRINT_CODER_NATIVE_SAFE_FS_AUTHORITY_CROSS_FILESYSTEM");
+  const bool force_cross_filesystem = authority_cross_filesystem != nullptr &&
+                                      std::string(authority_cross_filesystem) == "1";
+#else
+  const bool force_cross_filesystem = false;
+#endif
+  if (force_cross_filesystem || authority_parent_stat.st_dev != root_stat.st_dev) {
+    CloseFd(&authority_parent_fd);
+    *failure = {"UNSUPPORTED_PLATFORM",
+                "Workspace root is a filesystem mount without a private authority parent"};
+    return -1;
+  }
+  const std::string leaf = ".sprint-coder-directory-quarantine-" + workspace_key.substr(0, 32);
+  bool created = false;
+  if (mkdirat(authority_parent_fd, leaf.c_str(), 0700) == 0)
+    created = true;
+  else if (errno != EEXIST) {
+    const int mkdir_errno = errno;
+    CloseFd(&authority_parent_fd);
+    errno = mkdir_errno;
+    *failure = {(mkdir_errno == EACCES || mkdir_errno == EPERM || mkdir_errno == EROFS)
+                    ? "UNSUPPORTED_PLATFORM"
+                    : "NATIVE_FAILURE",
+                ErrnoMessage("create private directory quarantine")};
+    return -1;
+  }
+  if (created && fsync(authority_parent_fd) != 0) {
+    CloseFd(&authority_parent_fd);
+    *failure = {"NATIVE_FAILURE", ErrnoMessage("persist private directory quarantine")};
+    return -1;
+  }
+  int fd = openat(authority_parent_fd, leaf.c_str(),
+                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  struct stat descriptor_stat {};
+  struct stat namespace_stat {};
+  if (fd < 0 || fstat(fd, &descriptor_stat) != 0 ||
+      fstatat(authority_parent_fd, leaf.c_str(), &namespace_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
+      !SameDirectoryObject(descriptor_stat, namespace_stat) || descriptor_stat.st_uid != getuid() ||
+      descriptor_stat.st_dev != root_stat.st_dev || (descriptor_stat.st_mode & 0777) != 0700) {
+    CloseFd(&fd);
+    CloseFd(&authority_parent_fd);
+    *failure = {"UNSAFE_LOCK", "Private directory quarantine identity is unsafe"};
+    return -1;
+  }
+  CloseFd(&authority_parent_fd);
+  return fd;
+}
+
 bool SameDirectoryObject(const struct stat& first, const struct stat& second) {
   return S_ISDIR(first.st_mode) && S_ISDIR(second.st_mode) && first.st_dev == second.st_dev &&
          first.st_ino == second.st_ino && first.st_mode == second.st_mode;
@@ -2600,6 +2695,11 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
                !VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
       // VerifyRelativeParentNamespace provides the failure.
     } else {
+      int authority_probe_fd =
+          OpenPrivateDirectoryQuarantine(root_fd, workspace_path, workspace_key, &failure);
+      CloseFd(&authority_probe_fd);
+    }
+    if (failure.code.empty()) {
       struct stat existing {};
       if (fstatat(parent_fd, segments.back().c_str(), &existing, AT_SYMLINK_NOFOLLOW) == 0 ||
           errno != ENOENT) {
@@ -2950,6 +3050,7 @@ napi_value CleanupDirectoryRemoval(napi_env env, napi_callback_info info) {
   int parent_fd = OpenRelativeParent(root_fd, segments, &failure);
   const std::string quarantine_leaf = ".sprint-coder-rmdir-" + expected_identity.substr(0, 32);
   const std::string delete_leaf = ".sprint-coder-rmdir-delete-" + expected_identity.substr(0, 32);
+  int private_quarantine_fd = -1;
   {
     std::lock_guard<std::mutex> guard(state.mutex);
     const auto session = state.sessions.find(session_id);
@@ -2961,59 +3062,79 @@ napi_value CleanupDirectoryRemoval(napi_env env, napi_callback_info info) {
              !VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
       if (failure.code.empty()) failure = {"UNSAFE_PATH", "Directory parent changed"};
     } else {
-      struct stat target {};
-      if (fstatat(parent_fd, segments.back().c_str(), &target, AT_SYMLINK_NOFOLLOW) == 0 ||
-          errno != ENOENT) {
-        failure = {"UNSAFE_PATH", "Directory removal cleanup found a target"};
+      private_quarantine_fd =
+          OpenPrivateDirectoryQuarantine(root_fd, workspace_path, workspace_key, &failure);
+      if (private_quarantine_fd < 0) {
+        // OpenPrivateDirectoryQuarantine provides the failure.
       } else {
-        struct stat quarantined {};
-        int quarantine_fd = openat(parent_fd, quarantine_leaf.c_str(),
-                                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        if (quarantine_fd < 0 && errno == ENOENT) {
-          quarantine_fd = openat(parent_fd, delete_leaf.c_str(),
-                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat target {};
+        if (fstatat(parent_fd, segments.back().c_str(), &target, AT_SYMLINK_NOFOLLOW) == 0 ||
+            errno != ENOENT) {
+          failure = {"UNSAFE_PATH", "Directory removal cleanup found a target"};
+        } else {
+          struct stat quarantined {};
+          int quarantine_fd = openat(parent_fd, quarantine_leaf.c_str(),
+                                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
           if (quarantine_fd < 0 && errno == ENOENT) {
-            // cleanup_pending is the durable proof that removal was authorized and completed.
+            quarantine_fd = openat(private_quarantine_fd, delete_leaf.c_str(),
+                                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (quarantine_fd < 0 && errno == ENOENT) {
+              // cleanup_pending is the durable proof that removal was authorized and completed.
+            }
           }
-        }
-        if (quarantine_fd >= 0) {
-          const bool already_staged =
-              fstatat(parent_fd, delete_leaf.c_str(), &quarantined, AT_SYMLINK_NOFOLLOW) == 0;
-          const std::string& cleanup_leaf = already_staged ? delete_leaf : quarantine_leaf;
-          std::string token;
-          const bool matches = quarantine_fd >= 0 && fstat(quarantine_fd, &quarantined) == 0 &&
-                               ReadDirectoryOwnershipToken(quarantine_fd, &token) &&
-                               PinnedOwnedDirectoryIdentityMatches(
-                                   parent_fd, cleanup_leaf, quarantine_fd, token,
-                                   &expected_identity, &quarantined) &&
-                               DirectoryIsEmpty(quarantine_fd);
-          if (!matches)
-            failure = {"UNSAFE_PATH", "Directory removal cleanup refused quarantine"};
-          else if (!already_staged &&
-                   AtomicMoveNoReplace(parent_fd, quarantine_leaf.c_str(), parent_fd,
-                                       delete_leaf.c_str()) != 0)
-            failure = AtomicMutationFailure("stage removed directory cleanup");
-          else {
-            HitDirectoryCrashPoint("directory.after_remove_stage");
-            if (!PinnedOwnedDirectoryIdentityMatches(
-                       parent_fd, delete_leaf, quarantine_fd, token, &expected_identity, nullptr)) {
-              if (!already_staged &&
-                  AtomicMoveNoReplace(parent_fd, delete_leaf.c_str(), parent_fd,
-                                      quarantine_leaf.c_str()) != 0)
-                failure = {"NATIVE_FAILURE", "Failed to restore removal cleanup substitution"};
-              else
+          if (quarantine_fd >= 0) {
+            const bool already_staged =
+                fstatat(private_quarantine_fd, delete_leaf.c_str(), &quarantined,
+                        AT_SYMLINK_NOFOLLOW) == 0;
+            const std::string& cleanup_leaf = already_staged ? delete_leaf : quarantine_leaf;
+            const int cleanup_parent_fd = already_staged ? private_quarantine_fd : parent_fd;
+            std::string token;
+            const bool matches = quarantine_fd >= 0 && fstat(quarantine_fd, &quarantined) == 0 &&
+                                 ReadDirectoryOwnershipToken(quarantine_fd, &token) &&
+                                 PinnedOwnedDirectoryIdentityMatches(
+                                     cleanup_parent_fd, cleanup_leaf, quarantine_fd, token,
+                                     &expected_identity, &quarantined) &&
+                                 DirectoryIsEmpty(quarantine_fd);
+            if (!matches)
+              failure = {"UNSAFE_PATH", "Directory removal cleanup refused quarantine"};
+            else if (!already_staged &&
+                     AtomicMoveNoReplace(parent_fd, quarantine_leaf.c_str(), private_quarantine_fd,
+                                         delete_leaf.c_str()) != 0)
+              failure = AtomicMutationFailure("stage removed directory cleanup");
+            else if (!already_staged &&
+                     (fsync(parent_fd) != 0 || fsync(private_quarantine_fd) != 0))
+              failure = {"NATIVE_FAILURE",
+                         ErrnoMessage("persist staged removed directory cleanup")};
+            else {
+              HitDirectoryCrashPoint("directory.after_remove_stage");
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+              const char* substitute =
+                  std::getenv("SPRINT_CODER_NATIVE_SAFE_FS_SUBSTITUTE_PRIVATE_DELETE");
+              if (substitute != nullptr && std::string(substitute) == "1") {
+                const std::string held_leaf = delete_leaf + "-held";
+                renameat(private_quarantine_fd, delete_leaf.c_str(), private_quarantine_fd,
+                         held_leaf.c_str());
+                mkdirat(private_quarantine_fd, delete_leaf.c_str(), 0700);
+              }
+#endif
+              if (!PinnedOwnedDirectoryIdentityMatches(
+                      private_quarantine_fd, delete_leaf, quarantine_fd, token,
+                      &expected_identity, nullptr))
                 failure = {"UNSAFE_PATH", "Directory removal cleanup identity changed"};
-            } else if (unlinkat(parent_fd, delete_leaf.c_str(), AT_REMOVEDIR) != 0 ||
-                       fsync(parent_fd) != 0)
-              failure = {"NATIVE_FAILURE", ErrnoMessage("cleanup removed directory quarantine")};
-            else
-              HitDirectoryCrashPoint("directory.after_remove_cleanup");
+              else if (!RemovePinnedDirectory(private_quarantine_fd, delete_leaf,
+                                               quarantine_fd) ||
+                       fsync(private_quarantine_fd) != 0)
+                failure = {"NATIVE_FAILURE", ErrnoMessage("cleanup removed directory quarantine")};
+              else
+                HitDirectoryCrashPoint("directory.after_remove_cleanup");
+            }
+            CloseFd(&quarantine_fd);
           }
-          CloseFd(&quarantine_fd);
         }
       }
     }
   }
+  CloseFd(&private_quarantine_fd);
   CloseFd(&parent_fd);
   CloseFd(&root_fd);
   if (!failure.code.empty()) return ThrowFailure(env, failure.code, failure.message);
