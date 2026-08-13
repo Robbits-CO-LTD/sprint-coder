@@ -198,6 +198,9 @@ describe('OpenAICompatibleProviderClient', () => {
     expect(
       resolvedProfileEndpointTrust(configurable, { baseUrl: 'http://127.0.0.1:8080/v1' }),
     ).toBe('trusted-local');
+    expect(resolvedProfileEndpointTrust(configurable, { baseUrl: 'http://[::1]:8080/v1' })).toBe(
+      'trusted-local',
+    );
     expect(
       resolvedProfileEndpointTrust(configurable, { baseUrl: 'https://local.example.test/v1' }),
     ).toBe('trusted-remote');

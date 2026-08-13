@@ -64,9 +64,15 @@ export class ProviderEndpointPolicy {
 
   digestForBaseUrl(input: string): string {
     const canonical = this.canonicalizeBaseUrl(input);
-    const parsed = new URL(canonical);
-    const trust = isExplicitLocalHostname(parsed.hostname) ? 'trusted-local' : 'trusted-remote';
+    const trust = this.trustForBaseUrl(canonical);
     return endpointDigest(canonical, trust);
+  }
+
+  trustForBaseUrl(input: string): PreparedProviderEndpoint['trust'] {
+    const canonical = this.canonicalizeBaseUrl(input);
+    return isExplicitLocalHostname(new URL(canonical).hostname)
+      ? 'trusted-local'
+      : 'trusted-remote';
   }
 
   async prepareRequestUrl(input: string | URL): Promise<PreparedProviderEndpoint> {

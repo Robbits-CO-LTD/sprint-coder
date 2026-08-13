@@ -102,6 +102,5 @@ export function resolvedProfileEndpointTrust(
   profile: ProviderProfile,
   credential: OpenAICompatibleCredential,
 ): 'trusted-local' | 'trusted-remote' {
-  const hostname = new URL(resolveProfileBaseUrl(profile, credential)).hostname.toLowerCase();
-  return hostname === 'localhost' || hostname === '127.0.0.1' ? 'trusted-local' : 'trusted-remote';
+  return endpointPolicy.trustForBaseUrl(resolveProfileBaseUrl(profile, credential));
 }
