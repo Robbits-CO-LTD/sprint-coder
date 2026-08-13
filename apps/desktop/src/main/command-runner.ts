@@ -75,6 +75,20 @@ const POSIX_COMMAND_WRAPPER = String.raw`
 IFS= read -r control_nonce <&4 || exit 125
 exec 4<&-
 trap '' TERM
+if [ ! -x "$1" ]; then
+  printf '{"nonce":"%s","type":"spawnError","status":126}\n' "$control_nonce" >&3
+  exec /bin/sleep 2147483647
+fi
+first_line=$(/usr/bin/head -n 1 "$1" 2>/dev/null || :)
+case "$first_line" in
+  '#!'*)
+    interpreter=$(printf '%s\n' "$first_line" | /usr/bin/awk '{sub(/^#![[:space:]]*/, ""); print $1}')
+    if [ -n "$interpreter" ] && [ ! -x "$interpreter" ]; then
+      printf '{"nonce":"%s","type":"spawnError","status":127}\n' "$control_nonce" >&3
+      exec /bin/sleep 2147483647
+    fi
+    ;;
+esac
 (
   trap - TERM
   IFS= read -r gate <&5 || exit 125
@@ -87,11 +101,7 @@ printf '{"nonce":"%s","type":"started","pid":%s}\n' "$control_nonce" "$target_pi
 # stderr. That supervisor-owned diagnostic must not contaminate the requested command's stderr.
 wait "$target_pid" 2>/dev/null
 status=$?
-if [ "$status" -eq 126 ] || [ "$status" -eq 127 ]; then
-  printf '{"nonce":"%s","type":"spawnError","status":%s}\n' "$control_nonce" "$status" >&3
-else
-  printf '{"nonce":"%s","type":"outcome","exitCode":%s,"signal":null}\n' "$control_nonce" "$status" >&3
-fi
+printf '{"nonce":"%s","type":"outcome","exitCode":%s,"signal":null}\n' "$control_nonce" "$status" >&3
 exec /bin/sleep 2147483647
 `;
 
@@ -1164,13 +1174,16 @@ function waitForPosixCommandOutcome(
                 resolveStarted(Number(value.pid));
               }
             } else if (value.type === 'spawnError' && typeof value.status === 'number') {
-              settled = true;
-              reject(
-                new CommandRunnerError(
-                  'SPAWN_FAILED',
-                  `POSIX target exec failed with status ${value.status}`,
-                ),
+              const spawnError = new CommandRunnerError(
+                'SPAWN_FAILED',
+                `POSIX target exec failed with status ${value.status}`,
               );
+              if (!startSettled) {
+                startSettled = true;
+                rejectStarted(spawnError);
+              }
+              settled = true;
+              reject(spawnError);
             } else if (
               value.type === 'outcome' &&
               (typeof value.exitCode === 'number' || value.exitCode === null) &&

@@ -421,6 +421,25 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform !== 'win32')(
+    'preserves an explicit exit 127 after the target passes the spawn boundary',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', 'process.exit(127)'],
+        cwd: '.',
+      });
+
+      await expect(new CommandRunner().run(spec)).resolves.toMatchObject({
+        exitCode: 127,
+        signal: null,
+        termination: 'natural',
+      });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
     'drains a redirected background descendant after its direct child exits naturally',
     async () => {
       const root = await workspace();
