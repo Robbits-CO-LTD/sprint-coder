@@ -9,6 +9,7 @@ import {
   advanceCodexAppServerStage,
   buildCodexArgs,
   buildCodexPrompt,
+  buildCodexTeamDynamicTools,
   buildCodexTurnInput,
   codexOperationForItem,
   parseCodexModels,
@@ -17,6 +18,9 @@ import {
   resolveCodexCommand,
   terminateCodexProcessTree,
   isUnsupportedMultiRootError,
+  validateCodexTeamMcpInventory,
+  codexDynamicToolResponseFromMcp,
+  codexInitializeCapabilities,
 } from './codex-adapter';
 import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 import type { RuntimeFailureDiagnostic } from './protocol';
@@ -241,6 +245,86 @@ describe('Codex runtime probe', () => {
       expect(events.at(-1)).toMatchObject({ type: 'completed' });
       expect(diagnostics).toEqual([]);
     }
+  });
+
+  it('negotiates and proxies a validated Team dynamic tool through app-server', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-team-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'team-codex.mjs');
+    const inventoryTools = Object.fromEntries(
+      TEAM_CORE_MCP_TOOL_NAMES.map((name) => [
+        name,
+        { name, description: `Team tool ${name}`, inputSchema: { type: 'object' } },
+      ]),
+    );
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+        "createInterface({ input: process.stdin }).on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method === 'initialize') {",
+        '    if (message.params.capabilities?.experimentalApi !== true) process.exit(10);',
+        "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        '  }',
+        "  if (message.method === 'mcpServerStatus/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ name: 'team', tools: " +
+          JSON.stringify(inventoryTools) +
+          ' }] } });',
+        "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ cwd: message.params.cwds[0], skills: [], errors: [] }] } });",
+        "  if (message.method === 'thread/start') {",
+        `    if (message.params.dynamicTools?.length !== ${TEAM_CORE_MCP_TOOL_NAMES.length}) process.exit(11);`,
+        '    if (message.params.dynamicTools?.some((tool) => tool.deferLoading !== false)) process.exit(12);',
+        "    send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-1' } } });",
+        '  }',
+        "  if (message.method === 'turn/start') {",
+        "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+        "    send({ jsonrpc: '2.0', id: 'bad-namespace', method: 'item/tool/call', params: { threadId: 'thread-1', turnId: 'turn-1', callId: 'call-1', namespace: 'unexpected', tool: 'team_list_models', arguments: {} } });",
+        '  }',
+        "  if (message.method === 'mcpServer/tool/call') {",
+        "    if (message.params.server !== 'team' || message.params.tool !== 'team_list_models') process.exit(13);",
+        "    send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: '{\\\"models\\\":[]}' }] } });",
+        '  }',
+        "  if (message.id === 'bad-namespace' && message.result?.success === false) {",
+        "    send({ jsonrpc: '2.0', id: 'bad-thread', method: 'item/tool/call', params: { threadId: 'thread-other', turnId: 'turn-1', callId: 'call-2', namespace: null, tool: 'team_list_models', arguments: {} } });",
+        '  }',
+        "  if (message.id === 'bad-thread' && message.result?.success === false) {",
+        "    send({ jsonrpc: '2.0', id: 'tool-call-1', method: 'item/tool/call', params: { threadId: 'thread-1', turnId: 'turn-1', callId: 'call-3', namespace: null, tool: 'team_list_models', arguments: {} } });",
+        '  }',
+        "  if (message.id === 'tool-call-1' && message.result?.success === true) {",
+        "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
+        '  }',
+        '});',
+      ].join('\n'),
+    );
+    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+    const failures: Array<{ code: string }> = [];
+    const events: Array<{ type: string }> = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'team-dynamic-tool-turn',
+        'request',
+        [],
+        () => undefined,
+        root,
+        'auto',
+        (event) => events.push(event),
+        (error) => failures.push(error),
+        () => resolve(),
+        {
+          socketPath: 'ignored-by-fake-cli',
+          token: 'turn-token',
+          guidance: 'use Team tools',
+          toolNames: TEAM_CORE_MCP_TOOL_NAMES,
+        },
+      );
+    });
+
+    expect(failures).toEqual([]);
+    expect(events.at(-1)).toMatchObject({ type: 'completed' });
   });
 
   it('constructs ordered app-server localImage inputs without embedding paths in text', () => {
@@ -741,9 +825,87 @@ describe('Codex runtime probe', () => {
     );
     expect(args).toContain('mcp_servers.team.default_tools_approval_mode="approve"');
     expect(args).toContain('mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]');
-    expect(args).toContain('features.tool_search_always_defer_mcp_tools=false');
+    expect(args).not.toContain('features.tool_search_always_defer_mcp_tools=false');
     expect(args.join(' ')).not.toContain('turn-token');
     expect(args.slice(0, 3)).toEqual(['app-server', '--listen', 'stdio://']);
+  });
+
+  it('requires the pinned Team MCP server and every enabled tool in app-server inventory', () => {
+    expect(
+      validateCodexTeamMcpInventory(
+        {
+          data: [
+            {
+              name: 'team',
+              tools: Object.fromEntries(
+                TEAM_CORE_MCP_TOOL_NAMES.map((name) => [name, { name, inputSchema: {} }]),
+              ),
+            },
+          ],
+        },
+        TEAM_CORE_MCP_TOOL_NAMES,
+      ),
+    ).toEqual({ ok: true, serverFound: true, missingTools: [] });
+    expect(
+      validateCodexTeamMcpInventory(
+        { data: [{ name: 'team', tools: { team_list_models: {} } }] },
+        TEAM_CORE_MCP_TOOL_NAMES,
+      ),
+    ).toMatchObject({ ok: false, serverFound: true });
+    expect(validateCodexTeamMcpInventory({ data: [] }, TEAM_CORE_MCP_TOOL_NAMES)).toEqual({
+      ok: false,
+      serverFound: false,
+      missingTools: [...TEAM_CORE_MCP_TOOL_NAMES],
+    });
+  });
+
+  it('publishes only the validated Team inventory as non-deferred dynamic tools', () => {
+    const inventory = {
+      data: [
+        {
+          name: 'team',
+          tools: {
+            team_list_models: {
+              name: 'team_list_models',
+              description: 'models',
+              inputSchema: { type: 'object' },
+            },
+            unexpected: { name: 'unexpected', description: 'no', inputSchema: {} },
+          },
+        },
+      ],
+    };
+    expect(buildCodexTeamDynamicTools(inventory, ['team_list_models'])).toEqual([
+      {
+        type: 'function',
+        name: 'team_list_models',
+        description: 'models',
+        inputSchema: { type: 'object' },
+        deferLoading: false,
+      },
+    ]);
+  });
+
+  it('enables the app-server experimental API for dynamic Team tools', () => {
+    expect(codexInitializeCapabilities(false, false)).toEqual({});
+    expect(codexInitializeCapabilities(true, false)).toEqual({ experimentalApi: true });
+    expect(codexInitializeCapabilities(false, true)).toEqual({ experimentalApi: true });
+  });
+
+  it('converts an MCP result into a bounded dynamic-tool response', () => {
+    expect(
+      codexDynamicToolResponseFromMcp({
+        content: [{ type: 'text', text: '{"ok":true}' }],
+        structuredContent: { ok: true },
+      }),
+    ).toEqual({
+      success: true,
+      contentItems: [{ type: 'inputText', text: '{"ok":true}' }],
+    });
+    expect(codexDynamicToolResponseFromMcp({ content: [], isError: true })).toEqual({
+      success: false,
+      contentItems: [{ type: 'inputText', text: 'Team tool failed.' }],
+    });
   });
 
   it('enables live Web search only for an explicitly research-enabled Team turn', () => {
