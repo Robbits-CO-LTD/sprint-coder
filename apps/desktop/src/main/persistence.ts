@@ -4652,22 +4652,18 @@ function syncFile(path: string): void {
   }
 }
 
+function supportsRecoveryDirectorySync(platform: NodeJS.Platform): boolean {
+  return platform !== 'win32';
+}
+
 function syncDirectory(path: string): void {
-  let descriptor: number;
+  // libuv implements fsync with FlushFileBuffers on Windows, which requires GENERIC_WRITE.
+  // Node can open a directory for reading there but cannot portably provide that writable file
+  // handle. Recovery files themselves are still mandatorily fsynced before every publication.
+  if (!supportsRecoveryDirectorySync(process.platform)) return;
+  const descriptor = openSync(path, 'r');
   try {
-    descriptor = openSync(path, 'r');
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (process.platform === 'win32' && (code === 'EISDIR' || code === 'EPERM')) return;
-    throw error;
-  }
-  try {
-    try {
-      fsyncSync(descriptor);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (process.platform !== 'win32' || (code !== 'EINVAL' && code !== 'ENOTSUP')) throw error;
-    }
+    fsyncSync(descriptor);
   } finally {
     closeSync(descriptor);
   }
@@ -4889,6 +4885,7 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
 }
 
 export const __persistenceRecoveryTestables = {
+  supportsDirectorySync: supportsRecoveryDirectorySync,
   setCrashCheckpointForTesting(callback: ((checkpoint: RecoveryCrashCheckpoint) => void) | null) {
     recoveryCrashCheckpointForTesting = callback;
   },

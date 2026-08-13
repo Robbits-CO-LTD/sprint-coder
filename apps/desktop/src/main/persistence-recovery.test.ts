@@ -55,6 +55,12 @@ afterEach(() => {
 
 if (runsWithElectronAbi)
   describe('database corruption recovery (backup/restore)', () => {
+    it('uses parent-directory fsync only on platforms that support it', () => {
+      expect(__persistenceRecoveryTestables.supportsDirectorySync('win32')).toBe(false);
+      expect(__persistenceRecoveryTestables.supportsDirectorySync('darwin')).toBe(true);
+      expect(__persistenceRecoveryTestables.supportsDirectorySync('linux')).toBe(true);
+    });
+
     it('__recovery_crash_fixture_child__', () => {
       if (recoveryCrashFixturePath === undefined || recoveryCrashFixtureCheckpoint === undefined)
         return;
