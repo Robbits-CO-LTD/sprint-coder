@@ -242,6 +242,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@v6
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
+
+      - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-safe-fs
+
       - name: Warm Windows process identity query
         shell: pwsh
         run: |
