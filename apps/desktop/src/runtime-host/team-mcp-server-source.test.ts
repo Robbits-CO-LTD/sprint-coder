@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { afterEach, describe, expect, it } from 'vitest';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
+import { TEAM_HIRE_WORKER_TOOL } from '../main/team-tools';
 
 // Exercises the exact script string the Claude adapter writes to disk and hands to the real
 // Claude CLI as an MCP stdio server (see claude-adapter.ts). The JSON-RPC handshake shape asserted
@@ -215,7 +216,7 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     expect(
       (hireProperties['managerPolicy'] as { properties: Record<string, unknown> }).properties,
     ).not.toHaveProperty('maxDelegationDepth');
-    expect(hireSchema?.['allOf']).toHaveLength(2);
+    expect(JSON.stringify(hireSchema)).not.toMatch(/"(?:allOf|if|then|not)"/);
     expect(hireSchema?.['required']).toEqual(
       expect.arrayContaining([
         'agentKind',
@@ -224,6 +225,20 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
         'modelSelection',
         'modelSelectionReason',
       ]),
+    );
+    const providerSchema = TEAM_HIRE_WORKER_TOOL.inputSchema as Record<string, unknown>;
+    const providerProperties = providerSchema['properties'] as Record<string, unknown>;
+    expect({
+      agentKind: stripDescriptions(hireProperties['agentKind']),
+      managerPolicy: stripDescriptions(hireProperties['managerPolicy']),
+      additionalProperties: hireSchema?.['additionalProperties'],
+    }).toEqual({
+      agentKind: stripDescriptions(providerProperties['agentKind']),
+      managerPolicy: stripDescriptions(providerProperties['managerPolicy']),
+      additionalProperties: providerSchema['additionalProperties'],
+    });
+    expect(hireSchema?.['required']).toEqual(
+      expect.arrayContaining(providerSchema['required'] as string[]),
     );
     const missionSchema = tools.find(({ name }) => name === 'team_assign_mission')?.inputSchema;
     expect(missionSchema).toMatchObject({
@@ -414,6 +429,16 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     expect(reply).toHaveProperty('error');
   });
 });
+
+function stripDescriptions(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripDescriptions);
+  if (typeof value !== 'object' || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== 'description')
+      .map(([key, nested]) => [key, stripDescriptions(nested)]),
+  );
+}
 
 async function vi_waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;

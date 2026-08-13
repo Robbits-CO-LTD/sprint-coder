@@ -538,8 +538,8 @@ export function buildClaudePrompt(
  * misleading: with no tools at all the model still believes it has them (the system prompt describes
  * them), so it narrates invented tool calls in prose — observed directly, a turn that answered "Let
  * me find the file first. **Tool: bash** …" and then stopped. Read/Glob/Grep cannot write, and
- * `--permission-mode manual` refuses anything that is not on this list, so the boundary that matters
- * is unchanged while the model can actually look at the code it is being asked about.
+ * `--permission-mode default` is accepted by the supported legacy CLI while this explicit tool
+ * allowlist keeps write-capable tools out of the model's runtime surface.
  *
  * The wider sets are an allowlist the CLI applies to itself, NOT an OS boundary —
  * §Managed Runtime is explicit that "単なるtool非公開はsecurity boundaryに数えない", so a Turn run
@@ -554,7 +554,7 @@ const CLAUDE_TOOLS_BY_SCOPE: Record<RuntimeWriteScope, readonly string[] | 'defa
 };
 
 const CLAUDE_PERMISSION_MODE_BY_SCOPE: Record<RuntimeWriteScope, string> = {
-  'read-only': 'manual',
+  'read-only': 'default',
   'workspace-write': 'acceptEdits',
   full: 'bypassPermissions',
 };
@@ -585,9 +585,8 @@ export function buildClaudeArgs(
     '--tools',
     tools,
     // Only meaningful once tools exist. `acceptEdits` lets the edit tools through without an
-    // interactive prompt there is no channel for; `manual` is what read-only relies on to refuse
-    // anything that slips into the tool set, and its refusals come back structured on
-    // `permission_denials` rather than as prose (verified on 2.1.218).
+    // interactive prompt there is no channel for. Read-only uses the legacy-compatible `default`
+    // mode plus the explicit Read/Glob/Grep allowlist, so write tools are never exposed.
     '--permission-mode',
     CLAUDE_PERMISSION_MODE_BY_SCOPE[writeScope],
     // Pins writable paths to the Workspace even at workspace-write. Without it the CLI's own notion
