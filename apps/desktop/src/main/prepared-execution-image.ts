@@ -496,6 +496,16 @@ export async function sealExecutablePath(
   const canonicalPath = await realpath(path);
   if (canonicalPath.split('/').at(-1) === 'env')
     throw new Error('Dynamic shebang interpreters are unsupported');
+  if (process.platform === 'win32') {
+    const before = await stat(canonicalPath, { bigint: true });
+    if (!before.isFile() || (before.nlink !== 1n && !allowHardlinks))
+      throw new Error('Executable is not a permitted regular file');
+    const bytes = windowsAddon().readNoReparseImageFile(canonicalPath, allowHardlinks);
+    const after = await stat(canonicalPath, { bigint: true });
+    if (!sameIdentityStats(before, after, allowHardlinks))
+      throw new Error('Executable changed while sealing approval');
+    return sealedIdentity(canonicalPath, before, bytes, allowHardlinks);
+  }
   const noFollow = constants.O_NOFOLLOW;
   if (noFollow === undefined) throw new Error('O_NOFOLLOW is unavailable');
   const source = await open(canonicalPath, constants.O_RDONLY | noFollow);
@@ -508,26 +518,38 @@ export async function sealExecutablePath(
     if (!sameStats(before, after)) throw new Error('Shebang interpreter changed');
     if (bytes.byteLength < 1 || bytes.byteLength > MAX_EXECUTION_IMAGE_BYTES)
       throw new Error('Shebang interpreter exceeds the size limit');
-    const shebang = process.platform === 'win32' || !allowScript ? undefined : parseShebang(bytes);
+    const shebang = !allowScript ? undefined : parseShebang(bytes);
     const interpreter =
       shebang === undefined ? undefined : await sealExecutablePath(shebang.path, false, false);
-    return Object.freeze({
-      canonicalPath,
-      dev: String(before.dev),
-      ino: String(before.ino),
-      size: Number(before.size),
-      mtimeMs: Number(before.mtimeNs) / 1_000_000,
-      ctimeMs: Number(before.ctimeNs) / 1_000_000,
-      mtimeNs: String(before.mtimeNs),
-      ctimeNs: String(before.ctimeNs),
-      mode: Number(before.mode),
-      digest: sha256(bytes),
-      allowSourceHardlinks: allowHardlinks,
-      ...(interpreter === undefined ? {} : { interpreter }),
-    });
+    return sealedIdentity(canonicalPath, before, bytes, allowHardlinks, interpreter);
   } finally {
     await source.close();
   }
+}
+
+function sealedIdentity(
+  canonicalPath: string,
+  stats: BigIntStats,
+  bytes: Buffer,
+  allowHardlinks: boolean,
+  interpreter?: SealedExecutableIdentity,
+): SealedExecutableIdentity {
+  if (bytes.byteLength < 1 || bytes.byteLength > MAX_EXECUTION_IMAGE_BYTES)
+    throw new Error('Executable exceeds the size limit');
+  return Object.freeze({
+    canonicalPath,
+    dev: String(stats.dev),
+    ino: String(stats.ino),
+    size: Number(stats.size),
+    mtimeMs: Number(stats.mtimeNs) / 1_000_000,
+    ctimeMs: Number(stats.ctimeNs) / 1_000_000,
+    mtimeNs: String(stats.mtimeNs),
+    ctimeNs: String(stats.ctimeNs),
+    mode: Number(stats.mode),
+    digest: sha256(bytes),
+    allowSourceHardlinks: allowHardlinks,
+    ...(interpreter === undefined ? {} : { interpreter }),
+  });
 }
 
 async function isRootOwnedSystemExecutable(path: string): Promise<boolean> {
@@ -578,6 +600,14 @@ function assertExpectedStats(stats: BigIntStats, expected: SealedExecutableIdent
 }
 
 function sameStats(first: BigIntStats, second: BigIntStats): boolean {
+  return sameIdentityStats(first, second, false);
+}
+
+function sameIdentityStats(
+  first: BigIntStats,
+  second: BigIntStats,
+  allowHardlinks: boolean,
+): boolean {
   return (
     first.dev === second.dev &&
     first.ino === second.ino &&
@@ -586,7 +616,7 @@ function sameStats(first: BigIntStats, second: BigIntStats): boolean {
     first.ctimeNs === second.ctimeNs &&
     first.mode === second.mode &&
     first.nlink === second.nlink &&
-    second.nlink === 1n
+    (allowHardlinks || second.nlink === 1n)
   );
 }
 
