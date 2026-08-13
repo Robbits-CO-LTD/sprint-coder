@@ -4486,6 +4486,65 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-primary);
   border-color: var(--accent-line);
 }
+.md-mermaid {
+  width: 100%;
+  max-height: 560px;
+  margin: 6px 0 12px;
+  padding: 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+}
+.md-mermaid svg {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 520px;
+  margin: 0 auto;
+}
+.md-mermaid .node rect,
+.md-mermaid .node circle,
+.md-mermaid .node ellipse,
+.md-mermaid .node polygon,
+.md-mermaid .node path {
+  fill: var(--bg-elevated);
+  stroke: var(--border-strong);
+}
+.md-mermaid .node text,
+.md-mermaid .label text,
+.md-mermaid .edgeLabel text,
+.md-mermaid .cluster-label text,
+.md-mermaid text {
+  fill: var(--text-primary);
+}
+.md-mermaid .actor,
+.md-mermaid .labelBox,
+.md-mermaid .note,
+.md-mermaid .activation0,
+.md-mermaid .activation1,
+.md-mermaid .activation2,
+.md-mermaid .stateGroup rect,
+.md-mermaid .classGroup rect,
+.md-mermaid .classBox {
+  fill: var(--bg-elevated);
+  stroke: var(--border-strong);
+}
+.md-mermaid .flowchart-link,
+.md-mermaid .edgePath path,
+.md-mermaid .messageLine0,
+.md-mermaid .messageLine1,
+.md-mermaid .loopLine,
+.md-mermaid .relation,
+.md-mermaid .transition,
+.md-mermaid marker path {
+  stroke: var(--text-secondary);
+}
+.md-mermaid marker path {
+  fill: var(--text-secondary);
+}
 .md-table-wrap {
   width: 100%;
   margin: 6px 0 12px;

@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react';
-import type { ComponentPropsWithoutRef } from 'react';
+import { isValidElement, useEffect, useMemo, useRef, useState } from 'react';
+import type { ComponentPropsWithoutRef, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -43,7 +43,7 @@ type MarkdownElementProps<Tag extends 'pre' | 'table'> = ComponentPropsWithoutRe
   node?: unknown;
 };
 
-function PreBlock({ children, node, ...rest }: MarkdownElementProps<'pre'>) {
+function StandardPreBlock({ children, node, ...rest }: MarkdownElementProps<'pre'>) {
   void node;
   const preRef = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
@@ -72,6 +72,206 @@ function PreBlock({ children, node, ...rest }: MarkdownElementProps<'pre'>) {
   );
 }
 
+const MAX_MERMAID_SOURCE_LENGTH = 20_000;
+const MAX_MERMAID_LINES = 300;
+const MAX_MERMAID_DIAGRAMS = 4;
+const MAX_MERMAID_TOTAL_SOURCE_LENGTH = 40_000;
+const MERMAID_RESOURCE_REFERENCE =
+  /(?:https?:)?\/\/|(?:data|file|javascript|vbscript):|url\s*\(|<\s*(?:img|image|link|style)\b|@\{[^}]*\bimg\s*:|\b(?:image|icon|themeCSS)\s*:/i;
+let nextMermaidId = 1;
+
+function mermaidSource(children: ReactNode): string | null {
+  if (!isValidElement<{ className?: string; children?: ReactNode }>(children)) return null;
+  if (children.props.className !== 'language-mermaid') return null;
+  return String(children.props.children ?? '').replace(/\n$/, '');
+}
+
+function PreBlock(props: MarkdownElementProps<'pre'> & { isStreaming: boolean }) {
+  const { isStreaming, children, ...rest } = props;
+  const source = mermaidSource(children);
+  if (source === null || isStreaming)
+    return <StandardPreBlock {...rest}>{children}</StandardPreBlock>;
+  return (
+    <MermaidDiagram
+      source={source}
+      fallback={<StandardPreBlock {...rest}>{children}</StandardPreBlock>}
+    />
+  );
+}
+
+function MermaidDiagram({ source, fallback }: { source: string; fallback: ReactNode }) {
+  const [rendered, setRendered] = useState<{ source: string; svg: string } | null>(null);
+  const invalidInput =
+    source.length === 0 ||
+    source.length > MAX_MERMAID_SOURCE_LENGTH ||
+    source.split('\n').length > MAX_MERMAID_LINES ||
+    MERMAID_RESOURCE_REFERENCE.test(source);
+
+  useEffect(() => {
+    if (invalidInput) return;
+    let current = true;
+    const id = `sprint-coder-mermaid-${nextMermaidId++}`;
+    void import('mermaid')
+      .then(async ({ default: mermaid }) => {
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          htmlLabels: false,
+          flowchart: { htmlLabels: false },
+          suppressErrorRendering: true,
+        });
+        const rendered = await mermaid.render(id, source);
+        if (current) setRendered({ source, svg: sanitizeMermaidSvg(rendered.svg) });
+      })
+      .catch(() => {
+        if (current) setRendered(null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [invalidInput, source]);
+
+  const svg = rendered?.source === source ? rendered.svg : null;
+  if (invalidInput || svg === null) return fallback;
+  return (
+    <div
+      className="md-mermaid"
+      role="img"
+      aria-label="会話内の図"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+}
+
+export function sanitizeMermaidSvg(svg: string): string {
+  const document = new DOMParser().parseFromString(svg, 'image/svg+xml');
+  const root = document.documentElement;
+  if (root.localName !== 'svg' || document.querySelector('parsererror') !== null)
+    throw new Error('Invalid Mermaid SVG');
+  const nonElementNodes = document.createNodeIterator(
+    root,
+    NodeFilter.SHOW_CDATA_SECTION |
+      NodeFilter.SHOW_COMMENT |
+      NodeFilter.SHOW_PROCESSING_INSTRUCTION,
+  );
+  const nodesToRemove: Node[] = [];
+  for (let node = nonElementNodes.nextNode(); node !== null; node = nonElementNodes.nextNode())
+    nodesToRemove.push(node);
+  for (const node of nodesToRemove) node.parentNode?.removeChild(node);
+  const allowedTags = new Set([
+    'svg',
+    'g',
+    'path',
+    'rect',
+    'circle',
+    'ellipse',
+    'line',
+    'polyline',
+    'polygon',
+    'text',
+    'tspan',
+    'defs',
+    'marker',
+    'lineargradient',
+    'radialgradient',
+    'stop',
+    'clippath',
+    'mask',
+    'pattern',
+    'title',
+    'desc',
+    'use',
+  ]);
+  const allowedAttributes = new Set([
+    'id',
+    'class',
+    'role',
+    'aria-label',
+    'aria-labelledby',
+    'aria-describedby',
+    'xmlns',
+    'viewbox',
+    'width',
+    'height',
+    'x',
+    'y',
+    'x1',
+    'x2',
+    'y1',
+    'y2',
+    'cx',
+    'cy',
+    'r',
+    'rx',
+    'ry',
+    'd',
+    'points',
+    'transform',
+    'opacity',
+    'fill',
+    'fill-opacity',
+    'fill-rule',
+    'stroke',
+    'stroke-width',
+    'stroke-opacity',
+    'stroke-linecap',
+    'stroke-linejoin',
+    'stroke-dasharray',
+    'stroke-dashoffset',
+    'font-family',
+    'font-size',
+    'font-style',
+    'font-weight',
+    'text-anchor',
+    'dominant-baseline',
+    'dx',
+    'dy',
+    'offset',
+    'stop-color',
+    'stop-opacity',
+    'gradientunits',
+    'gradienttransform',
+    'spreadmethod',
+    'markerwidth',
+    'markerheight',
+    'markerunits',
+    'orient',
+    'refx',
+    'refy',
+    'preserveaspectratio',
+    'clip-path',
+    'mask',
+    'marker-start',
+    'marker-mid',
+    'marker-end',
+    'href',
+    'xlink:href',
+  ]);
+  for (const element of [...document.querySelectorAll('*')]) {
+    if (!allowedTags.has(element.localName.toLowerCase())) {
+      element.remove();
+      continue;
+    }
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value.trim();
+      const urlReferences = [...value.matchAll(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi)].map(
+        (match) => match[2] ?? '',
+      );
+      if (!allowedAttributes.has(name)) element.removeAttribute(attribute.name);
+      else if ((name === 'href' || name === 'xlink:href') && !/^#[A-Za-z_][\w:.-]*$/.test(value))
+        element.removeAttribute(attribute.name);
+      else if (
+        /url\s*\(/i.test(value) &&
+        (urlReferences.length === 0 ||
+          urlReferences.some((reference) => !/^#[A-Za-z_][\w:.-]*$/.test(reference)))
+      )
+        element.removeAttribute(attribute.name);
+    }
+  }
+  return new XMLSerializer().serializeToString(root);
+}
+
 function TableBlock({ children, node, ...rest }: MarkdownElementProps<'table'>) {
   void node;
   return (
@@ -81,14 +281,53 @@ function TableBlock({ children, node, ...rest }: MarkdownElementProps<'table'>) 
   );
 }
 
-const COMPONENTS = { a: SafeAnchor, pre: PreBlock, img: SafeImage, table: TableBlock };
-
-export function Markdown({ content }: { content: string }) {
+export function Markdown({
+  content,
+  isStreaming = false,
+}: {
+  content: string;
+  isStreaming?: boolean;
+}) {
+  const components = useMemo(
+    () => ({
+      a: SafeAnchor,
+      pre: (props: MarkdownElementProps<'pre'>) => (
+        <PreBlock {...props} isStreaming={isStreaming} />
+      ),
+      img: SafeImage,
+      table: TableBlock,
+    }),
+    [isStreaming],
+  );
   return (
     <div className="md-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMermaidBudget]} components={components}>
         {content}
       </ReactMarkdown>
     </div>
   );
+}
+
+function remarkMermaidBudget() {
+  return (tree: unknown): void => {
+    let diagrams = 0;
+    let totalSourceLength = 0;
+    const walk = (node: unknown): void => {
+      if (typeof node !== 'object' || node === null) return;
+      const record = node as {
+        type?: unknown;
+        lang?: unknown;
+        value?: unknown;
+        children?: unknown;
+      };
+      if (record.type === 'code' && record.lang === 'mermaid') {
+        diagrams += 1;
+        totalSourceLength += typeof record.value === 'string' ? record.value.length : 0;
+        if (diagrams > MAX_MERMAID_DIAGRAMS || totalSourceLength > MAX_MERMAID_TOTAL_SOURCE_LENGTH)
+          record.lang = 'mermaid-fallback';
+      }
+      if (Array.isArray(record.children)) for (const child of record.children) walk(child);
+    };
+    walk(tree);
+  };
 }

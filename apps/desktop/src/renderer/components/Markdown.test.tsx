@@ -39,4 +39,22 @@ describe('Markdown', () => {
     expect(html).toContain('<pre>');
     expect(html).toContain('const ready = true;');
   });
+
+  it('keeps Mermaid source as copyable code while the response is streaming', () => {
+    const html = renderToStaticMarkup(
+      <Markdown content={'```mermaid\ngraph TD\nA-->B\n```'} isStreaming />,
+    );
+
+    expect(html).toContain('language-mermaid');
+    expect(html).toContain('graph TD');
+    expect(html).not.toContain('md-mermaid');
+  });
+
+  it('falls back to code without trying to render oversized Mermaid input', () => {
+    const source = `graph TD\n${'A-->B\n'.repeat(301)}`;
+    const html = renderToStaticMarkup(<Markdown content={`\`\`\`mermaid\n${source}\`\`\``} />);
+
+    expect(html).toContain('language-mermaid');
+    expect(html).not.toContain('md-mermaid');
+  });
 });

@@ -46,7 +46,7 @@ export function MessageBubble({ author, content, attachments = [], isStreaming =
     >
       <span className="msg-label">Assistant</span>
       <div className={`bubble${isStreaming ? ' caret' : ''}`}>
-        <Markdown content={content} />
+        <Markdown content={content} isStreaming={isStreaming} />
       </div>
     </div>
   );
