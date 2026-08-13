@@ -94,7 +94,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
   }
 
   async apply(step: EditSagaStep, lease: unknown | null): Promise<OperationObservation> {
-    return this.runIntent(step, asMutationLease(lease), 'forward');
+    return this.runIntent(step, asMutationLeaseResolver(lease), 'forward');
   }
 
   async restore(
@@ -102,17 +102,18 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     _expectedPost: OperationObservation,
     lease: unknown | null,
   ): Promise<OperationObservation> {
-    return this.runIntent(step, asMutationLease(lease), 'compensation');
+    return this.runIntent(step, asMutationLeaseResolver(lease), 'compensation');
   }
 
   async observe(step: EditSagaStep, lease: unknown | null): Promise<EditEffectObservation> {
-    const token = asMutationLease(lease);
-    const session = await this.resolveSession(token);
+    const resolveToken = asMutationLeaseResolver(lease);
+    const session = await this.resolveSession(resolveToken());
+    const token = resolveToken();
     const intent = createNativeMutationIntentSnapshot(
       this.buildSeed(step, token, session, 'forward'),
       randomBytes(16).toString('hex'),
     );
-    this.assertSession(session, token);
+    this.assertSession(session, resolveToken());
     const effect = await this.native.observeIntent(session, intent);
     const observation = toSagaObservation('forward', step.operation.kind, effect);
     if (matchesPhase(step, observation, 'pre')) return { state: 'pre', observation };
@@ -122,52 +123,60 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
 
   private async runIntent(
     step: EditSagaStep,
-    token: MutationLeaseToken,
+    resolveToken: () => MutationLeaseToken,
     direction: NativeMutationDirection,
   ): Promise<OperationObservation> {
-    const session = await this.resolveSession(token);
+    const session = await this.resolveSession(resolveToken());
+    const token = resolveToken();
     let intent = this.journal.prepareNativeMutationIntent(
       this.buildSeed(step, token, session, direction),
       token,
       this.now(),
       'edit-saga-executor',
     );
-    this.assertSession(session, token);
+    this.assertSession(session, resolveToken());
     await this.native.observeIntent(session, intent);
     if (intent.temp !== null) {
-      intent = this.transition(intent, token, session, { state: 'aux_pending' });
+      intent = this.transition(intent, resolveToken, session, { state: 'aux_pending' });
       const bytes = await this.artifacts.read(stagingArtifact(step, direction));
-      this.assertSession(session, token);
+      this.assertSession(session, resolveToken());
       const auxObservation = await this.native.stageIntentArtifact(session, intent, bytes);
-      intent = this.transition(intent, token, session, { state: 'aux_observed', auxObservation });
+      intent = this.transition(intent, resolveToken, session, {
+        state: 'aux_observed',
+        auxObservation,
+      });
     }
-    intent = this.transition(intent, token, session, { state: 'effect_pending' });
-    this.assertSession(session, token);
+    intent = this.transition(intent, resolveToken, session, { state: 'effect_pending' });
+    this.assertSession(session, resolveToken());
     const effectObservation = await this.native.applyIntentEffect(session, intent);
-    intent = this.transition(intent, token, session, {
+    intent = this.transition(intent, resolveToken, session, {
       state: 'effect_observed',
       effectObservation,
     });
     if (intent.temp !== null || intent.tombstone !== null) {
-      intent = this.transition(intent, token, session, { state: 'cleanup_pending' });
-      this.assertSession(session, token);
+      intent = this.transition(intent, resolveToken, session, { state: 'cleanup_pending' });
+      this.assertSession(session, resolveToken());
       await this.native.cleanupIntentAuxiliary(session, intent);
-      this.transition(intent, token, session, {
+      this.transition(intent, resolveToken, session, {
         state: 'completed',
         cleanupObservation: { state: 'absent' },
       });
     } else {
-      this.transition(intent, token, session, { state: 'completed', cleanupObservation: null });
+      this.transition(intent, resolveToken, session, {
+        state: 'completed',
+        cleanupObservation: null,
+      });
     }
     return toSagaObservation(direction, step.operation.kind, effectObservation);
   }
 
   private transition(
     intent: NativeMutationIntentSnapshot,
-    token: MutationLeaseToken,
+    resolveToken: () => MutationLeaseToken,
     session: NativeSafeFsSession,
     transition: NativeMutationIntentTransition,
   ): NativeMutationIntentSnapshot {
+    const token = resolveToken();
     return this.journal.updateNativeMutationIntent(
       intent.id,
       intent.revision,
@@ -321,6 +330,16 @@ function asMutationLease(lease: unknown): MutationLeaseToken {
   )
     throw new MutationLeaseStaleError();
   return token;
+}
+
+function asMutationLeaseResolver(lease: unknown): () => MutationLeaseToken {
+  const current =
+    lease !== null && typeof lease === 'object'
+      ? (lease as { current?: unknown }).current
+      : undefined;
+  if (typeof current === 'function') return () => asMutationLease(current());
+  const token = asMutationLease(lease);
+  return () => token;
 }
 
 function defaultIntentId(

@@ -51,6 +51,7 @@ class MemoryArtifacts implements Pick<EditArtifactRepository, 'read' | 'put'> {
 class FakeNative {
   readonly calls: string[] = [];
   failAssertOn: number | null = null;
+  afterObserve: (() => void) | null = null;
   private assertCount = 0;
   nextObserve: NativeMutationEffectObservation | null = null;
 
@@ -66,6 +67,8 @@ class FakeNative {
     intent: NativeMutationIntentSnapshot,
   ): Promise<NativeMutationEffectObservation> {
     this.calls.push('observe');
+    this.afterObserve?.();
+    this.afterObserve = null;
     return (
       this.nextObserve ?? { source: intent.expectedSource, destination: ABSENT, auxiliary: ABSENT }
     );
@@ -115,14 +118,19 @@ class FakeNative {
 // digest recomputation, effect semantics) so persisted transitions are authentic.
 class FakeJournal {
   readonly intents = new Map<string, NativeMutationIntentSnapshot>();
+  readonly leaseRevisions: number[] = [];
+
+  constructor(private readonly expectedLease?: () => MutationLeaseToken) {}
+
   getMutationWorkspacePath(): string | null {
     return WORKSPACE;
   }
   prepareNativeMutationIntent(
     seed: NativeMutationIntentSeed,
-    _lease: MutationLeaseToken,
+    lease: MutationLeaseToken,
     _now: string,
   ): NativeMutationIntentSnapshot {
+    this.assertLease(lease);
     const existing = this.intents.get(seed.id);
     if (existing !== undefined) return existing;
     const snapshot = createNativeMutationIntentSnapshot(seed, 'a'.repeat(32));
@@ -132,17 +140,25 @@ class FakeJournal {
   updateNativeMutationIntent(
     id: string,
     expectedRevision: number,
-    _lease: MutationLeaseToken,
+    lease: MutationLeaseToken,
     now: string,
     _nativeSessionId: string,
     transition: NativeMutationIntentTransition,
   ): NativeMutationIntentSnapshot {
+    this.assertLease(lease);
     const current = this.intents.get(id);
     if (current === undefined) throw new Error('intent not found');
     if (current.revision !== expectedRevision) throw new Error('stale intent revision');
     const next = transitionNativeMutationIntent(current, transition, now);
     this.intents.set(id, next);
     return next;
+  }
+
+  private assertLease(lease: MutationLeaseToken): void {
+    this.leaseRevisions.push(lease.revision);
+    const expected = this.expectedLease?.();
+    if (expected !== undefined && lease.revision !== expected.revision)
+      throw new MutationLeaseStaleError();
   }
 }
 
@@ -299,6 +315,31 @@ describe('NativeSafeFsEditEffectBoundary', () => {
     // The effect never entered the addon and the intent stayed durably pending.
     expect(native.calls).toEqual(['assert', 'observe', 'assert', 'stage', 'assert']);
     expect([...journal.intents.values()][0]).toMatchObject({ state: 'effect_pending' });
+  });
+
+  it('resolves the latest renewed lease before every native journal transition', async () => {
+    const native = new FakeNative();
+    const artifacts = new MemoryArtifacts();
+    const saga = await stageSaga(singlePlan('update'), artifacts);
+    let current = lease();
+    const journal = new FakeJournal(() => current);
+    const boundary = makeBoundary(native, journal, artifacts);
+    native.afterObserve = () => {
+      current = Object.freeze({
+        ...current,
+        revision: current.revision + 1,
+        renewedAt: '2026-07-23T00:00:20.000Z',
+        expiresAt: '2026-07-23T01:00:20.000Z',
+      });
+    };
+
+    await expect(boundary.apply(saga.steps[0]!, { current: () => current })).resolves.toBeDefined();
+
+    expect(journal.leaseRevisions[0]).toBe(1);
+    expect(journal.leaseRevisions.slice(1)).toEqual(
+      Array(journal.leaseRevisions.length - 1).fill(2),
+    );
+    expect([...journal.intents.values()][0]).toMatchObject({ state: 'completed' });
   });
 
   it('refuses to enter the addon when the session cannot be reasserted at all', async () => {
