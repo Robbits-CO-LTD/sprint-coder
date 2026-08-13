@@ -4642,7 +4642,9 @@ let recoveryCrashCheckpointForTesting: ((checkpoint: RecoveryCrashCheckpoint) =>
   null;
 
 function syncFile(path: string): void {
-  const descriptor = openSync(path, 'r');
+  // Windows requires a writable descriptor for FlushFileBuffers. Both callers pass a regular,
+  // recovery-owned file that was just created and must be durably flushed before publication.
+  const descriptor = openSync(path, 'r+');
   try {
     fsyncSync(descriptor);
   } finally {
