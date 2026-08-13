@@ -129,6 +129,15 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
     return this.runIntent(step, asMutationLeaseResolver(lease), 'compensation');
   }
 
+  async resume(
+    step: EditSagaStep,
+    direction: 'forward' | 'compensation',
+    lease: unknown | null,
+  ): Promise<OperationObservation> {
+    if (step.operation.kind !== 'mkdir') throw new MutationLeaseStaleError();
+    return this.runIntent(step, asMutationLeaseResolver(lease), direction);
+  }
+
   async observe(step: EditSagaStep, lease: unknown | null): Promise<EditEffectObservation> {
     const resolveToken = asMutationLeaseResolver(lease);
     const session = await this.resolveSession(resolveToken());
@@ -198,7 +207,10 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
         this.now(),
         'edit-saga-executor',
       );
-    } else if (intent.leaseFence !== String(token.fence) || intent.nativeSessionId !== session.id) {
+    } else if (
+      intent.state !== 'completed' &&
+      (intent.leaseFence !== String(token.fence) || intent.nativeSessionId !== session.id)
+    ) {
       if (
         token.purpose !== 'recovery' ||
         this.journal.bindNativeMutationIntentRecovery === undefined

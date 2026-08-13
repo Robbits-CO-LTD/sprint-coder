@@ -699,9 +699,11 @@ describe('NativeSafeFs authority boundary', () => {
       },
     );
 
-    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()))(
-      'resumes an owned removal quarantine after a subprocess crash',
-      async () => {
+    it
+      .skipIf(!existsSync(nativeSafeFsTestAddonPath()))
+      .each(['directory.after_remove_stage', 'directory.after_remove_cleanup'])(
+      'resumes an owned removal quarantine after a subprocess crash at %s',
+      async (cleanupPoint) => {
         const input = await fixture();
         await mkdir(join(input.workspace, 'parent'));
         const addonPath = nativeSafeFsTestAddonPath();
@@ -754,7 +756,7 @@ describe('NativeSafeFs authority boundary', () => {
               pathSegments: ['parent', 'removed-after-crash'],
               expectedIdentityDigest: created.identityDigest,
             },
-            point: 'directory.after_remove_cleanup',
+            point: cleanupPoint,
           }),
         ).resolves.toBe(86);
         session = await boundary.openSession({ ...input, fence: '715' });

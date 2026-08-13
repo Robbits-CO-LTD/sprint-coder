@@ -10,7 +10,17 @@
 // binary with ELECTRON_RUN_AS_NODE=1 unless it is already running that way.
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -463,6 +473,14 @@ if (runsWithElectronAbi) {
       ).recover(request.id);
       expect(recovered.state).toBe('committed');
       expect((await lstat(directoryPath)).isDirectory()).toBe(true);
+      expect(reopened.getNativeMutationIntent('nmi-forward-1-saga-mkdir-restart')).toMatchObject({
+        state: 'completed',
+        cleanupObservation: { state: 'absent' },
+      });
+      await expect(readFile(directoryPath)).rejects.toMatchObject({ code: 'EISDIR' });
+      expect(
+        (await readdir(directoryPath)).filter((name) => name.startsWith('.sprint-coder-')),
+      ).toEqual([]);
       await Promise.all(
         [...secondSessions.sessions.values()].map((session) => native.closeSession(session)),
       );

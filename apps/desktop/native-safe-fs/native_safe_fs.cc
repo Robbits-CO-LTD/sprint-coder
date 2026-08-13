@@ -2435,25 +2435,37 @@ bool SameDirectoryObject(const struct stat& first, const struct stat& second) {
          first.st_ino == second.st_ino && first.st_mode == second.st_mode;
 }
 
-bool PinnedOwnedDirectoryMatches(int parent_fd, const std::string& leaf, int directory_fd,
-                                 const std::string& marker_leaf,
-                                 const std::string& expected_token, bool require_only_marker,
-                                 struct stat* pinned_stat) {
+bool PinnedOwnedDirectoryIdentityMatches(int parent_fd, const std::string& leaf,
+                                         int directory_fd, const std::string& expected_token,
+                                         const std::string* expected_identity,
+                                         struct stat* pinned_stat) {
   struct stat descriptor_stat {};
   struct stat namespace_stat {};
   std::string attribute_token;
-  std::string marker_token;
   if (directory_fd < 0 || fstat(directory_fd, &descriptor_stat) != 0 ||
       fstatat(parent_fd, leaf.c_str(), &namespace_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
       !SameDirectoryObject(descriptor_stat, namespace_stat) ||
       !ReadDirectoryOwnershipToken(directory_fd, &attribute_token) ||
       attribute_token != expected_token ||
+      (expected_identity != nullptr &&
+       OwnedDirectoryIdentityDigest(descriptor_stat, attribute_token) != *expected_identity))
+    return false;
+  if (pinned_stat != nullptr) *pinned_stat = descriptor_stat;
+  return true;
+}
+
+bool PinnedOwnedDirectoryMatches(int parent_fd, const std::string& leaf, int directory_fd,
+                                 const std::string& marker_leaf,
+                                 const std::string& expected_token, bool require_only_marker,
+                                 struct stat* pinned_stat) {
+  std::string marker_token;
+  if (!PinnedOwnedDirectoryIdentityMatches(parent_fd, leaf, directory_fd, expected_token, nullptr,
+                                           pinned_stat) ||
       (require_only_marker &&
        (!ReadMarkerToken(directory_fd, marker_leaf, &marker_token) ||
         marker_token != expected_token ||
         !DirectoryContainsOnlyMarker(directory_fd, marker_leaf))))
     return false;
-  if (pinned_stat != nullptr) *pinned_stat = descriptor_stat;
   return true;
 }
 
@@ -2739,10 +2751,8 @@ napi_value InspectDirectoryOwnership(napi_env env, napi_callback_info info) {
       } else {
         int directory_fd = openat(parent_fd, segments.back().c_str(),
                                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        std::string token, attribute_token;
-        if (directory_fd < 0 || !ReadMarkerToken(directory_fd, marker_leaf, &token) ||
-            !ReadDirectoryOwnershipToken(directory_fd, &attribute_token) ||
-            token != expected_token || attribute_token != expected_token) {
+        if (!PinnedOwnedDirectoryMatches(parent_fd, segments.back(), directory_fd, marker_leaf,
+                                         expected_token, true, &observed)) {
           failure = {"UNSAFE_PATH", "Directory ownership marker does not match"};
         }
         CloseFd(&directory_fd);
@@ -2796,12 +2806,9 @@ napi_value CleanupDirectoryOwnership(napi_env env, napi_callback_info info) {
     } else {
       int directory_fd = openat(parent_fd, segments.back().c_str(),
                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-      std::string token, attribute_token;
-      const bool attribute_matches = directory_fd >= 0 &&
-                                     ReadDirectoryOwnershipToken(directory_fd, &attribute_token) &&
-                                     attribute_token == expected_token &&
-                                     OwnedDirectoryIdentityDigest(observed, attribute_token) ==
-                                         expected_identity;
+      std::string token;
+      const bool attribute_matches = PinnedOwnedDirectoryIdentityMatches(
+          parent_fd, segments.back(), directory_fd, expected_token, &expected_identity, &observed);
       const bool marker_present = ReadMarkerToken(directory_fd, marker_leaf, &token);
       if (!attribute_matches ||
           (marker_present
@@ -2809,7 +2816,9 @@ napi_value CleanupDirectoryOwnership(napi_env env, napi_callback_info info) {
                : !DirectoryIsEmpty(directory_fd))) {
         failure = {"UNSAFE_PATH", "Directory marker cleanup refused non-owned contents"};
       } else if (marker_present &&
-                 (unlinkat(directory_fd, marker_leaf.c_str(), 0) != 0 || fsync(directory_fd) != 0)) {
+                 (!PinnedOwnedDirectoryIdentityMatches(parent_fd, segments.back(), directory_fd,
+                                                       expected_token, &expected_identity, nullptr) ||
+                  unlinkat(directory_fd, marker_leaf.c_str(), 0) != 0 || fsync(directory_fd) != 0)) {
         failure = {"NATIVE_FAILURE", ErrnoMessage("cleanup mkdir ownership marker")};
       }
       CloseFd(&directory_fd);
@@ -2869,9 +2878,12 @@ napi_value RemoveDirectory(napi_env env, napi_callback_info info) {
         int directory_fd = openat(parent_fd, segments.back().c_str(),
                                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         std::string ownership_token;
+        const bool has_token = directory_fd >= 0 &&
+                               ReadDirectoryOwnershipToken(directory_fd, &ownership_token);
         const bool identity_matches =
-            directory_fd >= 0 && ReadDirectoryOwnershipToken(directory_fd, &ownership_token) &&
-            OwnedDirectoryIdentityDigest(current, ownership_token) == expected_identity &&
+            has_token && PinnedOwnedDirectoryIdentityMatches(
+                             parent_fd, segments.back(), directory_fd, ownership_token,
+                             &expected_identity, &current) &&
             DirectoryIsEmpty(directory_fd);
         CloseFd(&directory_fd);
         if (!identity_matches)
@@ -2895,10 +2907,15 @@ napi_value RemoveDirectory(napi_env env, napi_callback_info info) {
       const bool quarantine_matches =
           quarantined_fd >= 0 && fstat(quarantined_fd, &quarantined) == 0 &&
           ReadDirectoryOwnershipToken(quarantined_fd, &ownership_token) &&
-          OwnedDirectoryIdentityDigest(quarantined, ownership_token) == expected_identity;
+          PinnedOwnedDirectoryIdentityMatches(parent_fd, quarantine_leaf, quarantined_fd,
+                                              ownership_token, &expected_identity, &quarantined);
       CloseFd(&quarantined_fd);
       if (!quarantine_matches) {
-        failure = {"UNSAFE_PATH", "Directory quarantine is absent or changed"};
+        if (AtomicMoveNoReplace(parent_fd, quarantine_leaf.c_str(), parent_fd,
+                                segments.back().c_str()) == 0)
+          failure = {"UNSAFE_PATH", "Directory identity changed during quarantine"};
+        else
+          failure = {"NATIVE_FAILURE", "Failed to restore substituted directory quarantine"};
       }
     }
     if (failure.code.empty() && fsync(parent_fd) != 0) {
@@ -2932,6 +2949,7 @@ napi_value CleanupDirectoryRemoval(napi_env env, napi_callback_info info) {
     return ThrowFailure(env, failure.code, failure.message);
   int parent_fd = OpenRelativeParent(root_fd, segments, &failure);
   const std::string quarantine_leaf = ".sprint-coder-rmdir-" + expected_identity.substr(0, 32);
+  const std::string delete_leaf = ".sprint-coder-rmdir-delete-" + expected_identity.substr(0, 32);
   {
     std::lock_guard<std::mutex> guard(state.mutex);
     const auto session = state.sessions.find(session_id);
@@ -2952,21 +2970,46 @@ napi_value CleanupDirectoryRemoval(napi_env env, napi_callback_info info) {
         int quarantine_fd = openat(parent_fd, quarantine_leaf.c_str(),
                                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (quarantine_fd < 0 && errno == ENOENT) {
-          // cleanup_pending is the durable proof that removal was authorized and completed.
-        } else {
+          quarantine_fd = openat(parent_fd, delete_leaf.c_str(),
+                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+          if (quarantine_fd < 0 && errno == ENOENT) {
+            // cleanup_pending is the durable proof that removal was authorized and completed.
+          }
+        }
+        if (quarantine_fd >= 0) {
+          const bool already_staged =
+              fstatat(parent_fd, delete_leaf.c_str(), &quarantined, AT_SYMLINK_NOFOLLOW) == 0;
+          const std::string& cleanup_leaf = already_staged ? delete_leaf : quarantine_leaf;
           std::string token;
           const bool matches = quarantine_fd >= 0 && fstat(quarantine_fd, &quarantined) == 0 &&
                                ReadDirectoryOwnershipToken(quarantine_fd, &token) &&
-                               OwnedDirectoryIdentityDigest(quarantined, token) == expected_identity &&
+                               PinnedOwnedDirectoryIdentityMatches(
+                                   parent_fd, cleanup_leaf, quarantine_fd, token,
+                                   &expected_identity, &quarantined) &&
                                DirectoryIsEmpty(quarantine_fd);
-          CloseFd(&quarantine_fd);
           if (!matches)
             failure = {"UNSAFE_PATH", "Directory removal cleanup refused quarantine"};
-          else if (unlinkat(parent_fd, quarantine_leaf.c_str(), AT_REMOVEDIR) != 0 ||
-                   fsync(parent_fd) != 0)
-            failure = {"NATIVE_FAILURE", ErrnoMessage("cleanup removed directory quarantine")};
-          else
-            HitDirectoryCrashPoint("directory.after_remove_cleanup");
+          else if (!already_staged &&
+                   AtomicMoveNoReplace(parent_fd, quarantine_leaf.c_str(), parent_fd,
+                                       delete_leaf.c_str()) != 0)
+            failure = AtomicMutationFailure("stage removed directory cleanup");
+          else {
+            HitDirectoryCrashPoint("directory.after_remove_stage");
+            if (!PinnedOwnedDirectoryIdentityMatches(
+                       parent_fd, delete_leaf, quarantine_fd, token, &expected_identity, nullptr)) {
+              if (!already_staged &&
+                  AtomicMoveNoReplace(parent_fd, delete_leaf.c_str(), parent_fd,
+                                      quarantine_leaf.c_str()) != 0)
+                failure = {"NATIVE_FAILURE", "Failed to restore removal cleanup substitution"};
+              else
+                failure = {"UNSAFE_PATH", "Directory removal cleanup identity changed"};
+            } else if (unlinkat(parent_fd, delete_leaf.c_str(), AT_REMOVEDIR) != 0 ||
+                       fsync(parent_fd) != 0)
+              failure = {"NATIVE_FAILURE", ErrnoMessage("cleanup removed directory quarantine")};
+            else
+              HitDirectoryCrashPoint("directory.after_remove_cleanup");
+          }
+          CloseFd(&quarantine_fd);
         }
       }
     }

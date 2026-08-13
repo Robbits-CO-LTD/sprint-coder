@@ -186,6 +186,11 @@ export interface EditEffectBoundary {
     expectedPost: OperationObservation,
     lease: unknown | null,
   ): Promise<OperationObservation>;
+  resume?(
+    step: EditSagaStep,
+    direction: 'forward' | 'compensation',
+    lease: unknown | null,
+  ): Promise<OperationObservation>;
 }
 
 export interface EditSagaLeaseAccess {
@@ -757,17 +762,23 @@ export class EditSagaExecutor {
     for (const step of saga.steps) {
       if (step.state !== 'effect_pending' || step.operation.kind !== 'mkdir') continue;
       await this.assertLease(lease, saga);
-      const observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
-      if (observed.state !== 'post')
-        return this.compensate(id, 'interrupted during mkdir apply', lease);
-      validatePostObservation(step, observed.observation);
+      let observation: OperationObservation;
+      if (this.boundary.resume !== undefined) {
+        observation = await this.boundary.resume(step, 'forward', this.leaseAccess(lease, saga));
+      } else {
+        const observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
+        if (observed.state !== 'post')
+          return this.compensate(id, 'interrupted during mkdir apply', lease);
+        observation = observed.observation;
+      }
+      validatePostObservation(step, observation);
       saga = this.updateStep(
         saga,
         step.ordinal,
         (current) => ({
           ...current,
           state: 'effect_observed',
-          postObservation: observed.observation,
+          postObservation: observation,
         }),
         'applying',
       );
@@ -794,41 +805,94 @@ export class EditSagaExecutor {
       let step = stepAt(saga, original.ordinal);
       if (step.state === 'pending' || step.state === 'restored') continue;
       if (step.state === 'effect_pending') {
-        let observed: EditEffectObservation;
-        try {
-          await this.assertLease(lease, saga);
-          observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
-        } catch (error) {
+        if (step.operation.kind === 'mkdir' && this.boundary.resume !== undefined) {
+          try {
+            await this.assertLease(lease, saga);
+            const observation = await this.boundary.resume(
+              step,
+              'forward',
+              this.leaseAccess(lease, saga),
+            );
+            validatePostObservation(step, observation);
+            saga = this.updateStep(
+              saga,
+              step.ordinal,
+              (value) => ({ ...value, state: 'effect_observed', postObservation: observation }),
+              'compensating',
+            );
+            step = stepAt(saga, step.ordinal);
+          } catch (error) {
+            return this.requireRecovery(
+              saga,
+              'effect_outcome_unknown',
+              step.ordinal,
+              errorMessage(error),
+              null,
+            );
+          }
+        } else {
+          let observed: EditEffectObservation;
+          try {
+            await this.assertLease(lease, saga);
+            observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
+          } catch (error) {
+            return this.requireRecovery(
+              saga,
+              'effect_outcome_unknown',
+              step.ordinal,
+              errorMessage(error),
+              null,
+            );
+          }
+          if (observed.state === 'pre') {
+            saga = this.updateStep(
+              saga,
+              step.ordinal,
+              (value) => ({
+                ...value,
+                state: 'restored',
+              }),
+              'compensating',
+            );
+            continue;
+          }
           return this.requireRecovery(
             saga,
             'effect_outcome_unknown',
             step.ordinal,
-            errorMessage(error),
-            null,
+            failure,
+            observed.observation,
           );
         }
-        if (observed.state === 'pre') {
-          saga = this.updateStep(
-            saga,
-            step.ordinal,
-            (value) => ({
-              ...value,
-              state: 'restored',
-            }),
-            'compensating',
-          );
-          continue;
-        }
-        return this.requireRecovery(
-          saga,
-          'effect_outcome_unknown',
-          step.ordinal,
-          failure,
-          observed.observation,
-        );
       }
 
       if (step.state === 'compensation_pending') {
+        if (step.operation.kind === 'mkdir' && this.boundary.resume !== undefined) {
+          try {
+            await this.assertLease(lease, saga);
+            const restored = await this.boundary.resume(
+              step,
+              'compensation',
+              this.leaseAccess(lease, saga),
+            );
+            validateRestoredObservation(step, restored);
+            saga = this.updateStep(
+              saga,
+              step.ordinal,
+              (value) => ({ ...value, state: 'restored', restoredObservation: restored }),
+              'compensating',
+            );
+            continue;
+          } catch (error) {
+            return this.requireRecovery(
+              saga,
+              'compensation_effect_unknown',
+              step.ordinal,
+              errorMessage(error),
+              null,
+            );
+          }
+        }
         let observed: EditEffectObservation;
         try {
           await this.assertLease(lease, saga);
