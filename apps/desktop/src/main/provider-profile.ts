@@ -1,4 +1,7 @@
 import { providerProfileSchema, type ProviderProfile } from '@sprint-coder/contracts';
+import { ProviderEndpointPolicy } from './provider-endpoint-policy';
+
+const endpointPolicy = new ProviderEndpointPolicy();
 
 export interface ProviderProfileRegistry {
   register(profile: ProviderProfile): void;
@@ -31,6 +34,8 @@ export type OpenAICompatibleCredential = Readonly<{
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
+  endpointDigest?: string;
+  localConsentDigest?: string;
 }>;
 
 export function serializeOpenAICompatibleCredential(
@@ -55,10 +60,17 @@ export function parseOpenAICompatibleCredential(value: string): OpenAICompatible
     throw new Error('OpenAI-compatible base URL is invalid');
   if (record.accountId !== undefined && typeof record.accountId !== 'string')
     throw new Error('OpenAI-compatible account ID is invalid');
+  for (const field of ['endpointDigest', 'localConsentDigest'] as const)
+    if (record[field] !== undefined && !/^[a-f0-9]{64}$/u.test(String(record[field])))
+      throw new Error(`OpenAI-compatible ${field} is invalid`);
   return {
     ...(typeof record.apiKey === 'string' ? { apiKey: record.apiKey } : {}),
     ...(typeof record.baseUrl === 'string' ? { baseUrl: record.baseUrl } : {}),
     ...(typeof record.accountId === 'string' ? { accountId: record.accountId } : {}),
+    ...(typeof record.endpointDigest === 'string' ? { endpointDigest: record.endpointDigest } : {}),
+    ...(typeof record.localConsentDigest === 'string'
+      ? { localConsentDigest: record.localConsentDigest }
+      : {}),
   };
 }
 
@@ -83,14 +95,7 @@ export function resolveProfileBaseUrl(
       throw new Error(`Provider Profile ${profile.id} requires an account ID`);
     baseUrl = baseUrl.replaceAll('{accountId}', encodeURIComponent(accountId));
   }
-  const parsed = new URL(baseUrl);
-  if (
-    parsed.protocol !== 'https:' &&
-    parsed.hostname !== 'localhost' &&
-    parsed.hostname !== '127.0.0.1'
-  )
-    throw new Error('Custom Provider base URL must use HTTPS or loopback HTTP');
-  return baseUrl.replace(/\/+$/, '');
+  return endpointPolicy.canonicalizeBaseUrl(baseUrl);
 }
 
 export function resolvedProfileEndpointTrust(
