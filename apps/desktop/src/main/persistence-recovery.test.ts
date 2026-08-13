@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -16,7 +17,11 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
-import { SqlitePersistenceClient } from './persistence';
+import {
+  DatabaseRecoveryError,
+  SqlitePersistenceClient,
+  __persistenceRecoveryTestables,
+} from './persistence';
 
 // Phase 7 blocking subset: "DB migration、backup/restore、1万event projection復元".
 // Migration coverage lives in persistence.test.ts (legacy v1→latest chain); this file proves the
@@ -34,6 +39,14 @@ const execFileAsync = promisify(execFile);
 
 const tempDirs: string[] = [];
 
+const recoveryCrashFixturePath = process.env.SPRINT_CODER_RECOVERY_CRASH_FIXTURE_PATH;
+const recoveryCrashFixtureCheckpoint = process.env.SPRINT_CODER_RECOVERY_CRASH_CHECKPOINT as
+  | 'after_main_retired_before_sidecar_cleanup'
+  | 'after_main_retired'
+  | 'after_staging_validated'
+  | 'before_publish'
+  | undefined;
+
 function tempDatabasePath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'sprint-coder-recovery-'));
   tempDirs.push(dir);
@@ -41,11 +54,146 @@ function tempDatabasePath(): string {
 }
 
 afterEach(() => {
+  __persistenceRecoveryTestables.setCrashCheckpointForTesting(null);
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 if (runsWithElectronAbi)
   describe('database corruption recovery (backup/restore)', () => {
+    it('uses parent-directory fsync only on platforms that support it', () => {
+      expect(__persistenceRecoveryTestables.supportsDirectorySync('win32')).toBe(false);
+      expect(__persistenceRecoveryTestables.supportsDirectorySync('darwin')).toBe(true);
+      expect(__persistenceRecoveryTestables.supportsDirectorySync('linux')).toBe(true);
+    });
+
+    it('__recovery_crash_fixture_child__', () => {
+      if (recoveryCrashFixturePath === undefined || recoveryCrashFixtureCheckpoint === undefined)
+        return;
+      __persistenceRecoveryTestables.setCrashCheckpointForTesting((checkpoint) => {
+        if (checkpoint === recoveryCrashFixtureCheckpoint) {
+          writeFileSync(`${recoveryCrashFixturePath}.checkpoint`, checkpoint);
+          process.kill(process.pid, 'SIGKILL');
+        }
+      });
+      new SqlitePersistenceClient(recoveryCrashFixturePath);
+      throw new Error(`Recovery did not stop at ${recoveryCrashFixtureCheckpoint}`);
+    });
+
+    const crashCheckpoints = [
+      'after_main_retired_before_sidecar_cleanup',
+      'after_main_retired',
+      'after_staging_validated',
+      'before_publish',
+    ] as const;
+
+    for (const checkpoint of crashCheckpoints)
+      it(`resumes recovery after a process exit at ${checkpoint}`, async () => {
+        const path = tempDatabasePath();
+        const seeded = new SqlitePersistenceClient(path);
+        const task = seeded.createTask(`survives ${checkpoint}`);
+        seeded.close();
+        copyFileSync(path, `${path}.pre-migration.bak`);
+        writeFileSync(path, 'not a sqlite database — simulated corruption');
+        if (checkpoint === 'after_main_retired_before_sidecar_cleanup') {
+          writeFileSync(`${path}-wal`, 'stale WAL from corrupt main');
+          writeFileSync(`${path}-shm`, 'stale SHM from corrupt main');
+        }
+
+        let childFailure: unknown;
+        try {
+          await execFileAsync(
+            electronTestExecutablePath(),
+            [
+              join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+              'run',
+              'src/main/persistence-recovery.test.ts',
+              '-t',
+              '__recovery_crash_fixture_child__',
+            ],
+            {
+              cwd: process.cwd(),
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                ELECTRON_RUN_AS_NODE: '1',
+                SPRINT_CODER_ELECTRON_DB_TEST: '1',
+                SPRINT_CODER_RECOVERY_CRASH_FIXTURE_PATH: path,
+                SPRINT_CODER_RECOVERY_CRASH_CHECKPOINT: checkpoint,
+              },
+              timeout: recoveryBridgeTimeoutMs,
+            },
+          );
+        } catch (error) {
+          childFailure = error;
+        }
+        expect(childFailure).toBeDefined();
+        expect(readFileSync(`${path}.checkpoint`, 'utf8')).toBe(checkpoint);
+
+        let checkedBeforePublish = false;
+        if (checkpoint === 'after_main_retired_before_sidecar_cleanup') {
+          expect(existsSync(`${path}-wal`)).toBe(true);
+          expect(existsSync(`${path}-shm`)).toBe(true);
+          __persistenceRecoveryTestables.setCrashCheckpointForTesting((current) => {
+            if (current !== 'before_publish') return;
+            checkedBeforePublish = true;
+            expect(existsSync(`${path}-wal`)).toBe(false);
+            expect(existsSync(`${path}-shm`)).toBe(false);
+          });
+          expect(checkedBeforePublish).toBe(false);
+        }
+
+        const recovered = new SqlitePersistenceClient(path);
+        expect(recovered.getTask(task.id).title).toBe(`survives ${checkpoint}`);
+        expect(recovered.recoveryReport.restoredFromBackup).toBe(true);
+        expect(recovered.recoveryReport.resumedRecovery).toBe(true);
+        expect(recovered.recoveryReport.recoveryFailure).toBeNull();
+        recovered.close();
+        if (checkpoint === 'after_main_retired_before_sidecar_cleanup')
+          expect(checkedBeforePublish).toBe(true);
+
+        expect(
+          readdirSync(join(path, '..')).filter(
+            (name) =>
+              name.startsWith('sprint-coder.db.recovery-') ||
+              name.startsWith('sprint-coder.db.recovery-stage-'),
+          ),
+        ).toEqual([]);
+      });
+
+    it('resumes from a valid backup when main is absent and no marker survived', () => {
+      const path = tempDatabasePath();
+      const seeded = new SqlitePersistenceClient(path);
+      const task = seeded.createTask('backup-only restart');
+      seeded.close();
+      copyFileSync(path, `${path}.pre-migration.bak`);
+      rmSync(path);
+
+      const recovered = new SqlitePersistenceClient(path);
+      expect(recovered.getTask(task.id).title).toBe('backup-only restart');
+      expect(recovered.recoveryReport.resumedRecovery).toBe(true);
+      expect(recovered.recoveryReport.restoredFromBackup).toBe(true);
+      recovered.close();
+    });
+
+    it('fails closed when main is absent and the remaining backup is invalid', () => {
+      const path = tempDatabasePath();
+      writeFileSync(`${path}.pre-migration.bak`, 'not a sqlite database');
+
+      let failure: unknown;
+      try {
+        new SqlitePersistenceClient(path);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(DatabaseRecoveryError);
+      expect((failure as DatabaseRecoveryError).recoveryReport).toMatchObject({
+        corruptionDetected: true,
+        resumedRecovery: true,
+        recoveryFailure: 'Database recovery failed: no valid backup candidate',
+      });
+      expect(existsSync(path)).toBe(false);
+    });
+
     it('includes committed WAL-only pages in a pre-migration backup on every OS', () => {
       const path = tempDatabasePath();
       const seeded = new SqlitePersistenceClient(path);
@@ -110,6 +258,25 @@ if (runsWithElectronAbi)
       recovered.close();
     });
 
+    it('starts fresh when initial corruption recovery finds only invalid backups', () => {
+      const path = tempDatabasePath();
+      writeFileSync(path, 'corrupt main database');
+      writeFileSync(`${path}.pre-migration.bak`, 'corrupt backup database');
+
+      const recovered = new SqlitePersistenceClient(path);
+      expect(recovered.recoveryReport).toMatchObject({
+        corruptionDetected: true,
+        restoredFromBackup: false,
+        freshStart: true,
+        resumedRecovery: false,
+        recoveryFailure: null,
+      });
+      expect(recovered.recoveryReport.corruptFileMovedTo).not.toBeNull();
+      expect(existsSync(recovered.recoveryReport.corruptFileMovedTo ?? '')).toBe(true);
+      expect(existsSync(`${path}.pre-migration.bak`)).toBe(true);
+      recovered.close();
+    });
+
     it('reports a clean open for a healthy database', () => {
       const path = tempDatabasePath();
       const client = new SqlitePersistenceClient(path);
@@ -118,6 +285,8 @@ if (runsWithElectronAbi)
         restoredFromBackup: false,
         freshStart: false,
         corruptFileMovedTo: null,
+        resumedRecovery: false,
+        recoveryFailure: null,
       });
       client.close();
     });
