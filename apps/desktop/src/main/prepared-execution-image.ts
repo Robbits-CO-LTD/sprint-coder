@@ -470,7 +470,7 @@ async function prepareWindowsSideBySideImages(
       const dependency = queue.shift()!;
       const name = basename(dependency.canonicalPath).toLowerCase();
       if (copied.has(name)) continue;
-      if (basename(name) !== name || !/^[a-z0-9_.-]+\.dll$/u.test(name))
+      if (basename(name) !== name || !/^[a-z0-9_.-]+\.dll$/iu.test(name))
         throw new Error('Windows execution image has an unsafe DLL dependency name');
       if (copied.size >= 128)
         throw new Error('Windows execution image exceeds the side-by-side DLL limit');
