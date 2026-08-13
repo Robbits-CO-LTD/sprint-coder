@@ -48,7 +48,11 @@ import {
   type PreparedPatchOperation,
   type PreparedStructuredPatch,
 } from './structured-patch';
-import { MutationLeaseStaleError, type MutationLeaseToken } from './mutation-lease';
+import {
+  MutationLeaseStaleError,
+  MutationQuarantinedError,
+  type MutationLeaseToken,
+} from './mutation-lease';
 import { workspaceMutationBinding } from './path-guard';
 
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -683,9 +687,110 @@ if (runsWithElectronAbi) {
           reopened.getNativeMutationIntent(`nmi-forward-1-saga-${expectedState}`),
         ).toMatchObject({ state: 'completed' });
         expect(reopened.listRecoverableNativeMutationIntents()).toEqual([]);
+        expect(reopened.startTurn(task.id, `continued after ${expectedState}`)).toBeDefined();
         reopened.close();
       },
     );
+
+    it('keeps the Task quarantined when restart observation drift requires recovery', async () => {
+      const env = await fixture('intent-observation-drift');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const firstSessions = makeResolveSession(native, env);
+      const { path, plan } = await buildUpdatePatch(env.workspace);
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const request = buildRequest({
+        id: 'saga-observation-drift',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-observation-drift',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+      await expect(
+        new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          new NativeSafeFsEditEffectBoundary({
+            native: crashAfterNativeCall(native, 'stageIntentArtifact'),
+            journal: persistence,
+            artifacts,
+            resolveSession: firstSessions.resolveSession,
+          }),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'instance-observation-drift-1'),
+        ).apply(request),
+      ).rejects.toBeInstanceOf(EditSagaCrashError);
+      await Promise.all(
+        [...firstSessions.sessions.values()].map((session) => native.closeSession(session)),
+      );
+      persistence.close();
+
+      await writeFile(path, 'EXTERNAL_CHANGE', { mode: 0o600 });
+      const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+      const startupQuarantines = reopened.initializeMutationRecovery(
+        'instance-observation-drift-2',
+        new Date().toISOString(),
+      );
+      const secondSessions = makeResolveSession(native, env);
+      const reopenedArtifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const releasedFences = new Map<string, number>();
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(reopened),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: reopened,
+          artifacts: reopenedArtifacts,
+          resolveSession: secondSessions.resolveSession,
+        }),
+        reopenedArtifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(
+          reopened,
+          'instance-observation-drift-2',
+          undefined,
+          undefined,
+          async (lease) => {
+            releasedFences.set(lease.workspaceKey, lease.fence);
+          },
+        ),
+      );
+
+      await expect(
+        reconcileStartupNativeMutations({
+          journal: reopened,
+          recoverSaga: (sagaId) => executor.recover(sagaId),
+          reconcileEditSagas: () => executor.reconcileAll(),
+          startupQuarantines,
+          releasedFences,
+          now: () => new Date().toISOString(),
+        }),
+      ).rejects.toBeInstanceOf(MutationLeaseStaleError);
+
+      expect(
+        reopened.getNativeMutationIntent('nmi-forward-1-saga-observation-drift'),
+      ).toMatchObject({
+        state: 'recovery_required',
+      });
+      expect(() => reopened.startTurn(task.id, 'must remain quarantined')).toThrow(
+        MutationQuarantinedError,
+      );
+      await Promise.all(
+        [...secondSessions.sessions.values()].map((session) => native.closeSession(session)),
+      );
+      reopened.close();
+    });
 
     it('compensates every applied step back to its pre-image when finalize fails deterministically', async () => {
       const env = await fixture('compensate');
