@@ -664,18 +664,6 @@ function validateRevision(value: NativeMutationRevision) {
     throw new Error('Invalid Native mutation revision observation');
 }
 
-function validateDirectoryOwnership(value: NativeMutationDirectoryOwnership | null) {
-  if (value === null) return;
-  if (!isRecord(value)) throw new Error('Invalid Native mutation directory ownership');
-  assertExactKeys(value, ['markerLeafName', 'token']);
-  if (
-    !/^\.sprint-coder-mkdir-[a-f0-9]{32}$/.test(value.markerLeafName) ||
-    !isDigest(value.token) ||
-    value.markerLeafName !== `.sprint-coder-mkdir-${value.token.slice(0, 32)}`
-  )
-    throw new Error('Invalid Native mutation directory ownership');
-}
-
 function nativeFileRevision(value: NativeMutationEndpointExpectation): NativeMutationFileRevision {
   if (value.state !== 'present' || value.entryKind === 'directory')
     throw new Error('Native mutation expected a file revision');

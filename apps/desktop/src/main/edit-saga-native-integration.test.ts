@@ -298,7 +298,7 @@ if (runsWithElectronAbi) {
       });
       const { resolveSession, sessions } = makeResolveSession(native, env);
       const directoryPath = join(env.workspace, 'provider-directory');
-      const { persistence, task, turn, workspace, workspaceKey, rootIdentityDigest } =
+      const { persistence, task, turn, workspace, rootIdentityDigest } =
         await preparePersistence(env);
       const artifacts = await EditArtifactStore.open({
         rootPath: env.artifactRoot,
@@ -318,8 +318,7 @@ if (runsWithElectronAbi) {
       );
       const rootId = workspace.primaryRootId ?? 'legacy-primary';
       const ids = ['saga-mkdir', 'op-mkdir'][Symbol.iterator]();
-      let workspaceEdit!: WorkspacePatchDeps;
-      workspaceEdit = {
+      const workspaceEdit: WorkspacePatchDeps = {
         turnWorkspaceSetFor: () => workspace,
         turnRootMutationBindingsFor: () =>
           persistence.getTurnWorkspaceMutationBindings(turn.turnId),
