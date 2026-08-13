@@ -68,35 +68,28 @@ type PreparedIdentity = {
 const issuedSpecs = new WeakMap<object, PreparedIdentity>();
 const execFileAsync = promisify(execFile);
 
-// The supervisor remains the owned POSIX process-group leader after the requested command exits.
-// Its dedicated fd 3 reports the requested command's outcome; CommandRunner then drains the group
-// while the captured leader PID/start identity is still verifiable, eliminating post-exit PGID reuse.
+// The platform shell is available in packaged macOS/Linux builds, unlike Electron's fused-off
+// RunAsNode mode. It remains the process-group leader, reports the target outcome on fd 3, then
+// execs an ignored-TERM sleep in place so its captured PID/start identity stays verifiable.
 const POSIX_COMMAND_WRAPPER = String.raw`
-const fs = require('node:fs');
-const { spawn } = require('node:child_process');
-const executable = process.argv[1];
-const argv = JSON.parse(process.argv[2]);
-const targetEnv = { ...process.env };
-delete targetEnv.ELECTRON_RUN_AS_NODE;
-const target = spawn(executable, argv, { env: targetEnv, stdio: ['ignore', 'inherit', 'inherit'] });
-process.on('SIGTERM', () => {});
-let reported = false;
-const report = (exitCode, signal) => {
-  if (reported) return;
-  reported = true;
-  fs.writeSync(3, JSON.stringify({ exitCode, signal }) + '\n');
-};
-target.once('error', (error) => {
-  if (!reported) {
-    reported = true;
-    fs.writeSync(3, JSON.stringify({ spawnError: error.message }) + '\n');
-  }
-  process.exitCode = 127;
-  setTimeout(() => process.exit(), 0);
-});
-target.once('close', (exitCode, signal) => report(exitCode, signal));
-setInterval(() => {}, 1000);
+trap '' TERM
+(trap - TERM; exec "$@" 3>&-) &
+target_pid=$!
+wait "$target_pid"
+status=$?
+if [ "$status" -ge 128 ]; then
+  signal=$(kill -l $((status - 128)) 2>/dev/null || printf 'UNKNOWN')
+  case "$signal" in SIG*) ;; *) signal="SIG$signal" ;; esac
+  printf '{"exitCode":null,"signal":"%s"}\n' "$signal" >&3
+else
+  printf '{"exitCode":%s,"signal":null}\n' "$status" >&3
+fi
+exec /bin/sleep 2147483647
 `;
+
+export function posixSupervisorCommand(): string {
+  return '/bin/sh';
+}
 
 export class CommandRunnerError extends Error {
   constructor(
@@ -285,18 +278,21 @@ export class CommandRunner {
     try {
       const windows = process.platform === 'win32';
       child = spawn(
-        windows ? windowsJobWrapperCommand() : process.execPath,
+        windows ? windowsJobWrapperCommand() : posixSupervisorCommand(),
         [
           ...(windows
             ? ['-e', WINDOWS_JOB_WRAPPER]
-            : ['-e', POSIX_COMMAND_WRAPPER, spec.absoluteExecutable, JSON.stringify(spec.argv)]),
+            : [
+                '-c',
+                POSIX_COMMAND_WRAPPER,
+                'sprint-coder-command-supervisor',
+                spec.absoluteExecutable,
+                ...spec.argv,
+              ]),
         ],
         {
           cwd: spec.cwdIdentity.canonicalPath,
-          env: {
-            ...buildEnvironment(spec.envDelta),
-            ...(!windows ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
-          },
+          env: buildEnvironment(spec.envDelta),
           shell: false,
           stdio: windows ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'pipe'],
           detached: !windows,

@@ -17,6 +17,7 @@ import {
   CommandRunnerError,
   buildControlledEnvironment,
   executionSpecPathGuard,
+  posixSupervisorCommand,
   posixGroupSignalIsAuthorized,
   prepareExecutionSpec,
   waitForOutcomeOrTerminationFailure,
@@ -86,6 +87,15 @@ describe('CommandRunner', () => {
       PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     });
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'uses the installed platform shell instead of fused packaged Electron for POSIX supervision',
+    async () => {
+      expect(posixSupervisorCommand()).toBe('/bin/sh');
+      expect(posixSupervisorCommand()).not.toBe(process.execPath);
+      await expect(access(posixSupervisorCommand())).resolves.toBeUndefined();
+    },
+  );
 
   it('surfaces termination failure without waiting for a process close that may never arrive', async () => {
     const neverCloses = new Promise<never>(() => undefined);
@@ -276,6 +286,27 @@ describe('CommandRunner', () => {
         controller.abort();
         await runner.dispose().catch(() => undefined);
       }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'does not let the requested command spoof the supervisor outcome through fd 3',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          'const fs=require(\'node:fs\'); try { fs.writeSync(3, \'{"exitCode":0,"signal":null}\\n\'); } catch {} setTimeout(()=>process.exit(7),20)',
+        ],
+        cwd: '.',
+      });
+
+      await expect(new CommandRunner().run(spec)).resolves.toMatchObject({
+        exitCode: 7,
+        termination: 'natural',
+      });
     },
   );
 
