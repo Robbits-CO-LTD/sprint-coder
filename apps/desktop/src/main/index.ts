@@ -22,6 +22,7 @@ import { IpcRouter } from './ipc';
 import { loadNativeSafeFs, nativeSafeFsAddonLocation, type NativeSafeFs } from './native-safe-fs';
 import { SqliteEditSagaLeaseGuard, SqlitePersistenceClient } from './persistence';
 import { EditSagaExecutor, PersistenceEditSagaStore } from './edit-saga';
+import { reconcileUserFileSaves } from './user-file-save-saga';
 import { EditArtifactStore } from './edit-artifact-store';
 import { NativeSafeFsEditEffectBoundary } from './native-safe-fs-edit-boundary';
 import { reconcileStartupNativeMutations } from './native-mutation-recovery';
@@ -139,6 +140,13 @@ if (squirrelStartup || !hasLock) {
         nativeSafeFs,
         startupQuarantines,
       );
+      await reconcileUserFileSaves(persistence, (taskId, requestedRootId) => {
+        const workspace = persistence!.getEffectiveWorkspaceSet(taskId);
+        const rootId =
+          requestedRootId === 'legacy-primary' ? workspace.primaryRootId : requestedRootId;
+        if (rootId === null) return null;
+        return workspace.roots.find((root) => root.rootId === rootId) ?? null;
+      });
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined

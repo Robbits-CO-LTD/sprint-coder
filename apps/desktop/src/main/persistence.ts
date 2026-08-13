@@ -250,6 +250,8 @@ import {
   type AssuranceRound,
   type EvidenceRecord,
 } from './assurance';
+import type { SaveOutcome } from './workspace-edit';
+import type { UserFileSaveIntent } from './user-file-save-saga';
 
 class SqliteEditSagaLeaseHandle {
   timer: ReturnType<typeof setTimeout> | null = null;
@@ -1066,6 +1068,20 @@ type EventWithoutSeq = TurnEvent extends infer Event
     ? Omit<Event, 'seq'>
     : never
   : never;
+type UserFileSaveIntentRow = {
+  principal: string;
+  task_id: string;
+  kind: string;
+  operation_id: string;
+  request_hash: string;
+  root_id: string;
+  root_label: string;
+  path: string;
+  base_digest: string;
+  replacement_digest: string;
+  byte_length: number;
+  state: UserFileSaveIntent['state'];
+};
 
 type WorkerWorktreeState = 'created' | 'active' | 'cleaned' | 'quarantined';
 
@@ -3236,6 +3252,32 @@ const migrations = [
         ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
     `,
   },
+  {
+    version: 70,
+    checksum: 'user-file-save-intent-v70',
+    sql: `
+      CREATE TABLE user_file_save_intents (
+        principal TEXT NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+        root_id TEXT NOT NULL,
+        root_label TEXT NOT NULL,
+        path TEXT NOT NULL,
+        base_digest TEXT NOT NULL CHECK (length(base_digest) = 64),
+        replacement_digest TEXT NOT NULL CHECK (length(replacement_digest) = 64),
+        byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+        state TEXT NOT NULL CHECK (state IN ('prepared', 'completed', 'recovery_required')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(principal, task_id, kind, operation_id),
+        UNIQUE(principal, task_id, kind, request_hash, root_id, path, base_digest, replacement_digest)
+      );
+      CREATE INDEX user_file_save_intents_recovery_idx
+        ON user_file_save_intents(state, created_at, operation_id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4583,6 +4625,13 @@ export interface PersistenceClient {
     operationId: string,
     requestHash: string,
   ): { found: boolean; value?: T };
+  prepareUserFileSaveIntent(intent: Omit<UserFileSaveIntent, 'state'>): UserFileSaveIntent;
+  listRecoverableUserFileSaveIntents(): readonly UserFileSaveIntent[];
+  finalizeUserFileSaveIntent(
+    intent: UserFileSaveIntent,
+    result: SaveOutcome,
+  ): { result: SaveOutcome; event: TurnEvent | null };
+  requireUserFileSaveRecovery(intent: UserFileSaveIntent): void;
   interruptActiveTurns(): number;
   getStartupRecovery(): DatabaseRecovery;
   recordGeneratedImage(input: {
@@ -14296,6 +14345,164 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return { found: true, value: decoded.value };
   }
 
+  prepareUserFileSaveIntent(intent: Omit<UserFileSaveIntent, 'state'>): UserFileSaveIntent {
+    return this.db
+      .transaction(() => {
+        this.assertTask(intent.taskId);
+        const existing = this.db
+          .prepare(
+            `SELECT * FROM user_file_save_intents
+             WHERE principal = ? AND task_id = ? AND kind = ? AND operation_id = ?`,
+          )
+          .get(intent.principal, intent.taskId, intent.kind, intent.operationId) as
+          UserFileSaveIntentRow | undefined;
+        if (existing !== undefined) {
+          const snapshot = toUserFileSaveIntent(existing);
+          if (JSON.stringify(withoutUserFileSaveState(snapshot)) !== JSON.stringify(intent))
+            throw new OperationConflictError('User file save operation was reused');
+          return snapshot;
+        }
+        const matchingFacts = this.db
+          .prepare(
+            `SELECT * FROM user_file_save_intents
+             WHERE principal = ? AND task_id = ? AND kind = ? AND request_hash = ?
+               AND root_id = ? AND path = ? AND base_digest = ? AND replacement_digest = ?`,
+          )
+          .get(
+            intent.principal,
+            intent.taskId,
+            intent.kind,
+            intent.requestHash,
+            intent.rootId,
+            intent.path,
+            intent.baseDigest,
+            intent.replacementDigest,
+          ) as UserFileSaveIntentRow | undefined;
+        if (matchingFacts !== undefined) return toUserFileSaveIntent(matchingFacts);
+        const now = new Date().toISOString();
+        this.db
+          .prepare(
+            `INSERT INTO user_file_save_intents(
+               principal, task_id, kind, operation_id, request_hash, root_id, root_label, path,
+               base_digest, replacement_digest, byte_length, state, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)`,
+          )
+          .run(
+            intent.principal,
+            intent.taskId,
+            intent.kind,
+            intent.operationId,
+            intent.requestHash,
+            intent.rootId,
+            intent.rootLabel,
+            intent.path,
+            intent.baseDigest,
+            intent.replacementDigest,
+            intent.byteLength,
+            now,
+            now,
+          );
+        return { ...intent, state: 'prepared' as const };
+      })
+      .immediate();
+  }
+
+  listRecoverableUserFileSaveIntents(): readonly UserFileSaveIntent[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM user_file_save_intents
+           WHERE state IN ('prepared', 'recovery_required') ORDER BY created_at, operation_id`,
+        )
+        .all() as UserFileSaveIntentRow[]
+    ).map(toUserFileSaveIntent);
+  }
+
+  finalizeUserFileSaveIntent(
+    intent: UserFileSaveIntent,
+    result: SaveOutcome,
+  ): { result: SaveOutcome; event: TurnEvent | null } {
+    return this.db
+      .transaction(() => {
+        const row = this.db
+          .prepare(
+            `SELECT * FROM user_file_save_intents
+             WHERE principal = ? AND task_id = ? AND kind = ? AND operation_id = ?`,
+          )
+          .get(intent.principal, intent.taskId, intent.kind, intent.operationId) as
+          UserFileSaveIntentRow | undefined;
+        if (row === undefined) throw new NotFoundError('User file save intent not found');
+        const current = toUserFileSaveIntent(row);
+        if (
+          JSON.stringify(withoutUserFileSaveState(current)) !==
+          JSON.stringify(withoutUserFileSaveState(intent))
+        )
+          throw new OperationConflictError('User file save intent changed');
+        if (current.state === 'completed') {
+          const cached = this.getOperationResult<SaveOutcome>(
+            current.principal,
+            current.taskId,
+            current.kind,
+            current.operationId,
+            current.requestHash,
+          );
+          return { result: cached.value as SaveOutcome, event: null };
+        }
+        const now = new Date().toISOString();
+        this.db
+          .prepare(
+            `INSERT INTO operations(
+               principal, task_id, kind, operation_id, request_hash, state, result_json,
+               created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?)`,
+          )
+          .run(
+            current.principal,
+            current.taskId,
+            current.kind,
+            current.operationId,
+            current.requestHash,
+            JSON.stringify({ value: result }),
+            now,
+            now,
+          );
+        const event =
+          result.outcome === 'saved'
+            ? this.recordUserFileSave({
+                taskId: current.taskId,
+                rootId: current.rootId,
+                rootLabel: current.rootLabel,
+                path: current.path,
+                byteLength: current.byteLength,
+              })
+            : null;
+        this.db
+          .prepare(
+            `UPDATE user_file_save_intents SET state = 'completed', updated_at = ?
+             WHERE principal = ? AND task_id = ? AND kind = ? AND operation_id = ?`,
+          )
+          .run(now, current.principal, current.taskId, current.kind, current.operationId);
+        return { result, event };
+      })
+      .immediate();
+  }
+
+  requireUserFileSaveRecovery(intent: UserFileSaveIntent): void {
+    this.db
+      .prepare(
+        `UPDATE user_file_save_intents SET state = 'recovery_required', updated_at = ?
+         WHERE principal = ? AND task_id = ? AND kind = ? AND operation_id = ?
+           AND state != 'completed'`,
+      )
+      .run(
+        new Date().toISOString(),
+        intent.principal,
+        intent.taskId,
+        intent.kind,
+        intent.operationId,
+      );
+  }
+
   /**
    * Takes custody of a generated image, in the same transaction as the Turn event that announces it.
    *
@@ -17823,6 +18030,28 @@ function nativeMutationStepIsNext(
 function withoutEditSagaRevision(snapshot: EditSagaSnapshot): Omit<EditSagaSnapshot, 'revision'> {
   const { revision: _revision, ...rest } = snapshot;
   return rest;
+}
+
+function toUserFileSaveIntent(row: UserFileSaveIntentRow): UserFileSaveIntent {
+  return Object.freeze({
+    principal: row.principal,
+    taskId: row.task_id,
+    kind: row.kind,
+    operationId: row.operation_id,
+    requestHash: row.request_hash,
+    rootId: row.root_id,
+    rootLabel: row.root_label,
+    path: row.path,
+    baseDigest: row.base_digest,
+    replacementDigest: row.replacement_digest,
+    byteLength: row.byte_length,
+    state: row.state,
+  });
+}
+
+function withoutUserFileSaveState(intent: UserFileSaveIntent): Omit<UserFileSaveIntent, 'state'> {
+  const { state: _state, ...facts } = intent;
+  return facts;
 }
 
 function nextPersistenceTimestamp(previous: string): string {

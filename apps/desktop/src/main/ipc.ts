@@ -243,11 +243,8 @@ import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinato
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
 import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
-import {
-  openWorkspaceFileForEdit,
-  recoverWorkspaceFileForEdit,
-  saveWorkspaceFile,
-} from './workspace-edit';
+import { openWorkspaceFileForEdit, recoverWorkspaceFileForEdit } from './workspace-edit';
+import { executeUserFileSave } from './user-file-save-saga';
 import {
   SkillSettingsError,
   SkillSettingsService,
@@ -1757,34 +1754,34 @@ export class IpcRouter {
       IPC_CHANNELS.filesSave,
       fileSaveInputSchema,
       fileSaveResultSchema,
-      (input, event, envelope) =>
-        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.filesSave, () => {
-          const root = resolveEffectiveWorkspaceRoot(
-            this.persistence.getEffectiveWorkspaceSet(input.taskId),
-            input.rootId,
-          );
-          if (root === null)
-            return {
-              outcome: 'refused' as const,
-              digest: null,
-              reason: 'outside_workspace' as const,
-              conflictPath: null,
-            };
-          const result = saveWorkspaceFile(root.path, input.path, input.text, input.baseDigest);
-          // Audited only on an actual write, and as its own event type: `files.changed` is the record
-          // of what a Runtime did, and a human's edit does not belong in it (issue #43).
-          if (result.outcome === 'saved')
-            this.publish(
-              this.persistence.recordUserFileSave({
-                taskId: input.taskId,
-                rootId: root.rootId,
-                rootLabel: root.label,
-                path: input.path,
-                byteLength: Buffer.byteLength(input.text, 'utf8'),
-              }),
-            );
-          return result;
-        }).value,
+      async (input, event, envelope) => {
+        const root = resolveEffectiveWorkspaceRoot(
+          this.persistence.getEffectiveWorkspaceSet(input.taskId),
+          input.rootId,
+        );
+        if (root === null)
+          return {
+            outcome: 'refused' as const,
+            digest: null,
+            reason: 'outside_workspace' as const,
+            conflictPath: null,
+          };
+        return executeUserFileSave(
+          this.persistence,
+          {
+            principal: principalFor(event),
+            taskId: input.taskId,
+            kind: IPC_CHANNELS.filesSave,
+            operationId: envelope.operationId,
+            requestHash: requestHash(envelope.payload),
+            root,
+            path: input.path,
+            text: input.text,
+            baseDigest: input.baseDigest,
+          },
+          { onFinalized: (savedEvent) => this.publish(savedEvent) },
+        );
+      },
     );
     this.handle(
       IPC_CHANNELS.filesList,
