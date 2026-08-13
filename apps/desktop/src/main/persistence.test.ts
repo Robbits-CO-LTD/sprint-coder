@@ -51,6 +51,7 @@ import {
   stageEditSagaRequest,
   type EditArtifactRepository,
   type EditEffectBoundary,
+  type EditSagaLeaseAccess,
   type EditSagaStep,
   type OperationObservation,
 } from './edit-saga';
@@ -2821,12 +2822,16 @@ if (runsWithElectronAbi)
         const observedLeaseRevisions: number[] = [];
         const boundary: EditEffectBoundary = {
           async apply(_step, lease) {
-            observedLeaseRevisions.push((lease as MutationLeaseToken).revision);
+            observedLeaseRevisions.push(
+              ((lease as EditSagaLeaseAccess).current() as MutationLeaseToken).revision,
+            );
             await new Promise<void>((resolve) => setTimeout(resolve, 61_000));
             return post;
           },
           async observe(_step, lease) {
-            observedLeaseRevisions.push((lease as MutationLeaseToken).revision);
+            observedLeaseRevisions.push(
+              ((lease as EditSagaLeaseAccess).current() as MutationLeaseToken).revision,
+            );
             return { state: 'post', observation: post };
           },
           async restore() {

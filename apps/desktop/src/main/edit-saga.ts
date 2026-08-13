@@ -180,6 +180,10 @@ export interface EditEffectBoundary {
   ): Promise<OperationObservation>;
 }
 
+export interface EditSagaLeaseAccess {
+  current(): unknown;
+}
+
 export interface EditSagaLeaseGuard {
   acquire(saga: EditSagaSnapshot, purpose: 'forward' | 'recovery'): Promise<unknown>;
   current(lease: unknown, saga: EditSagaSnapshot): unknown;
@@ -670,6 +674,12 @@ export class EditSagaExecutor {
     return this.leaseGuard.current(lease, saga);
   }
 
+  private leaseAccess(lease: unknown | null, saga: EditSagaSnapshot): EditSagaLeaseAccess | null {
+    const guard = this.leaseGuard;
+    if (lease === null || guard === undefined) return null;
+    return { current: () => guard.current(lease, saga) };
+  }
+
   private async assertLease(lease: unknown | null, saga: EditSagaSnapshot): Promise<void> {
     if (lease !== null && this.leaseGuard !== undefined)
       await this.leaseGuard.assertCurrent(lease, saga);
@@ -691,7 +701,7 @@ export class EditSagaExecutor {
       const step = stepAt(saga, currentStep.ordinal);
       try {
         await this.assertLease(lease, saga);
-        const observation = await this.boundary.apply(step, this.currentLease(lease, saga));
+        const observation = await this.boundary.apply(step, this.leaseAccess(lease, saga));
         validatePostObservation(step, observation);
         await this.fault?.hit({ kind: 'afterEffectBeforeJournal', ordinal: step.ordinal });
         await this.assertLease(lease, saga);
@@ -714,7 +724,7 @@ export class EditSagaExecutor {
       await this.fault?.hit({ kind: 'beforeFinalize' });
       for (const step of saga.steps) {
         await this.assertLease(lease, saga);
-        const observed = await this.boundary.observe(step, this.currentLease(lease, saga));
+        const observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
         if (observed.state !== 'post') throw new Error('Final Edit observation is not post-image');
         validatePostObservation(step, observed.observation);
         if (
@@ -750,7 +760,7 @@ export class EditSagaExecutor {
         let observed: EditEffectObservation;
         try {
           await this.assertLease(lease, saga);
-          observed = await this.boundary.observe(step, this.currentLease(lease, saga));
+          observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
         } catch (error) {
           return this.requireRecovery(
             saga,
@@ -785,7 +795,7 @@ export class EditSagaExecutor {
         let observed: EditEffectObservation;
         try {
           await this.assertLease(lease, saga);
-          observed = await this.boundary.observe(step, this.currentLease(lease, saga));
+          observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
         } catch (error) {
           return this.requireRecovery(
             saga,
@@ -848,7 +858,7 @@ export class EditSagaExecutor {
         const restored = await this.boundary.restore(
           step,
           expectedPost,
-          this.currentLease(lease, saga),
+          this.leaseAccess(lease, saga),
         );
         validateRestoredObservation(step, restored);
         await this.fault?.hit({ kind: 'afterRestoreBeforeJournal', ordinal: step.ordinal });
@@ -867,7 +877,7 @@ export class EditSagaExecutor {
         let observed: EditEffectObservation | null = null;
         try {
           await this.assertLease(lease, saga);
-          observed = await this.boundary.observe(step, this.currentLease(lease, saga));
+          observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
         } catch {
           // A missing or corrupted artifact is itself recovery evidence; never retry blindly.
         }
