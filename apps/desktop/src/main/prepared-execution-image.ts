@@ -95,9 +95,10 @@ export async function prepareExecutionImage(
   try {
     const sourceBytes =
       process.platform === 'win32'
-        ? windowsAddon().readNoReparseImageFile(
+        ? readWindowsImage(
             expected.canonicalPath,
             expected.allowSourceHardlinks === true,
+            'approved executable',
           )
         : await readStablePosixImage(expected);
     assertDigestAndSize(sourceBytes, expected);
@@ -346,7 +347,7 @@ function parseElfDynamicSearchPaths(bytes: Buffer): readonly string[] | null {
 }
 
 const WINDOWS_SYSTEM_DLL =
-  /^(?:api-ms-win-|ext-ms-win-)|^(?:advapi32|avrt|bcrypt|cfgmgr32|combase|comctl32|comdlg32|crypt32|cryptbase|cryptnet|cryptui|d3d11|d3d12|dbgcore|dbghelp|dcomp|dhcpcsvc|dhcpcsvc6|dnsapi|dsound|dwmapi|dwrite|dxgi|gdi32|hid|iertutil|imm32|iphlpapi|kernel32|mf|mfplat|mfreadwrite|msacm32|msvcp140|msvfw32|mswsock|ncrypt|netapi32|normaliz|ntasn1|ntdll|ole32|oleacc|oleaut32|powrprof|profapi|propsys|psapi|rpcrt4|secur32|setupapi|shcore|shell32|shlwapi|srvcli|ucrtbase|urlmon|user32|userenv|usp10|uxtheme|vcruntime140(?:_1)?|version|winhttp|wininet|winmm|wintrust|wlanapi|wldp|ws2_32|wtsapi32)\.dll$/iu;
+  /^(?:api-ms-win-|ext-ms-win-)|^(?:advapi32|combase|gdi32|kernel32|kernelbase|msvcrt|ntdll|ole32|oleaut32|rpcrt4|sechost|shell32|shlwapi|user32|ws2_32)\.dll$/iu;
 
 export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
   const imports = parsePeImports(bytes);
@@ -378,7 +379,7 @@ async function prepareWindowsSideBySideImages(
         // A source DLL may be hardlinked by a package manager. That alias is harmless here: the
         // native read pins one handle, and only those exact bytes are materialized into the held
         // app-owned execution directory before CreateProcess.
-        const bytes = windowsAddon().readNoReparseImageFile(sourcePath, true);
+        const bytes = readWindowsImage(sourcePath, true, `side-by-side dependency ${name}`);
         totalBytes += bytes.byteLength;
         if (totalBytes > MAX_EXECUTION_IMAGE_BYTES)
           throw new Error('Windows execution image dependencies exceed the size limit');
@@ -500,7 +501,7 @@ export async function sealExecutablePath(
     const before = await stat(canonicalPath, { bigint: true });
     if (!before.isFile() || (before.nlink !== 1n && !allowHardlinks))
       throw new Error('Executable is not a permitted regular file');
-    const bytes = windowsAddon().readNoReparseImageFile(canonicalPath, allowHardlinks);
+    const bytes = readWindowsImage(canonicalPath, allowHardlinks, 'approval executable');
     const after = await stat(canonicalPath, { bigint: true });
     if (!sameIdentityStats(before, after, allowHardlinks))
       throw new Error('Executable changed while sealing approval');
@@ -525,6 +526,18 @@ export async function sealExecutablePath(
   } finally {
     await source.close();
   }
+}
+
+function readWindowsImage(path: string, allowHardlinks: boolean, label: string): Buffer {
+  try {
+    return windowsAddon().readNoReparseImageFile(path, allowHardlinks);
+  } catch (error) {
+    throw new Error(`${label} failed native identity validation: ${errorMessage(error)}`);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function sealedIdentity(
