@@ -5086,18 +5086,15 @@ export class IpcRouter {
         else controller.abort();
         await this.mailbox.run(taskId, () => {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
-          this.publish(
-            this.persistence.appendDelta(
-              taskId,
-              started.turnId,
-              messageId,
-              `${synthesizing ? '\n\n' : ''}${
-                error instanceof ProviderStreamTimeoutError
-                  ? error.userMessage
-                  : 'Providerの応答が安全な上限を超えたため、このTurnを終了しました。'
-              }`,
-            ),
-          );
+          if (error instanceof ProviderStreamTimeoutError)
+            this.publish(
+              this.persistence.appendDelta(
+                taskId,
+                started.turnId,
+                messageId,
+                `${synthesizing ? '\n\n' : ''}${error.userMessage}`,
+              ),
+            );
           this.finishAndAdvance(taskId, started.turnId, 'failed');
         });
         return;

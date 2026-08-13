@@ -77,4 +77,14 @@ describe('ProviderStreamBudget', () => {
       new ProviderStreamBudget(Date.now() - PROVIDER_STREAM_LIMITS.callDurationMs - 1).assertTime(),
     ).toThrowError(ProviderQuotaExceededError);
   });
+
+  it('does not reset the Turn aggregate when a new provider call begins', () => {
+    const budget = new ProviderStreamBudget();
+    const halfTurn = 'a'.repeat(PROVIDER_STREAM_LIMITS.persistedTurnBytes / 2);
+    budget.consumeOutput(halfTurn);
+    budget.beginCall();
+    budget.consumeToolResult(halfTurn);
+    budget.beginCall();
+    expect(() => budget.consumeOutput('a')).toThrowError(ProviderQuotaExceededError);
+  });
 });

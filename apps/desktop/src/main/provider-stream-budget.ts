@@ -36,6 +36,8 @@ export class ProviderStreamBudget {
   private eventCount = 0;
   private toolCallCount = 0;
   private toolResultBytes = 0;
+  private turnRawBytes = 0;
+  private turnAggregateBytes = 0;
   private readonly toolBytes = new Map<string, number>();
 
   constructor(
@@ -70,6 +72,12 @@ export class ProviderStreamBudget {
       PROVIDER_STREAM_LIMITS.rawStreamBytes,
       'raw_stream_bytes',
     );
+    this.turnRawBytes = checkedTotal(
+      this.turnRawBytes,
+      bytes,
+      PROVIDER_STREAM_LIMITS.rawStreamBytes,
+      'raw_stream_bytes',
+    );
   }
 
   consumeEvent(bytes: number): void {
@@ -79,25 +87,24 @@ export class ProviderStreamBudget {
   }
 
   consumeOutput(text: string): void {
+    const bytes = Buffer.byteLength(text, 'utf8');
     this.outputBytes = checkedTotal(
       this.outputBytes,
-      Buffer.byteLength(text, 'utf8'),
+      bytes,
       PROVIDER_STREAM_LIMITS.normalizedOutputBytes,
       'normalized_output_bytes',
     );
+    this.consumeTurnAggregate(bytes);
   }
 
   consumeToolArguments(key: string, text: string): void {
+    const bytes = Buffer.byteLength(text, 'utf8');
     const current = this.toolBytes.get(key) ?? 0;
     this.toolBytes.set(
       key,
-      checkedTotal(
-        current,
-        Buffer.byteLength(text, 'utf8'),
-        PROVIDER_STREAM_LIMITS.toolArgumentBytes,
-        'tool_argument_bytes',
-      ),
+      checkedTotal(current, bytes, PROVIDER_STREAM_LIMITS.toolArgumentBytes, 'tool_argument_bytes'),
     );
+    this.consumeTurnAggregate(bytes);
   }
 
   consumeToolCall(): void {
@@ -110,11 +117,22 @@ export class ProviderStreamBudget {
   }
 
   consumeToolResult(text: string): void {
+    const bytes = Buffer.byteLength(text, 'utf8');
     this.toolResultBytes = checkedTotal(
       this.toolResultBytes,
-      Buffer.byteLength(text, 'utf8'),
+      bytes,
       PROVIDER_STREAM_LIMITS.normalizedOutputBytes,
       'normalized_output_bytes',
+    );
+    this.consumeTurnAggregate(bytes);
+  }
+
+  private consumeTurnAggregate(bytes: number): void {
+    this.turnAggregateBytes = checkedTotal(
+      this.turnAggregateBytes,
+      bytes,
+      PROVIDER_STREAM_LIMITS.persistedTurnBytes,
+      'persisted_turn_bytes',
     );
   }
 }
