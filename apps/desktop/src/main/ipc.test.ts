@@ -113,6 +113,7 @@ import {
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
   runBestEffortCancellation,
+  shouldStartNextQueuedAfterCancel,
   resolveEffectiveWorkspaceRoot,
   verifyTurnWorkspaceIdentities,
   toPublicError,
@@ -472,6 +473,11 @@ describe('Turn cancellation boundary', () => {
     expect(stopped).toBe(false);
     expect(onFailure).toHaveBeenCalledOnce();
     expect(finalize).toHaveBeenCalledOnce();
+  });
+
+  it('keeps queued input dormant when Team stop-all cancels its Leader', () => {
+    expect(shouldStartNextQueuedAfterCancel(false, true, true)).toBe(false);
+    expect(shouldStartNextQueuedAfterCancel(undefined, true, true)).toBe(true);
   });
 });
 

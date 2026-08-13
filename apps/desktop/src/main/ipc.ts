@@ -284,6 +284,14 @@ export async function runBestEffortCancellation(
   }
 }
 
+export function shouldStartNextQueuedAfterCancel(
+  startNextQueued: boolean | undefined,
+  runtimeStopped: boolean,
+  canceledEventExists: boolean,
+): boolean {
+  return startNextQueued !== false && runtimeStopped && canceledEventExists;
+}
+
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import {
   ToolAuthorizationDeniedError,
@@ -2836,10 +2844,13 @@ export class IpcRouter {
             const completion = this.persistence.cancelTurnAndFinishGoal(input.taskId, input.turnId);
             canceledEvent = completion.event;
             goalTask = completion.task;
-            next =
-              !runtimeStopped || canceledEvent === null
-                ? null
-                : this.persistence.startNextQueued(input.taskId);
+            next = shouldStartNextQueuedAfterCancel(
+              input.startNextQueued,
+              runtimeStopped,
+              canceledEvent !== null,
+            )
+              ? this.persistence.startNextQueued(input.taskId)
+              : null;
           },
         );
         if (result.executed) {

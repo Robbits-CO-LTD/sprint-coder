@@ -338,7 +338,7 @@ type AppState = {
     text: string,
     skills?: readonly TurnSkillSelection[],
   ): Promise<StopAndSendResult>;
-  cancelActiveTurn(taskId: string): Promise<boolean>;
+  cancelActiveTurn(taskId: string, startNextQueued?: boolean): Promise<boolean>;
   showToast(message: string): void;
   dismissToast(): void;
 };
@@ -1902,6 +1902,14 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!window.sprintCoder?.teams || get().teamBusy) return;
       set({ teamBusy: true });
       try {
+        // The Team Leader runs as the task's active Turn, separately from worker runtimes.
+        // Stop it first so it cannot react to worker cancellation by hiring replacements while
+        // the user's "stop all" request is still being processed.
+        const activeTurn = get().turnByTask[taskId];
+        if (activeTurn?.status === 'running') {
+          const leaderStopped = await get().cancelActiveTurn(taskId, false);
+          if (!leaderStopped) return;
+        }
         const detail = await window.sprintCoder.teams.stopAll(taskId);
         set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
       } catch (err) {
@@ -2415,14 +2423,18 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async cancelActiveTurn(taskId: string) {
+    async cancelActiveTurn(taskId: string, startNextQueued = true) {
       const turn = get().turnByTask[taskId];
       if (!turn || turn.status !== 'running' || !window.sprintCoder) return false;
       set((state) => ({
         turnByTask: { ...state.turnByTask, [taskId]: { ...turn, status: 'canceling' } },
       }));
       try {
-        await window.sprintCoder.turns.cancel({ taskId, turnId: turn.turnId });
+        await window.sprintCoder.turns.cancel({
+          taskId,
+          turnId: turn.turnId,
+          ...(startNextQueued ? {} : { startNextQueued: false }),
+        });
         // turn.completed(state:'canceled') will arrive via subscription and finalize.
         return true;
       } catch (err) {
