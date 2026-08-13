@@ -1028,6 +1028,41 @@ describe('NativeSafeFs authority boundary', () => {
       await boundary.closeSession(session);
     });
 
+    it('accepts only an exact digest-bound recovery execution on a newly fenced session', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const originalSession = await boundary.openSession({ ...input, fence: '801' });
+      const intent = nativeIntent({
+        session: originalSession,
+        kind: 'add',
+        sourceSegments: ['recover.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: Buffer.from('recovered'),
+      });
+      await boundary.closeSession(originalSession);
+      const recoverySession = await boundary.openSession({ ...input, fence: '802' });
+
+      await expect(
+        boundary.observeIntent(recoverySession, intent, {
+          intentDigest: '0'.repeat(64),
+          leaseFence: recoverySession.fence,
+          nativeSessionId: recoverySession.id,
+        }),
+      ).rejects.toMatchObject({ code: 'STALE_SESSION' } satisfies Partial<NativeSafeFsError>);
+      await expect(
+        boundary.observeIntent(recoverySession, intent, {
+          intentDigest: intent.intentDigest,
+          leaseFence: recoverySession.fence,
+          nativeSessionId: recoverySession.id,
+        }),
+      ).resolves.toEqual({
+        source: { state: 'absent' },
+        destination: { state: 'absent' },
+        auxiliary: { state: 'absent' },
+      });
+      await boundary.closeSession(recoverySession);
+    });
+
     it('rejects symlink, hardlink, and special-file observations without following them', async () => {
       const input = await fixture();
       await writeFile(join(input.workspace, 'target.txt'), 'target', { mode: 0o600 });

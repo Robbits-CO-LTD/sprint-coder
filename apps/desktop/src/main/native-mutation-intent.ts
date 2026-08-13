@@ -115,7 +115,8 @@ export type NativeMutationIntentTransition =
   | Readonly<{ state: 'effect_pending' }>
   | Readonly<{ state: 'effect_observed'; effectObservation: NativeMutationEffectObservation }>
   | Readonly<{ state: 'cleanup_pending' }>
-  | Readonly<{ state: 'completed'; cleanupObservation: Readonly<{ state: 'absent' }> | null }>;
+  | Readonly<{ state: 'completed'; cleanupObservation: Readonly<{ state: 'absent' }> | null }>
+  | Readonly<{ state: 'recovery_required'; recoveryReason: string }>;
 
 export function deriveNativeMutationEffectKind(
   originalKind: NativeMutationIntentKind,
@@ -281,6 +282,20 @@ export function transitionNativeMutationIntent(
       updatedAt,
     );
   }
+  if (transition.state === 'recovery_required') {
+    if (
+      current.state === 'completed' ||
+      current.state === 'recovery_required' ||
+      transition.recoveryReason.length < 1 ||
+      transition.recoveryReason.length > 200
+    )
+      throw new Error('Invalid Native mutation recovery transition');
+    return nextSnapshot(
+      current,
+      { state: 'recovery_required', recoveryReason: transition.recoveryReason },
+      updatedAt,
+    );
+  }
   const unreachable: never = transition;
   throw new Error(`Unsupported Native mutation transition: ${JSON.stringify(unreachable)}`);
 }
@@ -379,7 +394,13 @@ export function parseNativeMutationIntentSnapshot(value: unknown): NativeMutatio
     (!cleanupRequired && snapshot.cleanupObservation !== null)
   )
     throw new Error('Native mutation cleanup observation does not match state');
-  if ((snapshot.state === 'recovery_required') !== (snapshot.recoveryReason !== null))
+  if (
+    (snapshot.state === 'recovery_required') !== (snapshot.recoveryReason !== null) ||
+    (snapshot.recoveryReason !== null &&
+      (typeof snapshot.recoveryReason !== 'string' ||
+        snapshot.recoveryReason.length < 1 ||
+        snapshot.recoveryReason.length > 200))
+  )
     throw new Error('Native mutation recovery reason does not match state');
   return freezeSnapshot(snapshot);
 }

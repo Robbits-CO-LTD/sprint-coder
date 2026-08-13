@@ -24,6 +24,7 @@ import { SqliteEditSagaLeaseGuard, SqlitePersistenceClient } from './persistence
 import { EditSagaExecutor, PersistenceEditSagaStore } from './edit-saga';
 import { EditArtifactStore } from './edit-artifact-store';
 import { NativeSafeFsEditEffectBoundary } from './native-safe-fs-edit-boundary';
+import { reconcileStartupNativeMutations } from './native-mutation-recovery';
 import { MutationLeaseStaleError } from './mutation-lease';
 import type { MutationLeaseToken } from './mutation-lease';
 import { FileRevisionRegistry } from './file-revision';
@@ -129,8 +130,15 @@ if (squirrelStartup || !hasLock) {
         (workspaceKey, minimumFence) =>
           nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
       );
-      persistence.initializeMutationRecovery(randomUUID(), new Date().toISOString());
-      const workspaceEdit = await wireEditSagaRecovery(persistence, nativeSafeFs);
+      const startupQuarantines = persistence.initializeMutationRecovery(
+        randomUUID(),
+        new Date().toISOString(),
+      );
+      const workspaceEdit = await wireEditSagaRecovery(
+        persistence,
+        nativeSafeFs,
+        startupQuarantines,
+      );
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined
@@ -420,6 +428,7 @@ async function loadRenderer(window: BrowserWindow): Promise<void> {
 async function wireEditSagaRecovery(
   persistence: SqlitePersistenceClient,
   nativeSafeFs: NativeSafeFs,
+  startupQuarantines: ReturnType<SqlitePersistenceClient['initializeMutationRecovery']>,
 ): Promise<WorkspacePatchDeps | undefined> {
   // Slice 4.7d/4.7e: connect the NativeSafeFs edit boundary to the Edit Saga executor and
   // its restart recovery. The workspace mutation path stays fail-closed — no write
@@ -507,12 +516,17 @@ async function wireEditSagaRecovery(
         sessions.delete(lease.leaseId);
       }
     };
+    const releasedRecoveryFences = new Map<string, number>();
     const leaseGuard = new SqliteEditSagaLeaseGuard(
       persistence,
       randomUUID(),
       undefined,
       undefined,
-      closeLeaseSession,
+      async (lease) => {
+        await closeLeaseSession(lease);
+        if (lease.purpose === 'recovery')
+          releasedRecoveryFences.set(lease.workspaceKey, lease.fence);
+      },
     );
     const executor = new EditSagaExecutor(
       new PersistenceEditSagaStore(persistence),
@@ -526,7 +540,14 @@ async function wireEditSagaRecovery(
       undefined,
       leaseGuard,
     );
-    await executor.reconcileAll();
+    await reconcileStartupNativeMutations({
+      journal: persistence,
+      recoverSaga: (sagaId) => executor.recover(sagaId),
+      reconcileEditSagas: () => executor.reconcileAll(),
+      startupQuarantines,
+      releasedFences: releasedRecoveryFences,
+      now: () => new Date().toISOString(),
+    });
     return {
       turnWorkspaceSetFor: (taskId, turnId) =>
         persistence.readTurnWorkspaceSetForTask(taskId, turnId),

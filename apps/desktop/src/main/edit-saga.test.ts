@@ -126,6 +126,21 @@ class FakeBoundary implements EditEffectBoundary {
   }
 }
 
+class ResumableBoundary extends FakeBoundary {
+  readonly resumed: number[] = [];
+
+  async resume(
+    step: EditSagaStep,
+    direction: 'forward' | 'compensation',
+  ): Promise<OperationObservation> {
+    expect(direction).toBe('forward');
+    const observed = await this.observe(step);
+    expect(observed.state).toBe('post');
+    this.resumed.push(step.ordinal);
+    return observed.observation;
+  }
+}
+
 class SemanticBoundary implements EditEffectBoundary {
   readonly files: Map<string, string>;
   constructor(
@@ -363,6 +378,25 @@ describe('EditSagaExecutor', () => {
     expect(boundary.applied).toEqual([1]);
     expect(boundary.restored).toEqual([]);
     expect([...boundary.files.values()]).toEqual(['A1', 'B0']);
+  });
+
+  it('resumes a sealed non-mkdir effect and continues the remaining Saga steps', async () => {
+    const store = new InMemoryEditSagaStore();
+    const artifacts = new MemoryArtifacts();
+    const boundary = new ResumableBoundary(artifacts);
+    const executor = new EditSagaExecutor(store, boundary, artifacts, {
+      hit(point: EditSagaFaultPoint) {
+        if (point.kind === 'afterEffectBeforeJournal' && point.ordinal === 1)
+          throw new EditSagaCrashError('simulated crash');
+      },
+    });
+
+    await expect(executor.apply(request())).rejects.toBeInstanceOf(EditSagaCrashError);
+    const recovered = await new EditSagaExecutor(store, boundary, artifacts).recover('saga-1');
+
+    expect(recovered.state).toBe('committed');
+    expect(boundary.resumed).toEqual([1]);
+    expect(boundary.applied).toEqual([1, 2]);
   });
 
   it('recognizes a restore completed immediately before process death', async () => {
