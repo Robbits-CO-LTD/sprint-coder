@@ -95,18 +95,6 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
     },
   },
   ['agentKind', 'role', 'objective'],
-  {
-    allOf: [
-      {
-        if: { properties: { agentKind: { const: 'manager' } } },
-        then: { required: ['managerPolicy'] },
-      },
-      {
-        if: { properties: { agentKind: { const: 'worker' } } },
-        then: { not: { required: ['managerPolicy'] } },
-      },
-    ],
-  },
 );
 
 export const TEAM_LIST_MODELS_TOOL = teamToolDefinition(

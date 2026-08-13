@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ToolRegistry,
   createExecutionSpec,
@@ -51,6 +51,7 @@ import {
   stageEditSagaRequest,
   type EditArtifactRepository,
   type EditEffectBoundary,
+  type EditSagaLeaseAccess,
   type EditSagaStep,
   type OperationObservation,
 } from './edit-saga';
@@ -2294,11 +2295,13 @@ if (runsWithElectronAbi)
           createdAt: '2026-07-23T00:00:00.000Z',
         }),
       );
-      const token = await new SqliteEditSagaLeaseGuard(
+      const guard = new SqliteEditSagaLeaseGuard(
         persistence,
         'project-root-executor',
         () => new Date('2026-07-23T00:00:01.000Z'),
-      ).acquire(saga, 'forward');
+      );
+      const lease = await guard.acquire(saga, 'forward');
+      const token = guard.current(lease, saga);
 
       expect(saga).toMatchObject({ rootId, workspaceKey, rootIdentityDigest });
       expect(token).toMatchObject({ rootId, workspaceKey, rootIdentityDigest });
@@ -2311,6 +2314,7 @@ if (runsWithElectronAbi)
         ),
       ).toMatchObject({ sagaId: saga.id, state: 'planned' });
       persistence.releaseMutationLease(token, '2026-07-23T00:00:02.000Z');
+      await guard.stop(lease, saga);
       persistence.close();
     });
 
@@ -2789,6 +2793,152 @@ if (runsWithElectronAbi)
       expect(effectCount).toBe(1);
       secondClient.close();
       persistence.close();
+    });
+
+    it('renews the mutation lease while a healthy Edit effect runs beyond its TTL', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-07-23T00:00:00.000Z'));
+      try {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const rootIdentityDigest = '7'.repeat(64);
+        const workspaceKey = bindMutationWorkspace(
+          persistence,
+          task.id,
+          '/workspace/slow-effect',
+          rootIdentityDigest,
+        );
+        const turn = persistence.startTurn(task.id, 'slow healthy edit');
+        const request = {
+          id: 'slow-effect-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'slow-effect-operation',
+          plan: persistedEditPlan(),
+          mutationBinding: { workspaceKey, rootIdentityDigest },
+          createdAt: new Date().toISOString(),
+        } as const;
+        const post = persistedObservation('after', `file:${editHash('after')}`);
+        const observedLeaseRevisions: number[] = [];
+        const boundary: EditEffectBoundary = {
+          async apply(_step, lease) {
+            observedLeaseRevisions.push(
+              ((lease as EditSagaLeaseAccess).current() as MutationLeaseToken).revision,
+            );
+            await new Promise<void>((resolve) => setTimeout(resolve, 61_000));
+            return post;
+          },
+          async observe(_step, lease) {
+            observedLeaseRevisions.push(
+              ((lease as EditSagaLeaseAccess).current() as MutationLeaseToken).revision,
+            );
+            return { state: 'post', observation: post };
+          },
+          async restore() {
+            return persistedObservation('before', `file:${editHash('before')}`);
+          },
+        };
+        const renew = vi.spyOn(persistence, 'renewMutationLease');
+        const applying = new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          boundary,
+          new PersistenceTestArtifacts(),
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'slow-effect-instance'),
+        ).apply(request);
+
+        await vi.advanceTimersByTimeAsync(61_000);
+
+        await expect(applying).resolves.toMatchObject({ state: 'committed' });
+        expect(observedLeaseRevisions).toHaveLength(2);
+        expect(observedLeaseRevisions[1]).toBeGreaterThan(observedLeaseRevisions[0]!);
+        expect(renew).toHaveBeenCalledTimes(3);
+        await vi.advanceTimersByTimeAsync(61_000);
+        expect(renew).toHaveBeenCalledTimes(3);
+        const inspection = new Database(path, { readonly: true });
+        expect(
+          inspection
+            .prepare(
+              'SELECT state, quarantine_reason FROM workspace_mutation_state WHERE workspace_key = ?',
+            )
+            .get(workspaceKey),
+        ).toEqual({ state: 'idle', quarantine_reason: null });
+        inspection.close();
+        persistence.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('fails closed when heartbeat renewal detects a policy change during an effect', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-07-23T00:00:00.000Z'));
+      try {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const rootIdentityDigest = '6'.repeat(64);
+        const workspaceKey = bindMutationWorkspace(
+          persistence,
+          task.id,
+          '/workspace/renewal-policy-change',
+          rootIdentityDigest,
+        );
+        const turn = persistence.startTurn(task.id, 'policy changes during effect');
+        const request = {
+          id: 'renewal-policy-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'renewal-policy-operation',
+          plan: persistedEditPlan(),
+          mutationBinding: { workspaceKey, rootIdentityDigest },
+          createdAt: new Date().toISOString(),
+        } as const;
+        const post = persistedObservation('after', `file:${editHash('after')}`);
+        const boundary: EditEffectBoundary = {
+          async apply() {
+            await new Promise<void>((resolve) => setTimeout(resolve, 21_000));
+            return post;
+          },
+          async observe() {
+            return { state: 'post', observation: post };
+          },
+          async restore() {
+            return persistedObservation('before', `file:${editHash('before')}`);
+          },
+        };
+        const applying = new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          boundary,
+          new PersistenceTestArtifacts(),
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'renewal-policy-instance'),
+        ).apply(request);
+        const outcome = applying.then(
+          () => null,
+          (error: unknown) => error,
+        );
+        await vi.advanceTimersByTimeAsync(10_000);
+        persistence.setAccessPreset(task.id, 'auto');
+        await vi.advanceTimersByTimeAsync(11_000);
+
+        expect(await outcome).toBeInstanceOf(MutationLeaseStaleError);
+        expect(persistence.getEditSaga(request.id)).toMatchObject({
+          state: 'applying',
+          steps: [expect.objectContaining({ state: 'effect_pending', postObservation: null })],
+        });
+        const inspection = new Database(path, { readonly: true });
+        expect(
+          inspection
+            .prepare(
+              'SELECT state, quarantine_reason FROM workspace_mutation_state WHERE workspace_key = ?',
+            )
+            .get(workspaceKey),
+        ).toEqual({ state: 'quarantined', quarantine_reason: 'policy_epoch_changed' });
+        inspection.close();
+        persistence.close();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('does not publish an effect result after its lease is fenced', async () => {

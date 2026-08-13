@@ -147,7 +147,7 @@ describe('Claude runtime probe', () => {
       '--tools',
       'Read,Glob,Grep',
       '--permission-mode',
-      'manual',
+      'default',
       '--strict-mcp-config',
       '--safe-mode',
       '--no-session-persistence',
