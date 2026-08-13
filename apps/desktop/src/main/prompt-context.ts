@@ -1,10 +1,10 @@
-import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { RuntimeContextFragment, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { digestCanonical } from './context-compiler';
+import { safeGitExecFileSync } from './safe-git';
 
 export const PROMPT_CONTEXT_VERSION = 1;
 const MAX_WORKSPACE_RULE_BYTES = 24 * 1024;
@@ -208,16 +208,10 @@ export function discoverWorkspaceRules(workspace: RuntimeWorkspaceSet): PromptWo
 function workspaceRuleCandidates(root: string): string[] {
   const candidates = new Set([join(root, 'AGENTS.md')]);
   try {
-    const output = execFileSync(
-      'git',
+    const output = safeGitExecFileSync(
+      root,
       ['ls-files', '--cached', '--others', '--exclude-standard', '--', 'AGENTS.md', '**/AGENTS.md'],
-      {
-        cwd: root,
-        encoding: 'utf8',
-        timeout: 2_000,
-        maxBuffer: 64 * 1024,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      },
+      { timeout: 2_000, maxBuffer: 64 * 1024 },
     );
     for (const item of output.split(/\r?\n/u).filter(Boolean).slice(0, 64)) {
       const path = resolve(root, item);
@@ -234,20 +228,15 @@ function workspaceRuleCandidates(root: string): string[] {
 export function captureVcsSnapshot(workspace: RuntimeWorkspaceSet): PromptEnvironment['vcs'] {
   return workspace.roots.map((root) => {
     try {
-      const branch = execFileSync('git', ['branch', '--show-current'], {
-        cwd: root.path,
-        encoding: 'utf8',
+      const branch = safeGitExecFileSync(root.path, ['branch', '--show-current'], {
         timeout: 2_000,
         maxBuffer: 64 * 1024,
-        stdio: ['ignore', 'pipe', 'ignore'],
       }).trim();
-      const status = execFileSync('git', ['status', '--short', '--untracked-files=normal'], {
-        cwd: root.path,
-        encoding: 'utf8',
-        timeout: 2_000,
-        maxBuffer: 64 * 1024,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      const status = safeGitExecFileSync(
+        root.path,
+        ['status', '--short', '--untracked-files=normal'],
+        { timeout: 2_000, maxBuffer: 64 * 1024 },
+      );
       return {
         root: root.path,
         branch: branch === '' ? null : branch,

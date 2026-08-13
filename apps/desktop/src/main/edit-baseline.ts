@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
 import { readWorkspaceTextFile } from './workspace-file';
+import { safeGitExecFile } from './safe-git';
 
 // Resolves the "before" side of a file's diff for one Turn (issue #41).
 //
@@ -108,40 +108,8 @@ function unquoteGitPath(value: string): string {
 }
 
 function runGit(cwd: string, args: string[]): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile(
-      'git',
-      [
-        // Same hardening as worker-worktree.ts: a repository must not be able to run code because
-        // the app looked at it.
-        '-c',
-        'core.hooksPath=',
-        '-c',
-        'core.fsmonitor=',
-        '-c',
-        'core.pager=cat',
-        '-C',
-        cwd,
-        ...args,
-      ],
-      {
-        timeout: GIT_TIMEOUT_MS,
-        maxBuffer: MAX_BASELINE_BYTES,
-        windowsHide: true,
-        env: {
-          PATH: process.env['PATH'] ?? '',
-          HOME: process.env['HOME'] ?? '',
-          // No credential helper, no editor, no locale-dependent output.
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_OPTIONAL_LOCKS: '0',
-          LC_ALL: 'C',
-        },
-      },
-      (error, stdout) => {
-        // Every failure is the same answer here: not a repository, path not in HEAD, git missing,
-        // output too large. None of them are worth distinguishing — each means "no baseline".
-        resolve(error === null ? stdout : null);
-      },
-    );
+  return safeGitExecFile(cwd, args, {
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: MAX_BASELINE_BYTES,
   });
 }
