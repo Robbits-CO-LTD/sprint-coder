@@ -321,7 +321,7 @@ export class CommandRunner {
           ],
           {
             cwd: spec.cwdIdentity.canonicalPath,
-            env: buildEnvironment(spec.envDelta),
+            env: buildEnvironment(spec.envDelta, executionImage.environment),
             shell: false,
             stdio: windows
               ? ['pipe', 'pipe', 'pipe']
@@ -356,7 +356,7 @@ export class CommandRunner {
               nativeAddonPath: nativeSafeFsAddonPath(),
               argv: [...executionImage.argvPrefix, ...spec.argv],
               cwd: spec.cwdIdentity.canonicalPath,
-              env: buildEnvironment(spec.envDelta),
+              env: buildEnvironment(spec.envDelta, executionImage.environment),
             }),
           );
         } catch (error) {
@@ -1365,8 +1365,11 @@ export function readProcessStartIdentity(pid: number): string {
   return `unsupported:${pid}`;
 }
 
-function buildEnvironment(delta: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(delta));
+function buildEnvironment(
+  delta: Readonly<Record<string, string>>,
+  internal?: Readonly<Record<string, string>>,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries([...Object.entries(delta), ...Object.entries(internal ?? {})]);
 }
 
 export function buildControlledEnvironment(

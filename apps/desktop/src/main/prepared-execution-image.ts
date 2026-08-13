@@ -38,6 +38,7 @@ export type PreparedExecutionImage = Readonly<{
   descriptors: readonly number[];
   digest: string;
   identity: string;
+  environment?: Readonly<Record<string, string>>;
   close(): Promise<void>;
 }>;
 
@@ -93,6 +94,7 @@ export async function prepareExecutionImage(
   const windowsDependencyIds: string[] = [];
   let sealedId: string | undefined;
   let sealedDescriptor: number | undefined;
+  let supportSealedId: string | undefined;
   let interpreter: PreparedExecutionImage | undefined;
   try {
     const sourceBytes =
@@ -159,6 +161,10 @@ export async function prepareExecutionImage(
         : parseShebang(heldBytes);
     const hasRelativeMachOLoaderPath = containsRelativeMachOLoaderPath(heldBytes);
     const hasRelativeElfLoaderPath = containsUnsafeElfLoaderPath(heldBytes);
+    const trustedElfRuntime =
+      process.platform !== 'linux' || trustedLinuxPath
+        ? true
+        : await hasTrustedSystemElfRuntime(heldBytes);
     if (
       process.platform === 'darwin' &&
       shebang === undefined &&
@@ -169,7 +175,8 @@ export async function prepareExecutionImage(
       process.platform === 'linux' &&
       shebang === undefined &&
       !trustedLinuxPath &&
-      hasRelativeElfLoaderPath
+      hasRelativeElfLoaderPath &&
+      !trustedElfRuntime
     )
       throw new Error('Linux cannot safely launch a mutable dynamically loaded image');
     if (shebang !== undefined && !allowScript)
@@ -192,6 +199,25 @@ export async function prepareExecutionImage(
     const shellScript =
       canonicalInterpreter !== undefined &&
       ['sh', 'bash', 'zsh'].includes(basename(canonicalInterpreter));
+    let environment: Readonly<Record<string, string>> | undefined;
+    if (
+      process.platform === 'linux' &&
+      !trustedLinuxPath &&
+      ['node', 'nodejs'].includes(basename(expected.canonicalPath).toLowerCase())
+    ) {
+      const preload = posixAddon().prepareSealedExecutionImage(
+        Buffer.from(
+          'Object.defineProperty(process,"execPath",{value:process.env.SPRINT_CODER_PINNED_EXECUTABLE});',
+          'utf8',
+        ),
+        0o444,
+      );
+      supportSealedId = preload.id;
+      environment = Object.freeze({
+        NODE_OPTIONS: `--require=/proc/${process.pid}/fd/${preload.fd}`,
+        SPRINT_CODER_PINNED_EXECUTABLE: baseLaunchPath,
+      });
+    }
     return Object.freeze({
       launchPath: interpreter?.launchPath ?? baseLaunchPath,
       argvPrefix:
@@ -219,6 +245,7 @@ export async function prepareExecutionImage(
           'utf8',
         ),
       ),
+      ...(environment === undefined ? {} : { environment }),
       async close(): Promise<void> {
         try {
           await interpreter?.close();
@@ -233,6 +260,10 @@ export async function prepareExecutionImage(
             if (sealedId !== undefined) {
               posixAddon().closeSealedExecutionImage(sealedId);
               sealedId = undefined;
+            }
+            if (supportSealedId !== undefined) {
+              posixAddon().closeSealedExecutionImage(supportSealedId);
+              supportSealedId = undefined;
             }
             if (held !== undefined) {
               await held.close();
@@ -249,6 +280,7 @@ export async function prepareExecutionImage(
     if (windowsId !== undefined) windowsAddon().closePreparedExecutionImage(windowsId);
     for (const id of windowsDependencyIds.splice(0)) windowsAddon().closePreparedExecutionImage(id);
     if (sealedId !== undefined) posixAddon().closeSealedExecutionImage(sealedId);
+    if (supportSealedId !== undefined) posixAddon().closeSealedExecutionImage(supportSealedId);
     await held?.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
     throw error;
@@ -265,8 +297,8 @@ export function containsUnsafeElfLoaderPath(bytes: Buffer): boolean {
   const dynamic = parseElfDynamicInputs(bytes);
   return (
     dynamic === null ||
-    dynamic.hasInterpreter ||
-    dynamic.hasNeededDependency ||
+    dynamic.interpreter !== undefined ||
+    dynamic.neededDependencies.length > 0 ||
     dynamic.searchPaths.length > 0
   );
 }
@@ -274,8 +306,8 @@ export function containsUnsafeElfLoaderPath(bytes: Buffer): boolean {
 /** Parse DT_RPATH/DT_RUNPATH through PT_DYNAMIC. Any malformed ELF fails closed. */
 function parseElfDynamicInputs(bytes: Buffer): Readonly<{
   searchPaths: readonly string[];
-  hasInterpreter: boolean;
-  hasNeededDependency: boolean;
+  interpreter?: string;
+  neededDependencies: readonly string[];
 }> | null {
   if (
     bytes.length < 64 ||
@@ -301,7 +333,7 @@ function parseElfDynamicInputs(bytes: Buffer): Readonly<{
   if (phentsize < (is64 ? 56 : 32) || phnum > 4096) return null;
   const loads: Array<{ offset: number; vaddr: number; filesz: number }> = [];
   let dynamic: { offset: number; size: number } | undefined;
-  let hasInterpreter = false;
+  let interpreter: string | undefined;
   for (let index = 0; index < phnum; index += 1) {
     const header = phoff + index * phentsize;
     if (header < 0 || header > bytes.length - phentsize) return null;
@@ -313,20 +345,25 @@ function parseElfDynamicInputs(bytes: Buffer): Readonly<{
       return null;
     if (type === 1) loads.push({ offset, vaddr, filesz });
     if (type === 2) dynamic = { offset, size: filesz };
-    if (type === 3) hasInterpreter = true;
+    if (type === 3) {
+      if (filesz < 2 || filesz > 4096) return null;
+      const end = bytes.indexOf(0, offset);
+      if (end < offset || end >= offset + filesz) return null;
+      interpreter = bytes.subarray(offset, end).toString('utf8');
+    }
   }
   if (dynamic === undefined)
     return Object.freeze({
       searchPaths: Object.freeze([]),
-      hasInterpreter,
-      hasNeededDependency: false,
+      ...(interpreter === undefined ? {} : { interpreter }),
+      neededDependencies: Object.freeze([]),
     });
   const entrySize = is64 ? 16 : 8;
   let stringTableAddress: number | undefined;
   let stringTableSize: number | undefined;
   const searchOffsets: number[] = [];
+  const neededOffsets: number[] = [];
   let terminated = false;
-  let hasNeededDependency = false;
   for (
     let offset = dynamic.offset;
     offset + entrySize <= dynamic.offset + dynamic.size;
@@ -341,15 +378,15 @@ function parseElfDynamicInputs(bytes: Buffer): Readonly<{
     }
     if (tag === 5) stringTableAddress = value;
     else if (tag === 10) stringTableSize = value;
-    else if (tag === 1) hasNeededDependency = true;
+    else if (tag === 1) neededOffsets.push(value);
     else if (tag === 15 || tag === 29) searchOffsets.push(value);
   }
   if (!terminated) return null;
-  if (searchOffsets.length === 0)
+  if (searchOffsets.length === 0 && neededOffsets.length === 0)
     return Object.freeze({
       searchPaths: Object.freeze([]),
-      hasInterpreter,
-      hasNeededDependency,
+      ...(interpreter === undefined ? {} : { interpreter }),
+      neededDependencies: Object.freeze([]),
     });
   if (stringTableAddress === undefined || stringTableSize === undefined) return null;
   const mapping = loads.find(
@@ -361,20 +398,64 @@ function parseElfDynamicInputs(bytes: Buffer): Readonly<{
   if (mapping === undefined) return null;
   const stringTable = mapping.offset + (stringTableAddress - mapping.vaddr);
   const paths: string[] = [];
-  for (const relativeOffset of searchOffsets) {
+  const readString = (relativeOffset: number): string | null => {
     if (relativeOffset >= stringTableSize) return null;
     const start = stringTable + relativeOffset;
     const endLimit = stringTable + stringTableSize;
     const end = bytes.indexOf(0, start);
-    if (end < start || end >= endLimit) return null;
-    const value = bytes.subarray(start, end).toString('utf8');
+    return end < start || end >= endLimit ? null : bytes.subarray(start, end).toString('utf8');
+  };
+  for (const relativeOffset of searchOffsets) {
+    const value = readString(relativeOffset);
+    if (value === null) return null;
     if (value.length > 0) paths.push(value);
+  }
+  const neededDependencies: string[] = [];
+  for (const relativeOffset of neededOffsets) {
+    const value = readString(relativeOffset);
+    if (value === null || value.length === 0) return null;
+    neededDependencies.push(value);
   }
   return Object.freeze({
     searchPaths: Object.freeze(paths),
-    hasInterpreter,
-    hasNeededDependency,
+    ...(interpreter === undefined ? {} : { interpreter }),
+    neededDependencies: Object.freeze(neededDependencies),
   });
+}
+
+async function hasTrustedSystemElfRuntime(bytes: Buffer): Promise<boolean> {
+  const dynamic = parseElfDynamicInputs(bytes);
+  if (dynamic === null || dynamic.searchPaths.length > 0) return false;
+  if (dynamic.interpreter !== undefined) {
+    if (
+      !dynamic.interpreter.startsWith('/') ||
+      !(await isRootOwnedNonWritableExecutable(dynamic.interpreter))
+    )
+      return false;
+  }
+  const directories = [
+    '/lib',
+    '/lib64',
+    '/usr/lib',
+    '/usr/lib64',
+    '/lib/x86_64-linux-gnu',
+    '/usr/lib/x86_64-linux-gnu',
+    '/lib/aarch64-linux-gnu',
+    '/usr/lib/aarch64-linux-gnu',
+  ];
+  for (const name of dynamic.neededDependencies) {
+    if (basename(name) !== name || !/^[A-Za-z0-9_.+-]{1,255}$/u.test(name)) return false;
+    let trusted = false;
+    for (const directory of directories) {
+      const candidate = join(directory, name);
+      if (await isRootOwnedNonWritableExecutable(candidate)) {
+        trusted = true;
+        break;
+      }
+    }
+    if (!trusted) return false;
+  }
+  return true;
 }
 
 const WINDOWS_SYSTEM_DLL =
