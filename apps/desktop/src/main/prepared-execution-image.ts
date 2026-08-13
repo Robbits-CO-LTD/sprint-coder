@@ -347,7 +347,7 @@ function parseElfDynamicSearchPaths(bytes: Buffer): readonly string[] | null {
 }
 
 const WINDOWS_SYSTEM_DLL =
-  /^(?:api-ms-win-|ext-ms-win-)|^(?:advapi32|combase|gdi32|kernel32|kernelbase|msvcrt|ntdll|ole32|oleaut32|rpcrt4|sechost|shell32|shlwapi|user32|ws2_32)\.dll$/iu;
+  /^(?:api-ms-win-|ext-ms-win-)|^(?:advapi32|avrt|bcrypt|cfgmgr32|combase|comctl32|comdlg32|crypt32|cryptbase|cryptnet|cryptui|d3d11|d3d12|dbgcore|dbghelp|dcomp|dhcpcsvc|dhcpcsvc6|dnsapi|dsound|dwmapi|dwrite|dxgi|gdi32|hid|iertutil|imm32|iphlpapi|kernel32|kernelbase|mf|mfplat|mfreadwrite|msacm32|msvcp140|msvcrt|msvfw32|mswsock|ncrypt|netapi32|normaliz|ntasn1|ntdll|ole32|oleacc|oleaut32|powrprof|profapi|propsys|psapi|rpcrt4|sechost|secur32|setupapi|shcore|shell32|shlwapi|srvcli|ucrtbase|urlmon|user32|userenv|usp10|uxtheme|vcruntime140(?:_1)?|version|winhttp|wininet|winmm|wintrust|wlanapi|wldp|ws2_32|wtsapi32)\.dll$/iu;
 
 export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
   const imports = parsePeImports(bytes);
