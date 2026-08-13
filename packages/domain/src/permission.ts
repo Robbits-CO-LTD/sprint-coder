@@ -57,6 +57,16 @@ export type PermissionResource =
       attachmentManifestDigest: string | null;
       attachmentByteCount: number;
     }
+  | {
+      kind: 'provider-disclosure';
+      providerId: string;
+      canonicalPath: string;
+      sourceDigest: string;
+      disclosedDigest: string;
+      classification: 'sensitive' | 'uncertain';
+      reasons: readonly string[];
+      classifierVersion: string;
+    }
   | { kind: 'secret'; secretId: string }
   | { kind: 'external'; target: string };
 
@@ -78,6 +88,14 @@ export type ResourceSet =
       allowLocalOnlyTaskRemote: boolean;
       attachmentManifestDigest: string | null;
       attachmentByteCount: number;
+    }
+  | {
+      kind: 'provider-disclosure-exact';
+      providerId: string;
+      canonicalPath: string;
+      sourceDigest: string;
+      disclosedDigest: string;
+      classifierVersion: string;
     }
   | { kind: 'secret-exact'; secretId: string }
   | { kind: 'external-exact'; target: string }
@@ -579,6 +597,26 @@ function requestFactsValid(request: PermissionRequest): boolean {
       return false;
     if (request.providerEgress !== request.resource.providerTrust) return false;
   }
+  if (request.resource.kind === 'provider-disclosure') {
+    const segments = request.resource.canonicalPath.split(/[\\/]+/);
+    if (
+      request.resource.providerId.length === 0 ||
+      request.resource.canonicalPath.length === 0 ||
+      request.resource.canonicalPath.includes('\0') ||
+      segments.includes('.') ||
+      segments.includes('..') ||
+      !/^[a-f0-9]{64}$/.test(request.resource.sourceDigest) ||
+      !/^[a-f0-9]{64}$/.test(request.resource.disclosedDigest) ||
+      !(['sensitive', 'uncertain'] as const).includes(request.resource.classification) ||
+      !Array.isArray(request.resource.reasons) ||
+      request.resource.reasons.length === 0 ||
+      request.resource.reasons.some(
+        (reason) => typeof reason !== 'string' || reason.length === 0 || reason.length > 128,
+      ) ||
+      request.resource.classifierVersion.length === 0
+    )
+      return false;
+  }
   if (request.resource.kind === 'workspace-path' || request.resource.kind === 'external-path') {
     const segments = request.resource.canonicalPath.split(/[\\/]+/);
     if (
@@ -618,7 +656,8 @@ function requestFactsValid(request: PermissionRequest): boolean {
   }
   const resourceMatchesCapability =
     request.capability === 'workspace.read' || request.capability === 'workspace.write'
-      ? request.resource.kind === 'workspace-path'
+      ? request.resource.kind === 'workspace-path' ||
+        (request.capability === 'workspace.read' && request.resource.kind === 'provider-disclosure')
       : request.capability === 'filesystem.external.read' ||
           request.capability === 'filesystem.external.write'
         ? request.resource.kind === 'external-path'
@@ -735,6 +774,17 @@ function permissionResourceIdentity(resource: PermissionResource): string {
   if (resource.kind === 'network') return JSON.stringify([resource.kind, resource.origin]);
   if (resource.kind === 'secret') return JSON.stringify([resource.kind, resource.secretId]);
   if (resource.kind === 'external') return JSON.stringify([resource.kind, resource.target]);
+  if (resource.kind === 'provider-disclosure')
+    return JSON.stringify([
+      resource.kind,
+      resource.providerId,
+      resource.canonicalPath,
+      resource.sourceDigest,
+      resource.disclosedDigest,
+      resource.classification,
+      resource.reasons,
+      resource.classifierVersion,
+    ]);
   return JSON.stringify([
     resource.kind,
     resource.providerId,
@@ -876,6 +926,15 @@ function resourceContains(set: ResourceSet, resource: PermissionResource): boole
       set.allowedProvenance.includes(resource.provenanceTrust) &&
       (!set.requireSecretScanClean || resource.secretScan === 'clean') &&
       (!resource.localOnlyTask || resource.providerTrust === 'trusted-local')
+    );
+  if (set.kind === 'provider-disclosure-exact')
+    return (
+      resource.kind === 'provider-disclosure' &&
+      resource.providerId === set.providerId &&
+      resource.canonicalPath === set.canonicalPath &&
+      resource.sourceDigest === set.sourceDigest &&
+      resource.disclosedDigest === set.disclosedDigest &&
+      resource.classifierVersion === set.classifierVersion
     );
   if (set.kind === 'secret-exact')
     return resource.kind === 'secret' && resource.secretId === set.secretId;
@@ -1056,6 +1115,14 @@ function resourceSetIsSubset(candidate: ResourceSet, parent: ResourceSet): boole
       (!candidate.allowLocalOnlyTaskRemote || parent.allowLocalOnlyTaskRemote) &&
       candidate.attachmentManifestDigest === parent.attachmentManifestDigest &&
       candidate.attachmentByteCount === parent.attachmentByteCount
+    );
+  if (candidate.kind === 'provider-disclosure-exact' && parent.kind === 'provider-disclosure-exact')
+    return (
+      candidate.providerId === parent.providerId &&
+      candidate.canonicalPath === parent.canonicalPath &&
+      candidate.sourceDigest === parent.sourceDigest &&
+      candidate.disclosedDigest === parent.disclosedDigest &&
+      candidate.classifierVersion === parent.classifierVersion
     );
   return false;
 }

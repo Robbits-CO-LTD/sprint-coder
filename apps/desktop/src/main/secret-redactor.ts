@@ -89,6 +89,9 @@ export function redactSecrets(input: string): string {
       // A bare JWT (three dot-separated base64url segments, header starting `eyJ`) can appear
       // without any `token=`/`Authorization:` label at all (e.g. a cookie value, a URL fragment).
       .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_JWT]')
+      .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, '[REDACTED_SLACK_TOKEN]')
+      .replace(/\bglpat-[A-Za-z0-9_-]{10,}\b/g, '[REDACTED_GITLAB_TOKEN]')
+      .replace(/\b([a-z][a-z0-9+.-]*:\/\/)(?:[^\s/@:]+)(?::[^\s/@]*)?@/gi, '$1[REDACTED]@')
   );
 }
 

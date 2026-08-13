@@ -391,6 +391,7 @@ import {
   PROVIDER_WORKSPACE_GUIDANCE,
   ProviderWorkspaceTools,
   WorkspaceToolRejection,
+  providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
   workspaceToolAuthorizationGuard,
 } from './provider-workspace-tools';
@@ -3266,6 +3267,15 @@ export class IpcRouter {
 
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     const facts = approvalFactsForTool(request, capability);
+    const disclosure = providerDisclosureAuthorizationFacts(request.input);
+    if (capability === 'workspace.read' && disclosure !== undefined)
+      return {
+        decision: 'approval_required' as const,
+        reason: 'provider_disclosure_requires_explicit_approval',
+        beforeExecute: () =>
+          providerDisclosureAuthorizationFacts(request.input)?.sourceDigest ===
+          disclosure.sourceDigest,
+      };
     const commandRunner = request.entry.implementationKind === 'command-runner';
     const sandboxProfile =
       capability === 'workspace.write' || capability === 'filesystem.external.write'
