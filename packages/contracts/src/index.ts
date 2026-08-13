@@ -2996,7 +2996,13 @@ export const turnSteerInputSchema = z
   })
   .strict();
 export const turnStopAndSendInputSchema = z.object(turnTextAndSkillsInputShape).strict();
-export const turnCancelInputSchema = z.object({ taskId: idSchema, turnId: idSchema }).strict();
+export const turnCancelInputSchema = z
+  .object({
+    taskId: idSchema,
+    turnId: idSchema,
+    startNextQueued: z.boolean().optional(),
+  })
+  .strict();
 export const turnSubscriptionInputSchema = z
   .object({
     taskId: idSchema,

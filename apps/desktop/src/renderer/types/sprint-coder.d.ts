@@ -992,7 +992,7 @@ export interface SprintCoderApi {
       attachmentIds: string[];
       attachmentSelectionIdentity: string | null;
     }): Promise<{ turnId: string; renamedTask?: TaskSummary | undefined }>;
-    cancel(input: { taskId: string; turnId: string }): Promise<void>;
+    cancel(input: { taskId: string; turnId: string; startNextQueued?: boolean }): Promise<void>;
     queue(input: {
       taskId: string;
       text: string;

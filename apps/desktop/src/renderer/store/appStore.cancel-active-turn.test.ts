@@ -119,7 +119,11 @@ describe('stopAllTeamWorkers leader cancellation', () => {
 
     await useAppStore.getState().stopAllTeamWorkers(taskId);
 
-    expect(cancel).toHaveBeenCalledWith({ taskId, turnId: 'turn-1' });
+    expect(cancel).toHaveBeenCalledWith({
+      taskId,
+      turnId: 'turn-1',
+      startNextQueued: false,
+    });
     expect(stopAll).toHaveBeenCalledWith(taskId);
     expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(stopAll.mock.invocationCallOrder[0]!);
     expect(useAppStore.getState().teamByTask[taskId]).toBe(detail);
