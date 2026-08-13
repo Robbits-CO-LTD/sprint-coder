@@ -422,6 +422,7 @@ import {
   ProviderStreamTimeoutError,
   providerEventsWithDeadline,
 } from './provider-stream-deadline';
+import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 import { UpdateInstallMutationGate } from './update-install-mutation-gate';
 import { ProviderVerificationService } from './provider-verification';
 import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
@@ -4733,6 +4734,7 @@ export class IpcRouter {
       },
     };
     let workspaceToolSnapshot: ToolCatalogSnapshot | undefined;
+    const streamBudget = new ProviderStreamBudget();
     try {
       await this.ensureProviderEndpointConsent(
         this.persistence.getProviderConnection(connectionId),
@@ -4852,6 +4854,7 @@ export class IpcRouter {
                 : { tools: dispatchRound.tools }),
             },
             controller.signal,
+            streamBudget,
           ),
           {
             executionId,
@@ -5048,6 +5051,7 @@ export class IpcRouter {
                   );
             content = redactSecrets(JSON.stringify(result ?? null));
           }
+          streamBudget.consumeToolResult(content);
           messages.push({
             role: 'tool',
             content,
@@ -5067,11 +5071,18 @@ export class IpcRouter {
         aggregateUsage,
       );
     } catch (error) {
-      if (error instanceof ProviderStreamTimeoutError) {
+      if (
+        error instanceof ProviderStreamTimeoutError ||
+        error instanceof ProviderQuotaExceededError
+      ) {
         if (runtime !== undefined)
-          void this.cancelProviderExecution(runtime, controller, error.executionId).catch(
-            () => undefined,
-          );
+          void this.cancelProviderExecution(
+            runtime,
+            controller,
+            error instanceof ProviderStreamTimeoutError
+              ? error.executionId
+              : (this.providerExecutionIdByTurn.get(started.turnId) ?? started.turnId),
+          ).catch(() => undefined);
         else controller.abort();
         await this.mailbox.run(taskId, () => {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
@@ -5080,7 +5091,11 @@ export class IpcRouter {
               taskId,
               started.turnId,
               messageId,
-              `${synthesizing ? '\n\n' : ''}${error.userMessage}`,
+              `${synthesizing ? '\n\n' : ''}${
+                error instanceof ProviderStreamTimeoutError
+                  ? error.userMessage
+                  : 'Providerの応答が安全な上限を超えたため、このTurnを終了しました。'
+              }`,
             ),
           );
           this.finishAndAdvance(taskId, started.turnId, 'failed');

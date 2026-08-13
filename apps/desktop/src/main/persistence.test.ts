@@ -43,6 +43,7 @@ import {
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
 import { BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
 import { modelSelectionForRuntime } from './connection-identity';
+import { PROVIDER_STREAM_LIMITS, ProviderQuotaExceededError } from './provider-stream-budget';
 import {
   EditSagaCrashError,
   EditSagaExecutor,
@@ -907,6 +908,32 @@ if (runsWithElectronAbi)
         content: '修正完了です。',
         workContent: '調査を開始します。\n\n原因を確認しました。',
       });
+      persistence.close();
+    });
+
+    it('atomically rejects a delta that would exceed the persisted turn byte quota', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'stream safely');
+      const messageId = randomUUID();
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, turn.turnId, stage);
+      persistence.appendDelta(task.id, turn.turnId, messageId, 'a');
+      const rawDb = Reflect.get(persistence, 'db') as Database.Database;
+      rawDb
+        .prepare('UPDATE messages SET content = ? WHERE id = ?')
+        .run('a'.repeat(PROVIDER_STREAM_LIMITS.persistedTurnBytes), messageId);
+
+      expect(() => persistence.appendDelta(task.id, turn.turnId, messageId, 'b')).toThrowError(
+        ProviderQuotaExceededError,
+      );
+      expect(
+        (
+          rawDb
+            .prepare('SELECT length(CAST(content AS BLOB)) AS bytes FROM messages WHERE id = ?')
+            .get(messageId) as { bytes: number }
+        ).bytes,
+      ).toBe(PROVIDER_STREAM_LIMITS.persistedTurnBytes);
       persistence.close();
     });
 

@@ -24,6 +24,7 @@ import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { projectContextProviderMessages } from './project-context-delivery';
 import { applyWorkerContextInheritance, reserveTeamWorkerContext } from './team-worker-runtime';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
+import { ProviderStreamBudget } from './provider-stream-budget';
 
 export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   fallback: TeamWorkerRuntime;
@@ -207,6 +208,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     try {
       const runtime = this.deps.registry.resolve(connection);
       modelLease = await acquireProviderModelLease(runtime, connection, modelId);
+      const streamBudget = new ProviderStreamBudget();
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
         providerCallCount += 1;
         if (
@@ -239,6 +241,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             ...(webSearch ? { webSearch: true } : {}),
           },
           controller.signal,
+          streamBudget,
         )) {
           if (event.type === 'output_delta') {
             output.push(event.text);
@@ -305,9 +308,11 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             label: `${toolCall.name}の実行完了`,
             at: new Date().toISOString(),
           });
+          const toolResult = JSON.stringify(result ?? null);
+          streamBudget.consumeToolResult(toolResult);
           messages.push({
             role: 'tool',
-            content: JSON.stringify(result ?? null),
+            content: toolResult,
             toolCallId: toolCall.callId,
             toolName: toolCall.name,
           });

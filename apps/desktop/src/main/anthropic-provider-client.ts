@@ -9,6 +9,7 @@ import {
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
 import type { ProviderFetch } from './openai-provider-client';
 import { normalizeAnthropicMessagesStream } from './anthropic-messages-stream';
+import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 
 const ANTHROPIC_API_BASE_URL = 'https://api.anthropic.com/v1';
 const ANTHROPIC_API_VERSION = '2023-06-01';
@@ -118,6 +119,7 @@ export class AnthropicProviderClient implements ProviderRuntime {
     connection: ProviderConnection,
     request: ProviderExecutionRequest,
     signal: AbortSignal,
+    budget = new ProviderStreamBudget(),
   ): AsyncIterable<CanonicalProviderEvent> {
     assertAnthropicConnection(connection);
     const parsed = providerExecutionRequestSchema.parse(request);
@@ -163,8 +165,12 @@ export class AnthropicProviderClient implements ProviderRuntime {
         };
         return;
       }
-      yield* normalizeAnthropicMessagesStream(response.body, parsed.modelId);
-    } catch {
+      yield* normalizeAnthropicMessagesStream(response.body, parsed.modelId, budget.beginCall());
+    } catch (error) {
+      if (error instanceof ProviderQuotaExceededError) {
+        controller.abort();
+        throw error;
+      }
       yield {
         type: 'error',
         error: {

@@ -1,4 +1,5 @@
 import type { CanonicalProviderEvent, ProviderMessageToolCall } from '@sprint-coder/contracts';
+import { ProviderStreamBudget, readBoundedServerSentJson } from './provider-stream-budget';
 
 type ToolAccumulator = {
   callId: string | null;
@@ -10,13 +11,14 @@ export async function* normalizeOpenAIChatCompletionsStream(
   body: ReadableStream<Uint8Array>,
   providerId: string,
   requestedModel: string,
+  budget = new ProviderStreamBudget(),
 ): AsyncIterable<CanonicalProviderEvent> {
   let resolvedModel = requestedModel;
   let stopReason = 'completed';
   let usage: Record<string, unknown> | null = null;
   const tools = new Map<number, ToolAccumulator>();
 
-  for await (const value of readServerSentJson(body)) {
+  for await (const value of readBoundedServerSentJson(body, budget)) {
     const event = asRecord(value);
     if (event === null) continue;
     if (typeof event.model === 'string') resolvedModel = event.model;
@@ -29,12 +31,18 @@ export async function* normalizeOpenAIChatCompletionsStream(
       if (typeof choice.finish_reason === 'string') stopReason = choice.finish_reason;
       const delta = asRecord(choice.delta);
       if (delta === null) continue;
-      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0)
+      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+        budget.consumeOutput(delta.reasoning_content);
         yield { type: 'reasoning_delta', text: delta.reasoning_content };
-      for (const reasoning of reasoningTexts(delta.reasoning_details))
+      }
+      for (const reasoning of reasoningTexts(delta.reasoning_details)) {
+        budget.consumeOutput(reasoning);
         yield { type: 'reasoning_delta', text: reasoning };
-      if (typeof delta.content === 'string' && delta.content.length > 0)
+      }
+      if (typeof delta.content === 'string' && delta.content.length > 0) {
+        budget.consumeOutput(delta.content);
         yield { type: 'output_delta', text: delta.content };
+      }
       if (!Array.isArray(delta.tool_calls)) continue;
       for (const rawTool of delta.tool_calls) {
         const tool = asRecord(rawTool);
@@ -44,7 +52,10 @@ export async function* normalizeOpenAIChatCompletionsStream(
         const fn = asRecord(tool.function);
         if (typeof tool.id === 'string') current.callId = tool.id;
         if (typeof fn?.name === 'string') current.name = fn.name;
-        if (typeof fn?.arguments === 'string') current.arguments += fn.arguments;
+        if (typeof fn?.arguments === 'string') {
+          budget.consumeToolArguments(String(index), fn.arguments);
+          current.arguments += fn.arguments;
+        }
         tools.set(index, current);
       }
     }
@@ -52,6 +63,7 @@ export async function* normalizeOpenAIChatCompletionsStream(
 
   for (const tool of [...tools.entries()].sort(([a], [b]) => a - b).map(([, value]) => value)) {
     if (tool.callId === null || tool.name === null) continue;
+    budget.consumeToolCall();
     yield {
       type: 'tool_call',
       callId: tool.callId,
@@ -76,39 +88,6 @@ export async function* normalizeOpenAIChatCompletionsStream(
     },
   };
   yield { type: 'completed', stopReason };
-}
-
-async function* readServerSentJson(body: ReadableStream<Uint8Array>): AsyncIterable<unknown> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let pending = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      pending += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n');
-      let boundary = pending.indexOf('\n\n');
-      while (boundary >= 0) {
-        const block = pending.slice(0, boundary);
-        pending = pending.slice(boundary + 2);
-        const data = block
-          .split('\n')
-          .filter((line) => line.startsWith('data:'))
-          .map((line) => line.slice(5).trimStart())
-          .join('\n');
-        if (data.length > 0 && data !== '[DONE]') {
-          try {
-            yield JSON.parse(data) as unknown;
-          } catch {
-            // Ignore one malformed frame; a later terminal frame still determines the result.
-          }
-        }
-        boundary = pending.indexOf('\n\n');
-      }
-      if (done) break;
-    }
-  } finally {
-    reader.releaseLock();
-  }
 }
 
 function reasoningTexts(value: unknown): string[] {

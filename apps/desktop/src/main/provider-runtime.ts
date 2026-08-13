@@ -7,6 +7,7 @@ import {
   type ProviderRuntimeKind,
 } from '@sprint-coder/contracts';
 import type { ProviderModelLease } from './ollama-model-lifecycle';
+import type { ProviderStreamBudget } from './provider-stream-budget';
 
 export type ProviderVerificationResult = Readonly<{
   status: 'verified' | 'invalid_credentials' | 'unavailable';
@@ -25,6 +26,7 @@ export interface ProviderRuntime {
     connection: ProviderConnection,
     request: ProviderExecutionRequest,
     signal: AbortSignal,
+    budget?: ProviderStreamBudget,
   ): AsyncIterable<CanonicalProviderEvent>;
   cancel(executionId: string): Promise<void>;
   acquireModelLease?(connection: ProviderConnection, modelId: string): Promise<ProviderModelLease>;

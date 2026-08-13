@@ -1,4 +1,5 @@
 import type { CanonicalProviderEvent, NormalizedProviderUsage } from '@sprint-coder/contracts';
+import { ProviderStreamBudget, readBoundedServerSentJson } from './provider-stream-budget';
 
 type ToolBlock = {
   callId: string;
@@ -9,13 +10,14 @@ type ToolBlock = {
 export async function* normalizeAnthropicMessagesStream(
   body: ReadableStream<Uint8Array>,
   requestedModel: string,
+  budget = new ProviderStreamBudget(),
 ): AsyncIterable<CanonicalProviderEvent> {
   let resolvedModel = requestedModel;
   let stopReason: string | null = null;
   let usage = emptyUsage();
   const tools = new Map<number, ToolBlock>();
 
-  for await (const value of readServerSentJson(body)) {
+  for await (const value of readBoundedServerSentJson(body, budget)) {
     const event = record(value);
     if (event === null || typeof event.type !== 'string') continue;
 
@@ -34,22 +36,27 @@ export async function* normalizeAnthropicMessagesStream(
         block?.type === 'tool_use' &&
         typeof block.id === 'string' &&
         typeof block.name === 'string'
-      )
+      ) {
+        const partialJson = objectHasValues(block.input) ? JSON.stringify(block.input) : '';
+        if (partialJson !== '') budget.consumeToolArguments(String(index), partialJson);
         tools.set(index, {
           callId: block.id.slice(0, 256),
           name: block.name.slice(0, 256),
-          partialJson: objectHasValues(block.input) ? JSON.stringify(block.input) : '',
+          partialJson,
         });
+      }
       continue;
     }
 
     if (event.type === 'content_block_delta') {
       const delta = record(event.delta);
       if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+        budget.consumeOutput(delta.text);
         yield { type: 'output_delta', text: delta.text };
         continue;
       }
       if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+        budget.consumeOutput(delta.thinking);
         yield { type: 'reasoning_delta', text: delta.thinking };
         continue;
       }
@@ -60,7 +67,10 @@ export async function* normalizeAnthropicMessagesStream(
         typeof delta.partial_json === 'string'
       ) {
         const tool = tools.get(index);
-        if (tool !== undefined) tool.partialJson += delta.partial_json;
+        if (tool !== undefined) {
+          budget.consumeToolArguments(String(index), delta.partial_json);
+          tool.partialJson += delta.partial_json;
+        }
       }
       continue;
     }
@@ -71,6 +81,7 @@ export async function* normalizeAnthropicMessagesStream(
       const tool = tools.get(index);
       if (tool === undefined) continue;
       tools.delete(index);
+      budget.consumeToolCall();
       yield {
         type: 'tool_call',
         callId: tool.callId,
@@ -144,39 +155,6 @@ function mergeUsage(
     cacheWriteTokens: integer(value.cache_creation_input_tokens) ?? current.cacheWriteTokens,
     reasoningTokens: integer(outputDetails?.thinking_tokens) ?? current.reasoningTokens,
   };
-}
-
-async function* readServerSentJson(body: ReadableStream<Uint8Array>): AsyncIterable<unknown> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let pending = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      pending += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n');
-      let boundary = pending.indexOf('\n\n');
-      while (boundary >= 0) {
-        const block = pending.slice(0, boundary);
-        pending = pending.slice(boundary + 2);
-        const data = block
-          .split('\n')
-          .filter((line) => line.startsWith('data:'))
-          .map((line) => line.slice(5).trimStart())
-          .join('\n');
-        if (data !== '') {
-          try {
-            yield JSON.parse(data) as unknown;
-          } catch {
-            // Unknown and malformed SSE frames are ignored per Anthropic's versioning policy.
-          }
-        }
-        boundary = pending.indexOf('\n\n');
-      }
-      if (done) break;
-    }
-  } finally {
-    reader.releaseLock();
-  }
 }
 
 function parseToolInput(

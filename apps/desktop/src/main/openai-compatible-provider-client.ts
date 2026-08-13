@@ -25,6 +25,7 @@ import {
 } from './ollama-model-lifecycle';
 import { secureLogger } from './secure-logger';
 import { ProviderEndpointPolicy, secureProviderFetch } from './provider-endpoint-policy';
+import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
 const endpointPolicy = new ProviderEndpointPolicy();
@@ -168,6 +169,7 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     connection: ProviderConnection,
     request: ProviderExecutionRequest,
     signal: AbortSignal,
+    budget = new ProviderStreamBudget(),
   ): AsyncIterable<CanonicalProviderEvent> {
     assertCompatibleConnection(connection);
     const parsed = providerExecutionRequestSchema.parse(request);
@@ -213,14 +215,25 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
         return;
       }
       if (profile.protocol === 'responses')
-        yield* normalizeOpenAIResponsesStream(response.body, connection.providerId, parsed.modelId);
+        yield* normalizeOpenAIResponsesStream(
+          response.body,
+          connection.providerId,
+          parsed.modelId,
+          {},
+          budget.beginCall(),
+        );
       else
         yield* normalizeOpenAIChatCompletionsStream(
           response.body,
           connection.providerId,
           parsed.modelId,
+          budget.beginCall(),
         );
-    } catch {
+    } catch (error) {
+      if (error instanceof ProviderQuotaExceededError) {
+        controller.abort();
+        throw error;
+      }
       yield {
         type: 'error',
         error: {

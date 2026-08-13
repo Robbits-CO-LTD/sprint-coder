@@ -1,10 +1,12 @@
 import type { CanonicalProviderEvent, NormalizedProviderUsage } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
+import { ProviderStreamBudget, readBoundedServerSentJson } from './provider-stream-budget';
 
 export async function* normalizeGeminiContentStream(
   body: ReadableStream<Uint8Array>,
   requestedModel: string,
   executionId = requestedModel,
+  budget = new ProviderStreamBudget(),
 ): AsyncIterable<CanonicalProviderEvent> {
   let resolvedModel = requestedModel;
   let stopReason: string | null = null;
@@ -13,7 +15,7 @@ export async function* normalizeGeminiContentStream(
   let received = false;
   let failed = false;
 
-  for await (const value of readServerSentJson(body)) {
+  for await (const value of readBoundedServerSentJson(body, budget)) {
     const chunk = record(value);
     if (chunk === null) continue;
     received = true;
@@ -54,6 +56,7 @@ export async function* normalizeGeminiContentStream(
       for (const partValue of parts) {
         const part = record(partValue);
         if (typeof part?.text === 'string') {
+          budget.consumeOutput(part.text);
           yield part.thought === true
             ? { type: 'reasoning_delta', text: part.text }
             : { type: 'output_delta', text: part.text };
@@ -61,6 +64,8 @@ export async function* normalizeGeminiContentStream(
         const functionCall = record(part?.functionCall);
         if (functionCall !== null && typeof functionCall.name === 'string') {
           toolOrdinal += 1;
+          budget.consumeToolCall();
+          budget.consumeToolArguments(String(toolOrdinal), JSON.stringify(functionCall.args ?? {}));
           yield {
             type: 'tool_call',
             callId:
@@ -118,39 +123,6 @@ function mergeUsage(
     cacheReadTokens: integer(value.cachedContentTokenCount) ?? current.cacheReadTokens,
     reasoningTokens: integer(value.thoughtsTokenCount) ?? current.reasoningTokens,
   };
-}
-
-async function* readServerSentJson(body: ReadableStream<Uint8Array>): AsyncIterable<unknown> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let pending = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      pending += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n');
-      let boundary = pending.indexOf('\n\n');
-      while (boundary >= 0) {
-        const block = pending.slice(0, boundary);
-        pending = pending.slice(boundary + 2);
-        const data = block
-          .split('\n')
-          .filter((line) => line.startsWith('data:'))
-          .map((line) => line.slice(5).trimStart())
-          .join('\n');
-        if (data !== '') {
-          try {
-            yield JSON.parse(data) as unknown;
-          } catch {
-            // Ignore unknown frames and continue until the stream closes.
-          }
-        }
-        boundary = pending.indexOf('\n\n');
-      }
-      if (done) break;
-    }
-  } finally {
-    reader.releaseLock();
-  }
 }
 
 function jsonValue(

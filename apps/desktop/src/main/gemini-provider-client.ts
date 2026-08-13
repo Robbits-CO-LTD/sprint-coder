@@ -9,6 +9,7 @@ import {
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
 import type { ProviderFetch } from './openai-provider-client';
 import { normalizeGeminiContentStream } from './gemini-content-stream';
+import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 
 const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 const MODELS_SOURCE = 'https://ai.google.dev/api/models';
@@ -116,6 +117,7 @@ export class GeminiProviderClient implements ProviderRuntime {
     connection: ProviderConnection,
     request: ProviderExecutionRequest,
     signal: AbortSignal,
+    budget = new ProviderStreamBudget(),
   ): AsyncIterable<CanonicalProviderEvent> {
     assertGeminiConnection(connection);
     const parsed = providerExecutionRequestSchema.parse(request);
@@ -166,8 +168,17 @@ export class GeminiProviderClient implements ProviderRuntime {
         };
         return;
       }
-      yield* normalizeGeminiContentStream(response.body, parsed.modelId, parsed.executionId);
-    } catch {
+      yield* normalizeGeminiContentStream(
+        response.body,
+        parsed.modelId,
+        parsed.executionId,
+        budget.beginCall(),
+      );
+    } catch (error) {
+      if (error instanceof ProviderQuotaExceededError) {
+        controller.abort();
+        throw error;
+      }
       yield {
         type: 'error',
         error: {
