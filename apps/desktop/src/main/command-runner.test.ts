@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { access, chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,6 +17,7 @@ import {
   CommandRunnerError,
   buildControlledEnvironment,
   executionSpecPathGuard,
+  posixGroupIdentityMatches,
   prepareExecutionSpec,
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
@@ -85,6 +96,30 @@ describe('CommandRunner', () => {
     await expect(
       waitForOutcomeOrTerminationFailure(neverCloses, terminationFailure),
     ).rejects.toMatchObject({ code: 'PROCESS_TREE_TERMINATION_FAILED' });
+  });
+
+  it('refuses a POSIX group signal when a live leader PID has a different start identity', () => {
+    expect(
+      posixGroupIdentityMatches({
+        leaderAlive: true,
+        expectedStartIdentity: 'darwin:expected',
+        observedStartIdentity: 'darwin:reused',
+      }),
+    ).toBe(false);
+    expect(
+      posixGroupIdentityMatches({
+        leaderAlive: true,
+        expectedStartIdentity: 'darwin:expected',
+        observedStartIdentity: 'darwin:expected',
+      }),
+    ).toBe(true);
+    expect(
+      posixGroupIdentityMatches({
+        leaderAlive: false,
+        expectedStartIdentity: 'darwin:expected',
+        observedStartIdentity: null,
+      }),
+    ).toBe(true);
   });
 
   it('prepares an immutable spec from a canonical Workspace cwd and rejects escapes', async () => {
@@ -196,6 +231,155 @@ describe('CommandRunner', () => {
       await expectProcessDead(pids.child);
     },
   );
+
+  it.runIf(process.platform !== 'win32')(
+    'drains a redirected background descendant after its direct child exits naturally',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: '/bin/sh',
+        argv: ['-c', 'sleep 30 >/dev/null 2>&1 & echo $! > child.pid'],
+        cwd: '.',
+      });
+      const runner = new CommandRunner({ cancelGraceMs: 30 });
+      let descendantPid: number | undefined;
+      let processGroupId: number | undefined;
+
+      try {
+        const result = await runner.run(spec, {
+          onStarted: ({ pid }) => {
+            processGroupId = pid;
+          },
+        });
+        descendantPid = Number.parseInt(await readFile(join(root, 'child.pid'), 'utf8'), 10);
+        if (!Number.isInteger(descendantPid) || descendantPid <= 0)
+          throw new Error('Background process published an invalid PID');
+        if (processGroupId === undefined)
+          throw new Error('Command process group was not published');
+
+        expect(result).toMatchObject({ exitCode: 0, canceled: false, termination: 'natural' });
+        await expectProcessDead(descendantPid);
+        await expectProcessGroupDead(processGroupId);
+        expect(runner.activeCount).toBe(0);
+        await expect(runner.dispose()).resolves.toBeUndefined();
+      } finally {
+        if (descendantPid !== undefined) killProcessIfAlive(descendantPid);
+        if (processGroupId !== undefined) killProcessGroupIfAlive(processGroupId);
+        await runner.dispose().catch(() => undefined);
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'keeps ownership active until a stubborn natural-close background group is drained',
+    async () => {
+      const root = await workspace();
+      const childScript =
+        "const fs=require('node:fs'); fs.writeFileSync('child.pid',String(process.pid)); process.on('SIGTERM',()=>{}); fs.writeFileSync('ready','yes'); setInterval(()=>{},1000)";
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: '/bin/sh',
+        argv: [
+          '-c',
+          `${JSON.stringify(process.execPath)} -e ${JSON.stringify(childScript)} >/dev/null 2>&1 & while [ ! -f ready ]; do sleep 0.01; done`,
+        ],
+        cwd: '.',
+      });
+      const runner = new CommandRunner({ cancelGraceMs: 200 });
+      let descendantPid: number | undefined;
+      let processGroupId: number | undefined;
+
+      try {
+        const running = runner.run(spec, {
+          onStarted: ({ pid }) => {
+            processGroupId = pid;
+          },
+        });
+        descendantPid = await readPidWhenReady(join(root, 'child.pid'));
+        if (processGroupId === undefined)
+          throw new Error('Command process group was not published');
+        await expectProcessDead(processGroupId);
+        expect(runner.activeCount).toBe(1);
+
+        await expect(running).resolves.toMatchObject({
+          exitCode: 0,
+          canceled: false,
+          termination: 'natural',
+        });
+        await expectProcessDead(descendantPid);
+        await expectProcessGroupDead(processGroupId);
+        expect(runner.activeCount).toBe(0);
+      } finally {
+        if (descendantPid !== undefined) killProcessIfAlive(descendantPid);
+        if (processGroupId !== undefined) killProcessGroupIfAlive(processGroupId);
+        await runner.dispose().catch(() => undefined);
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'settles a cancel and dispose race without releasing owned descendants early',
+    async () => {
+      const root = await workspace();
+      const controller = new AbortController();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          "const cp=require('node:child_process'); const child=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:'ignore'}); console.log(JSON.stringify({parent:process.pid,child:child.pid})); setInterval(()=>{},1000)",
+        ],
+        cwd: '.',
+      });
+      const runner = new CommandRunner({ cancelGraceMs: 30 });
+      let output = '';
+      let pids: { parent: number; child: number } | undefined;
+      let disposing: Promise<void> | undefined;
+
+      try {
+        const running = runner.run(spec, {
+          signal: controller.signal,
+          onChunk: (chunk) => {
+            output += chunk.text;
+            if (pids !== undefined || !output.includes('\n')) return;
+            pids = JSON.parse(output.trim()) as { parent: number; child: number };
+            controller.abort();
+            disposing = runner.dispose();
+          },
+        });
+        await expect(running).resolves.toMatchObject({ canceled: true });
+        await expect(disposing).resolves.toBeUndefined();
+        if (pids === undefined) throw new Error('Owned process PIDs were not observed');
+        await expectProcessDead(pids.parent);
+        await expectProcessDead(pids.child);
+        expect(runner.activeCount).toBe(0);
+      } finally {
+        controller.abort();
+        if (pids !== undefined) {
+          killProcessIfAlive(pids.parent);
+          killProcessIfAlive(pids.child);
+          killProcessGroupIfAlive(pids.parent);
+        }
+        await runner.dispose().catch(() => undefined);
+      }
+    },
+  );
+
+  it('settles a normal command with no descendants before dispose', async () => {
+    const root = await workspace();
+    const runner = new CommandRunner();
+    const spec = await prepareExecutionSpec({
+      workspacePath: root,
+      executable: process.execPath,
+      argv: ['--version'],
+      cwd: '.',
+    });
+
+    await expect(runner.run(spec)).resolves.toMatchObject({ exitCode: 0, termination: 'natural' });
+    expect(runner.activeCount).toBe(0);
+    await expect(runner.dispose()).resolves.toBeUndefined();
+  });
 
   it('fails closed when an unissued or changed ExecutionSpec reaches the execution boundary', async () => {
     const root = await workspace();
@@ -451,4 +635,47 @@ async function expectProcessDead(pid: number): Promise<void> {
     }
   }
   throw new Error(`Process ${pid} survived CommandRunner cancellation`);
+}
+
+async function expectProcessGroupDead(processGroupId: number): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(-processGroupId, 0);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } catch {
+      return;
+    }
+  }
+  throw new Error(`Process group ${processGroupId} survived CommandRunner completion`);
+}
+
+function killProcessIfAlive(pid: number): void {
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // Already gone.
+  }
+}
+
+function killProcessGroupIfAlive(processGroupId: number): void {
+  try {
+    process.kill(-processGroupId, 'SIGKILL');
+  } catch {
+    // Already gone.
+  }
+}
+
+async function readPidWhenReady(path: string): Promise<number> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      const pid = Number.parseInt(await readFile(path, 'utf8'), 10);
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    } catch {
+      // The background process has not published its PID yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Background process did not publish its PID');
 }

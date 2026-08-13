@@ -206,6 +206,18 @@ export class CommandRunner {
     const forceResults = await Promise.allSettled(
       entries.map(([executionId, active]) => this.forceOwnedTree(executionId, active.lease)),
     );
+    await Promise.all(
+      entries.map(async ([executionId, active], index) => {
+        if (
+          process.platform === 'win32' ||
+          forceResults[index]?.status !== 'fulfilled' ||
+          (active.child.exitCode === null && active.child.signalCode === null)
+        )
+          return;
+        if (await this.waitForOwnedTreeExit(executionId, active.lease, 3_000))
+          this.releaseActive(executionId, active);
+      }),
+    );
     const settlements = entries.map(([, active]) => active.settled);
     const settled = await Promise.race([
       Promise.allSettled(settlements).then(() => true),
@@ -536,8 +548,10 @@ export class CommandRunner {
     if (options.signal?.aborted) cancel();
 
     let retainActive = false;
+    let outcomeObserved = false;
     try {
       const outcome = await waitForOutcomeOrTerminationFailure(outcomePromise, terminationFailure);
+      outcomeObserved = true;
       if (canceled && this.ownedTreeAlive(executionId, lease)) await forcePromise;
       else if (forceTimer !== undefined) {
         clearTimeout(forceTimer);
@@ -546,6 +560,8 @@ export class CommandRunner {
       }
       if (terminationError !== undefined) throw terminationError;
       if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
+      if (!canceled && process.platform !== 'win32')
+        await this.drainNaturalPosixTree(executionId, lease);
       await finalizeStreams();
       if (sinkError !== undefined) throw sinkError;
       return Object.freeze({
@@ -570,7 +586,7 @@ export class CommandRunner {
             active.resolveSettled();
           }
         };
-        void active.outcome.then(release, release);
+        if (!outcomeObserved) void active.outcome.then(release, release);
       }
       throw error;
     } finally {
@@ -619,14 +635,16 @@ export class CommandRunner {
     signal: 'SIGTERM' | 'SIGKILL',
   ): boolean {
     const active = this.active.get(executionId);
+    if (active === undefined || active.lease !== lease) return false;
+    const leaderAlive = active.child.exitCode === null && active.child.signalCode === null;
     if (
-      active === undefined ||
-      active.lease !== lease ||
-      active.child.exitCode !== null ||
-      active.child.signalCode !== null
+      !posixGroupIdentityMatches({
+        leaderAlive,
+        expectedStartIdentity: active.processStartIdentity,
+        observedStartIdentity: leaderAlive ? readProcessStartIdentity(active.pid) : null,
+      })
     )
       return false;
-    if (readProcessStartIdentity(active.pid) !== active.processStartIdentity) return false;
     try {
       if (process.platform === 'win32') return false;
       process.kill(-active.pid, signal);
@@ -678,6 +696,31 @@ export class CommandRunner {
     }
   }
 
+  private async drainNaturalPosixTree(executionId: string, lease: string): Promise<void> {
+    if (!this.ownedTreeAlive(executionId, lease)) return;
+    this.signalOwnedTree(executionId, lease, 'SIGTERM');
+    if (await this.waitForOwnedTreeExit(executionId, lease, this.cancelGraceMs)) return;
+    await this.forceOwnedTree(executionId, lease);
+    if (await this.waitForOwnedTreeExit(executionId, lease, 5_000)) return;
+    throw new CommandRunnerError(
+      'PROCESS_TREE_TERMINATION_FAILED',
+      'Naturally completed command left an owned process group that could not be drained',
+    );
+  }
+
+  private async waitForOwnedTreeExit(
+    executionId: string,
+    lease: string,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.ownedTreeAlive(executionId, lease)) {
+      if (Date.now() >= deadline) return false;
+      await delay(Math.min(20, Math.max(1, deadline - Date.now())));
+    }
+    return true;
+  }
+
   private async terminateKnownAndWait(
     executionId: string,
     lease: string,
@@ -714,6 +757,12 @@ export class CommandRunner {
     void active.outcome.then(release, release);
   }
 
+  private releaseActive(executionId: string, active: ActiveProcess): void {
+    if (this.active.get(executionId) === active) this.active.delete(executionId);
+    if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
+    active.resolveSettled();
+  }
+
   private ownedTreeAlive(executionId: string, lease: string): boolean {
     const active = this.active.get(executionId);
     if (active === undefined || active.lease !== lease) return false;
@@ -725,6 +774,19 @@ export class CommandRunner {
       return false;
     }
   }
+}
+
+export function posixGroupIdentityMatches(
+  input: Readonly<{
+    leaderAlive: boolean;
+    expectedStartIdentity: string;
+    observedStartIdentity: string | null;
+  }>,
+): boolean {
+  // While descendants keep the original process group alive, POSIX keeps its numeric PGID
+  // reserved even after the leader exits. A live leader still needs the captured start identity so
+  // a reused PID can never authorize a signal to an unrelated group.
+  return !input.leaderAlive || input.observedStartIdentity === input.expectedStartIdentity;
 }
 
 async function captureWindowsProcessTree(
