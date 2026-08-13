@@ -14,6 +14,11 @@ import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { secureLogger } from './secure-logger';
 import { parseSkillImportConfirmation } from './import-skill-builtin';
+import {
+  teamMcpToolNamesForCapabilities,
+  type TeamMcpRole,
+  type TeamMcpToolName,
+} from '../runtime-host/team-mcp-tool-contract';
 
 // macOS's sockaddr_un.sun_path is 104 bytes (Linux allows 108); staying comfortably under that
 // keeps bind() from failing on long app-data paths (a real, previously-hit failure mode on this
@@ -137,6 +142,8 @@ export type TeamMcpRegistration = Readonly<{
   skillImportUserText?: string;
   allowProjectMemory?: boolean;
   allowTeamTools?: boolean;
+  role?: TeamMcpRole;
+  allowedTools?: readonly TeamMcpToolName[];
   contextOwner?: { type: 'turn' | 'team_execution'; id: string };
   initialWaitCursor?: number;
 }>;
@@ -452,6 +459,9 @@ export class TeamMcpBridge {
     }
     const [turnId, registration] = found;
     try {
+      const allowedTools = new Set<string>(teamMcpToolNamesForCapabilities(registration));
+      if (!allowedTools.has(request.tool))
+        throw new Error('Tool is not allowed for this Team MCP role');
       if (process.env['SPRINT_CODER_TEAM_MCP_TRACE'] === '1') {
         const teamId = this.coordinator.get(registration.taskId)?.team.id;
         secureLogger.debug(

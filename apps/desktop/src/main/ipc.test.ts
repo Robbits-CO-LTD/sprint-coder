@@ -809,8 +809,8 @@ describe('root-aware file selection', () => {
 
 describe('Provider Team completion and model errors', () => {
   it('derives Leader MCP Team capability only from the sealed Team Turn contract', () => {
-    expect(leaderMcpCapabilities(true)).toEqual({ allowTeamTools: true });
-    expect(leaderMcpCapabilities(false)).toEqual({ allowTeamTools: false });
+    expect(leaderMcpCapabilities(true)).toEqual({ role: 'leader', allowTeamTools: true });
+    expect(leaderMcpCapabilities(false)).toEqual({ role: 'leader', allowTeamTools: false });
   });
 
   it('does not mislabel an external Provider model error as a Codex CLI error', () => {

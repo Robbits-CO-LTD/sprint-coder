@@ -2886,7 +2886,16 @@ if (runsWithElectronAbi)
     it('allows an explicitly identified Manager to hire a child within persisted policy', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Manager delegation');
-      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const validateModelSelection = vi.fn();
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        validateModelSelection,
+      );
       const team = persistence.promoteTaskToTeam(task.id);
 
       const manager = await coordinator.hireWorkerAs(
@@ -2948,6 +2957,8 @@ if (runsWithElectronAbi)
       expect(
         coordinator.getForAgent(task.id, manager.id)?.workers.map(({ id }) => id),
       ).not.toContain(sibling.id);
+      const agentsBeforeRejectedHire = persistence.getTeamSnapshot(team.id).agents;
+      const budgetsBeforeRejectedHire = persistence.getTeamBudgetStatus(team.id);
       await expect(
         coordinator.hireWorkerAs(
           {
@@ -2956,10 +2967,18 @@ if (runsWithElectronAbi)
             objective: '許可なく再委譲する',
             contextInheritancePolicy: 'none',
             writeCapable: false,
+            modelSelection: {
+              connectionId: 'builtin:codex-cli',
+              requestedProvider: 'openai',
+              requestedModel: 'gpt-5.6-sol',
+            },
           },
           child.id,
         ),
       ).rejects.toThrow('Only a Manager with canDelegate');
+      expect(validateModelSelection).not.toHaveBeenCalled();
+      expect(persistence.getTeamSnapshot(team.id).agents).toEqual(agentsBeforeRejectedHire);
+      expect(persistence.getTeamBudgetStatus(team.id)).toEqual(budgetsBeforeRejectedHire);
       const submission = await coordinator.assignTaskAs(
         {
           taskId: task.id,
