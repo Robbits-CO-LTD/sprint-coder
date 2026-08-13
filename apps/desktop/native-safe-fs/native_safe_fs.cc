@@ -1118,6 +1118,15 @@ std::string FileIdentityDigest(const struct stat& file_stat) {
   return Sha256Bytes(reinterpret_cast<const unsigned char*>(facts.data()), facts.size());
 }
 
+std::string DirectoryIdentityDigest(const struct stat& directory_stat) {
+  const std::string facts =
+      "[\"native-directory-identity-v1\",\"" +
+      std::to_string(static_cast<uint64_t>(directory_stat.st_dev)) + "\",\"" +
+      std::to_string(static_cast<uint64_t>(directory_stat.st_ino)) + "\"," +
+      std::to_string(static_cast<uint32_t>(directory_stat.st_mode)) + ",\"directory\"]";
+  return Sha256Bytes(reinterpret_cast<const unsigned char*>(facts.data()), facts.size());
+}
+
 bool ObserveOpenFile(int fd, const struct stat& namespace_stat, RevisionObservation* observation,
                      NativeFailure* failure) {
   struct stat before {};
@@ -2287,6 +2296,77 @@ napi_value CleanupIntentAuxiliary(napi_env env, napi_callback_info info) {
   return promise;
 }
 
+bool ReadDirectoryInput(napi_env env, napi_value value, std::string* session_id,
+                        std::vector<std::string>* segments) {
+  return ReadString(env, value, "sessionId", session_id) && IsLowerHex(*session_id, 32) &&
+         ReadSegments(env, value, "pathSegments", false, false, segments);
+}
+
+napi_value MakeDirectoryObservation(napi_env env, const struct stat* directory_stat) {
+  napi_value result;
+  napi_create_object(env, &result);
+  if (directory_stat == nullptr) {
+    napi_set_named_property(env, result, "state", MakeString(env, "absent"));
+    return result;
+  }
+  napi_set_named_property(env, result, "state", MakeString(env, "present"));
+  napi_set_named_property(env, result, "identityDigest",
+                          MakeString(env, DirectoryIdentityDigest(*directory_stat)));
+  return result;
+}
+
+napi_value ObserveDirectory(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  std::string session_id;
+  std::vector<std::string> segments;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object ||
+      !ReadDirectoryInput(env, argv[0], &session_id, &segments))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs directory input");
+
+  NativeFailure failure;
+  int root_fd = -1;
+  int parent_fd = -1;
+  std::string workspace_key;
+  std::string workspace_path;
+  uint64_t invalidation_version = 0;
+  if (!CaptureSessionRoot(session_id, &root_fd, &workspace_key, &workspace_path,
+                          &invalidation_version, &failure))
+    return ThrowFailure(env, failure.code, failure.message);
+  parent_fd = OpenRelativeParent(root_fd, segments, &failure);
+  if (parent_fd < 0) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  struct stat observed {};
+  int result = -1;
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(session_id);
+    if (session == state.sessions.end() || session->second.workspace_key != workspace_key ||
+        state.invalidation_versions[workspace_key] != invalidation_version) {
+      failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before observation"};
+    } else if (!VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure)) {
+      // Verification provides the failure.
+    } else {
+      result = fstatat(parent_fd, segments.back().c_str(), &observed, AT_SYMLINK_NOFOLLOW);
+      const int saved_errno = errno;
+      if (result == 0 && !S_ISDIR(observed.st_mode)) {
+        failure = {"UNSAFE_PATH", "NativeSafeFs directory endpoint is not a directory"};
+      } else if (result != 0 && saved_errno != ENOENT) {
+        errno = saved_errno;
+        failure = {"UNSAFE_PATH", ErrnoMessage("stat workspace directory")};
+      }
+    }
+  }
+  CloseFd(&parent_fd);
+  CloseFd(&root_fd);
+  if (!failure.code.empty()) return ThrowFailure(env, failure.code, failure.message);
+  return MakeDirectoryObservation(env, result == 0 ? &observed : nullptr);
+}
+
 napi_value CreateDirectory(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -2296,9 +2376,7 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
     return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs create directory input must be an object");
   std::string session_id;
   std::vector<std::string> segments;
-  if (!ReadString(env, argv[0], "sessionId", &session_id) ||
-      !IsLowerHex(session_id, 32) ||
-      !ReadSegments(env, argv[0], "pathSegments", false, false, &segments))
+  if (!ReadDirectoryInput(env, argv[0], &session_id, &segments))
     return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs directory input");
 
   NativeFailure failure;
@@ -2317,6 +2395,7 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
   }
 
   int result = -1;
+  struct stat created {};
   {
     std::lock_guard<std::mutex> guard(state.mutex);
     const auto session = state.sessions.find(session_id);
@@ -2339,6 +2418,9 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
           unlinkat(parent_fd, segments.back().c_str(), AT_REMOVEDIR);
           errno = saved_errno;
           failure = {"NATIVE_FAILURE", ErrnoMessage("fsync mkdir parent")};
+        } else if (fstatat(parent_fd, segments.back().c_str(), &created, AT_SYMLINK_NOFOLLOW) != 0 ||
+                   !S_ISDIR(created.st_mode)) {
+          failure = {"NATIVE_FAILURE", "NativeSafeFs mkdir identity was not observed"};
         }
       }
     }
@@ -2348,6 +2430,54 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
   if (result != 0 || !failure.code.empty())
     return ThrowFailure(env, failure.code.empty() ? "NATIVE_FAILURE" : failure.code,
                         failure.message.empty() ? "NativeSafeFs mkdir failed" : failure.message);
+  return MakeDirectoryObservation(env, &created);
+}
+
+napi_value RemoveDirectory(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  std::string session_id;
+  std::string expected_identity;
+  std::vector<std::string> segments;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object ||
+      !ReadDirectoryInput(env, argv[0], &session_id, &segments) ||
+      !ReadString(env, argv[0], "expectedIdentityDigest", &expected_identity) ||
+      !IsLowerHex(expected_identity, 64))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs remove directory input");
+  NativeFailure failure;
+  int root_fd = -1;
+  int parent_fd = -1;
+  std::string workspace_key;
+  std::string workspace_path;
+  uint64_t invalidation_version = 0;
+  if (!CaptureSessionRoot(session_id, &root_fd, &workspace_key, &workspace_path,
+                          &invalidation_version, &failure))
+    return ThrowFailure(env, failure.code, failure.message);
+  parent_fd = OpenRelativeParent(root_fd, segments, &failure);
+  struct stat current {};
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(session_id);
+    if (session == state.sessions.end() || session->second.workspace_key != workspace_key ||
+        state.invalidation_versions[workspace_key] != invalidation_version) {
+      failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before directory removal"};
+    } else if (parent_fd < 0 ||
+               !VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure) ||
+               fstatat(parent_fd, segments.back().c_str(), &current, AT_SYMLINK_NOFOLLOW) != 0 ||
+               !S_ISDIR(current.st_mode) || DirectoryIdentityDigest(current) != expected_identity) {
+      if (failure.code.empty())
+        failure = {"UNSAFE_PATH", "NativeSafeFs directory identity changed before removal"};
+    } else if (unlinkat(parent_fd, segments.back().c_str(), AT_REMOVEDIR) != 0) {
+      failure = {"UNSAFE_PATH", ErrnoMessage("remove workspace directory")};
+    } else if (fsync(parent_fd) != 0) {
+      failure = {"NATIVE_FAILURE", ErrnoMessage("fsync removed directory parent")};
+    }
+  }
+  CloseFd(&parent_fd);
+  CloseFd(&root_fd);
+  if (!failure.code.empty()) return ThrowFailure(env, failure.code, failure.message);
   napi_value undefined;
   napi_get_undefined(env, &undefined);
   return undefined;
@@ -2416,7 +2546,11 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr},
       {"cleanupIntentAuxiliary", nullptr, CleanupIntentAuxiliary, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"observeDirectory", nullptr, ObserveDirectory, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
       {"createDirectory", nullptr, CreateDirectory, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
+      {"removeDirectory", nullptr, RemoveDirectory, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"closeSession", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"exchangeFiles", nullptr, ExchangeFiles, nullptr, nullptr, nullptr, napi_default, nullptr},

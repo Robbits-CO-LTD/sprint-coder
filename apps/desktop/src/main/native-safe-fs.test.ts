@@ -8,6 +8,7 @@ import {
   readFile,
   realpath,
   rename,
+  rmdir,
   rm,
   symlink,
   writeFile,
@@ -521,8 +522,15 @@ describe('NativeSafeFs authority boundary', () => {
       const boundary = fixtureBoundary(input);
       const session = await boundary.openSession({ ...input, fence: '32' });
 
-      await expect(boundary.createDirectory(session, ['parent', 'child'])).resolves.toBeUndefined();
+      await expect(boundary.observeDirectory(session, ['parent', 'child'])).resolves.toEqual({
+        state: 'absent',
+      });
+      const created = await boundary.createDirectory(session, ['parent', 'child']);
+      expect(created).toMatchObject({ state: 'present', identityDigest: expect.any(String) });
       expect((await lstat(join(input.workspace, 'parent', 'child'))).isDirectory()).toBe(true);
+      await expect(boundary.observeDirectory(session, ['parent', 'child'])).resolves.toEqual(
+        created,
+      );
       await expect(boundary.createDirectory(session, ['parent', 'child'])).rejects.toMatchObject({
         code: 'UNSAFE_PATH',
       } satisfies Partial<NativeSafeFsError>);
@@ -532,6 +540,29 @@ describe('NativeSafeFs authority boundary', () => {
       await expect(boundary.createDirectory(session, ['..', 'child'])).rejects.toMatchObject({
         code: 'INVALID_INPUT',
       } satisfies Partial<NativeSafeFsError>);
+      await writeFile(join(input.workspace, 'parent', 'child', 'kept.txt'), 'kept');
+      await expect(
+        boundary.removeDirectory(session, ['parent', 'child'], created.identityDigest),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await rm(join(input.workspace, 'parent', 'child', 'kept.txt'));
+      await expect(
+        boundary.removeDirectory(session, ['parent', 'child'], '0'.repeat(64)),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await rmdir(join(input.workspace, 'parent', 'child'));
+      await mkdir(join(input.workspace, 'parent', 'child'));
+      await expect(
+        boundary.removeDirectory(session, ['parent', 'child'], created.identityDigest),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      const replacement = await boundary.observeDirectory(session, ['parent', 'child']);
+      expect(replacement.state).toBe('present');
+      if (replacement.state !== 'present') {
+        throw new Error('replacement directory was not observed');
+      }
+      expect(replacement.identityDigest).not.toBe(created.identityDigest);
+      await boundary.removeDirectory(session, ['parent', 'child'], replacement.identityDigest);
+      await expect(boundary.observeDirectory(session, ['parent', 'child'])).resolves.toEqual({
+        state: 'absent',
+      });
       await boundary.closeSession(session);
     });
 
