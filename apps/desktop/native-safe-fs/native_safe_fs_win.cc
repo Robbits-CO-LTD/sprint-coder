@@ -69,6 +69,36 @@ napi_value ThrowUnsafeImageFile(napi_env env, const char* code) {
   return nullptr;
 }
 
+napi_value EnableSafeDllSearchPolicy(napi_env env, napi_callback_info info) {
+  (void)info;
+  HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+  if (kernel32 == nullptr) return ThrowWindowsError(env, "GetModuleHandleW");
+  using SetDefaultDllDirectoriesFn = BOOL(WINAPI*)(DWORD);
+  using SetProcessMitigationPolicyFn = BOOL(WINAPI*)(PROCESS_MITIGATION_POLICY, PVOID, SIZE_T);
+  auto set_directories = reinterpret_cast<SetDefaultDllDirectoriesFn>(
+      GetProcAddress(kernel32, "SetDefaultDllDirectories"));
+  auto set_mitigation = reinterpret_cast<SetProcessMitigationPolicyFn>(
+      GetProcAddress(kernel32, "SetProcessMitigationPolicy"));
+  if (set_directories == nullptr || set_mitigation == nullptr) {
+    SetLastError(ERROR_PROC_NOT_FOUND);
+    return ThrowWindowsError(env, "safe DLL policy discovery");
+  }
+  // Remove the current working directory and application directory from implicit LoadLibrary
+  // searches. Static side-by-side imports were already copied and pinned by Main; Windows system
+  // imports must resolve from System32 before any application-directory candidate.
+  if (!set_directories(LOAD_LIBRARY_SEARCH_SYSTEM32))
+    return ThrowWindowsError(env, "SetDefaultDllDirectories");
+  PROCESS_MITIGATION_IMAGE_LOAD_POLICY policy{};
+  policy.NoRemoteImages = 1;
+  policy.NoLowMandatoryLabelImages = 1;
+  policy.PreferSystem32Images = 1;
+  if (!set_mitigation(ProcessImageLoadPolicy, &policy, sizeof(policy)))
+    return ThrowWindowsError(env, "SetProcessMitigationPolicy");
+  napi_value result;
+  napi_get_boolean(env, true, &result);
+  return result;
+}
+
 std::wstring NormalizeFinalPath(std::wstring path) {
   constexpr wchar_t kUncPrefix[] = L"\\\\?\\UNC\\";
   constexpr wchar_t kLongPrefix[] = L"\\\\?\\";
@@ -741,6 +771,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
        napi_default, nullptr},
       {"closePreparedExecutionImage", nullptr, ClosePreparedExecutionImage, nullptr, nullptr,
        nullptr, napi_default, nullptr},
+      {"enableSafeDllSearchPolicy", nullptr, EnableSafeDllSearchPolicy, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   napi_add_env_cleanup_hook(env, CleanupPreparedExecutionImages, nullptr);

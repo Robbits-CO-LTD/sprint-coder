@@ -53,6 +53,10 @@ process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   let request;
   try { request = JSON.parse(input); } catch { process.exitCode = 125; return; }
+  try {
+    const boundary = require(request.nativeAddonPath);
+    if (boundary.enableSafeDllSearchPolicy() !== true) throw new Error('policy unavailable');
+  } catch { process.exitCode = 125; return; }
   const { spawn } = require('node:child_process');
   const child = spawn(request.executable, request.argv, {
     cwd: request.cwd,

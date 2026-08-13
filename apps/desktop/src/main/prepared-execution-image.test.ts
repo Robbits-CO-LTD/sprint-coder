@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  containsRelativeElfLoaderPath,
+  containsUnsafeElfLoaderPath,
   containsRelativeMachOLoaderPath,
   hasUnsafeWindowsDllImport,
 } from './prepared-execution-image';
@@ -24,12 +24,17 @@ describe('hasUnsafeWindowsDllImport', () => {
     expect(hasUnsafeWindowsDllImport(peWithImport('python311.dll'))).toBe(true);
   });
 
+  it('inspects delay-load imports instead of leaving them outside the pinned dependency set', () => {
+    expect(hasUnsafeWindowsDllImport(peWithImport('KERNEL32.dll', true))).toBe(false);
+    expect(hasUnsafeWindowsDllImport(peWithImport('payload.dll', true))).toBe(true);
+  });
+
   it('fails closed for malformed images', () => {
     expect(hasUnsafeWindowsDllImport(Buffer.from('not a PE'))).toBe(true);
   });
 });
 
-function peWithImport(name: string): Buffer {
+function peWithImport(name: string, delay = false): Buffer {
   const bytes = Buffer.alloc(0x400);
   bytes.write('MZ');
   bytes.writeUInt32LE(0x80, 0x3c);
@@ -38,24 +43,76 @@ function peWithImport(name: string): Buffer {
   bytes.writeUInt16LE(0xf0, 0x94);
   const optional = 0x98;
   bytes.writeUInt16LE(0x20b, optional);
-  bytes.writeUInt32LE(0x1000, optional + 120);
-  bytes.writeUInt32LE(40, optional + 124);
+  if (delay) {
+    bytes.writeUInt32LE(0x1080, optional + 112 + 13 * 8);
+    bytes.writeUInt32LE(64, optional + 112 + 13 * 8 + 4);
+  } else {
+    bytes.writeUInt32LE(0x1000, optional + 120);
+    bytes.writeUInt32LE(40, optional + 124);
+  }
   const section = optional + 0xf0;
   bytes.writeUInt32LE(0x200, section + 8);
   bytes.writeUInt32LE(0x1000, section + 12);
   bytes.writeUInt32LE(0x200, section + 16);
   bytes.writeUInt32LE(0x200, section + 20);
-  bytes.writeUInt32LE(0x1050, 0x20c);
-  bytes.write(`${name}\0`, 0x250, 'ascii');
+  if (delay) {
+    bytes.writeUInt32LE(1, 0x280);
+    bytes.writeUInt32LE(0x10c0, 0x284);
+    bytes.write(`${name}\0`, 0x2c0, 'ascii');
+  } else {
+    bytes.writeUInt32LE(0x1050, 0x20c);
+    bytes.write(`${name}\0`, 0x250, 'ascii');
+  }
   return bytes;
 }
 
-describe('containsRelativeElfLoaderPath', () => {
-  it.each(['$ORIGIN/lib', '${ORIGIN}/../lib'])('rejects ELF dependency token %s', (token) => {
-    expect(containsRelativeElfLoaderPath(Buffer.from(`ELF\0${token}\0`))).toBe(true);
+describe('containsUnsafeElfLoaderPath', () => {
+  it.each(['$ORIGIN/lib', '${ORIGIN}/../lib', '/workspace/lib'])(
+    'rejects ELF DT_RUNPATH %s',
+    (path) => {
+      expect(containsUnsafeElfLoaderPath(elfWithRunpath(path))).toBe(true);
+    },
+  );
+
+  it('fails closed for malformed ELF data', () => {
+    expect(containsUnsafeElfLoaderPath(Buffer.from('not an ELF'))).toBe(true);
   });
 
-  it('allows an absolute ELF dependency path', () => {
-    expect(containsRelativeElfLoaderPath(Buffer.from('/usr/lib/libc.so'))).toBe(false);
+  it('allows an ELF image without RPATH or RUNPATH', () => {
+    expect(containsUnsafeElfLoaderPath(elfWithRunpath())).toBe(false);
   });
 });
+
+function elfWithRunpath(runpath?: string): Buffer {
+  const bytes = Buffer.alloc(0x400);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  bytes.writeBigUInt64LE(64n, 32);
+  bytes.writeUInt16LE(64, 52);
+  bytes.writeUInt16LE(56, 54);
+  bytes.writeUInt16LE(2, 56);
+  // PT_LOAD maps the complete file at virtual address 0x400000.
+  bytes.writeUInt32LE(1, 64);
+  bytes.writeBigUInt64LE(0n, 72);
+  bytes.writeBigUInt64LE(0x40_0000n, 80);
+  bytes.writeBigUInt64LE(BigInt(bytes.length), 96);
+  // PT_DYNAMIC lives at file offset 0x200.
+  bytes.writeUInt32LE(2, 120);
+  bytes.writeBigUInt64LE(0x200n, 128);
+  bytes.writeBigUInt64LE(0x40_0200n, 136);
+  bytes.writeBigUInt64LE(BigInt(runpath === undefined ? 48 : 64), 152);
+  writeElfDynamic(bytes, 0x200, 5, 0x40_0300); // DT_STRTAB
+  writeElfDynamic(bytes, 0x210, 10, 128); // DT_STRSZ
+  let terminator = 0x220;
+  if (runpath !== undefined) {
+    writeElfDynamic(bytes, 0x220, 29, 1); // DT_RUNPATH
+    bytes.write(`\0${runpath}\0`, 0x300, 'utf8');
+    terminator = 0x230;
+  }
+  writeElfDynamic(bytes, terminator, 0, 0);
+  return bytes;
+}
+
+function writeElfDynamic(bytes: Buffer, offset: number, tag: number, value: number): void {
+  bytes.writeBigUInt64LE(BigInt(tag), offset);
+  bytes.writeBigUInt64LE(BigInt(value), offset + 8);
+}

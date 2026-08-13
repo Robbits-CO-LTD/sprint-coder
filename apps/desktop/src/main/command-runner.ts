@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { createReadStream, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { stat, realpath } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { isAbsolute, join, relative } from 'node:path';
@@ -17,7 +17,14 @@ import {
   type PathGuard,
 } from './path-guard';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
-import { prepareExecutionImage, type PreparedExecutionImage } from './prepared-execution-image';
+import { nativeSafeFsAddonPath } from './native-safe-fs';
+import {
+  prepareExecutionImage,
+  sealExecutablePath,
+  sealedExecutableIdentityDigest,
+  type PreparedExecutionImage,
+  type SealedExecutableIdentity,
+} from './prepared-execution-image';
 import { createStreamingSecretRedactor } from './secret-redactor';
 import {
   assignProcessToOwnedJob,
@@ -56,17 +63,7 @@ export type PrepareExecutionSpecInput = Readonly<{
 
 type PreparedIdentity = {
   pathGuard: PathGuard;
-  executableCanonicalPath: string;
-  executableDev: string;
-  executableIno: string;
-  executableSize: number;
-  executableMtimeMs: number;
-  executableCtimeMs: number;
-  executableMtimeNs: string;
-  executableCtimeNs: string;
-  executableMode: number;
-  executableDigest: string;
-  allowSourceHardlinks: boolean;
+  executable: SealedExecutableIdentity;
 };
 
 const issuedSpecs = new WeakMap<object, PreparedIdentity>();
@@ -139,8 +136,13 @@ export async function prepareExecutionSpec(
   });
   if (pathGuard.targetIdentity?.kind !== 'directory')
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Command cwd must be a directory');
+  const executableIdentity = await sealExecutablePath(
+    executableCanonicalPath,
+    allowSourceHardlinks,
+  );
   const spec = createExecutionSpec({
     absoluteExecutable: executableCanonicalPath,
+    executionIdentityDigest: sealedExecutableIdentityDigest(executableIdentity),
     argv: input.argv,
     cwdIdentity: {
       canonicalPath: pathGuard.resolvedPath,
@@ -152,17 +154,7 @@ export async function prepareExecutionSpec(
   });
   issuedSpecs.set(spec, {
     pathGuard,
-    executableCanonicalPath,
-    executableDev: String(executableStats.dev),
-    executableIno: String(executableStats.ino),
-    executableSize: Number(executableStats.size),
-    executableMtimeMs: Number(executableStats.mtimeNs) / 1_000_000,
-    executableCtimeMs: Number(executableStats.ctimeNs) / 1_000_000,
-    executableMtimeNs: String(executableStats.mtimeNs),
-    executableCtimeNs: String(executableStats.ctimeNs),
-    executableMode: Number(executableStats.mode),
-    executableDigest: await digestFile(executableCanonicalPath),
-    allowSourceHardlinks,
+    executable: executableIdentity,
   });
   return spec;
 }
@@ -359,6 +351,7 @@ export class CommandRunner {
           child.stdin?.end(
             JSON.stringify({
               executable: executionImage.launchPath,
+              nativeAddonPath: nativeSafeFsAddonPath(),
               argv: [...executionImage.argvPrefix, ...spec.argv],
               cwd: spec.cwdIdentity.canonicalPath,
               env: buildEnvironment(spec.envDelta),
@@ -772,19 +765,9 @@ export class CommandRunner {
       );
     try {
       await revalidatePathGuard(identity.pathGuard);
-      return await prepareExecutionImage({
-        canonicalPath: identity.executableCanonicalPath,
-        dev: identity.executableDev,
-        ino: identity.executableIno,
-        size: identity.executableSize,
-        mtimeMs: identity.executableMtimeMs,
-        ctimeMs: identity.executableCtimeMs,
-        mtimeNs: identity.executableMtimeNs,
-        ctimeNs: identity.executableCtimeNs,
-        mode: identity.executableMode,
-        digest: identity.executableDigest,
-        allowSourceHardlinks: identity.allowSourceHardlinks,
-      });
+      if (spec.executionIdentityDigest !== sealedExecutableIdentityDigest(identity.executable))
+        throw new Error('Approved execution identity changed');
+      return await prepareExecutionImage(identity.executable);
     } catch (error) {
       throw new CommandRunnerError('EXECUTION_IDENTITY_CHANGED', errorMessage(error));
     }
@@ -1441,16 +1424,6 @@ function splitUtf8(text: string, maxBytes: number): string[] {
   }
   if (current.length > 0) parts.push(current);
   return parts;
-}
-
-function digestFile(filePath: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('sha256');
-    const stream = createReadStream(filePath);
-    stream.on('error', reject);
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.on('end', () => resolve(hash.digest('hex')));
-  });
 }
 
 function delay(ms: number): Promise<void> {

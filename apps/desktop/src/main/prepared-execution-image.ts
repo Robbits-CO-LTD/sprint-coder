@@ -28,6 +28,7 @@ export type SealedExecutableIdentity = Readonly<{
   mode: number;
   digest: string;
   allowSourceHardlinks?: boolean;
+  interpreter?: SealedExecutableIdentity;
 }>;
 
 export type PreparedExecutionImage = Readonly<{
@@ -38,6 +39,28 @@ export type PreparedExecutionImage = Readonly<{
   identity: string;
   close(): Promise<void>;
 }>;
+
+export function sealedExecutableIdentityDigest(identity: SealedExecutableIdentity): string {
+  return sha256(
+    Buffer.from(
+      JSON.stringify([
+        'sealed-executable-identity-v1',
+        identity.canonicalPath,
+        identity.dev,
+        identity.ino,
+        identity.size,
+        identity.mtimeNs,
+        identity.ctimeNs,
+        identity.mode,
+        identity.digest,
+        identity.interpreter === undefined
+          ? null
+          : sealedExecutableIdentityDigest(identity.interpreter),
+      ]),
+      'utf8',
+    ),
+  );
+}
 
 type WindowsExecutionAddon = Readonly<{
   readNoReparseImageFile(path: string, allowHardlinks?: boolean): Buffer;
@@ -68,6 +91,7 @@ export async function prepareExecutionImage(
   const windowsDependencyIds: string[] = [];
   let sealedId: string | undefined;
   let sealedDescriptor: number | undefined;
+  let interpreter: PreparedExecutionImage | undefined;
   try {
     const sourceBytes =
       process.platform === 'win32'
@@ -134,7 +158,7 @@ export async function prepareExecutionImage(
         ? undefined
         : parseShebang(heldBytes);
     const hasRelativeMachOLoaderPath = containsRelativeMachOLoaderPath(heldBytes);
-    const hasRelativeElfLoaderPath = containsRelativeElfLoaderPath(heldBytes);
+    const hasRelativeElfLoaderPath = containsUnsafeElfLoaderPath(heldBytes);
     if (
       process.platform === 'darwin' &&
       shebang === undefined &&
@@ -145,10 +169,10 @@ export async function prepareExecutionImage(
       throw new Error('Linux cannot safely launch an image with a relative loader path');
     if (shebang !== undefined && !allowScript)
       throw new Error('Nested shebang interpreters are unsupported');
-    const interpreter =
-      shebang === undefined
-        ? undefined
-        : await prepareExecutionImage(await sealExecutablePath(shebang.path), false);
+    if ((shebang === undefined) !== (expected.interpreter === undefined))
+      throw new Error('Shebang interpreter identity changed');
+    interpreter =
+      shebang === undefined ? undefined : await prepareExecutionImage(expected.interpreter!, false);
     const scriptArgument =
       shebang === undefined
         ? undefined
@@ -159,7 +183,7 @@ export async function prepareExecutionImage(
       interpreter === undefined
         ? baseDescriptors
         : [...interpreter.descriptors, ...(descriptor === undefined ? [] : [descriptor])];
-    const canonicalInterpreter = shebang === undefined ? undefined : await realpath(shebang.path);
+    const canonicalInterpreter = expected.interpreter?.canonicalPath;
     const shellScript =
       canonicalInterpreter !== undefined &&
       ['sh', 'bash', 'zsh'].includes(basename(canonicalInterpreter));
@@ -216,6 +240,7 @@ export async function prepareExecutionImage(
       },
     });
   } catch (error) {
+    await interpreter?.close().catch(() => undefined);
     if (windowsId !== undefined) windowsAddon().closePreparedExecutionImage(windowsId);
     for (const id of windowsDependencyIds.splice(0)) windowsAddon().closePreparedExecutionImage(id);
     if (sealedId !== undefined) posixAddon().closeSealedExecutionImage(sealedId);
@@ -231,8 +256,93 @@ export function containsRelativeMachOLoaderPath(bytes: Buffer): boolean {
   );
 }
 
-export function containsRelativeElfLoaderPath(bytes: Buffer): boolean {
-  return ['$ORIGIN', '${ORIGIN}'].some((token) => bytes.includes(Buffer.from(token, 'utf8')));
+export function containsUnsafeElfLoaderPath(bytes: Buffer): boolean {
+  const paths = parseElfDynamicSearchPaths(bytes);
+  return paths === null || paths.length > 0;
+}
+
+/** Parse DT_RPATH/DT_RUNPATH through PT_DYNAMIC. Any malformed ELF fails closed. */
+function parseElfDynamicSearchPaths(bytes: Buffer): readonly string[] | null {
+  if (
+    bytes.length < 64 ||
+    bytes[0] !== 0x7f ||
+    bytes[1] !== 0x45 ||
+    bytes[2] !== 0x4c ||
+    bytes[3] !== 0x46 ||
+    bytes[5] !== 1
+  )
+    return null;
+  const elfClass = bytes[4];
+  if (elfClass !== 1 && elfClass !== 2) return null;
+  const is64 = elfClass === 2;
+  const readWord = (offset: number): number | null => {
+    if (offset < 0 || offset > bytes.length - (is64 ? 8 : 4)) return null;
+    const value = is64 ? bytes.readBigUInt64LE(offset) : BigInt(bytes.readUInt32LE(offset));
+    return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+  };
+  const phoff = readWord(is64 ? 32 : 28);
+  if (phoff === null) return null;
+  const phentsize = bytes.readUInt16LE(is64 ? 54 : 42);
+  const phnum = bytes.readUInt16LE(is64 ? 56 : 44);
+  if (phentsize < (is64 ? 56 : 32) || phnum > 4096) return null;
+  const loads: Array<{ offset: number; vaddr: number; filesz: number }> = [];
+  let dynamic: { offset: number; size: number } | undefined;
+  for (let index = 0; index < phnum; index += 1) {
+    const header = phoff + index * phentsize;
+    if (header < 0 || header > bytes.length - phentsize) return null;
+    const type = bytes.readUInt32LE(header);
+    const offset = readWord(header + (is64 ? 8 : 4));
+    const vaddr = readWord(header + (is64 ? 16 : 8));
+    const filesz = readWord(header + (is64 ? 32 : 16));
+    if (offset === null || vaddr === null || filesz === null || offset + filesz > bytes.length)
+      return null;
+    if (type === 1) loads.push({ offset, vaddr, filesz });
+    if (type === 2) dynamic = { offset, size: filesz };
+  }
+  if (dynamic === undefined) return Object.freeze([]);
+  const entrySize = is64 ? 16 : 8;
+  let stringTableAddress: number | undefined;
+  let stringTableSize: number | undefined;
+  const searchOffsets: number[] = [];
+  let terminated = false;
+  for (
+    let offset = dynamic.offset;
+    offset + entrySize <= dynamic.offset + dynamic.size;
+    offset += entrySize
+  ) {
+    const tag = readWord(offset);
+    const value = readWord(offset + (is64 ? 8 : 4));
+    if (tag === null || value === null) return null;
+    if (tag === 0) {
+      terminated = true;
+      break;
+    }
+    if (tag === 5) stringTableAddress = value;
+    else if (tag === 10) stringTableSize = value;
+    else if (tag === 15 || tag === 29) searchOffsets.push(value);
+  }
+  if (!terminated) return null;
+  if (searchOffsets.length === 0) return Object.freeze([]);
+  if (stringTableAddress === undefined || stringTableSize === undefined) return null;
+  const mapping = loads.find(
+    (load) =>
+      stringTableAddress! >= load.vaddr &&
+      stringTableAddress! - load.vaddr <= load.filesz &&
+      stringTableSize! <= load.filesz - (stringTableAddress! - load.vaddr),
+  );
+  if (mapping === undefined) return null;
+  const stringTable = mapping.offset + (stringTableAddress - mapping.vaddr);
+  const paths: string[] = [];
+  for (const relativeOffset of searchOffsets) {
+    if (relativeOffset >= stringTableSize) return null;
+    const start = stringTable + relativeOffset;
+    const endLimit = stringTable + stringTableSize;
+    const end = bytes.indexOf(0, start);
+    if (end < start || end >= endLimit) return null;
+    const value = bytes.subarray(start, end).toString('utf8');
+    if (value.length > 0) paths.push(value);
+  }
+  return Object.freeze(paths);
 }
 
 const WINDOWS_SYSTEM_DLL =
@@ -301,10 +411,11 @@ function parsePeImports(bytes: Buffer): readonly string[] | null {
   if (optionalSize < 112 || optional > bytes.length - optionalSize) return null;
   const magic = bytes.readUInt16LE(optional);
   const directory = optional + (magic === 0x20b ? 112 : magic === 0x10b ? 96 : -1);
-  if (directory < optional || directory > bytes.length - 16) return null;
+  if (directory < optional || directory + 14 * 8 > optional + optionalSize) return null;
   const importRva = bytes.readUInt32LE(directory + 8);
   const importSize = bytes.readUInt32LE(directory + 12);
-  if (importRva === 0 && importSize === 0) return Object.freeze([]);
+  const delayRva = bytes.readUInt32LE(directory + 13 * 8);
+  const delaySize = bytes.readUInt32LE(directory + 13 * 8 + 4);
   const sections = optional + optionalSize;
   const rvaToOffset = (rva: number): number | null => {
     for (let index = 0; index < sectionCount; index += 1) {
@@ -322,27 +433,40 @@ function parsePeImports(bytes: Buffer): readonly string[] | null {
     }
     return null;
   };
-  const table = rvaToOffset(importRva);
-  if (table === null) return null;
   const imports: string[] = [];
-  for (let offset = table; offset <= bytes.length - 20; offset += 20) {
-    const nameRva = bytes.readUInt32LE(offset + 12);
-    if (
-      bytes.readUInt32LE(offset) === 0 &&
-      bytes.readUInt32LE(offset + 4) === 0 &&
-      bytes.readUInt32LE(offset + 8) === 0 &&
-      nameRva === 0 &&
-      bytes.readUInt32LE(offset + 16) === 0
-    )
-      return Object.freeze(imports);
-    const nameOffset = rvaToOffset(nameRva);
-    if (nameOffset === null) return null;
-    const end = bytes.indexOf(0, nameOffset);
-    if (end < 0 || end - nameOffset > 260) return null;
-    imports.push(bytes.subarray(nameOffset, end).toString('ascii').toLowerCase());
-    if (imports.length > 1024) return null;
+  const parseTable = (
+    rva: number,
+    size: number,
+    stride: number,
+    nameField: number,
+    delay: boolean,
+  ): boolean => {
+    if (rva === 0 && size === 0) return true;
+    if (rva === 0 || size < stride || size > 1024 * stride) return false;
+    const table = rvaToOffset(rva);
+    if (table === null) return false;
+    for (let offset = table; offset + stride <= bytes.length; offset += stride) {
+      const nameRva = bytes.readUInt32LE(offset + nameField);
+      if (bytes.subarray(offset, offset + stride).every((value) => value === 0)) return true;
+      // Delay descriptors with grAttrs bit 0 clear contain process VAs, which cannot be mapped
+      // safely without loading the image. Fail closed instead of guessing.
+      if (delay && (bytes.readUInt32LE(offset) & 1) === 0) return false;
+      const nameOffset = rvaToOffset(nameRva);
+      if (nameOffset === null) return false;
+      const end = bytes.indexOf(0, nameOffset);
+      if (end < 0 || end - nameOffset > 260) return false;
+      imports.push(bytes.subarray(nameOffset, end).toString('ascii').toLowerCase());
+      if (imports.length > 1024) return false;
+    }
+    return false;
+  };
+  if (
+    !parseTable(importRva, importSize, 20, 12, false) ||
+    !parseTable(delayRva, delaySize, 32, 4, true)
+  ) {
+    return null;
   }
-  return null;
+  return Object.freeze(imports);
 }
 
 function parseShebang(
@@ -364,7 +488,11 @@ function parseShebang(
   return Object.freeze({ path, arguments: Object.freeze(fields) });
 }
 
-async function sealExecutablePath(path: string): Promise<SealedExecutableIdentity> {
+export async function sealExecutablePath(
+  path: string,
+  allowHardlinks = false,
+  allowScript = true,
+): Promise<SealedExecutableIdentity> {
   const canonicalPath = await realpath(path);
   if (canonicalPath.split('/').at(-1) === 'env')
     throw new Error('Dynamic shebang interpreters are unsupported');
@@ -373,13 +501,16 @@ async function sealExecutablePath(path: string): Promise<SealedExecutableIdentit
   const source = await open(canonicalPath, constants.O_RDONLY | noFollow);
   try {
     const before = await source.stat({ bigint: true });
-    if (!before.isFile() || before.nlink !== 1n)
+    if (!before.isFile() || (before.nlink !== 1n && !allowHardlinks))
       throw new Error('Shebang interpreter is not a unique regular file');
     const bytes = await source.readFile();
     const after = await source.stat({ bigint: true });
     if (!sameStats(before, after)) throw new Error('Shebang interpreter changed');
     if (bytes.byteLength < 1 || bytes.byteLength > MAX_EXECUTION_IMAGE_BYTES)
       throw new Error('Shebang interpreter exceeds the size limit');
+    const shebang = process.platform === 'win32' || !allowScript ? undefined : parseShebang(bytes);
+    const interpreter =
+      shebang === undefined ? undefined : await sealExecutablePath(shebang.path, false, false);
     return Object.freeze({
       canonicalPath,
       dev: String(before.dev),
@@ -391,6 +522,8 @@ async function sealExecutablePath(path: string): Promise<SealedExecutableIdentit
       ctimeNs: String(before.ctimeNs),
       mode: Number(before.mode),
       digest: sha256(bytes),
+      allowSourceHardlinks: allowHardlinks,
+      ...(interpreter === undefined ? {} : { interpreter }),
     });
   } finally {
     await source.close();

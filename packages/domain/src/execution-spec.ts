@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
 export type ExecutionSpec = Readonly<{
-  version: 1;
+  version: 2;
   absoluteExecutable: string;
+  executionIdentityDigest: string;
   argv: readonly string[];
   cwdIdentity: Readonly<{
     canonicalPath: string;
@@ -32,6 +33,8 @@ export function createExecutionSpec(input: ExecutionSpecInput): ExecutionSpec {
     throw new Error('ExecutionSpec cwd identity must be absolute');
   if (!DIGEST.test(input.cwdIdentity.identityDigest))
     throw new Error('ExecutionSpec cwd identity digest is invalid');
+  if (!DIGEST.test(input.executionIdentityDigest))
+    throw new Error('ExecutionSpec execution identity digest is invalid');
   if (input.stdinMode !== 'closed') throw new Error('ExecutionSpec stdin mode is unsupported');
   if (input.shell !== 'none') throw new Error('ExecutionSpec shell mode is unsupported');
 
@@ -45,8 +48,9 @@ export function createExecutionSpec(input: ExecutionSpecInput): ExecutionSpec {
     envDelta[key] = value;
   }
   const canonical = {
-    version: 1 as const,
+    version: 2 as const,
     absoluteExecutable: input.absoluteExecutable,
+    executionIdentityDigest: input.executionIdentityDigest,
     argv: [...input.argv],
     cwdIdentity: { ...input.cwdIdentity },
     envDelta,
@@ -71,13 +75,14 @@ export function validateExecutionSpec(value: unknown): value is ExecutionSpec {
     const candidate = value as ExecutionSpec;
     const rebuilt = createExecutionSpec({
       absoluteExecutable: candidate.absoluteExecutable,
+      executionIdentityDigest: candidate.executionIdentityDigest,
       argv: candidate.argv,
       cwdIdentity: candidate.cwdIdentity,
       envDelta: candidate.envDelta,
       stdinMode: candidate.stdinMode,
       shell: candidate.shell,
     });
-    return candidate.version === 1 && candidate.commandBytesHash === rebuilt.commandBytesHash;
+    return candidate.version === 2 && candidate.commandBytesHash === rebuilt.commandBytesHash;
   } catch {
     return false;
   }

@@ -945,12 +945,15 @@ describe('CommandRunner', () => {
     30_000,
   );
 
-  it.runIf(process.platform !== 'win32')(
-    'rejects env shebang aliases before dynamic PATH resolution',
+  it.runIf(process.platform === 'linux')(
+    'rejects a shebang interpreter replaced after approval but before revalidation',
     async () => {
       const root = await workspace();
-      const executable = join(root, 'dynamic.sh');
-      await writeFile(executable, '#!/bin/env node\nconsole.log("unsafe")\n');
+      const interpreter = join(root, 'approved-sh');
+      await copyFile('/bin/sh', interpreter);
+      await chmod(interpreter, 0o700);
+      const executable = join(root, 'command.sh');
+      await writeFile(executable, `#!${interpreter}\nprintf 'must-not-run\\n'\n`);
       await chmod(executable, 0o700);
       const spec = await prepareTestExecutionSpec({
         workspacePath: root,
@@ -959,10 +962,31 @@ describe('CommandRunner', () => {
         cwd: '.',
       });
 
+      await rename(interpreter, `${interpreter}.approved`);
+      await copyFile('/bin/false', interpreter);
+      await chmod(interpreter, 0o700);
+
       await expect(new CommandRunner().run(spec)).rejects.toMatchObject({
         code: 'EXECUTION_IDENTITY_CHANGED',
-        message: expect.stringMatching(/shebang/i),
-      });
+      } satisfies Partial<CommandRunnerError>);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects env shebang aliases before dynamic PATH resolution',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'dynamic.sh');
+      await writeFile(executable, '#!/bin/env node\nconsole.log("unsafe")\n');
+      await chmod(executable, 0o700);
+      await expect(
+        prepareTestExecutionSpec({
+          workspacePath: root,
+          executable,
+          argv: [],
+          cwd: '.',
+        }),
+      ).rejects.toThrow(/shebang/i);
     },
   );
 
