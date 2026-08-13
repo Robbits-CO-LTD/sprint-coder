@@ -187,6 +187,25 @@ napi_value RunPreparedExecutionImage(napi_env env, napi_callback_info info) {
   STARTUPINFOEXW startup{};
   startup.StartupInfo.cb = sizeof(startup);
   startup.lpAttributeList = attributes;
+  HANDLE inherited_standard_handles[3] = {nullptr, nullptr, nullptr};
+  const DWORD standard_handle_ids[3] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+  for (size_t index = 0; index < 3; ++index) {
+    HANDLE source = GetStdHandle(standard_handle_ids[index]);
+    if (source == nullptr || source == INVALID_HANDLE_VALUE ||
+        !DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(),
+                         &inherited_standard_handles[index], 0, TRUE,
+                         DUPLICATE_SAME_ACCESS)) {
+      for (HANDLE handle : inherited_standard_handles) {
+        if (handle != nullptr) CloseHandle(handle);
+      }
+      DeleteProcThreadAttributeList(attributes);
+      return ThrowWindowsError(env, "DuplicateHandle");
+    }
+  }
+  startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  startup.StartupInfo.hStdInput = inherited_standard_handles[0];
+  startup.StartupInfo.hStdOutput = inherited_standard_handles[1];
+  startup.StartupInfo.hStdError = inherited_standard_handles[2];
   PROCESS_INFORMATION process{};
   std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
   mutable_command.push_back(L'\0');
@@ -194,6 +213,7 @@ napi_value RunPreparedExecutionImage(napi_env env, napi_callback_info info) {
       executable.c_str(), mutable_command.data(), nullptr, nullptr, TRUE,
       CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
       &startup.StartupInfo, &process);
+  for (HANDLE handle : inherited_standard_handles) CloseHandle(handle);
   DeleteProcThreadAttributeList(attributes);
   if (!created) return ThrowWindowsError(env, "CreateProcessW");
   if (ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {

@@ -47,6 +47,11 @@ describe('containsRelativeMachOLoaderPath', () => {
 describe('hasUnsafeWindowsDllImport', () => {
   it('allows system DLL imports and rejects side-by-side DLL imports', () => {
     expect(hasUnsafeWindowsDllImport(peWithImport('KERNEL32.dll'))).toBe(false);
+    expect(
+      hasUnsafeWindowsDllImport(
+        peWithImport('ext-ms-onecore-appmodel-staterepository-cache-l1-1-0.dll'),
+      ),
+    ).toBe(false);
     expect(hasUnsafeWindowsDllImport(peWithImport('python311.dll'))).toBe(true);
   });
 
