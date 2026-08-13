@@ -187,6 +187,7 @@ import type { LiveState } from './context-reminder';
 import { deriveLiveState } from './live-state';
 import { redactSecrets } from './secret-redactor';
 import { deriveTaskTitle } from './task-title';
+import { PROVIDER_STREAM_LIMITS, ProviderQuotaExceededError } from './provider-stream-budget';
 import {
   BUILTIN_CLAUDE_CONNECTION_ID,
   BUILTIN_CODEX_CONNECTION_ID,
@@ -13972,6 +13973,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.db.transaction(() => {
       const turn = this.getTurn(taskId, turnId);
       if (turn.state !== 'synthesizing') throw new Error('Turn is not streaming');
+      const addedBytes = Buffer.byteLength(delta, 'utf8');
+      const persistedBytes =
+        turn.assistant_message_id === null
+          ? 0
+          : ((
+              this.db
+                .prepare('SELECT length(CAST(content AS BLOB)) AS bytes FROM messages WHERE id = ?')
+                .get(turn.assistant_message_id) as { bytes: number } | undefined
+            )?.bytes ?? 0);
+      if (addedBytes > PROVIDER_STREAM_LIMITS.persistedTurnBytes - persistedBytes)
+        throw new ProviderQuotaExceededError('persisted_turn_bytes');
       const now = new Date().toISOString();
       if (turn.assistant_message_id === null) {
         this.db

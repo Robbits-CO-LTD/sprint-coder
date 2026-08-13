@@ -9,6 +9,7 @@ import {
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
 import { openAICompatibleResponseRequest, type ProviderFetch } from './openai-provider-client';
 import { normalizeOpenAIResponsesStream } from './openai-responses-stream';
+import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 
 const XAI_API_BASE_URL = 'https://api.x.ai/v1';
 const MODELS_SOURCE = 'https://docs.x.ai/developers/rest-api-reference/inference/models';
@@ -128,6 +129,7 @@ export class XAIProviderClient implements ProviderRuntime {
     connection: ProviderConnection,
     request: ProviderExecutionRequest,
     signal: AbortSignal,
+    budget = new ProviderStreamBudget(),
   ): AsyncIterable<CanonicalProviderEvent> {
     assertXAIConnection(connection);
     const parsed = providerExecutionRequestSchema.parse(request);
@@ -170,10 +172,20 @@ export class XAIProviderClient implements ProviderRuntime {
         };
         return;
       }
-      yield* normalizeOpenAIResponsesStream(response.body, 'xai', parsed.modelId, {
-        costTicksPerUsd: XAI_COST_TICKS_PER_USD,
-      });
-    } catch {
+      yield* normalizeOpenAIResponsesStream(
+        response.body,
+        'xai',
+        parsed.modelId,
+        {
+          costTicksPerUsd: XAI_COST_TICKS_PER_USD,
+        },
+        budget.beginCall(),
+      );
+    } catch (error) {
+      if (error instanceof ProviderQuotaExceededError) {
+        controller.abort();
+        throw error;
+      }
       yield {
         type: 'error',
         error: {

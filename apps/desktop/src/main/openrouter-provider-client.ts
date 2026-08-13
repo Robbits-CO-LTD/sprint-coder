@@ -9,6 +9,7 @@ import {
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
 import type { OpenAICredentialResolver, ProviderFetch } from './openai-provider-client';
 import { normalizeOpenRouterResponsesStream } from './openrouter-responses-stream';
+import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 
 const OPENROUTER_API_BASE_URL = 'https://openrouter.ai/api/v1';
 const MODELS_SOURCE = 'https://openrouter.ai/docs/api/api-reference/models/get-models';
@@ -112,6 +113,7 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
     connection: ProviderConnection,
     request: ProviderExecutionRequest,
     signal: AbortSignal,
+    budget = new ProviderStreamBudget(),
   ): AsyncIterable<CanonicalProviderEvent> {
     assertOpenRouterConnection(connection);
     const parsed = providerExecutionRequestSchema.parse(request);
@@ -150,8 +152,12 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
         };
         return;
       }
-      yield* normalizeOpenRouterResponsesStream(response.body, parsed.modelId);
-    } catch {
+      yield* normalizeOpenRouterResponsesStream(response.body, parsed.modelId, budget.beginCall());
+    } catch (error) {
+      if (error instanceof ProviderQuotaExceededError) {
+        controller.abort();
+        throw error;
+      }
       yield {
         type: 'error',
         error: {

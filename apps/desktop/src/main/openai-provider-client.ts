@@ -8,6 +8,7 @@ import {
 } from '@sprint-coder/contracts';
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
 import { normalizeOpenAIResponsesStream } from './openai-responses-stream';
+import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 
 const OPENAI_API_BASE_URL = 'https://api.openai.com/v1';
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -131,6 +132,7 @@ export class OpenAIProviderClient implements ProviderRuntime {
     connection: ProviderConnection,
     request: ProviderExecutionRequest,
     signal: AbortSignal,
+    budget = new ProviderStreamBudget(),
   ): AsyncIterable<CanonicalProviderEvent> {
     assertOpenAIConnection(connection);
     const parsed = providerExecutionRequestSchema.parse(request);
@@ -166,8 +168,18 @@ export class OpenAIProviderClient implements ProviderRuntime {
         };
         return;
       }
-      yield* normalizeOpenAIResponsesStream(response.body, connection.providerId, parsed.modelId);
-    } catch {
+      yield* normalizeOpenAIResponsesStream(
+        response.body,
+        connection.providerId,
+        parsed.modelId,
+        {},
+        budget.beginCall(),
+      );
+    } catch (error) {
+      if (error instanceof ProviderQuotaExceededError) {
+        controller.abort();
+        throw error;
+      }
       yield {
         type: 'error',
         error: {

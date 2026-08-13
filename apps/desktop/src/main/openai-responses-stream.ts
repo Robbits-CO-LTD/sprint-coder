@@ -1,20 +1,36 @@
 import type { CanonicalProviderEvent } from '@sprint-coder/contracts';
+import { ProviderStreamBudget, readBoundedServerSentJson } from './provider-stream-budget';
 
 export async function* normalizeOpenAIResponsesStream(
   body: ReadableStream<Uint8Array>,
   providerId: string,
   requestedModel: string,
   options: Readonly<{ costTicksPerUsd?: number }> = {},
+  budget = new ProviderStreamBudget(),
 ): AsyncIterable<CanonicalProviderEvent> {
-  for await (const value of readServerSentJson(body)) {
+  const toolArguments = new Map<string, string>();
+  for await (const value of readBoundedServerSentJson(body, budget)) {
     const event = asRecord(value);
     if (event === null || typeof event.type !== 'string') continue;
     if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+      budget.consumeOutput(event.delta);
       yield { type: 'output_delta', text: event.delta };
       continue;
     }
     if (event.type === 'response.reasoning_summary_text.delta' && typeof event.delta === 'string') {
+      budget.consumeOutput(event.delta);
       yield { type: 'reasoning_delta', text: event.delta };
+      continue;
+    }
+    if (
+      event.type === 'response.function_call_arguments.delta' &&
+      typeof event.delta === 'string'
+    ) {
+      const key = toolEventKey(event);
+      if (key !== null) {
+        budget.consumeToolArguments(key, event.delta);
+        toolArguments.set(key, (toolArguments.get(key) ?? '') + event.delta);
+      }
       continue;
     }
     if (event.type === 'response.output_item.done') {
@@ -23,13 +39,20 @@ export async function* normalizeOpenAIResponsesStream(
         item?.type === 'function_call' &&
         typeof item.call_id === 'string' &&
         typeof item.name === 'string'
-      )
+      ) {
+        const key = toolEventKey(item) ?? toolEventKey(event) ?? item.call_id;
+        const accumulated = toolArguments.get(key);
+        budget.consumeToolCall();
+        if (accumulated === undefined && typeof item.arguments === 'string')
+          budget.consumeToolArguments(item.call_id, item.arguments);
         yield {
           type: 'tool_call',
           callId: item.call_id,
           name: item.name,
-          input: parseToolArguments(item.arguments),
+          input: parseToolArguments(accumulated ?? item.arguments),
         };
+        toolArguments.delete(key);
+      }
       continue;
     }
     if (event.type === 'response.completed') {
@@ -77,37 +100,10 @@ export async function* normalizeOpenAIResponsesStream(
   }
 }
 
-async function* readServerSentJson(body: ReadableStream<Uint8Array>): AsyncIterable<unknown> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let pending = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      pending += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n');
-      let boundary = pending.indexOf('\n\n');
-      while (boundary >= 0) {
-        const block = pending.slice(0, boundary);
-        pending = pending.slice(boundary + 2);
-        const data = block
-          .split('\n')
-          .filter((line) => line.startsWith('data:'))
-          .map((line) => line.slice(5).trimStart())
-          .join('\n');
-        if (data.length > 0 && data !== '[DONE]') {
-          try {
-            yield JSON.parse(data) as unknown;
-          } catch {
-            // A malformed provider event is ignored; a later terminal event still decides outcome.
-          }
-        }
-        boundary = pending.indexOf('\n\n');
-      }
-      if (done) break;
-    }
-  } finally {
-    reader.releaseLock();
-  }
+function toolEventKey(value: Record<string, unknown>): string | null {
+  for (const candidate of [value.item_id, value.id, value.call_id, value.output_index])
+    if (typeof candidate === 'string' || typeof candidate === 'number') return String(candidate);
+  return null;
 }
 
 function parseToolArguments(

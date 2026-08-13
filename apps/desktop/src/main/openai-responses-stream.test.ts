@@ -83,6 +83,23 @@ describe('normalizeOpenAIResponsesStream', () => {
       events.push(event);
     expect(events).toEqual([{ type: 'output_delta', text: 'ok' }]);
   });
+
+  it('assembles function arguments split across response events', async () => {
+    const body = sse([
+      { type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '{"query":' },
+      { type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '"weather"}' },
+      {
+        type: 'response.output_item.done',
+        item: { id: 'fc_1', type: 'function_call', call_id: 'call_1', name: 'lookup' },
+      },
+    ]);
+    const events = [];
+    for await (const event of normalizeOpenAIResponsesStream(body, 'openai', 'gpt'))
+      events.push(event);
+    expect(events).toEqual([
+      { type: 'tool_call', callId: 'call_1', name: 'lookup', input: { query: 'weather' } },
+    ]);
+  });
 });
 
 function sse(events: readonly unknown[]): ReadableStream<Uint8Array> {
