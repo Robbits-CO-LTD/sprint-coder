@@ -437,8 +437,20 @@ export class CommandRunner {
           active.posixOwnedMembers?.set(targetPid, targetStartIdentity);
         }
       } catch (error) {
-        await this.terminateKnownAndWait(executionId, lease, active.outcome);
-        this.releaseActive(executionId, active);
+        try {
+          await this.terminateKnownAndWait(executionId, lease, active.outcome);
+          this.releaseActive(executionId, active);
+        } catch (terminationError) {
+          if (
+            terminationError instanceof CommandRunnerError &&
+            terminationError.code === 'PROCESS_TREE_TERMINATION_FAILED'
+          ) {
+            retainedExecutionImage = true;
+            active.executionImage = executionImage;
+            this.retainUntilOutcome(executionId, active);
+          }
+          throw terminationError;
+        }
         throw error;
       }
       try {
@@ -1369,7 +1381,16 @@ function buildEnvironment(
   delta: Readonly<Record<string, string>>,
   internal?: Readonly<Record<string, string>>,
 ): NodeJS.ProcessEnv {
-  return Object.fromEntries([...Object.entries(delta), ...Object.entries(internal ?? {})]);
+  const environment = Object.fromEntries([
+    ...Object.entries(delta),
+    ...Object.entries(internal ?? {}),
+  ]);
+  if (process.platform === 'linux') {
+    for (const key of Object.keys(environment)) {
+      if (/^LD_(?:AUDIT|LIBRARY_PATH|PRELOAD)$/u.test(key)) delete environment[key];
+    }
+  }
+  return environment;
 }
 
 export function buildControlledEnvironment(

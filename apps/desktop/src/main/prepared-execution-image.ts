@@ -117,14 +117,22 @@ export async function prepareExecutionImage(
       const noFollow = constants.O_NOFOLLOW;
       if (noFollow === undefined) throw new Error('O_NOFOLLOW is unavailable');
       held = await open(destination, constants.O_RDONLY | noFollow);
-      const before = await held.stat({ bigint: true });
-      if (!before.isFile() || before.nlink !== 1n) throw new Error('Prepared image is not unique');
+      const linked = await held.stat({ bigint: true });
+      if (!linked.isFile() || linked.nlink !== 1n) throw new Error('Prepared image is not unique');
       const verifier = await open(destination, constants.O_RDONLY | noFollow);
       try {
+        // Remove the pathname before the final verification. The interpreter receives only the
+        // already-open descriptor, so another same-uid process cannot reopen and mutate it after
+        // the approved bytes have been checked.
+        await rm(destination);
+        const pinnedBefore = await held.stat({ bigint: true });
         const verifiedBefore = await verifier.stat({ bigint: true });
         heldBytes = await verifier.readFile();
         const verifiedAfter = await verifier.stat({ bigint: true });
-        if (!sameStats(before, verifiedBefore) || !sameStats(verifiedBefore, verifiedAfter))
+        if (
+          !sameUnlinkedStats(pinnedBefore, verifiedBefore) ||
+          !sameUnlinkedStats(verifiedBefore, verifiedAfter)
+        )
           throw new Error('Prepared image changed while pinned');
       } finally {
         await verifier.close();
@@ -137,9 +145,12 @@ export async function prepareExecutionImage(
       );
     const digest = sha256(heldBytes);
     const trustedMacPath =
-      process.platform === 'darwin' && (await isRootOwnedSystemExecutable(expected.canonicalPath));
+      process.platform === 'darwin' &&
+      process.getuid?.() !== 0 &&
+      (await isRootOwnedSystemExecutable(expected.canonicalPath));
     const trustedLinuxPath =
       process.platform === 'linux' &&
+      process.getuid?.() !== 0 &&
       (await isRootOwnedNonWritableExecutable(expected.canonicalPath));
     // Linux exposes the sealed memfd through the Main process so descendants that reuse
     // process.execPath still resolve an immutable image. macOS has no equivalent and only permits
@@ -577,7 +588,7 @@ function parseShebang(
     path === undefined ||
     !path.startsWith('/') ||
     path.split('/').at(-1) === 'env' ||
-    fields.length > 1
+    fields.length > 0
   )
     throw new Error('Unsupported shebang interpreter');
   return Object.freeze({ path, arguments: Object.freeze(fields) });
@@ -607,6 +618,7 @@ async function sealExecutablePathInternal(
     const before = await stat(canonicalPath, { bigint: true });
     if (!before.isFile() || (before.nlink !== 1n && !allowHardlinks))
       throw new Error('Executable is not a permitted regular file');
+    assertReadableImageSize(before);
     const bytes = readWindowsImage(canonicalPath, allowHardlinks, 'approval executable');
     const after = await stat(canonicalPath, { bigint: true });
     if (!sameIdentityStats(before, after, allowHardlinks))
@@ -644,6 +656,7 @@ async function sealExecutablePathInternal(
     const before = await source.stat({ bigint: true });
     if (!before.isFile() || (before.nlink !== 1n && !allowHardlinks))
       throw new Error('Shebang interpreter is not a unique regular file');
+    assertReadableImageSize(before);
     const bytes = await source.readFile();
     const after = await source.stat({ bigint: true });
     if (!sameStats(before, after)) throw new Error('Shebang interpreter changed');
@@ -733,6 +746,7 @@ async function readExpectedWindowsImage(
 }
 
 async function isRootOwnedSystemExecutable(path: string): Promise<boolean> {
+  if (process.getuid?.() === 0) return false;
   const systemPrefixes = ['/bin/', '/sbin/', '/usr/bin/', '/usr/sbin/', '/System/'];
   if (!systemPrefixes.some((prefix) => path.startsWith(prefix))) return false;
   let current = path;
@@ -750,6 +764,7 @@ async function isRootOwnedSystemExecutable(path: string): Promise<boolean> {
 }
 
 async function isRootOwnedNonWritableExecutable(path: string): Promise<boolean> {
+  if (process.getuid?.() === 0) return false;
   let current = path;
   for (;;) {
     try {
@@ -771,6 +786,7 @@ async function readStablePosixImage(expected: SealedExecutableIdentity): Promise
   try {
     const before = await source.stat({ bigint: true });
     assertExpectedStats(before, expected);
+    assertReadableImageSize(before);
     const bytes = await source.readFile();
     const after = await source.stat({ bigint: true });
     if (!sameStats(before, after)) throw new Error('Executable changed while pinned');
@@ -778,6 +794,11 @@ async function readStablePosixImage(expected: SealedExecutableIdentity): Promise
   } finally {
     await source.close();
   }
+}
+
+function assertReadableImageSize(stats: BigIntStats): void {
+  if (stats.size < 1n || stats.size > BigInt(MAX_EXECUTION_IMAGE_BYTES))
+    throw new Error('Executable exceeds the size limit');
 }
 
 function assertExpectedStats(stats: BigIntStats, expected: SealedExecutableIdentity): void {
@@ -796,6 +817,21 @@ function assertExpectedStats(stats: BigIntStats, expected: SealedExecutableIdent
 
 function sameStats(first: BigIntStats, second: BigIntStats): boolean {
   return sameIdentityStats(first, second, false);
+}
+
+function sameUnlinkedStats(first: BigIntStats, second: BigIntStats): boolean {
+  return (
+    first.isFile() &&
+    second.isFile() &&
+    first.dev === second.dev &&
+    first.ino === second.ino &&
+    first.size === second.size &&
+    first.mtimeNs === second.mtimeNs &&
+    first.ctimeNs === second.ctimeNs &&
+    first.mode === second.mode &&
+    first.nlink === 0n &&
+    second.nlink === 0n
+  );
 }
 
 function sameIdentityStats(

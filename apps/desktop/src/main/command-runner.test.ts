@@ -12,6 +12,7 @@ import {
   realpath,
   rename,
   rm,
+  truncate,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -72,6 +73,8 @@ describe('CommandRunner', () => {
       localappdata: 'C:\\Users\\example\\AppData\\Local',
       ProgramFiles: 'C:\\Program Files',
       OPENAI_API_KEY: 'must-not-cross',
+      LD_PRELOAD: '/workspace/attacker.so',
+      LD_LIBRARY_PATH: '/workspace/lib',
       AWS_SECRET_ACCESS_KEY: 'must-not-cross',
     });
 
@@ -85,6 +88,8 @@ describe('CommandRunner', () => {
     });
     expect(environment).not.toHaveProperty('OPENAI_API_KEY');
     expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
+    expect(environment).not.toHaveProperty('LD_PRELOAD');
+    expect(environment).not.toHaveProperty('LD_LIBRARY_PATH');
   });
 
   it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
@@ -809,6 +814,28 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
+    'preserves leading, middle, and trailing empty Windows argv entries',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', 'console.log(JSON.stringify(process.argv.slice(1)))', '', 'middle', ''],
+        cwd: '.',
+      });
+      let output = '';
+      await expect(
+        new CommandRunner().run(spec, {
+          onChunk: (chunk) => {
+            output += chunk.text;
+          },
+        }),
+      ).resolves.toMatchObject({ exitCode: 0 });
+      expect(JSON.parse(output.trim())).toEqual(['', 'middle', '']);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
     'runs a short-lived Windows command exactly once after the durable dispatch boundary',
     async () => {
       const root = await workspace();
@@ -989,6 +1016,29 @@ describe('CommandRunner', () => {
       ).rejects.toThrow(/shebang/i);
     },
   );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects launcher shebang arguments that could resolve an unsealed executable',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'dynamic-launcher.sh');
+      await writeFile(executable, '#!/usr/bin/nice node\nconsole.log("unsafe")\n');
+      await chmod(executable, 0o700);
+      await expect(
+        prepareTestExecutionSpec({ workspacePath: root, executable, argv: [], cwd: '.' }),
+      ).rejects.toThrow(/shebang/i);
+    },
+  );
+
+  it('rejects an oversized executable before reading its sparse contents', async () => {
+    const root = await workspace();
+    const executable = join(root, process.platform === 'win32' ? 'oversized.exe' : 'oversized');
+    await writeFile(executable, 'x');
+    await truncate(executable, 512 * 1024 * 1024 + 1);
+    await expect(
+      prepareExecutionSpec({ workspacePath: root, executable, argv: [], cwd: '.' }),
+    ).rejects.toThrow(/size limit/i);
+  });
 
   it.runIf(process.platform === 'darwin')(
     'fails closed for a mutable native image when descriptor execution is unavailable',

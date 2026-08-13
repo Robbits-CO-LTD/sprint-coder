@@ -100,6 +100,7 @@ napi_value EnableSafeDllSearchPolicy(napi_env env, napi_callback_info info) {
 }
 
 std::wstring QuoteCommandLineArgument(const std::wstring& value) {
+  if (value.empty()) return L"\"\"";
   if (value.find_first_of(L" \t\n\v\"") == std::wstring::npos) return value;
   std::wstring quoted = L"\"";
   size_t slashes = 0;
