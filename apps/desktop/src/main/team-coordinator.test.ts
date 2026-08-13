@@ -3551,6 +3551,80 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('dispatches the latest instruction revision after a preflight steer', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Steer active preflight');
+      const runtime = new TestWorkerRuntime();
+      const contents: string[] = [];
+      vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+        contents.push(input.content);
+        return {
+          claims: {
+            deliveryId: input.envelope.deliveryId,
+            sourceAgentId: input.envelope.sourceAgentId,
+            targetAgentId: input.envelope.targetAgentId,
+          },
+          completion: {
+            status: 'succeeded',
+            summary: 'latest instruction completed',
+            artifacts: [],
+            verification: [],
+            risks: [],
+          },
+          usage: { costCents: 0, tokens: 0, timeMs: 0, toolCalls: 0 },
+        };
+      });
+      let releasePreflight!: () => void;
+      const preflight = new Promise<void>((resolve) => {
+        releasePreflight = resolve;
+      });
+      let preflightStarted = false;
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          preflightStarted = true;
+          await preflight;
+        },
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'steered preflight worker',
+        objective: 'run only the latest instruction',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'instruction-v1',
+        doneCriteria: ['latest revision is dispatched'],
+      });
+      await waitFor(() => preflightStarted);
+
+      await expect(
+        coordinator.steerExecution(task.id, submission.executionId, 'instruction-v2'),
+      ).resolves.toMatchObject({ state: 'queued' });
+      releasePreflight();
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+      );
+
+      expect(contents).toEqual(['instruction-v2']);
+      expect(persistence.getTeamExecution(submission.executionId).instruction.revision).toBe(2);
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { instructionRevision: 2, state: 'completed' },
+      ]);
+      persistence.close();
+    });
+
     it('stops a Worker whose execution is active in preflight without dispatching it', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Stop active preflight Worker');

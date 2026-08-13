@@ -1211,6 +1211,13 @@ export class TeamCoordinator {
         throw new Error('read-only execution cannot steer a workspace-write execution');
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'steer', instruction);
+      if (
+        execution.state === 'waiting_rate_limit' &&
+        this.persistence
+          .listTeamAttempts(execution.id)
+          .some((attempt) => attempt.state === 'waiting_rate_limit')
+      )
+        throw new Error('A rate-limited attempt cannot be steered until it resumes');
       const revised = this.persistence.reviseQueuedTeamExecution({
         executionId,
         createdByAgentId: execution.createdByAgentId,
@@ -1433,15 +1440,6 @@ export class TeamCoordinator {
                 `工程${ordinal}チェックポイント: ${checkpoint?.summary ?? ''}`,
             )
             .join('\n');
-    const content = [
-      completedMissionContext,
-      input.attemptStartReason === 'manual_resume'
-        ? '前回の部分変更を最初に検査し、完了済み操作を重複させずに再開してください。'
-        : '',
-      execution.instruction.content,
-    ]
-      .filter((part) => part !== '')
-      .join('\n\n');
     const snapshot = this.persistence.getTeamSnapshot(input.teamId);
     const leader = snapshot.agents.find(({ id }) => id === input.leaderId);
     const storedWorker = snapshot.agents.find(({ id }) => id === input.workerId);
@@ -1496,6 +1494,16 @@ export class TeamCoordinator {
         to: 'running',
         now: this.isoNow(),
       });
+      const dispatchExecution = this.persistence.getTeamExecution(input.executionId);
+      const content = [
+        completedMissionContext,
+        input.attemptStartReason === 'manual_resume'
+          ? '前回の部分変更を最初に検査し、完了済み操作を重複させずに再開してください。'
+          : '',
+        dispatchExecution.instruction.content,
+      ]
+        .filter((part) => part !== '')
+        .join('\n\n');
       let attempt =
         input.resumeAttemptId === undefined
           ? this.persistence.createTeamAttempt(
