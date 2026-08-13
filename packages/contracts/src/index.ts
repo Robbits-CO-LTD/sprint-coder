@@ -3049,6 +3049,10 @@ export const databaseRecoverySchema = z
     corruptionDetected: z.boolean(),
     restoredFromBackup: z.boolean(),
     freshStart: z.boolean(),
+    /** Diagnostic-only bundle containing the corrupt main/WAL/SHM generation, when preserved. */
+    corruptBundlePath: z.string().nullable(),
+    /** The preserved WAL may contain committed pages that were not present in the restored backup. */
+    possibleCommittedDataLoss: z.boolean(),
     /** Turns finalised as `interrupted` because the app exited while they were running. */
     interruptedTurns: z.number().int().nonnegative(),
   })

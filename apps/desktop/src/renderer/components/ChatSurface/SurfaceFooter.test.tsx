@@ -10,6 +10,8 @@ describe('describeRecovery', () => {
     corruptionDetected: false,
     restoredFromBackup: false,
     freshStart: false,
+    corruptBundlePath: null,
+    possibleCommittedDataLoss: false,
     interruptedTurns: 0,
   };
 
@@ -22,6 +24,20 @@ describe('describeRecovery', () => {
   it('reports a restore from backup', () => {
     expect(describeRecovery({ ...clean, corruptionDetected: true, restoredFromBackup: true })).toBe(
       'データベースをバックアップから復元しました',
+    );
+  });
+
+  it('reports backup restore and possible committed data loss with the recovery path together', () => {
+    expect(
+      describeRecovery({
+        ...clean,
+        corruptionDetected: true,
+        restoredFromBackup: true,
+        corruptBundlePath: '/diagnostics/sprint-coder.db.corrupt-id',
+        possibleCommittedDataLoss: true,
+      }),
+    ).toBe(
+      'データベースをバックアップから復元しました / 復元前のWALに確定データが残っている可能性があります（回収先: /diagnostics/sprint-coder.db.corrupt-id）',
     );
   });
 

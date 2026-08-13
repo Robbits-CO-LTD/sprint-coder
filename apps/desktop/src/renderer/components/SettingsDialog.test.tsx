@@ -239,6 +239,8 @@ describe('the read-only lines in 詳細', () => {
         corruptionDetected: false,
         restoredFromBackup: false,
         freshStart: false,
+        corruptBundlePath: null,
+        possibleCommittedDataLoss: false,
         interruptedTurns: 0,
       }),
     ).toBe('問題なく起動しました');
@@ -247,8 +249,12 @@ describe('the read-only lines in 詳細', () => {
         corruptionDetected: true,
         restoredFromBackup: true,
         freshStart: false,
+        corruptBundlePath: '/diagnostics/sprint-coder.db.corrupt-id',
+        possibleCommittedDataLoss: true,
         interruptedTurns: 2,
       }),
-    ).toBe('破損を検出 · バックアップから復元 · 中断されたターン 2件');
+    ).toBe(
+      '破損を検出 · バックアップから復元 · 確定データ喪失の可能性 · 回収先 /diagnostics/sprint-coder.db.corrupt-id · 中断されたターン 2件',
+    );
   });
 });

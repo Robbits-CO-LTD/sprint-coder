@@ -42,6 +42,7 @@ const tempDirs: string[] = [];
 const recoveryCrashFixturePath = process.env.SPRINT_CODER_RECOVERY_CRASH_FIXTURE_PATH;
 const recoveryCrashFixtureCheckpoint = process.env.SPRINT_CODER_RECOVERY_CRASH_CHECKPOINT as
   | 'after_main_retired_before_sidecar_cleanup'
+  | 'after_corrupt_wal_bundled'
   | 'after_main_retired'
   | 'after_staging_validated'
   | 'before_publish'
@@ -81,6 +82,7 @@ if (runsWithElectronAbi)
 
     const crashCheckpoints = [
       'after_main_retired_before_sidecar_cleanup',
+      'after_corrupt_wal_bundled',
       'after_main_retired',
       'after_staging_validated',
       'before_publish',
@@ -94,7 +96,10 @@ if (runsWithElectronAbi)
         seeded.close();
         copyFileSync(path, `${path}.pre-migration.bak`);
         writeFileSync(path, 'not a sqlite database — simulated corruption');
-        if (checkpoint === 'after_main_retired_before_sidecar_cleanup') {
+        if (
+          checkpoint === 'after_main_retired_before_sidecar_cleanup' ||
+          checkpoint === 'after_corrupt_wal_bundled'
+        ) {
           writeFileSync(`${path}-wal`, 'stale WAL from corrupt main');
           writeFileSync(`${path}-shm`, 'stale SHM from corrupt main');
         }
@@ -133,6 +138,21 @@ if (runsWithElectronAbi)
         if (checkpoint === 'after_main_retired_before_sidecar_cleanup') {
           expect(existsSync(`${path}-wal`)).toBe(true);
           expect(existsSync(`${path}-shm`)).toBe(true);
+        }
+        if (checkpoint === 'after_corrupt_wal_bundled') {
+          expect(existsSync(`${path}-wal`)).toBe(false);
+          expect(existsSync(`${path}-shm`)).toBe(true);
+          const partialBundle = readdirSync(join(path, '..')).find((name) =>
+            name.startsWith('sprint-coder.db.corrupt-'),
+          );
+          expect(partialBundle).toBeDefined();
+          expect(existsSync(join(path, '..', partialBundle ?? '', 'wal'))).toBe(true);
+          expect(existsSync(join(path, '..', partialBundle ?? '', 'manifest.json'))).toBe(false);
+        }
+        if (
+          checkpoint === 'after_main_retired_before_sidecar_cleanup' ||
+          checkpoint === 'after_corrupt_wal_bundled'
+        ) {
           __persistenceRecoveryTestables.setCrashCheckpointForTesting((current) => {
             if (current !== 'before_publish') return;
             checkedBeforePublish = true;
@@ -148,7 +168,10 @@ if (runsWithElectronAbi)
         expect(recovered.recoveryReport.resumedRecovery).toBe(true);
         expect(recovered.recoveryReport.recoveryFailure).toBeNull();
         recovered.close();
-        if (checkpoint === 'after_main_retired_before_sidecar_cleanup')
+        if (
+          checkpoint === 'after_main_retired_before_sidecar_cleanup' ||
+          checkpoint === 'after_corrupt_wal_bundled'
+        )
           expect(checkedBeforePublish).toBe(true);
 
         expect(
@@ -227,6 +250,67 @@ if (runsWithElectronAbi)
       recovered.close();
     });
 
+    it('preserves a corrupt database generation with WAL-only committed pages without replaying it', () => {
+      const path = tempDatabasePath();
+      const seeded = new SqlitePersistenceClient(path);
+      const task = seeded.createTask('checkpointed backup value');
+      seeded.close();
+      copyFileSync(path, `${path}.pre-migration.bak`);
+
+      const writer = new Database(path);
+      writer.pragma('journal_mode = WAL');
+      writer.pragma('wal_autocheckpoint = 0');
+      writer
+        .prepare('UPDATE tasks SET title = ? WHERE id = ?')
+        .run('committed only in WAL', task.id);
+      const mainBytes = readFileSync(path);
+      const walBytes = readFileSync(`${path}-wal`);
+      const shmBytes = readFileSync(`${path}-shm`);
+      expect(walBytes.byteLength).toBeGreaterThan(0);
+      writer.close();
+
+      // Recreate the exact live generation after close() checkpoints it, then damage only main's
+      // header so the recovery probe takes the corrupt path while the real committed WAL survives.
+      const corruptMainBytes = Buffer.from(mainBytes);
+      corruptMainBytes.fill(0, 0, 32);
+      writeFileSync(path, corruptMainBytes);
+      writeFileSync(`${path}-wal`, walBytes);
+      writeFileSync(`${path}-shm`, shmBytes);
+
+      const recovered = new SqlitePersistenceClient(path);
+      expect(recovered.getTask(task.id).title).toBe('checkpointed backup value');
+      expect(recovered.recoveryReport.restoredFromBackup).toBe(true);
+      expect(recovered.recoveryReport.possibleCommittedDataLoss).toBe(true);
+      const bundlePath = recovered.recoveryReport.corruptBundlePath;
+      expect(bundlePath).not.toBeNull();
+      expect(recovered.getStartupRecovery()).toMatchObject({
+        restoredFromBackup: true,
+        corruptBundlePath: bundlePath,
+        possibleCommittedDataLoss: true,
+      });
+      expect(readFileSync(join(bundlePath ?? '', 'wal'))).toEqual(walBytes);
+      expect(readFileSync(join(bundlePath ?? '', 'shm')).byteLength).toBe(shmBytes.byteLength);
+      const manifest = JSON.parse(
+        readFileSync(join(bundlePath ?? '', 'manifest.json'), 'utf8'),
+      ) as {
+        possibleCommittedDataLoss: boolean;
+        automaticReplay: boolean;
+        sourceDatabaseBasename: string;
+        files: Record<'main' | 'wal' | 'shm', { present: boolean; size: number | null }>;
+      };
+      expect(manifest).toMatchObject({
+        possibleCommittedDataLoss: true,
+        automaticReplay: false,
+        sourceDatabaseBasename: 'sprint-coder.db',
+        files: {
+          main: { present: true, size: corruptMainBytes.byteLength },
+          wal: { present: true, size: walBytes.byteLength },
+          shm: { present: true, size: shmBytes.byteLength },
+        },
+      });
+      recovered.close();
+    });
+
     it('restores from the pre-migration backup when the database file is corrupt', () => {
       const path = tempDatabasePath();
       const seeded = new SqlitePersistenceClient(path);
@@ -241,6 +325,11 @@ if (runsWithElectronAbi)
       expect(recovered.recoveryReport.freshStart).toBe(false);
       expect(recovered.recoveryReport.corruptFileMovedTo).not.toBeNull();
       expect(existsSync(recovered.recoveryReport.corruptFileMovedTo ?? '')).toBe(true);
+      expect(recovered.recoveryReport.corruptBundlePath).not.toBeNull();
+      expect(recovered.recoveryReport.possibleCommittedDataLoss).toBe(false);
+      expect(
+        existsSync(join(recovered.recoveryReport.corruptBundlePath ?? '', 'manifest.json')),
+      ).toBe(true);
       expect(recovered.listTasks().some((row) => row.id === task.id)).toBe(true);
       recovered.close();
     });
@@ -261,6 +350,8 @@ if (runsWithElectronAbi)
     it('starts fresh when initial corruption recovery finds only invalid backups', () => {
       const path = tempDatabasePath();
       writeFileSync(path, 'corrupt main database');
+      writeFileSync(`${path}-wal`, 'possibly committed WAL');
+      writeFileSync(`${path}-shm`, 'matching SHM');
       writeFileSync(`${path}.pre-migration.bak`, 'corrupt backup database');
 
       const recovered = new SqlitePersistenceClient(path);
@@ -273,6 +364,11 @@ if (runsWithElectronAbi)
       });
       expect(recovered.recoveryReport.corruptFileMovedTo).not.toBeNull();
       expect(existsSync(recovered.recoveryReport.corruptFileMovedTo ?? '')).toBe(true);
+      expect(recovered.recoveryReport.possibleCommittedDataLoss).toBe(true);
+      expect(
+        readFileSync(join(recovered.recoveryReport.corruptBundlePath ?? '', 'wal'), 'utf8'),
+      ).toBe('possibly committed WAL');
+      expect(existsSync(join(recovered.recoveryReport.corruptBundlePath ?? '', 'shm'))).toBe(true);
       expect(existsSync(`${path}.pre-migration.bak`)).toBe(true);
       recovered.close();
     });
@@ -285,6 +381,8 @@ if (runsWithElectronAbi)
         restoredFromBackup: false,
         freshStart: false,
         corruptFileMovedTo: null,
+        corruptBundlePath: null,
+        possibleCommittedDataLoss: false,
         resumedRecovery: false,
         recoveryFailure: null,
       });
