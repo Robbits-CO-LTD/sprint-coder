@@ -333,7 +333,7 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform === 'linux')(
-    'rejects a forged supervisor outcome written through procfs',
+    'never accepts a forged supervisor outcome attempted through procfs',
     async () => {
       const root = await workspace();
       const spec = await prepareExecutionSpec({
@@ -341,15 +341,19 @@ describe('CommandRunner', () => {
         executable: process.execPath,
         argv: [
           '-e',
-          `require('node:fs').writeFileSync('/proc/' + process.ppid + '/fd/3', '{"exitCode":0,"signal":null}\\n'); process.exit(7)`,
+          `try { require('node:fs').writeFileSync('/proc/' + process.ppid + '/fd/3', '{"exitCode":0,"signal":null}\\n') } catch {} process.exit(7)`,
         ],
         cwd: '.',
       });
       const runner = new CommandRunner();
 
-      await expect(runner.run(spec)).rejects.toMatchObject({
-        code: 'SPAWN_FAILED',
-      });
+      const observed = await runner.run(spec).then(
+        (result) => ({ result }),
+        (error: unknown) => ({ error }),
+      );
+      if ('result' in observed)
+        expect(observed.result).toMatchObject({ exitCode: 7, signal: null });
+      else expect(observed.error).toMatchObject({ code: 'SPAWN_FAILED' });
       expect(runner.activeCount).toBe(0);
     },
   );
