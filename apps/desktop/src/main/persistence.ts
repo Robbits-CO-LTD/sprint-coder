@@ -4611,6 +4611,8 @@ export type DatabaseRecoveryReport = {
   restoredFromBackup: boolean;
   freshStart: boolean;
   corruptFileMovedTo: string | null;
+  corruptBundlePath: string | null;
+  possibleCommittedDataLoss: boolean;
   resumedRecovery: boolean;
   recoveryFailure: string | null;
 };
@@ -4628,6 +4630,7 @@ export class DatabaseRecoveryError extends Error {
 
 type RecoveryCrashCheckpoint =
   | 'after_main_retired_before_sidecar_cleanup'
+  | 'after_corrupt_wal_bundled'
   | 'after_main_retired'
   | 'after_staging_validated'
   | 'before_publish';
@@ -4641,6 +4644,19 @@ type RecoveryMarker = {
 };
 
 type RecoveryMarkerRecord = { marker: RecoveryMarker; path: string };
+
+type RecoveryBundleManifest = {
+  version: 1;
+  recoveryId: string;
+  sourceDatabaseBasename: string;
+  recoveredAt: string;
+  automaticReplay: false;
+  possibleCommittedDataLoss: boolean;
+  files: Record<
+    'main' | 'wal' | 'shm',
+    { originalBasename: string; storedBasename: string; present: boolean; size: number | null }
+  >;
+};
 
 let recoveryCrashCheckpointForTesting: ((checkpoint: RecoveryCrashCheckpoint) => void) | null =
   null;
@@ -4676,6 +4692,14 @@ function syncDirectory(path: string): void {
 function isRegularFile(path: string): boolean {
   try {
     return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
   } catch {
     return false;
   }
@@ -4755,6 +4779,140 @@ function writeRecoveryMarker(
   }
 }
 
+function recoveryBundleManifestPath(bundlePath: string): string {
+  return `${bundlePath}${sep}manifest.json`;
+}
+
+function readRecoveryBundleManifest(bundlePath: string): RecoveryBundleManifest | null {
+  const manifestPath = recoveryBundleManifestPath(bundlePath);
+  if (!existsSync(manifestPath)) return null;
+  if (!isRegularFile(manifestPath)) throw new Error('Database recovery manifest is not a file');
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch {
+    throw new Error('Database recovery manifest is malformed');
+  }
+  const manifest = value as Partial<RecoveryBundleManifest>;
+  if (
+    manifest.version !== 1 ||
+    manifest.automaticReplay !== false ||
+    typeof manifest.possibleCommittedDataLoss !== 'boolean' ||
+    typeof manifest.files !== 'object' ||
+    manifest.files === null
+  )
+    throw new Error('Database recovery manifest is malformed');
+  return manifest as RecoveryBundleManifest;
+}
+
+function writeRecoveryBundleManifest(
+  databasePath: string,
+  bundlePath: string,
+  recoveryId: string,
+): RecoveryBundleManifest {
+  const members = [
+    { key: 'main', suffix: '' },
+    { key: 'wal', suffix: '-wal' },
+    { key: 'shm', suffix: '-shm' },
+  ] as const;
+  const files = Object.fromEntries(
+    members.map(({ key, suffix }) => {
+      const storedPath = `${bundlePath}${sep}${key}`;
+      const present = isRegularFile(storedPath);
+      return [
+        key,
+        {
+          originalBasename: basename(`${databasePath}${suffix}`),
+          storedBasename: key,
+          present,
+          size: present ? lstatSync(storedPath).size : null,
+        },
+      ];
+    }),
+  ) as RecoveryBundleManifest['files'];
+  const manifest: RecoveryBundleManifest = {
+    version: 1,
+    recoveryId,
+    sourceDatabaseBasename: basename(databasePath),
+    recoveredAt: new Date().toISOString(),
+    automaticReplay: false,
+    possibleCommittedDataLoss: files.wal.present,
+    files,
+  };
+  const manifestPath = recoveryBundleManifestPath(bundlePath);
+  const temporaryPath = `${manifestPath}.tmp-${randomUUID()}`;
+  try {
+    writeFileSync(temporaryPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+    syncFile(temporaryPath);
+    renameSync(temporaryPath, manifestPath);
+    syncDirectory(bundlePath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+  return manifest;
+}
+
+function preserveCorruptDatabaseBundle(
+  databasePath: string,
+  bundlePath: string,
+  recoveryId: string,
+  onMoved?: (member: 'main' | 'wal' | 'shm') => void,
+): RecoveryBundleManifest | null {
+  const members = [
+    { key: 'main', source: databasePath },
+    { key: 'wal', source: `${databasePath}-wal` },
+    { key: 'shm', source: `${databasePath}-shm` },
+  ] as const;
+  const hasSource = members.some(({ source }) => existsSync(source));
+  if (!existsSync(bundlePath)) {
+    if (!hasSource) return null;
+    mkdirSync(bundlePath);
+    syncDirectory(dirname(databasePath));
+  } else if (!isDirectory(bundlePath)) {
+    throw new Error('Database recovery bundle path is not a directory');
+  }
+
+  const publishedManifest = readRecoveryBundleManifest(bundlePath);
+  if (publishedManifest !== null) {
+    if (hasSource) throw new Error('Database recovery found files after bundle finalization');
+    return publishedManifest;
+  }
+
+  for (const { key, source } of members) {
+    const destination = `${bundlePath}${sep}${key}`;
+    const sourceExists = existsSync(source);
+    const destinationExists = existsSync(destination);
+    if (sourceExists && !isRegularFile(source))
+      throw new Error(`Database recovery ${key} source is not a regular file`);
+    if (destinationExists && !isRegularFile(destination))
+      throw new Error(`Database recovery ${key} bundle member is not a regular file`);
+    if (sourceExists && destinationExists)
+      throw new Error(`Database recovery found both source and bundled ${key}`);
+    if (!sourceExists) continue;
+    renameSync(source, destination);
+    syncFile(destination);
+    syncDirectory(bundlePath);
+    syncDirectory(dirname(databasePath));
+    onMoved?.(key);
+  }
+  return writeRecoveryBundleManifest(databasePath, bundlePath, recoveryId);
+}
+
+function applyRecoveryBundleReport(
+  report: DatabaseRecoveryReport,
+  bundlePath: string,
+  manifest: RecoveryBundleManifest | null,
+): void {
+  if (manifest === null) return;
+  report.corruptBundlePath = bundlePath;
+  report.possibleCommittedDataLoss = manifest.possibleCommittedDataLoss;
+  const corruptMainPath = `${bundlePath}${sep}main`;
+  if (isRegularFile(corruptMainPath)) report.corruptFileMovedTo = corruptMainPath;
+}
+
 // Probe before real use. Recovery is journaled before the main file is retired, and a validated,
 // synced staging database is atomically published. A restart with no main file must therefore
 // resume the marker instead of letting better-sqlite3 silently create an empty database.
@@ -4764,12 +4922,15 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
     restoredFromBackup: false,
     freshStart: false,
     corruptFileMovedTo: null,
+    corruptBundlePath: null,
+    possibleCommittedDataLoss: false,
     resumedRecovery: false,
     recoveryFailure: null,
   };
   const backupPath = `${databasePath}.pre-migration.bak`;
   try {
     let markerRecord = readRecoveryMarker(databasePath);
+    let createdMarker = false;
     if (markerRecord === null) {
       if (existsSync(databasePath) && databasePassesQuickCheck(databasePath)) return report;
       const existingCandidates = [backupPath, `${backupPath}.previous`].filter((candidate) =>
@@ -4784,10 +4945,10 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
           throw new Error('Database recovery failed: no valid backup candidate');
         }
         report.corruptionDetected = true;
-        const movedTo = `${databasePath}.corrupt-${Date.now()}`;
-        renameSync(databasePath, movedTo);
-        report.corruptFileMovedTo = movedTo;
-        for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
+        const recoveryId = randomUUID();
+        const bundlePath = `${databasePath}.corrupt-${recoveryId}`;
+        const manifest = preserveCorruptDatabaseBundle(databasePath, bundlePath, recoveryId);
+        applyRecoveryBundleReport(report, bundlePath, manifest);
         report.freshStart = true;
         return report;
       }
@@ -4805,20 +4966,7 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
       const markerPath = `${databasePath}.recovery-${recoveryId}.json`;
       writeRecoveryMarker(databasePath, markerPath, marker);
       markerRecord = { marker, path: markerPath };
-      if (existsSync(databasePath)) {
-        const retiredPath = recoveryOwnedPath(
-          databasePath,
-          marker.retired,
-          `${basename(databasePath)}.corrupt-`,
-        );
-        renameSync(databasePath, retiredPath);
-        syncDirectory(dirname(databasePath));
-        report.corruptFileMovedTo = retiredPath;
-        recoveryCrashCheckpointForTesting?.('after_main_retired_before_sidecar_cleanup');
-        for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
-        syncDirectory(dirname(databasePath));
-      }
-      recoveryCrashCheckpointForTesting?.('after_main_retired');
+      createdMarker = true;
     } else {
       report.resumedRecovery = true;
       report.corruptionDetected = true;
@@ -4833,12 +4981,14 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
       marker.staging,
       `${basename(databasePath)}.recovery-stage-`,
     );
-    const retiredPath = recoveryOwnedPath(
+    const bundlePath = recoveryOwnedPath(
       databasePath,
       marker.retired,
       `${basename(databasePath)}.corrupt-`,
     );
-    if (isRegularFile(retiredPath)) report.corruptFileMovedTo = retiredPath;
+    const recoveryId = marker.retired.slice(`${basename(databasePath)}.corrupt-`.length);
+    if (isDirectory(bundlePath))
+      applyRecoveryBundleReport(report, bundlePath, readRecoveryBundleManifest(bundlePath));
     if (existsSync(databasePath)) {
       if (databasePassesQuickCheck(databasePath)) {
         for (const suffix of ['', '-wal', '-shm'])
@@ -4848,17 +4998,22 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
         report.restoredFromBackup = true;
         return report;
       }
-      if (existsSync(retiredPath))
-        throw new Error('Database recovery found both main and retired databases');
-      renameSync(databasePath, retiredPath);
-      syncDirectory(dirname(databasePath));
       report.corruptionDetected = true;
-      report.corruptFileMovedTo = retiredPath;
-      for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
     }
 
-    for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
-    syncDirectory(dirname(databasePath));
+    const manifest = preserveCorruptDatabaseBundle(
+      databasePath,
+      bundlePath,
+      recoveryId,
+      (member) => {
+        if (member === 'main')
+          recoveryCrashCheckpointForTesting?.('after_main_retired_before_sidecar_cleanup');
+        if (member === 'wal') recoveryCrashCheckpointForTesting?.('after_corrupt_wal_bundled');
+      },
+    );
+    applyRecoveryBundleReport(report, bundlePath, manifest);
+    if (createdMarker) recoveryCrashCheckpointForTesting?.('after_main_retired');
+
     const sourcePath = `${dirname(databasePath)}${sep}${marker.source}`;
     if (!databasePassesQuickCheck(sourcePath))
       throw new Error('Database recovery failed: marker backup is invalid');
@@ -4876,6 +5031,8 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
       syncDirectory(dirname(databasePath));
     }
     recoveryCrashCheckpointForTesting?.('after_staging_validated');
+    const finalizedManifest = preserveCorruptDatabaseBundle(databasePath, bundlePath, recoveryId);
+    applyRecoveryBundleReport(report, bundlePath, finalizedManifest);
     recoveryCrashCheckpointForTesting?.('before_publish');
     if (existsSync(databasePath))
       throw new Error('Database recovery refused to replace main database');
