@@ -52,6 +52,7 @@ describe('hasUnsafeWindowsDllImport', () => {
         peWithImport('ext-ms-onecore-appmodel-staterepository-cache-l1-1-0.dll'),
       ),
     ).toBe(false);
+    expect(hasUnsafeWindowsDllImport(peWithImport('wpaxholder.dll'))).toBe(false);
     expect(hasUnsafeWindowsDllImport(peWithImport('python311.dll'))).toBe(true);
   });
 
