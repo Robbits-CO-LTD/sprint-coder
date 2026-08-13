@@ -41,7 +41,11 @@ const tempDirs: string[] = [];
 
 const recoveryCrashFixturePath = process.env.SPRINT_CODER_RECOVERY_CRASH_FIXTURE_PATH;
 const recoveryCrashFixtureCheckpoint = process.env.SPRINT_CODER_RECOVERY_CRASH_CHECKPOINT as
-  'after_main_retired' | 'after_staging_validated' | 'before_publish' | undefined;
+  | 'after_main_retired_before_sidecar_cleanup'
+  | 'after_main_retired'
+  | 'after_staging_validated'
+  | 'before_publish'
+  | undefined;
 
 function tempDatabasePath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'sprint-coder-recovery-'));
@@ -50,6 +54,7 @@ function tempDatabasePath(): string {
 }
 
 afterEach(() => {
+  __persistenceRecoveryTestables.setCrashCheckpointForTesting(null);
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -75,6 +80,7 @@ if (runsWithElectronAbi)
     });
 
     const crashCheckpoints = [
+      'after_main_retired_before_sidecar_cleanup',
       'after_main_retired',
       'after_staging_validated',
       'before_publish',
@@ -88,6 +94,10 @@ if (runsWithElectronAbi)
         seeded.close();
         copyFileSync(path, `${path}.pre-migration.bak`);
         writeFileSync(path, 'not a sqlite database — simulated corruption');
+        if (checkpoint === 'after_main_retired_before_sidecar_cleanup') {
+          writeFileSync(`${path}-wal`, 'stale WAL from corrupt main');
+          writeFileSync(`${path}-shm`, 'stale SHM from corrupt main');
+        }
 
         let childFailure: unknown;
         try {
@@ -119,12 +129,27 @@ if (runsWithElectronAbi)
         expect(childFailure).toBeDefined();
         expect(readFileSync(`${path}.checkpoint`, 'utf8')).toBe(checkpoint);
 
+        let checkedBeforePublish = false;
+        if (checkpoint === 'after_main_retired_before_sidecar_cleanup') {
+          expect(existsSync(`${path}-wal`)).toBe(true);
+          expect(existsSync(`${path}-shm`)).toBe(true);
+          __persistenceRecoveryTestables.setCrashCheckpointForTesting((current) => {
+            if (current !== 'before_publish') return;
+            checkedBeforePublish = true;
+            expect(existsSync(`${path}-wal`)).toBe(false);
+            expect(existsSync(`${path}-shm`)).toBe(false);
+          });
+          expect(checkedBeforePublish).toBe(false);
+        }
+
         const recovered = new SqlitePersistenceClient(path);
         expect(recovered.getTask(task.id).title).toBe(`survives ${checkpoint}`);
         expect(recovered.recoveryReport.restoredFromBackup).toBe(true);
         expect(recovered.recoveryReport.resumedRecovery).toBe(true);
         expect(recovered.recoveryReport.recoveryFailure).toBeNull();
         recovered.close();
+        if (checkpoint === 'after_main_retired_before_sidecar_cleanup')
+          expect(checkedBeforePublish).toBe(true);
 
         expect(
           readdirSync(join(path, '..')).filter(

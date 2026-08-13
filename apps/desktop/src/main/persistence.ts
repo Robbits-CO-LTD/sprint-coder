@@ -4626,7 +4626,11 @@ export class DatabaseRecoveryError extends Error {
   }
 }
 
-type RecoveryCrashCheckpoint = 'after_main_retired' | 'after_staging_validated' | 'before_publish';
+type RecoveryCrashCheckpoint =
+  | 'after_main_retired_before_sidecar_cleanup'
+  | 'after_main_retired'
+  | 'after_staging_validated'
+  | 'before_publish';
 
 type RecoveryMarker = {
   version: 1;
@@ -4810,7 +4814,9 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
         renameSync(databasePath, retiredPath);
         syncDirectory(dirname(databasePath));
         report.corruptFileMovedTo = retiredPath;
+        recoveryCrashCheckpointForTesting?.('after_main_retired_before_sidecar_cleanup');
         for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
+        syncDirectory(dirname(databasePath));
       }
       recoveryCrashCheckpointForTesting?.('after_main_retired');
     } else {
@@ -4851,6 +4857,8 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
       for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
     }
 
+    for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
+    syncDirectory(dirname(databasePath));
     const sourcePath = `${dirname(databasePath)}${sep}${marker.source}`;
     if (!databasePassesQuickCheck(sourcePath))
       throw new Error('Database recovery failed: marker backup is invalid');
