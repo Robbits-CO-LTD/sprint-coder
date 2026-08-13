@@ -44,6 +44,10 @@ type WindowsExecutionAddon = Readonly<{
   holdPreparedExecutionImage(path: string): Readonly<{ id: string; bytes: Buffer }>;
   closePreparedExecutionImage(id: string): void;
 }>;
+type PosixExecutionAddon = Readonly<{
+  prepareSealedExecutionImage(bytes: Buffer, mode: number): Readonly<{ id: string; fd: number }>;
+  closeSealedExecutionImage(id: string): void;
+}>;
 
 const MAX_EXECUTION_IMAGE_BYTES = 512 * 1024 * 1024;
 
@@ -61,6 +65,8 @@ export async function prepareExecutionImage(
   );
   let held: FileHandle | undefined;
   let windowsId: string | undefined;
+  let sealedId: string | undefined;
+  let sealedDescriptor: number | undefined;
   try {
     const sourceBytes =
       process.platform === 'win32'
@@ -77,6 +83,11 @@ export async function prepareExecutionImage(
       const prepared = windowsAddon().holdPreparedExecutionImage(destination);
       windowsId = prepared.id;
       heldBytes = prepared.bytes;
+    } else if (process.platform === 'linux') {
+      const sealed = posixAddon().prepareSealedExecutionImage(sourceBytes, expected.mode & 0o777);
+      sealedId = sealed.id;
+      sealedDescriptor = sealed.fd;
+      heldBytes = sourceBytes;
     } else {
       const noFollow = constants.O_NOFOLLOW;
       if (noFollow === undefined) throw new Error('O_NOFOLLOW is unavailable');
@@ -102,7 +113,7 @@ export async function prepareExecutionImage(
     // descriptor through /dev/fd. Launch the private prepared path there while
     // retaining the verified handle for the lifetime of the child. Linux can
     // execute the inherited descriptor directly through procfs.
-    const descriptor = process.platform === 'win32' ? undefined : held?.fd;
+    const descriptor = process.platform === 'linux' ? sealedDescriptor : held?.fd;
     const baseLaunchPath =
       process.platform === 'linux'
         ? '/proc/self/fd/6'
@@ -115,12 +126,17 @@ export async function prepareExecutionImage(
         ? undefined
         : parseShebang(heldBytes);
     const hasRelativeMachOLoaderPath = containsRelativeMachOLoaderPath(heldBytes);
+    const hasRelativeElfLoaderPath = containsRelativeElfLoaderPath(heldBytes);
     if (
       process.platform === 'darwin' &&
       shebang === undefined &&
       (!trustedMacPath || hasRelativeMachOLoaderPath)
     )
       throw new Error('macOS cannot safely launch this mutable native execution image');
+    if (process.platform === 'linux' && shebang === undefined && hasRelativeElfLoaderPath)
+      throw new Error('Linux cannot safely launch an image with a relative loader path');
+    if (process.platform === 'win32' && hasUnsafeWindowsDllImport(heldBytes))
+      throw new Error('Windows execution image requires a non-system side-by-side DLL');
     if (shebang !== undefined && !allowScript)
       throw new Error('Nested shebang interpreters are unsupported');
     const interpreter =
@@ -177,6 +193,10 @@ export async function prepareExecutionImage(
               windowsAddon().closePreparedExecutionImage(windowsId);
               windowsId = undefined;
             }
+            if (sealedId !== undefined) {
+              posixAddon().closeSealedExecutionImage(sealedId);
+              sealedId = undefined;
+            }
             if (held !== undefined) {
               await held.close();
               held = undefined;
@@ -189,6 +209,7 @@ export async function prepareExecutionImage(
     });
   } catch (error) {
     if (windowsId !== undefined) windowsAddon().closePreparedExecutionImage(windowsId);
+    if (sealedId !== undefined) posixAddon().closeSealedExecutionImage(sealedId);
     await held?.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
     throw error;
@@ -199,6 +220,72 @@ export function containsRelativeMachOLoaderPath(bytes: Buffer): boolean {
   return ['@loader_path/', '@executable_path/', '@rpath/'].some((token) =>
     bytes.includes(Buffer.from(token, 'utf8')),
   );
+}
+
+export function containsRelativeElfLoaderPath(bytes: Buffer): boolean {
+  return ['$ORIGIN', '${ORIGIN}'].some((token) => bytes.includes(Buffer.from(token, 'utf8')));
+}
+
+const WINDOWS_SYSTEM_DLL =
+  /^(?:api-ms-win-|ext-ms-win-)|^(?:advapi32|bcrypt|comctl32|comdlg32|crypt32|dbghelp|dnsapi|gdi32|imm32|iphlpapi|kernel32|msvcp140|normaliz|ntdll|ole32|oleaut32|powrprof|psapi|rpcrt4|secur32|setupapi|shell32|shlwapi|ucrtbase|user32|userenv|vcruntime140(?:_1)?|version|winhttp|winmm|ws2_32)\.dll$/iu;
+
+export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
+  const imports = parsePeImports(bytes);
+  return imports === null || imports.some((name) => !WINDOWS_SYSTEM_DLL.test(name));
+}
+
+function parsePeImports(bytes: Buffer): readonly string[] | null {
+  if (bytes.length < 0x100 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) return null;
+  const pe = bytes.readUInt32LE(0x3c);
+  if (pe > bytes.length - 24 || bytes.readUInt32LE(pe) !== 0x0000_4550) return null;
+  const sectionCount = bytes.readUInt16LE(pe + 6);
+  const optionalSize = bytes.readUInt16LE(pe + 20);
+  const optional = pe + 24;
+  if (optionalSize < 112 || optional > bytes.length - optionalSize) return null;
+  const magic = bytes.readUInt16LE(optional);
+  const directory = optional + (magic === 0x20b ? 112 : magic === 0x10b ? 96 : -1);
+  if (directory < optional || directory > bytes.length - 16) return null;
+  const importRva = bytes.readUInt32LE(directory + 8);
+  const importSize = bytes.readUInt32LE(directory + 12);
+  if (importRva === 0 && importSize === 0) return Object.freeze([]);
+  const sections = optional + optionalSize;
+  const rvaToOffset = (rva: number): number | null => {
+    for (let index = 0; index < sectionCount; index += 1) {
+      const section = sections + index * 40;
+      if (section > bytes.length - 40) return null;
+      const virtualSize = bytes.readUInt32LE(section + 8);
+      const virtualAddress = bytes.readUInt32LE(section + 12);
+      const rawSize = bytes.readUInt32LE(section + 16);
+      const rawAddress = bytes.readUInt32LE(section + 20);
+      const span = Math.max(virtualSize, rawSize);
+      if (rva >= virtualAddress && rva - virtualAddress < span) {
+        const offset = rawAddress + (rva - virtualAddress);
+        return offset < bytes.length ? offset : null;
+      }
+    }
+    return null;
+  };
+  const table = rvaToOffset(importRva);
+  if (table === null) return null;
+  const imports: string[] = [];
+  for (let offset = table; offset <= bytes.length - 20; offset += 20) {
+    const nameRva = bytes.readUInt32LE(offset + 12);
+    if (
+      bytes.readUInt32LE(offset) === 0 &&
+      bytes.readUInt32LE(offset + 4) === 0 &&
+      bytes.readUInt32LE(offset + 8) === 0 &&
+      nameRva === 0 &&
+      bytes.readUInt32LE(offset + 16) === 0
+    )
+      return Object.freeze(imports);
+    const nameOffset = rvaToOffset(nameRva);
+    if (nameOffset === null) return null;
+    const end = bytes.indexOf(0, nameOffset);
+    if (end < 0 || end - nameOffset > 260) return null;
+    imports.push(bytes.subarray(nameOffset, end).toString('ascii').toLowerCase());
+    if (imports.length > 1024) return null;
+  }
+  return null;
 }
 
 function parseShebang(
@@ -340,4 +427,18 @@ function windowsAddon(): WindowsExecutionAddon {
     throw new Error('Prepared execution native boundary is unavailable');
   loadedWindowsAddon = candidate as WindowsExecutionAddon;
   return loadedWindowsAddon;
+}
+
+let loadedPosixAddon: PosixExecutionAddon | undefined;
+function posixAddon(): PosixExecutionAddon {
+  if (loadedPosixAddon !== undefined) return loadedPosixAddon;
+  const require = createRequire(join(__dirname, 'prepared-execution-image-loader.cjs'));
+  const candidate = require(nativeSafeFsAddonPath()) as Partial<PosixExecutionAddon>;
+  if (
+    typeof candidate.prepareSealedExecutionImage !== 'function' ||
+    typeof candidate.closeSealedExecutionImage !== 'function'
+  )
+    throw new Error('Sealed execution image native boundary is unavailable');
+  loadedPosixAddon = candidate as PosixExecutionAddon;
+  return loadedPosixAddon;
 }

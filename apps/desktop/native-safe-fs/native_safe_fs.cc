@@ -9,6 +9,7 @@
 #include <sys/stdio.h>
 #elif defined(__linux__)
 #include <linux/fs.h>
+#include <linux/memfd.h>
 #include <sys/syscall.h>
 #endif
 #include <unistd.h>
@@ -64,6 +65,17 @@ struct GlobalState {
 };
 
 GlobalState state;
+
+#if defined(__linux__)
+std::mutex prepared_execution_mutex;
+std::unordered_map<std::string, int> prepared_execution_images;
+uint64_t prepared_execution_sequence = 1;
+#endif
+
+napi_value MakeString(napi_env env, const std::string& value);
+napi_value ThrowFailure(napi_env env, const std::string& code, const std::string& message);
+bool ReadString(napi_env env, napi_value object, const char* name, std::string* output);
+std::string ErrnoMessage(const char* operation);
 
 #if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
 struct TestControlState {
@@ -131,6 +143,94 @@ void CloseFd(int* fd) {
     *fd = -1;
   }
 }
+
+#if defined(__linux__)
+napi_value PrepareSealedExecutionImage(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 2) {
+    napi_throw_type_error(env, nullptr, "prepareSealedExecutionImage requires bytes and mode");
+    return nullptr;
+  }
+  bool is_buffer = false;
+  void* data = nullptr;
+  size_t length = 0;
+  uint32_t mode = 0;
+  if (napi_is_buffer(env, argv[0], &is_buffer) != napi_ok || !is_buffer ||
+      napi_get_buffer_info(env, argv[0], &data, &length) != napi_ok || length == 0 ||
+      length > 512ULL * 1024ULL * 1024ULL ||
+      napi_get_value_uint32(env, argv[1], &mode) != napi_ok || (mode & ~0777U) != 0)
+    return ThrowFailure(env, "UNSAFE_EXECUTION_IMAGE", "Invalid sealed execution image");
+  int fd = static_cast<int>(syscall(SYS_memfd_create, "sprint-coder-execution",
+                                    MFD_CLOEXEC | MFD_ALLOW_SEALING));
+  if (fd < 0) return ThrowFailure(env, "UNSAFE_EXECUTION_IMAGE", ErrnoMessage("memfd_create"));
+  const auto* bytes = static_cast<const unsigned char*>(data);
+  size_t offset = 0;
+  while (offset < length) {
+    const ssize_t written = write(fd, bytes + offset, length - offset);
+    if (written <= 0) {
+      close(fd);
+      return ThrowFailure(env, "UNSAFE_EXECUTION_IMAGE", ErrnoMessage("write memfd"));
+    }
+    offset += static_cast<size_t>(written);
+  }
+  if (fchmod(fd, mode) != 0 ||
+      fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+    close(fd);
+    return ThrowFailure(env, "UNSAFE_EXECUTION_IMAGE", ErrnoMessage("seal memfd"));
+  }
+  struct stat observed{};
+  if (fstat(fd, &observed) != 0 || static_cast<size_t>(observed.st_size) != length ||
+      (fcntl(fd, F_GET_SEALS) & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
+          (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) {
+    close(fd);
+    return ThrowFailure(env, "UNSAFE_EXECUTION_IMAGE", "Execution image sealing failed");
+  }
+  std::string id;
+  {
+    std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+    id = std::to_string(getpid()) + "-" + std::to_string(prepared_execution_sequence++);
+    prepared_execution_images.emplace(id, fd);
+  }
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_set_named_property(env, result, "id", MakeString(env, id));
+  napi_value descriptor;
+  napi_create_int32(env, fd, &descriptor);
+  napi_set_named_property(env, result, "fd", descriptor);
+  return result;
+}
+
+napi_value CloseSealedExecutionImage(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
+    napi_throw_type_error(env, nullptr, "closeSealedExecutionImage requires one id");
+    return nullptr;
+  }
+  std::string id;
+  napi_value holder;
+  napi_create_object(env, &holder);
+  napi_set_named_property(env, holder, "id", argv[0]);
+  if (!ReadString(env, holder, "id", &id)) {
+    napi_throw_type_error(env, nullptr, "Invalid sealed execution image id");
+    return nullptr;
+  }
+  int fd = -1;
+  {
+    std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+    const auto found = prepared_execution_images.find(id);
+    if (found == prepared_execution_images.end())
+      return ThrowFailure(env, "UNSAFE_EXECUTION_IMAGE", "Sealed execution image is stale");
+    fd = found->second;
+    prepared_execution_images.erase(found);
+  }
+  close(fd);
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
+#endif
 
 void ReleaseSession(Session* session) {
   if (session->lock_fd >= 0) flock(session->lock_fd, LOCK_UN);
@@ -3184,6 +3284,16 @@ void Cleanup(void*) {
     test_control.changed.notify_all();
   }
 #endif
+#if defined(__linux__)
+  {
+    std::lock_guard<std::mutex> execution_guard(prepared_execution_mutex);
+    for (const auto& [id, fd] : prepared_execution_images) {
+      (void)id;
+      close(fd);
+    }
+    prepared_execution_images.clear();
+  }
+#endif
   std::lock_guard<std::mutex> guard(state.mutex);
   for (auto& [id, session] : state.sessions) {
     (void)id;
@@ -3222,6 +3332,12 @@ napi_value Initialize(napi_env env, napi_value exports) {
        napi_default, nullptr},
       {"closeSession", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"exchangeFiles", nullptr, ExchangeFiles, nullptr, nullptr, nullptr, napi_default, nullptr},
+#if defined(__linux__)
+      {"prepareSealedExecutionImage", nullptr, PrepareSealedExecutionImage, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
+      {"closeSealedExecutionImage", nullptr, CloseSealedExecutionImage, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+#endif
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
 #if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
