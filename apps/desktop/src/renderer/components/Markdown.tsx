@@ -147,6 +147,16 @@ export function sanitizeMermaidSvg(svg: string): string {
   const root = document.documentElement;
   if (root.localName !== 'svg' || document.querySelector('parsererror') !== null)
     throw new Error('Invalid Mermaid SVG');
+  const nonElementNodes = document.createNodeIterator(
+    root,
+    NodeFilter.SHOW_CDATA_SECTION |
+      NodeFilter.SHOW_COMMENT |
+      NodeFilter.SHOW_PROCESSING_INSTRUCTION,
+  );
+  const nodesToRemove: Node[] = [];
+  for (let node = nonElementNodes.nextNode(); node !== null; node = nonElementNodes.nextNode())
+    nodesToRemove.push(node);
+  for (const node of nodesToRemove) node.parentNode?.removeChild(node);
   const allowedTags = new Set([
     'svg',
     'g',

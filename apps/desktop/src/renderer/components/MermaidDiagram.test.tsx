@@ -50,6 +50,21 @@ describe('Mermaid SVG security boundary', () => {
     expect(() => sanitizeMermaidSvg('<div>not svg</div>')).toThrow('Invalid Mermaid SVG');
   });
 
+  it('removes non-element XML nodes before HTML reparsing', () => {
+    const sanitized = sanitizeMermaidSvg(`
+      <svg xmlns="http://www.w3.org/2000/svg">
+        <desc><![CDATA[x><img src=x onerror=alert(1)>]]></desc>
+        <!-- harmless-looking comment -->
+        <?unsafe processing-instruction?>
+      </svg>
+    `);
+    const container = document.createElement('div');
+    container.innerHTML = sanitized;
+
+    expect(container.querySelector('img')).toBeNull();
+    expect(sanitized).not.toMatch(/CDATA|comment|processing-instruction|onerror/i);
+  });
+
   it('rejects resource-bearing Mermaid source before the renderer can fetch it', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
