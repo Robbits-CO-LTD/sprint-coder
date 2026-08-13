@@ -145,10 +145,15 @@ export class SkillStoreError extends Error {
     readonly code:
       'UNAVAILABLE' | 'INVALID_SKILL' | 'UNSAFE_SOURCE' | 'SOURCE_CHANGED' | 'CONFLICT',
     message: string,
+    readonly preserveContestedPath = false,
   ) {
     super(message);
     this.name = 'SkillStoreError';
   }
+}
+
+function shouldPreserveContestedPath(error: unknown): boolean {
+  return error instanceof SkillStoreError && error.preserveContestedPath;
 }
 
 const issuedCandidates = new WeakSet<object>();
@@ -551,7 +556,8 @@ export class SkillStore {
       await syncDirectory(providerRoot);
       return { status: 'imported', path: destination, manifest };
     } catch (error) {
-      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      if (!shouldPreserveContestedPath(error))
+        await rm(staging, { recursive: true, force: true }).catch(() => undefined);
       if (error instanceof SkillStoreError) throw error;
       throw new SkillStoreError('CONFLICT', 'Skill import could not be committed atomically');
     }
@@ -602,7 +608,8 @@ export class SkillStore {
       await syncDirectory(providerRoot);
       return { status: 'imported', path: destination, manifest };
     } catch (error) {
-      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      if (!shouldPreserveContestedPath(error))
+        await rm(staging, { recursive: true, force: true }).catch(() => undefined);
       if (error instanceof SkillStoreError) throw error;
       throw new SkillStoreError('CONFLICT', 'Skill update could not be committed atomically');
     }
@@ -883,6 +890,7 @@ export class SkillStore {
     const destination = this.revisionPath(source, skillId, digest);
     if (await pathExists(destination)) return;
     const staging = join(skillRoot, `.staging-${randomUUID()}`);
+    let preserveContestedPath = false;
     try {
       await copySafeDirectory(sourcePath, staging, {
         omit: new Set(['manifest.json', '.disabled']),
@@ -901,8 +909,12 @@ export class SkillStore {
         if (!(await pathExists(destination))) throw error;
       }
       await syncDirectory(skillRoot);
+    } catch (error) {
+      preserveContestedPath = shouldPreserveContestedPath(error);
+      throw error;
     } finally {
-      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      if (!preserveContestedPath)
+        await rm(staging, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 }
@@ -998,6 +1010,14 @@ async function readRawSnapshot(
       let bytes: Buffer;
       try {
         const opened = await handle.stat({ bigint: true });
+        if (
+          !opened.isFile() ||
+          opened.nlink !== 1n ||
+          opened.dev !== before.dev ||
+          opened.ino !== before.ino ||
+          opened.size > BigInt(MAX_FILE_BYTES)
+        )
+          throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
         bytes = await handle.readFile();
         const after = await handle.stat({ bigint: true });
         const pathAfter = await lstat(absolutePath, { bigint: true });
@@ -1223,9 +1243,11 @@ async function writeExclusive(
     }
     await assertMaterializedSingleLinkFile(path, bytes);
   } catch (error) {
-    if (created) await rm(path, { force: true }).catch(() => undefined);
-    if (error instanceof SkillStoreError) throw error;
-    throw new SkillStoreError('SOURCE_CHANGED', 'Skill destination changed identity');
+    if (error instanceof SkillStoreError)
+      throw created && !error.preserveContestedPath
+        ? new SkillStoreError(error.code, error.message, true)
+        : error;
+    throw new SkillStoreError('SOURCE_CHANGED', 'Skill destination changed identity', created);
   } finally {
     await parentHandle?.close();
   }
@@ -1423,6 +1445,14 @@ async function copySafeDirectory(
       const handle = await open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
         const opened = await handle.stat({ bigint: true });
+        if (
+          !opened.isFile() ||
+          opened.nlink !== 1n ||
+          opened.dev !== before.dev ||
+          opened.ino !== before.ino ||
+          opened.size > BigInt(MAX_FILE_BYTES)
+        )
+          throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
         const bytes = await handle.readFile();
         const after = await handle.stat({ bigint: true });
         const pathAfter = await lstat(sourcePath, { bigint: true });
