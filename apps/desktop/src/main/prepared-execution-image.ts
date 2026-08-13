@@ -117,9 +117,9 @@ export async function prepareExecutionImage(
     if (
       process.platform === 'darwin' &&
       shebang === undefined &&
-      heldBytes.includes(Buffer.from('@loader_path/../lib', 'utf8'))
+      (!trustedMacPath || heldBytes.includes(Buffer.from('@loader_path/../lib', 'utf8')))
     )
-      throw new Error('macOS loader-relative native execution images are unsupported');
+      throw new Error('macOS cannot safely launch this mutable native execution image');
     if (shebang !== undefined && !allowScript)
       throw new Error('Nested shebang interpreters are unsupported');
     const interpreter =
