@@ -79,13 +79,7 @@ target_pid=$!
 # stderr. That supervisor-owned diagnostic must not contaminate the requested command's stderr.
 wait "$target_pid" 2>/dev/null
 status=$?
-if [ "$status" -ge 128 ]; then
-  signal=$(kill -l $((status - 128)) 2>/dev/null || printf 'UNKNOWN')
-  case "$signal" in SIG*) ;; *) signal="SIG$signal" ;; esac
-  printf '{"exitCode":null,"signal":"%s"}\n' "$signal" >&3
-else
-  printf '{"exitCode":%s,"signal":null}\n' "$status" >&3
-fi
+printf '{"exitCode":%s,"signal":null}\n' "$status" >&3
 exec /bin/sleep 2147483647
 `;
 
@@ -428,6 +422,7 @@ export class CommandRunner {
       stderr: createStreamingSecretRedactor(),
     };
     let terminationError: unknown;
+    const ownedCancellationSignals = new Set<'SIGTERM' | 'SIGKILL'>();
     let rejectTerminationFailure: ((error: unknown) => void) | undefined;
     const terminationFailure = new Promise<never>((_resolve, reject) => {
       rejectTerminationFailure = reject;
@@ -556,14 +551,18 @@ export class CommandRunner {
       if (canceled) return;
       canceled = true;
       termination = 'cooperative';
-      if (process.platform !== 'win32') this.signalOwnedTree(executionId, lease, 'SIGTERM');
+      if (process.platform !== 'win32' && this.signalOwnedTree(executionId, lease, 'SIGTERM'))
+        ownedCancellationSignals.add('SIGTERM');
       forcePromise = new Promise<void>((resolve) => {
         resolveForce = resolve;
       });
       forceTimer = setTimeout(() => {
         void (async () => {
           try {
-            if (await this.forceOwnedTree(executionId, lease)) termination = 'forced';
+            if (await this.forceOwnedTree(executionId, lease)) {
+              termination = 'forced';
+              if (process.platform !== 'win32') ownedCancellationSignals.add('SIGKILL');
+            }
             if (terminationWatchdog === undefined)
               terminationWatchdog = setTimeout(() => {
                 const failure = new CommandRunnerError(
@@ -622,9 +621,13 @@ export class CommandRunner {
         );
       await finalizeStreams();
       if (sinkError !== undefined) throw sinkError;
+      const reportedOutcome =
+        process.platform === 'win32'
+          ? outcome
+          : outcomeFromOwnedCancellationSignal(outcome, ownedCancellationSignals);
       return Object.freeze({
         executionId,
-        ...outcome,
+        ...reportedOutcome,
         canceled,
         termination,
         durationMs: Date.now() - startedAt,
@@ -1065,6 +1068,23 @@ function waitForPosixCommandOutcome(
     });
     child.once('close', (exitCode, signal) => finish({ exitCode, signal }));
   });
+}
+
+function outcomeFromOwnedCancellationSignal(
+  outcome: Readonly<{ exitCode: number | null; signal: string | null }>,
+  sentSignals: ReadonlySet<'SIGTERM' | 'SIGKILL'>,
+): { exitCode: number | null; signal: string | null } {
+  // A POSIX shell exposes both explicit exit(128 + N) and signal N as the same status. Preserve
+  // high explicit exit codes unless this runner sent the matching cancellation signal itself.
+  const matchingSignal =
+    outcome.exitCode === 128 + 15 && sentSignals.has('SIGTERM')
+      ? 'SIGTERM'
+      : outcome.exitCode === 128 + 9 && sentSignals.has('SIGKILL')
+        ? 'SIGKILL'
+        : undefined;
+  return matchingSignal === undefined
+    ? { exitCode: outcome.exitCode, signal: outcome.signal }
+    : { exitCode: null, signal: matchingSignal };
 }
 
 export function waitForOutcomeOrTerminationFailure<T>(

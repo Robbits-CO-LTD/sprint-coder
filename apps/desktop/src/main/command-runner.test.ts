@@ -250,7 +250,12 @@ describe('CommandRunner', () => {
         },
       });
 
-      await expect(running).resolves.toMatchObject({ canceled: true, termination: 'forced' });
+      await expect(running).resolves.toMatchObject({
+        exitCode: null,
+        signal: 'SIGTERM',
+        canceled: true,
+        termination: 'forced',
+      });
       expect(runner.activeCount).toBe(0);
       const stdout = chunks
         .filter(({ stream }) => stream === 'stdout')
@@ -318,6 +323,46 @@ describe('CommandRunner', () => {
 
       await expect(new CommandRunner().run(spec)).resolves.toMatchObject({
         exitCode: 7,
+        termination: 'natural',
+      });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'preserves the ambiguous shell status for a naturally self-signaled command',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', "process.kill(process.pid, 'SIGINT')"],
+        cwd: '.',
+      });
+
+      await expect(new CommandRunner().run(spec)).resolves.toMatchObject({
+        exitCode: 130,
+        signal: null,
+        canceled: false,
+        termination: 'natural',
+      });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'preserves an explicit high exit code instead of guessing that it was a signal',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', 'process.exit(130)'],
+        cwd: '.',
+      });
+
+      await expect(new CommandRunner().run(spec)).resolves.toMatchObject({
+        exitCode: 130,
+        signal: null,
+        canceled: false,
         termination: 'natural',
       });
     },
