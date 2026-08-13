@@ -262,6 +262,62 @@ describe('TeamExecutionScheduler', () => {
     await settleScheduler();
   });
 
+  it('records cancellation while an admitted job is still active', async () => {
+    const scheduler = new TeamExecutionScheduler(1);
+    const preflight = deferred();
+    scheduler.submit({
+      executionId: 'preflight',
+      teamId: 'team-1',
+      teamLimit: 1,
+      run: () => preflight.promise,
+    });
+
+    await settleScheduler();
+    expect(scheduler.snapshot().activeExecutionIds).toEqual(['preflight']);
+    expect(scheduler.cancelQueued('preflight')).toBe(true);
+    expect(scheduler.isCancellationRequested('preflight')).toBe(true);
+
+    preflight.resolve();
+    await settleScheduler();
+    expect(scheduler.isCancellationRequested('preflight')).toBe(false);
+  });
+
+  it('does not treat an active job as preflight after dispatch closes the fence', async () => {
+    const scheduler = new TeamExecutionScheduler(1);
+    const running = deferred();
+    scheduler.submit({
+      executionId: 'running',
+      teamId: 'team-1',
+      teamLimit: 1,
+      run: () => running.promise,
+    });
+
+    await settleScheduler();
+    expect(scheduler.tryFinishPreflight('running')).toBe(true);
+    expect(scheduler.cancelQueued('running')).toBe(false);
+    expect(scheduler.isCancellationRequested('running')).toBe(false);
+
+    running.resolve();
+    await settleScheduler();
+  });
+
+  it('cannot claim dispatch after preflight cancellation is recorded', async () => {
+    const scheduler = new TeamExecutionScheduler(1);
+    const preflight = deferred();
+    scheduler.submit({
+      executionId: 'canceled-preflight',
+      teamId: 'team-1',
+      teamLimit: 1,
+      run: () => preflight.promise,
+    });
+
+    await settleScheduler();
+    expect(scheduler.cancelQueued('canceled-preflight')).toBe(true);
+    expect(scheduler.tryFinishPreflight('canceled-preflight')).toBe(false);
+    preflight.resolve();
+    await settleScheduler();
+  });
+
   it('requeues an active execution only after its current run releases the slot', async () => {
     const scheduler = new TeamExecutionScheduler(1);
     const first = deferred();

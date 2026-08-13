@@ -3491,6 +3491,177 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('cancels an active preflight execution before runtime dispatch', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Cancel active preflight');
+      const runtime = new TestWorkerRuntime();
+      let releasePreflight!: () => void;
+      const preflight = new Promise<void>((resolve) => {
+        releasePreflight = resolve;
+      });
+      let preflightStarted = false;
+      const scheduler = new TeamExecutionScheduler(1);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          preflightStarted = true;
+          await preflight;
+        },
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'preflight worker',
+        objective: 'must be canceled before runtime',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'must-not-run',
+        doneCriteria: ['runtime remains untouched'],
+      });
+      await waitFor(() => preflightStarted);
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('queued');
+
+      await expect(
+        coordinator.cancelExecution(task.id, submission.executionId),
+      ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+      releasePreflight();
+      await waitFor(() =>
+        scheduler
+          .snapshot()
+          .activeExecutionIds.every((executionId) => executionId !== submission.executionId),
+      );
+
+      expect(runtime.activeStarts).toBe(0);
+      expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(0);
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('canceled');
+      const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
+      expect(persistence.getTeamTask(dispatch.teamTaskId).status).toBe('canceled');
+      expect(persistence.getTeamDelivery(dispatch.messageId)?.state).toBe('failed');
+      persistence.close();
+    });
+
+    it('stops a Worker whose execution is active in preflight without dispatching it', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Stop active preflight Worker');
+      const runtime = new TestWorkerRuntime();
+      let releasePreflight!: () => void;
+      const preflight = new Promise<void>((resolve) => {
+        releasePreflight = resolve;
+      });
+      let preflightStarted = false;
+      const scheduler = new TeamExecutionScheduler(1);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          preflightStarted = true;
+          await preflight;
+        },
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'stopped preflight worker',
+        objective: 'must not dispatch',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'must-not-run',
+        doneCriteria: ['runtime remains untouched'],
+      });
+      await waitFor(() => preflightStarted);
+
+      await expect(coordinator.stopWorker(task.id, worker.id)).resolves.toMatchObject({
+        id: worker.id,
+        state: 'stopped',
+      });
+      releasePreflight();
+      await waitFor(() => scheduler.snapshot().activeCount === 0);
+
+      expect(runtime.activeStarts).toBe(0);
+      expect(runtime.stopped).toEqual([worker.id]);
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('canceled');
+      expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(0);
+      persistence.close();
+    });
+
+    it('cleans an isolation canceled while its worktree is being prepared', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Cancel isolation preparation');
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const originalEnsureCreated = manager.ensureCreated.bind(manager);
+      let releaseCreation!: () => void;
+      const creation = new Promise<void>((resolve) => {
+        releaseCreation = resolve;
+      });
+      let creationStarted = false;
+      vi.spyOn(manager, 'ensureCreated').mockImplementationOnce(async (input) => {
+        creationStarted = true;
+        await creation;
+        return originalEnsureCreated(input);
+      });
+      const runtime = new TestWorkerRuntime();
+      const scheduler = new TeamExecutionScheduler(1);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+        undefined,
+        undefined,
+        manager,
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'isolated worker',
+        objective: 'must be canceled during creation',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'must-not-run',
+        doneCriteria: ['runtime remains untouched'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => creationStarted);
+
+      await coordinator.cancelExecution(task.id, submission.executionId);
+      releaseCreation();
+      await waitFor(() => scheduler.snapshot().activeCount === 0);
+
+      expect(runtime.activeStarts).toBe(0);
+      expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(0);
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
+        phase: 'quarantined',
+        repositories: [expect.objectContaining({ state: 'cleaned' })],
+      });
+      persistence.close();
+    });
+
     it('persists a terminal, identity-bound report when a scheduled runtime fails', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Runtime failure report');
