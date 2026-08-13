@@ -252,7 +252,7 @@ describe('CommandRunner', () => {
         executable: process.execPath,
         argv: [
           '-e',
-          `require('node:fs').writeFileSync(${JSON.stringify(dispatchMarker)}, String(process.pid) + '\\n', { flag: 'a' }); const child=require('node:child_process').spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{}); console.log('ready'); setInterval(()=>{},1000)"],{stdio:['ignore','pipe','ignore']}); child.stdout.once('data',()=>console.log(JSON.stringify({parent:process.pid,child:child.pid}))); setInterval(()=>{},1000)`,
+          `require('node:fs').writeFileSync(${JSON.stringify(dispatchMarker)}, String(process.pid) + '\\n', { flag: 'a' }); const child=require('node:child_process').spawn(process.argv0,['-e',"process.on('SIGTERM',()=>{}); console.log('ready'); setInterval(()=>{},1000)"],{stdio:['ignore','pipe','ignore']}); child.stdout.once('data',()=>console.log(JSON.stringify({parent:process.pid,child:child.pid}))); setInterval(()=>{},1000)`,
         ],
         cwd: '.',
       });
@@ -503,7 +503,7 @@ describe('CommandRunner', () => {
         executable: process.execPath,
         argv: [
           '-e',
-          `const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],{stdio:'ignore'}); console.log(JSON.stringify({target:process.pid,child:child.pid})); setTimeout(()=>{process.kill(process.ppid,'SIGKILL'); setTimeout(()=>process.exit(0),150)},100); setInterval(()=>{},1000)`,
+          `const {spawn}=require('node:child_process'); const child=spawn(process.argv0,['-e',"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],{stdio:'ignore'}); console.log(JSON.stringify({target:process.pid,child:child.pid})); setTimeout(()=>{process.kill(process.ppid,'SIGKILL'); setTimeout(()=>process.exit(0),150)},100); setInterval(()=>{},1000)`,
         ],
         cwd: '.',
       });
@@ -589,7 +589,7 @@ describe('CommandRunner', () => {
         executable: process.execPath,
         argv: [
           '-e',
-          "const cp=require('node:child_process'); const child=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:'ignore'}); console.log(JSON.stringify({parent:process.pid,child:child.pid})); setInterval(()=>{},1000)",
+          "const cp=require('node:child_process'); const child=cp.spawn(process.argv0,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:'ignore'}); console.log(JSON.stringify({parent:process.pid,child:child.pid})); setInterval(()=>{},1000)",
         ],
         cwd: '.',
       });
@@ -763,7 +763,7 @@ describe('CommandRunner', () => {
         executable: process.execPath,
         argv: [
           '-e',
-          "const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); console.log(JSON.stringify({parent:process.pid,child:child.pid})); setInterval(()=>{},1000)",
+          "const child=require('node:child_process').spawn(process.argv0,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); console.log(JSON.stringify({parent:process.pid,child:child.pid})); setInterval(()=>{},1000)",
         ],
         cwd: '.',
       });
