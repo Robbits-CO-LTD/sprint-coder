@@ -19,19 +19,29 @@ import { serializeAnthropicCredential } from './anthropic-provider-client';
 import { serializeGeminiCredential } from './gemini-provider-client';
 import { serializeXAICredential } from './xai-provider-client';
 import {
+  parseOpenAICompatibleCredential,
   resolveProfileBaseUrl,
   serializeOpenAICompatibleCredential,
   type OpenAICompatibleCredential,
   type ProviderProfileRegistry,
 } from './provider-profile';
+import {
+  isPreparedProviderEndpoint,
+  type PreparedProviderEndpoint,
+} from './provider-endpoint-policy';
 
 export interface ProviderConnectionRepository {
   listProviderConnections(): readonly ProviderConnection[];
   createProviderConnection(connection: ProviderConnection): ProviderConnection;
+  setProviderConnectionSecretReference?(
+    connectionId: string,
+    secretReference: string | null,
+  ): ProviderConnection;
 }
 
 export interface ProviderConnectionSecretWriter {
   put(secret: string): string;
+  get?(reference: string): string;
   delete(reference: string): void;
 }
 
@@ -225,7 +235,10 @@ export class ProviderConnectionService {
     }
   }
 
-  createProfile(input: ProviderProfileConnectionCreateInput): ProviderConnection {
+  createProfile(
+    input: ProviderProfileConnectionCreateInput,
+    endpointApproval?: PreparedProviderEndpoint,
+  ): ProviderConnection {
     const parsed = providerProfileConnectionCreateInputSchema.parse(input);
     if (this.profiles === undefined) throw new Error('Provider Profile Registry is not configured');
     const profile = this.profiles.get(parsed.profileId);
@@ -240,10 +253,24 @@ export class ProviderConnectionService {
       ...(parsed.apiKey === undefined ? {} : { apiKey: parsed.apiKey }),
       ...(parsed.baseUrl === undefined ? {} : { baseUrl: parsed.baseUrl }),
       ...(parsed.accountId === undefined ? {} : { accountId: parsed.accountId }),
+      ...(endpointApproval === undefined ? {} : { endpointDigest: endpointApproval.digest }),
+      ...(endpointApproval?.trust === 'trusted-local'
+        ? { localConsentDigest: endpointApproval.digest }
+        : {}),
     };
     // Validate the effective endpoint before writing either the credential envelope or Connection.
     // This prevents an insecure LAN HTTP URL from surviving as a permanently unavailable record.
-    resolveProfileBaseUrl(profile, credential);
+    const canonicalBaseUrl = resolveProfileBaseUrl(profile, credential);
+    if (endpointApproval === undefined)
+      throw new Error('Provider endpoint requires a confirmed endpoint approval');
+    if (!isPreparedProviderEndpoint(endpointApproval))
+      throw new Error('Provider endpoint approval is not policy-issued');
+    if (
+      endpointApproval.canonicalUrl.replace(/\/+$/u, '') !== canonicalBaseUrl ||
+      (endpointApproval.trust === 'trusted-local' &&
+        endpointApproval.digest !== credential.localConsentDigest)
+    )
+      throw new Error('Provider endpoint approval does not match the effective endpoint');
     const secretReference = this.secrets.put(serializeOpenAICompatibleCredential(credential));
     const timestamp = this.now().toISOString();
     try {
@@ -275,5 +302,56 @@ export class ProviderConnectionService {
       this.secrets.delete(secretReference);
       throw error;
     }
+  }
+
+  confirmExistingProfileEndpoint(
+    connectionId: string,
+    endpointApproval: PreparedProviderEndpoint,
+  ): ProviderConnection {
+    if (!isPreparedProviderEndpoint(endpointApproval))
+      throw new Error('Provider endpoint approval is not policy-issued');
+    const connection = this.repository
+      .listProviderConnections()
+      .find((candidate) => candidate.id === connectionId);
+    if (connection === undefined) throw new Error('Provider Connection was not found');
+    if (connection.runtimeKind !== 'openai_compatible' || connection.secretReference === null)
+      throw new Error('Provider Connection does not use a Profile credential');
+    if (
+      this.profiles === undefined ||
+      this.secrets.get === undefined ||
+      this.repository.setProviderConnectionSecretReference === undefined
+    )
+      throw new Error('Provider endpoint credential migration is unavailable');
+    const profile = this.profiles.get(connection.providerId);
+    const credential = parseOpenAICompatibleCredential(
+      this.secrets.get(connection.secretReference),
+    );
+    const canonicalBaseUrl = resolveProfileBaseUrl(profile, credential);
+    if (endpointApproval.canonicalUrl.replace(/\/+$/u, '') !== canonicalBaseUrl)
+      throw new Error('Provider endpoint approval does not match the existing endpoint');
+    const updatedCredential: OpenAICompatibleCredential = {
+      ...(credential.apiKey === undefined ? {} : { apiKey: credential.apiKey }),
+      ...(credential.baseUrl === undefined ? {} : { baseUrl: credential.baseUrl }),
+      ...(credential.accountId === undefined ? {} : { accountId: credential.accountId }),
+      endpointDigest: endpointApproval.digest,
+      ...(endpointApproval.trust === 'trusted-local'
+        ? { localConsentDigest: endpointApproval.digest }
+        : {}),
+    };
+    const newReference = this.secrets.put(serializeOpenAICompatibleCredential(updatedCredential));
+    let updated: ProviderConnection;
+    try {
+      updated = this.repository.setProviderConnectionSecretReference(connection.id, newReference);
+    } catch (error) {
+      this.secrets.delete(newReference);
+      throw error;
+    }
+    try {
+      this.secrets.delete(connection.secretReference);
+    } catch {
+      // The new reference is already committed. A stale encrypted blob is safer than rolling the
+      // Connection back to an endpoint credential that no longer carries the verified digest.
+    }
+    return updated;
   }
 }

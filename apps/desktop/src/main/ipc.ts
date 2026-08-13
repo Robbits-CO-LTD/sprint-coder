@@ -434,11 +434,16 @@ import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
 import {
   MainProviderProfileRegistry,
   parseOpenAICompatibleCredential,
+  resolveProfileBaseUrl,
   resolvedProfileEndpointTrust,
   type OpenAICompatibleCredential,
 } from './provider-profile';
 import { BUNDLED_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { OpenAICompatibleProviderClient } from './openai-compatible-provider-client';
+import {
+  ProviderEndpointConsentChallenges,
+  ProviderEndpointPolicy,
+} from './provider-endpoint-policy';
 import {
   MODEL_TASK_TITLE_TIMEOUT_MS,
   TASK_TITLE_PROMPT,
@@ -578,6 +583,11 @@ export class IpcRouter {
   private readonly teamRuntimeAvailability = new TeamRuntimeAvailabilityTracker();
   private readonly providerRegistry = new MainProviderRegistry();
   private readonly providerProfiles = new MainProviderProfileRegistry();
+  private readonly providerEndpointPolicy = new ProviderEndpointPolicy();
+  private readonly providerEndpointChallenges = new ProviderEndpointConsentChallenges(
+    this.providerEndpointPolicy,
+  );
+  private readonly providerSecrets: ProviderSecretStorage;
   private readonly compatibleRuntime: OpenAICompatibleProviderClient;
   private readonly providerEgressTrustForConnection: (
     connection: ProviderConnection,
@@ -615,6 +625,7 @@ export class IpcRouter {
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),
     );
+    this.providerSecrets = providerSecrets;
     for (const profile of BUNDLED_PROVIDER_PROFILES) this.providerProfiles.register(profile);
     const resolveCompatibleCredential = (
       connection: ProviderConnection,
@@ -1523,12 +1534,45 @@ export class IpcRouter {
       providerProfileConnectionCreateInputSchema,
       providerConnectionSchema,
       async (input, event, envelope) => {
+        const profile = this.providerProfiles.get(input.profileId);
+        const credential: OpenAICompatibleCredential = {
+          ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
+          ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
+          ...(input.accountId === undefined ? {} : { accountId: input.accountId }),
+        };
+        const preparedEndpoint = await this.providerEndpointChallenges.prepare(
+          resolveProfileBaseUrl(profile, credential),
+        );
+        let endpoint = preparedEndpoint.endpoint;
+        try {
+          if (preparedEndpoint.endpoint.trust === 'trusted-local') {
+            const confirmation = await dialog.showMessageBox(this.window, {
+              type: 'warning',
+              title: 'ローカルProviderへの接続',
+              message: 'このローカル接続先を許可しますか？',
+              detail: preparedEndpoint.endpoint.canonicalUrl,
+              buttons: ['キャンセル', 'この接続先を許可'],
+              defaultId: 0,
+              cancelId: 0,
+              noLink: true,
+            });
+            if (confirmation.response !== 1)
+              throw new Error('Local Provider endpoint consent was canceled');
+          }
+          endpoint = this.providerEndpointChallenges.confirm(
+            preparedEndpoint.challenge,
+            preparedEndpoint.endpoint.digest,
+          );
+        } catch (error) {
+          this.providerEndpointChallenges.cancel(preparedEndpoint.challenge);
+          throw error;
+        }
         const created = this.runMutation(
           event,
           envelope,
           '',
           IPC_CHANNELS.providersCreateProfileConnection,
-          () => this.providerConnections.createProfile(input),
+          () => this.providerConnections.createProfile(input, endpoint),
         ).value;
         return this.providerVerification.verify(created);
       },
@@ -1537,9 +1581,11 @@ export class IpcRouter {
       IPC_CHANNELS.providersVerifyConnection,
       z.object({ connectionId: connectionIdSchema }).strict(),
       providerConnectionSchema,
-      (input) =>
+      async (input) =>
         this.providerVerification.verify(
-          this.persistence.getProviderConnection(input.connectionId),
+          await this.ensureProviderEndpointConsent(
+            this.persistence.getProviderConnection(input.connectionId),
+          ),
         ),
     );
     this.handleMutation(
@@ -1582,6 +1628,9 @@ export class IpcRouter {
         if (runtime === null) {
           if (input.selection.connectionId === null || input.selection.requestedModel === null)
             throw new InvalidModelError('provider');
+          await this.ensureProviderEndpointConsent(
+            this.persistence.getProviderConnection(input.selection.connectionId),
+          );
           const connection = await this.providerVerification.requireVerifiedForExecution(
             input.selection.connectionId,
           );
@@ -4012,6 +4061,54 @@ export class IpcRouter {
     };
   }
 
+  private async ensureProviderEndpointConsent(
+    connection: ProviderConnection,
+    allowLocalPrompt = true,
+  ): Promise<ProviderConnection> {
+    if (connection.runtimeKind !== 'openai_compatible') return connection;
+    if (connection.secretReference === null)
+      throw new Error('Provider Profile Connection has no secret reference');
+    const profile = this.providerProfiles.get(connection.providerId);
+    const credential = parseOpenAICompatibleCredential(
+      this.providerSecrets.get(connection.secretReference),
+    );
+    const baseUrl = resolveProfileBaseUrl(profile, credential);
+    const expectedDigest = this.providerEndpointPolicy.digestForBaseUrl(baseUrl);
+    const local = resolvedProfileEndpointTrust(profile, credential) === 'trusted-local';
+    if (
+      credential.endpointDigest === expectedDigest &&
+      (!local || credential.localConsentDigest === expectedDigest)
+    )
+      return connection;
+
+    const prepared = await this.providerEndpointChallenges.prepare(baseUrl);
+    try {
+      if (prepared.endpoint.trust === 'trusted-local') {
+        if (!allowLocalPrompt) throw new Error('Local Provider endpoint requires explicit consent');
+        const confirmation = await dialog.showMessageBox(this.window, {
+          type: 'warning',
+          title: 'ローカルProviderへの再同意',
+          message: '既存のローカル接続先を引き続き許可しますか？',
+          detail: prepared.endpoint.canonicalUrl,
+          buttons: ['キャンセル', 'この接続先を許可'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+        if (confirmation.response !== 1)
+          throw new Error('Local Provider endpoint consent was canceled');
+      }
+      const endpoint = this.providerEndpointChallenges.confirm(
+        prepared.challenge,
+        prepared.endpoint.digest,
+      );
+      return this.providerConnections.confirmExistingProfileEndpoint(connection.id, endpoint);
+    } catch (error) {
+      this.providerEndpointChallenges.cancel(prepared.challenge);
+      throw error;
+    }
+  }
+
   private async refreshModelCatalog(): Promise<void> {
     const [codexCapability, claudeCapability] = await Promise.all([
       this.codexRuntime.probe(),
@@ -4030,6 +4127,7 @@ export class IpcRouter {
             connection.secretReference !== null,
         )
         .map(async (connection) => {
+          await this.ensureProviderEndpointConsent(connection, false);
           const verified = await this.providerVerification.requireVerifiedForExecution(
             connection.id,
           );
@@ -4385,6 +4483,9 @@ export class IpcRouter {
     const executionId = randomUUID();
     let modelLease: ProviderModelLease | undefined;
     try {
+      await this.ensureProviderEndpointConsent(
+        this.persistence.getProviderConnection(connectionId),
+      );
       const connection = await this.providerVerification.requireVerifiedForExecution(
         connectionId,
         controller.signal,
@@ -4633,6 +4734,9 @@ export class IpcRouter {
     };
     let workspaceToolSnapshot: ToolCatalogSnapshot | undefined;
     try {
+      await this.ensureProviderEndpointConsent(
+        this.persistence.getProviderConnection(connectionId),
+      );
       const connection = await this.providerVerification.requireVerifiedForExecution(
         connectionId,
         controller.signal,

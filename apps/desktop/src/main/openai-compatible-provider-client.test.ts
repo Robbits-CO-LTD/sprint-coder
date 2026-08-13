@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   CanonicalProviderEvent,
   ProviderConnection,
@@ -10,6 +10,7 @@ import {
   openAICompatibleChatCompletionRequest,
   resolveOllamaNativeGenerateEndpoint,
 } from './openai-compatible-provider-client';
+import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 
 const profile: ProviderProfile = {
   id: 'example',
@@ -50,6 +51,19 @@ const connection: ProviderConnection = {
   createdAt: '2026-07-28T00:00:00.000Z',
   updatedAt: '2026-07-28T00:00:00.000Z',
 };
+
+const endpointPolicy = new ProviderEndpointPolicy();
+
+function approvedCredential(target: ProviderProfile, apiKey?: string) {
+  const digest = endpointPolicy.digestForBaseUrl(target.baseUrl);
+  return {
+    ...(apiKey === undefined ? {} : { apiKey }),
+    endpointDigest: digest,
+    ...(resolvedProfileEndpointTrust(target, {}) === 'trusted-local'
+      ? { localConsentDigest: digest }
+      : {}),
+  };
+}
 
 function registry(): MainProviderProfileRegistry {
   const result = new MainProviderProfileRegistry();
@@ -141,7 +155,9 @@ describe('OpenAICompatibleProviderClient', () => {
       };
       const profiles = new MainProviderProfileRegistry();
       profiles.register(ollamaProfile);
-      const client = new OpenAICompatibleProviderClient(profiles, () => ({}));
+      const client = new OpenAICompatibleProviderClient(profiles, () =>
+        approvedCredential(ollamaProfile),
+      );
       const ollamaConnection = {
         ...connection,
         id: 'ollama:real-local',
@@ -182,6 +198,9 @@ describe('OpenAICompatibleProviderClient', () => {
     expect(
       resolvedProfileEndpointTrust(configurable, { baseUrl: 'http://127.0.0.1:8080/v1' }),
     ).toBe('trusted-local');
+    expect(resolvedProfileEndpointTrust(configurable, { baseUrl: 'http://[::1]:8080/v1' })).toBe(
+      'trusted-local',
+    );
     expect(
       resolvedProfileEndpointTrust(configurable, { baseUrl: 'https://local.example.test/v1' }),
     ).toBe('trusted-remote');
@@ -194,7 +213,7 @@ describe('OpenAICompatibleProviderClient', () => {
     const requests: Array<{ url: string; authorization: string | null }> = [];
     const client = new OpenAICompatibleProviderClient(
       registry(),
-      () => ({ apiKey: 'test-key' }),
+      () => approvedCredential(profile, 'test-key'),
       async (input, init) => {
         requests.push({
           url: String(input),
@@ -236,6 +255,20 @@ describe('OpenAICompatibleProviderClient', () => {
     });
   });
 
+  it('fails closed before network access when a stored endpoint has no validated digest', async () => {
+    const providerFetch = vi.fn();
+    const client = new OpenAICompatibleProviderClient(
+      registry(),
+      () => ({ apiKey: 'legacy-key' }),
+      providerFetch,
+    );
+
+    await expect(client.listModels(connection, new AbortController().signal)).rejects.toThrow(
+      'requires validation',
+    );
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
+
   it('omits authentication for a Profile whose API key is optional', async () => {
     const optionalProfile: ProviderProfile = {
       ...profile,
@@ -248,7 +281,7 @@ describe('OpenAICompatibleProviderClient', () => {
     profiles.register(optionalProfile);
     const client = new OpenAICompatibleProviderClient(
       profiles,
-      () => ({}),
+      () => approvedCredential(optionalProfile),
       async (input, init) => {
         expect(String(input)).toBe('http://localhost:11434/v1/models');
         expect(new Headers(init?.headers).has('authorization')).toBe(false);
@@ -270,7 +303,7 @@ describe('OpenAICompatibleProviderClient', () => {
   it('normalizes fragmented Chat Completions text, reasoning, tools, usage and resolution', async () => {
     const client = new OpenAICompatibleProviderClient(
       registry(),
-      () => ({ apiKey: 'test-key' }),
+      () => approvedCredential(profile, 'test-key'),
       async (_input, init) => {
         expect(JSON.parse(String(init?.body))).toMatchObject({
           model: 'model-a',
@@ -365,7 +398,7 @@ describe('OpenAICompatibleProviderClient', () => {
   it('returns 429 to the shared Scheduler contract instead of credentials', async () => {
     const client = new OpenAICompatibleProviderClient(
       registry(),
-      () => ({ apiKey: 'test-key' }),
+      () => approvedCredential(profile, 'test-key'),
       async () =>
         new Response(null, {
           status: 429,
@@ -408,7 +441,7 @@ describe('OpenAICompatibleProviderClient', () => {
     const requests: Array<{ url: string; body: unknown }> = [];
     const client = new OpenAICompatibleProviderClient(
       profiles,
-      () => ({ apiKey: 'test-key' }),
+      () => approvedCredential(curated, 'test-key'),
       async (input, init) => {
         requests.push({
           url: String(input),

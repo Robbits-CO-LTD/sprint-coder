@@ -9,7 +9,11 @@ import {
 } from '@sprint-coder/contracts';
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
 import type { OpenAICompatibleCredential, ProviderProfileRegistry } from './provider-profile';
-import { profileRequiresCredential, resolveProfileBaseUrl } from './provider-profile';
+import {
+  profileRequiresCredential,
+  resolveProfileBaseUrl,
+  resolvedProfileEndpointTrust,
+} from './provider-profile';
 import type { ProviderFetch } from './openai-provider-client';
 import { openAICompatibleResponseRequest } from './openai-provider-client';
 import { normalizeOpenAIResponsesStream } from './openai-responses-stream';
@@ -20,8 +24,10 @@ import {
   type ProviderModelLease,
 } from './ollama-model-lifecycle';
 import { secureLogger } from './secure-logger';
+import { ProviderEndpointPolicy, secureProviderFetch } from './provider-endpoint-policy';
 
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
+const endpointPolicy = new ProviderEndpointPolicy();
 
 export type OpenAICompatibleCredentialResolver = (
   connection: ProviderConnection,
@@ -34,7 +40,7 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
   constructor(
     private readonly profiles: ProviderProfileRegistry,
     private readonly resolveCredential: OpenAICompatibleCredentialResolver,
-    private readonly providerFetch: ProviderFetch = fetch,
+    private readonly providerFetch: ProviderFetch = secureProviderFetch,
     private readonly now: () => Date = () => new Date(),
   ) {
     this.modelLifecycle = new OllamaModelLeaseCoordinator(
@@ -354,6 +360,13 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
       throw new Error(`Provider Profile ${profile.id} requires an API key`);
     }
     const baseUrl = resolveProfileBaseUrl(profile, credential);
+    if (credential.endpointDigest !== endpointPolicy.digestForBaseUrl(baseUrl))
+      throw new Error('Provider endpoint requires validation');
+    if (
+      resolvedProfileEndpointTrust(profile, credential) === 'trusted-local' &&
+      credential.localConsentDigest !== endpointPolicy.digestForBaseUrl(baseUrl)
+    )
+      throw new Error('Local Provider endpoint requires explicit consent');
     return this.providerFetch(`${baseUrl}${path}`, { ...init, headers, signal });
   }
 }
